@@ -449,8 +449,8 @@ As in `settings.html`, in the desktop C style.
 ### Versions (decided)
 
 - Semantic versions. `CHANGES.md` is the version source (repo-infra D5).
-  The repository has no `CHANGES.md` yet; repo-infra onboarding creates it,
-  and Parts 1 to 4 record their changes in it.
+  `CHANGES.md` was created empty on 2026-10-22 (`### New` under
+  `[Unreleased]`); Parts 1 to 4 record their changes in it.
 - `VERSION` in the `Makefile` today is the container tag and keeps
   checkouts apart (Standing Constraint on container stamps). It is split:
   an image tag for that job, and the release version from `CHANGES.md`.
