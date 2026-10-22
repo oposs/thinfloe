@@ -310,7 +310,8 @@ fn reword(mut tile: Tile, user: &SourceFile) -> Tile {
 }
 
 /// A user file that can only have been meant to reword a shipped tile, but
-/// no shipped file carries its name: it sets no Exec and no X-TF-Action.
+/// no shipped file carries its name: it sets no Exec and no X-TF-Action
+/// (or X-DBRRG-Action).
 /// 80-logout.desktop was shipped until Restart and Power off replaced it, and
 /// a machine whose user had renamed Log out kept that file in its home; the
 /// menu then drew it as a grey tile saying "has no Exec".
