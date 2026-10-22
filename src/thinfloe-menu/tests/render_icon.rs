@@ -2,10 +2,10 @@
 //! --render-icon` processes under the kernel limits. Run under a memory
 //! cap, so an unbounded render fails the test instead of the session.
 
-use thinfloe_menu::icons::{self, ICON_DEADLINE, ICON_MEMORY, ICONS_BUDGET, IconJob, MAX_SVG_ELEMENTS};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use thinfloe_menu::icons::{self, ICON_DEADLINE, ICON_MEMORY, ICONS_BUDGET, IconJob, MAX_SVG_ELEMENTS};
 
 const RENDERER: &str = env!("CARGO_BIN_EXE_thinfloe-menu");
 

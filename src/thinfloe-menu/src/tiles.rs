@@ -196,8 +196,16 @@ fn read_file_bounded(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_string())
 }
 
-fn flag(entry: &Entry, key: &str) -> bool {
-    entry.get(key) == Some("true")
+/// `X-TF-<suffix>`, else the old `X-DBRRG-<suffix>` that tile files in a
+/// home saved before the rename may still carry. The new key wins.
+fn tf_key<'a>(entry: &'a Entry, suffix: &str) -> Option<&'a str> {
+    entry
+        .get(&format!("X-TF-{suffix}"))
+        .or_else(|| entry.get(&format!("X-DBRRG-{suffix}")))
+}
+
+fn flag(entry: &Entry, suffix: &str) -> bool {
+    tf_key(entry, suffix) == Some("true")
 }
 
 fn non_empty(entry: &Entry, key: &str) -> Option<String> {
@@ -219,12 +227,12 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
     let Some(name) = non_empty(entry, "Name") else {
         return Tile::broken(file, origin, format!("{file} has no Name"));
     };
-    let action = match Action::parse(entry.get("X-TF-Action")) {
+    let action = match Action::parse(tf_key(entry, "Action")) {
         Ok(a) => a,
         Err(e) => return Tile::broken(file, origin, format!("{file}: {e}")),
     };
     if user && action != Action::Run {
-        let named = entry.get("X-TF-Action").unwrap_or_default();
+        let named = tf_key(entry, "Action").unwrap_or_default();
         return Tile::broken(
             file,
             origin,
@@ -246,12 +254,12 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
         icon: non_empty(entry, "Icon"),
         action,
         argv,
-        terminal: action == Action::Run && flag(entry, "Terminal"),
+        terminal: action == Action::Run && entry.get("Terminal") == Some("true"),
         // Ignored unless the action is run: the other actions have no
         // program, and save-home would save twice.
-        save_on_exit: action == Action::Run && flag(entry, "X-TF-Save-On-Exit"),
+        save_on_exit: action == Action::Run && flag(entry, "Save-On-Exit"),
         // Only a program can run twice; the other actions are one at a time.
-        multiple: action == Action::Run && flag(entry, "X-TF-Multiple"),
+        multiple: action == Action::Run && flag(entry, "Multiple"),
         origin,
         problem: None,
         note: None,
@@ -260,12 +268,15 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
 
 /// Keys only a shipped file may set. A user file that rewords a shipped tile
 /// and sets one of them still rewords it; the key is named on the tile.
-const SHIPPED_ONLY_KEYS: [&str; 5] = [
+const SHIPPED_ONLY_KEYS: [&str; 8] = [
     "Exec",
     "Terminal",
     "X-TF-Action",
     "X-TF-Save-On-Exit",
     "X-TF-Multiple",
+    "X-DBRRG-Action",
+    "X-DBRRG-Save-On-Exit",
+    "X-DBRRG-Multiple",
 ];
 
 fn reword(mut tile: Tile, user: &SourceFile) -> Tile {
@@ -307,7 +318,7 @@ fn rewords_nothing(shipped: &[SourceFile], user: &SourceFile) -> bool {
     let Ok(entry) = &user.entry else {
         return false;
     };
-    entry.get("Exec").is_none() && entry.get("X-TF-Action").is_none() && !shipped.iter().any(|f| f.name == user.name)
+    entry.get("Exec").is_none() && tf_key(entry, "Action").is_none() && !shipped.iter().any(|f| f.name == user.name)
 }
 
 /// Banner lines for the user files `merge` leaves out as rewords of a tile
@@ -582,10 +593,7 @@ mod tests {
             &[],
             &[
                 src("60-x.desktop", "[Desktop Entry]\nName=X\nX-TF-Action=logout\n"),
-                src(
-                    "61-y.desktop",
-                    "[Desktop Entry]\nName=Y\nX-TF-Action=reboot\nExec=y\n",
-                ),
+                src("61-y.desktop", "[Desktop Entry]\nName=Y\nX-TF-Action=reboot\nExec=y\n"),
                 src("62-z.desktop", "[Desktop Entry]\nName=Z\nX-TF-Action=run\nExec=z\n"),
             ],
         );
@@ -604,10 +612,7 @@ mod tests {
     fn multiple_only_on_run_tiles() {
         let tiles = merge(
             &[
-                src(
-                    "10-a.desktop",
-                    "[Desktop Entry]\nName=A\nExec=a\nX-TF-Multiple=true\n",
-                ),
+                src("10-a.desktop", "[Desktop Entry]\nName=A\nExec=a\nX-TF-Multiple=true\n"),
                 src("20-b.desktop", "[Desktop Entry]\nName=B\nExec=b\n"),
                 src(
                     "40-save-home.desktop",
@@ -752,6 +757,94 @@ mod tests {
         let tiles = merge(&[], &[src("60-x.desktop", "[Desktop Entry]\nName=X\nExec=\"x\n")]);
         assert_eq!(tiles.len(), 1);
         assert!(tiles[0].problem.is_some());
+    }
+
+    #[test]
+    fn old_keys_are_read() {
+        let tiles = merge(
+            &[src(
+                "40-save-home.desktop",
+                "[Desktop Entry]\nName=B\nX-DBRRG-Action=save-home\n",
+            )],
+            &[src(
+                "70-u.desktop",
+                "[Desktop Entry]\nName=U\nExec=u\nX-DBRRG-Multiple=true\n",
+            )],
+        );
+        assert_eq!(tiles[0].action, Action::SaveHome);
+        assert!(tiles[1].multiple);
+    }
+
+    #[test]
+    fn new_key_wins_over_old() {
+        let tiles = merge(
+            &[],
+            &[src(
+                "70-u.desktop",
+                "[Desktop Entry]\nName=U\nExec=u\nX-TF-Multiple=false\nX-DBRRG-Multiple=true\n",
+            )],
+        );
+        assert!(!tiles[0].multiple);
+    }
+
+    #[test]
+    fn old_action_key_still_limited_for_user_files() {
+        let tiles = merge(
+            &[],
+            &[src(
+                "60-x.desktop",
+                "[Desktop Entry]\nName=X\nX-DBRRG-Action=reboot\nExec=y\n",
+            )],
+        );
+        assert!(
+            tiles[0]
+                .problem
+                .as_deref()
+                .unwrap()
+                .contains("may only use the run action")
+        );
+    }
+
+    #[test]
+    fn reword_names_old_shipped_only_keys() {
+        let tiles = merge(
+            &[thinlinc()],
+            &[src(
+                "10-thinlinc.desktop",
+                "[Desktop Entry]\nName=TL\nX-DBRRG-Multiple=true\n",
+            )],
+        );
+        match &tiles[0].origin {
+            Origin::Reworded { ignored } => assert!(ignored.contains(&"X-DBRRG-Multiple".to_string())),
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn old_action_key_counts_for_the_runs_nothing_rule() {
+        let tiles = merge(
+            &[],
+            &[src("60-x.desktop", "[Desktop Entry]\nName=X\nX-DBRRG-Action=run\n")],
+        );
+        assert_eq!(tiles.len(), 1);
+        assert!(tiles[0].problem.as_deref().unwrap().contains("has no Exec"));
+    }
+
+    #[test]
+    fn upgrade_tile_keeps_its_file_name() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("50-upgrade-image.desktop")).unwrap();
+        let shipped = src("50-upgrade-image.desktop", &text);
+        let tiles = merge(
+            std::slice::from_ref(&shipped),
+            &[src("50-upgrade-image.desktop", "[Desktop Entry]\nName=Neu\n")],
+        );
+        assert!(
+            tiles[0].argv.contains(&"thinfloe-upgrade".to_string()),
+            "{:?}",
+            tiles[0].argv
+        );
+        assert_eq!(tiles[0].name, "Neu");
     }
 
     #[test]

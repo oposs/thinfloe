@@ -5,14 +5,14 @@
 //! thinfloe-session saves on no status at all; any other status means the menu
 //! failed.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::ExitCode;
 use thinfloe_menu::app::{self, Config};
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
 use thinfloe_menu::{tiles, ui};
-use std::ffi::OsString;
-use std::path::PathBuf;
-use std::process::ExitCode;
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)

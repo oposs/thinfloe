@@ -170,7 +170,10 @@ mod tests {
 
     #[test]
     fn splits_exec() {
-        assert_eq!(split_exec("sudo thinfloe-upgrade").unwrap(), ["sudo", "thinfloe-upgrade"]);
+        assert_eq!(
+            split_exec("sudo thinfloe-upgrade").unwrap(),
+            ["sudo", "thinfloe-upgrade"]
+        );
         assert_eq!(split_exec("foo %U --x").unwrap(), ["foo", "--x"]);
         assert_eq!(
             split_exec(r#""/a b/c" "q\"x" 100%%"#).unwrap(),
