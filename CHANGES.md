@@ -9,3 +9,4 @@
 - Machines are now named `thinfloe-` followed by the same six digits, instead of `dbrrg-`. DNS entries, monitoring and ThinLinc server settings that know a machine by its name need updating.
 - The commands an administrator types have new names: `sudo thinfloe-password` (was `dbrrg-password`), `thinfloe-upgrade` (was `upgrade-image`) and `thinfloe-menu --check` (was `dbrrg-menu --check`).
 - Boot and session log lines now start with `thinfloe:` instead of `dbrrg:`.
+- The settings files in the home directory have new names: `~/.thinfloe-environment`, `~/.thinfloe-sessionrc`, `~/.thinfloe-password`, `~/.thinfloe-ssh-host-keys` and `~/.config/thinfloe/`. The first boot renames the old `~/.dbrrg-*` files, so keyboard layout, password and SSH host keys carry over, and leaves the old names as links so the previous version still starts with the same settings.

@@ -208,6 +208,7 @@ tf_route_iface() {
 tf_restore_home_from_file() {
     _drhf_archive="$1"
     _drhf_home="$2"
+    _drhf_renamed="${3:-}"
 
     if [ ! -f "$_drhf_archive" ]; then
         warn "thinfloe: no home archive at $_drhf_archive"
@@ -248,6 +249,10 @@ tf_restore_home_from_file() {
         return 2
     fi
 
+    # An archive saved by 3.x carries ~/.dbrrg-* names; give them their
+    # 4.0 names now, before anything reads them. Never fails the restore.
+    tf_migrate_home_names "$_drhf_home" "$_drhf_archive" "$_drhf_renamed" || true
+
     return 0
 }
 
@@ -267,6 +272,7 @@ tf_restore_home_from_url() {
     _drhu_home="$2"
     _drhu_timeout="${3:-120}"
     _drhu_tmp="${4:-/tmp/thinfloe-home.pkg}"
+    _drhu_renamed="${5:-}"
 
     rm -f "$_drhu_tmp" 2>/dev/null || true
 
@@ -299,10 +305,135 @@ tf_restore_home_from_url() {
         return 2
     fi
 
-    tf_restore_home_from_file "$_drhu_tmp" "$_drhu_home"
+    tf_restore_home_from_file "$_drhu_tmp" "$_drhu_home" "$_drhu_renamed"
     _drhu_rc=$?
     rm -f "$_drhu_tmp" 2>/dev/null || true
     return $_drhu_rc
+}
+
+# Home files that 3.x called ~/.dbrrg-* and 4.0 calls ~/.thinfloe-*.
+# One "old:new:link-target" triple per line, paths relative to the home. The
+# link target is relative to the directory holding the old name, so the link
+# resolves the same in the initramfs and after the pivot.
+TF_HOME_RENAMES=".dbrrg-environment:.thinfloe-environment:.thinfloe-environment
+.dbrrg-sessionrc:.thinfloe-sessionrc:.thinfloe-sessionrc
+.dbrrg-password:.thinfloe-password:.thinfloe-password
+.dbrrg-ssh-host-keys:.thinfloe-ssh-host-keys:.thinfloe-ssh-host-keys
+.config/dbrrg:.config/thinfloe:thinfloe"
+
+# _tf_archive_lists <listing> <name>
+#
+# True when the tar listing holds <name>: exactly as ./name, name, ./name/ or
+# name/, or as a member below it (./name/x, name/x). The last case matters
+# for a directory that a hand-made archive lists only through its members,
+# without an entry of its own. Plain string comparison with awk's index(); no
+# regular expression, so a dot in a name matches only a dot. The name goes
+# in through the environment, because awk -v would interpret backslashes.
+_tf_archive_lists() {
+    printf '%s\n' "$1" | _TF_NAME="$2" awk '
+        BEGIN { n = ENVIRON["_TF_NAME"]; a = "./" n; b = n }
+        $0 == a || $0 == b || index($0, a "/") == 1 || index($0, b "/") == 1 { f = 1 }
+        END { exit !f }'
+}
+
+# tf_migrate_home_names <home> <archive> [<renamed-file>]
+#
+# Give the files of a 3.x home archive their 4.0 names, after the archive has
+# been extracted over the image's default home.
+#
+# The rule is decided by what is IN THE ARCHIVE, not by what is on disk. The
+# default home already ships .thinfloe-environment and .thinfloe-sessionrc,
+# so "the new name exists" is always true and says nothing. Per name pair:
+#   - the archive lists the new name: nothing to do, the new file wins;
+#   - else the archive lists the old name and a real (not symlink) old file
+#     is on disk: it replaces whatever image default sits at the new name,
+#     and each name renamed is appended to <renamed-file>, one per line;
+#   - an old name that is a symlink is what a previous 4.0 boot left behind
+#     (see tf_link_old_home_names); it is never a 3.x file and is left alone.
+# The archive is listed once. tar and the other tools are those the
+# initramfs has: no cut, head, basename, readlink.
+#
+# ALWAYS returns 0; a failed rename must not fail the boot.
+tf_migrate_home_names() {
+    _tmh_home="$1"
+    _tmh_archive="$2"
+    _tmh_renamed="${3:-}"
+
+    _tmh_list=$(tar -tzf "$_tmh_archive" 2>/dev/null) || true
+    [ -n "$_tmh_list" ] || return 0
+
+    # Newline-separated triples, split with parameter expansion: the shell
+    # may be dash, which has no here-strings, and a pipe would run the loop
+    # in a subshell.
+    _tmh_rest="$TF_HOME_RENAMES"
+    while [ -n "$_tmh_rest" ]; do
+        case "$_tmh_rest" in
+            *'
+'*) _tmh_line="${_tmh_rest%%'
+'*}"; _tmh_rest="${_tmh_rest#*'
+'}" ;;
+            *)  _tmh_line="$_tmh_rest"; _tmh_rest="" ;;
+        esac
+        _tmh_old="${_tmh_line%%:*}"
+        _tmh_tail="${_tmh_line#*:}"
+        _tmh_new="${_tmh_tail%%:*}"
+
+        _tf_archive_lists "$_tmh_list" "$_tmh_new" && continue
+        _tf_archive_lists "$_tmh_list" "$_tmh_old" || continue
+        [ -L "$_tmh_home/$_tmh_old" ] && continue
+        [ -e "$_tmh_home/$_tmh_old" ] || continue
+
+        rm -rf "$_tmh_home/$_tmh_new" 2>/dev/null || true
+        if mv "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new" 2>/dev/null; then
+            tf_log "thinfloe: renamed ~/$_tmh_old to ~/$_tmh_new"
+            if [ -n "$_tmh_renamed" ]; then
+                echo "$_tmh_old" >> "$_tmh_renamed" 2>/dev/null || true
+            fi
+        else
+            warn "thinfloe: could not rename ~/$_tmh_old to ~/$_tmh_new"
+        fi
+    done
+
+    return 0
+}
+
+# tf_link_old_home_names <home>
+#
+# For every new name that exists in the home, make the old name a symlink to
+# it. After the first 4.0 boot the previous release sits in tl.old/ and the
+# boot menu can start it; 3.x reads ~/.dbrrg-environment, ~/.dbrrg-password
+# and ~/.dbrrg-ssh-host-keys and would find nothing (a default keyboard, no
+# password, fresh host keys) without these links. They live in the home, so
+# every save carries them. Runs on every boot and on every restore outcome,
+# so the links come back after a save that left them out. The link target is
+# relative (see TF_HOME_RENAMES).
+#
+# ALWAYS returns 0.
+tf_link_old_home_names() {
+    _tlo_home="$1"
+
+    _tlo_rest="$TF_HOME_RENAMES"
+    while [ -n "$_tlo_rest" ]; do
+        case "$_tlo_rest" in
+            *'
+'*) _tlo_line="${_tlo_rest%%'
+'*}"; _tlo_rest="${_tlo_rest#*'
+'}" ;;
+            *)  _tlo_line="$_tlo_rest"; _tlo_rest="" ;;
+        esac
+        _tlo_old="${_tlo_line%%:*}"
+        _tlo_tail="${_tlo_line#*:}"
+        _tlo_new="${_tlo_tail%%:*}"
+        _tlo_target="${_tlo_tail#*:}"
+
+        [ -e "$_tlo_home/$_tlo_new" ] || [ -L "$_tlo_home/$_tlo_new" ] || continue
+
+        rm -rf "$_tlo_home/$_tlo_old" 2>/dev/null || true
+        ln -s "$_tlo_target" "$_tlo_home/$_tlo_old" 2>/dev/null || \
+            warn "thinfloe: could not link ~/$_tlo_old"
+    done
+
+    return 0
 }
 
 # restore_home <newroot> <efi-mount> <state-dir> <ramroot>
@@ -382,11 +513,11 @@ restore_home() {
             warn "thinfloe: could not record boot-home-base"
 
         tf_log "thinfloe: restoring home from $_rh_url"
-        tf_restore_home_from_url "$_rh_url" "$_rh_home" 120
+        tf_restore_home_from_url "$_rh_url" "$_rh_home" 120 "" "$_rh_state/home-renamed"
         _rh_rc=$?
     else
         tf_log "thinfloe: restoring home from $_rh_efi/home.tar.gz"
-        tf_restore_home_from_file "$_rh_efi/home.tar.gz" "$_rh_home"
+        tf_restore_home_from_file "$_rh_efi/home.tar.gz" "$_rh_home" "$_rh_state/home-renamed"
         _rh_rc=$?
     fi
 
@@ -395,6 +526,11 @@ restore_home() {
         1) echo absent > "$_rh_state/home-restore" 2>/dev/null || true ;;
         *) echo failed > "$_rh_state/home-restore" 2>/dev/null || true ;;
     esac
+
+    # On every path, including a failed or absent restore: the old names
+    # must exist as links whenever the new file exists, so a fallback boot
+    # of 3.x finds its settings.
+    tf_link_old_home_names "$_rh_home" || true
 
     return 0
 }
