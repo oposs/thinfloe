@@ -1,0 +1,84 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geo:ital@0;1&family=JetBrains+Mono:wght@400&family=Inter:wght@400;600&display=swap');
+:root{--ice:#7cc4ff}
+.desk{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;color:#e6edf3;font-family:Inter,sans-serif;display:flex;flex-direction:column;background:#05070a;border-radius:6px}
+.geo{font-family:'Geo',sans-serif;font-style:italic}
+.head{display:flex;align-items:center;gap:14px;padding:16px 32px 0}
+.head .host{margin-left:auto;font-size:16px;color:#8a97a6}
+.mid{flex:1;display:flex;align-items:center;justify-content:center}
+.panel{width:58%}
+.ptitle{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+.ptitle .t{font-family:'Geo',sans-serif;font-style:italic;font-size:30px}
+.ptitle .last{margin-left:auto;font-size:12px;color:#7d8996}
+.btn{font-size:13px;padding:7px 14px;border:1px solid #2a3a4a;background:#0d1218;color:#e6edf3;cursor:pointer}
+.btn.pri{background:var(--ice);color:#04121f;border-color:var(--ice);font-weight:600}
+.row{position:relative;display:flex;align-items:center;gap:16px;background:#0d1218;margin-bottom:3px;padding:12px 16px 12px 22px}
+.row.upd::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--ice)}
+.row img,.row .ic{width:40px;height:40px;flex:none}
+.row .ic{display:flex;align-items:center;justify-content:center;color:#cfd8e1}
+.cb{width:20px;height:20px;border:2px solid #4a5a6a;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px}
+.cb.on{background:var(--ice);border-color:var(--ice);color:#04121f;font-weight:700}
+.row .n{font-family:'Geo',sans-serif;font-style:italic;font-size:21px}
+.row .src{font-size:11px;color:#6b7785;font-family:'JetBrains Mono',monospace}
+.row .st{margin-left:auto;text-align:right;font-size:12px;color:#9aa6b2;min-width:190px}
+.row .st b{color:var(--ice);font-weight:600}
+.row .st .ok{color:#98c379}
+.row .act{min-width:120px;text-align:right}
+.log{height:22%;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;padding:10px 32px;border-top:1px solid #151b22;white-space:pre;overflow:hidden}
+.log .t{color:#5d6976}.log .s{color:var(--ice)}.log .g{color:#98c379}
+.mini{display:flex;gap:3px;margin-top:22px}
+.mini .tile{position:relative;flex:1;background:#0d1218;display:flex;align-items:center;gap:12px;padding:12px 14px 12px 22px}
+.mini .tile img{width:36px;height:36px}
+.mini .tile .n{font-family:'Geo',sans-serif;font-style:italic;font-size:19px}
+.dot{position:absolute;top:8px;right:10px;font-size:11px;color:#04121f;background:var(--ice);padding:1px 7px;font-weight:600}
+.note{font-size:13px;color:#999;margin-top:10px}
+</style>
+
+<h2>Settings: add-ons</h2>
+<p class="subtitle">Opened from the new Settings tile. Same style as desktop C. ThinLinc has an update waiting, OxuLnk is current, a user add-on is not installed.</p>
+
+<div class="desk">
+  <div class="head"><span style="display:flex;align-items:center;gap:14px;opacity:.6"><svg class="tflogo" viewBox="250 370 420 280" width="52"></svg><span class="geo" style="font-size:34px">ThinFloe</span></span><span class="host geo">thinfloe-3f9a2c · 3.1.0 · 14:32</span></div>
+  <div class="mid"><div class="panel">
+    <div class="ptitle"><span class="t">Add-ons</span><span class="last">last checked today 06:12</span><span class="btn">Check now</span><span class="btn">Back</span></div>
+
+    <div class="row upd">
+      <div class="cb on">✓</div><img src="./thinlinc_128.png">
+      <div><div class="n">ThinLinc</div><div class="src">https://www.cendio.com/downloads/clients/…</div></div>
+      <div class="st">4.21.0 installed<br><b>4.22.0 ready for next boot</b></div>
+      <div class="act"><span class="btn pri">Update now</span></div>
+    </div>
+
+    <div class="row">
+      <div class="cb on">✓</div><img src="./oxulnk-ox.png">
+      <div><div class="n">OxuLnk</div><div class="src">apt · deb.example.ch stable · oxulnk-desktop</div></div>
+      <div class="st"><span class="ok">0.1.0+dev20261008 · up to date</span></div>
+      <div class="act"></div>
+    </div>
+
+    <div class="row">
+      <div class="cb"></div><div class="ic"><svg viewBox="0 0 24 24" width="32" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg></div>
+      <div><div class="n">Remmina</div><div class="src">~/.config/thinfloe/menu/60-remmina.desktop · tar</div></div>
+      <div class="st">not installed</div>
+      <div class="act"><span class="btn">Install now</span></div>
+    </div>
+
+    <div class="mini">
+      <div class="tile"><img src="./thinlinc_128.png"><span class="n">ThinLinc</span><span class="dot">update</span></div>
+      <div class="tile"><img src="./oxulnk-ox.png"><span class="n">OxuLnk</span></div>
+      <div class="tile" style="opacity:.0"></div><div class="tile" style="opacity:0"></div>
+    </div>
+  </div></div>
+  <div class="log"></div>
+</div>
+
+<p class="note">Bottom strip: how the ThinLinc tile in the main menu shows that an update waits. Ticking a box installs now; unticking removes the tile and the copy on the EFI partition.</p>
+
+<script>
+document.querySelectorAll('svg.tflogo').forEach(s=>s.innerHTML=`<g transform="translate(0 632) skewX(-9) translate(0 -632)" fill="#fff"><path d="M278 388H625V447H433V632H360V447H278Z"/><path d="M498 502H624V562H570V632H498Z"/></g>`);
+document.querySelector('.log').innerHTML = [
+  ['06:12:03','add-ons','ThinLinc: new file at cendio.com (ETag changed)'],
+  ['06:12:41','add-ons','<span class="g">ThinLinc 4.22.0 stored on EFI partition, active at next boot</span>'],
+  ['06:12:42','add-ons','OxuLnk: up to date'],
+].map(([t,s,x])=>`<span class="t">${t}</span>  <span class="s">${s.padEnd(10,' ')}</span>| ${x}`).join('\n');
+</script>
