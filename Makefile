@@ -401,6 +401,7 @@ test: test-unit rootfs
 	@test/integration/test-password.sh
 	@test/integration/test-field-report.sh
 	@test/integration/test-cmdline.sh
+	@test/integration/test-3x-fallback.sh
 	@test/integration/test-session-lifecycle.sh
 	@test/integration/test-container-stamp.sh
 	@test/integration/test-usb-image-deps.sh
