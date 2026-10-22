@@ -837,6 +837,18 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
 - **A failed listing fails the restore.** When the archive cannot be listed
   after a successful extraction, `home-restore` is `failed`, so no save
   overwrites the stored archive with a half-migrated home.
+- **The links are made at write time too.** `thinfloe-password --set` and
+  `thinfloe-ssh-hostkeys` create `~/.dbrrg-password` and
+  `~/.dbrrg-ssh-host-keys` when they write, owned by tluser, and `--clear`
+  removes the link with the file. A home saved by 4.0 therefore always lists
+  `.dbrrg-password` next to `.thinfloe-password`.
+- **A password cleared on 3.x stays cleared.** 3.x's `dbrrg-password --clear`
+  removes only the `~/.dbrrg-password` link and leaves the hash in
+  `~/.thinfloe-password`. An archive that lists `.thinfloe-password` without
+  `.dbrrg-password` is read as that clear: the restore removes
+  `~/.thinfloe-password` and logs `thinfloe: ~/.dbrrg-password was removed by
+  the previous version; clearing ~/.thinfloe-password`. If the reading is
+  wrong, the user sets the password again; a revoked password never returns.
 - **Accepted loss.** A 3.x fallback that runs `dbrrg-password --clear` and
   then `--set` replaces the link with a real file. Back on 4.0 the new name
   wins and the 4.0 password returns; the real old entry is replaced by a link

@@ -361,6 +361,9 @@ _tf_archive_lists() {
 #     and each name renamed is appended to <renamed-file>, one per line;
 #   - an old name that is a symlink is what a previous 4.0 boot left behind
 #     (see tf_link_old_home_names); it is never a 3.x file and is left alone.
+# One more rule, for the password only: an archive that lists
+# .thinfloe-password but not .dbrrg-password was saved by 3.x after a
+# `dbrrg-password --clear`, and ~/.thinfloe-password is removed (see below).
 # The archive is listed once. tar and the other tools are those the
 # initramfs has: no cut, head, basename, readlink.
 #
@@ -405,6 +408,23 @@ tf_migrate_home_names() {
             warn "thinfloe: could not rename ~/$_tmh_old to ~/$_tmh_new"
         fi
     done
+
+    # A password cleared on 3.x. 3.x's `dbrrg-password --clear` runs
+    # `rm -f ~/.dbrrg-password`, which removes only the link; the hash in
+    # ~/.thinfloe-password survives, 3.x saves it, and thinfloe-password.service
+    # would set the revoked password again. Every 4.0 write (thinfloe-password
+    # --set) and every 4.0 restore creates the link, so a home saved by 4.0
+    # always lists .dbrrg-password next to .thinfloe-password. The new name
+    # without the old one can therefore only be a 3.x clear: fail closed and
+    # drop the hash. If this guess is ever wrong, the user sets the password
+    # again; a revoked one never comes back. Only the password: it is the one
+    # file 3.x deletes on purpose.
+    if _tf_archive_lists "$_tmh_list" .thinfloe-password \
+       && ! _tf_archive_lists "$_tmh_list" .dbrrg-password; then
+        tf_log "thinfloe: ~/.dbrrg-password was removed by the previous version; clearing ~/.thinfloe-password"
+        rm -f "$_tmh_home/.thinfloe-password" 2>/dev/null || \
+            warn "thinfloe: could not remove ~/.thinfloe-password"
+    fi
 
     return 0
 }

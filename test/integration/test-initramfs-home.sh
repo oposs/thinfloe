@@ -766,6 +766,44 @@ else
     bad "both names: new=$(cat "$h/.thinfloe-password") old=$(cat "$h/.dbrrg-password")"
 fi
 
+# A password cleared on 3.x: 3.x's `dbrrg-password --clear` removes only the
+# ~/.dbrrg-password link, so its save holds .thinfloe-password without the old
+# name. Every 4.0 write and restore creates the link, so this shape means
+# "cleared by 3.x"; the restore must not bring the revoked password back.
+d="$WORK/hn-pwcleared"; mkdefault "$d"; mkdir -p "$d/src"
+echo mine >"$d/src/.thinfloe-environment"
+ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
+echo revoked >"$d/src/.thinfloe-password"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+tf_log() { echo "$@" >>"$WORK/tflog"; }
+: >"$WORK/tflog"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+tf_log() { :; }
+h="$d/newroot/home/tluser"
+if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.thinfloe-password" \
+   && ! -e "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
+   && "$(cat "$h/.thinfloe-environment")" == "mine" && -L "$h/.dbrrg-environment" \
+   && "$(cat "$d/state/home-restore")" == "ok" ]] \
+   && grep -qxF "thinfloe: ~/.dbrrg-password was removed by the previous version; clearing ~/.thinfloe-password" "$WORK/tflog"; then
+    ok "password cleared on 3.x: ~/.thinfloe-password removed, no link, logged"
+else
+    bad "password cleared on 3.x: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password") log=$(cat "$WORK/tflog")"
+fi
+
+# A home saved by 4.0 holds both names, the old one a link: the password stays.
+d="$WORK/hn-pwkept"; mkdefault "$d"; mkdir -p "$d/src"
+echo kept >"$d/src/.thinfloe-password"
+ln -s .thinfloe-password "$d/src/.dbrrg-password"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "kept" && -L "$h/.dbrrg-password" \
+   && "$(readlink "$h/.dbrrg-password")" == ".thinfloe-password" ]]; then
+    ok "4.0 archive with the password and its link: the password is kept"
+else
+    bad "4.0 password with link: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password")"
+fi
+
 # Members without ./ (tar -C dir -czf archive .dbrrg-environment).
 d="$WORK/hn-noslash"; mkdefault "$d"; mkdir -p "$d/src"
 echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
@@ -857,6 +895,21 @@ if [[ ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
     check_3x_result "rename and link helpers work with only the initramfs's tools" "$h" "$d/state"
 else
     bad "sandboxed rename: stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
+fi
+
+# The cleared-on-3.x check with only the initramfs's tools.
+d="$WORK/hn-sb-pw"; mkdefault "$d"; mkdir -p "$d/src"
+echo revoked >"$d/src/.thinfloe-password"
+tar -C "$d/src" -czf "$d/a.tgz" .
+h="$d/newroot/home/tluser"
+tar -xzf "$d/a.tgz" -C "$h"
+: >"$WORK/warnings"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.dbrrg-password" \
+   && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
+    ok "the cleared-on-3.x check works with only the initramfs's tools"
+else
+    bad "sandboxed clear: pw=$(cat "$h/.thinfloe-password" 2>&1) stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
 fi
 
 # --- tf_finalize_upgrade, inside the same sandbox ---------------------

@@ -171,4 +171,37 @@ else
     bad "3.x password (rc $rc): $(cat "$WORK/pw.out") calls: $(cat "$TF_TEST_LOG")"
 fi
 
+# --- a password cleared on 3.x stays cleared on 4.0 ------------------------
+# 3.x's --clear removes ~/.dbrrg-password, which is only the link; the hash in
+# ~/.thinfloe-password survives and 3.x saves it. The next 4.0 restore must
+# not hand the revoked password back to thinfloe-password.service.
+cat >"$STUBS/passwd" <<'STUB'
+#!/bin/bash
+echo "passwd $*" >>"$TF_TEST_LOG"
+exit 0
+STUB
+chmod +x "$STUBS/passwd"
+env PATH="$STUBS:$PATH" TF_TEST_PASSWD_HOME="$H3" HOME=/root \
+    "$FIX/dbrrg-password" --clear >"$WORK/pw.out" 2>&1
+rc=$?
+if [[ $rc -eq 0 && ! -L "$H3/.dbrrg-password" && -f "$H3/.thinfloe-password" ]]; then
+    ok "3.x --clear removes only the link (fixture behaves as in the field)"
+else
+    bad "3.x --clear (rc $rc): $(ls -la "$H3" | tr '\n' ' ') out: $(cat "$WORK/pw.out")"
+fi
+( cd "$H3" && tar --warning=no-file-changed -zcf - . ) >"$WORK/home3.tgz"
+
+NR="$WORK/newroot-after-clear"
+mkdir -p "$NR/newroot/home/tluser" "$NR/efi" "$NR/state"
+echo default-env >"$NR/newroot/home/tluser/.thinfloe-environment"
+cp "$WORK/home3.tgz" "$NR/efi/home.tar.gz"
+restore_home "$NR/newroot" "$NR/efi" "$NR/state" "tl/ramroot.sqsh"
+H5="$NR/newroot/home/tluser"
+if [[ ! -e "$H5/.thinfloe-password" && ! -L "$H5/.dbrrg-password" \
+   && "$(cat "$H5/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]]; then
+    ok "4.0 restore after a 3.x --clear: no ~/.thinfloe-password, the rest kept"
+else
+    bad "4.0 restore after 3.x --clear: pw=$(cat "$H5/.thinfloe-password" 2>&1) env=$(cat "$H5/.thinfloe-environment" 2>&1)"
+fi
+
 exit "$fail"
