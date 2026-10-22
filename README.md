@@ -1,4 +1,6 @@
-# ThinFloe - Docker-Based RamRoot Generator v3.0
+# ThinFloe
+
+ThinFloe boots a thin client from a USB stick or the network into RAM. Like an ice floe it carries you for a while and is gone at power-off, except for the saved home. Releases before 4.0 were called dbrrg (Docker-Based RamRoot Generator).
 
 Modern diskless Linux system using SquashFS + OverlayFS + ZRAM + Dracut.
 

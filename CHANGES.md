@@ -12,3 +12,4 @@
 - Tile files now use `X-TF-Action`, `X-TF-Save-On-Exit` and `X-TF-Multiple`. Files that still carry the old `X-DBRRG-` keys keep working, and the new key wins when a file has both.
 - The screen-blanking setting in `~/.thinfloe-sessionrc` is now `TF_IDLE_TIMEOUT`. The old `DBRRG_IDLE_TIMEOUT` still works when `TF_IDLE_TIMEOUT` is not set.
 - The settings files in the home directory have new names: `~/.thinfloe-environment`, `~/.thinfloe-sessionrc`, `~/.thinfloe-password`, `~/.thinfloe-ssh-host-keys` and `~/.config/thinfloe/`. The first boot renames the old `~/.dbrrg-*` files, so keyboard layout, password and SSH host keys carry over, and leaves the old names as links so the previous version still starts with the same settings.
+- The boot option `rd.thinfloe.debug` replaces `rd.dbrrg.debug`. The old option still works.

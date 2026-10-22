@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ThinFloe (Docker-Based RamRoot Generator) creates bootable diskless client images that run entirely from RAM. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments using ThinLinc.
+ThinFloe creates bootable diskless client images that run entirely from RAM. The name is an ice floe: the system floats in RAM, carries you for a while, and is gone at power-off, except for the saved home. Releases before 4.0 called the project dbrrg (Docker-Based RamRoot Generator); the old name survives in a few places listed under Standing Constraints. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments using ThinLinc.
 
 ## Build System Architecture
 
@@ -405,15 +405,16 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 ## Standing Constraints
 
-Fifteen rules in this repository look like ordinary configuration but are
-load-bearing. All but the patched-labwc, hook-order, menu-rendering and
-logout-save ones have each caused a real shipped-image bug. The
+Sixteen rules in this repository look like ordinary configuration but are
+load-bearing. All but the patched-labwc, hook-order, menu-rendering,
+logout-save and old-names ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
 reverting it silently would ship regressions in both patched behaviours. The
 hook-order one was caught in QEMU: the race it closes is present in every
 image built before it. The menu-rendering and logout-save ones are preventive
-too: both were decided while the menu was designed, and no image has shipped
-without them.
+too: the menu-rendering and logout-save ones were decided while the menu was
+designed, and no image has shipped without them. The old-names one is
+preventive as well: nothing has shipped broken from it.
 
 ### No login password ships in the image
 
@@ -808,6 +809,57 @@ stick of 4 GB or more; sticks already in the field keep their 2000 MB.
 `test/integration/test-initramfs-home.sh` guard both halves, and `make
 qemu-smoke-upgrade` boots a staged upgrade through OVMF and syslinux and
 requires the rotation and `DEFAULT current` afterwards.
+
+### Old home-file names stay as links while the migration code exists
+
+A 3.x home archive holds `~/.dbrrg-environment`, `~/.dbrrg-sessionrc`,
+`~/.dbrrg-password`, `~/.dbrrg-ssh-host-keys` and `~/.config/dbrrg`. The
+restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
+`TF_HOME_RENAMES`) gives them the 4.0 names `.thinfloe-environment`,
+`.thinfloe-sessionrc`, `.thinfloe-password`, `.thinfloe-ssh-host-keys` and
+`.config/thinfloe`, and logs `thinfloe: renamed ~/<old> to ~/<new>`.
+
+- **The archive decides, not the disk.** The default home already ships
+  `.thinfloe-environment` and `.thinfloe-sessionrc`, so "the new name exists"
+  is always true. The new name wins when the archive lists it. Otherwise a
+  real old entry in the archive replaces the image default at the new name.
+  An old name that is a symlink is what an earlier 4.0 boot left behind and
+  is not touched.
+- **The old names stay as relative symlinks** (`tf_link_old_home_names`, on
+  every boot and every restore outcome). After the first 4.0 boot the
+  previous release sits in `tl.old/` and the boot entry `LABEL previous`
+  starts it; 3.x reads the old names and would otherwise find a default
+  keyboard, no password and fresh SSH host keys. The links live in the home,
+  so every save carries them.
+- **The marker** `/run/thinfloe/state/home-renamed` lists one old name per
+  line, and only when a real 3.x file was renamed. A later part of the
+  ThinFloe work reads it; nothing does yet.
+- **A failed listing fails the restore.** When the archive cannot be listed
+  after a successful extraction, `home-restore` is `failed`, so no save
+  overwrites the stored archive with a half-migrated home.
+- **Accepted loss.** A 3.x fallback that runs `dbrrg-password --clear` and
+  then `--set` replaces the link with a real file. Back on 4.0 the new name
+  wins and the 4.0 password returns; the real old entry is replaced by a link
+  and a warning is logged.
+- `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
+  upgrade copy never carries either machine identity.
+- Still read, next to the new names: `rd.dbrrg.debug` (`rd.thinfloe.debug`),
+  `X-DBRRG-Action`, `X-DBRRG-Save-On-Exit` and `X-DBRRG-Multiple` (the
+  `X-TF-` key wins) and `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
+- Shipped tile files keep their file names (`50-upgrade-image.desktop`),
+  because a user file rewording a shipped tile matches by file name.
+- Upload bridge: `scripts/publish.sh` also uploads the image as
+  `dbrrg-usb.img.zst` (a hard link under `artifacts/images/bridge/`),
+  because the 3.x `upgrade-image` fetches only that name. `vmlinuz`,
+  `initrd.img` and `ramroot.sqsh` keep their names. The upgrade server
+  `https://tobi.oetiker.ch/dbrrg` is unchanged.
+
+Guards: `test/integration/test-initramfs-home.sh` (migration and links),
+`test/integration/test-3x-fallback.sh` (frozen 3.x scripts in
+`test/fixtures/3.x/` run against a 4.0 home), `test/integration/test-cmdline.sh`,
+the tile tests in `src/thinfloe-menu/src/tiles.rs`,
+`test/unit/test_upgrade_image.py` (`make test-unit`) and `make
+qemu-smoke-upgrade`.
 
 ## Known Limitations
 
