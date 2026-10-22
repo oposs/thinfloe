@@ -836,8 +836,8 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   entry is skipped with the warning `thinfloe: ~/.config is a symlink,
   leaving ~/.config/dbrrg alone`.
 - **The marker** `/run/thinfloe/state/home-renamed` lists one old name per
-  line, and only when a real 3.x file was renamed. A later part of the
-  ThinFloe work reads it; nothing does yet.
+  line, and only when a real 3.x file was renamed. Nothing reads it yet; it
+  is meant for the add-on auto-tick.
 - **A failed listing fails the restore.** When the archive cannot be listed
   after a successful extraction, `home-restore` is `failed`, so no save
   overwrites the stored archive with a half-migrated home.
@@ -858,7 +858,16 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   wins and the 4.0 password returns; the real old entry is replaced by a link
   and a warning is logged.
 - `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
-  upgrade copy never carries either machine identity.
+  upgrade copy never carries either machine identity. 3.x's fresh install
+  excludes only `./.dbrrg-ssh-host-keys`, which is now a link, and copies
+  `.thinfloe-ssh-host-keys`: run from a fallback boot of 3.x, it gives the
+  new stick this machine's SSH host keys. 3.x cannot be changed.
+- A stick whose image predates 47c20bb (2026-10-07) upgrades with its old
+  `upgrade-image`, which does not boot `LABEL new`, so its first ThinFloe
+  boot runs the 3.x initramfs on the 4.0 squashfs: no rename, a default
+  keyboard, no SSH password, fresh host keys, the host name `dbrrg-…`, and
+  every save refused with exit 4 (the archive on the ESP stays intact). The
+  next boot runs the 4.0 initramfs and migrates the home.
 - Still read, next to the new names: `rd.dbrrg.debug` (`rd.thinfloe.debug`),
   `X-DBRRG-Action`, `X-DBRRG-Save-On-Exit` and `X-DBRRG-Multiple` (the
   `X-TF-` key wins) and `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
