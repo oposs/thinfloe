@@ -831,6 +831,10 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   starts it; 3.x reads the old names and would otherwise find a default
   keyboard, no password and fresh SSH host keys. The links live in the home,
   so every save carries them.
+- **A symlinked `~/.config` is not followed.** Renaming or linking
+  `.config/dbrrg` through it would change the directory it points to, so the
+  entry is skipped with the warning `thinfloe: ~/.config is a symlink,
+  leaving ~/.config/dbrrg alone`.
 - **The marker** `/run/thinfloe/state/home-renamed` lists one old name per
   line, and only when a real 3.x file was renamed. A later part of the
   ThinFloe work reads it; nothing does yet.

@@ -347,6 +347,23 @@ _tf_archive_lists() {
         END { exit !f }'
 }
 
+# _tf_parent_is_link <home> <name>
+#
+# True, with a warning, when <name> sits below a directory of the home that
+# is a symlink (today only ~/.config, for .config/dbrrg). Renaming, removing
+# or linking below it would act on wherever that link points, possibly
+# outside the home: rm -rf of a real ~/.config/dbrrg would delete the target's
+# directory. Such an entry is skipped.
+_tf_parent_is_link() {
+    case "$2" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+    [ -L "$1/${2%/*}" ] || return 1
+    warn "thinfloe: ~/${2%/*} is a symlink, leaving ~/$2 alone"
+    return 0
+}
+
 # tf_migrate_home_names <home> <archive> [<renamed-file>]
 #
 # Give the files of a 3.x home archive their 4.0 names, after the archive has
@@ -393,6 +410,7 @@ tf_migrate_home_names() {
         _tmh_tail="${_tmh_line#*:}"
         _tmh_new="${_tmh_tail%%:*}"
 
+        _tf_parent_is_link "$_tmh_home" "$_tmh_old" && continue
         _tf_archive_lists "$_tmh_list" "$_tmh_new" && continue
         _tf_archive_lists "$_tmh_list" "$_tmh_old" || continue
         [ -L "$_tmh_home/$_tmh_old" ] && continue
@@ -458,6 +476,7 @@ tf_link_old_home_names() {
         _tlo_new="${_tlo_tail%%:*}"
         _tlo_target="${_tlo_tail#*:}"
 
+        _tf_parent_is_link "$_tlo_home" "$_tlo_old" && continue
         [ -e "$_tlo_home/$_tlo_new" ] || [ -L "$_tlo_home/$_tlo_new" ] || continue
 
         if [ -e "$_tlo_home/$_tlo_old" ] && [ ! -L "$_tlo_home/$_tlo_old" ]; then

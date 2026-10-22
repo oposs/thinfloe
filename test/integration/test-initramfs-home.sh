@@ -834,6 +834,26 @@ else
     bad "deep members only: $(ls -R "$h/.config" 2>&1 | tr '\n' ' ')"
 fi
 
+# A ~/.config that is a symlink: renaming or linking below it would act on
+# whatever it points to, possibly outside the home. The .config/dbrrg entry is
+# skipped with a warning; the other names are handled as usual.
+d="$WORK/hn-cfglink"; mkdefault "$d"; mkdir -p "$d/src" "$d/outside/dbrrg/menu" "$d/outside/thinfloe"
+echo outside >"$d/outside/dbrrg/menu/x.desktop"
+echo "XKB_DEFAULT_LAYOUT=fr" >"$d/src/.dbrrg-environment"
+ln -s "$d/outside" "$d/src/.config"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+: >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ -L "$h/.config" && -d "$d/outside/dbrrg" && ! -L "$d/outside/dbrrg" \
+   && ! -L "$d/outside/thinfloe/dbrrg" && ! -e "$d/outside/thinfloe/menu" \
+   && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=fr" \
+   && "$(grep -c 'is a symlink' "$WORK/warnings")" -ge 2 ]]; then
+    ok "a symlinked ~/.config: .config/dbrrg skipped and warned, the rest migrated"
+else
+    bad "symlinked .config: outside=$(ls -la "$d/outside" | tr '\n' ' ') warnings=$(cat "$WORK/warnings")"
+fi
+
 # Absent archive: links for names whose new file exists, nothing else.
 d="$WORK/hn-absent"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
