@@ -165,6 +165,17 @@ else
     bad "staged keystore not chowned to tluser - save-home could not read it"
 fi
 
+# 3.x reads ~/.dbrrg-ssh-host-keys. The link is made when the keystore is
+# written, so a home saved before the next boot's initramfs runs still lets a
+# fallback boot of 3.x find the keys. It belongs to tluser, like the keystore.
+OLD="$TF_HOME_DIR/.dbrrg-ssh-host-keys"
+if [[ -L "$OLD" ]] && [[ "$(readlink "$OLD")" == ".thinfloe-ssh-host-keys" ]] &&
+   grep -q "^chown -h tluser:tluser $OLD\$" "$TF_TEST_CHOWN_LOG"; then
+    ok "staging links ~/.dbrrg-ssh-host-keys to the keystore, owned by tluser"
+else
+    bad "staging links ~/.dbrrg-ssh-host-keys to the keystore, owned by tluser (link '$(readlink "$OLD" 2>/dev/null)', chown: $(grep '^chown -h' "$TF_TEST_CHOWN_LOG" | head -1))"
+fi
+
 # --- keys already live, keystore empty -> do nothing ---------------------
 
 fresh_case already
@@ -194,6 +205,23 @@ if [[ "$(cat "$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key" 2>/dev/
     ok "--stage copies the live keys into the keystore"
 else
     bad "--stage did not copy the live keys into the keystore"
+fi
+
+if [[ -L "$TF_HOME_DIR/.dbrrg-ssh-host-keys" ]] &&
+   [[ "$(readlink "$TF_HOME_DIR/.dbrrg-ssh-host-keys")" == ".thinfloe-ssh-host-keys" ]]; then
+    ok "--stage links ~/.dbrrg-ssh-host-keys to the keystore"
+else
+    bad "--stage links ~/.dbrrg-ssh-host-keys to the keystore"
+fi
+
+# A link already in place (every boot after the first 4.0 one) is kept as a
+# link, not turned into a directory or a link inside the keystore.
+"$SCRIPT" --stage >/dev/null 2>&1
+if [[ -L "$TF_HOME_DIR/.dbrrg-ssh-host-keys" ]] &&
+   [[ ! -e "$TF_HOME_DIR/.thinfloe-ssh-host-keys/.thinfloe-ssh-host-keys" ]]; then
+    ok "a second --stage leaves the link as it was"
+else
+    bad "a second --stage leaves the link as it was"
 fi
 
 if [[ $fail -ne 0 ]]; then

@@ -222,6 +222,37 @@ else
     bad "--set never writes the plaintext to the store or the terminal (exit $rc)"
 fi
 
+# ---------------------------------------------------------------- test 11
+# 3.x reads ~/.dbrrg-password. The link is made when the hash is written, not
+# only by the next boot's initramfs: a home saved before that boot would
+# otherwise hold .thinfloe-password without .dbrrg-password, which the restore
+# reads as "cleared by 3.x" and removes. The link belongs to tluser, like the
+# file.
+setup
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+OLD="$WORK/home/tluser/.dbrrg-password"
+if [[ "$rc" == "0" ]] && [[ -L "$OLD" ]] &&
+   [[ "$(readlink "$OLD")" == "$STORE_NAME" ]] &&
+   grep -q "^chown -h tluser:tluser $OLD\$" "$WORK/calls.log"; then
+    ok "--set links ~/.dbrrg-password to the stored hash, owned by tluser"
+else
+    bad "--set links ~/.dbrrg-password to the stored hash, owned by tluser (exit $rc, link '$(readlink "$OLD" 2>/dev/null)', chown: $(grep '^chown -h' "$WORK/calls.log" 2>/dev/null | head -1))"
+fi
+
+# ---------------------------------------------------------------- test 12
+# --clear removes the link as well as the file; a dangling link left behind
+# would be carried into every save.
+setup
+echo "$FAKE_HASH" >"$STORE"
+ln -s "$STORE_NAME" "$WORK/home/tluser/.dbrrg-password"
+rc=$(run_password "$WORK/root" '' --clear)
+if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
+   [[ ! -L "$WORK/home/tluser/.dbrrg-password" ]]; then
+    ok "--clear removes ~/.dbrrg-password as well"
+else
+    bad "--clear removes ~/.dbrrg-password as well (exit $rc, link left: $([[ -L "$WORK/home/tluser/.dbrrg-password" ]] && echo yes || echo no))"
+fi
+
 if [[ "$fail" == "0" ]]; then
     echo
     echo "PASSED - thinfloe-password"

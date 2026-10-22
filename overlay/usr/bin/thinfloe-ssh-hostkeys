@@ -29,6 +29,8 @@ SSH_DIR="${TF_SSH_DIR:-/etc/ssh}"
 HOME_DIR="${TF_HOME_DIR:-/home/tluser}"
 KEY_OWNER="${TF_KEY_OWNER:-tluser}"
 KEYSTORE="$HOME_DIR/.thinfloe-ssh-host-keys"
+# The name 3.x reads; a link to the keystore. See stage_to_keystore.
+OLD_KEYSTORE="$HOME_DIR/.dbrrg-ssh-host-keys"
 
 # has_keys <dir> - true if <dir> holds at least one private host key.
 # An unmatched glob stays literal in POSIX sh, so the -e test is the check.
@@ -77,6 +79,20 @@ stage_to_keystore() {
         echo "thinfloe-ssh-hostkeys: WARNING could not chown $KEYSTORE" >&2
     chmod 700 "$KEYSTORE" 2>/dev/null || true
     chmod 600 "$KEYSTORE"/ssh_host_*_key 2>/dev/null || true
+
+    # 3.x, which the boot menu can still start after an upgrade, reads
+    # ~/.dbrrg-ssh-host-keys. The initramfs links it on every boot, but a
+    # home saved before the next boot would carry the keys without it, and a
+    # fallback boot of 3.x would then generate fresh host keys. The link is
+    # relative and belongs to tluser, like the keystore. rm -rf before ln: on
+    # an existing link to a directory, ln -s would create the link inside
+    # the keystore instead.
+    if [ "$(readlink "$OLD_KEYSTORE" 2>/dev/null)" != ".thinfloe-ssh-host-keys" ]; then
+        rm -rf "$OLD_KEYSTORE" 2>/dev/null || true
+        ln -s .thinfloe-ssh-host-keys "$OLD_KEYSTORE" 2>/dev/null || \
+            echo "thinfloe-ssh-hostkeys: WARNING could not link $OLD_KEYSTORE" >&2
+    fi
+    chown -h "$KEY_OWNER:$KEY_OWNER" "$OLD_KEYSTORE" 2>/dev/null || true
 
     return 0
 }
