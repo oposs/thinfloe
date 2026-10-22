@@ -4,7 +4,7 @@
 #
 # Usage: scripts/run-qemu-upgrade-smoke.sh USB_IMAGE WORK_IMAGE LOG TIMEOUT GRACE APPEND
 #
-# The stick is set up the way upgrade-image leaves it: tl.new/ holds a
+# The stick is set up the way thinfloe-upgrade leaves it: tl.new/ holds a
 # complete image and both syslinux.cfg copies say DEFAULT new. QEMU then boots
 # with OVMF, so syslinux - not -kernel - picks the kernel. "LABEL new" gets
 # APPEND (the smoke test's serial-console options) in place of its own, so the
@@ -37,7 +37,7 @@ start=$(partx -g -o START -n 1 "$WORK") || exit 2
 ESP="$WORK@@$((start * 512))"
 export MTOOLS_SKIP_CHECK=1
 
-tmp=$(mktemp -d "$(dirname "$WORK")/dbrrg-upgrade-smoke.XXXXXX") || exit 2
+tmp=$(mktemp -d "$(dirname "$WORK")/thinfloe-upgrade-smoke.XXXXXX") || exit 2
 trap 'rm -rf "$tmp"' EXIT
 
 # Stage tl.new from the stick's own tl/, and mark tl/ so the rotation can be

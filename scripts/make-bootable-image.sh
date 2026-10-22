@@ -8,7 +8,7 @@ source /scripts/lib/common.sh
 EFI_PARTITION_SIZE="${EFI_PARTITION_SIZE:-3000}"
 VERSION="${VERSION:-dev}"
 BUILD_ID="${BUILD_ID:-unknown}"
-PROJECT_NAME="${PROJECT_NAME:-dbrrg}"
+PROJECT_NAME="${PROJECT_NAME:-thinfloe}"
 
 ROOTFS_DIR="/artifacts/rootfs"
 IMAGE_DIR="/artifacts/images"

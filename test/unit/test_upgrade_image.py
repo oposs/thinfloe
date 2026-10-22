@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Offline tests for upgrade-image.
+"""Offline tests for thinfloe-upgrade.
 
-upgrade-image has no .py extension and is executed, not imported, so these
+thinfloe-upgrade has no .py extension and is executed, not imported, so these
 tests load it through importlib. It guards its entry point with
 `if __name__ == "__main__"`, so importing it runs no UI.
 
-Everything here runs unprivileged. mount, umount and dbrrg-save-home are
+Everything here runs unprivileged. mount, umount and thinfloe-save-home are
 replaced with fakes; tar is real, because archiving a temporary directory
 needs no privileges and the archive's contents are the assertion.
 """
@@ -25,7 +25,7 @@ from typing import List
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "overlay" / "usr" / "bin" / "upgrade-image"
+SCRIPT = REPO / "overlay" / "usr" / "bin" / "thinfloe-upgrade"
 
 
 def load_upgrade_image():
@@ -45,7 +45,7 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
     """The save before a reboot must not be killed or silently discarded."""
 
     def test_timeout_exceeds_the_scripts_own_ping_bound(self):
-        # dbrrg-save-home pings the boot server for up to 60s BEFORE it starts
+        # thinfloe-save-home pings the boot server for up to 60s BEFORE it starts
         # the tar and the upload. A 60s timeout here killed it mid-upload.
         with mock.patch.object(ui.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
@@ -55,7 +55,7 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
         timeout = run.call_args.kwargs["timeout"]
         self.assertGreater(
             timeout, 60,
-            "timeout must exceed dbrrg-save-home's own 60s ping bound",
+            "timeout must exceed thinfloe-save-home's own 60s ping bound",
         )
 
     def test_a_refusal_is_reported_not_swallowed(self):
@@ -81,12 +81,12 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
         self.assertIn(
             "boot server unreachable",
             stderr.getvalue(),
-            "stderr from dbrrg-save-home not echoed",
+            "stderr from thinfloe-save-home not echoed",
         )
 
     def test_a_timeout_is_reported_not_swallowed(self):
         with mock.patch.object(ui.subprocess, "run") as run:
-            run.side_effect = subprocess.TimeoutExpired(["dbrrg-save-home"], 600)
+            run.side_effect = subprocess.TimeoutExpired(["thinfloe-save-home"], 600)
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 rc = ui.save_home_before_finish()
@@ -105,7 +105,7 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
                 rc = ui.save_home_before_finish()
         self.assertEqual(rc, -1)
         self.assertIn(
-            "WARNING: could not run dbrrg-save-home",
+            "WARNING: could not run thinfloe-save-home",
             stdout.getvalue(),
             "missing script warning not logged",
         )
@@ -135,7 +135,7 @@ class TestHomeArchiveArgv(unittest.TestCase):
 
     def test_excludes_the_ssh_host_keys(self):
         argv = ui.home_archive_argv("/home/tluser", "/mnt/home.tar.gz")
-        self.assertIn("--exclude=./.dbrrg-ssh-host-keys", argv)
+        self.assertIn("--exclude=./.thinfloe-ssh-host-keys", argv)
 
     def test_archives_relative_to_the_home_directory(self):
         # restore_home() unpacks into the home directory itself, so members
@@ -159,13 +159,13 @@ class TestHomeArchiveContents(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.work = tempfile.TemporaryDirectory()
         self.home = Path(self.work.name) / "home"
-        (self.home / ".dbrrg-ssh-host-keys").mkdir(parents=True)
-        (self.home / ".dbrrg-ssh-host-keys" / "ssh_host_ed25519_key").write_text(
+        (self.home / ".thinfloe-ssh-host-keys").mkdir(parents=True)
+        (self.home / ".thinfloe-ssh-host-keys" / "ssh_host_ed25519_key").write_text(
             "PRIVATE KEY"
         )
-        (self.home / ".dbrrg-sessionrc").write_text("wlr-randr --output DP-1\n")
-        (self.home / ".config" / "dbrrg" / "menu").mkdir(parents=True)
-        (self.home / ".config" / "dbrrg" / "menu" / "15-mine.desktop").write_text(
+        (self.home / ".thinfloe-sessionrc").write_text("wlr-randr --output DP-1\n")
+        (self.home / ".config" / "thinfloe" / "menu").mkdir(parents=True)
+        (self.home / ".config" / "thinfloe" / "menu" / "15-mine.desktop").write_text(
             "[Desktop Entry]\nName=Mine\n"
         )
         self.dest = Path(self.work.name) / "home.tar.gz"
@@ -184,21 +184,21 @@ class TestHomeArchiveContents(unittest.TestCase):
             ui.home_archive_argv(str(self.home), str(self.dest)), check=True
         )
         joined = "\n".join(self._members())
-        self.assertNotIn(".dbrrg-ssh-host-keys", joined)
+        self.assertNotIn(".thinfloe-ssh-host-keys", joined)
 
     def test_the_users_own_settings_are_in_the_archive(self):
         subprocess.run(
             ui.home_archive_argv(str(self.home), str(self.dest)), check=True
         )
         members = self._members()
-        self.assertIn("./.dbrrg-sessionrc", members)
-        self.assertIn("./.config/dbrrg/menu/15-mine.desktop", members)
+        self.assertIn("./.thinfloe-sessionrc", members)
+        self.assertIn("./.config/thinfloe/menu/15-mine.desktop", members)
 
 
 
 
 class TestHomeArchiveExcludes(unittest.TestCase):
-    """The exclude list is the one dbrrg-save-home uses, plus machine identity."""
+    """The exclude list is the one thinfloe-save-home uses, plus machine identity."""
 
     def setUp(self):
         self.work = tempfile.TemporaryDirectory()
@@ -214,10 +214,10 @@ class TestHomeArchiveExcludes(unittest.TestCase):
         for name in (".cache", ".other-cache", ".keep"):
             (self.home / name).mkdir()
             (self.home / name / "f").write_text("x")
-        (self.home / ".dbrrg-ssh-host-keys").mkdir()
-        (self.home / ".dbrrg-ssh-host-keys" / "k").write_text("PRIVATE")
+        (self.home / ".thinfloe-ssh-host-keys").mkdir()
+        (self.home / ".thinfloe-ssh-host-keys" / "k").write_text("PRIVATE")
         (self.home / "wg0.conf").write_text("PrivateKey = secret\n")
-        (self.home / ".dbrrg-password").write_text("hash\n")
+        (self.home / ".thinfloe-password").write_text("hash\n")
 
     def _members(self):
         subprocess.run(
@@ -250,12 +250,12 @@ class TestHomeArchiveExcludes(unittest.TestCase):
     def test_identity_is_excluded_even_when_a_user_file_ignores_it(self):
         (self.home / ".save-home-exclude").write_text("./.cache\n")
         joined = "\n".join(self._members())
-        self.assertNotIn(".dbrrg-ssh-host-keys", joined)
+        self.assertNotIn(".thinfloe-ssh-host-keys", joined)
         self.assertNotIn("wg0.conf", joined)
 
     def test_the_remote_access_password_is_in_the_archive(self):
         self.default.write_text("./.cache\n")
-        self.assertIn("./.dbrrg-password", self._members())
+        self.assertIn("./.thinfloe-password", self._members())
 
     def test_no_exclude_file_at_all_still_archives(self):
         self.assertIn("./.keep/f", self._members())
@@ -314,7 +314,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
         self.addCleanup(self.work.cleanup)
         self.home = Path(self.work.name) / "home"
         self.home.mkdir()
-        (self.home / ".dbrrg-sessionrc").write_text("x\n")
+        (self.home / ".thinfloe-sessionrc").write_text("x\n")
 
         out = contextlib.redirect_stdout(io.StringIO())
         out.__enter__()
@@ -680,7 +680,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
 
 def _drive(is_boot=False):
     return ui.DriveInfo(
-        device="/dev/sdb", size="16G", model="Stick", label="", is_dbrrg=False,
+        device="/dev/sdb", size="16G", model="Stick", label="", is_thinfloe=False,
         efi_partition=None, part_size_mb=0, is_boot=is_boot,
         has_tl_old=False, has_tl_new=False,
     )
@@ -873,7 +873,7 @@ class TestMountinfoDetection(unittest.TestCase):
         self.assertEqual(ui._unescape_mountinfo("a\\011b\\012c\\134d"), "a\tb\nc\\d")
 
 
-# A stick written before "LABEL new" existed: upgrade-image must add the entry.
+# A stick written before "LABEL new" existed: thinfloe-upgrade must add the entry.
 OLD_SYSLINUX_CFG = """SERIAL 0 115200
 DEFAULT current
 TIMEOUT 5
@@ -927,10 +927,10 @@ class TestShippedSyslinuxCfg(unittest.TestCase):
 
 
 class TestSetBootDefault(unittest.TestCase):
-    """upgrade-image points the next boot at tl.new/ in both config copies."""
+    """thinfloe-upgrade points the next boot at tl.new/ in both config copies."""
 
     def setUp(self):
-        self.esp = Path(tempfile.mkdtemp(prefix="dbrrg-esp-"))
+        self.esp = Path(tempfile.mkdtemp(prefix="thinfloe-esp-"))
         self.addCleanup(shutil.rmtree, self.esp, ignore_errors=True)
         (self.esp / "efi" / "boot").mkdir(parents=True)
         self.copies = [self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg"]
@@ -986,13 +986,13 @@ class TestAbUpgradeBootDefault(unittest.TestCase):
     """
 
     def setUp(self):
-        self.esp = Path(tempfile.mkdtemp(prefix="dbrrg-esp-"))
+        self.esp = Path(tempfile.mkdtemp(prefix="thinfloe-esp-"))
         self.addCleanup(shutil.rmtree, self.esp, ignore_errors=True)
         (self.esp / "efi" / "boot").mkdir(parents=True)
         (self.esp / "tl").mkdir()
         for c in (self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg"):
             c.write_text(OLD_SYSLINUX_CFG)
-        fw = Path(tempfile.mkdtemp(prefix="dbrrg-fw-"))
+        fw = Path(tempfile.mkdtemp(prefix="thinfloe-fw-"))
         self.addCleanup(shutil.rmtree, fw, ignore_errors=True)
         for f in ui.FIRMWARE_FILES:
             (fw / f).write_text("new")
@@ -1030,7 +1030,7 @@ class TestAbUpgradeBootDefault(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             return run(cmd, *a, **kw)
         with mock.patch.object(ui, "run_cmd", side_effect=fake_run), \
-             mock.patch.object(ui.tempfile, "mkdtemp", side_effect=[str(self.esp), tempfile.mkdtemp(prefix="dbrrg-work-")]), \
+             mock.patch.object(ui.tempfile, "mkdtemp", side_effect=[str(self.esp), tempfile.mkdtemp(prefix="thinfloe-work-")]), \
              mock.patch.object(ui.shutil, "rmtree"), \
              contextlib.redirect_stdout(io.StringIO()):
             ui.do_ab_upgrade(self.drive(False), "http://example.invalid")
@@ -1092,7 +1092,7 @@ class TestAbUpgradeSpace(TestAbUpgradeBootDefault):
 
 
 class TestZstdContentSize(unittest.TestCase):
-    """The image size is read from the zstd frame header of dbrrg-usb.img.zst.
+    """The image size is read from the zstd frame header of thinfloe-usb.img.zst.
 
     Each header below is the first 18 bytes of a real `zstd -3` (or `-1`)
     output, one per width of the Frame_Content_Size field.
@@ -1140,7 +1140,7 @@ class TestImageSize(unittest.TestCase):
         with mock.patch.object(ui.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess(
                 [], 0, bytes.fromhex("28b52ffd84580000b0bb5c1300b42333c0fa"), b"")
-            self.assertEqual(ui.image_size("http://x/dbrrg-usb.img.zst"), 3148873728)
+            self.assertEqual(ui.image_size("http://x/thinfloe-usb.img.zst"), 3148873728)
         argv = run.call_args.args[0]
         self.assertIn("-r", argv)
         self.assertEqual(argv[argv.index("-r") + 1], "0-17")
@@ -1149,12 +1149,12 @@ class TestImageSize(unittest.TestCase):
     def test_a_failed_request_is_unknown(self):
         with mock.patch.object(ui.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 22, b"", b"404")
-            self.assertIsNone(ui.image_size("http://x/dbrrg-usb.img.zst"))
+            self.assertIsNone(ui.image_size("http://x/thinfloe-usb.img.zst"))
 
     def test_a_curl_timeout_is_unknown(self):
         with mock.patch.object(ui.subprocess, "run",
                                side_effect=subprocess.TimeoutExpired("curl", 30)):
-            self.assertIsNone(ui.image_size("http://x/dbrrg-usb.img.zst"))
+            self.assertIsNone(ui.image_size("http://x/thinfloe-usb.img.zst"))
 
 
 class TestFreshInstallDriveSize(unittest.TestCase):
@@ -1165,7 +1165,7 @@ class TestFreshInstallDriveSize(unittest.TestCase):
     def drive(self):
         return ui.DriveInfo(
             device="/dev/sdz", size="1.9G", model="Tiny", label="",
-            is_dbrrg=False, efi_partition=None, part_size_mb=0,
+            is_thinfloe=False, efi_partition=None, part_size_mb=0,
             is_boot=False, has_tl_old=False, has_tl_new=False,
         )
 

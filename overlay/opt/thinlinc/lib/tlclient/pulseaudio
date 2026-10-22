@@ -26,7 +26,7 @@
 set -u
 unset LD_LIBRARY_PATH
 
-log() { echo "dbrrg-tlclient-audio: $*" >&2; }
+log() { echo "thinfloe-tlclient-audio: $*" >&2; }
 
 # --- locate the module specification among the arguments --------------------
 # Match only module-native-protocol-tcp, the module this wrapper knows how to

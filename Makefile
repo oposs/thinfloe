@@ -1,6 +1,6 @@
-# Makefile for dbrrg - SquashFS + OverlayFS + ZRAM + Dracut
+# Makefile for ThinFloe - SquashFS + OverlayFS + ZRAM + Dracut
 
-PROJECT_NAME := dbrrg
+PROJECT_NAME := thinfloe
 VERSION := 3.0.0
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 BUILD_ID := $(shell date -u +%Y%m%d-%H%M%S)
@@ -70,7 +70,7 @@ all: image
 	@echo "✓ Build complete!"
 
 help:
-	@echo "dbrrg Build System"
+	@echo "ThinFloe Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all (default)     - Build complete USB image"
@@ -118,7 +118,7 @@ OVERLAY_FILES := $(shell find overlay -type f ! -name '*~' 2>/dev/null)
 # changed.
 PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 
-# dbrrg-menu is built from source in the ubuntu container's menu-build stage.
+# thinfloe-menu is built from source in the ubuntu container's menu-build stage.
 # Like PATCH_FILES, its sources must be prerequisites of .ubuntu-container:
 # OVERLAY_FILES only finds files under overlay/, and the crate cannot live
 # there because overlay/ is copied into the shipped rootfs. Without this,
@@ -126,14 +126,14 @@ PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 # do, and 'make test' validates a stale binary while printing green. The
 # directories are listed as well, so deleting a file still changes a
 # prerequisite's mtime.
-MENU_FILES := $(shell find src/dbrrg-menu -path src/dbrrg-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
-MENU_DIRS := $(shell find src/dbrrg-menu -path src/dbrrg-menu/target -prune -o -type d -print 2>/dev/null)
+MENU_FILES := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
+MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type d -print 2>/dev/null)
 
 # Each container stamp holds the ID of the image its build produced, and is
 # removed at parse time unless the tag still names exactly that image.
 #
 # The stamp is per checkout, but the tag is not: every checkout of this repo
-# builds dbrrg-ubuntu:$(VERSION). The old check only asked whether the tag
+# builds thinfloe-ubuntu:$(VERSION). The old check only asked whether the tag
 # existed, so after another checkout built and re-tagged the image, this
 # checkout's stamp still said "up to date" and `make test` ran its guards
 # against the other checkout's image and reported green. A stamp from before
@@ -274,11 +274,11 @@ $(QCOW2_EMPTY_IMAGE):
 
 qemu-test: $(QCOW2_BOOT_IMAGE) $(QCOW2_TARGET_IMAGE) $(QCOW2_EMPTY_IMAGE)
 	@echo "Starting QEMU with 3 drives for upgrade testing..."
-	@echo "  Boot drive:   $(QCOW2_BOOT_IMAGE) (vda) - current dbrrg"
-	@echo "  Target drive: $(QCOW2_TARGET_IMAGE) (vdb) - dbrrg for A/B test"
+	@echo "  Boot drive:   $(QCOW2_BOOT_IMAGE) (vda) - current ThinFloe"
+	@echo "  Target drive: $(QCOW2_TARGET_IMAGE) (vdb) - ThinFloe for A/B test"
 	@echo "  Empty drive:  $(QCOW2_EMPTY_IMAGE) (vdc) - fresh install test"
 	@echo ""
-	@echo "Run 'upgrade-image' to test upgrade workflow"
+	@echo "Run 'thinfloe-upgrade' to test upgrade workflow"
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
 	qemu-system-x86_64 \
@@ -304,7 +304,7 @@ qemu-test: $(QCOW2_BOOT_IMAGE) $(QCOW2_TARGET_IMAGE) $(QCOW2_EMPTY_IMAGE)
 # -kernel/-initrd rather than going through syslinux. That is deliberate:
 # driving the bootloader menu over a serial line is racy, and booting
 # directly is deterministic while still exercising everything that matters -
-# the kernel, the initramfs, the dbrrg dracut module, the squashfs mount, the
+# the kernel, the initramfs, the ThinFloe dracut module, the squashfs mount, the
 # overlay setup and systemd startup. Syslinux itself is covered by the
 # interactive qemu-test target.
 #
@@ -362,7 +362,7 @@ qemu-smoke-netboot: $(KERNEL) $(INITRD) $(SQUASHFS) | $(IMAGE_DIR)
 		-device virtio-rng-pci,rng=rng0
 
 # Headless first boot of a staged upgrade: tl.new/ on the stick and
-# syslinux.cfg on DEFAULT new, as upgrade-image leaves them, booted through
+# syslinux.cfg on DEFAULT new, as thinfloe-upgrade leaves them, booted through
 # OVMF and syslinux. Requires the initramfs to rotate tl.new into tl/ and set
 # DEFAULT current again. See scripts/run-qemu-upgrade-smoke.sh.
 QEMU_UPGRADE_LOG := $(IMAGE_DIR)/qemu-upgrade-smoke.log
@@ -376,13 +376,13 @@ qemu-smoke-upgrade: $(USB_IMAGE)
 		"$(QEMU_SMOKE_APPEND)"
 
 # Host-side tests. No image, no container, no network: the fast feedback
-# loop for the scripts in overlay/usr/bin and for dbrrg-menu's rules.
+# loop for the scripts in overlay/usr/bin and for thinfloe-menu's rules.
 # Deliberately not dependent on 'rootfs'.
 #
 # MEMCAP bounds the cargo tests: the tile-file and icon tests feed
 # deliberately oversized input, and a broken bound must fail the test rather
 # than take the machine's memory. Set MEMCAP= where systemd-run is missing.
-MENU_DIR := src/dbrrg-menu
+MENU_DIR := src/thinfloe-menu
 MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
 test-unit:
 	@python3 -m unittest discover -s test/unit -v
@@ -391,7 +391,7 @@ test-unit:
 test: test-unit rootfs
 	@test/integration/test-firmware.sh
 	@test/integration/test-wifi-stack.sh
-	@DBRRG_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
+	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-initramfs-home.sh
 	@test/integration/test-initramfs-commands.sh

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Offline tests for the prerequisites of the USB image.
 #
-# dbrrg-usb.img used to depend on the phony target `rootfs`, so every target
+# thinfloe-usb.img used to depend on the phony target `rootfs`, so every target
 # that needs it (image, qemu-smoke, qemu-test) built it again. The new build
 # gets new random GPT GUIDs, and the .zst made by `make image` then no longer
 # matched the raw image next to it. The image now depends on the files it is
@@ -36,20 +36,20 @@ STUB
 chmod +x "$RUNTIME"
 
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/vendor" "$TREE/src/dbrrg-menu/src" \
+mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/vendor" "$TREE/src/thinfloe-menu/src" \
     "$TREE/artifacts/rootfs" "$TREE/artifacts/images" "$TREE/configs" "$TREE/scripts/lib"
 cp "$REPO/Makefile" "$TREE/Makefile"
-inputs=(containers/ubuntu/Dockerfile containers/image-builder/Dockerfile vendor/oxulnk-desktop.deb src/dbrrg-menu/src/main.rs
+inputs=(containers/ubuntu/Dockerfile containers/image-builder/Dockerfile vendor/oxulnk-desktop.deb src/thinfloe-menu/src/main.rs
         configs/syslinux.cfg scripts/make-bootable-image.sh scripts/lib/common.sh)
 for f in "${inputs[@]}"; do : >"$TREE/$f"; done
 (cd "$TREE" && touch -d '2020-01-01' "${inputs[@]}" containers/ubuntu/patches \
-    src/dbrrg-menu/src src/dbrrg-menu)
+    src/thinfloe-menu/src src/thinfloe-menu)
 echo sha256:aaaa >"$TREE/.ubuntu-container"
 echo sha256:aaaa >"$TREE/.image-builder-container"
 touch -d '2021-01-01' "$TREE/.ubuntu-container" "$TREE/.image-builder-container"
 for f in vmlinuz initrd.img ramroot.sqsh; do : >"$TREE/artifacts/rootfs/$f"; done
 touch -d '2022-01-01' "$TREE"/artifacts/rootfs/*
-USB="artifacts/images/dbrrg-usb.img"
+USB="artifacts/images/thinfloe-usb.img"
 
 # Prints "up-to-date" when make would not rebuild the image, "rebuild" otherwise.
 state() {

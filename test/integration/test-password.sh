@@ -1,11 +1,11 @@
 #!/bin/bash
-# Offline tests for dbrrg-password.
+# Offline tests for thinfloe-password.
 #
 # The image ships no password for tluser: adduser --disabled-password leaves
 # `!` in the shadow field and nothing overwrites it. A person at the machine
-# sets one with `sudo dbrrg-password`, and it has to survive a reboot, so the
-# hash is stored in tluser's home directory where dbrrg-save-home captures it
-# and the initramfs restores it. dbrrg-password --apply, run before
+# sets one with `sudo thinfloe-password`, and it has to survive a reboot, so the
+# hash is stored in tluser's home directory where thinfloe-save-home captures it
+# and the initramfs restores it. thinfloe-password --apply, run before
 # ssh.service, puts it back into the shadow file.
 #
 # Two properties are load-bearing and have each already cost this repo a bug
@@ -15,9 +15,9 @@
 #     This script runs under sudo, where env_reset makes HOME /root, so a
 #     $HOME-based path writes the hash into root's home: lost at reboot, and
 #     with the wrong owner. Same defect as the one cfe7aa0 fixed in
-#     dbrrg-save-home.
+#     thinfloe-save-home.
 #   - The stored file is owned by tluser, not root, like the rest of the
-#     home. Until 2026-10 the netboot save in dbrrg-save-home ran tar as
+#     home. Until 2026-10 the netboot save in thinfloe-save-home ran tar as
 #     tluser, and a root-owned 600 file failed that save outright.
 #
 # Runs without root: chpasswd, getent, passwd and chown are stubbed and their
@@ -28,7 +28,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT="$REPO/overlay/usr/bin/dbrrg-password"
+SCRIPT="$REPO/overlay/usr/bin/thinfloe-password"
 
 if [[ ! -x "$SCRIPT" ]]; then
     echo "FAIL: $SCRIPT not found or not executable" >&2
@@ -49,7 +49,7 @@ mkdir -p "$STUBS"
 # being given a plaintext password to hash; with -e a ready-made hash.
 cat >"$STUBS/chpasswd" <<'STUB'
 #!/bin/bash
-{ echo "chpasswd $*"; sed 's/^/stdin: /'; } >>"$DBRRG_TEST_LOG"
+{ echo "chpasswd $*"; sed 's/^/stdin: /'; } >>"$TF_TEST_LOG"
 exit 0
 STUB
 
@@ -57,10 +57,10 @@ STUB
 # shadow for the hash chpasswd just produced.
 cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
-echo "getent $*" >>"$DBRRG_TEST_LOG"
+echo "getent $*" >>"$TF_TEST_LOG"
 case "$1" in
-    passwd) echo "tluser:x:1000:1000:ThinUser:$DBRRG_TEST_PASSWD_HOME:/bin/bash" ;;
-    shadow) echo "tluser:$DBRRG_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
+    passwd) echo "tluser:x:1000:1000:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
+    shadow) echo "tluser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
     *)      exit 2 ;;
 esac
 exit 0
@@ -68,27 +68,27 @@ STUB
 
 cat >"$STUBS/passwd" <<'STUB'
 #!/bin/bash
-echo "passwd $*" >>"$DBRRG_TEST_LOG"
+echo "passwd $*" >>"$TF_TEST_LOG"
 exit 0
 STUB
 
 cat >"$STUBS/chown" <<'STUB'
 #!/bin/bash
-echo "chown $*" >>"$DBRRG_TEST_LOG"
+echo "chown $*" >>"$TF_TEST_LOG"
 exit 0
 STUB
 
 chmod +x "$STUBS"/*
 
-STORE_NAME=".dbrrg-password"
+STORE_NAME=".thinfloe-password"
 
 # run_password <home-for-HOME-env> <stdin-text> [args...]
 run_password() {
     local home_env="$1" input="$2"; shift 2
     printf '%s' "$input" | \
-    DBRRG_TEST_LOG="$WORK/calls.log" \
-    DBRRG_TEST_PASSWD_HOME="$WORK/home/tluser" \
-    DBRRG_TEST_SHADOW_HASH="$FAKE_HASH" \
+    TF_TEST_LOG="$WORK/calls.log" \
+    TF_TEST_PASSWD_HOME="$WORK/home/tluser" \
+    TF_TEST_SHADOW_HASH="$FAKE_HASH" \
     HOME="$home_env" \
     PATH="$STUBS:$PATH" \
         "$SCRIPT" "$@" >"$WORK/out" 2>"$WORK/err"
@@ -224,6 +224,6 @@ fi
 
 if [[ "$fail" == "0" ]]; then
     echo
-    echo "PASSED - dbrrg-password"
+    echo "PASSED - thinfloe-password"
 fi
 exit $fail

@@ -20,8 +20,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 # --- 1. the KMS race -----------------------------------------------------
 
-WAITKMS="overlay/usr/libexec/dbrrg/wait-kms"
-UNIT="overlay/etc/systemd/system/dbrrg-wait-kms.service"
+WAITKMS="overlay/usr/libexec/thinfloe/wait-kms"
+UNIT="overlay/etc/systemd/system/thinfloe-wait-kms.service"
 AUTOLOGIN="overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf"
 
 if [[ -x "$WAITKMS" ]]; then
@@ -31,9 +31,9 @@ else
 fi
 
 if [[ -f "$UNIT" ]]; then
-    ok "dbrrg-wait-kms.service exists"
+    ok "thinfloe-wait-kms.service exists"
 else
-    bad "dbrrg-wait-kms.service missing"
+    bad "thinfloe-wait-kms.service missing"
 fi
 
 # A plain After=dev-dri-card0.device is satisfied by simpledrm's card0, so it
@@ -57,10 +57,10 @@ else
     bad "the unit is not ordered before getty@tty1 - it would not cover the gap"
 fi
 
-if grep -q 'dbrrg-wait-kms' "$AUTOLOGIN" 2>/dev/null; then
-    ok "the autologin drop-in pulls in dbrrg-wait-kms"
+if grep -q 'thinfloe-wait-kms' "$AUTOLOGIN" 2>/dev/null; then
+    ok "the autologin drop-in pulls in thinfloe-wait-kms"
 else
-    bad "the autologin drop-in does not reference dbrrg-wait-kms"
+    bad "the autologin drop-in does not reference thinfloe-wait-kms"
 fi
 
 # The reason for the whole constraints section in CLAUDE.md: this repo has
@@ -87,14 +87,14 @@ ln -s /fake/drivers/i915 "$WORK/sys/card0/device/driver"
 mkdir -p "$WORK/stubs"
 cat >"$WORK/stubs/udevadm" <<'STUB'
 #!/bin/bash
-echo "udevadm $*" >>"$DBRRG_TEST_UDEV_LOG"
+echo "udevadm $*" >>"$TF_TEST_UDEV_LOG"
 exit 0
 STUB
 chmod +x "$WORK/stubs/udevadm"
 
 start=$(date +%s)
-DBRRG_TEST_UDEV_LOG="$WORK/udev.log" \
-DBRRG_DRM_GLOB="$WORK/sys/card[0-9]*" \
+TF_TEST_UDEV_LOG="$WORK/udev.log" \
+TF_DRM_GLOB="$WORK/sys/card[0-9]*" \
 PATH="$WORK/stubs:$PATH" \
     "$WAITKMS" >"$WORK/out" 2>"$WORK/err"
 rc=$?
@@ -111,9 +111,9 @@ mkdir -p "$WORK/sys2/card0/device"
 ln -s /fake/drivers/simpledrm "$WORK/sys2/card0/device/driver"
 : >"$WORK/udev2.log"
 start=$(date +%s)
-DBRRG_TEST_UDEV_LOG="$WORK/udev2.log" \
-DBRRG_DRM_GLOB="$WORK/sys2/card[0-9]*" \
-DBRRG_KMS_TIMEOUT=1 \
+TF_TEST_UDEV_LOG="$WORK/udev2.log" \
+TF_DRM_GLOB="$WORK/sys2/card[0-9]*" \
+TF_KMS_TIMEOUT=1 \
 PATH="$WORK/stubs:$PATH" \
     "$WAITKMS" >"$WORK/out2" 2>"$WORK/err2"
 rc=$?
@@ -131,15 +131,15 @@ mkdir -p "$WORK/sys3/card0/device"
 ln -s /fake/drivers/i915 "$WORK/sys3/card0/device/driver"
 cat >"$WORK/stubs/udevadm-fail" <<'STUB'
 #!/bin/bash
-echo "udevadm $*" >>"$DBRRG_TEST_UDEV_LOG"
+echo "udevadm $*" >>"$TF_TEST_UDEV_LOG"
 exit 1
 STUB
 chmod +x "$WORK/stubs/udevadm-fail"
 mv "$WORK/stubs/udevadm" "$WORK/stubs/udevadm-success"
 ln -s udevadm-fail "$WORK/stubs/udevadm"
 
-DBRRG_TEST_UDEV_LOG="$WORK/udev3.log" \
-DBRRG_DRM_GLOB="$WORK/sys3/card[0-9]*" \
+TF_TEST_UDEV_LOG="$WORK/udev3.log" \
+TF_DRM_GLOB="$WORK/sys3/card[0-9]*" \
 PATH="$WORK/stubs:$PATH" \
     "$WAITKMS" >"$WORK/out3" 2>"$WORK/err3"
 rc=$?
@@ -150,7 +150,7 @@ else
 fi
 
 # --- 2. per-machine network config outside the session ---
-SO=overlay/usr/lib/dracut/modules.d/90dbrrg/setup-overlay.sh
+SO=overlay/usr/lib/dracut/modules.d/90thinfloe/setup-overlay.sh
 l_restore=$(grep -n 'restore_home' "$SO" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)
 l_net=$(grep -n 'install_local_network' "$SO" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)
 if [[ -n "$l_restore" && -n "$l_net" && "$l_net" -gt "$l_restore" ]]; then
@@ -167,33 +167,33 @@ else
     bad "Dockerfile must chmod 600 /etc/netplan/*.yaml (netplan: permissions too open)"
 fi
 
-RC=overlay/home/tluser/.dbrrg-sessionrc
+RC=overlay/home/tluser/.thinfloe-sessionrc
 if ! grep -q 'sudo netplan apply' "$RC"; then
-    ok ".dbrrg-sessionrc no longer tells the user to run netplan apply"
+    ok ".thinfloe-sessionrc no longer tells the user to run netplan apply"
 else
-    bad ".dbrrg-sessionrc still contains sudo netplan apply"
+    bad ".thinfloe-sessionrc still contains sudo netplan apply"
 fi
 if grep -q 'wifi.yaml' "$RC" && grep -q 'wg0.conf' "$RC"; then
-    ok ".dbrrg-sessionrc mentions wifi.yaml and wg0.conf"
+    ok ".thinfloe-sessionrc mentions wifi.yaml and wg0.conf"
 else
-    bad ".dbrrg-sessionrc must mention wifi.yaml and wg0.conf"
+    bad ".thinfloe-sessionrc must mention wifi.yaml and wg0.conf"
 fi
 
 # A unit that copies the files cannot work: the netplan systemd generator
 # emits netplan-wpa-<iface>.service when systemd starts, before any unit
 # runs, so files installed later get .network files but no WPA unit.
-if [[ ! -e overlay/etc/systemd/system/dbrrg-local-network.service ]]; then
-    ok "no dbrrg-local-network.service (the copy belongs in the initramfs)"
+if [[ ! -e overlay/etc/systemd/system/thinfloe-local-network.service ]]; then
+    ok "no thinfloe-local-network.service (the copy belongs in the initramfs)"
 else
-    bad "dbrrg-local-network.service exists; it runs too late for the netplan generator"
+    bad "thinfloe-local-network.service exists; it runs too late for the netplan generator"
 fi
 
 # --- 3. retry the session once on a GPU failure --------------------------
 
-PROFILE="overlay/etc/profile.d/10-dbrrg-session.sh"
+PROFILE="overlay/etc/profile.d/10-thinfloe-session.sh"
 
-if grep -q 'DBRRG_SESSION_RETRIED' "$PROFILE"; then
-    ok "the session script guards its retry with DBRRG_SESSION_RETRIED"
+if grep -q 'TF_SESSION_RETRIED' "$PROFILE"; then
+    ok "the session script guards its retry with TF_SESSION_RETRIED"
 else
     bad "no retry guard - a GPU not ready at login still loses the whole boot"
 fi
@@ -206,16 +206,16 @@ fi
 
 # Exactly one retry. A loop here spins forever on a machine with no GPU and
 # fills the journal.
-retries=$(grep -c 'DBRRG_SESSION_RETRIED' "$PROFILE")
+retries=$(grep -c 'TF_SESSION_RETRIED' "$PROFILE")
 if [[ "$retries" -ge 2 ]]; then
     ok "the guard is both set and tested ($retries references)"
 else
-    bad "DBRRG_SESSION_RETRIED appears $retries time(s) - it must be set and tested"
+    bad "TF_SESSION_RETRIED appears $retries time(s) - it must be set and tested"
 fi
 
 # Behaviour: run the real profile script under sh with stub tty, labwc and
 # wait-kms. The real wait-kms waits up to 20s for a GPU, so a host that has
-# /usr/libexec/dbrrg/wait-kms must not be the one that answers here.
+# /usr/libexec/thinfloe/wait-kms must not be the one that answers here.
 mkdir -p "$WORK/ps/bin" "$WORK/ps/home" "$WORK/ps/run"
 cat >"$WORK/ps/bin/wait-kms" <<'STUB'
 #!/bin/sh
@@ -243,9 +243,9 @@ run_profile() {   # $1 = scripted statuses, space separated; $2 = wait-kms
         XDG_RUNTIME_DIR="$WORK/ps/run" \
         STUB_COUNT="$WORK/ps/count" STUB_SEQ="$WORK/ps/seq" \
         STUB_WAITKMS_COUNT="$WORK/ps/waitkms" \
-        DBRRG_WAIT_KMS="${2:-$WORK/ps/bin/wait-kms}" \
-        DBRRG_SESSION_VERDICT="$REPO/overlay/usr/libexec/dbrrg/session-verdict" \
-        DBRRG_SESSION_FAILURES="$WORK/ps/failures" \
+        TF_WAIT_KMS="${2:-$WORK/ps/bin/wait-kms}" \
+        TF_SESSION_VERDICT="$REPO/overlay/usr/libexec/thinfloe/session-verdict" \
+        TF_SESSION_FAILURES="$WORK/ps/failures" \
         sh "$PROFILE" >"$WORK/ps/out" 2>&1
     ps_rc=$?
     ps_calls=$(wc -l <"$WORK/ps/count")
@@ -295,10 +295,10 @@ else
     bad "export-rootfs.sh still packs podman's bind-mounted /etc/hostname"
 fi
 
-if grep -v '^[[:space:]]*#' "$SO" | grep -q 'dbrrg_write_hostname'; then
+if grep -v '^[[:space:]]*#' "$SO" | grep -q 'tf_write_hostname'; then
     ok "setup-overlay.sh writes the hostname from the machine-id"
 else
-    bad "setup-overlay.sh never calls dbrrg_write_hostname - hostname stays unset"
+    bad "setup-overlay.sh never calls tf_write_hostname - hostname stays unset"
 fi
 
 if grep -q 'hostnamectl' "$UNDOCK"; then
@@ -309,10 +309,10 @@ fi
 
 # basename, cut, head and install are not in the initramfs (module-setup.sh
 # does not install them). A call there fails silently: cut gave the hostname
-# "dbrrg-", basename left the netboot interface name empty so no boot-mac was
+# "thinfloe-", basename left the netboot interface name empty so no boot-mac was
 # recorded. Comments may mention them.
-for f in mount-squashfs.sh dbrrg-lib.sh setup-overlay.sh; do
-    if grep -v '^[[:space:]]*#' "overlay/usr/lib/dracut/modules.d/90dbrrg/$f" \
+for f in mount-squashfs.sh thinfloe-lib.sh setup-overlay.sh; do
+    if grep -v '^[[:space:]]*#' "overlay/usr/lib/dracut/modules.d/90thinfloe/$f" \
        | grep -qE '(^|[|;&(`]|\$\()[[:space:]]*(basename|cut)([[:space:]]|$)'; then
         bad "$f calls basename/cut, which the initramfs does not ship"
     else

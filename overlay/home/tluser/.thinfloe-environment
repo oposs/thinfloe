@@ -1,0 +1,47 @@
+# Per-machine settings that the compositor reads when it STARTS.
+#
+# Sourced before labwc launches, after the system defaults in
+# /etc/thinfloe/labwc/environment - so anything you set here overrides them.
+#
+# This file lives in your home directory, so it is saved by
+# /usr/bin/thinfloe-save-home and restored on the next boot. Quit the ThinLinc
+# client once after editing, or the change is lost at reboot.
+#
+# VARIABLE ASSIGNMENTS ONLY. This is sourced before there is a compositor to
+# talk to, so commands like wlr-randr do not belong here - put those in
+# ~/.thinfloe-sessionrc, which runs inside the session.
+#
+# ---------------------------------------------------------------------------
+# KEYBOARD
+# ---------------------------------------------------------------------------
+# System default is a pc105 US layout, CapsLock as Ctrl, right-Alt as Compose.
+# Uncomment and adjust for this machine:
+#
+#XKB_DEFAULT_LAYOUT=de
+#XKB_DEFAULT_VARIANT=nodeadkeys
+#XKB_DEFAULT_MODEL=pc105
+#XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps
+#
+# Swiss German, for example:
+#XKB_DEFAULT_LAYOUT=ch
+#XKB_DEFAULT_VARIANT=de_nodeadkeys
+#
+# Two layouts with Alt+Shift to switch between them:
+#XKB_DEFAULT_LAYOUT=us,de
+#XKB_DEFAULT_OPTIONS=grp:alt_shift_toggle,compose:ralt,ctrl:nocaps
+#
+# NOTE: XKB_DEFAULT_OPTIONS replaces the system value, it does not add to it.
+# Repeat compose:ralt and ctrl:nocaps above if you still want them.
+#
+# List available layouts, variants and options with:
+#   localectl list-x11-keymap-layouts
+#   localectl list-x11-keymap-variants ch
+#   localectl list-x11-keymap-options
+#
+# ---------------------------------------------------------------------------
+# CURSOR
+# ---------------------------------------------------------------------------
+# Installed themes: whiteglass (default), redglass, handhelds.
+#
+#XCURSOR_THEME=whiteglass
+#XCURSOR_SIZE=32

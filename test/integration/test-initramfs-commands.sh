@@ -1,12 +1,12 @@
 #!/bin/bash
-# Every external command the 90dbrrg dracut hooks run must exist in the BUILT
+# Every external command the 90thinfloe dracut hooks run must exist in the BUILT
 # initrd.
 #
 # The initramfs holds only what module-setup.sh installs plus dracut's own
 # base set. A hook that calls anything else fails with "command not found" at
 # boot, usually behind `2>/dev/null || true`, while every offline test passes
 # on the dev host, which has the command. That is how the hostname shipped as
-# "dbrrg-", why netboot never recorded the boot MAC, and why every sync in the
+# "thinfloe-", why netboot never recorded the boot MAC, and why every sync in the
 # tl.new upgrade rotation failed.
 #
 # test-initramfs-home.sh runs the helpers with a PATH built from
@@ -20,7 +20,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 INITRD="${1:-artifacts/rootfs/initrd.img}"
 SQSH="${2:-artifacts/rootfs/ramroot.sqsh}"
-MODDIR="$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg"
+MODDIR="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe"
 EXTRACT="$REPO/test/integration/initramfs-commands.py"
 
 for f in "$INITRD" "$SQSH"; do
@@ -79,27 +79,27 @@ fi
 sed -nE 's#^(usr/)?s?bin/([^/]+)$#\2#p' "$WORK/initrd.list" | sort -u >"$WORK/bins"
 echo "note - $(wc -l <"$WORK/bins") executables in $INITRD"
 
-# The 90dbrrg hooks must be in there at all, or the rest proves nothing.
-if grep -qE '(^|/)dbrrg-lib\.sh$' "$WORK/initrd.list"; then
-    ok "the dbrrg module is in the initrd"
+# The 90thinfloe hooks must be in there at all, or the rest proves nothing.
+if grep -qE '(^|/)thinfloe-lib\.sh$' "$WORK/initrd.list"; then
+    ok "the thinfloe module is in the initrd"
 else
-    bad "no dbrrg-lib.sh in $INITRD - the dbrrg dracut module was not included"
+    bad "no thinfloe-lib.sh in $INITRD - the thinfloe dracut module was not included"
 fi
 
 # The drop-ins that order the pre-mount and mount hooks after the cmdline
 # hook. Without them both raced dracut-cmdline.service; see
-# 90dbrrg/dbrrg-after-cmdline.conf.
+# 90thinfloe/thinfloe-after-cmdline.conf.
 for unit in dracut-pre-mount dracut-mount; do
-    if grep -qE "/$unit\.service\.d/90-dbrrg-after-cmdline\.conf$" "$WORK/initrd.list"; then
+    if grep -qE "/$unit\.service\.d/90-thinfloe-after-cmdline\.conf$" "$WORK/initrd.list"; then
         ok "$unit.service is ordered after dracut-cmdline in the initrd"
     else
-        bad "no $unit.service.d/90-dbrrg-after-cmdline.conf in $INITRD"
+        bad "no $unit.service.d/90-thinfloe-after-cmdline.conf in $INITRD"
     fi
 done
-if grep -qx 'After=dracut-cmdline.service' "$MODDIR/dbrrg-after-cmdline.conf"; then
+if grep -qx 'After=dracut-cmdline.service' "$MODDIR/thinfloe-after-cmdline.conf"; then
     ok "the drop-in orders After=dracut-cmdline.service"
 else
-    bad "dbrrg-after-cmdline.conf lacks After=dracut-cmdline.service"
+    bad "thinfloe-after-cmdline.conf lacks After=dracut-cmdline.service"
 fi
 
 # Netboot networking: DHCP from systemd-networkd, names from systemd-resolved.
@@ -128,7 +128,7 @@ fi
 {
     compgen -b
     compgen -k
-    # name() anywhere on a line: dbrrg-lib.sh defines a fallback dinfo with
+    # name() anywhere on a line: thinfloe-lib.sh defines a fallback dinfo with
     # `type dinfo || dinfo() { info "$@"; }`.
     grep -ohE '(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)' \
         "$WORK/dracut-lib.sh" "$MODDIR"/*.sh |
@@ -153,12 +153,12 @@ done
 
 missing=$(comm -23 "$WORK/used" "$WORK/known" | comm -23 - "$WORK/bins")
 if [[ -z "$missing" ]]; then
-    ok "all $used_n commands the 90dbrrg hooks use exist in the initrd"
+    ok "all $used_n commands the 90thinfloe hooks use exist in the initrd"
 else
     for cmd in $missing; do
         where=$(grep -lwE "(^|[;&|({!]|\\\$\\(|then|do|else)[[:space:]]*$cmd\\b" "${hooks[@]}" \
             | sed 's#.*/##' | paste -sd' ')
-        bad "'$cmd' is used by ${where:-a 90dbrrg hook} but is not in the initrd"
+        bad "'$cmd' is used by ${where:-a 90thinfloe hook} but is not in the initrd"
     done
 fi
 

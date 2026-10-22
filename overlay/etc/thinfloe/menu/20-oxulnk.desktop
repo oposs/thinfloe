@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=OxuLnk
+Icon=oxulnk-desktop
+Exec=oxulnk-desktop
+X-TF-Save-On-Exit=true
+X-TF-Multiple=true

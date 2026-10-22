@@ -59,7 +59,7 @@ if "$CHECK" "$WORK/full.log" >"$WORK/out" 2>&1; then
 else
     bad "full check rejected it: $(grep FAIL "$WORK/out")"
 fi
-# The dbrrg hooks raced the cmdline hook: pre-mount started first.
+# The ThinFloe hooks raced the cmdline hook: pre-mount started first.
 printf '         Starting dracut-pre-mount.service - dracut pre-mount hook...\n[  OK  ] Finished dracut-cmdline.service - dracut cmdline hook.\n         Starting dracut-mount.service - dracut mount hook...\nReached target multi-user.target\n' >"$WORK/race.log"
 if "$CHECK" "$WORK/race.log" >"$WORK/out" 2>&1; then
     bad "full check passed a boot whose pre-mount hook started before dracut-cmdline finished"

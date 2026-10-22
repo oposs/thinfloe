@@ -1,5 +1,5 @@
 #!/bin/bash
-# Publish dbrrg artifacts to web server
+# Publish ThinFloe artifacts to web server
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,8 +13,8 @@ FILES=(
     "$ARTIFACT_DIR/rootfs/vmlinuz"
     "$ARTIFACT_DIR/rootfs/initrd.img"
     "$ARTIFACT_DIR/rootfs/ramroot.sqsh"
-    "$ARTIFACT_DIR/images/dbrrg-usb.img.zst"
-    "$ARTIFACT_DIR/images/dbrrg-usb.img.zst.sha256"
+    "$ARTIFACT_DIR/images/thinfloe-usb.img.zst"
+    "$ARTIFACT_DIR/images/thinfloe-usb.img.zst.sha256"
 )
 
 # Check all files exist

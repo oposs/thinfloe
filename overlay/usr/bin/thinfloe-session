@@ -1,0 +1,163 @@
+#!/bin/sh
+# Body of the graphical session, run by labwc via 'labwc -S'.
+#
+# The body of the session is thinfloe-menu, the tile grid. ThinLinc is one of
+# its tiles. The menu saves the home directory itself before it exits, so
+# this script does not save; it reads the menu's exit status (see the end
+# of this file).
+#
+# When this script returns, labwc terminates and the tty1 login starts a
+# fresh session. Leaving the compositor running would strand the user on a
+# bare desktop with no keybindings and no way to recover.
+# NOTE: the home directory has ALREADY been restored, by restore_home() in
+# the initramfs before the pivot - not by this script or its caller. It has
+# to happen there so a user's ~/.thinfloe-environment (keyboard layout, cursor)
+# is on disk before labwc reads XKB_DEFAULT_* at startup, and so the SSH host
+# keys inside it are available before sshd starts. Do not add a restore call
+# here - it would overwrite the running session's home with the on-disk copy
+# midway through.
+
+# Per-device session customisation, sourced after the home restore so the
+# user's own saved copy wins.
+#
+# This is the Wayland replacement for ~/.xsessionrc, which the move off X11
+# removed. That file was how people configured individual machines - display
+# layout with xrandr, keyboard, netplan/WiFi - and because it lives in $HOME
+# it is captured by save-home and restored on every boot, so edits persist
+# without rebuilding an image.
+#
+# Displays: wlr-randr is the xrandr equivalent for this compositor, e.g.
+#   wlr-randr --output DP-1 --transform 90 --pos 1920,0
+# For layouts that must survive a monitor being switched on late or waking
+# from DPMS, run kanshi from here instead - it reapplies on hotplug, which a
+# one-shot wlr-randr does not.
+#
+# Sourced rather than executed, matching ~/.xsessionrc semantics: no execute
+# bit needed, and it can export variables into the session.
+#
+# It runs BEFORE the menu, and so before any tile starts tlclient, because the ThinLinc client reads the monitor
+# layout once at startup - a rotation applied afterwards would leave the
+# client believing a portrait screen is still landscape.
+if [ -r "$HOME/.thinfloe-sessionrc" ]; then
+    . "$HOME/.thinfloe-sessionrc"
+fi
+
+# Background helpers. Every one of them must die with the session: labwc
+# terminates when this script returns, and an orphan would linger against the
+# next session's compositor. One trap covers all of them, so adding a helper
+# means appending its PID here and nothing else.
+HELPER_PIDS=""
+kill_helpers() {
+    for _p in $HELPER_PIDS; do
+        kill "$_p" 2>/dev/null
+    done
+}
+trap kill_helpers EXIT INT TERM
+
+# The taskbar. Without it a window minimized via labwc's iconify button is
+# gone for the rest of the session - there are no keybindings and no menu to
+# get it back. See /etc/thinfloe/waybar/config.jsonc.
+if command -v waybar >/dev/null 2>&1; then
+    waybar -c /etc/thinfloe/waybar/config.jsonc \
+           -s /etc/thinfloe/waybar/style.css &
+    HELPER_PIDS="$HELPER_PIDS $!"
+fi
+
+# Screen blanking. Wayland splits this in two: labwc reports idleness via
+# ext_idle_notifier_v1 but has no timeout of its own, so without a policy
+# daemon listening nothing ever blanks. That is what was lost moving off X11,
+# where the X server did it internally (xset s / server-side DPMS).
+#
+# wlopm - not wlr-randr - is the right tool. wlr-randr --off speaks the output
+# *management* protocol and disables the output outright, changing the monitor
+# layout and resizing the fullscreen ThinLinc client. wlopm speaks output
+# *power* management, which is true DPMS: the panel sleeps, the layout is
+# untouched, any input wakes it.
+#
+# No locking. ext_session_lock_manager_v1 is available, but tluser has no
+# password, so a lock screen would have nothing to authenticate against -
+# session security is ThinLinc's job, not the local compositor's.
+#
+# Note the ThinLinc client is an X11 app under Xwayland and cannot send an
+# idle inhibit, so a long video inside the remote session with no input will
+# blank the local screen. Any keypress restores it.
+#
+# Per-machine override from ~/.thinfloe-sessionrc, sourced above:
+#   TF_IDLE_TIMEOUT=900   longer grace period
+#   TF_IDLE_TIMEOUT=0     disable blanking entirely
+: "${TF_IDLE_TIMEOUT:=300}"
+if [ "$TF_IDLE_TIMEOUT" -gt 0 ] 2>/dev/null &&
+   command -v swayidle >/dev/null 2>&1 &&
+   command -v wlopm >/dev/null 2>&1; then
+    swayidle -w \
+        timeout "$TF_IDLE_TIMEOUT" 'wlopm --off \*' \
+        resume 'wlopm --on \*' &
+    HELPER_PIDS="$HELPER_PIDS $!"
+fi
+
+# The menu, overridable so test/integration/test-session-lifecycle.sh can
+# run this script unprivileged.
+TF_MENU="${TF_MENU:-/usr/bin/thinfloe-menu}"
+# Where the menu's exit status is left for 10-thinfloe-session.sh. labwc always
+# exits 0 whatever this script returns, so this file is the only way the
+# login shell learns that the menu failed.
+TF_SESSION_STATUS="${TF_SESSION_STATUS:-${XDG_RUNTIME_DIR:-/tmp}/thinfloe-session.status}"
+
+# Show why the menu failed, in a window, and keep the compositor alive while
+# it is open. Returning straight away would let getty restart the session
+# and the reason would never be on screen.
+tf_hold() {
+    foot --title "ThinFloe: the menu failed" -- sh -c '
+        echo "thinfloe-menu exited with status $1, so the session stopped."
+        echo "This session did not save your home directory when it ended."
+        echo ""
+        echo "Last lines of the session log ($2):"
+        tail -n 20 "$2" 2>/dev/null
+        echo ""
+        echo "Close this window to continue."
+        exec sh' thinfloe-hold "$1" "${TF_SESSION_LOG:-unknown}"
+}
+
+# The menu's exit status:
+#
+#   0          log out. The menu has already saved the home directory
+#              behind its dialog, or the save failed and the person at the
+#              machine chose "Log out anyway". Do not save again: a second
+#              save would only repeat the first one's result, or overwrite
+#              what the person just declined to keep waiting for.
+#   10, 11     restart, power off. The menu has saved, as for 0.
+#   any other  the menu failed: do NOT save, show why, hold
+#
+# Failure is the default branch on purpose. A Rust panic exits 101, a
+# segfault 139, a failed exec 126 or 127; reading those as logout would make
+# a crash silent, and saving on them would archive the home once per
+# respawn.
+"$TF_MENU"
+menu_rc=$?
+echo "$menu_rc" >"$TF_SESSION_STATUS" 2>/dev/null || true
+case "$menu_rc" in
+    0)
+        exit 0
+        ;;
+    10|11)
+        # sudo, because the image has no polkit: systemd refuses Reboot and
+        # PowerOff to a caller that is not root when no polkit authority
+        # answers.
+        if [ "$menu_rc" = 10 ]; then verb=reboot; else verb=poweroff; fi
+        if sudo systemctl "$verb"; then
+            exit 0
+        fi
+        echo "thinfloe: sudo systemctl $verb failed" >&2
+        foot --title "ThinFloe: $verb failed" -- sh -c '
+            echo "The menu saved your home directory, but \"sudo systemctl $1\" failed."
+            echo ""
+            echo "Close this window to continue."
+            exec sh' thinfloe-hold "$verb"
+        exit "$menu_rc"
+        ;;
+    *)
+        echo "thinfloe: thinfloe-menu exited with status $menu_rc - the home directory was not saved" >&2
+        tf_hold "$menu_rc"
+        exit "$menu_rc"
+        ;;
+esac

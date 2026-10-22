@@ -1,0 +1,1241 @@
+#!/usr/bin/env python3
+"""
+thinfloe-upgrade - ThinFloe firmware upgrade utility
+
+Installs or upgrades ThinFloe firmware on USB drives.
+Supports A/B updates for existing ThinFloe drives, or fresh install for new drives.
+"""
+
+import atexit
+import fnmatch
+import glob
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+# ============ Constants ============
+
+DEFAULT_URL = "https://tobi.oetiker.ch/dbrrg"
+EFI_PARTLABEL = "EFI-SYSTEM"
+FIRMWARE_FILES = ("vmlinuz", "initrd.img", "ramroot.sqsh")
+TLUSER = "tluser"
+HOME_ARCHIVE_NAME = "home.tar.gz"
+# The shipped default exclude list; thinfloe-save-home reads the same file.
+SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
+# Per-machine identity, always left out of the copy (appended outside the
+# user-editable exclude list so a ~/.save-home-exclude cannot drop them):
+#  - the SSH host keys: two machines with one host key is a real problem; a
+#    stick without them generates its own on first boot.
+#  - the WireGuard config: it holds the machine's private key, and two peers
+#    sharing one key break both tunnels.
+# ~/.thinfloe-password is deliberately NOT here: the user set it for remote
+# access and it travels with the home on purpose.
+IDENTITY_EXCLUDES = ("./.thinfloe-ssh-host-keys", "./wg0.conf")
+# The home archive carries configuration, not data. A file above this size is
+# a download or a binary left in the home; thinfloe-save-home uses the same limit.
+SAVE_HOME_MAX_FILE_BYTES = 10 * 1024 * 1024
+# Room asked for beyond the release's own size: FAT cluster slack, and a
+# release that is a little bigger than the one measured.
+UPGRADE_SPACE_MARGIN = 1.1
+# udev may not have re-read the partition table yet, right after partprobe on
+# a drive that was just written byte for byte.
+EFI_RETRY_SECONDS = 15
+# Where the initramfs records this boot's home restore outcome; thinfloe-save-home
+# reads the same file. Module constant so tests can point it elsewhere.
+STATE_DIR = "/run/thinfloe/state"
+# The ESP the initramfs mounted for this boot. Module constant so tests can
+# point it elsewhere.
+BOOT_EFI_MOUNT = "/run/thinfloe/storage/efi"
+# Both copies of the boot loader config on the ESP: BIOS syslinux reads the
+# first, the EFI build the second.
+SYSLINUX_CFGS = ("syslinux.cfg", "efi/boot/syslinux.cfg")
+
+# ============ Data Classes ============
+
+@dataclass
+class DriveInfo:
+    """Information about a detected block device"""
+    device: str              # /dev/sda
+    size: str                # "16G"
+    model: str               # "SanDisk Cruzer"
+    label: str               # Filesystem label
+    is_thinfloe: bool           # True if this is a ThinFloe drive
+    efi_partition: Optional[str]  # /dev/sda1 if EFI-SYSTEM exists
+    part_size_mb: int        # EFI partition size in MB
+    is_boot: bool            # True if this is the current boot device
+    has_tl_old: bool         # True if tl.old/ exists (has fallback)
+    has_tl_new: bool         # True if tl.new/ exists (pending upgrade)
+
+
+# ============ Global State ============
+
+_cleanup_items: List[Tuple[str, str]] = []  # (type, path) - "mount" or "dir"
+
+
+def _register_cleanup(cleanup_type: str, path: str) -> None:
+    """Register an item for cleanup on exit"""
+    _cleanup_items.append((cleanup_type, path))
+
+
+def _unregister_cleanup(cleanup_type: str, path: str) -> None:
+    """Remove an item from cleanup list"""
+    global _cleanup_items
+    _cleanup_items = [(t, p) for t, p in _cleanup_items if not (t == cleanup_type and p == path)]
+
+
+MOUNTINFO = "/proc/self/mountinfo"
+
+
+def _unescape_mountinfo(field: str) -> str:
+    """Decode the octal escapes (\\040 space, \\011 tab, \\012 newline, \\134 backslash)"""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def _is_or_holds_mount(path: str) -> bool:
+    """True if path is a mount point or has a mount anywhere beneath it"""
+    if os.path.ismount(path):
+        return True
+    real = os.path.realpath(path).rstrip("/")
+    try:
+        with open(MOUNTINFO) as f:
+            for line in f:
+                fields = line.split()
+                if len(fields) > 4:
+                    mnt = _unescape_mountinfo(fields[4])
+                    if mnt == real or mnt.startswith(real + "/"):
+                        return True
+    except OSError:
+        pass
+    return False
+
+
+def _do_cleanup() -> None:
+    """Cleanup all registered items (called on exit)"""
+    for cleanup_type, path in reversed(_cleanup_items):
+        try:
+            if cleanup_type == "mount":
+                run_cmd(["umount", path], check=False, capture=True)
+            elif cleanup_type == "dir":
+                # Entries run in reverse, so a "mount" on this path has had
+                # its umount attempted already. If that failed (busy), the
+                # directory IS the stick: rmtree would delete its tl/, tl.old/
+                # and home.tar.gz. Leave it. rmtree is only right for scratch
+                # dirs (work_dir) the script filled itself, never a mount point.
+                if _is_or_holds_mount(path):
+                    print(f"WARNING: {path} is still mounted - leaving it "
+                          f"untouched", file=sys.stderr)
+                else:
+                    shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+
+
+atexit.register(_do_cleanup)
+
+
+# ============ Utility Functions ============
+
+def die(message: str) -> None:
+    """Print error and exit"""
+    print(f"\nERROR: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def log(message: str) -> None:
+    """Print log message"""
+    print(f"==> {message}")
+
+
+def ensure_root() -> None:
+    """Re-execute with sudo if not running as root"""
+    if os.geteuid() != 0:
+        print("Requesting root privileges...")
+        os.execvp("sudo", ["sudo"] + sys.argv)
+
+
+def run_cmd(
+    cmd: List[str],
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run a command"""
+    return subprocess.run(cmd, check=check, capture_output=capture, text=True)
+
+
+def get_cmd_output(cmd: List[str]) -> str:
+    """Run command and return stdout, empty string on failure"""
+    try:
+        result = run_cmd(cmd, check=False, capture=True)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+# ============ Menu Functions ============
+
+def print_header(title: str) -> None:
+    """Print a section header"""
+    print()
+    print("=" * 60)
+    print(f"  {title}")
+    print("=" * 60)
+
+
+def show_menu(title: str, options: List[Tuple[str, str]], allow_back: bool = True) -> Optional[str]:
+    """Show a numbered menu and get user selection."""
+    print_header(title)
+
+    for i, (_, desc) in enumerate(options, 1):
+        print(f"  {i}) {desc}")
+
+    if allow_back:
+        print(f"  0) {'Back' if options else 'Cancel'}")
+
+    print()
+
+    while True:
+        try:
+            choice = input("Select option: ").strip()
+            if not choice:
+                continue
+
+            num = int(choice)
+            if num == 0 and allow_back:
+                return None
+            if 1 <= num <= len(options):
+                return options[num - 1][0]
+
+            print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a number.")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+
+
+def show_input(prompt: str, default: str = "") -> Optional[str]:
+    """Get text input from user"""
+    try:
+        if default:
+            result = input(f"{prompt} [{default}]: ").strip()
+            return result if result else default
+        else:
+            return input(f"{prompt}: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return None
+
+
+def confirm(message: str) -> bool:
+    """Ask yes/no confirmation"""
+    try:
+        while True:
+            response = input(f"{message} (y/n): ").strip().lower()
+            if response in ("y", "yes"):
+                return True
+            if response in ("n", "no"):
+                return False
+            print("Please enter 'y' or 'n'.")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+
+
+# ============ Boot Device Detection ============
+
+def detect_boot_device() -> Optional[str]:
+    """Detect which device we booted from (if any)."""
+    sqsh_path_file = Path("/run/thinfloe/state/squashfs-path")
+    if not sqsh_path_file.exists():
+        return None
+
+    try:
+        sqsh_path = sqsh_path_file.read_text().strip()
+    except Exception:
+        return None
+
+    if not sqsh_path.startswith("/run/thinfloe/storage/efi/"):
+        return None
+
+    boot_part = get_cmd_output(["findmnt", "-n", "-o", "SOURCE", "/run/thinfloe/storage/efi"])
+    if not boot_part:
+        return None
+
+    parent = get_cmd_output(["lsblk", "-no", "PKNAME", boot_part])
+    return f"/dev/{parent}" if parent else None
+
+
+# ============ Drive Detection ============
+
+def find_efi_partition(device: str) -> Optional[str]:
+    """Find EFI-SYSTEM partition on a device"""
+    devname = os.path.basename(device)
+
+    for pattern in [f"/dev/{devname}*[0-9]", f"/dev/{devname}p*[0-9]"]:
+        for part in glob.glob(pattern):
+            partlabel = get_cmd_output(["blkid", "-s", "PARTLABEL", "-o", "value", part])
+            if partlabel == EFI_PARTLABEL:
+                return part
+
+    return None
+
+
+def examine_efi_partition(efi_partition: str) -> Tuple[bool, bool, bool]:
+    """
+    Examine EFI partition to determine if it's a ThinFloe drive.
+    Returns: (is_thinfloe, has_tl_old, has_tl_new)
+    """
+    tmp_mount = tempfile.mkdtemp(prefix="thinfloe-check-")
+    _register_cleanup("dir", tmp_mount)
+
+    is_thinfloe = False
+    has_tl_old = False
+    has_tl_new = False
+
+    try:
+        result = run_cmd(["mount", "-o", "ro", efi_partition, tmp_mount], check=False, capture=True)
+        if result.returncode == 0:
+            _register_cleanup("mount", tmp_mount)
+
+            tl_path = os.path.join(tmp_mount, "tl")
+            if os.path.isdir(tl_path):
+                # Check for firmware files
+                has_vmlinuz = os.path.isfile(os.path.join(tl_path, "vmlinuz"))
+                has_ramroot = os.path.isfile(os.path.join(tl_path, "ramroot.sqsh"))
+                is_thinfloe = has_vmlinuz and has_ramroot
+
+            has_tl_old = os.path.isdir(os.path.join(tmp_mount, "tl.old"))
+            has_tl_new = os.path.isdir(os.path.join(tmp_mount, "tl.new"))
+
+            run_cmd(["umount", tmp_mount], check=False, capture=True)
+            _unregister_cleanup("mount", tmp_mount)
+    except Exception:
+        pass
+
+    # rmdir, never rmtree: if the umount failed this is still the stick
+    try:
+        os.rmdir(tmp_mount)
+    except OSError:
+        pass
+    _unregister_cleanup("dir", tmp_mount)
+
+    return is_thinfloe, has_tl_old, has_tl_new
+
+
+def enumerate_drives() -> List[DriveInfo]:
+    """Find all suitable block devices"""
+    drives = []
+    boot_dev = detect_boot_device()
+
+    for block_dir in Path("/sys/block").iterdir():
+        devname = block_dir.name
+
+        # Consider sd*, nvme*, vd* devices
+        if not any(devname.startswith(p) for p in ("sd", "nvme", "vd")):
+            continue
+
+        # Skip loop devices, ram disks, etc.
+        if devname.startswith(("loop", "ram", "zram")):
+            continue
+
+        device = f"/dev/{devname}"
+
+        # Get drive info
+        size = get_cmd_output(["lsblk", "-dno", "SIZE", device]) or "?"
+        model = get_cmd_output(["lsblk", "-dno", "MODEL", device]) or "Unknown"
+
+        # Check for EFI-SYSTEM partition
+        efi_part = find_efi_partition(device)
+
+        is_thinfloe = False
+        has_tl_old = False
+        has_tl_new = False
+        part_size_mb = 0
+        label = ""
+
+        if efi_part:
+            # Get partition size
+            part_size_str = get_cmd_output(["lsblk", "-bno", "SIZE", efi_part])
+            try:
+                part_size_mb = int(part_size_str) // (1024 * 1024) if part_size_str else 0
+            except ValueError:
+                part_size_mb = 0
+
+            # Get filesystem label
+            label = get_cmd_output(["blkid", "-s", "LABEL", "-o", "value", efi_part])
+
+            # Examine partition contents
+            is_thinfloe, has_tl_old, has_tl_new = examine_efi_partition(efi_part)
+
+        is_boot = boot_dev is not None and device == boot_dev
+
+        drives.append(DriveInfo(
+            device=device,
+            size=size,
+            model=model.strip(),
+            label=label,
+            is_thinfloe=is_thinfloe,
+            efi_partition=efi_part,
+            part_size_mb=part_size_mb,
+            is_boot=is_boot,
+            has_tl_old=has_tl_old,
+            has_tl_new=has_tl_new,
+        ))
+
+    return drives
+
+
+# ============ Source Selection ============
+
+def select_source() -> Optional[str]:
+    """Let user select firmware source URL"""
+    options = [
+        ("default", f"Default: {DEFAULT_URL}"),
+        ("custom", "Enter custom URL"),
+    ]
+
+    choice = show_menu("Select Firmware Source", options)
+    if choice is None:
+        return None
+
+    if choice == "default":
+        return DEFAULT_URL
+    elif choice == "custom":
+        return show_input("Enter firmware URL", DEFAULT_URL)
+
+    return None
+
+
+# ============ Firmware Download ============
+
+def download_file(url: str, dest: str) -> bool:
+    """Download a file with progress"""
+    print(f"  Downloading {os.path.basename(url)}...")
+    result = subprocess.run(
+        ["curl", "-L", "--progress-bar", "-o", dest, url],
+        check=False
+    )
+    return result.returncode == 0
+
+
+def download_firmware(base_url: str, work_dir: str) -> str:
+    """Download firmware files from URL, returns path to firmware directory"""
+    log(f"Downloading firmware from {base_url}...")
+
+    firmware_dir = os.path.join(work_dir, "firmware")
+    os.makedirs(firmware_dir, exist_ok=True)
+
+    for filename in FIRMWARE_FILES:
+        url = f"{base_url}/{filename}"
+        dest = os.path.join(firmware_dir, filename)
+        if not download_file(url, dest):
+            die(f"Failed to download {filename}")
+
+    log("Firmware downloaded successfully")
+    return firmware_dir
+
+
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def zstd_content_size(header: bytes) -> Optional[int]:
+    """Uncompressed size from a zstd frame header, None when it has none.
+
+    The header is at most 18 bytes: magic, Frame_Header_Descriptor, an
+    optional window byte, a 0/1/2/4-byte dictionary id and a 0/1/2/4/8-byte
+    Frame_Content_Size (RFC 8878, 3.1.1.1).
+    """
+    if len(header) < 5 or header[:4] != ZSTD_MAGIC:
+        return None
+    fhd = header[4]
+    fcs_flag = fhd >> 6
+    single_segment = bool(fhd & 0x20)
+    if fcs_flag == 0 and not single_segment:
+        return None
+    pos = 5 + (0 if single_segment else 1) + (0, 1, 2, 4)[fhd & 0x03]
+    width = (1, 2, 4, 8)[fcs_flag]
+    field = header[pos:pos + width]
+    if len(field) != width:
+        return None
+    size = int.from_bytes(field, "little")
+    return size + 256 if width == 2 else size
+
+
+def image_size(image_url: str) -> Optional[int]:
+    """Uncompressed size of the published image, None when it cannot be learned.
+
+    Only the first 18 bytes are fetched. --max-filesize makes curl give up
+    instead of downloading the whole 700 MB image from a server that ignores
+    the range and answers 200 with a Content-Length.
+    """
+    try:
+        result = subprocess.run(
+            ["curl", "-fsSL", "-r", "0-17", "--max-filesize", "4096", image_url],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return zstd_content_size(result.stdout[:18])
+
+
+def drive_size_bytes(device: str) -> Optional[int]:
+    """Size of the whole drive in bytes, None when lsblk cannot tell."""
+    try:
+        return int(get_cmd_output(["lsblk", "-bdno", "SIZE", device]))
+    except ValueError:
+        return None
+
+
+def check_drive_fits(base_url: str, device: str) -> None:
+    """Die when the image is larger than the drive, before anything is written.
+
+    dd onto a stick smaller than thinfloe-usb.img (3148873728 bytes with the
+    3000 MB ESP) wrote until the end of the device and failed, leaving a
+    partition table that points past it and a stick that does not boot.
+    An old server or a stream compressed from a pipe may not tell the size;
+    the install then goes on as before, with a warning.
+    """
+    needed = image_size(f"{base_url}/thinfloe-usb.img.zst")
+    have = drive_size_bytes(device)
+    if needed is None or have is None:
+        log("WARNING: could not learn the size of "
+            + ("the image" if needed is None else f"{device}")
+            + "; the drive is not checked for space")
+        return
+    if have < needed:
+        die(f"{device} is too small: it holds {have} bytes "
+            f"({have / 1e9:.1f} GB), the image needs {needed} bytes "
+            f"({needed / 1e9:.1f} GB). Nothing was written.")
+
+
+def download_and_write_image(base_url: str, device: str) -> None:
+    """Download compressed image and write directly to device"""
+    image_url = f"{base_url}/thinfloe-usb.img.zst"
+
+    log(f"Downloading and writing image to {device}...")
+    print(f"  Source: {image_url}")
+
+    # curl | zstd -d | dd
+    curl_cmd = ["curl", "-L", "--progress-bar", image_url]
+    zstd_cmd = ["zstd", "-d"]
+    dd_cmd = ["dd", f"of={device}", "bs=1M", "conv=fsync"]
+
+    curl_proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE)
+    zstd_proc = subprocess.Popen(zstd_cmd, stdin=curl_proc.stdout, stdout=subprocess.PIPE)
+    dd_proc = subprocess.Popen(dd_cmd, stdin=zstd_proc.stdout)
+
+    curl_proc.stdout.close()
+    zstd_proc.stdout.close()
+    dd_proc.communicate()
+
+    if dd_proc.returncode != 0:
+        die("Failed to write image")
+
+    log("Image written successfully")
+
+
+# ============ Upgrade Operations ============
+
+def _new_label_block(lines: List[str]) -> List[str]:
+    """A "LABEL new" entry copied from "LABEL current", with tl/ -> tl.new/.
+
+    Sticks written before the entry existed lack it. Copying the stick's own
+    current entry keeps its kernel options.
+    """
+    start = next((i for i, l in enumerate(lines) if l.strip() == "LABEL current"), None)
+    if start is None:
+        return []
+    block = ["", "LABEL new"]
+    for line in lines[start + 1:]:
+        if not line.startswith((" ", "\t")):
+            break
+        block.append(line.replace("/tl/", "/tl.new/").replace("ramroot=tl/", "ramroot=tl.new/"))
+    return block
+
+
+def set_boot_default(efi_mount: str, label: str) -> None:
+    """Make syslinux boot <label> by default, in both config copies.
+
+    After a staged upgrade the next boot must take its kernel from tl.new/:
+    only that kernel matches tl.new/ramroot.sqsh, and the initramfs rotates
+    tl.new into tl/ only on such a boot (tf_finalize_upgrade), then sets
+    DEFAULT current again. Each copy is written to .tmp and renamed over the
+    original, so a power cut leaves the old or the new file.
+    """
+    for rel in SYSLINUX_CFGS:
+        path = os.path.join(efi_mount, rel)
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            lines = f.read().splitlines()
+        lines = [f"DEFAULT {label}" if l.startswith("DEFAULT ") else l for l in lines]
+        if not any(l.strip() == "LABEL new" for l in lines):
+            lines += _new_label_block(lines)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("\n".join(lines) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+
+def free_bytes(path: str) -> int:
+    """Bytes an unprivileged writer can still put on the filesystem at path."""
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def tree_bytes(path: str) -> int:
+    """Bytes the files below path occupy on disk; 0 when it does not exist."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def do_ab_upgrade(drive: DriveInfo, base_url: str) -> None:
+    """Perform A/B upgrade on existing ThinFloe drive"""
+
+    if drive.is_boot:
+        # Boot drive - use already mounted partition
+        efi_mount = BOOT_EFI_MOUNT
+        if not os.path.ismount(efi_mount):
+            die(f"Boot EFI partition not mounted at {efi_mount}")
+        owned_mount = False
+    else:
+        # Non-boot drive - mount it
+        efi_mount = tempfile.mkdtemp(prefix="thinfloe-upgrade-")
+        _register_cleanup("dir", efi_mount)
+
+        result = run_cmd(["mount", drive.efi_partition, efi_mount], check=False, capture=True)
+        if result.returncode != 0:
+            die(f"Failed to mount EFI partition: {result.stderr}")
+        _register_cleanup("mount", efi_mount)
+        owned_mount = True
+
+    # Download firmware
+    work_dir = tempfile.mkdtemp(prefix="thinfloe-fw-")
+    _register_cleanup("dir", work_dir)
+
+    firmware_dir = download_firmware(base_url, work_dir)
+
+    # Paths
+    tl_path = os.path.join(efi_mount, "tl")
+    tl_old_path = os.path.join(efi_mount, "tl.old")
+    tl_new_path = os.path.join(efi_mount, "tl.new")
+
+    # Both paths remove tl.old and tl.new before they write, so their space
+    # counts as free. Checked before anything is removed: a stick that cannot
+    # take the release keeps its fallback.
+    need = int(sum(os.path.getsize(os.path.join(firmware_dir, f))
+                   for f in FIRMWARE_FILES) * UPGRADE_SPACE_MARGIN)
+    have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
+    if have < need:
+        die(f"Not enough space on {drive.device}: the new release needs "
+            f"{need // (1024 * 1024)} MB, {have // (1024 * 1024)} MB can be made "
+            f"free. Nothing was changed.")
+
+    if drive.is_boot:
+        # Additive upgrade - write to tl.new/, finalized on next boot.
+        #
+        # tl.old goes first. The rotation on the next boot removes it anyway,
+        # and with it in place the stick needed room for three releases: at
+        # 775 MB each that does not fit a 2000 MB partition. While tl.new is
+        # staged the fallback is tl/, the "current" entry.
+        log("Installing firmware to tl.new/ (will activate on reboot)...")
+
+        if os.path.exists(tl_old_path):
+            run_cmd(["rm", "-rf", tl_old_path])
+
+        if os.path.exists(tl_new_path):
+            run_cmd(["rm", "-rf", tl_new_path])
+
+        run_cmd(["mkdir", "-p", tl_new_path])
+        for filename in FIRMWARE_FILES:
+            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
+        # Only after tl.new is complete: DEFAULT new with a partial tl.new
+        # would not boot.
+        run_cmd(["sync"])
+        set_boot_default(efi_mount, "new")
+    else:
+        # Direct A/B rotation
+        log("Rotating firmware (tl -> tl.old, installing new tl)...")
+
+        if os.path.exists(tl_old_path):
+            run_cmd(["rm", "-rf", tl_old_path])
+
+        if os.path.exists(tl_path):
+            run_cmd(["mv", tl_path, tl_old_path])
+
+        if os.path.exists(tl_new_path):
+            run_cmd(["rm", "-rf", tl_new_path])
+
+        run_cmd(["mkdir", "-p", tl_path])
+        for filename in FIRMWARE_FILES:
+            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_path])
+        # A DEFAULT new left from an unfinished upgrade would point at the
+        # tl.new just removed.
+        set_boot_default(efi_mount, "current")
+
+    run_cmd(["sync"])
+
+    # Cleanup
+    if owned_mount:
+        run_cmd(["umount", efi_mount])
+        _unregister_cleanup("mount", efi_mount)
+        shutil.rmtree(efi_mount, ignore_errors=True)
+        _unregister_cleanup("dir", efi_mount)
+
+    shutil.rmtree(work_dir, ignore_errors=True)
+    _unregister_cleanup("dir", work_dir)
+
+    if drive.is_boot:
+        log("Upgrade staged! Reboot to activate new firmware.")
+        log("If the new version fails, type 'current' at the boot prompt.")
+    else:
+        log("Upgrade complete! Previous version saved as fallback.")
+
+
+def load_exclude_patterns(home_dir: str) -> List[str]:
+    """Read the save-home exclude list the way thinfloe-save-home does.
+
+    ~/.save-home-exclude replaces the shipped default (it does not extend it).
+    Blank lines and lines starting with # are skipped.
+    """
+    path = os.path.join(home_dir, ".save-home-exclude")
+    if not os.access(path, os.R_OK):
+        path = SAVE_HOME_EXCLUDE_DEFAULT
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    return [ln for ln in lines if ln and not ln.startswith("#")]
+
+
+def _excluded(rel: str, patterns: List[str]) -> bool:
+    """Approximately tar's --exclude match for a "./"-relative member name.
+
+    A pattern starting with "./" matches the whole name, anything else a
+    trailing part after a slash; "*" matches "/" as it does in tar. Used only
+    to skip what tar will leave out anyway, so a near miss costs a log line.
+    """
+    return any(
+        fnmatch.fnmatchcase(rel, p if p.startswith("./") else "*/" + p)
+        for p in patterns
+    )
+
+
+def large_files(home_dir: str, patterns: List[str]) -> List[Tuple[int, str]]:
+    """(size, "./"-relative name) of each regular file above the size limit.
+
+    Directories and files the patterns exclude are skipped, and symlinks are
+    not followed.
+    """
+    found = []
+    for root, dirs, files in os.walk(home_dir):
+        rel_root = "." + root[len(home_dir):]
+        dirs[:] = [d for d in dirs
+                   if not _excluded(f"{rel_root}/{d}", patterns)]
+        for name in files:
+            rel = f"{rel_root}/{name}"
+            if _excluded(rel, patterns):
+                continue
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > SAVE_HOME_MAX_FILE_BYTES:
+                found.append((st.st_size, rel))
+    return sorted(found, key=lambda f: f[1])
+
+
+def tar_literal(name: str) -> str:
+    """An --exclude pattern that matches exactly this name: wildcard
+    characters are escaped. A newline needs nothing, as an argument carries it.
+    """
+    return re.sub(r"([\\*?\[\]])", r"\\\1", name)
+
+
+def home_archive_argv(home_dir: str, dest: str) -> List[str]:
+    """Build the tar command line for a new stick's home.tar.gz.
+
+    restore_home() in the initramfs unpacks this archive into the home
+    directory itself, so the members must be relative: -C <home> with a bare
+    ".". The excludes are the save-home list plus IDENTITY_EXCLUDES, plus
+    every file above SAVE_HOME_MAX_FILE_BYTES, each one named in the log.
+    """
+    patterns = load_exclude_patterns(home_dir) + list(IDENTITY_EXCLUDES)
+    excludes = [f"--exclude={p}" for p in patterns]
+    limit_mb = SAVE_HOME_MAX_FILE_BYTES // (1024 * 1024)
+    for size, rel in large_files(home_dir, patterns):
+        log(f"not copied ({size // (1024 * 1024)} MB, over {limit_mb} MB): "
+            f"{rel.replace(chr(10), '?')}")
+        excludes.append(f"--exclude={tar_literal(rel)}")
+    return ["tar", "-C", home_dir, *excludes, "-czf", dest, "."]
+
+
+def _failure_detail(e: subprocess.CalledProcessError) -> str:
+    """What to show for a failed command: its stderr, else the exception text.
+
+    str(e) is the whole command line (every --exclude for tar), which hides
+    the one thing the person needs to see, e.g. "No space left on device".
+    """
+    stderr = e.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    stderr = (stderr or "").strip()
+    return stderr if stderr else str(e)
+
+
+def home_restore_failed() -> bool:
+    """True when this boot's home restore failed (the home is a default one).
+
+    A missing or unreadable marker means "proceed": it is absent on a first
+    boot and on an initramfs that predates it, same as thinfloe-save-home.
+    """
+    try:
+        with open(os.path.join(STATE_DIR, "home-restore"),
+                  encoding="utf-8", errors="replace") as f:
+            return f.read().strip() == "failed"
+    except OSError:
+        return False
+
+
+def copy_home_to_drive(device: str) -> bool:
+    """Write this machine's home directory onto a freshly installed drive.
+
+    Returns True when a verified home.tar.gz is on the drive's EFI partition.
+    Never raises: the install has already succeeded by the time this runs, and
+    a failed copy must not turn a good install into a traceback.
+    """
+    # Never $HOME, ~, Path.home() or SUDO_USER. This process is root by now,
+    # so HOME is /root, and SUDO_USER is unset for a VT root login - which is
+    # reachable because root has no password. The same defect in
+    # thinfloe-save-home archived root's dotfiles over the user's home.
+    try:
+        home_dir = pwd.getpwnam(TLUSER).pw_dir
+    except KeyError:
+        log(f"WARNING: no {TLUSER} account on this system - home not copied")
+        return False
+
+    if not os.path.isdir(home_dir):
+        log(f"WARNING: {home_dir} is not a directory - home not copied")
+        return False
+
+    # The same refusal thinfloe-save-home makes: after a failed restore the live
+    # home is the shipped default, and copying it would pass that off as the
+    # machine's configuration.
+    if home_restore_failed():
+        log("WARNING: this boot's home restore failed, so the home here is a "
+            "default one - home not copied")
+        return False
+
+    waited = 0
+    try:
+        efi_partition = find_efi_partition(device)
+        while efi_partition is None and waited < EFI_RETRY_SECONDS:
+            time.sleep(1)
+            waited += 1
+            efi_partition = find_efi_partition(device)
+    except KeyboardInterrupt:
+        log("WARNING: home copy interrupted - home not copied")
+        return False
+    if efi_partition is None:
+        log(f"WARNING: no {EFI_PARTLABEL} partition found on {device} after "
+            f"{waited}s - home not copied")
+        return False
+
+    try:
+        tmp_mount = tempfile.mkdtemp(prefix="thinfloe-home-")
+    except OSError as e:
+        log(f"WARNING: could not create a temporary mount point: {e} - "
+            f"home not copied")
+        return False
+    _register_cleanup("dir", tmp_mount)
+    dest = os.path.join(tmp_mount, HOME_ARCHIVE_NAME)
+    ok = False
+    mounted = False
+
+    try:
+        run_cmd(["mount", efi_partition, tmp_mount], capture=True)
+        mounted = True
+        _register_cleanup("mount", tmp_mount)
+
+        log(f"Copying {home_dir} to {device} (without SSH host keys and wg0.conf)")
+        try:
+            run_cmd(home_archive_argv(home_dir, dest), capture=True)
+        except subprocess.CalledProcessError as e:
+            # GNU tar exits 1 for "file changed as we read it" - a socket, a
+            # dangling symlink, a file being written - and still produces a
+            # usable archive. Only 2 and above are real errors.
+            if e.returncode == 1:
+                detail = _failure_detail(e) if e.stderr else ""
+                log("NOTE: some files changed while being archived; the copy "
+                    "is usable" + (f" ({detail})" if detail else ""))
+            else:
+                raise
+
+        # tar can succeed on a stick that is failing; a bad home.tar.gz may be
+        # accepted by the next boot in place of a good home.
+        run_cmd(["gzip", "-t", dest], capture=True)
+
+        # The archive is in the page cache until this returns. A stick pulled
+        # out before it lands carries an empty or partial file.
+        run_cmd(["sync"], capture=True)
+        ok = True
+    except subprocess.CalledProcessError as e:
+        log(f"WARNING: could not copy the home directory: {_failure_detail(e)}")
+        if os.path.isfile(dest):
+            # A truncated home.tar.gz is worse than none at all.
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+        ok = False
+    except OSError as e:
+        log(f"WARNING: could not copy the home directory: {e}")
+        ok = False
+    except KeyboardInterrupt:
+        log("WARNING: home copy interrupted - home not copied")
+        ok = False
+    finally:
+        # Whatever ended the copy early, a partial home.tar.gz must not stay on
+        # the stick: the next boot's restore only checks that the first member
+        # lists, so a truncated archive would unpack a partial home.
+        if mounted and not ok and os.path.isfile(dest):
+            try:
+                os.unlink(dest)
+            except OSError as e:
+                log(f"WARNING: could not remove the partial {dest}: {e}")
+        if mounted:
+            try:
+                run_cmd(["umount", tmp_mount], capture=True)
+                _unregister_cleanup("mount", tmp_mount)
+            except subprocess.CalledProcessError as e:
+                log(f"WARNING: could not unmount {tmp_mount}: {e} - the copied "
+                    f"home may be incomplete")
+                ok = False
+        # rmdir, never rmtree: if the unmount failed, the directory is still
+        # the stick, and a recursive delete would wipe the copy (and the
+        # stick's other files). rmdir on a busy mount point just fails.
+        try:
+            os.rmdir(tmp_mount)
+        except OSError:
+            pass
+        _unregister_cleanup("dir", tmp_mount)
+
+    if ok:
+        log(f"Home directory copied to {device}")
+    return ok
+
+
+def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
+    """Write fresh image to drive.
+
+    Returns None when the home copy was not asked for or declined, otherwise
+    whether it succeeded. The install itself counts as done either way.
+    """
+
+    check_drive_fits(base_url, drive.device)
+
+    print_header("WARNING - Data Loss")
+    print(f"\n  This will ERASE ALL DATA on {drive.device}!")
+    print(f"\n  Device: {drive.device}")
+    print(f"  Model:  {drive.model}")
+    print(f"  Size:   {drive.size}")
+    print()
+
+    if not confirm("  Continue?"):
+        die("Aborted")
+
+    download_and_write_image(base_url, drive.device)
+
+    # Sync and reload partition table
+    run_cmd(["sync"])
+    run_cmd(["partprobe", drive.device], check=False, capture=True)
+
+    # Offer to carry this machine's configuration across; otherwise the new
+    # stick boots with the shipped default home. Nothing is copied without an
+    # explicit "y": confirm() re-asks on an empty answer and treats EOF or
+    # Ctrl-C as no (the person may be building a stick for somebody else).
+    # Asked only here - the A/B upgrade path writes to a drive that already
+    # carries its own home.
+    print()
+    print("  This machine's home directory holds its WiFi credentials,")
+    print("  ThinLinc settings and customisations. Copying it onto the new")
+    print("  drive means it boots configured. The SSH host keys and wg0.conf")
+    print("  are not copied, so the new machine keeps its own identity.")
+    print()
+    home_copied: Optional[bool] = None
+    if confirm("  Copy this machine's home directory to the new drive?"):
+        home_copied = copy_home_to_drive(drive.device)
+
+    log("Fresh install complete!")
+    return home_copied
+
+
+# ============ Drive Display ============
+
+def format_drive_info(d: DriveInfo) -> str:
+    """Format drive information for display"""
+    parts = [d.device, d.size]
+
+    if d.model and d.model != "Unknown":
+        parts.append(d.model)
+
+    if d.label:
+        parts.append(f'"{d.label}"')
+
+    return " ".join(parts)
+
+
+def format_drive_status(d: DriveInfo) -> str:
+    """Format drive status tags"""
+    tags = []
+
+    if d.is_boot:
+        tags.append("<<< BOOT DRIVE >>>")
+
+    if d.is_thinfloe:
+        tags.append("[ThinFloe]")
+        if d.has_tl_old:
+            tags.append("[has fallback]")
+        if d.has_tl_new:
+            tags.append("[pending upgrade]")
+    elif d.efi_partition:
+        tags.append("[has EFI]")
+    else:
+        tags.append("[empty]")
+
+    return " ".join(tags)
+
+
+def show_drives_with_operations(drives: List[DriveInfo]) -> Optional[Tuple[DriveInfo, str]]:
+    """
+    Show all drives with their available operations.
+    Returns (selected_drive, operation) or None if cancelled.
+    """
+    print_header("Available Drives")
+    print()
+
+    # Build list of all options across all drives
+    options = []
+    option_num = 1
+
+    for d in drives:
+        # Print drive info header
+        info = format_drive_info(d)
+        status = format_drive_status(d)
+        print(f"  {info}")
+        print(f"    {status}")
+
+        # Determine available operations for this drive
+        if d.is_boot:
+            # Boot drive: only upgrade available
+            print(f"    {option_num}) Upgrade firmware (A/B, activates on reboot)")
+            options.append((d, "upgrade"))
+            option_num += 1
+        elif d.is_thinfloe:
+            # Other ThinFloe drive: upgrade or overwrite
+            print(f"    {option_num}) Upgrade firmware (A/B with fallback)")
+            options.append((d, "upgrade"))
+            option_num += 1
+            print(f"    {option_num}) Overwrite entire drive (fresh install)")
+            options.append((d, "overwrite"))
+            option_num += 1
+        else:
+            # Non-ThinFloe drive: only overwrite
+            print(f"    {option_num}) Install ThinFloe (overwrites entire drive)")
+            options.append((d, "overwrite"))
+            option_num += 1
+
+        print()
+
+    print(f"  0) Cancel")
+    print()
+
+    while True:
+        try:
+            choice = input("Select option: ").strip()
+            if not choice:
+                continue
+
+            num = int(choice)
+            if num == 0:
+                return None
+            if 1 <= num <= len(options):
+                return options[num - 1]
+
+            print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a number.")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+
+
+# ============ Home Save ============
+
+# thinfloe-save-home's own bound on waiting for the boot server is 60 seconds,
+# and the tar and upload come after it. A 60 second timeout here therefore
+# killed the child while it was uploading, and the bare `except Exception:
+# pass` around it discarded both the timeout and any failure, so a user whose
+# home was not saved was told the operation completed successfully.
+SAVE_HOME_TIMEOUT = 600
+
+# Exit codes from thinfloe-save-home. See the table at the top of that script.
+SAVE_HOME_MESSAGES = {
+    0: None,  # saved; nothing to say
+    1: "the home directory could not be found",
+    2: "this boot's home restore had failed, so saving was refused",
+    3: "the boot server could not be reached",
+    4: "this machine has nowhere to store a home directory",
+    5: "the save was attempted and failed",
+}
+
+
+def save_home_before_finish() -> int:
+    """Save the home directory before the user reboots.
+
+    Returns thinfloe-save-home's exit status, or -1 if it could not be run.
+    Never raises: a failed save must not lose the install that just
+    succeeded, but it must not be hidden either.
+    """
+    log("Saving the home directory (this can take a few minutes on netboot)...")
+    try:
+        result = subprocess.run(
+            ["thinfloe-save-home"],
+            capture_output=True,
+            timeout=SAVE_HOME_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"WARNING: saving the home directory timed out after "
+            f"{SAVE_HOME_TIMEOUT}s - it may be incomplete")
+        return -1
+    except (FileNotFoundError, OSError) as e:
+        log(f"WARNING: could not run thinfloe-save-home: {e}")
+        return -1
+
+    if result.returncode == 0:
+        return 0
+
+    reason = SAVE_HOME_MESSAGES.get(
+        result.returncode, f"it exited {result.returncode}"
+    )
+    log(f"WARNING: your home directory was NOT saved - {reason}")
+    stderr = result.stderr.decode("utf-8", "replace").strip()
+    if stderr:
+        for line in stderr.splitlines():
+            print(f"    {line}", file=sys.stderr)
+    return result.returncode
+
+
+# ============ Main ============
+
+def print_outcome_lines(home_copied: Optional[bool], home_saved: bool) -> None:
+    """One line per outcome, so the closing screen cannot contradict a warning.
+
+    The install succeeded either way; these lines say what else did not.
+    """
+    if home_copied is True:
+        print("  Home directory copied to the new drive.")
+    elif home_copied is False:
+        print("  Home directory NOT copied to the new drive - the reason "
+              "was printed above.")
+    if home_saved:
+        print("  Home directory saved.")
+    else:
+        print("  Home directory NOT saved - see the warning above.")
+
+
+def main() -> int:
+    """Main entry point"""
+    try:
+        ensure_root()
+
+        # Step 1: Select firmware source first
+        base_url = select_source()
+        if base_url is None:
+            return 0
+
+        # Ensure URL doesn't end with /
+        base_url = base_url.rstrip("/")
+
+        # Step 2: Enumerate drives
+        drives = enumerate_drives()
+        if not drives:
+            die("No suitable drives found")
+
+        # Step 3: Show drives and let user select operation
+        result = show_drives_with_operations(drives)
+        if result is None:
+            return 0
+
+        drive, operation = result
+
+        # Step 4: Execute the selected operation
+        home_copied: Optional[bool] = None
+        if operation == "upgrade":
+            # Confirm upgrade
+            print_header("Confirm Upgrade")
+            print(f"\n  Target: {format_drive_info(drive)}")
+            print(f"  Source: {base_url}")
+            if drive.is_boot:
+                print(f"  Mode:   Additive (writes to tl.new/, activates on reboot)")
+            else:
+                print(f"  Mode:   A/B upgrade (current -> tl.old, new -> tl)")
+            print()
+
+            if not confirm("  Proceed?"):
+                return 0
+
+            do_ab_upgrade(drive, base_url)
+        else:
+            # Fresh install (overwrite)
+            if drive.is_boot:
+                die("Cannot overwrite the boot drive while running!")
+            home_copied = do_fresh_install(drive, base_url)
+
+        # Save home before a potential reboot. A failure here is reported and
+        # does not fail the install, which has already succeeded.
+        home_saved = save_home_before_finish() == 0
+
+        print_header("Success")
+        print("\n  Operation completed successfully!")
+        print_outcome_lines(home_copied, home_saved)
+        if operation == "upgrade" and drive.is_boot:
+            print("\n  Reboot to activate the new firmware.")
+            print("  If it fails, select 'previous' at boot menu.")
+        print()
+
+        return 0
+
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return 130
+
+    except Exception as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

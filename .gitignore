@@ -13,8 +13,8 @@ __pycache__
 .DS_Store
 Thumbs.db
 
-# dbrrg-menu build output, when CARGO_TARGET_DIR is not set
-/src/dbrrg-menu/target/
+# thinfloe-menu build output, when CARGO_TARGET_DIR is not set
+/src/thinfloe-menu/target/
 
 # Brainstorming mockups (superpowers visual companion)
 .superpowers/

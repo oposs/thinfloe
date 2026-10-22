@@ -10,8 +10,8 @@ Description: allow fullscreen Xwayland views to span every output
  Wayland client's xdg_toplevel.set_fullscreen names a single output and
  spanning it would be protocol-incorrect.
  .
- dbrrg-specific: not proposed for upstream inclusion, see Forwarded below.
-Author: dbrrg maintainers
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
 Origin: vendor
 Forwarded: not-needed
 Last-Update: 2026-07-27
@@ -25,7 +25,7 @@ index c439b44..0725272 100644
  }
  
 +/*
-+ * dbrrg: Xwayland fullscreen may span the whole output layout.
++ * thinfloe: Xwayland fullscreen may span the whole output layout.
 + *
 + * labwc clamps a fullscreen view to view->output. The ThinLinc client
 + * (TigerVNC) derives the remote screen layout from the geometry it actually

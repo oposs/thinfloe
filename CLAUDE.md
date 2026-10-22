@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-dbrrg (Docker-Based RamRoot Generator) creates bootable diskless client images that run entirely from RAM. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments using ThinLinc.
+ThinFloe (Docker-Based RamRoot Generator) creates bootable diskless client images that run entirely from RAM. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments using ThinLinc.
 
 ## Build System Architecture
 
@@ -15,7 +15,7 @@ The build process uses containers in `containers/` directory:
 3. **containers/image-builder/Dockerfile** - Final packaging container with tools to create bootable EFI images
 
 The `menu-build` stage of `containers/ubuntu/Dockerfile` compiles the tile menu
-`dbrrg-menu` from the crate at `src/dbrrg-menu/` (Rust 1.96.0 via rustup,
+`thinfloe-menu` from the crate at `src/thinfloe-menu/` (Rust 1.96.0 via rustup,
 `cargo build --release --locked`) and the final stage copies the result into
 the image. `MENU_FILES` and `MENU_DIRS` in the `Makefile` list the crate's
 files and directories as prerequisites of `.ubuntu-container`, so editing the
@@ -45,7 +45,7 @@ Compiles iPXE from source and exports PXE/EFI boot files to `artifacts/rootfs/`.
 
 ### Write image to USB stick:
 ```bash
-dd if=artifacts/images/dbrrg-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
+dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
 ```
 
 ## Boot Flow Architecture
@@ -54,13 +54,13 @@ The boot process involves several interconnected components:
 
 1. **SYSLINUX/EFI Boot** - Initial bootloader (syslinux.cfg) loads kernel with `ramroot=` parameter
 
-2. **Dracut Module** (overlay/usr/lib/dracut/modules.d/90dbrrg/) - Modern initramfs using Dracut:
+2. **Dracut Module** (overlay/usr/lib/dracut/modules.d/90thinfloe/) - Modern initramfs using Dracut:
    - **module-setup.sh** - Installs hooks and tools into initramfs
-   - **parse-dbrrg.sh** - Parses kernel command line parameters
+   - **parse-thinfloe.sh** - Parses kernel command line parameters
    - **mount-squashfs.sh** - Mounts SquashFS rootfs from local or network source
    - **setup-overlay.sh** - Sets up ZRAM-backed OverlayFS for writes
-   - **dbrrg-lib.sh** - Shared library functions
-   - **dbrrg-cleanup.sh** - Pre-pivot cleanup
+   - **thinfloe-lib.sh** - Shared library functions
+   - **thinfloe-cleanup.sh** - Pre-pivot cleanup
 
 3. **Boot Process**:
    - **SquashFS Mount**: Mounts compressed read-only rootfs from USB partition or HTTP URL
@@ -75,15 +75,15 @@ The boot process involves several interconnected components:
 4. **Un-dockerization** (overlay/etc/systemd/system/un-dockerize.service) - First-boot service removes Docker artifacts, fixes /etc/hosts, reconfigures systemd-resolved
 
 5. **Home Persistence** - the initramfs restores the home directory before
-   the pivot (`restore_home()` in the dracut module). `dbrrg-menu` saves it
-   (`dbrrg-save-home`). Saves after a tile with `X-DBRRG-Save-On-Exit=true`
+   the pivot (`restore_home()` in the dracut module). `thinfloe-menu` saves it
+   (`thinfloe-save-home`). Saves after a tile with `X-TF-Save-On-Exit=true`
    (ThinLinc, oxulnk) exits and from the Back up home tile run in the
    background, one at a time, with at most one more queued. The Restart and
    Power off tiles ask Stay / Stop them and restart (power off) while
    programs run (SIGTERM to each process group, SIGKILL after 5 s), wait for
    a running save, then save behind their dialog before the menu exits 10
    (11); a failed save asks Stay / Restart anyway (Power off anyway).
-   `dbrrg-session` never saves; on 10 and 11 it runs `sudo systemctl
+   `thinfloe-session` never saves; on 10 and 11 it runs `sudo systemctl
    reboot` or `poweroff`. The `logout` action (exit 0) takes the same steps;
    no shipped tile uses it.
 
@@ -92,7 +92,7 @@ The boot process involves several interconnected components:
 - **configs/syslinux.cfg** - Boot menu and kernel parameters. The `ramroot=` parameter determines boot source (local: `tl/ramroot.sqsh`, network: `http://server/path/ramroot.sqsh`)
 - **overlay/home/tluser/.thinlinc/tlclient.conf** - ThinLinc client configuration
 - **overlay/home/tluser/wifi.yaml** - WiFi configuration template for netplan
-- **overlay/usr/lib/dracut/modules.d/90dbrrg/** - Dracut module for boot process
+- **overlay/usr/lib/dracut/modules.d/90thinfloe/** - Dracut module for boot process
 
 ## Customizing the System
 
@@ -107,12 +107,12 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 - System services: `overlay/etc/systemd/system/`
 - Network configuration: `overlay/etc/netplan/`
 - SSH configuration: `overlay/etc/ssh/sshd_config.d/`
-- Session/compositor: `overlay/etc/dbrrg/labwc/` (`rc.xml`, `environment`) - kept outside `$HOME` because home is captured/restored wholesale by the persistence machinery, see [Persistent Home Directory](#persistent-home-directory).
+- Session/compositor: `overlay/etc/thinfloe/labwc/` (`rc.xml`, `environment`) - kept outside `$HOME` because home is captured/restored wholesale by the persistence machinery, see [Persistent Home Directory](#persistent-home-directory).
   `rc.xml` also holds the window rule that keeps the window with app_id
-  `dbrrg-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the taskbar
+  `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the taskbar
   (`skipTaskbar`).
-- Taskbar: `overlay/etc/dbrrg/waybar/` (`config.jsonc`, `style.css`) - a
-  single `wlr/taskbar` module, launched by `dbrrg-session`. It exists
+- Taskbar: `overlay/etc/thinfloe/waybar/` (`config.jsonc`, `style.css`) - a
+  single `wlr/taskbar` module, launched by `thinfloe-session`. It exists
   because labwc draws an iconify button and, with zero keybindings and no
   window list, a minimized window would otherwise be unreachable for the rest of
   the session. Kept outside `$HOME` for the same reason `rc.xml` is.
@@ -120,21 +120,21 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   fullscreen surfaces above the layer-shell top layer and ignores exclusive
   zones - so it is visible exactly when no window is fullscreen, which is
   when a window can go missing.
-- Tiles: the shipped tiles are `.desktop` files in `overlay/etc/dbrrg/menu/`,
+- Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
-  `~/.config/dbrrg/menu/*.desktop`: at most 32 files, and they may only `run`
-  a program. `X-DBRRG-Multiple=true` lets a run tile start again while a
+  `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
+  a program. `X-TF-Multiple=true` lets a run tile start again while a
   copy of it still runs (ThinLinc, oxulnk and Terminal set it); without it a
   tile runs once at a time. A user file rewording a shipped tile cannot set
   it. A user file named like a shipped one may reword `Name`, `Comment`
   and `Icon` only; its other keys are ignored. The files travel with the home
   directory through `save-home`.
   A user file that matches no shipped file and sets neither `Exec` nor
-  `X-DBRRG-Action` is not drawn; the banner names it. That is what a reword
+  `X-TF-Action` is not drawn; the banner names it. That is what a reword
   of the old `80-logout.desktop` became when Restart and Power off replaced
   it, and it used to draw a grey "has no Exec" tile.
   `Icon=` is user data the menu parses on every boot, so each icon renders
-  in a child process, `dbrrg-menu --render-icon`, one at a time, under
+  in a child process, `thinfloe-menu --render-icon`, one at a time, under
   `RLIMIT_AS` 256 MiB, `RLIMIT_STACK` 256 MiB, `RLIMIT_CPU` 3 s,
   `RLIMIT_FSIZE` 0 and `RLIMIT_NOFILE` 16. The menu kills and reaps it
   after 2 s, or when the 5 s for all icons are used up. Any failure draws
@@ -150,30 +150,30 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   rendering, the child still refuses an SVG that nests deeper than 64
   elements, has more than 10000, declares entities or uses filters (one
   `feTurbulence` ran for over a minute). Limits and guards are in
-  `src/dbrrg-menu/src/icons.rs`, and `src/dbrrg-menu/tests/render_icon.rs`
+  `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
-- Session startup: `overlay/usr/bin/dbrrg-session`, `overlay/etc/profile.d/10-dbrrg-session.sh`
-- **Per-machine user customisation:** `overlay/home/tluser/.dbrrg-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `dbrrg-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
-  It is also where screen blanking is tuned: `DBRRG_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `dbrrg-session` right after this file is sourced.
+- Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
+- **Per-machine user customisation:** `overlay/home/tluser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
+  It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
 
-- **Per-machine user environment:** `overlay/home/tluser/.dbrrg-environment` — variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-dbrrg-session.sh` after `/etc/dbrrg/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
+- **Per-machine user environment:** `overlay/home/tluser/.thinfloe-environment` — variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-thinfloe-session.sh` after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
 
   | variable | default | effect |
   | --- | --- | --- |
   | `LABWC_FULLSCREEN_SPAN_OUTPUTS` | `1` | fullscreen Xwayland windows (the ThinLinc client) span every monitor |
 
-  A per-machine override in `~/.dbrrg-environment` **works**, including for
-  keys also set in `/etc/dbrrg/labwc/environment` - `LABWC_FULLSCREEN_SPAN_OUTPUTS`
+  A per-machine override in `~/.thinfloe-environment` **works**, including for
+  keys also set in `/etc/thinfloe/labwc/environment` - `LABWC_FULLSCREEN_SPAN_OUTPUTS`
   above and the pre-existing `XKB_DEFAULT_*` / `XCURSOR_*` keyboard and cursor
   overrides. This is not as simple as it looks: labwc's
   `session_environment_init()` (`src/config/session.c:77`) calls
   `setenv(key, value, 1)` - overwrite - and, run with `-C`, treats
   `<config_dir>/environment` as the *only* environment file it reads
   (`src/common/dir.c:153-157`, called from `src/main.c:211`). Pointing `-C`
-  straight at `/etc/dbrrg/labwc` therefore let labwc's own re-read reset any
+  straight at `/etc/thinfloe/labwc` therefore let labwc's own re-read reset any
   key also present in the user's file back to the system value, silently
-  discarding what `10-dbrrg-session.sh` had just exported into the shell.
-  The fix, `overlay/usr/bin/dbrrg-compose-labwc-config`, composes a
+  discarding what `10-thinfloe-session.sh` had just exported into the shell.
+  The fix, `overlay/usr/bin/thinfloe-compose-labwc-config`, composes a
   merged config directory at session start - the system dir's files
   symlinked in unchanged, plus an `environment` file that is the system
   defaults followed by the user's file - and points `-C` at that instead, so
@@ -181,14 +181,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   winning, since labwc's `setenv` on a later duplicate overwrites the
   earlier one - `test/runtime/test-labwc-runtime.sh` asserts this against
   the real parser). If `XDG_RUNTIME_DIR` is unset/unwritable or the merge
-  fails, the session falls back to the plain `/etc/dbrrg/labwc` (today's
+  fails, the session falls back to the plain `/etc/thinfloe/labwc` (today's
   behaviour) rather than failing to start. This is proven by
   `test/integration/test-labwc-config-merge.sh` (the merge logic, offline)
   and `test/runtime/test-labwc-runtime.sh` (the parser assumption, against
   real labwc).
 
   **Confirmed on hardware (2026-07-27):** an `XKB_DEFAULT_*` override in
-  `~/.dbrrg-environment` takes effect, which is what the merge exists to
+  `~/.thinfloe-environment` takes effect, which is what the merge exists to
   make possible - before it, that documented feature had never worked. The
   session also starts normally, i.e. the merged config dir is used without
   needing its fallback. Not separately exercised: setting
@@ -200,18 +200,18 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 
   | file | sourced | for |
   | --- | --- | --- |
-  | `~/.dbrrg-environment` | before the compositor starts | variables read at startup — keyboard, cursor |
-  | `~/.dbrrg-sessionrc` | inside the running session | commands needing a compositor — `wlr-randr`, `kanshi`, netplan |
+  | `~/.thinfloe-environment` | before the compositor starts | variables read at startup — keyboard, cursor |
+  | `~/.thinfloe-sessionrc` | inside the running session | commands needing a compositor — `wlr-randr`, `kanshi`, netplan |
 
   This is why the home restore happens in the **initramfs** rather than
-  inside the session: a user's saved `.dbrrg-environment` has to be on disk
+  inside the session: a user's saved `.thinfloe-environment` has to be on disk
   before the compositor reads `XKB_DEFAULT_*`. Restoring home inside the
   session would make a user keyboard change take effect only on the *next*
-  boot. Do not move the restore into `dbrrg-session`, and do not move it
-  back into `10-dbrrg-session.sh` either — `dbrrg-ssh-hostkeys` now needs
+  boot. Do not move the restore into `thinfloe-session`, and do not move it
+  back into `10-thinfloe-session.sh` either — `thinfloe-ssh-hostkeys` now needs
   the home directory before `multi-user.target`.
 
-  Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/dbrrg/labwc/rc.xml` does **not** — see [Standing Constraints](#standing-constraints).
+  Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not** — see [Standing Constraints](#standing-constraints).
 - Autologin: `overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf`
 - User defaults: `overlay/home/tluser/`
 
@@ -224,15 +224,15 @@ The system implements home directory persistence across reboots:
 - On boot: the initramfs restores `/home/tluser` — from `home.tar.gz` on the
   EFI partition when booting from USB, or from `home.pkg` on the boot server
   when netbooting. This happens in `restore_home()`
-  (`overlay/usr/lib/dracut/modules.d/90dbrrg/dbrrg-lib.sh`), called from
+  (`overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh`), called from
   `setup-overlay.sh`, **not** at login. It moved there so the SSH host keys
   stored inside the home directory are available before sshd starts.
   Netboot identifies the machine by the MAC recorded at
-  `/run/dbrrg/state/boot-mac` — the interface the initramfs actually used —
+  `/run/thinfloe/state/boot-mac` — the interface the initramfs actually used —
   rather than by re-deriving it, so restore and save cannot disagree.
-- On restart or power off: `dbrrg-menu` runs `/usr/bin/dbrrg-save-home`,
+- On restart or power off: `thinfloe-menu` runs `/usr/bin/thinfloe-save-home`,
   which saves the home directory back to USB or uploads it to the boot
-  server via HTTP POST. A tile with `X-DBRRG-Save-On-Exit=true` (ThinLinc,
+  server via HTTP POST. A tile with `X-TF-Save-On-Exit=true` (ThinLinc,
   oxulnk) after its program exits and the Back up home tile save in the
   background, one at a time, with at most one more queued; no dialog. The
   Restart and Power off tiles ask Stay / Stop them and restart (power off)
@@ -242,24 +242,24 @@ The system implements home directory persistence across reboots:
   anyway). A program stopped this way gets no Save-On-Exit save, and neither
   does the last program ending while the question is up: the menu then goes
   on without asking. The menu greys the save tile out when
-  `/run/dbrrg/state/home-restore` says `failed`; after a Save-On-Exit tile
+  `/run/thinfloe/state/home-restore` says `failed`; after a Save-On-Exit tile
   exits on such a boot, the save is skipped with a line in the menu's log.
-- `dbrrg-save-home` resolves the directory to archive from `getent passwd
+- `thinfloe-save-home` resolves the directory to archive from `getent passwd
   tluser`, never from `$HOME`, and every read of a recorded value under
-  `/run/dbrrg/state` ends in `|| true`. Both are load-bearing. `sudo` on this
+  `/run/thinfloe/state` ends in `|| true`. Both are load-bearing. `sudo` on this
   image sets `HOME=/root` (`Defaults env_reset`, no `env_keep` for HOME), so a
   save called from a root process archived `/root` over the user's home; and
   `set -e` ends a script on `X=$(cat missing)`, which disabled every save on
   USB boot, where `boot-home-base` is never written.
   `test/integration/test-save-home.sh` guards both.
 
-- The remote-access password rides the same archive. `sudo dbrrg-password`
-  stores the hash the system produced in `~tluser/.dbrrg-password`, mode 600
+- The remote-access password rides the same archive. `sudo thinfloe-password`
+  stores the hash the system produced in `~tluser/.thinfloe-password`, mode 600
   and **owned by tluser**, like the rest of the home. Both save paths of
-  `dbrrg-save-home` run tar as root, so a file tluser cannot read is still
+  `thinfloe-save-home` run tar as root, so a file tluser cannot read is still
   archived; until 2026-10 the netboot path ran tar as tluser, and one such
   file failed every netboot save with exit 5.
-  `dbrrg-password.service`, ordered `Before=ssh.service`, reinstalls it on
+  `thinfloe-password.service`, ordered `Before=ssh.service`, reinstalls it on
   every boot with `chpasswd -e`. `--clear` removes it and locks the account
   again.
 
@@ -267,22 +267,22 @@ The system implements home directory persistence across reboots:
   EFI partition with no file permissions, or is POSTed to the boot server over
   plain HTTP. Anyone holding the boot medium can read it and attack it
   offline. This is the same exposure the SSH host *private* keys in
-  `~/.dbrrg-ssh-host-keys` already carry, which is why it was accepted.
+  `~/.thinfloe-ssh-host-keys` already carry, which is why it was accepted.
 
-- `dbrrg-save-home` leaves out what makes the archive slow to unpack on every
+- `thinfloe-save-home` leaves out what makes the archive slow to unpack on every
   boot (a 233MB Claude binary did this): patterns come from
-  `~/.save-home-exclude`, falling back to `/etc/dbrrg/save-home-exclude`, and
+  `~/.save-home-exclude`, falling back to `/etc/thinfloe/save-home-exclude`, and
   a user file replaces the shipped one rather than extending it. The shipped
   list leaves out `~/Downloads`.
 - The archive is for configuration, not data: every regular file over
   10 MB is left out, whatever the exclude list says, and named on stdout
-  (`dbrrg: not saved (NN MB, over 10 MB): ./path`), which the menu log
+  (`thinfloe: not saved (NN MB, over 10 MB): ./path`), which the menu log
   shows. Files the exclude list already leaves out are not named. A newline
   in such a file's name becomes `?` in the tar pattern, so a small file
-  differing from it only there is left out too. `upgrade-image`'s home copy
+  differing from it only there is left out too. `thinfloe-upgrade`'s home copy
   applies the same limit (`SAVE_HOME_MAX_FILE_BYTES`).
 - On USB it writes to the ESP the initramfs already mounted at
-  `/run/dbrrg/storage/efi`, never a second mount by partlabel - every stick
+  `/run/thinfloe/storage/efi`, never a second mount by partlabel - every stick
   carries that label, so with two sticks plugged in the home can land on the
   wrong one. The branch tests `mountpoint -q`, not `-d`: the directory exists
   on every boot, netboot included, and an unmounted one would take the
@@ -290,26 +290,26 @@ The system implements home directory persistence across reboots:
   then `mv` over `home.tar.gz`, all through `sudo` because the ESP's vfat
   mount is root-owned. The ESP therefore has to hold two archives briefly.
   The netboot upload uses `curl -f`, otherwise an HTTP 413/500 reply is exit 0.
-- Exit codes of `dbrrg-save-home`: 0 saved; 1 home directory missing; 2 this
+- Exit codes of `thinfloe-save-home`: 0 saved; 1 home directory missing; 2 this
   boot's restore failed, so saving would overwrite the stored home with a
   default one; 3 boot server unreachable; 4 nowhere to store; 5 save
   attempted and failed. `test/integration/test-save-home.sh` guards each.
 
-- `upgrade-image`'s fresh install can copy this machine's home onto the new
+- `thinfloe-upgrade`'s fresh install can copy this machine's home onto the new
   drive: `home.tar.gz` on its ESP, addressed by device node
   (`find_efi_partition(device)`), never by partlabel - the new stick carries
   the same `EFI-SYSTEM` label as the running one. It uses the save-home
-  exclude list and **always** leaves out `~/.dbrrg-ssh-host-keys` and
+  exclude list and **always** leaves out `~/.thinfloe-ssh-host-keys` and
   `~/wg0.conf` (`IDENTITY_EXCLUDES`, outside the user-editable list). Those
   are machine identities: two machines would share one SSH host key or one
-  WireGuard private key, which breaks both tunnels. `~/.dbrrg-password`
-  travels on purpose. Like `dbrrg-save-home`, it refuses when this boot's
-  restore failed (`/run/dbrrg/state/home-restore` is `failed`), since the
+  WireGuard private key, which breaks both tunnels. `~/.thinfloe-password`
+  travels on purpose. Like `thinfloe-save-home`, it refuses when this boot's
+  restore failed (`/run/thinfloe/state/home-restore` is `failed`), since the
   live home is then a default one. `test/unit/test_upgrade_image.py` guards
   this, run via `make test-unit`.
 - Before the fresh install asks to erase the drive, it compares the drive
   (`lsblk -bdno SIZE`) with the image's uncompressed size, read from the
-  zstd frame header of `dbrrg-usb.img.zst` (`curl -r 0-17`), and stops when
+  zstd frame header of `thinfloe-usb.img.zst` (`curl -r 0-17`), and stops when
   the drive is smaller: `dd` onto such a stick failed partway and left it
   unbootable. When the size cannot be learned (no range support, a stream
   compressed from a pipe) it warns and goes on.
@@ -319,7 +319,7 @@ This allows WiFi credentials, ThinLinc settings, and user customizations to pers
 ## Network Boot vs USB Boot
 
 The boot method follows from `ramroot=` on the kernel command line
-(`is_remote_url` in `dbrrg-lib.sh`):
+(`is_remote_url` in `thinfloe-lib.sh`):
 
 - **USB Boot**: a path such as `tl/ramroot.sqsh` → loaded from the
   `EFI-SYSTEM` partition, home persisted to that partition
@@ -330,7 +330,7 @@ Both modes execute identical code paths after SquashFS mount.
 
 Netboot networking in the initramfs is dracut's `systemd-networkd` and
 `systemd-resolved` modules (`--add` in `containers/ubuntu/Dockerfile`).
-`parse-dbrrg.sh` sets `rd.neednet=1` for an http ramroot, so
+`parse-thinfloe.sh` sets `rd.neednet=1` for an http ramroot, so
 `systemd-networkd-wait-online` runs before the hooks; USB boots do not set
 it and do not wait. dracut 110 has no `network-legacy` module, and the
 hook's former `dhclient` call never worked - the initramfs had no
@@ -346,9 +346,9 @@ modules. `isc-dhcp-client` is not installed: nothing in the image runs
 depends on the package. Dropping it took 328 KiB off `ramroot.sqsh`.
 
 `make qemu-smoke-netboot` boots the artifacts from a local HTTP server with
-`ramroot=http://boot.dbrrg.test:<port>/ramroot.sqsh` and requires the
-hostname `dbrrg-123456` for MAC 52:54:00:12:34:56, a `home.pkg` request under
-that MAC, a query for `boot.dbrrg.test` at the test's DNS server and a
+`ramroot=http://boot.thinfloe.test:<port>/ramroot.sqsh` and requires the
+hostname `thinfloe-123456` for MAC 52:54:00:12:34:56, a `home.pkg` request under
+that MAC, a query for `boot.thinfloe.test` at the test's DNS server and a
 download of `ramroot.sqsh`. That name exists only in `scripts/smoke-dns.py`,
 a stdlib one-name DNS server, so a boot that downloads the ramroot used the
 DNS server from its DHCP lease: resolved forwards to QEMU's 10.0.2.3, and
@@ -366,14 +366,14 @@ user namespaces on the host. With the name left unanswered the boot stops at
 The containers/ubuntu/Dockerfile follows several important patterns:
 
 1. **SSH Host Keys**: Host keys are removed at build time. On first boot
-   `dbrrg-ssh-hostkeys.service` generates them and stages them into
-   `~tluser/.dbrrg-ssh-host-keys`, from where `dbrrg-save-home` captures them
+   `thinfloe-ssh-hostkeys.service` generates them and stages them into
+   `~tluser/.thinfloe-ssh-host-keys`, from where `thinfloe-save-home` captures them
    into the home archive at logout; the initramfs restores them on every
    subsequent boot. `ssh.socket` is **masked** — see Standing Constraints.
    Keys do not persist until the first clean logout: a machine hard-powered
    off before then generates fresh keys next boot.
 
-2. **Initramfs Generation**: The build uses Dracut (`dracut --force --no-hostonly --add "dbrrg plymouth"`) to create initramfs. The `--no-hostonly` flag is mandatory - see [Standing Constraints](#standing-constraints). The custom module in `overlay/usr/lib/dracut/modules.d/90dbrrg/` is automatically included. This must run AFTER overlay files are applied and SSH keys are removed.
+2. **Initramfs Generation**: The build uses Dracut (`dracut --force --no-hostonly --add "thinfloe plymouth"`) to create initramfs. The `--no-hostonly` flag is mandatory - see [Standing Constraints](#standing-constraints). The custom module in `overlay/usr/lib/dracut/modules.d/90thinfloe/` is automatically included. This must run AFTER overlay files are applied and SSH keys are removed.
 
 3. **Systemd Service Management**: Services are explicitly enabled/disabled during build to control first-boot behavior. The `un-dockerize.service` runs once and disables itself.
 
@@ -423,7 +423,7 @@ without them.
 gives every machine in the field the same login, and because tluser has
 `NOPASSWD:ALL` two lines below, that login is root: anyone who could reach
 port 22 and knew the default owned every deployed machine. It also
-contradicted `overlay/usr/bin/dbrrg-session`, which already documented
+contradicted `overlay/usr/bin/thinfloe-session`, which already documented
 "tluser has no password" as the reason the session has no lock screen.
 
 `passwd -l` is **not** a substitute for leaving it unset. It prefixes the
@@ -441,7 +441,7 @@ somebody gives root a password.
 set, and the user needs it once they set one; the image ships no
 `authorized_keys`, so turning it off leaves no remote access at all.
 
-A person at the machine sets their own password with `sudo dbrrg-password`.
+A person at the machine sets their own password with `sudo thinfloe-password`.
 See [Persistent Home Directory](#persistent-home-directory) for how it
 survives a reboot. `test/integration/test-session-packages.sh` guards the
 shadow fields, both sshd settings and the unit, and
@@ -542,16 +542,16 @@ The older dracut on 24.04 defaulted to generic, which is why the existing
 comment ("Keep it generic (no --hostonly)") was true when written and became
 false on dracut 110. `--add-drivers` is not a substitute: it bypasses the
 filter for its own arguments only (`dracut:2768`), leaving every module
-requested by `90dbrrg/module-setup.sh` still filtered.
+requested by `90thinfloe/module-setup.sh` still filtered.
 
 ### labwc must have zero keybindings
 
-`overlay/etc/dbrrg/labwc/rc.xml` has a `<keyboard>` section with no
+`overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section with no
 `<default />` and no `<keybind>` entries. This is mandatory. The config
-directory lives at `/etc/dbrrg/labwc`, not under `$HOME` - see
+directory lives at `/etc/thinfloe/labwc`, not under `$HOME` - see
 [Persistent Home Directory](#persistent-home-directory) for why - and is
-selected via `labwc -C /etc/dbrrg/labwc` in
-`overlay/etc/profile.d/10-dbrrg-session.sh`.
+selected via `labwc -C /etc/thinfloe/labwc` in
+`overlay/etc/profile.d/10-thinfloe-session.sh`.
 
 The reason is *not* the missing `zwp_keyboard_shortcuts_inhibit_manager_v1` -
 that was this repo's earlier explanation and it is wrong. Xwayland's only use
@@ -585,7 +585,7 @@ assertion on `rc.xml` itself - run via `make test`.
 `systemctl mask ssh.socket`, and enables `ssh.service` alone. Re-enabling the
 socket reintroduces an ordering cycle.
 
-`dbrrg-ssh-hostkeys.service` must run before sshd. With the socket active,
+`thinfloe-ssh-hostkeys.service` must run before sshd. With the socket active,
 sshd has two entry points with different ordering — the socket from
 `sockets.target`, the service from `multi-user.target` — so the key unit had
 to be ordered `Before=ssh.socket`. But a `DefaultDependencies=yes` unit is
@@ -609,10 +609,10 @@ symlink in place, since `disable` is a no-op on an already-masked unit.
 miss: it ships enabled via `Wants=` from **both** `ssh.socket.wants/` and
 `ssh.service.wants/`, so disabling `ssh.socket` only removes the first of
 those two symlinks — the second survives on its own. Left alone, it races
-`dbrrg-ssh-hostkeys.service` on a genuine first boot: its
+`thinfloe-ssh-hostkeys.service` on a genuine first boot: its
 `ConditionFirstBoot=yes`, and neither unit is ordered against the other,
 both only declaring `Before=ssh.service`. If `sshd-keygen.service` wins, it
-writes keys straight into `/etc/ssh`; `dbrrg-ssh-hostkeys.service` then
+writes keys straight into `/etc/ssh`; `thinfloe-ssh-hostkeys.service` then
 finds live keys already present and skips generation, so those keys are
 never staged into the keystore and are lost on the next boot — reproducing
 the regenerate-every-boot bug this whole mechanism exists to fix. It is only
@@ -636,7 +636,7 @@ single boot, not just the first.
 Two real instances of this bug have shipped in this repo:
 
 - The predecessor `regenerate_ssh_host_keys.service` (deleted on this
-  branch, replaced by `dbrrg-ssh-hostkeys.service`) was ordered
+  branch, replaced by `thinfloe-ssh-hostkeys.service`) was ordered
   `Before=ssh.socket` (which pulls in `sockets.target`, itself before
   `basic.target`) — see "ssh.socket must stay masked" above for the full
   cycle and its fix.
@@ -660,7 +660,7 @@ additionally asserts `un-dockerize.service` has no
 
 ### labwc is a local rebuild, not the archive package
 
-`containers/ubuntu/Dockerfile` builds `labwc_0.9.3-1+dbrrg1` from Ubuntu's
+`containers/ubuntu/Dockerfile` builds `labwc_0.9.3-1+thinfloe1` from Ubuntu's
 source package with the patches in `containers/ubuntu/patches/`, applied as a
 quilt series. Two behaviours depend on it:
 
@@ -682,7 +682,7 @@ without that dependency would not trigger a rebuild, leaving `make test` and
 `make test-runtime` validating a stale image while still reporting green.
 
 The same false green has a second source: the image tag. `.ubuntu-container`
-belongs to one checkout, but every checkout builds `dbrrg-ubuntu:$(VERSION)`,
+belongs to one checkout, but every checkout builds `thinfloe-ubuntu:$(VERSION)`,
 so another checkout's build replaces the image under this checkout's stamp.
 Each container stamp therefore holds the image ID its build produced, and the
 `Makefile` drops it at parse time when the tag names a different image or
@@ -695,41 +695,41 @@ via `make test`.
 The netplan systemd generator creates `netplan-wpa-<if>.service` when the
 manager starts. A `~/wifi.yaml` or `~/wg0.conf` copied into place after that
 never gets a WPA unit, and WiFi never associates. `install_local_network()`
-in `dbrrg-lib.sh`, called from `setup-overlay.sh` after `restore_home`, does
+in `thinfloe-lib.sh`, called from `setup-overlay.sh` after `restore_home`, does
 the copy (and creates the `wg-quick@wg0` wants link) before switch-root, so
 the generator sees the files. Netplan files are mode 0600 through a `chmod`
 in `containers/ubuntu/Dockerfile`, because git stores only 644 and 755.
-Do not move the copy into a `dbrrg-local-network.service`.
+Do not move the copy into a `thinfloe-local-network.service`.
 `test/integration/test-field-report.sh` asserts that unit does not exist and
 `test/integration/test-session-packages.sh` asserts mode 600 in the image.
 
 ### The initramfs has no cut, basename, head, install, wc or date
 
-Only what the `inst_multiple` lines in `90dbrrg/module-setup.sh` install,
+Only what the `inst_multiple` lines in `90thinfloe/module-setup.sh` install,
 plus dracut's base set, exists there. Shell builtins (`printf`, `test`,
 `read`) are fine. A missing command fails silently at boot while every
 offline test passes on the dev host - that is how the hostname shipped as
-`dbrrg`, why netboot never recorded the boot MAC, and why every `sync` in
+`thinfloe`, why netboot never recorded the boot MAC, and why every `sync` in
 the `tl.new` upgrade rotation failed. `sync` and `rmdir` are now installed
 explicitly for that rotation. `dhclient` is no longer installed: DHCP is
 `systemd-networkd`'s job (see [Network Boot vs USB Boot](#network-boot-vs-usb-boot)).
 `test/integration/test-initramfs-home.sh` runs
-the helpers, `dbrrg_finalize_upgrade` included, with PATH restricted to that
+the helpers, `tf_finalize_upgrade` included, with PATH restricted to that
 set. `test/integration/test-initramfs-commands.sh` checks every command the
-90dbrrg hooks call against `lsinitramfs` of the built `initrd.img`, so a new
+90thinfloe hooks call against `lsinitramfs` of the built `initrd.img`, so a new
 call to a missing tool fails `make test` even where no offline test runs it.
 Its command extractor (`test/integration/initramfs-commands.py`) is a
 heuristic: it skips comments, quoted text, `for` lists and `case` patterns,
 and descends into `$( )`; a command it cannot see is not checked.
 
-### The dbrrg pre-mount and mount hooks run after dracut-cmdline
+### The ThinFloe pre-mount and mount hooks run after dracut-cmdline
 
-`90dbrrg/module-setup.sh` installs `dbrrg-after-cmdline.conf` as a drop-in
+`90thinfloe/module-setup.sh` installs `thinfloe-after-cmdline.conf` as a drop-in
 for `dracut-pre-mount.service` and `dracut-mount.service`
 (`After=dracut-cmdline.service`). Upstream orders both only after
-`dracut-initqueue.service`, which a dbrrg boot does not pull in, so they ran
-in parallel with the cmdline hook that sets `root=dbrrg` and writes
-`/tmp/dbrrg-ramroot`. A boot that lost that race logged `Can't mount root
+`dracut-initqueue.service`, which a ThinFloe boot does not pull in, so they ran
+in parallel with the cmdline hook that sets `root=thinfloe` and writes
+`/tmp/thinfloe-ramroot`. A boot that lost that race logged `Can't mount root
 filesystem` and stopped in the emergency shell; QEMU netboot hit it, and the
 USB smoke log showed pre-mount starting before cmdline finished. USB was
 spared only by the time the pre-mount hook spends waiting for the ESP.
@@ -741,41 +741,41 @@ either hook starts before `dracut-cmdline.service` has finished.
 
 podman bind-mounts `/etc/hostname` in the build container, so `mksquashfs`
 packed the container ID (`fa0ad0f31bfa`) and every machine had the same name.
-`dbrrg_write_hostname` writes `dbrrg-` plus the first six hex digits of the
+`tf_write_hostname` writes `thinfloe-` plus the first six hex digits of the
 persisted machine-id on USB, or the last six hex digits of the boot MAC on
 netboot, where the machine-id is new every boot. It runs before switch-root,
 so PID 1 reads the name and `%H` in `un-dockerize.service` is correct.
 `test/integration/test-field-report.sh` guards the exclusion and the call.
 
-### dbrrg-menu draws on the CPU
+### thinfloe-menu draws on the CPU
 
 The crate has no `wgpu`, `glow` or `eframe`. The target images have no Vulkan
 ICD (`/usr/share/vulkan/icd.d` does not exist), and GL would make the menu's
 start depend on EGL. `test/integration/test-session-packages.sh` fails when
 the binary links or names a GPU library.
 
-### dbrrg-session never saves; dbrrg-menu saves before it exits 0, 10 or 11
+### thinfloe-session never saves; thinfloe-menu saves before it exits 0, 10 or 11
 
 Decided 2026-10-02, so a failed save is shown at the machine and answered
 there (Stay / Log out anyway, Restart anyway, Power off anyway). 0 is log
 out, 10 restart and 11 power off (decided 2026-10-08, when Restart and Power
-off replaced the Log out tile); `dbrrg-session` runs `sudo systemctl reboot`
+off replaced the Log out tile); `thinfloe-session` runs `sudo systemctl reboot`
 or `poweroff` for them and shows a window if that fails, and
 `session-verdict` counts all three as a clean end. Failure is the default
-branch of the status handling in `dbrrg-session`: a panic (101), a segfault
+branch of the status handling in `thinfloe-session`: a panic (101), a segfault
 (139) or a failed exec (126/127) read as logout would be silent, and saving
 on them would archive the home on every respawn.
 `test/integration/test-session-lifecycle.sh` guards both.
 
 ### The first boot after an upgrade takes its kernel from tl.new
 
-`upgrade-image` stages an upgrade of the running stick in `tl.new/` and then
+`thinfloe-upgrade` stages an upgrade of the running stick in `tl.new/` and then
 sets `DEFAULT new` in both `syslinux.cfg` copies (`/syslinux.cfg` and
 `/efi/boot/syslinux.cfg`; it adds `LABEL new` to a stick written before the
 entry existed). `LABEL new` boots `/tl.new/vmlinuz` with
-`ramroot=tl.new/ramroot.sqsh`. On that boot `dbrrg_finalize_upgrade`
-(`dbrrg-lib.sh`) sets `DEFAULT current` again, rotates `tl` → `tl.old` and
-`tl.new` → `tl`, and points `/tmp/dbrrg-ramroot` at `tl/ramroot.sqsh`. It
+`ramroot=tl.new/ramroot.sqsh`. On that boot `tf_finalize_upgrade`
+(`thinfloe-lib.sh`) sets `DEFAULT current` again, rotates `tl` → `tl.old` and
+`tl.new` → `tl`, and points `/tmp/thinfloe-ramroot` at `tl/ramroot.sqsh`. It
 rotates **only** when ramroot= is `tl.new/ramroot.sqsh`. The rotation has to
 happen in the initramfs, because the squashfs is mounted from the stick and
 cannot be moved afterwards.
@@ -786,9 +786,9 @@ every module not already in the old initramfs failed to load: an i226-V NIC
 (`igc`) stayed down until the next reboot, while WiFi (`iwlwifi`, in the
 initramfs) worked. Seen in the field 2026-10-07.
 
-Limits: the upgrade runs the *running* image's `upgrade-image`, so a machine
+Limits: the upgrade runs the *running* image's `thinfloe-upgrade`, so a machine
 on an image from before this fix has the mismatch once more on its next
-upgrade. Staging such an older image with the new `upgrade-image` (a
+upgrade. Staging such an older image with the new `thinfloe-upgrade` (a
 downgrade) boots it from `tl.new/`, where its initramfs rotates
 unconditionally and then fails to find `tl.new/ramroot.sqsh`; type `current`
 at the boot prompt, and set `DEFAULT current` in both copies by hand.
@@ -796,7 +796,7 @@ at the boot prompt, and set `DEFAULT current` in both copies by hand.
 A stick holds at most two releases. One release (`vmlinuz`, `initrd.img`,
 `ramroot.sqsh`) was 775 MB in 2026-10, and the ESP was 2000 MB: with
 `tl.old/` still present, staging `tl.new/` needed room for three and failed.
-`upgrade-image` therefore removes `tl.old/` before it stages `tl.new/`;
+`thinfloe-upgrade` therefore removes `tl.old/` before it stages `tl.new/`;
 while an upgrade is staged the fallback is `tl/`, the `current` entry. Before
 it removes anything it checks that free space plus `tl.old/` and `tl.new/`
 holds the release plus 10 %, and stops with "Nothing was changed" if not.
@@ -852,7 +852,7 @@ missing was any listener, so labwc reported idleness into an empty room
 forever.
 
 `swayidle` (the listener) and `wlopm` (the output power switch) are therefore
-part of the session package set, launched from `dbrrg-session` at a 300 s
+part of the session package set, launched from `thinfloe-session` at a 300 s
 default. Two decisions are deliberate:
 
 - **`wlopm`, never `wlr-randr --off`.** `wlr-randr` is already in the image
@@ -868,10 +868,10 @@ default. Two decisions are deliberate:
 Known consequence: the ThinLinc client is an X11 app under Xwayland and cannot
 send an idle inhibit, so a long video inside the remote session with no local
 input blanks the local screen. Any keypress restores it. Raise
-`DBRRG_IDLE_TIMEOUT` in `~/.dbrrg-sessionrc` where that matters.
+`TF_IDLE_TIMEOUT` in `~/.thinfloe-sessionrc` where that matters.
 
 `test/integration/test-session-packages.sh` guards both halves - the two labwc
-protocols, the presence of `swayidle`/`wlopm`, that `dbrrg-session` starts the
+protocols, the presence of `swayidle`/`wlopm`, that `thinfloe-session` starts the
 daemon, and that it does *not* blank with `wlr-randr --off`.
 
 **Confirmed on hardware (2026-10-01):** the screen blanks at the 300 s default
@@ -898,19 +898,19 @@ after the X11 removal" above.
 ### A failed menu is shown and counted
 
 `labwc` always exits 0, whatever its `-S` command returned (measured: a `-S`
-command exiting 10, 0 or 101 all give `labwc` exit 0). `dbrrg-session`
-therefore writes the menu's exit status to `$XDG_RUNTIME_DIR/dbrrg-session.status`
+command exiting 10, 0 or 101 all give `labwc` exit 0). `thinfloe-session`
+therefore writes the menu's exit status to `$XDG_RUNTIME_DIR/thinfloe-session.status`
 and, on any status but 0, opens a `foot` window with the status and the last
-lines of the session log. `overlay/usr/libexec/dbrrg/session-verdict`, called
-from `overlay/etc/profile.d/10-dbrrg-session.sh`, reads that file after labwc
+lines of the session log. `overlay/usr/libexec/thinfloe/session-verdict`, called
+from `overlay/etc/profile.d/10-thinfloe-session.sh`, reads that file after labwc
 returns. After three consecutive failed sessions, counted in
-`/tmp/dbrrg-session-failures.<uid>`, it reports the status and
-`10-dbrrg-session.sh` stops the restarts and shows the failure screen.
+`/tmp/thinfloe-session-failures.<uid>`, it reports the status and
+`10-thinfloe-session.sh` stops the restarts and shows the failure screen.
 
 The session log also carries labwc's own line:
 `[ERROR] [../src/server.c:167] spawned child 12 exited with 10`.
 
-From a VT, `dbrrg-menu --check` lists every tile, why one is grey, and why
+From a VT, `thinfloe-menu --check` lists every tile, why one is grey, and why
 an icon draws its letter.
 
 ### The menu's log
@@ -918,9 +918,9 @@ an icon draws its letter.
 The bottom 30 % of the menu (at least eight rows) is a log:
 `HH:MM:SS  source | text`, in local time. It shows every tile start and
 exit (with the exit status or signal), each save and its outcome, and every
-line a tile's program or `dbrrg-save-home` writes to stdout or stderr, with
+line a tile's program or `thinfloe-save-home` writes to stdout or stderr, with
 the tile name or `save-home` as source. Program output is untrusted, so the
-bounds are fixed in `src/dbrrg-menu/src/log.rs`: lines are cut at 1 KiB, the
+bounds are fixed in `src/thinfloe-menu/src/log.rs`: lines are cut at 1 KiB, the
 log and the queue from the reader threads keep 500 lines each, and output
 wakes the menu at most ten times a second. A program's last lines appear
 before its exit line; a background child that keeps the pipes open delays
@@ -931,9 +931,9 @@ session log has all of it.
 
 ### The session waits for the GPU before it starts
 
-`dbrrg-wait-kms.service` waits up to 20 s for a real KMS driver before the
+`thinfloe-wait-kms.service` waits up to 20 s for a real KMS driver before the
 tty1 autologin: i915 is omitted from the initrd and binds only after
-switch-root, and simpledrm's `card0` alone does not count. `10-dbrrg-session.sh`
+switch-root, and simpledrm's `card0` alone does not count. `10-thinfloe-session.sh`
 retries labwc once after another wait-kms, so a machine with no GPU waits about
 40 s before the failure screen.
 
@@ -942,7 +942,7 @@ retries labwc once after another wait-kms, so a machine with no GPU waits about
 There is no polkit in this image, no `polkitd` and no `pkexec`, and systemd
 gates `Reboot` and `PowerOff` for non-root callers on a polkit authority. A
 bare `systemctl reboot` as `tluser` is refused. Use `sudo systemctl reboot`,
-the way `dbrrg-save-home` and `dbrrg-session` (for the Restart and Power off
+the way `thinfloe-save-home` and `thinfloe-session` (for the Restart and Power off
 tiles) already escalate.
 
 ### Reaching a terminal
@@ -951,7 +951,7 @@ The Terminal tile of the menu starts `foot` inside the session. With zero
 labwc keybindings ([Standing Constraints](#standing-constraints)) there is no
 other in-session path, so when the session is down, reach a terminal from a VT
 (Ctrl+Alt+F2, say) or over SSH instead. **SSH needs a password
-first:** a machine nobody has run `sudo dbrrg-password` on refuses every
+first:** a machine nobody has run `sudo thinfloe-password` on refuses every
 password login, because tluser's shadow field is `!` and the image ships no
 `authorized_keys`. On such a machine the VT is the only way in, and the VT
 autologin gets there without a password.

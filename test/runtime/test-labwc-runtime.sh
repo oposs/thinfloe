@@ -3,8 +3,8 @@
 # X11 client is given the union of both (2560x720), not a single output.
 # Also asserts that Xwayland binds the keyboard-grab manager, and that
 # labwc's environment-file parser lets a later duplicate assignment win
-# (the assumption dbrrg-compose-labwc-config's merge depends on).
-# Finally asserts that dbrrg-menu, a native Wayland client, maps at the full
+# (the assumption thinfloe-compose-labwc-config's merge depends on).
+# Finally asserts that thinfloe-menu, a native Wayland client, maps at the full
 # output size, rasterises on the CPU and keeps running.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
@@ -12,7 +12,7 @@
 
 set -uo pipefail
 
-IMAGE="${1:-localhost/dbrrg-runtime-test:latest}"
+IMAGE="${1:-localhost/thinfloe-runtime-test:latest}"
 fail=0
 
 # labwc -S only bounds the case where the probe runs and then exits or
@@ -21,7 +21,7 @@ fail=0
 # script. Cap it so that failure mode is loud instead of silent. The whole
 # rig normally completes in seconds; this bound is generous on purpose.
 RUNTIME_TIMEOUT=180
-CONTAINER_NAME="dbrrg-runtime-test-$$"
+CONTAINER_NAME="thinfloe-runtime-test-$$"
 
 out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
@@ -30,7 +30,7 @@ out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$CONTAI
     -e XDG_RUNTIME_DIR=/tmp/xdg \
     "$IMAGE" \
     sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
-           labwc -C /etc/dbrrg/labwc -S "python3 /usr/local/bin/x11-probe.py"' 2>&1)
+           labwc -C /etc/thinfloe/labwc -S "python3 /usr/local/bin/x11-probe.py"' 2>&1)
 rc=$?
 
 # timeout(1) exits 124 when it kills the command with the default TERM. But
@@ -85,7 +85,7 @@ fi
 # Do not "fix" this back to grepping for grab_keyboard - it would just make
 # the assertion unfalsifiable in this rig. Real XGrabKeyboard forwarding is
 # unverified until tested on real hardware with a real keyboard attached.
-GRAB_CONTAINER_NAME="dbrrg-runtime-test-grab-$$"
+GRAB_CONTAINER_NAME="thinfloe-runtime-test-grab-$$"
 
 grab_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$GRAB_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
@@ -95,7 +95,7 @@ grab_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$G
     -e WAYLAND_DEBUG=1 \
     "$IMAGE" \
     sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
-           labwc -C /etc/dbrrg/labwc -S "python3 /usr/local/bin/x11-probe.py --grab"' 2>&1)
+           labwc -C /etc/thinfloe/labwc -S "python3 /usr/local/bin/x11-probe.py --grab"' 2>&1)
 grab_rc=$?
 
 if [[ $grab_rc -eq 124 || $grab_rc -eq 137 ]]; then
@@ -120,12 +120,12 @@ else
 fi
 
 
-# The whole ~/.dbrrg-environment override fix (dbrrg-compose-labwc-config)
+# The whole ~/.thinfloe-environment override fix (thinfloe-compose-labwc-config)
 # rests on one assumption about labwc's own parser: that a LATER duplicate
 # assignment in the environment file wins. If labwc kept the FIRST value
 # instead, the merge would silently do nothing - the same class of bug as
 # the "export" prefix issue documented in
-# overlay/etc/dbrrg/labwc/environment. This is tested here, against the
+# overlay/etc/thinfloe/labwc/environment. This is tested here, against the
 # real labwc binary, rather than assumed.
 #
 # Build a config dir containing the shipped rc.xml (labwc needs one to
@@ -135,7 +135,7 @@ fi
 # probe window on this two-output rig gets a single output (1280x720)
 # instead of the spanned union (2560x720) that the first assertion above
 # proved '1' produces.
-DUP_CONTAINER_NAME="dbrrg-runtime-test-dup-$$"
+DUP_CONTAINER_NAME="thinfloe-runtime-test-dup-$$"
 
 dup_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$DUP_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
@@ -145,7 +145,7 @@ dup_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$DU
     "$IMAGE" \
     sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
            mkdir -p /tmp/dup-config &&
-           cp /etc/dbrrg/labwc/rc.xml /tmp/dup-config/rc.xml &&
+           cp /etc/thinfloe/labwc/rc.xml /tmp/dup-config/rc.xml &&
            printf "LABWC_FULLSCREEN_SPAN_OUTPUTS=1\nLABWC_FULLSCREEN_SPAN_OUTPUTS=0\n" >/tmp/dup-config/environment &&
            labwc -C /tmp/dup-config -S "python3 /usr/local/bin/x11-probe.py"' 2>&1)
 dup_rc=$?
@@ -169,12 +169,12 @@ else
     fail=1
 fi
 
-# dbrrg-menu is a native Wayland client, so x11-probe cannot see it; it
-# prints its own configure size under DBRRG_MENU_DEBUG. One output, so the
+# thinfloe-menu is a native Wayland client, so x11-probe cannot see it; it
+# prints its own configure size under TF_MENU_DEBUG. One output, so the
 # maximized grid must get all of it. timeout ends the menu after 10s: exit
 # 124 means it was still running, i.e. it neither crashed nor exited on its
 # own, and an exit 0 here would be a logout nobody asked for.
-MENU_CONTAINER_NAME="dbrrg-runtime-test-menu-$$"
+MENU_CONTAINER_NAME="thinfloe-runtime-test-menu-$$"
 
 menu_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$MENU_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
@@ -183,7 +183,7 @@ menu_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$M
     -e XDG_RUNTIME_DIR=/tmp/xdg \
     "$IMAGE" \
     sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
-           labwc -C /etc/dbrrg/labwc -S "sh -c \"DBRRG_MENU_DEBUG=1 timeout 10 dbrrg-menu; echo menu-rc=\$?\""' 2>&1)
+           labwc -C /etc/thinfloe/labwc -S "sh -c \"TF_MENU_DEBUG=1 timeout 10 thinfloe-menu; echo menu-rc=\$?\""' 2>&1)
 menu_rc=$?
 
 if [[ $menu_rc -eq 124 || $menu_rc -eq 137 ]]; then
@@ -193,37 +193,37 @@ if [[ $menu_rc -eq 124 || $menu_rc -eq 137 ]]; then
     exit 1
 fi
 
-if echo "$menu_out" | grep -q 'dbrrg-menu: configure 1280x720'; then
-    echo "ok   - dbrrg-menu maps at the full output size (1280x720)"
+if echo "$menu_out" | grep -q 'thinfloe-menu: configure 1280x720'; then
+    echo "ok   - thinfloe-menu maps at the full output size (1280x720)"
 else
-    echo "FAIL - dbrrg-menu did not configure at 1280x720"
+    echo "FAIL - thinfloe-menu did not configure at 1280x720"
     echo "$menu_out"
     fail=1
 fi
-if echo "$menu_out" | grep -q 'dbrrg-menu: raster'; then
-    echo "ok   - dbrrg-menu rasterised a frame on the CPU"
+if echo "$menu_out" | grep -q 'thinfloe-menu: raster'; then
+    echo "ok   - thinfloe-menu rasterised a frame on the CPU"
 else
-    echo "FAIL - dbrrg-menu never rasterised a frame"
+    echo "FAIL - thinfloe-menu never rasterised a frame"
     echo "$menu_out"
     fail=1
 fi
 # Every tile in this container is a shipped one (root has no
-# ~/.config/dbrrg/menu), so every icon must draw. A tile drawing its letter
-# also logs "dbrrg-menu: icon <name> for <file>: <why>".
-icons_line=$(echo "$menu_out" | grep -o 'dbrrg-menu: [0-9]* of [0-9]* tile icons drawn' | tail -1)
+# ~/.config/thinfloe/menu), so every icon must draw. A tile drawing its letter
+# also logs "thinfloe-menu: icon <name> for <file>: <why>".
+icons_line=$(echo "$menu_out" | grep -o 'thinfloe-menu: [0-9]* of [0-9]* tile icons drawn' | tail -1)
 icons_drawn=$(echo "$icons_line" | cut -d' ' -f2)
 icons_total=$(echo "$icons_line" | cut -d' ' -f4)
 if [[ -n "$icons_total" && "$icons_total" -gt 0 && "$icons_drawn" == "$icons_total" ]]; then
-    echo "ok   - dbrrg-menu drew every shipped tile icon ($icons_drawn of $icons_total)"
+    echo "ok   - thinfloe-menu drew every shipped tile icon ($icons_drawn of $icons_total)"
 else
     echo "FAIL - a shipped tile draws its letter: ${icons_line:-no icon count printed}"
-    echo "$menu_out" | grep 'dbrrg-menu: icon '
+    echo "$menu_out" | grep 'thinfloe-menu: icon '
     fail=1
 fi
 if echo "$menu_out" | grep -q 'menu-rc=124'; then
-    echo "ok   - dbrrg-menu kept running until stopped"
+    echo "ok   - thinfloe-menu kept running until stopped"
 else
-    echo "FAIL - dbrrg-menu exited on its own: $(echo "$menu_out" | grep menu-rc)"
+    echo "FAIL - thinfloe-menu exited on its own: $(echo "$menu_out" | grep menu-rc)"
     fail=1
 fi
 

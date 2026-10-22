@@ -1,0 +1,140 @@
+#!/bin/sh
+# Install the machine's persistent SSH host keys, or generate them once.
+#
+# The root filesystem is a read-only squashfs with a ZRAM overlay, so
+# /etc/ssh is writable but volatile: without this, keys are regenerated on
+# every boot and every client reports a changed host key every time.
+#
+# The keys are persisted INSIDE the home directory, which is already saved
+# to the EFI partition (USB) or the boot server (netboot) by
+# thinfloe-save-home, and restored by the initramfs before the pivot. That is
+# why this can run as an ordinary system service with no EFI mount, no
+# network, and no server-side endpoint of its own.
+#
+# Ordering: the initramfs has already put ~tluser/.thinfloe-ssh-host-keys in
+# place by the time this runs, and thinfloe-ssh-hostkeys.service is ordered
+# Before=ssh.service.
+#
+# Usage:
+#   thinfloe-ssh-hostkeys            install from the keystore, or generate
+#   thinfloe-ssh-hostkeys --stage    copy the live keys into the keystore
+#                                 (called by thinfloe-save-home before tarring)
+#
+# The TF_* variables exist so test/integration/test-ssh-hostkeys.sh can
+# redirect the layout; nothing in the image sets them.
+
+set -u
+
+SSH_DIR="${TF_SSH_DIR:-/etc/ssh}"
+HOME_DIR="${TF_HOME_DIR:-/home/tluser}"
+KEY_OWNER="${TF_KEY_OWNER:-tluser}"
+KEYSTORE="$HOME_DIR/.thinfloe-ssh-host-keys"
+
+# has_keys <dir> - true if <dir> holds at least one private host key.
+# An unmatched glob stays literal in POSIX sh, so the -e test is the check.
+has_keys() {
+    set -- "$1"/ssh_host_*_key
+    [ -e "$1" ]
+}
+
+# Install the persisted keys over the volatile ones.
+install_from_keystore() {
+    has_keys "$KEYSTORE" || return 1
+
+    cp -p "$KEYSTORE"/ssh_host_* "$SSH_DIR"/ 2>/dev/null || return 1
+
+    # The keystore lives inside tluser's home, so these arrive owned by
+    # tluser and carrying whatever mode the archive preserved. sshd refuses
+    # to start on a host key that is not root-owned and 0600, so both are
+    # forced here rather than trusted.
+    #
+    # NOTE: this is deliberately the OPPOSITE of the home restore in
+    # thinfloe-lib.sh, which must PRESERVE uid 1000 (tar --same-owner). Same
+    # archive, two different requirements. Do not "make them consistent".
+    chown root:root "$SSH_DIR"/ssh_host_* 2>/dev/null || \
+        echo "thinfloe-ssh-hostkeys: WARNING could not chown host keys" >&2
+    chmod 600 "$SSH_DIR"/ssh_host_*_key 2>/dev/null || true
+    chmod 644 "$SSH_DIR"/ssh_host_*_key.pub 2>/dev/null || true
+
+    return 0
+}
+
+# Copy the live keys into the keystore so the next thinfloe-save-home run
+# captures them in the home archive.
+stage_to_keystore() {
+    has_keys "$SSH_DIR" || {
+        echo "thinfloe-ssh-hostkeys: no host keys in $SSH_DIR to stage" >&2
+        return 1
+    }
+
+    mkdir -p "$KEYSTORE" 2>/dev/null || return 1
+    cp -p "$SSH_DIR"/ssh_host_* "$KEYSTORE"/ 2>/dev/null || return 1
+
+    # Owned by tluser like the rest of the home. thinfloe-save-home archives as
+    # root now, but until 2026-10 the netboot save ran tar as tluser, and an
+    # unreadable root-owned file failed the whole save.
+    chown -R "$KEY_OWNER:$KEY_OWNER" "$KEYSTORE" 2>/dev/null || \
+        echo "thinfloe-ssh-hostkeys: WARNING could not chown $KEYSTORE" >&2
+    chmod 700 "$KEYSTORE" 2>/dev/null || true
+    chmod 600 "$KEYSTORE"/ssh_host_*_key 2>/dev/null || true
+
+    return 0
+}
+
+case "${1:-}" in
+    --stage)
+        stage_to_keystore
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        echo "Usage: thinfloe-ssh-hostkeys [--stage]" >&2
+        exit 1
+        ;;
+esac
+
+if install_from_keystore; then
+    echo "thinfloe-ssh-hostkeys: installed persistent host keys from $KEYSTORE"
+
+    # Top up any key type the keystore did not carry. has_keys above only
+    # proves at least ONE key was present, so a partial keystore - a
+    # truncated home archive, a hand-edited directory, or simply a keystore
+    # written before a new key type existed - would otherwise leave sshd
+    # running with fewer host key types than the image expects, silently and
+    # with a log line identical to a full install.
+    #
+    # ssh-keygen -A only creates types that are missing and leaves existing
+    # keys untouched, so this is safe to run unconditionally here. Anything
+    # it generates is staged back so the keystore converges on the full set.
+    if ssh-keygen -A; then
+        chown root:root "$SSH_DIR"/ssh_host_* 2>/dev/null || true
+        chmod 600 "$SSH_DIR"/ssh_host_*_key 2>/dev/null || true
+        chmod 644 "$SSH_DIR"/ssh_host_*_key.pub 2>/dev/null || true
+        stage_to_keystore || \
+            echo "thinfloe-ssh-hostkeys: WARNING could not restage topped-up keys" >&2
+    fi
+
+    exit 0
+fi
+
+if has_keys "$SSH_DIR"; then
+    echo "thinfloe-ssh-hostkeys: host keys already present in $SSH_DIR"
+    exit 0
+fi
+
+# First boot of this machine, or a machine whose home was never saved.
+echo "thinfloe-ssh-hostkeys: no persistent host keys, generating"
+if ! ssh-keygen -A; then
+    echo "thinfloe-ssh-hostkeys: ssh-keygen -A failed" >&2
+    exit 1
+fi
+
+# Stage immediately so the keys are captured by the first thinfloe-save-home.
+# Note they do not actually persist until that runs, at logout - a machine
+# powered off before its first clean logout will generate fresh keys again
+# next boot. Accepted; see the design spec.
+stage_to_keystore || \
+    echo "thinfloe-ssh-hostkeys: WARNING could not stage keys into $KEYSTORE" >&2
+
+exit 0

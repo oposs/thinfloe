@@ -1,7 +1,7 @@
 #!/bin/bash
-# Offline tests for the initramfs home restore helpers in dbrrg-lib.sh.
+# Offline tests for the initramfs home restore helpers in thinfloe-lib.sh.
 #
-# The home restore moved out of /etc/profile.d/10-dbrrg-session.sh and into
+# The home restore moved out of /etc/profile.d/10-thinfloe-session.sh and into
 # the initramfs so that /home/tluser is populated before multi-user.target -
 # which is what lets the SSH host keys ride along inside the home archive
 # instead of needing their own EFI file or boot-server endpoint. See
@@ -17,7 +17,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-LIB="$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg/dbrrg-lib.sh"
+LIB="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh"
 
 if [[ ! -f "$LIB" ]]; then
     echo "FAIL: $LIB not found" >&2
@@ -37,97 +37,97 @@ bad() { echo "FAIL - $1"; fail=1; }
 info() { :; }
 warn() { echo "warn: $*" >>"$WORK/warnings"; }
 dinfo() { :; }
-dbrrg_log() { :; }
+tf_log() { :; }
 die()  { echo "die: $*" >>"$WORK/deaths"; return 1; }
 : >"$WORK/warnings"
 : >"$WORK/deaths"
 
-# dbrrg-lib.sh guards its body with "if [ -z "$_DBRRG_LIB_LOADED" ]", which
+# thinfloe-lib.sh guards its body with "if [ -z "$_TF_LIB_LOADED" ]", which
 # under bash's `set -u` needs the variable to already exist (even unset) or
 # referencing it aborts the script before the guard can even run.
-_DBRRG_LIB_LOADED=""
+_TF_LIB_LOADED=""
 
 # shellcheck source=/dev/null
 . "$LIB"
-# The library redefines dbrrg_log to write to /dev/console; silence it again.
-dbrrg_log() { :; }
+# The library redefines tf_log to write to /dev/console; silence it again.
+tf_log() { :; }
 
-# --- dbrrg_home_url ------------------------------------------------------
+# --- tf_home_url ------------------------------------------------------
 
-url=$(dbrrg_home_url "http://boot.example.org/tl/ramroot.sqsh" "aa:bb:cc:dd:ee:ff")
+url=$(tf_home_url "http://boot.example.org/tl/ramroot.sqsh" "aa:bb:cc:dd:ee:ff")
 if [[ "$url" == "http://boot.example.org/tl/home.pkg?mac=aa:bb:cc:dd:ee:ff" ]]; then
-    ok "dbrrg_home_url builds the archive URL from the ramroot URL"
+    ok "tf_home_url builds the archive URL from the ramroot URL"
 else
-    bad "dbrrg_home_url returned '$url'"
+    bad "tf_home_url returned '$url'"
 fi
 
-if dbrrg_home_url "" "aa:bb:cc:dd:ee:ff" >/dev/null 2>&1; then
-    bad "dbrrg_home_url accepted an empty ramroot URL"
+if tf_home_url "" "aa:bb:cc:dd:ee:ff" >/dev/null 2>&1; then
+    bad "tf_home_url accepted an empty ramroot URL"
 else
-    ok "dbrrg_home_url rejects an empty ramroot URL"
+    ok "tf_home_url rejects an empty ramroot URL"
 fi
 
-if dbrrg_home_url "http://x/tl/ramroot.sqsh" "" >/dev/null 2>&1; then
-    bad "dbrrg_home_url accepted an empty MAC"
+if tf_home_url "http://x/tl/ramroot.sqsh" "" >/dev/null 2>&1; then
+    bad "tf_home_url accepted an empty MAC"
 else
-    ok "dbrrg_home_url rejects an empty MAC"
+    ok "tf_home_url rejects an empty MAC"
 fi
 
-# --- dbrrg_record_boot_mac ----------------------------------------------
+# --- tf_record_boot_mac ----------------------------------------------
 
 mkdir -p "$WORK/sysfs/eth0" "$WORK/state"
 echo "de:ad:be:ef:00:01" >"$WORK/sysfs/eth0/address"
 
-if dbrrg_record_boot_mac "$WORK/sysfs/eth0/address" "$WORK/state" &&
+if tf_record_boot_mac "$WORK/sysfs/eth0/address" "$WORK/state" &&
    [[ "$(cat "$WORK/state/boot-mac")" == "de:ad:be:ef:00:01" ]]; then
-    ok "dbrrg_record_boot_mac writes the MAC to <state-dir>/boot-mac"
+    ok "tf_record_boot_mac writes the MAC to <state-dir>/boot-mac"
 else
-    bad "dbrrg_record_boot_mac did not record the MAC"
+    bad "tf_record_boot_mac did not record the MAC"
 fi
 
-if dbrrg_record_boot_mac "$WORK/sysfs/nosuch/address" "$WORK/state" 2>/dev/null; then
-    bad "dbrrg_record_boot_mac succeeded on a missing address file"
+if tf_record_boot_mac "$WORK/sysfs/nosuch/address" "$WORK/state" 2>/dev/null; then
+    bad "tf_record_boot_mac succeeded on a missing address file"
 else
-    ok "dbrrg_record_boot_mac fails on a missing address file"
+    ok "tf_record_boot_mac fails on a missing address file"
 fi
 
-# --- dbrrg_route_iface ---------------------------------------------------
+# --- tf_route_iface ---------------------------------------------------
 #
 # The boot MAC comes from the interface holding the default route, not from
 # the first /sys/class/net entry.
 
 routes='default via 10.0.2.2 dev enp0s3 proto dhcp src 10.0.2.15 metric 1024
 default via 192.168.1.1 dev enp1s0 proto dhcp src 192.168.1.9 metric 2048'
-got=$(printf '%s\n' "$routes" | dbrrg_route_iface)
-[[ "$got" == enp0s3 ]] && ok "dbrrg_route_iface picks the first default route's device" \
-    || bad "dbrrg_route_iface returned '$got', want enp0s3"
-if got=$(printf '' | dbrrg_route_iface); then
-    bad "dbrrg_route_iface succeeded with no default route (printed '$got')"
+got=$(printf '%s\n' "$routes" | tf_route_iface)
+[[ "$got" == enp0s3 ]] && ok "tf_route_iface picks the first default route's device" \
+    || bad "tf_route_iface returned '$got', want enp0s3"
+if got=$(printf '' | tf_route_iface); then
+    bad "tf_route_iface succeeded with no default route (printed '$got')"
 else
-    ok "dbrrg_route_iface fails with no default route"
+    ok "tf_route_iface fails with no default route"
 fi
 
-MS_SRC="$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg/mount-squashfs.sh"
+MS_SRC="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/mount-squashfs.sh"
 if grep -v '^[[:space:]]*#' "$MS_SRC" | grep -qE '\bdhclient\b|/sys/class/net/\*'; then
     bad "mount-squashfs.sh still runs dhclient or picks the first /sys/class/net entry"
 else
     ok "mount-squashfs.sh leaves DHCP to networkd and takes the lease's interface"
 fi
 
-# --- dbrrg_restore_home_from_file ---------------------------------------
+# --- tf_restore_home_from_file ---------------------------------------
 
-# Build a home archive the way dbrrg-save-home does: tar czf from inside
+# Build a home archive the way thinfloe-save-home does: tar czf from inside
 # $HOME, so members are stored as ./relative paths.
 mkdir -p "$WORK/src-home/.thinlinc"
-echo "layout=ch" >"$WORK/src-home/.dbrrg-environment"
+echo "layout=ch" >"$WORK/src-home/.thinfloe-environment"
 echo "tlconf" >"$WORK/src-home/.thinlinc/tlclient.conf"
 ( cd "$WORK/src-home" && tar czf "$WORK/home.tar.gz" . )
 
 TARGET="$WORK/newroot/home/tluser"
 mkdir -p "$TARGET"
 
-if dbrrg_restore_home_from_file "$WORK/home.tar.gz" "$TARGET" &&
-   [[ -f "$TARGET/.dbrrg-environment" ]] &&
+if tf_restore_home_from_file "$WORK/home.tar.gz" "$TARGET" &&
+   [[ -f "$TARGET/.thinfloe-environment" ]] &&
    [[ -f "$TARGET/.thinlinc/tlclient.conf" ]]; then
     ok "restore_home_from_file extracts the archive into the target home"
 else
@@ -138,7 +138,7 @@ fi
 # it must not be fatal and must leave the default home alone.
 mkdir -p "$WORK/newroot2/home/tluser"
 echo "shipped-default" >"$WORK/newroot2/home/tluser/.bashrc"
-if dbrrg_restore_home_from_file "$WORK/nope.tar.gz" "$WORK/newroot2/home/tluser" 2>/dev/null; then
+if tf_restore_home_from_file "$WORK/nope.tar.gz" "$WORK/newroot2/home/tluser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a missing archive"
 else
     ok "restore_home_from_file fails quietly on a missing archive"
@@ -152,7 +152,7 @@ fi
 # A corrupt archive must warn and return non-zero, never abort the boot.
 echo "this is not a tarball" >"$WORK/corrupt.tar.gz"
 mkdir -p "$WORK/newroot3/home/tluser"
-if dbrrg_restore_home_from_file "$WORK/corrupt.tar.gz" "$WORK/newroot3/home/tluser" 2>/dev/null; then
+if tf_restore_home_from_file "$WORK/corrupt.tar.gz" "$WORK/newroot3/home/tluser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a corrupt archive"
 else
     ok "restore_home_from_file fails on a corrupt archive"
@@ -166,11 +166,11 @@ fi
 # Valid gzip that is not a tar: decompresses cleanly, lists no members, and
 # GNU tar exits 0 on it. Without an explicit member check this reports a
 # successful restore having restored nothing - see the comment in
-# dbrrg_restore_home_from_file for why that is worse than it sounds.
+# tf_restore_home_from_file for why that is worse than it sounds.
 printf 'gzipped, but not a tar archive' | gzip > "$WORK/gz-not-tar.tar.gz"
 mkdir -p "$WORK/newroot7/home/tluser"
 echo "shipped-default" >"$WORK/newroot7/home/tluser/.bashrc"
-if dbrrg_restore_home_from_file "$WORK/gz-not-tar.tar.gz" \
+if tf_restore_home_from_file "$WORK/gz-not-tar.tar.gz" \
         "$WORK/newroot7/home/tluser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a valid-gzip non-tar payload"
 else
@@ -182,36 +182,36 @@ else
     bad "valid-gzip non-tar payload damaged the default home"
 fi
 
-# --- dbrrg_restore_home_from_url ----------------------------------------
+# --- tf_restore_home_from_url ----------------------------------------
 
-# Stub curl. $DBRRG_TEST_CURL_MODE selects the behaviour under test.
+# Stub curl. $TF_TEST_CURL_MODE selects the behaviour under test.
 STUBS="$WORK/stubs"
 mkdir -p "$STUBS"
 cat >"$STUBS/curl" <<'STUB'
 #!/bin/bash
-# Minimal curl stand-in: find the -o target, act per DBRRG_TEST_CURL_MODE.
+# Minimal curl stand-in: find the -o target, act per TF_TEST_CURL_MODE.
 out=""
 prev=""
 for a in "$@"; do
     [[ "$prev" == "-o" ]] && out="$a"
     prev="$a"
 done
-case "${DBRRG_TEST_CURL_MODE:-ok}" in
-    ok)      cp "$DBRRG_TEST_CURL_PAYLOAD" "$out"; exit 0 ;;
+case "${TF_TEST_CURL_MODE:-ok}" in
+    ok)      cp "$TF_TEST_CURL_PAYLOAD" "$out"; exit 0 ;;
     notfound) exit 22 ;;   # curl -f exit code for an HTTP 4xx
     timeout)  exit 28 ;;   # curl exit code for a timeout
 esac
 STUB
 chmod +x "$STUBS/curl"
 PATH="$STUBS:$PATH"
-export DBRRG_TEST_CURL_PAYLOAD="$WORK/home.tar.gz"
+export TF_TEST_CURL_PAYLOAD="$WORK/home.tar.gz"
 
 mkdir -p "$WORK/newroot4/home/tluser"
-DBRRG_TEST_CURL_MODE=ok
-export DBRRG_TEST_CURL_MODE
-if dbrrg_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
+TF_TEST_CURL_MODE=ok
+export TF_TEST_CURL_MODE
+if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
         "$WORK/newroot4/home/tluser" 5 "$WORK/dl.pkg" &&
-   [[ -f "$WORK/newroot4/home/tluser/.dbrrg-environment" ]]; then
+   [[ -f "$WORK/newroot4/home/tluser/.thinfloe-environment" ]]; then
     ok "restore_home_from_url extracts a fetched archive"
 else
     bad "restore_home_from_url did not extract a fetched archive"
@@ -225,8 +225,8 @@ fi
 # First netboot of a machine the server has never seen: a 404 is expected,
 # not a fault.
 mkdir -p "$WORK/newroot5/home/tluser"
-DBRRG_TEST_CURL_MODE=notfound
-if dbrrg_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
+TF_TEST_CURL_MODE=notfound
+if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
         "$WORK/newroot5/home/tluser" 5 "$WORK/dl5.pkg" 2>/dev/null; then
     bad "restore_home_from_url reported success on a 404"
 else
@@ -235,8 +235,8 @@ fi
 
 # A hanging boot server must not hang the boot.
 mkdir -p "$WORK/newroot6/home/tluser"
-DBRRG_TEST_CURL_MODE=timeout
-if dbrrg_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
+TF_TEST_CURL_MODE=timeout
+if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
         "$WORK/newroot6/home/tluser" 5 "$WORK/dl6.pkg" 2>/dev/null; then
     bad "restore_home_from_url reported success on a timeout"
 else
@@ -247,7 +247,7 @@ fi
 # looped on ping forever, which in an initramfs is a machine that never boots
 # and has no console to interrupt it.
 if grep -q -- '--max-time' \
-        "$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg/dbrrg-lib.sh"; then
+        "$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh"; then
     ok "the fetch is bounded by --max-time"
 else
     bad "no --max-time in the fetch - an unbounded wait would hang the boot"
@@ -266,7 +266,7 @@ mkdir -p "$WORK/usb/efi" "$WORK/usb/state" "$WORK/usb/newroot/home/tluser"
 cp "$WORK/home.tar.gz" "$WORK/usb/efi/home.tar.gz"
 if restore_home "$WORK/usb/newroot" "$WORK/usb/efi" "$WORK/usb/state" \
         "tl/ramroot.sqsh" &&
-   [[ -f "$WORK/usb/newroot/home/tluser/.dbrrg-environment" ]]; then
+   [[ -f "$WORK/usb/newroot/home/tluser/.thinfloe-environment" ]]; then
     ok "restore_home restores from the EFI partition on USB boot"
 else
     bad "restore_home did not restore from the EFI partition"
@@ -277,7 +277,7 @@ else
     bad "restore_home did not record 'ok' after a successful USB restore (got: $(cat "$WORK/usb/state/home-restore" 2>/dev/null))"
 fi
 
-# USB boot, corrupt archive: dbrrg-save-home must NOT be allowed to save
+# USB boot, corrupt archive: thinfloe-save-home must NOT be allowed to save
 # over the good archive with this default home, so the marker is "failed",
 # not "absent" - there WAS something at the archive path, it just did not
 # restore.
@@ -298,10 +298,10 @@ fi
 # Netboot: uses the recorded boot MAC to build the URL.
 mkdir -p "$WORK/net/efi" "$WORK/net/state" "$WORK/net/newroot/home/tluser"
 echo "de:ad:be:ef:00:01" >"$WORK/net/state/boot-mac"
-DBRRG_TEST_CURL_MODE=ok
+TF_TEST_CURL_MODE=ok
 if restore_home "$WORK/net/newroot" "$WORK/net/efi" "$WORK/net/state" \
         "http://boot.example.org/tl/ramroot.sqsh" &&
-   [[ -f "$WORK/net/newroot/home/tluser/.dbrrg-environment" ]]; then
+   [[ -f "$WORK/net/newroot/home/tluser/.thinfloe-environment" ]]; then
     ok "restore_home fetches from the boot server on netboot"
 else
     bad "restore_home did not fetch from the boot server"
@@ -317,7 +317,7 @@ fi
 # correct.
 mkdir -p "$WORK/net404/efi" "$WORK/net404/state" "$WORK/net404/newroot/home/tluser"
 echo "de:ad:be:ef:00:02" >"$WORK/net404/state/boot-mac"
-DBRRG_TEST_CURL_MODE=notfound
+TF_TEST_CURL_MODE=notfound
 if restore_home "$WORK/net404/newroot" "$WORK/net404/efi" "$WORK/net404/state" \
         "http://boot.example.org/tl/ramroot.sqsh"; then
     ok "restore_home returns 0 on a netboot 404"
@@ -331,10 +331,10 @@ else
 fi
 
 # Netboot, server times out: something was presumably there and it could not
-# be fetched - "failed", so dbrrg-save-home must not overwrite it.
+# be fetched - "failed", so thinfloe-save-home must not overwrite it.
 mkdir -p "$WORK/nettimeout/efi" "$WORK/nettimeout/state" "$WORK/nettimeout/newroot/home/tluser"
 echo "de:ad:be:ef:00:03" >"$WORK/nettimeout/state/boot-mac"
-DBRRG_TEST_CURL_MODE=timeout
+TF_TEST_CURL_MODE=timeout
 if restore_home "$WORK/nettimeout/newroot" "$WORK/nettimeout/efi" \
         "$WORK/nettimeout/state" "http://boot.example.org/tl/ramroot.sqsh"; then
     ok "restore_home returns 0 on a netboot timeout"
@@ -346,7 +346,7 @@ if [[ "$(cat "$WORK/nettimeout/state/home-restore" 2>/dev/null)" == "failed" ]];
 else
     bad "restore_home did not record 'failed' for a netboot timeout (got: $(cat "$WORK/nettimeout/state/home-restore" 2>/dev/null))"
 fi
-DBRRG_TEST_CURL_MODE=ok
+TF_TEST_CURL_MODE=ok
 
 # Netboot with no recorded MAC: skip, do not guess. Guessing is exactly the
 # failure this design removed - a wrong key means the home is posted where
@@ -365,7 +365,7 @@ else
     bad "restore_home did not record 'failed' with no boot MAC (got: $(cat "$WORK/nomac/state/home-restore" 2>/dev/null))"
 fi
 
-# The base the URL was built from must be recorded, so dbrrg-save-home posts
+# The base the URL was built from must be recorded, so thinfloe-save-home posts
 # to the same place instead of re-deriving it with a greedy sed over the whole
 # /proc/cmdline. That sed backtracks to the last slash ANYWHERE in the command
 # line, so a later parameter containing "/" (root=/dev/sda1, init=/sbin/init)
@@ -387,7 +387,7 @@ fi
 # Every failure mode must still return 0: restore_home is called from
 # setup-overlay.sh, where a non-zero return would abort the boot.
 mkdir -p "$WORK/fail/efi" "$WORK/fail/state" "$WORK/fail/newroot/home/tluser"
-DBRRG_TEST_CURL_MODE=timeout
+TF_TEST_CURL_MODE=timeout
 if restore_home "$WORK/fail/newroot" "$WORK/fail/efi" "$WORK/fail/state" \
         "tl/ramroot.sqsh"; then
     ok "restore_home returns 0 when the USB archive is absent"
@@ -399,7 +399,7 @@ if [[ "$(cat "$WORK/fail/state/home-restore" 2>/dev/null)" == "absent" ]]; then
 else
     bad "restore_home did not record 'absent' for a missing USB archive (got: $(cat "$WORK/fail/state/home-restore" 2>/dev/null))"
 fi
-DBRRG_TEST_CURL_MODE=ok
+TF_TEST_CURL_MODE=ok
 
 if [[ ! -s "$WORK/deaths" ]]; then
     ok "restore_home never calls die()"
@@ -480,20 +480,20 @@ else
     bad "symlinked wifi.yaml was installed or rc=$rc"
 fi
 
-# --- dbrrg_write_hostname ---
+# --- tf_write_hostname ---
 
 nr="$WORK/host-ok"; mkdir -p "$nr/etc"
-dbrrg_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
-if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "dbrrg-abcdef" ]]; then
-    ok "dbrrg_write_hostname writes dbrrg-<first 6 of machine-id>"
+tf_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" ]]; then
+    ok "tf_write_hostname writes thinfloe-<first 6 of machine-id>"
 else
-    bad "dbrrg_write_hostname: rc=$rc content=$(cat "$nr/etc/hostname" 2>&1)"
+    bad "tf_write_hostname: rc=$rc content=$(cat "$nr/etc/hostname" 2>&1)"
 fi
 
 for short in "" "abc12"; do
     nr="$WORK/host-short-${short:-empty}"; mkdir -p "$nr/etc"
     : >"$WORK/warnings"
-    dbrrg_write_hostname "$nr" "$short"; rc=$?
+    tf_write_hostname "$nr" "$short"; rc=$?
     if [[ $rc -eq 0 && ! -e "$nr/etc/hostname" && -s "$WORK/warnings" ]]; then
         ok "machine-id '${short}': no hostname written, warned, returns 0"
     else
@@ -503,60 +503,60 @@ done
 
 nr="$WORK/host-noetc"; mkdir -p "$nr"
 : >"$WORK/warnings"
-dbrrg_write_hostname "$nr" "abcdef0123456789"; rc=$?
+tf_write_hostname "$nr" "abcdef0123456789"; rc=$?
 if [[ $rc -eq 0 && -s "$WORK/warnings" ]]; then
     ok "unwritable /etc: warns and returns 0"
 else
     bad "unwritable /etc: rc=$rc warnings=$(cat "$WORK/warnings")"
 fi
 
-# --- dbrrg_write_hostname: boot MAC ---
+# --- tf_write_hostname: boot MAC ---
 
 mkstate() { mkdir -p "$WORK/$1/etc" "$WORK/$1/state"; echo "$WORK/$1"; }
 MID=0123456789abcdef0123456789abcdef
 
 nr=$(mkstate mac-ok); echo "52:54:00:AB:CD:EF" >"$nr/state/boot-mac"
-dbrrg_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
-if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "dbrrg-abcdef" ]]; then
-    ok "boot MAC 52:54:00:AB:CD:EF -> dbrrg-abcdef (last six, lowercase, not the OUI)"
+tf_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" ]]; then
+    ok "boot MAC 52:54:00:AB:CD:EF -> thinfloe-abcdef (last six, lowercase, not the OUI)"
 else
     bad "boot MAC hostname: rc=$rc content=$(cat "$nr/etc/hostname" 2>&1)"
 fi
 
 nr=$(mkstate mac-none)
-dbrrg_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
-if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "dbrrg-012345" ]]; then
+tf_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "thinfloe-012345" ]]; then
     ok "no boot-mac (USB boot) -> machine-id name"
 else
     bad "no boot-mac: rc=$rc content=$(cat "$nr/etc/hostname" 2>&1)"
 fi
 
 nr=$(mkstate mac-bad); echo "zz" >"$nr/state/boot-mac"; : >"$WORK/warnings"
-dbrrg_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
-if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "dbrrg-012345" && -s "$WORK/warnings" ]]; then
+tf_write_hostname "$nr" "$MID" "$nr/state"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "thinfloe-012345" && -s "$WORK/warnings" ]]; then
     ok "malformed MAC -> warns, falls back to machine-id"
 else
     bad "malformed MAC: rc=$rc content=$(cat "$nr/etc/hostname" 2>&1) warnings=$(cat "$WORK/warnings")"
 fi
 
 nr=$(mkstate mac-nonhex); echo "52:54:00:ab:cd:gh" >"$nr/state/boot-mac"; : >"$WORK/warnings"
-dbrrg_write_hostname "$nr" "$MID" "$nr/state"
-if [[ "$(cat "$nr/etc/hostname")" == "dbrrg-012345" && -s "$WORK/warnings" ]]; then
+tf_write_hostname "$nr" "$MID" "$nr/state"
+if [[ "$(cat "$nr/etc/hostname")" == "thinfloe-012345" && -s "$WORK/warnings" ]]; then
     ok "non-hex MAC digits -> warns, falls back to machine-id"
 else
     bad "non-hex MAC: content=$(cat "$nr/etc/hostname" 2>&1)"
 fi
 
 nr=$(mkstate mac-both); echo "aa:bb:cc:11:22:33" >"$nr/state/boot-mac"
-dbrrg_write_hostname "$nr" "$MID" "$nr/state"
-if [[ "$(cat "$nr/etc/hostname")" == "dbrrg-112233" ]]; then
+tf_write_hostname "$nr" "$MID" "$nr/state"
+if [[ "$(cat "$nr/etc/hostname")" == "thinfloe-112233" ]]; then
     ok "MAC wins over machine-id when both are present"
 else
     bad "MAC vs machine-id: content=$(cat "$nr/etc/hostname" 2>&1)"
 fi
 
 nr=$(mkstate mac-neither); echo "zz" >"$nr/state/boot-mac"; : >"$WORK/warnings"
-dbrrg_write_hostname "$nr" "" "$nr/state"; rc=$?
+tf_write_hostname "$nr" "" "$nr/state"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/hostname" && -s "$WORK/warnings" ]]; then
     ok "neither MAC nor machine-id usable -> no hostname, warned, returns 0"
 else
@@ -566,12 +566,12 @@ fi
 # --- only the initramfs's command set -----------------------------------
 #
 # The dev host has cut, basename, head and install; the initramfs does not.
-# dbrrg_write_hostname used `cut` and passed every test here while writing
-# the hostname "dbrrg-" at boot. So run the initramfs helpers with a PATH
+# tf_write_hostname used `cut` and passed every test here while writing
+# the hostname "thinfloe-" at boot. So run the initramfs helpers with a PATH
 # holding only what module-setup.sh installs (parsed, not hard-coded) plus
 # the dracut base tools the helpers rely on. A call to anything else fails.
 
-MS="$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg/module-setup.sh"
+MS="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/module-setup.sh"
 BIN="$WORK/initramfs-bin"; mkdir -p "$BIN"
 installed=$(grep -E '^[[:space:]]*inst_multiple' "$MS" | sed 's/#.*//' \
     | tr ' ' '\n' | grep -vE '^(inst_multiple|-o|)$|^/' || true)
@@ -595,13 +595,13 @@ echo "52:54:00:ab:cd:ef" >"$WORK/sb-addr"
 : >"$WORK/warnings"
 (
     PATH="$BIN"
-    dbrrg_write_hostname "$nr" "$MID" "$nr/state"
-    dbrrg_write_hostname "$nr2" "$MID" "$nr2/state"
-    dbrrg_record_boot_mac "$WORK/sb-addr" "$WORK/sb-state"
+    tf_write_hostname "$nr" "$MID" "$nr/state"
+    tf_write_hostname "$nr2" "$MID" "$nr2/state"
+    tf_record_boot_mac "$WORK/sb-addr" "$WORK/sb-state"
     install_local_network "$WORK/sb-net"
 ) 2>"$WORK/sb-stderr"
-if [[ "$(cat "$nr/etc/hostname")" == "dbrrg-abcdef" \
-   && "$(cat "$nr2/etc/hostname")" == "dbrrg-012345" \
+if [[ "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" \
+   && "$(cat "$nr2/etc/hostname")" == "thinfloe-012345" \
    && "$(cat "$WORK/sb-state/boot-mac" 2>&1)" == "52:54:00:ab:cd:ef" \
    && -f "$WORK/sb-net/etc/netplan/wifi.yaml" \
    && ! -s "$WORK/sb-stderr" && ! -s "$WORK/warnings" ]]; then
@@ -610,7 +610,7 @@ else
     bad "helpers failed under the initramfs PATH: hostnames=$(cat "$nr/etc/hostname" "$nr2/etc/hostname" 2>&1 | tr '\n' ' ') stderr=$(cat "$WORK/sb-stderr") warnings=$(cat "$WORK/warnings")"
 fi
 
-# --- dbrrg_finalize_upgrade, inside the same sandbox ---------------------
+# --- tf_finalize_upgrade, inside the same sandbox ---------------------
 #
 # The tl.new -> tl -> tl.old rotation called sync, which the initramfs did not
 # have, so every sync in it failed with "command not found" on the stick.
@@ -618,7 +618,7 @@ fi
 # The rotation used to run on every boot that found a tl.new, also when the
 # boot loader had loaded the kernel from tl/: the old kernel then ran on the
 # new ramroot.sqsh, whose modules are for the new kernel, and every module not
-# already in the initramfs (igc, an i226-V NIC) failed to load. upgrade-image
+# already in the initramfs (igc, an i226-V NIC) failed to load. thinfloe-upgrade
 # now points syslinux at the new "LABEL new" entry, which boots the kernel
 # from tl.new/, and the rotation runs only on such a boot.
 
@@ -644,13 +644,13 @@ defaults() {  # defaults <esp>: the DEFAULT line of both syslinux.cfg copies
 }
 
 esp=$(mkesp esp-rotate); echo tl.new/ramroot.sqsh >"$WORK/rr-rotate"
-( PATH="$BIN"; dbrrg_finalize_upgrade "$esp" tl.new/ramroot.sqsh "$WORK/rr-rotate" ) \
+( PATH="$BIN"; tf_finalize_upgrade "$esp" tl.new/ramroot.sqsh "$WORK/rr-rotate" ) \
     2>"$WORK/fu-stderr"; rc=$?
 if [[ $rc -eq 0 && -f "$esp/tl/ramroot.sqsh" && ! -e "$esp/tl.new" \
    && "$(cat "$esp/tl.old/marker")" == current && ! -s "$WORK/fu-stderr" ]]; then
     ok "a boot from tl.new rotates tl.new -> tl -> tl.old with only the initramfs's tools"
 else
-    bad "dbrrg_finalize_upgrade under the initramfs PATH: rc=$rc stderr=$(cat "$WORK/fu-stderr") esp=$(ls "$esp" | tr '\n' ' ')"
+    bad "tf_finalize_upgrade under the initramfs PATH: rc=$rc stderr=$(cat "$WORK/fu-stderr") esp=$(ls "$esp" | tr '\n' ' ')"
 fi
 if [[ "$(defaults "$esp")" == "DEFAULT current DEFAULT current " ]]; then
     ok "after the rotation both syslinux.cfg copies boot current again"
@@ -664,7 +664,7 @@ else
 fi
 
 esp=$(mkesp esp-from-tl); echo tl/ramroot.sqsh >"$WORK/rr-from-tl"
-( PATH="$BIN"; dbrrg_finalize_upgrade "$esp" tl/ramroot.sqsh "$WORK/rr-from-tl" ) 2>/dev/null; rc=$?
+( PATH="$BIN"; tf_finalize_upgrade "$esp" tl/ramroot.sqsh "$WORK/rr-from-tl" ) 2>/dev/null; rc=$?
 if [[ $rc -eq 0 && -d "$esp/tl.new" && "$(cat "$esp/tl/marker")" == current \
    && "$(cat "$WORK/rr-from-tl")" == tl/ramroot.sqsh ]]; then
     ok "a boot whose kernel came from tl/ leaves a pending tl.new alone"
@@ -673,7 +673,7 @@ else
 fi
 
 esp=$(mkesp esp-incomplete); rm "$esp/tl.new/ramroot.sqsh"; echo tl.new/ramroot.sqsh >"$WORK/rr-inc"
-( PATH="$BIN"; dbrrg_finalize_upgrade "$esp" tl.new/ramroot.sqsh "$WORK/rr-inc" ) 2>/dev/null; rc=$?
+( PATH="$BIN"; tf_finalize_upgrade "$esp" tl.new/ramroot.sqsh "$WORK/rr-inc" ) 2>/dev/null; rc=$?
 if [[ $rc -eq 0 && -d "$esp/tl.new" && "$(cat "$esp/tl/marker")" == current \
    && "$(cat "$WORK/rr-inc")" == tl.new/ramroot.sqsh ]]; then
     ok "an incomplete tl.new is left alone"
@@ -682,7 +682,7 @@ else
 fi
 
 esp="$WORK/esp-none"; mkdir -p "$esp/tl"; echo tl/ramroot.sqsh >"$WORK/rr-none"
-( PATH="$BIN"; dbrrg_finalize_upgrade "$esp" tl/ramroot.sqsh "$WORK/rr-none" ) 2>/dev/null; rc=$?
+( PATH="$BIN"; tf_finalize_upgrade "$esp" tl/ramroot.sqsh "$WORK/rr-none" ) 2>/dev/null; rc=$?
 if [[ $rc -eq 0 && -d "$esp/tl" && ! -e "$esp/tl.old" ]]; then
     ok "no pending upgrade: nothing is touched"
 else
@@ -692,30 +692,30 @@ fi
 # Resetting DEFAULT works on a stick without the EFI copy, and leaves every
 # other line alone.
 esp=$(mkesp esp-default); rm "$esp/efi/boot/syslinux.cfg"
-( PATH="$BIN"; dbrrg_set_boot_default "$esp" current ) 2>"$WORK/sd-stderr"; rc=$?
+( PATH="$BIN"; tf_set_boot_default "$esp" current ) 2>"$WORK/sd-stderr"; rc=$?
 if [[ $rc -eq 0 && "$(sed 1d "$esp/syslinux.cfg")" == "$(printf '%s\n' "$SYSLINUX_CFG" | sed 1d)" \
    && "$(head -n1 "$esp/syslinux.cfg")" == "DEFAULT current" && ! -s "$WORK/sd-stderr" \
    && ! -e "$esp/syslinux.cfg.tmp" ]]; then
-    ok "dbrrg_set_boot_default changes only the DEFAULT line"
+    ok "tf_set_boot_default changes only the DEFAULT line"
 else
-    bad "dbrrg_set_boot_default: rc=$rc stderr=$(cat "$WORK/sd-stderr") cfg=$(cat "$esp/syslinux.cfg")"
+    bad "tf_set_boot_default: rc=$rc stderr=$(cat "$WORK/sd-stderr") cfg=$(cat "$esp/syslinux.cfg")"
 fi
 
 # The pre-mount hook used to run in parallel with the cmdline hook that writes
-# /tmp/dbrrg-ramroot, so it must read ramroot= from the command line itself.
+# /tmp/thinfloe-ramroot, so it must read ramroot= from the command line itself.
 # Reading the file made every netboot wait 60s for an ESP. It does write the
 # file, after a rotation; the drop-in orders that write after the cmdline
 # hook's.
-FU="$REPO/overlay/usr/lib/dracut/modules.d/90dbrrg/finalize-upgrade.sh"
-if grep -v '^[[:space:]]*#' "$FU" | grep -qE '(cat|<)[[:space:]]*/tmp/dbrrg-ramroot'; then
-    bad "finalize-upgrade.sh reads /tmp/dbrrg-ramroot, which may not exist yet in pre-mount"
+FU="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/finalize-upgrade.sh"
+if grep -v '^[[:space:]]*#' "$FU" | grep -qE '(cat|<)[[:space:]]*/tmp/thinfloe-ramroot'; then
+    bad "finalize-upgrade.sh reads /tmp/thinfloe-ramroot, which may not exist yet in pre-mount"
 else
-    ok "finalize-upgrade.sh does not read the cmdline hook's /tmp/dbrrg-ramroot"
+    ok "finalize-upgrade.sh does not read the cmdline hook's /tmp/thinfloe-ramroot"
 fi
-if grep -qE '^dbrrg_finalize_upgrade "\$efi_mount" "\$ramroot" /tmp/dbrrg-ramroot$' "$FU"; then
+if grep -qE '^tf_finalize_upgrade "\$efi_mount" "\$ramroot" /tmp/thinfloe-ramroot$' "$FU"; then
     ok "finalize-upgrade.sh passes the boot's ramroot= and the mount hook's file"
 else
-    bad "finalize-upgrade.sh does not call dbrrg_finalize_upgrade with ramroot= and /tmp/dbrrg-ramroot"
+    bad "finalize-upgrade.sh does not call tf_finalize_upgrade with ramroot= and /tmp/thinfloe-ramroot"
 fi
 
 # finalize-upgrade.sh itself mounts the ESP and so cannot run here; this

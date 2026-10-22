@@ -1,0 +1,40 @@
+#!/bin/sh
+# Decide, after labwc has returned 0, whether the session that just ended
+# failed often enough to stop restarting it.
+#
+# Usage: session-verdict STATUS_FILE COUNTER_FILE
+#
+# STATUS_FILE holds thinfloe-menu's exit status, written by thinfloe-session.
+# labwc exits 0 whatever its -S command returned, so this file is the only
+# record of a failed menu. COUNTER_FILE counts consecutive failed sessions
+# and must survive the logout, so it does not live in XDG_RUNTIME_DIR.
+#
+# Exit 0: start a fresh session (a clean logout, a restart or power off
+#         the menu asked for with 10 or 11, or a failure below the limit).
+# Exit 1: stop and show the failure screen. Prints the menu's status.
+#
+# A missing or empty STATUS_FILE is a clean session: thinfloe-session writes it
+# only once the menu has returned, and an older thinfloe-session never writes it.
+
+TF_SESSION_FAILURE_LIMIT="${TF_SESSION_FAILURE_LIMIT:-3}"
+
+status=$(cat "$1" 2>/dev/null || true)
+case "$status" in
+    ''|0|10|11)
+        rm -f "$2"
+        exit 0
+        ;;
+esac
+
+count=$(cat "$2" 2>/dev/null || true)
+case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+esac
+count=$((count + 1))
+if [ "$count" -lt "$TF_SESSION_FAILURE_LIMIT" ]; then
+    echo "$count" >"$2" 2>/dev/null || true
+    exit 0
+fi
+rm -f "$2"
+echo "$status"
+exit 1

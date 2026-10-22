@@ -1,0 +1,85 @@
+#!/bin/sh
+# Compose a labwc config directory that merges the system defaults in
+# /etc/thinfloe/labwc with a user's per-machine ~/.thinfloe-environment, so that
+# labwc's OWN re-read of the environment file (session_environment_init(),
+# src/config/session.c) sees the user's values LAST and keeps them.
+#
+# Background: 10-thinfloe-session.sh sources both files into the shell with
+# "set -a" before exec'ing labwc, which is correct - but labwc, run with
+# -C, does not inherit and trust that; it re-reads <config_dir>/environment
+# itself and setenv()s every key with overwrite=1
+# (src/common/dir.c:153-157: with -C, this is the ONLY environment file it
+# considers - the XDG list is skipped entirely). So any key present in both
+# the system file and the user's file was silently reset to the system
+# value the moment labwc started, regardless of what the shell had already
+# exported. See CLAUDE.md's ".thinfloe-environment" section for the full
+# writeup and test/runtime/test-labwc-runtime.sh for the assertion that a
+# LATER duplicate assignment in that file is what wins - the assumption
+# this script's ordering depends on.
+#
+# Usage: thinfloe-compose-labwc-config <system-dir> <user-env-file> <output-dir>
+#
+#   <system-dir>     e.g. /etc/thinfloe/labwc - rc.xml and the system defaults
+#   <user-env-file>  e.g. $HOME/.thinfloe-environment - may not exist, that is
+#                    not an error
+#   <output-dir>     e.g. $XDG_RUNTIME_DIR/thinfloe-labwc - passed to labwc -C
+#
+# Every file in <system-dir> other than 'environment' is symlinked into
+# <output-dir> unchanged - rc.xml stays a single source of truth, and a
+# future file added under /etc/thinfloe/labwc/ is picked up without touching
+# this script. 'environment' itself is composed as <system-dir>/environment
+# followed by <user-env-file>.
+#
+# <output-dir> is wiped and rebuilt on every call: everything under it is
+# derived from the two inputs and nothing is ever authored there directly,
+# so rebuilding from scratch is what makes running this twice idempotent
+# instead of accumulating stale symlinks or appended environment lines.
+
+set -eu
+
+usage() {
+    echo "Usage: thinfloe-compose-labwc-config <system-dir> <user-env-file> <output-dir>" >&2
+    exit 1
+}
+
+[ $# -eq 3 ] || usage
+
+USER_ENV_FILE=$2
+OUT_DIR=$3
+
+SYSTEM_DIR=$(cd "$1" 2>/dev/null && pwd) || {
+    echo "thinfloe-compose-labwc-config: cannot read system config dir '$1'" >&2
+    exit 1
+}
+
+if [ -e "$OUT_DIR" ]; then
+    rm -rf "$OUT_DIR" 2>/dev/null || {
+        echo "thinfloe-compose-labwc-config: cannot clear existing output dir '$OUT_DIR'" >&2
+        exit 1
+    }
+fi
+
+mkdir -p "$OUT_DIR" 2>/dev/null || {
+    echo "thinfloe-compose-labwc-config: cannot create output dir '$OUT_DIR'" >&2
+    exit 1
+}
+
+for entry in "$SYSTEM_DIR"/*; do
+    [ -e "$entry" ] || continue   # empty dir / no glob match
+    name=$(basename "$entry")
+    [ "$name" = "environment" ] && continue
+    ln -s "$entry" "$OUT_DIR/$name"
+done
+
+# System defaults first, user overrides last: labwc's own parser setenv()s
+# each assignment with overwrite=1, so whichever occurrence of a duplicate
+# key comes LATER in the file wins. Putting the user's file second is what
+# makes the override effective instead of silently discarded.
+MERGED_ENV="$OUT_DIR/environment"
+: >"$MERGED_ENV"
+if [ -r "$SYSTEM_DIR/environment" ]; then
+    cat "$SYSTEM_DIR/environment" >>"$MERGED_ENV"
+fi
+if [ -r "$USER_ENV_FILE" ]; then
+    cat "$USER_ENV_FILE" >>"$MERGED_ENV"
+fi

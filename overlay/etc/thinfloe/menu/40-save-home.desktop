@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Back up home
+Icon=hard-drive-download
+X-TF-Action=save-home
