@@ -664,9 +664,66 @@ check_3x_result() {
 
 d="$WORK/hn-usb"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+tf_log() { echo "$@" >>"$WORK/tflog"; }
+: >"$WORK/tflog"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+tf_log() { :; }
 check_3x_result "3.x archive with a user XKB layout over the 4.0 default home" \
     "$d/newroot/home/tluser" "$d/state"
+if grep -qxF "thinfloe: renamed ~/.dbrrg-environment to ~/.thinfloe-environment" "$WORK/tflog" \
+   && grep -qxF "thinfloe: renamed ~/.config/dbrrg to ~/.config/thinfloe" "$WORK/tflog"; then
+    ok "the rename is logged as 'thinfloe: renamed ~/old to ~/new'"
+else
+    bad "rename log lines missing: $(cat "$WORK/tflog")"
+fi
+
+# Listing fails although extraction worked: the restore counts as failed, the
+# real old files stay, and no marker is written.
+d="$WORK/hn-listfail"; mkdefault "$d"; mkdir -p "$d/src" "$d/fakebin"
+mk3x "$d/src"; tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+REALTAR=$(command -v tar)
+cat >"$d/fakebin/tar" <<STUB
+#!/bin/bash
+# Fails only for list mode after the first call (the usability check lists too).
+n=\$(cat "$d/tarcount" 2>/dev/null || echo 0)
+case "\$1" in
+    -t*) echo \$((n+1)) >"$d/tarcount"; [ "\$n" -ge 1 ] && exit 2 ;;
+esac
+exec $REALTAR "\$@"
+STUB
+chmod +x "$d/fakebin/tar"
+: >"$WORK/warnings"
+( PATH="$d/fakebin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
+   && -f "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
+   && "$(cat "$h/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]] \
+   && grep -q "could not list" "$WORK/warnings"; then
+    ok "listing failure after extraction: restore failed, real old files kept, warned"
+else
+    bad "listing failure: state=$(cat "$d/state/home-restore") ls=$(ls -la "$h" | tr '\n' ' ')"
+fi
+
+# Early failed return (netboot without a boot MAC) still links the defaults.
+d="$WORK/hn-nomac"; mkdefault "$d"
+restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && -L "$h/.dbrrg-environment" \
+   && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" ]]; then
+    ok "netboot without boot MAC: failed, old names still linked to the defaults"
+else
+    bad "no-MAC path: $(ls -la "$h" | tr '\n' ' ')"
+fi
+
+# A real old entry replaced by the link is warned about.
+d="$WORK/hn-warnreal"; mkdefault "$d"; echo old >"$d/newroot/home/tluser/.dbrrg-environment"
+: >"$WORK/warnings"
+tf_link_old_home_names "$d/newroot/home/tluser"
+if grep -q "replacing real ~/.dbrrg-environment" "$WORK/warnings"; then
+    ok "replacing a real old entry by a link is warned about"
+else
+    bad "no warning for the removed real entry"
+fi
 
 # Second boot: the saved 4.0 archive holds the new names and the old links.
 d="$WORK/hn-4x"; mkdefault "$d"; mkdir -p "$d/src"

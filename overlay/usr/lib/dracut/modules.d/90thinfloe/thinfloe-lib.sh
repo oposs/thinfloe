@@ -205,6 +205,9 @@ tf_route_iface() {
 #       home in place rather than aborting the boot.
 #   2 = there WAS something and it did not restore - unusable tar, failed
 #       extraction, or the target directory could not even be created.
+#   3 = extracted, but the archive could not be listed to migrate the
+#       ~/.dbrrg-* names (treated like 2 by restore_home, which also skips
+#       linking the old names).
 tf_restore_home_from_file() {
     _drhf_archive="$1"
     _drhf_home="$2"
@@ -251,7 +254,15 @@ tf_restore_home_from_file() {
 
     # An archive saved by 3.x carries ~/.dbrrg-* names; give them their
     # 4.0 names now, before anything reads them. Never fails the restore.
-    tf_migrate_home_names "$_drhf_home" "$_drhf_archive" "$_drhf_renamed" || true
+    # If the archive cannot be listed now, the rename cannot be decided. The
+    # home then holds 3.x names beside image defaults, and linking the old
+    # names would delete the user's real files. Return 3: the caller counts
+    # it as a failed restore (saving is refused, the archive survives) and
+    # does not link.
+    if ! tf_migrate_home_names "$_drhf_home" "$_drhf_archive" "$_drhf_renamed"; then
+        warn "thinfloe: could not list $_drhf_archive after extraction, home names not migrated"
+        return 3
+    fi
 
     return 0
 }
@@ -353,14 +364,15 @@ _tf_archive_lists() {
 # The archive is listed once. tar and the other tools are those the
 # initramfs has: no cut, head, basename, readlink.
 #
-# ALWAYS returns 0; a failed rename must not fail the boot.
+# Returns 0, except 1 when the archive cannot be listed (the caller must then
+# treat the restore as failed). A failed single rename is only warned about.
 tf_migrate_home_names() {
     _tmh_home="$1"
     _tmh_archive="$2"
     _tmh_renamed="${3:-}"
 
     _tmh_list=$(tar -tzf "$_tmh_archive" 2>/dev/null) || true
-    [ -n "$_tmh_list" ] || return 0
+    [ -n "$_tmh_list" ] || return 1
 
     # Newline-separated triples, split with parameter expansion: the shell
     # may be dash, which has no here-strings, and a pipe would run the loop
@@ -428,6 +440,9 @@ tf_link_old_home_names() {
 
         [ -e "$_tlo_home/$_tlo_new" ] || [ -L "$_tlo_home/$_tlo_new" ] || continue
 
+        if [ -e "$_tlo_home/$_tlo_old" ] && [ ! -L "$_tlo_home/$_tlo_old" ]; then
+            warn "thinfloe: replacing real ~/$_tlo_old by a link to ~/$_tlo_new"
+        fi
         rm -rf "$_tlo_home/$_tlo_old" 2>/dev/null || true
         ln -s "$_tlo_target" "$_tlo_home/$_tlo_old" 2>/dev/null || \
             warn "thinfloe: could not link ~/$_tlo_old"
@@ -487,6 +502,7 @@ restore_home() {
             # save over whatever this default home ends up holding.
             warn "thinfloe: no boot MAC recorded, skipping home restore"
             echo failed > "$_rh_state/home-restore" 2>/dev/null || true
+            tf_link_old_home_names "$_rh_home" || true
             return 0
         fi
 
@@ -494,6 +510,7 @@ restore_home() {
         if [ -z "$_rh_url" ]; then
             warn "thinfloe: could not build home archive URL, skipping home restore"
             echo failed > "$_rh_state/home-restore" 2>/dev/null || true
+            tf_link_old_home_names "$_rh_home" || true
             return 0
         fi
 
@@ -527,10 +544,13 @@ restore_home() {
         *) echo failed > "$_rh_state/home-restore" 2>/dev/null || true ;;
     esac
 
-    # On every path, including a failed or absent restore: the old names
+    # On every path, including a failed or absent restore (and the early
+    # failed returns above): the old names
     # must exist as links whenever the new file exists, so a fallback boot
     # of 3.x finds its settings.
-    tf_link_old_home_names "$_rh_home" || true
+    # Not after a listing failure (rc 3): the real old files are still there
+    # and the new names are image defaults.
+    [ "$_rh_rc" = 3 ] || tf_link_old_home_names "$_rh_home" || true
 
     return 0
 }
