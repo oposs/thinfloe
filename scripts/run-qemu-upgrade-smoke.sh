@@ -15,6 +15,8 @@
 # squashfs and no module outside the initramfs could load. Passing requires:
 #   - a clean boot to multi-user.target (check-boot-smoke.sh),
 #   - the rotation's "Complete" line in the log,
+#   - a 3.x home.tar.gz on the stick is migrated: one "thinfloe: renamed"
+#     line per renamed name (environment, sessionrc, host keys, menu dir),
 #   - afterwards: no tl.new, tl.old holding the former tl, and both
 #     syslinux.cfg copies back on DEFAULT current.
 
@@ -49,6 +51,17 @@ for f in vmlinuz initrd.img ramroot.sqsh; do
 done
 echo before-upgrade >"$tmp/marker"
 mcopy -i "$ESP" "$tmp/marker" ::tl/marker || exit 2
+
+# The stick carries a 3.x home: this boot is the first ThinFloe boot after an
+# upgrade, so the initramfs has to rename these on restore.
+home="$tmp/home"
+mkdir -p "$home/.dbrrg-ssh-host-keys" "$home/.config/dbrrg/menu" || exit 2
+echo 'XKB_DEFAULT_LAYOUT=ch' >"$home/.dbrrg-environment"
+echo '# 3.x session rc' >"$home/.dbrrg-sessionrc"
+ssh-keygen -q -t ed25519 -N '' -f "$home/.dbrrg-ssh-host-keys/ssh_host_ed25519_key" || exit 2
+printf '[Desktop Entry]\nType=Application\nName=X\nExec=true\n' >"$home/.config/dbrrg/menu/x.desktop"
+tar -C "$home" -czf "$tmp/home.tar.gz" . || exit 2
+mcopy -o -i "$ESP" "$tmp/home.tar.gz" ::home.tar.gz || exit 2
 
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mtype -i "$ESP" "$cfg" | tr -d '\r' >"$tmp/cfg" || exit 2
@@ -86,6 +99,19 @@ if grep -q 'finalize-upgrade: Complete' "$LOG"; then
 else
     bad "no 'finalize-upgrade: Complete' in $LOG"
 fi
+
+for pair in ".dbrrg-environment .thinfloe-environment" \
+            ".dbrrg-sessionrc .thinfloe-sessionrc" \
+            ".dbrrg-ssh-host-keys .thinfloe-ssh-host-keys" \
+            ".config/dbrrg .config/thinfloe"; do
+    read -r from to <<<"$pair"
+    line="thinfloe: renamed ~/$from to ~/$to"
+    if grep -qF "$line" "$LOG"; then
+        ok "the 3.x home: $line"
+    else
+        bad "no '$line' in $LOG"
+    fi
+done
 
 if mdir -i "$ESP" ::tl.new >/dev/null 2>&1; then
     bad "tl.new is still on the stick"

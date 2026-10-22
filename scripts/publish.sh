@@ -17,6 +17,19 @@ FILES=(
     "$ARTIFACT_DIR/images/thinfloe-usb.img.zst.sha256"
 )
 
+# 3.x sticks fetch only the old name: publish the same image under it, with
+# a checksum file that names that file. A hard link keeps it from costing space.
+BRIDGE_DIR="$ARTIFACT_DIR/images/bridge"
+mkdir -p "$BRIDGE_DIR"
+if [[ -f "$ARTIFACT_DIR/images/thinfloe-usb.img.zst" ]]; then
+    ln -f "$ARTIFACT_DIR/images/thinfloe-usb.img.zst" "$BRIDGE_DIR/dbrrg-usb.img.zst"
+    (cd "$BRIDGE_DIR" && sha256sum dbrrg-usb.img.zst > dbrrg-usb.img.zst.sha256)
+fi
+FILES+=(
+    "$BRIDGE_DIR/dbrrg-usb.img.zst"
+    "$BRIDGE_DIR/dbrrg-usb.img.zst.sha256"
+)
+
 # Check all files exist
 for f in "${FILES[@]}"; do
     if [[ ! -f "$f" ]]; then
