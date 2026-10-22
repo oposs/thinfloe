@@ -85,7 +85,8 @@ fi
 # Per-machine override from ~/.thinfloe-sessionrc, sourced above:
 #   TF_IDLE_TIMEOUT=900   longer grace period
 #   TF_IDLE_TIMEOUT=0     disable blanking entirely
-: "${TF_IDLE_TIMEOUT:=300}"
+#   DBRRG_IDLE_TIMEOUT, its name before 4.0, is read when TF_IDLE_TIMEOUT is unset
+: "${TF_IDLE_TIMEOUT:=${DBRRG_IDLE_TIMEOUT:-300}}"
 if [ "$TF_IDLE_TIMEOUT" -gt 0 ] 2>/dev/null &&
    command -v swayidle >/dev/null 2>&1 &&
    command -v wlopm >/dev/null 2>&1; then

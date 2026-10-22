@@ -122,6 +122,27 @@ rc=$?
 [[ $rc -eq 137 && ! -e "$WORK/saved" ]] && ok "menu killed: no save, status 137" \
     || bad "menu killed: rc=$rc saved=$([[ -e $WORK/saved ]] && echo yes || echo no)"
 
+# --- idle timeout: TF_IDLE_TIMEOUT, then the pre-4.0 DBRRG_IDLE_TIMEOUT, then 300
+cat >"$WORK/bin/swayidle" <<STUB
+#!/bin/sh
+echo "\$@" >"$WORK/swayidle.args"
+STUB
+idle_args() { # sessionrc-content [extra env assignment]
+    rm -f "$WORK/swayidle.args"
+    printf '%s\n' "$1" >"$WORK/home/.thinfloe-sessionrc"
+    printf '#!/bin/sh\nsleep 0.3\nexit 0\n' >"$WORK/bin/menu"
+    chmod 755 "$WORK/bin/menu"
+    env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+        TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" \
+        sh "$SESSION" >/dev/null 2>&1
+    cat "$WORK/swayidle.args" 2>/dev/null
+}
+case "$(idle_args 'DBRRG_IDLE_TIMEOUT=900')" in *"timeout 900 "*) ok "idle: old DBRRG_IDLE_TIMEOUT is honoured" ;; *) bad "idle: old name ignored" ;; esac
+case "$(idle_args 'TF_IDLE_TIMEOUT=600
+DBRRG_IDLE_TIMEOUT=900')" in *"timeout 600 "*) ok "idle: TF_IDLE_TIMEOUT wins over the old name" ;; *) bad "idle: new name did not win" ;; esac
+case "$(idle_args '')" in *"timeout 300 "*) ok "idle: default is 300" ;; *) bad "idle: default is not 300" ;; esac
+rm -f "$WORK/home/.thinfloe-sessionrc"
+
 # --- session-verdict ---------------------------------------------------
 S="$WORK/vstatus"
 C="$WORK/vcount"

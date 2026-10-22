@@ -186,6 +186,16 @@ class TestHomeArchiveContents(unittest.TestCase):
         joined = "\n".join(self._members())
         self.assertNotIn(".thinfloe-ssh-host-keys", joined)
 
+    def test_old_host_key_name_is_excluded_too(self):
+        # Homes of the previous version carry .dbrrg-ssh-host-keys as a link
+        # to the new directory; the link must not reach the new stick either.
+        (self.home / ".dbrrg-ssh-host-keys").symlink_to(".thinfloe-ssh-host-keys/")
+        subprocess.run(
+            ui.home_archive_argv(str(self.home), str(self.dest)), check=True
+        )
+        joined = "\n".join(self._members())
+        self.assertNotIn("ssh-host-keys", joined)
+
     def test_the_users_own_settings_are_in_the_archive(self):
         subprocess.run(
             ui.home_archive_argv(str(self.home), str(self.dest)), check=True

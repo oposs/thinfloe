@@ -39,7 +39,7 @@ SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
 #    sharing one key break both tunnels.
 # ~/.thinfloe-password is deliberately NOT here: the user set it for remote
 # access and it travels with the home on purpose.
-IDENTITY_EXCLUDES = ("./.thinfloe-ssh-host-keys", "./wg0.conf")
+IDENTITY_EXCLUDES = ("./.thinfloe-ssh-host-keys", "./.dbrrg-ssh-host-keys", "./wg0.conf")
 # The home archive carries configuration, not data. A file above this size is
 # a download or a binary left in the home; thinfloe-save-home uses the same limit.
 SAVE_HOME_MAX_FILE_BYTES = 10 * 1024 * 1024
