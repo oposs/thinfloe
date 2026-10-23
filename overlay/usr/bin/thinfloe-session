@@ -74,7 +74,7 @@ fi
 # *power* management, which is true DPMS: the panel sleeps, the layout is
 # untouched, any input wakes it.
 #
-# No locking. ext_session_lock_manager_v1 is available, but tluser has no
+# No locking. ext_session_lock_manager_v1 is available, but tfuser has no
 # password, so a lock screen would have nothing to authenticate against -
 # session security is ThinLinc's job, not the local compositor's.
 #

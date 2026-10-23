@@ -1,6 +1,6 @@
 [Unit]
 Description=Install or generate persistent SSH host keys
-# The keys come out of /home/tluser, which the initramfs restored before the
+# The keys come out of /home/tfuser, which the initramfs restored before the
 # pivot - so there is nothing to wait for here beyond the filesystem.
 After=local-fs.target
 Before=ssh.service

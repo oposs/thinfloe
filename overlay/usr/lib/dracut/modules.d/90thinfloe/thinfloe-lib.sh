@@ -243,12 +243,12 @@ tf_restore_home_from_file() {
     fi
 
     # tar's default as root is --same-owner, and that is REQUIRED here, not
-    # incidental. thinfloe-save-home writes the archive as tluser, so members
+    # incidental. thinfloe-save-home writes the archive as tfuser, so members
     # carry uid/gid 1000 numerically; preserving them is what makes the
-    # restored home belong to tluser. Do NOT add --no-same-owner.
+    # restored home belong to tfuser. Do NOT add --no-same-owner.
     #
     # Note this is the exact OPPOSITE of what thinfloe-ssh-hostkeys must do a
-    # few files away: host keys come out of this same archive tluser-owned
+    # few files away: host keys come out of this same archive tfuser-owned
     # and have to be forced to root:root before sshd will touch them. Two
     # different problems; do not "make them consistent".
     if ! tar -xzf "$_drhf_archive" -C "$_drhf_home" 2>/dev/null; then
@@ -336,7 +336,7 @@ TF_HOME_RENAMES=".dbrrg-environment:.thinfloe-environment
 .config/dbrrg:.config/thinfloe"
 
 # The marker of a home that has 4.0 names. Every default home ships it
-# (overlay/home/tluser), and the migration writes it, so every home saved by
+# (overlay/home/tfuser), and the migration writes it, so every home saved by
 # 4.0 lists it. An archive that does not is a 3.x home, migrated once.
 TF_HOME_VERSION_FILE=".thinfloe-home-version"
 TF_HOME_VERSION=1
@@ -473,7 +473,7 @@ tf_migrate_home_names() {
     done
 
     # Into the existing file when there is one, so it keeps the owner the
-    # image gave it (tluser); the initramfs has no chown.
+    # image gave it (tfuser); the initramfs has no chown.
     # 2>/dev/null first: it must be in place before the redirection that fails.
     if ! echo "$TF_HOME_VERSION" 2>/dev/null > "$_tmh_home/$TF_HOME_VERSION_FILE"; then
         warn "thinfloe: could not write ~/$TF_HOME_VERSION_FILE, the next boot migrates again"
@@ -484,7 +484,7 @@ tf_migrate_home_names() {
 
 # restore_home <newroot> <efi-mount> <state-dir> <ramroot>
 #
-# Populate /home/tluser in the new root before the pivot.
+# Populate /home/tfuser in the new root before the pivot.
 #
 # This used to run at login, from /etc/profile.d/10-thinfloe-session.sh. It runs
 # here now so the home directory exists before multi-user.target, which is
@@ -520,7 +520,7 @@ restore_home() {
     _rh_state="$3"
     _rh_ramroot="$4"
 
-    _rh_home="$_rh_newroot/home/tluser"
+    _rh_home="$_rh_newroot/home/tfuser"
     _TF_LINK_WARNED=""
 
     if is_remote_url "$_rh_ramroot"; then
@@ -600,7 +600,7 @@ restore_home() {
 # return aborts the boot.
 install_local_network() {
     local _iln_root="$1"
-    local _iln_home="$_iln_root/home/tluser"
+    local _iln_home="$_iln_root/home/tfuser"
     local _iln_wants="$_iln_root/etc/systemd/system/multi-user.target.wants"
 
     if [ -f "$_iln_home/wifi.yaml" ] && [ ! -L "$_iln_home/wifi.yaml" ] && \

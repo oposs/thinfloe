@@ -142,7 +142,7 @@ Add a tile for one machine as a `.desktop` file in `~/.config/thinfloe/menu/`:
 [Desktop Entry]
 Type=Application
 Name=Screenshot
-Exec=grim /home/tluser/screenshot.png
+Exec=grim /home/tfuser/screenshot.png
 ```
 
 Without an `Icon` the tile shows the first letter of `Name`. The program must

@@ -134,19 +134,19 @@ class TestHomeArchiveArgv(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_excludes_the_ssh_host_keys(self):
-        argv = ui.home_archive_argv("/home/tluser", "/mnt/home.tar.gz")
+        argv = ui.home_archive_argv("/home/tfuser", "/mnt/home.tar.gz")
         self.assertIn("--exclude=./.thinfloe-ssh-host-keys", argv)
 
     def test_archives_relative_to_the_home_directory(self):
         # restore_home() unpacks into the home directory itself, so members
         # must be relative: the archive is built with -C <home> and a bare ".".
-        argv = ui.home_archive_argv("/home/tluser", "/mnt/home.tar.gz")
+        argv = ui.home_archive_argv("/home/tfuser", "/mnt/home.tar.gz")
         self.assertIn("-C", argv)
-        self.assertEqual(argv[argv.index("-C") + 1], "/home/tluser")
+        self.assertEqual(argv[argv.index("-C") + 1], "/home/tfuser")
         self.assertEqual(argv[-1], ".")
 
     def test_writes_to_the_given_destination(self):
-        argv = ui.home_archive_argv("/home/tluser", "/mnt/home.tar.gz")
+        argv = ui.home_archive_argv("/home/tfuser", "/mnt/home.tar.gz")
         self.assertIn("/mnt/home.tar.gz", argv)
 
 
@@ -382,23 +382,23 @@ class TestCopyHomeToDrive(unittest.TestCase):
         self.sleep = sleep.start()
         self.addCleanup(sleep.stop)
 
-    def _as_tluser(self):
-        """Make getpwnam("tluser") resolve to this test's temp home."""
+    def _as_tfuser(self):
+        """Make getpwnam("tfuser") resolve to this test's temp home."""
         return mock.patch.object(
             ui.pwd, "getpwnam", return_value=mock.Mock(pw_dir=str(self.home))
         )
 
-    def test_a_missing_tluser_account_is_reported_not_crashed(self):
+    def test_a_missing_tfuser_account_is_reported_not_crashed(self):
         # On an image where the account was renamed, getpwnam raises KeyError.
         # A traceback AFTER the image is written reads as a failed install.
-        with mock.patch.object(ui.pwd, "getpwnam", side_effect=KeyError("tluser")):
+        with mock.patch.object(ui.pwd, "getpwnam", side_effect=KeyError("tfuser")):
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd") as run_cmd:
                     self.assertFalse(ui.copy_home_to_drive("/dev/sdb"))
         run_cmd.assert_not_called()
 
     def test_no_efi_partition_retries_then_reports(self):
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(
                 ui, "find_efi_partition", return_value=None
             ) as find:
@@ -415,7 +415,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
         # Returns None twice, then the device: the retry must take it.
         results = [None, None, "/dev/sdb1"]
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition",
                                    side_effect=results):
                 with mock.patch.object(ui, "run_cmd") as run_cmd:
@@ -450,7 +450,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
                 existed_at_umount.append(os.path.exists(dest_seen[0]))
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     self.assertFalse(ui.copy_home_to_drive("/dev/sdb"))
@@ -471,7 +471,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, cmd)
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     self.assertTrue(ui.copy_home_to_drive("/dev/sdb"))
@@ -484,7 +484,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
                 raise subprocess.CalledProcessError(32, cmd)
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     self.assertFalse(ui.copy_home_to_drive("/dev/sdb"))
@@ -506,7 +506,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             calls.append(cmd[0])
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     self.assertTrue(ui.copy_home_to_drive("/dev/sdb"))
@@ -532,7 +532,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -547,7 +547,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             calls.append(cmd[0])
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(io.StringIO()):
@@ -565,7 +565,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -591,7 +591,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -626,7 +626,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -651,7 +651,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
 
     def test_a_failed_restore_refuses_the_copy_with_a_named_reason(self):
         out = io.StringIO()
-        with self._as_tluser(), self._state("failed\n"):
+        with self._as_tfuser(), self._state("failed\n"):
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd") as run_cmd:
                     with contextlib.redirect_stdout(out):
@@ -663,14 +663,14 @@ class TestCopyHomeToDrive(unittest.TestCase):
     def test_a_missing_or_other_restore_state_proceeds(self):
         for content in (None, "ok\n", "absent\n"):
             with self.subTest(content=content):
-                with self._as_tluser(), self._state(content):
+                with self._as_tfuser(), self._state(content):
                     with mock.patch.object(ui, "find_efi_partition",
                                            return_value="/dev/sdb1"):
                         with mock.patch.object(ui, "run_cmd"):
                             self.assertTrue(ui.copy_home_to_drive("/dev/sdb"))
 
     def test_an_unreadable_state_file_proceeds(self):
-        with self._as_tluser(), self._state("failed\n"):
+        with self._as_tfuser(), self._state("failed\n"):
             with mock.patch("builtins.open", side_effect=PermissionError("no")):
                 self.assertFalse(ui.home_restore_failed())
 
@@ -685,7 +685,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -702,7 +702,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui, "run_cmd", side_effect=fake_run_cmd):
                     with contextlib.redirect_stdout(out):
@@ -713,7 +713,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
 
     def test_a_mkdtemp_failure_is_reported_not_raised(self):
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"):
                 with mock.patch.object(ui.tempfile, "mkdtemp",
                                        side_effect=OSError(28, "No space left")):
@@ -727,7 +727,7 @@ class TestCopyHomeToDrive(unittest.TestCase):
     def test_ctrl_c_during_the_efi_retry_wait_is_reported_not_raised(self):
         self.sleep.side_effect = KeyboardInterrupt()
         out = io.StringIO()
-        with self._as_tluser():
+        with self._as_tfuser():
             with mock.patch.object(ui, "find_efi_partition", return_value=None):
                 with mock.patch.object(ui, "run_cmd") as run_cmd:
                     with contextlib.redirect_stdout(out):

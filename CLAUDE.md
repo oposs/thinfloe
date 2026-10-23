@@ -78,7 +78,7 @@ The boot process involves several interconnected components:
    - **ZRAM Setup**: Creates compressed RAM device for writable overlay
    - **OverlayFS**: Combines read-only SquashFS with writable ZRAM layer
    - **machine-id Persistence**: Reads/generates machine-id and stores it in /config/machine-id on EFI partition
-   - **Home Restore**: Restores `/home/tluser` from the boot medium
+   - **Home Restore**: Restores `/home/tfuser` from the boot medium
      (`home.tar.gz` on the EFI partition, or `home.pkg` from the boot server)
      before the pivot, so the home directory is in place before
      `multi-user.target`
@@ -101,8 +101,8 @@ The boot process involves several interconnected components:
 ## Key Configuration Files
 
 - **configs/syslinux.cfg** - Boot menu and kernel parameters. The `ramroot=` parameter determines boot source (local: `tl/ramroot.sqsh`, network: `http://server/path/ramroot.sqsh`)
-- **overlay/home/tluser/.thinlinc/tlclient.conf** - ThinLinc client configuration
-- **overlay/home/tluser/wifi.yaml** - WiFi configuration template for netplan
+- **overlay/home/tfuser/.thinlinc/tlclient.conf** - ThinLinc client configuration
+- **overlay/home/tfuser/wifi.yaml** - WiFi configuration template for netplan
 - **overlay/usr/lib/dracut/modules.d/90thinfloe/** - Dracut module for boot process
 
 ## Customizing the System
@@ -164,10 +164,10 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
-- **Per-machine user customisation:** `overlay/home/tluser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
+- **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
 
-- **Per-machine user environment:** `overlay/home/tluser/.thinfloe-environment` — variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-thinfloe-session.sh` after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
+- **Per-machine user environment:** `overlay/home/tfuser/.thinfloe-environment` — variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-thinfloe-session.sh` after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
 
   | variable | default | effect |
   | --- | --- | --- |
@@ -224,7 +224,7 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 
   Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not** — see [Standing Constraints](#standing-constraints).
 - Autologin: `overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf`
-- User defaults: `overlay/home/tluser/`
+- User defaults: `overlay/home/tfuser/`
 
 After modifying overlay files, rebuild with `make image`.
 
@@ -232,7 +232,7 @@ After modifying overlay files, rebuild with `make image`.
 
 The system implements home directory persistence across reboots:
 
-- On boot: the initramfs restores `/home/tluser` — from `home.tar.gz` on the
+- On boot: the initramfs restores `/home/tfuser` — from `home.tar.gz` on the
   EFI partition when booting from USB, or from `home.pkg` on the boot server
   when netbooting. This happens in `restore_home()`
   (`overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh`), called from
@@ -256,7 +256,7 @@ The system implements home directory persistence across reboots:
   `/run/thinfloe/state/home-restore` says `failed`; after a Save-On-Exit tile
   exits on such a boot, the save is skipped with a line in the menu's log.
 - `thinfloe-save-home` resolves the directory to archive from `getent passwd
-  tluser`, never from `$HOME`, and every read of a recorded value under
+  tfuser`, never from `$HOME`, and every read of a recorded value under
   `/run/thinfloe/state` ends in `|| true`. Both are load-bearing. `sudo` on this
   image sets `HOME=/root` (`Defaults env_reset`, no `env_keep` for HOME), so a
   save called from a root process archived `/root` over the user's home; and
@@ -265,10 +265,10 @@ The system implements home directory persistence across reboots:
   `test/integration/test-save-home.sh` guards both.
 
 - The remote-access password rides the same archive. `sudo thinfloe-password`
-  stores the hash the system produced in `~tluser/.thinfloe-password`, mode 600
-  and **owned by tluser**, like the rest of the home. Both save paths of
-  `thinfloe-save-home` run tar as root, so a file tluser cannot read is still
-  archived; until 2026-10 the netboot path ran tar as tluser, and one such
+  stores the hash the system produced in `~tfuser/.thinfloe-password`, mode 600
+  and **owned by tfuser**, like the rest of the home. Both save paths of
+  `thinfloe-save-home` run tar as root, so a file tfuser cannot read is still
+  archived; until 2026-10 the netboot path ran tar as tluser (the account's name before 4.0), and one such
   file failed every netboot save with exit 5.
   `thinfloe-password.service`, ordered `Before=ssh.service`, reinstalls it on
   every boot with `chpasswd -e`. `--clear` removes it and locks the account
@@ -380,7 +380,7 @@ The containers/ubuntu/Dockerfile follows several important patterns:
 
 1. **SSH Host Keys**: Host keys are removed at build time. On first boot
    `thinfloe-ssh-hostkeys.service` generates them and stages them into
-   `~tluser/.thinfloe-ssh-host-keys`, from where `thinfloe-save-home` captures them
+   `~tfuser/.thinfloe-ssh-host-keys`, from where `thinfloe-save-home` captures them
    into the home archive at logout; the initramfs restores them on every
    subsequent boot. `ssh.socket` is **masked** — see Standing Constraints.
    Keys do not persist until the first clean logout: a machine hard-powered
@@ -392,7 +392,7 @@ The containers/ubuntu/Dockerfile follows several important patterns:
 
 4. **Locale Generation**: `locale-gen` must run after overlay files are applied to process locale.gen configuration.
 
-5. **User Configuration**: The default user (tluser) is created with no password but added to sudo group with NOPASSWD privileges for management tasks.
+5. **User Configuration**: The default user (tfuser, uid 1000; called `tluser` before 4.0) is created with no password but added to sudo group with NOPASSWD privileges for management tasks. `/home/tluser` is a symlink to `/home/tfuser`, so old paths in saved files still resolve.
 
 ## Performance Optimizations
 
@@ -431,14 +431,14 @@ preventive as well: nothing has shipped broken from it.
 
 ### No login password ships in the image
 
-`containers/ubuntu/Dockerfile` creates tluser with `adduser
+`containers/ubuntu/Dockerfile` creates tfuser with `adduser
 --disabled-password` and nothing else. There used to be an `echo
 "tluser:tluser" | chpasswd` on the next line. Re-adding any shipped password
-gives every machine in the field the same login, and because tluser has
+gives every machine in the field the same login, and because tfuser has
 `NOPASSWD:ALL` two lines below, that login is root: anyone who could reach
 port 22 and knew the default owned every deployed machine. It also
 contradicted `overlay/usr/bin/thinfloe-session`, which already documented
-"tluser has no password" as the reason the session has no lock screen.
+"tfuser has no password" as the reason the session has no lock screen.
 
 `passwd -l` is **not** a substitute for leaving it unset. It prefixes the
 existing hash with `!` and leaves it recoverable. The shadow field must hold
@@ -463,7 +463,7 @@ shadow fields, both sshd settings and the unit, and
 test`.
 
 **Verified on a QEMU boot (2026-10-01):** `getty@tty1` started exactly once
-across a 300 s boot, so `login -f tluser` succeeds against a `!` field. A
+across a 300 s boot, so `login -f tfuser` succeeds against a `!` field. A
 failing autologin would have restarted it every 5 seconds
 (`RestartSec=5`, `StartLimitIntervalSec=0`). Not verified on hardware.
 
@@ -837,7 +837,7 @@ the home is native and nothing reads or keeps the old names (owner,
 
 - **The archive decides, not the disk.** The default home ships
   `.thinfloe-home-version`, `.thinfloe-environment` and `.thinfloe-sessionrc`
-  (`overlay/home/tluser/`), so all three are on disk after any extraction. An
+  (`overlay/home/tfuser/`), so all three are on disk after any extraction. An
   archive that lists the marker is native and is not touched; a `.dbrrg-*`
   entry in it came from a save on a 3.x fallback boot and is ignored. An
   archive without the marker is migrated: per name, the new name stays when
@@ -949,7 +949,7 @@ default. Two decisions are deliberate:
   resizes the fullscreen ThinLinc client (and makes
   `LABWC_FULLSCREEN_SPAN_OUTPUTS` recompute over a different set of outputs).
   `wlopm` speaks output *power* management - real DPMS, layout untouched.
-- **No locking.** `ext_session_lock_manager_v1` is available, but `tluser` has
+- **No locking.** `ext_session_lock_manager_v1` is available, but `tfuser` has
   no password, so a lock screen would have nothing to authenticate against.
   Session security is ThinLinc's job.
 
@@ -1029,7 +1029,7 @@ retries labwc once after another wait-kms, so a machine with no GPU waits about
 
 There is no polkit in this image, no `polkitd` and no `pkexec`, and systemd
 gates `Reboot` and `PowerOff` for non-root callers on a polkit authority. A
-bare `systemctl reboot` as `tluser` is refused. Use `sudo systemctl reboot`,
+bare `systemctl reboot` as `tfuser` is refused. Use `sudo systemctl reboot`,
 the way `thinfloe-save-home` and `thinfloe-session` (for the Restart and Power off
 tiles) already escalate.
 
@@ -1040,7 +1040,7 @@ labwc keybindings ([Standing Constraints](#standing-constraints)) there is no
 other in-session path, so when the session is down, reach a terminal from a VT
 (Ctrl+Alt+F2, say) or over SSH instead. **SSH needs a password
 first:** a machine nobody has run `sudo thinfloe-password` on refuses every
-password login, because tluser's shadow field is `!` and the image ships no
+password login, because tfuser's shadow field is `!` and the image ships no
 `authorized_keys`. On such a machine the VT is the only way in, and the VT
 autologin gets there without a password.
 

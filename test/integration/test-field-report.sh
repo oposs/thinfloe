@@ -167,7 +167,7 @@ else
     bad "Dockerfile must chmod 600 /etc/netplan/*.yaml (netplan: permissions too open)"
 fi
 
-RC=overlay/home/tluser/.thinfloe-sessionrc
+RC=overlay/home/tfuser/.thinfloe-sessionrc
 if ! grep -q 'sudo netplan apply' "$RC"; then
     ok ".thinfloe-sessionrc no longer tells the user to run netplan apply"
 else

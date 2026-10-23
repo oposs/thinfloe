@@ -298,18 +298,60 @@ else
     fail=1
 fi
 
-# No password ships for tluser. adduser --disabled-password leaves `!` in the
+# The account is tfuser (uid 1000, home /home/tfuser). /home/tluser stays as a
+# symlink so a 3.x path in a saved file still resolves; tluser is no account.
+if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
+        etc/passwd etc/sudoers home/tluser >/dev/null 2>&1; then
+    if grep -q '^tfuser:x:1000:[0-9]*:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - tfuser exists with uid 1000, home /home/tfuser"
+    else
+        echo "FAIL - tfuser is not uid 1000 with home /home/tfuser"
+        fail=1
+    fi
+    if [[ -L "$DPKG_TMP/acct/home/tluser" && "$(readlink "$DPKG_TMP/acct/home/tluser")" == "tfuser" ]]; then
+        echo "ok   - /home/tluser is a symlink to tfuser"
+    else
+        echo "FAIL - /home/tfuser is not a symlink to tfuser"
+        fail=1
+    fi
+    if ! grep -q '^tluser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - no tluser in /etc/passwd"
+    else
+        echo "FAIL - tluser is still in /etc/passwd"
+        fail=1
+    fi
+    if grep -qx 'tfuser ALL=(ALL) NOPASSWD:ALL' "$DPKG_TMP/acct/etc/sudoers"; then
+        echo "ok   - sudoers grants tfuser NOPASSWD"
+    else
+        echo "FAIL - sudoers does not grant tfuser NOPASSWD:ALL"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract passwd, sudoers and home/tluser"
+    fail=1
+fi
+if unsquashfs -no-xattrs -d "$DPKG_TMP/gty" "$SQSH" \
+        etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null 2>&1 &&
+   grep -q -- '--autologin tfuser ' \
+        "$DPKG_TMP/gty/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
+    echo "ok   - getty autologin is tfuser"
+else
+    echo "FAIL - getty autologin is not tfuser"
+    fail=1
+fi
+
+# No password ships for tfuser. adduser --disabled-password leaves `!` in the
 # shadow field; an image that carries a hash there has a login every machine
-# in the field shares, and tluser has NOPASSWD:ALL, so that login is root.
+# in the field shares, and tfuser has NOPASSWD:ALL, so that login is root.
 # `passwd -l` is NOT a fix for this: it prefixes the existing hash with `!`
 # and leaves it recoverable. The field must hold `!` and nothing else.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/shadow" "$SQSH" \
         etc/shadow >/dev/null 2>&1; then
-    tl_field=$(sed -n 's/^tluser:\([^:]*\):.*/\1/p' "$DPKG_TMP/shadow/etc/shadow")
+    tl_field=$(sed -n 's/^tfuser:\([^:]*\):.*/\1/p' "$DPKG_TMP/shadow/etc/shadow")
     if [[ "$tl_field" == "!" ]]; then
-        echo "ok   - tluser ships with no password hash"
+        echo "ok   - tfuser ships with no password hash"
     else
-        echo "FAIL - tluser ships a password field of '$tl_field'; the image has a shared login"
+        echo "FAIL - tfuser ships a password field of '$tl_field'; the image has a shared login"
         fail=1
     fi
     # root's field must be `!`, not empty. Empty plus the `nullok` that
@@ -397,9 +439,9 @@ fi
 
 # The default home must carry the 4.0 home marker. Without it a home saved
 # from it lists no marker, and every boot would treat it as a 3.x home.
-MARKER="$DPKG_TMP/hv/home/tluser/.thinfloe-home-version"
+MARKER="$DPKG_TMP/hv/home/tfuser/.thinfloe-home-version"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/hv" "$SQSH" \
-        home/tluser/.thinfloe-home-version >/dev/null 2>&1 &&
+        home/tfuser/.thinfloe-home-version >/dev/null 2>&1 &&
    [[ -f "$MARKER" && "$(cat "$MARKER")" == "1" ]]; then
     echo "ok   - the default home carries ~/.thinfloe-home-version 1"
 else

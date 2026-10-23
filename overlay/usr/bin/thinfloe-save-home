@@ -34,15 +34,15 @@ TF_EXCLUDE_DEFAULT="${TF_EXCLUDE_DEFAULT:-/etc/thinfloe/save-home-exclude}"
 #
 # thinfloe-upgrade re-execs itself under sudo and then calls this script from
 # that root process. sudo runs with `Defaults env_reset` and no env_keep for
-# HOME, so HOME becomes the target user's: `su - tluser -c "sudo printenv
+# HOME, so HOME becomes the target user's: `su - tfuser -c "sudo printenv
 # HOME"` prints /root on this image. A save triggered by `sudo thinfloe-upgrade`
 # therefore ran `cd /root` and wrote a tar of root's dotfiles over
 # /boot/efi/home.tar.gz. /root holds a .bashrc, so the archive had a valid
 # member and tf_restore_home_from_file accepted it on the next boot,
 # replacing the user's home and the SSH host keys staged in
 # ~/.thinfloe-ssh-host-keys, with no error printed anywhere.
-TF_HOME_DIR="${TF_HOME_DIR:-$(getent passwd tluser | cut -d: -f6)}"
-: "${TF_HOME_DIR:=/home/tluser}"
+TF_HOME_DIR="${TF_HOME_DIR:-$(getent passwd tfuser | cut -d: -f6)}"
+: "${TF_HOME_DIR:=/home/tfuser}"
 if [ ! -d "$TF_HOME_DIR" ]; then
   echo "thinfloe: $TF_HOME_DIR is not a directory - refusing to save, so" >&2
   echo "       the stored home is not overwritten with something else." >&2
@@ -171,7 +171,7 @@ dsh_large_files() {
     done <"$EXCLUDE_FILE"
   fi
   [ $# -gt 0 ] && set -- \( "$@" \) -prune -o
-  # As root, like tar: a directory tluser cannot read is still archived.
+  # As root, like tar: a directory tfuser cannot read is still archived.
   sudo find . "$@" -type f -size +"${TF_SAVE_HOME_MAX_BYTES}"c \
     -printf '%s\t%p\0' | sed -z 's/[][\\*?]/\\&/g' | tr '\n\0' '?\n'
 }
@@ -207,18 +207,18 @@ if [ "" != "$BOOT_SRV" ]; then
   # GNU tar exits 1 for "file changed as we read it", which is normal for a
   # live home; only status 2 and above is a failed archive.
   #
-  # tar runs as root, as on the USB branch below. As tluser, one file in the
-  # home that tluser cannot read (a root-owned 600 file left by a sudo
+  # tar runs as root, as on the USB branch below. As tfuser, one file in the
+  # home that tfuser cannot read (a root-owned 600 file left by a sudo
   # command) made tar exit 2 and failed every netboot save with exit 5, while
   # USB machines saved the same home fine. The archive is written through a
-  # redirect by this shell, so the temporary file stays tluser's to remove.
+  # redirect by this shell, so the temporary file stays tfuser's to remove.
   #
   # The file comes from mktemp, not a fixed name. It used to be
   # /tmp/$$.tar.gz, a name any local process can predict and create first:
   # the archive holds the password hash and the SSH host private keys, and a
   # file someone else made could be read, or swapped before the upload. Only
   # the kernel's protected_regular/protected_symlinks settings stood in the
-  # way. mktemp creates a new file, mode 600, owned by tluser, and honours
+  # way. mktemp creates a new file, mode 600, owned by tfuser, and honours
   # $TMPDIR. The traps remove it on every path out, error exits included.
   if ! _dsh_archive=$(mktemp --tmpdir --suffix=.tar.gz thinfloe-save-home.XXXXXX); then
     echo "thinfloe: could not create a temporary file - nothing was uploaded." >&2
@@ -267,7 +267,7 @@ elif mountpoint -q "$TF_EFI_MOUNT"; then
   #
   # Every write to the ESP goes through sudo: the initramfs mounts it with a
   # plain `mount -t vfat` and no uid= option, so it is root:root 0755 and
-  # tluser cannot create files there. tar still runs in the home directory, so
+  # tfuser cannot create files there. tar still runs in the home directory, so
   # the members stay relative.
   _dsh_new="$TF_EFI_MOUNT/home.tar.gz.new"
   if ! sudo rm -f "$_dsh_new"; then

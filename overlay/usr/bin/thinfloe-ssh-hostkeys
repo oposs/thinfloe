@@ -11,7 +11,7 @@
 # why this can run as an ordinary system service with no EFI mount, no
 # network, and no server-side endpoint of its own.
 #
-# Ordering: the initramfs has already put ~tluser/.thinfloe-ssh-host-keys in
+# Ordering: the initramfs has already put ~tfuser/.thinfloe-ssh-host-keys in
 # place by the time this runs, and thinfloe-ssh-hostkeys.service is ordered
 # Before=ssh.service.
 #
@@ -26,8 +26,8 @@
 set -u
 
 SSH_DIR="${TF_SSH_DIR:-/etc/ssh}"
-HOME_DIR="${TF_HOME_DIR:-/home/tluser}"
-KEY_OWNER="${TF_KEY_OWNER:-tluser}"
+HOME_DIR="${TF_HOME_DIR:-/home/tfuser}"
+KEY_OWNER="${TF_KEY_OWNER:-tfuser}"
 KEYSTORE="$HOME_DIR/.thinfloe-ssh-host-keys"
 
 # has_keys <dir> - true if <dir> holds at least one private host key.
@@ -43,8 +43,8 @@ install_from_keystore() {
 
     cp -p "$KEYSTORE"/ssh_host_* "$SSH_DIR"/ 2>/dev/null || return 1
 
-    # The keystore lives inside tluser's home, so these arrive owned by
-    # tluser and carrying whatever mode the archive preserved. sshd refuses
+    # The keystore lives inside tfuser's home, so these arrive owned by
+    # tfuser and carrying whatever mode the archive preserved. sshd refuses
     # to start on a host key that is not root-owned and 0600, so both are
     # forced here rather than trusted.
     #
@@ -70,8 +70,8 @@ stage_to_keystore() {
     mkdir -p "$KEYSTORE" 2>/dev/null || return 1
     cp -p "$SSH_DIR"/ssh_host_* "$KEYSTORE"/ 2>/dev/null || return 1
 
-    # Owned by tluser like the rest of the home. thinfloe-save-home archives as
-    # root now, but until 2026-10 the netboot save ran tar as tluser, and an
+    # Owned by tfuser like the rest of the home. thinfloe-save-home archives as
+    # root now, but until 2026-10 the netboot save ran tar as tfuser, and an
     # unreadable root-owned file failed the whole save.
     chown -R "$KEY_OWNER:$KEY_OWNER" "$KEYSTORE" 2>/dev/null || \
         echo "thinfloe-ssh-hostkeys: WARNING could not chown $KEYSTORE" >&2

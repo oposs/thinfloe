@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple
 DEFAULT_URL = "https://tobi.oetiker.ch/dbrrg"
 EFI_PARTLABEL = "EFI-SYSTEM"
 FIRMWARE_FILES = ("vmlinuz", "initrd.img", "ramroot.sqsh")
-TLUSER = "tluser"
+TFUSER = "tfuser"
 HOME_ARCHIVE_NAME = "home.tar.gz"
 # The shipped default exclude list; thinfloe-save-home reads the same file.
 SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
@@ -830,9 +830,9 @@ def copy_home_to_drive(device: str) -> bool:
     # reachable because root has no password. The same defect in
     # thinfloe-save-home archived root's dotfiles over the user's home.
     try:
-        home_dir = pwd.getpwnam(TLUSER).pw_dir
+        home_dir = pwd.getpwnam(TFUSER).pw_dir
     except KeyError:
-        log(f"WARNING: no {TLUSER} account on this system - home not copied")
+        log(f"WARNING: no {TFUSER} account on this system - home not copied")
         return False
 
     if not os.path.isdir(home_dir):

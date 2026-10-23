@@ -20,7 +20,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
 
     export TF_SESSION_ATTEMPTED=1
 
-    # The log MUST live somewhere tluser can write. /run is root-owned 0755,
+    # The log MUST live somewhere tfuser can write. /run is root-owned 0755,
     # so redirecting there fails - and a failed redirection means the command
     # is never executed at all. An earlier version of this hook pointed at
     # /run and so prevented the session from starting, while presenting as

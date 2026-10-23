@@ -3,7 +3,7 @@
 #
 # Host keys persist inside the home directory, which is already saved to the
 # EFI partition or the boot server. That removes the need for a separate EFI
-# file or a hostkeys.pkg endpoint, but it means the keys arrive tluser-owned
+# file or a hostkeys.pkg endpoint, but it means the keys arrive tfuser-owned
 # and must be forced to root:root 0600 before sshd will use them - the exact
 # opposite of the home restore, which must PRESERVE uid 1000.
 #
@@ -139,7 +139,7 @@ fi
 if grep -q "chown root:root" "$TF_TEST_CHOWN_LOG"; then
     ok "installed keys are chowned to root:root"
 else
-    bad "no chown to root:root - keys arrive tluser-owned and sshd will refuse them"
+    bad "no chown to root:root - keys arrive tfuser-owned and sshd will refuse them"
 fi
 
 # --- nothing anywhere -> generate, then stage into the keystore ----------
@@ -159,10 +159,10 @@ else
     bad "generated keys were not staged into the keystore - they would not persist"
 fi
 
-if grep -q "chown -R tluser:tluser" "$TF_TEST_CHOWN_LOG"; then
-    ok "staged keystore is chowned back to tluser"
+if grep -q "chown -R tfuser:tfuser" "$TF_TEST_CHOWN_LOG"; then
+    ok "staged keystore is chowned back to tfuser"
 else
-    bad "staged keystore not chowned to tluser - save-home could not read it"
+    bad "staged keystore not chowned to tfuser - save-home could not read it"
 fi
 
 # 4.0 keeps no link under the 3.x name ~/.dbrrg-ssh-host-keys: a 3.x home

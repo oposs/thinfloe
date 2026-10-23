@@ -179,17 +179,17 @@ COPY --from=menu-build /out/ /
 # pressing Enter. sshd refused it only because PermitEmptyPasswords defaults
 # to no, which made the hole invisible from the network and easy to keep.
 # `-d` then `-l` gives a field of `!`: no hash to recover and nothing to
-# authenticate with. Recovery at the machine goes through tluser's autologin
+# authenticate with. Recovery at the machine goes through tfuser's autologin
 # on tty1 and its passwordless sudo.
 RUN passwd -d root && passwd -l root
 
 # Create the session user with NO password.
 #
 # There used to be an `echo "tluser:tluser" | chpasswd` here. Every image in
-# the field therefore shipped the same login, and because tluser has
+# the field therefore shipped the same login, and because tfuser has
 # NOPASSWD:ALL below, anyone who could reach port 22 and knew that default had
 # root on every deployed machine. It also contradicted
-# overlay/usr/bin/thinfloe-session, which already documents "tluser has no
+# overlay/usr/bin/thinfloe-session, which already documents "tfuser has no
 # password" as the reason the session has no lock screen.
 #
 # --disabled-password leaves `!` in the shadow field, so password
@@ -200,10 +200,10 @@ RUN passwd -d root && passwd -l root
 #
 # `passwd -l` would NOT be a substitute for leaving it unset. It prefixes the
 # existing hash with `!` and leaves it recoverable.
-RUN adduser --disabled-password --gecos "ThinUser" tluser && \
-    adduser tluser sudo && \
-    echo "tluser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    adduser tluser audio
+RUN adduser --disabled-password --gecos "ThinUser" tfuser && \
+    adduser tfuser sudo && \
+    echo "tfuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    adduser tfuser audio
 
 # Apply overlay
 ADD overlay/ /__overlay
@@ -211,7 +211,10 @@ ADD overlay/ /__overlay
 # and git cannot store mode 0600, so set it here.
 RUN tar cf - --exclude="*~" -C /__overlay . | tar xf - && rm -rf /__overlay \
     && chmod 600 /etc/netplan/*.yaml
-RUN chown -R tluser:tluser /home/tluser
+RUN chown -R tfuser:tfuser /home/tfuser
+# The account was called tluser until 4.0; saved files and local notes may
+# still name /home/tluser.
+RUN ln -s tfuser /home/tluser
 
 # Generate locale
 RUN locale-gen
@@ -232,7 +235,7 @@ RUN printf '#!/bin/sh\nupdate-alternatives --query default.plymouth 2>/dev/null 
 # itself, but this image has systemd-logind, which is the correct seat manager
 # here: logind grants the active session ACL access to /dev/dri and /dev/input.
 # With seatd also running, wlroots' libseat tries the seatd backend first, hits
-# "could not access socket /run/seatd.sock: permission denied" because tluser is
+# "could not access socket /run/seatd.sock: permission denied" because tfuser is
 # in no seat group, and only then falls back to logind. That produced an alarming
 # error on every start and left DRM access depending on which backend won.
 # On 26.04 labwc pulls in libseat1 only and seatd is not installed; the guard

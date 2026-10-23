@@ -7,7 +7,7 @@
 # then /dev/dri/card0 is simpledrm. When i915 binds it REMOVES simpledrm's
 # card0 and registers its own, and in the gap there is no usable card0 at all.
 #
-# Measured on a NUC7i3BNK: the tluser session started at 11.099s and i915's
+# Measured on a NUC7i3BNK: the tfuser session started at 11.099s and i915's
 # card0 appeared at 11.372s. labwc failed with "Found 0 GPUs", and because
 # 10-thinfloe-session.sh holds a failure shell rather than exiting, the session
 # was never retried and the whole boot was lost.

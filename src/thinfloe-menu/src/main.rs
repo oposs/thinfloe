@@ -26,7 +26,7 @@ fn user_dir() -> PathBuf {
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/tluser"));
+        .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
     home.join(".config/thinfloe/menu")
 }
 

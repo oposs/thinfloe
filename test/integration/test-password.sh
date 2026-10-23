@@ -1,24 +1,24 @@
 #!/bin/bash
 # Offline tests for thinfloe-password.
 #
-# The image ships no password for tluser: adduser --disabled-password leaves
+# The image ships no password for tfuser: adduser --disabled-password leaves
 # `!` in the shadow field and nothing overwrites it. A person at the machine
 # sets one with `sudo thinfloe-password`, and it has to survive a reboot, so the
-# hash is stored in tluser's home directory where thinfloe-save-home captures it
+# hash is stored in tfuser's home directory where thinfloe-save-home captures it
 # and the initramfs restores it. thinfloe-password --apply, run before
 # ssh.service, puts it back into the shadow file.
 #
 # Two properties are load-bearing and have each already cost this repo a bug
 # in a sibling script:
 #
-#   - The home directory is resolved from `getent passwd tluser`, never $HOME.
+#   - The home directory is resolved from `getent passwd tfuser`, never $HOME.
 #     This script runs under sudo, where env_reset makes HOME /root, so a
 #     $HOME-based path writes the hash into root's home: lost at reboot, and
 #     with the wrong owner. Same defect as the one cfe7aa0 fixed in
 #     thinfloe-save-home.
-#   - The stored file is owned by tluser, not root, like the rest of the
+#   - The stored file is owned by tfuser, not root, like the rest of the
 #     home. Until 2026-10 the netboot save in thinfloe-save-home ran tar as
-#     tluser, and a root-owned 600 file failed that save outright.
+#     tfuser, and a root-owned 600 file failed that save outright.
 #
 # Runs without root: chpasswd, getent, passwd and chown are stubbed and their
 # calls recorded.
@@ -59,8 +59,8 @@ cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
 echo "getent $*" >>"$TF_TEST_LOG"
 case "$1" in
-    passwd) echo "tluser:x:1000:1000:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
-    shadow) echo "tluser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
+    passwd) echo "tfuser:x:1000:1000:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
+    shadow) echo "tfuser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
     *)      exit 2 ;;
 esac
 exit 0
@@ -87,7 +87,7 @@ run_password() {
     local home_env="$1" input="$2"; shift 2
     printf '%s' "$input" | \
     TF_TEST_LOG="$WORK/calls.log" \
-    TF_TEST_PASSWD_HOME="$WORK/home/tluser" \
+    TF_TEST_PASSWD_HOME="$WORK/home/tfuser" \
     TF_TEST_SHADOW_HASH="$FAKE_HASH" \
     HOME="$home_env" \
     PATH="$STUBS:$PATH" \
@@ -96,12 +96,12 @@ run_password() {
 }
 
 FAKE_HASH='$y$j9T$aaaaaaaaaaaaaaaaaaaaa$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-STORE="$WORK/home/tluser/$STORE_NAME"
+STORE="$WORK/home/tfuser/$STORE_NAME"
 
 setup() {
     rm -rf "$WORK/home" "$WORK/root" "$WORK/calls.log" \
            "$WORK/out" "$WORK/err"
-    mkdir -p "$WORK/home/tluser" "$WORK/root"
+    mkdir -p "$WORK/home/tfuser" "$WORK/root"
     echo "root's shell config" >"$WORK/root/.bashrc"
 }
 
@@ -128,15 +128,15 @@ else
 fi
 
 # ---------------------------------------------------------------- test 3
-# The stored file belongs to tluser, like the rest of the home (see the
+# The stored file belongs to tfuser, like the rest of the home (see the
 # header).
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 mode=$(stat -c '%a' "$STORE" 2>/dev/null)
-if [[ "$mode" == "600" ]] && grep -q "^chown tluser:tluser $STORE\$" "$WORK/calls.log"; then
-    ok "--set stores mode 600 owned by tluser"
+if [[ "$mode" == "600" ]] && grep -q "^chown tfuser:tfuser $STORE\$" "$WORK/calls.log"; then
+    ok "--set stores mode 600 owned by tfuser"
 else
-    bad "--set stores mode 600 owned by tluser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
+    bad "--set stores mode 600 owned by tfuser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
 fi
 
 # ---------------------------------------------------------------- test 4
@@ -172,7 +172,7 @@ echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --clear)
 order=$(grep '^passwd ' "$WORK/calls.log" | tr '\n' ' ')
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
-   [[ "$order" == "passwd -d tluser passwd -l tluser " ]]; then
+   [[ "$order" == "passwd -d tfuser passwd -l tfuser " ]]; then
     ok "--clear removes the stored hash and deletes before locking"
 else
     bad "--clear removes the stored hash and deletes before locking (exit $rc, stored $([[ -e "$STORE" ]] && echo yes || echo no), passwd calls: '$order')"
@@ -194,7 +194,7 @@ setup
 echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --apply)
 if [[ "$rc" == "0" ]] && grep -q '^chpasswd -e$' "$WORK/calls.log" &&
-   grep -qF "stdin: tluser:$FAKE_HASH" "$WORK/calls.log"; then
+   grep -qF "stdin: tfuser:$FAKE_HASH" "$WORK/calls.log"; then
     ok "--apply feeds the stored hash to chpasswd -e"
 else
     bad "--apply feeds the stored hash to chpasswd -e (exit $rc, calls: $(grep -c . "$WORK/calls.log" 2>/dev/null))"
@@ -227,7 +227,7 @@ fi
 # migrated once by the initramfs and nothing reads the old name afterwards.
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
-OLD="$WORK/home/tluser/.dbrrg-password"
+OLD="$WORK/home/tfuser/.dbrrg-password"
 if [[ "$rc" == "0" ]] && [[ ! -e "$OLD" && ! -L "$OLD" ]] &&
    ! grep -q '^chown -h' "$WORK/calls.log"; then
     ok "--set makes no ~/.dbrrg-password"
@@ -242,10 +242,10 @@ fi
 # home-version marker: a cleared password must not come back.
 setup
 echo "$FAKE_HASH" >"$STORE"
-echo "3x-hash" >"$WORK/home/tluser/.dbrrg-password"
+echo "3x-hash" >"$WORK/home/tfuser/.dbrrg-password"
 rc=$(run_password "$WORK/root" '' --clear)
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
-   [[ ! -e "$WORK/home/tluser/.dbrrg-password" ]]; then
+   [[ ! -e "$WORK/home/tfuser/.dbrrg-password" ]]; then
     ok "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password"
 else
     bad "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password (exit $rc)"

@@ -2,7 +2,7 @@
 # Offline tests for the initramfs home restore helpers in thinfloe-lib.sh.
 #
 # The home restore moved out of /etc/profile.d/10-thinfloe-session.sh and into
-# the initramfs so that /home/tluser is populated before multi-user.target -
+# the initramfs so that /home/tfuser is populated before multi-user.target -
 # which is what lets the SSH host keys ride along inside the home archive
 # instead of needing their own EFI file or boot-server endpoint. See
 # docs/superpowers/specs/2026-08-12-four-defects-design.md.
@@ -123,7 +123,7 @@ echo "layout=ch" >"$WORK/src-home/.thinfloe-environment"
 echo "tlconf" >"$WORK/src-home/.thinlinc/tlclient.conf"
 ( cd "$WORK/src-home" && tar czf "$WORK/home.tar.gz" . )
 
-TARGET="$WORK/newroot/home/tluser"
+TARGET="$WORK/newroot/home/tfuser"
 mkdir -p "$TARGET"
 
 if tf_restore_home_from_file "$WORK/home.tar.gz" "$TARGET" &&
@@ -136,14 +136,14 @@ fi
 
 # An absent archive is the normal first-boot case, not an error condition -
 # it must not be fatal and must leave the default home alone.
-mkdir -p "$WORK/newroot2/home/tluser"
-echo "shipped-default" >"$WORK/newroot2/home/tluser/.bashrc"
-if tf_restore_home_from_file "$WORK/nope.tar.gz" "$WORK/newroot2/home/tluser" 2>/dev/null; then
+mkdir -p "$WORK/newroot2/home/tfuser"
+echo "shipped-default" >"$WORK/newroot2/home/tfuser/.bashrc"
+if tf_restore_home_from_file "$WORK/nope.tar.gz" "$WORK/newroot2/home/tfuser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a missing archive"
 else
     ok "restore_home_from_file fails quietly on a missing archive"
 fi
-if [[ "$(cat "$WORK/newroot2/home/tluser/.bashrc")" == "shipped-default" ]]; then
+if [[ "$(cat "$WORK/newroot2/home/tfuser/.bashrc")" == "shipped-default" ]]; then
     ok "missing archive leaves the shipped default home intact"
 else
     bad "missing archive damaged the default home"
@@ -151,8 +151,8 @@ fi
 
 # A corrupt archive must warn and return non-zero, never abort the boot.
 echo "this is not a tarball" >"$WORK/corrupt.tar.gz"
-mkdir -p "$WORK/newroot3/home/tluser"
-if tf_restore_home_from_file "$WORK/corrupt.tar.gz" "$WORK/newroot3/home/tluser" 2>/dev/null; then
+mkdir -p "$WORK/newroot3/home/tfuser"
+if tf_restore_home_from_file "$WORK/corrupt.tar.gz" "$WORK/newroot3/home/tfuser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a corrupt archive"
 else
     ok "restore_home_from_file fails on a corrupt archive"
@@ -168,15 +168,15 @@ fi
 # successful restore having restored nothing - see the comment in
 # tf_restore_home_from_file for why that is worse than it sounds.
 printf 'gzipped, but not a tar archive' | gzip > "$WORK/gz-not-tar.tar.gz"
-mkdir -p "$WORK/newroot7/home/tluser"
-echo "shipped-default" >"$WORK/newroot7/home/tluser/.bashrc"
+mkdir -p "$WORK/newroot7/home/tfuser"
+echo "shipped-default" >"$WORK/newroot7/home/tfuser/.bashrc"
 if tf_restore_home_from_file "$WORK/gz-not-tar.tar.gz" \
-        "$WORK/newroot7/home/tluser" 2>/dev/null; then
+        "$WORK/newroot7/home/tfuser" 2>/dev/null; then
     bad "restore_home_from_file reported success on a valid-gzip non-tar payload"
 else
     ok "restore_home_from_file rejects a valid-gzip non-tar payload"
 fi
-if [[ "$(cat "$WORK/newroot7/home/tluser/.bashrc")" == "shipped-default" ]]; then
+if [[ "$(cat "$WORK/newroot7/home/tfuser/.bashrc")" == "shipped-default" ]]; then
     ok "valid-gzip non-tar payload leaves the default home intact"
 else
     bad "valid-gzip non-tar payload damaged the default home"
@@ -206,12 +206,12 @@ chmod +x "$STUBS/curl"
 PATH="$STUBS:$PATH"
 export TF_TEST_CURL_PAYLOAD="$WORK/home.tar.gz"
 
-mkdir -p "$WORK/newroot4/home/tluser"
+mkdir -p "$WORK/newroot4/home/tfuser"
 TF_TEST_CURL_MODE=ok
 export TF_TEST_CURL_MODE
 if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
-        "$WORK/newroot4/home/tluser" 5 "$WORK/dl.pkg" &&
-   [[ -f "$WORK/newroot4/home/tluser/.thinfloe-environment" ]]; then
+        "$WORK/newroot4/home/tfuser" 5 "$WORK/dl.pkg" &&
+   [[ -f "$WORK/newroot4/home/tfuser/.thinfloe-environment" ]]; then
     ok "restore_home_from_url extracts a fetched archive"
 else
     bad "restore_home_from_url did not extract a fetched archive"
@@ -224,20 +224,20 @@ fi
 
 # First netboot of a machine the server has never seen: a 404 is expected,
 # not a fault.
-mkdir -p "$WORK/newroot5/home/tluser"
+mkdir -p "$WORK/newroot5/home/tfuser"
 TF_TEST_CURL_MODE=notfound
 if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
-        "$WORK/newroot5/home/tluser" 5 "$WORK/dl5.pkg" 2>/dev/null; then
+        "$WORK/newroot5/home/tfuser" 5 "$WORK/dl5.pkg" 2>/dev/null; then
     bad "restore_home_from_url reported success on a 404"
 else
     ok "restore_home_from_url fails quietly on a 404"
 fi
 
 # A hanging boot server must not hang the boot.
-mkdir -p "$WORK/newroot6/home/tluser"
+mkdir -p "$WORK/newroot6/home/tfuser"
 TF_TEST_CURL_MODE=timeout
 if tf_restore_home_from_url "http://boot/tl/home.pkg?mac=x" \
-        "$WORK/newroot6/home/tluser" 5 "$WORK/dl6.pkg" 2>/dev/null; then
+        "$WORK/newroot6/home/tfuser" 5 "$WORK/dl6.pkg" 2>/dev/null; then
     bad "restore_home_from_url reported success on a timeout"
 else
     ok "restore_home_from_url fails quietly on a timeout"
@@ -262,11 +262,11 @@ fi
 # --- restore_home (orchestrator) ----------------------------------------
 
 # USB boot: ramroot is a relative path, archive sits at the EFI mount root.
-mkdir -p "$WORK/usb/efi" "$WORK/usb/state" "$WORK/usb/newroot/home/tluser"
+mkdir -p "$WORK/usb/efi" "$WORK/usb/state" "$WORK/usb/newroot/home/tfuser"
 cp "$WORK/home.tar.gz" "$WORK/usb/efi/home.tar.gz"
 if restore_home "$WORK/usb/newroot" "$WORK/usb/efi" "$WORK/usb/state" \
         "tl/ramroot.sqsh" &&
-   [[ -f "$WORK/usb/newroot/home/tluser/.thinfloe-environment" ]]; then
+   [[ -f "$WORK/usb/newroot/home/tfuser/.thinfloe-environment" ]]; then
     ok "restore_home restores from the EFI partition on USB boot"
 else
     bad "restore_home did not restore from the EFI partition"
@@ -281,7 +281,7 @@ fi
 # over the good archive with this default home, so the marker is "failed",
 # not "absent" - there WAS something at the archive path, it just did not
 # restore.
-mkdir -p "$WORK/usbcorrupt/efi" "$WORK/usbcorrupt/state" "$WORK/usbcorrupt/newroot/home/tluser"
+mkdir -p "$WORK/usbcorrupt/efi" "$WORK/usbcorrupt/state" "$WORK/usbcorrupt/newroot/home/tfuser"
 echo "this is not a tarball" >"$WORK/usbcorrupt/efi/home.tar.gz"
 if restore_home "$WORK/usbcorrupt/newroot" "$WORK/usbcorrupt/efi" \
         "$WORK/usbcorrupt/state" "tl/ramroot.sqsh"; then
@@ -296,12 +296,12 @@ else
 fi
 
 # Netboot: uses the recorded boot MAC to build the URL.
-mkdir -p "$WORK/net/efi" "$WORK/net/state" "$WORK/net/newroot/home/tluser"
+mkdir -p "$WORK/net/efi" "$WORK/net/state" "$WORK/net/newroot/home/tfuser"
 echo "de:ad:be:ef:00:01" >"$WORK/net/state/boot-mac"
 TF_TEST_CURL_MODE=ok
 if restore_home "$WORK/net/newroot" "$WORK/net/efi" "$WORK/net/state" \
         "http://boot.example.org/tl/ramroot.sqsh" &&
-   [[ -f "$WORK/net/newroot/home/tluser/.thinfloe-environment" ]]; then
+   [[ -f "$WORK/net/newroot/home/tfuser/.thinfloe-environment" ]]; then
     ok "restore_home fetches from the boot server on netboot"
 else
     bad "restore_home did not fetch from the boot server"
@@ -315,7 +315,7 @@ fi
 # Netboot, server 404s: the ordinary first-netboot case for a machine the
 # server has never seen, not a fault - "absent", and saving at logout is
 # correct.
-mkdir -p "$WORK/net404/efi" "$WORK/net404/state" "$WORK/net404/newroot/home/tluser"
+mkdir -p "$WORK/net404/efi" "$WORK/net404/state" "$WORK/net404/newroot/home/tfuser"
 echo "de:ad:be:ef:00:02" >"$WORK/net404/state/boot-mac"
 TF_TEST_CURL_MODE=notfound
 if restore_home "$WORK/net404/newroot" "$WORK/net404/efi" "$WORK/net404/state" \
@@ -332,7 +332,7 @@ fi
 
 # Netboot, server times out: something was presumably there and it could not
 # be fetched - "failed", so thinfloe-save-home must not overwrite it.
-mkdir -p "$WORK/nettimeout/efi" "$WORK/nettimeout/state" "$WORK/nettimeout/newroot/home/tluser"
+mkdir -p "$WORK/nettimeout/efi" "$WORK/nettimeout/state" "$WORK/nettimeout/newroot/home/tfuser"
 echo "de:ad:be:ef:00:03" >"$WORK/nettimeout/state/boot-mac"
 TF_TEST_CURL_MODE=timeout
 if restore_home "$WORK/nettimeout/newroot" "$WORK/nettimeout/efi" \
@@ -352,7 +352,7 @@ TF_TEST_CURL_MODE=ok
 # failure this design removed - a wrong key means the home is posted where
 # it will never be found again. No boot MAC is a fault in the boot itself,
 # not a normal "nothing to restore", so the marker is "failed".
-mkdir -p "$WORK/nomac/efi" "$WORK/nomac/state" "$WORK/nomac/newroot/home/tluser"
+mkdir -p "$WORK/nomac/efi" "$WORK/nomac/state" "$WORK/nomac/newroot/home/tfuser"
 if restore_home "$WORK/nomac/newroot" "$WORK/nomac/efi" "$WORK/nomac/state" \
         "http://boot.example.org/tl/ramroot.sqsh"; then
     ok "restore_home returns 0 when no boot MAC was recorded"
@@ -386,7 +386,7 @@ fi
 
 # Every failure mode must still return 0: restore_home is called from
 # setup-overlay.sh, where a non-zero return would abort the boot.
-mkdir -p "$WORK/fail/efi" "$WORK/fail/state" "$WORK/fail/newroot/home/tluser"
+mkdir -p "$WORK/fail/efi" "$WORK/fail/state" "$WORK/fail/newroot/home/tfuser"
 TF_TEST_CURL_MODE=timeout
 if restore_home "$WORK/fail/newroot" "$WORK/fail/efi" "$WORK/fail/state" \
         "tl/ramroot.sqsh"; then
@@ -411,16 +411,16 @@ fi
 WGUNIT=/usr/lib/systemd/system/wg-quick@.service
 
 mkhome() {  # mkhome <name>: fake newroot with a home, prints its path
-    mkdir -p "$WORK/$1/home/tluser"
+    mkdir -p "$WORK/$1/home/tfuser"
     echo "$WORK/$1"
 }
 
 nr=$(mkhome net-both)
-echo "network: {version: 2}" >"$nr/home/tluser/wifi.yaml"
-echo "[Interface]" >"$nr/home/tluser/wg0.conf"
+echo "network: {version: 2}" >"$nr/home/tfuser/wifi.yaml"
+echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
 install_local_network "$nr"; rc=$?
 [[ $rc -eq 0 ]] && ok "install_local_network returns 0 with both files"     || bad "install_local_network returned $rc with both files"
-if cmp -s "$nr/home/tluser/wifi.yaml" "$nr/etc/netplan/wifi.yaml" \
+if cmp -s "$nr/home/tfuser/wifi.yaml" "$nr/etc/netplan/wifi.yaml" \
         && [[ "$(stat -c%a "$nr/etc/netplan/wifi.yaml")" == 600 ]]; then
     ok "wifi.yaml copied to etc/netplan, mode 600"
 else
@@ -428,7 +428,7 @@ else
 fi
 [[ "$(stat -c%a "$nr/etc/wireguard" 2>/dev/null)" == 700 ]] \
     && ok "etc/wireguard is mode 700" || bad "etc/wireguard is not mode 700"
-if cmp -s "$nr/home/tluser/wg0.conf" "$nr/etc/wireguard/wg0.conf" \
+if cmp -s "$nr/home/tfuser/wg0.conf" "$nr/etc/wireguard/wg0.conf" \
         && [[ "$(stat -c%a "$nr/etc/wireguard/wg0.conf")" == 600 ]]; then
     ok "wg0.conf copied to etc/wireguard, mode 600"
 else
@@ -451,7 +451,7 @@ else
 fi
 
 nr=$(mkhome net-wg)
-echo "[Interface]" >"$nr/home/tluser/wg0.conf"
+echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
 install_local_network "$nr"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" \
         && -f "$nr/etc/wireguard/wg0.conf" \
@@ -462,7 +462,7 @@ else
 fi
 
 nr=$(mkhome net-template)
-cp "$REPO/overlay/home/tluser/wifi.yaml" "$nr/home/tluser/wifi.yaml"
+cp "$REPO/overlay/home/tfuser/wifi.yaml" "$nr/home/tfuser/wifi.yaml"
 install_local_network "$nr"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "unedited wifi.yaml template is not installed, returns 0"
@@ -472,7 +472,7 @@ fi
 
 nr=$(mkhome net-symlink)
 echo secret >"$WORK/target.yaml"
-ln -s "$WORK/target.yaml" "$nr/home/tluser/wifi.yaml"
+ln -s "$WORK/target.yaml" "$nr/home/tfuser/wifi.yaml"
 install_local_network "$nr"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "symlinked wifi.yaml is rejected, returns 0"
@@ -590,7 +590,7 @@ fi
 
 nr=$(mkstate sb-mac); echo "52:54:00:AB:CD:EF" >"$nr/state/boot-mac"
 nr2=$(mkstate sb-id)
-mkdir -p "$WORK/sb-net/home/tluser"; echo "x: 1" >"$WORK/sb-net/home/tluser/wifi.yaml"
+mkdir -p "$WORK/sb-net/home/tfuser"; echo "x: 1" >"$WORK/sb-net/home/tfuser/wifi.yaml"
 echo "52:54:00:ab:cd:ef" >"$WORK/sb-addr"
 : >"$WORK/warnings"
 (
@@ -625,10 +625,10 @@ OLD_NAMES=".dbrrg-environment .dbrrg-sessionrc .dbrrg-password .dbrrg-ssh-host-k
 # With nomarker the default home lacks the marker, so a test can see whether
 # the restore wrote one.
 mkdefault() {
-    mkdir -p "$1/newroot/home/tluser" "$1/efi" "$1/state"
-    echo default-env >"$1/newroot/home/tluser/.thinfloe-environment"
-    echo default-rc  >"$1/newroot/home/tluser/.thinfloe-sessionrc"
-    [[ "${2:-}" == nomarker ]] || echo 1 >"$1/newroot/home/tluser/.thinfloe-home-version"
+    mkdir -p "$1/newroot/home/tfuser" "$1/efi" "$1/state"
+    echo default-env >"$1/newroot/home/tfuser/.thinfloe-environment"
+    echo default-rc  >"$1/newroot/home/tfuser/.thinfloe-sessionrc"
+    [[ "${2:-}" == nomarker ]] || echo 1 >"$1/newroot/home/tfuser/.thinfloe-home-version"
 }
 
 # mk3x <srcdir>: the content of a 3.x home archive.
@@ -668,10 +668,10 @@ check_3x_result() {
     if [[ -z "$problems" ]]; then ok "$label"; else bad "$label:$problems"; fi
 }
 
-if [[ "$(cat "$REPO/overlay/home/tluser/.thinfloe-home-version" 2>/dev/null)" == "1" ]]; then
+if [[ "$(cat "$REPO/overlay/home/tfuser/.thinfloe-home-version" 2>/dev/null)" == "1" ]]; then
     ok "the image's default home carries ~/.thinfloe-home-version 1"
 else
-    bad "overlay/home/tluser/.thinfloe-home-version missing or not 1"
+    bad "overlay/home/tfuser/.thinfloe-home-version missing or not 1"
 fi
 
 # The default home ships the marker, so after extraction it is on disk
@@ -683,7 +683,7 @@ tf_log() { echo "$@" >>"$WORK/tflog"; }
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 tf_log() { :; }
 check_3x_result "3.x archive over a default home that ships the marker: migrated" \
-    "$d/newroot/home/tluser" "$d/state"
+    "$d/newroot/home/tfuser" "$d/state"
 if grep -qxF "thinfloe: renamed ~/.dbrrg-environment to ~/.thinfloe-environment" "$WORK/tflog" \
    && grep -qxF "thinfloe: renamed ~/.config/dbrrg to ~/.config/thinfloe" "$WORK/tflog"; then
     ok "the rename is logged as 'thinfloe: renamed ~/old to ~/new'"
@@ -697,7 +697,20 @@ d="$WORK/hn-usb-nomarker"; mkdefault "$d" nomarker; mkdir -p "$d/src"; mk3x "$d/
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 check_3x_result "3.x archive: the restore writes the marker" \
-    "$d/newroot/home/tluser" "$d/state"
+    "$d/newroot/home/tfuser" "$d/state"
+
+# The account is tfuser; a 3.x archive (made as tluser, same uid 1000) lands
+# in /home/tfuser of the new root.
+d="$WORK/hn-tfuser"; mkdir -p "$d/src" "$d/efi" "$d/state" "$d/newroot/home/tfuser"
+mk3x "$d/src"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+if [[ "$(cat "$d/newroot/home/tfuser/.thinfloe-environment" 2>/dev/null)" == "XKB_DEFAULT_LAYOUT=ch" \
+      && ! -e "$d/newroot/home/tluser" ]]; then
+    ok "a 3.x archive restores into /home/tfuser"
+else
+    bad "a 3.x archive restores into /home/tfuser: $(ls "$d/newroot/home" 2>&1 | tr '\n' ' ')"
+fi
 
 # A native archive (it lists the marker) with real .dbrrg-* entries beside
 # the new names: a 3.x fallback save put them there. Nothing is renamed or
@@ -715,7 +728,7 @@ tf_log() { echo "$@" >>"$WORK/tflog"; }
 : >"$WORK/tflog"; : >"$WORK/warnings"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 tf_log() { :; }
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && "$(cat "$h/.thinfloe-password")" == "pw-4x" \
    && "$(cat "$h/.thinfloe-sessionrc")" == "default-rc" && ! -e "$h/.thinfloe-ssh-host-keys" \
    && -f "$h/.dbrrg-environment" && ! -L "$h/.dbrrg-environment" \
@@ -747,7 +760,7 @@ ln -s elsewhere "$d/src/.dbrrg-sessionrc"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 : >"$WORK/warnings"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && "$(cat "$h/.thinfloe-password")" == "pw" \
    && "$(cat "$h/.thinfloe-sessionrc")" == "default-rc" \
    && "$(cat "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key")" == "k4" \
@@ -766,7 +779,7 @@ d="$WORK/hn-both"; mkdefault "$d"; mkdir -p "$d/src"
 echo old >"$d/src/.dbrrg-sessionrc"; echo new >"$d/src/.thinfloe-sessionrc"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-sessionrc")" == "new" && "$(cat "$h/.dbrrg-sessionrc")" == "old" \
    && ! -L "$h/.dbrrg-sessionrc" && ! -e "$d/state/home-renamed" \
    && "$(cat "$h/.thinfloe-home-version")" == "1" && "$(cat "$d/state/home-restore")" == "ok" ]]; then
@@ -792,7 +805,7 @@ STUB
 chmod +x "$d/fakebin/tar"
 : >"$WORK/warnings"
 ( PATH="$d/fakebin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
    && -f "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
    && "$(cat "$h/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" \
@@ -815,7 +828,7 @@ exec $REALTAR "\$@"
 STUB
 chmod +x "$d/fakebin/tar"
 ( PATH="$d/fakebin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
    && ! -e "$h/.thinfloe-home-version" ]]; then
     ok "extraction failure: restore failed, no marker, no home-renamed"
@@ -826,7 +839,7 @@ fi
 # A corrupt archive (empty listing): failed, no marker, no home-renamed.
 d="$WORK/hn-corrupt"; mkdefault "$d" nomarker; echo "not a tarball" >"$d/efi/home.tar.gz"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
    && ! -e "$h/.thinfloe-home-version" ]] && no_old_names "$h"; then
     ok "corrupt archive: failed, no marker, no home-renamed"
@@ -837,11 +850,11 @@ fi
 # Writing the marker fails: a warning, not a failed restore. The next boot
 # migrates again, which changes nothing.
 d="$WORK/hn-markfail"; mkdefault "$d" nomarker; mkdir -p "$d/src"; mk3x "$d/src"
-mkdir "$d/newroot/home/tluser/.thinfloe-home-version"
+mkdir "$d/newroot/home/tfuser/.thinfloe-home-version"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 : >"$WORK/warnings"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "ok" \
    && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]] \
    && grep -q "could not write ~/.thinfloe-home-version" "$WORK/warnings"; then
@@ -864,7 +877,7 @@ chmod +x "$d/fakebin/tar"
 calls=$(tr '\n' ' ' <"$d/tarcalls")
 if [[ "$calls" == "-tzf -xzf " ]]; then
     check_3x_result "one listing and one extraction per restore, 3.x home migrated" \
-        "$d/newroot/home/tluser" "$d/state"
+        "$d/newroot/home/tfuser" "$d/state"
 else
     bad "tar calls per restore: $calls"
 fi
@@ -873,7 +886,7 @@ fi
 # make no old names.
 d="$WORK/hn-nomac"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" ]] \
    && no_old_names "$h"; then
     ok "netboot without boot MAC: failed, no old names made"
@@ -884,7 +897,7 @@ d="$WORK/hn-nourl"; mkdefault "$d"
 echo "de:ad:be:ef:00:04" >"$d/state/boot-mac"
 ( tf_home_url() { return 1; }
   restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh" )
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" ]] \
    && no_old_names "$h"; then
     ok "netboot without a home URL: failed, no old names made"
@@ -895,7 +908,7 @@ fi
 # Absent archive: the default home stays as it is.
 d="$WORK/hn-absent"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$d/state/home-restore")" == "absent" && ! -e "$d/state/home-renamed" \
    && "$(cat "$h/.thinfloe-environment")" == "default-env" ]] && no_old_names "$h"; then
     ok "absent archive: default home untouched, no old names, no home-renamed"
@@ -940,7 +953,7 @@ echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .dbrrg-environment
 tar -tzf "$d/efi/home.tar.gz" | grep -qxF .dbrrg-environment || bad "fixture: member has a ./ prefix"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=de" && ! -e "$h/.dbrrg-environment" ]]; then
     ok "members listed without ./ are renamed"
 else
@@ -952,7 +965,7 @@ d="$WORK/hn-noslash-native"; mkdefault "$d"; mkdir -p "$d/src"
 echo 1 >"$d/src/.thinfloe-home-version"; echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .thinfloe-home-version .dbrrg-environment
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-environment")" == "default-env" && -f "$h/.dbrrg-environment" ]]; then
     ok "a marker listed without ./ makes the archive native"
 else
@@ -960,15 +973,15 @@ else
 fi
 
 # A directory listed only through its members, no entry of its own.
-d="$WORK/hn-deep"; mkdefault "$d"; mkdir -p "$d/src/.config/dbrrg/menu" "$d/newroot/home/tluser/.config/thinfloe/menu"
-echo default >"$d/newroot/home/tluser/.config/thinfloe/menu/default.desktop"
+d="$WORK/hn-deep"; mkdefault "$d"; mkdir -p "$d/src/.config/dbrrg/menu" "$d/newroot/home/tfuser/.config/thinfloe/menu"
+echo default >"$d/newroot/home/tfuser/.config/thinfloe/menu/default.desktop"
 echo user >"$d/src/.config/dbrrg/menu/x.desktop"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .config/dbrrg/menu/x.desktop
 if tar -tzf "$d/efi/home.tar.gz" | grep -qxF ".config/dbrrg/"; then
     bad "fixture: archive lists the directory itself"
 fi
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ -f "$h/.config/thinfloe/menu/x.desktop" && ! -e "$h/.config/thinfloe/menu/default.desktop" \
    && ! -e "$h/.config/dbrrg" && ! -L "$h/.config/dbrrg" ]]; then
     ok "a directory listed only through its members is renamed over the default"
@@ -986,7 +999,7 @@ ln -s "$d/outside" "$d/src/.config"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 : >"$WORK/warnings"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 if [[ -L "$h/.config" && -d "$d/outside/dbrrg" && ! -L "$d/outside/dbrrg" \
    && ! -e "$d/outside/thinfloe/menu" \
    && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=fr" \
@@ -1013,12 +1026,12 @@ echo "de:ad:be:ef:00:03" >"$d/state/boot-mac"
 TF_TEST_CURL_PAYLOAD="$d/home.pkg" TF_TEST_CURL_MODE=ok \
     restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
 check_3x_result "netboot: the 3.x home.pkg gets the same renames" \
-    "$d/newroot/home/tluser" "$d/state"
+    "$d/newroot/home/tfuser" "$d/state"
 
 # Idempotent: a second run changes nothing.
 d="$WORK/hn-idem"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/a.tgz" .
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 tar -xzf "$d/a.tgz" -C "$h"
 tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"
 snap1=$(cd "$h" && find . -printf '%p %y %l\n' | sort | tr '\n' ';')
@@ -1033,7 +1046,7 @@ fi
 # The migration with only the initramfs's tools, on the 3.x archive.
 d="$WORK/hn-sb"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/a.tgz" .
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
 ( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/state/home-renamed" ) 2>"$d/stderr"
@@ -1050,7 +1063,7 @@ echo mine >"$d/src/.thinfloe-environment"
 ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
 ln -s thinfloe "$d/src/.config/dbrrg"
 tar -C "$d/src" -czf "$d/a.tgz" .
-h="$d/newroot/home/tluser"
+h="$d/newroot/home/tfuser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
 ( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren" ) 2>"$d/stderr"

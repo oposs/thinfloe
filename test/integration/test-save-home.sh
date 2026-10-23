@@ -1,7 +1,7 @@
 #!/bin/bash
 # Offline tests for thinfloe-save-home.
 #
-# The archive must come from tluser's home, whatever $HOME says. thinfloe-upgrade
+# The archive must come from tfuser's home, whatever $HOME says. thinfloe-upgrade
 # re-execs itself under sudo and then calls this script, and sudo's env_reset
 # sets HOME to the target user's home: with no env_keep for HOME in
 # /etc/sudoers, that is /root. A save triggered that way archived root's
@@ -157,8 +157,8 @@ run_save_home() {
 setup() {
     rm -rf "$WORK/home" "$WORK/root" "$WORK/state" "$WORK/tmp" \
            "$WORK/tar.log" "$WORK/curl.log" "$WORK/sudo.log"
-    mkdir -p "$WORK/home/tluser" "$WORK/root" "$WORK/state" "$WORK/tmp"
-    echo "the user's wifi password" >"$WORK/home/tluser/.thinfloe-sessionrc"
+    mkdir -p "$WORK/home/tfuser" "$WORK/root" "$WORK/state" "$WORK/tmp"
+    echo "the user's wifi password" >"$WORK/home/tfuser/.thinfloe-sessionrc"
     echo "root's shell config"      >"$WORK/root/.bashrc"
     # Netboot: a boot server in the cmdline selects the upload path, which
     # needs no block device and so runs unprivileged.
@@ -168,12 +168,12 @@ setup() {
 
 # ---------------------------------------------------------------- test 1
 setup
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 archived=$(sed -n 's/^PWD=//p' "$WORK/tar.log" 2>/dev/null | head -1)
-if [[ "$archived" == "$WORK/home/tluser" ]]; then
-    ok "archives tluser's home when HOME points at /root"
+if [[ "$archived" == "$WORK/home/tfuser" ]]; then
+    ok "archives tfuser's home when HOME points at /root"
 else
-    bad "archives tluser's home when HOME points at /root (archived '$archived', exit $rc)"
+    bad "archives tfuser's home when HOME points at /root (archived '$archived', exit $rc)"
 fi
 
 # ---------------------------------------------------------------- test 2
@@ -193,7 +193,7 @@ fi
 # nothing at logout and lost every change made that session.
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q "thinfloe-ssh-hostkeys" "$WORK/sudo.log" 2>/dev/null; then
     ok "keeps going on a USB boot that recorded no boot-home-base"
 else
@@ -205,7 +205,7 @@ fi
 # the user what happened; with everything at 0 it can only say "saved".
 setup
 echo failed >"$WORK/state/home-restore"
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "2" ]] && [[ ! -s "$WORK/tar.log" ]]; then
     ok "exit 2 when this boot's home restore failed"
 else
@@ -219,7 +219,7 @@ cat >"$STUBS/ping" <<'STUB'
 exit 1
 STUB
 chmod +x "$STUBS/ping"
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "3" ]] && [[ ! -s "$WORK/curl.log" ]]; then
     ok "exit 3 when the boot server is unreachable"
 else
@@ -238,7 +238,7 @@ chmod +x "$STUBS/ping"
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/no-such-mount" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "4" ]] && ! grep -q "home saved" "$WORK/out"; then
     ok "exit 4 with no 'home saved' when there is nowhere to store the home"
 else
@@ -250,7 +250,7 @@ fi
 # refusal, which is exit 1. The menu would otherwise tell the user their home
 # directory does not exist when the upload merely failed.
 setup
-rc=$(TF_TEST_CURL_RC=7 run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(TF_TEST_CURL_RC=7 run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]]; then
     ok "exit 5 when the upload was attempted and failed"
 else
@@ -259,7 +259,7 @@ fi
 
 # ---------------------------------------------------------------- test 11
 setup
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && grep -q "home saved" "$WORK/out"; then
     ok "exit 0 and 'home saved' on a successful netboot save"
 else
@@ -282,7 +282,7 @@ mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 printf './.cache\n./.local/share/claude/versions\n' >"$WORK/exclude-default"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/exclude-default" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q 'exclude' "$WORK/tar.log" 2>/dev/null; then
     ok "passes exclude patterns to tar"
 else
@@ -294,11 +294,11 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-printf './my-own-junk\n' >"$WORK/home/tluser/.save-home-exclude"
+printf './my-own-junk\n' >"$WORK/home/tfuser/.save-home-exclude"
 printf './.cache\n' >"$WORK/exclude-default"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/exclude-default" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q 'my-own-junk' "$WORK/tar.log" 2>/dev/null; then
     ok "~/.save-home-exclude takes precedence over the shipped defaults"
 else
@@ -311,9 +311,9 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-printf './My Documents/big\n' >"$WORK/home/tluser/.save-home-exclude"
+printf './My Documents/big\n' >"$WORK/home/tfuser/.save-home-exclude"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q 'exclude=./My Documents/big' "$WORK/tar.log" 2>/dev/null; then
     ok "an exclude pattern containing a space survives as one pattern"
 else
@@ -326,10 +326,10 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-: >"$WORK/home/tluser/.save-home-exclude"
+: >"$WORK/home/tfuser/.save-home-exclude"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/nonexistent" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && ! grep -qE 'exclude=($|[[:space:]])' "$WORK/tar.log"; then
     ok "an empty exclude file produces no bare --exclude="
 else
@@ -345,7 +345,7 @@ mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 echo "THE GOOD OLD ARCHIVE" >"$WORK/esp/home.tar.gz"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_TEST_GZIP_FAIL=1 \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]] &&
    grep -q "THE GOOD OLD ARCHIVE" "$WORK/esp/home.tar.gz" &&
    [[ ! -e "$WORK/esp/home.tar.gz.new" ]]; then
@@ -362,7 +362,7 @@ setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && [[ -f "$WORK/esp/home.tar.gz" ]] &&
    ! grep -q 'mount' "$WORK/sudo.log" 2>/dev/null; then
     ok "writes to the existing ESP mount without mounting anything"
@@ -385,7 +385,7 @@ setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" TF_TEST_TAR_RC=1 \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && [[ -f "$WORK/esp/home.tar.gz" ]] &&
    [[ ! -e "$WORK/esp/home.tar.gz.new" ]]; then
     ok "tar exit 1 (file changed) still saves"
@@ -399,7 +399,7 @@ echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 echo "THE GOOD OLD ARCHIVE" >"$WORK/esp/home.tar.gz"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" TF_TEST_TAR_RC=2 \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]] && grep -q "THE GOOD OLD ARCHIVE" "$WORK/esp/home.tar.gz"; then
     ok "tar exit 2 is a failed save and keeps the old archive"
 else
@@ -413,7 +413,7 @@ setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 rm -rf "$WORK/esp"; mkdir -p "$WORK/esp"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "4" ]] && ! grep -q "home saved" "$WORK/out" &&
    [[ -z "$(ls -A "$WORK/esp")" ]]; then
     ok "an existing but unmounted ESP directory exits 4 and writes nothing"
@@ -422,11 +422,11 @@ else
 fi
 
 # --------------------------------------------------------------- test 22
-# Both branches archive as root. The netboot branch ran tar as tluser, so one
-# file in the home that tluser cannot read (a root-owned 600 file) failed
+# Both branches archive as root. The netboot branch ran tar as tfuser, so one
+# file in the home that tfuser cannot read (a root-owned 600 file) failed
 # every netboot save with exit 5 while USB saved the same home.
 setup
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && grep -q '^sudo tar ' "$WORK/sudo.log" 2>/dev/null; then
     ok "netboot save runs tar through sudo, like the USB save"
 else
@@ -436,7 +436,7 @@ setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
-     run_save_home "$WORK/root" "$WORK/home/tluser")
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && grep -q '^sudo tar ' "$WORK/sudo.log" 2>/dev/null; then
     ok "USB save runs tar through sudo"
 else
@@ -446,7 +446,7 @@ fi
 # --------------------------------------------------------------- test 23
 # A netboot archive that tar could not write is exit 5 and is never uploaded.
 setup
-rc=$(TF_TEST_TAR_RC=2 run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(TF_TEST_TAR_RC=2 run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]] && [[ ! -s "$WORK/curl.log" ]]; then
     ok "netboot tar exit 2 is exit 5 and uploads nothing"
 else
@@ -464,7 +464,7 @@ else
     bad "thinfloe-save-home still uses a predictable temp path: $fixed_tmp"
 fi
 setup
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 upload=$(grep -o 'data=@[^ ]*' "$WORK/curl.log" 2>/dev/null | head -1)
 upload=${upload#data=@}
 upload=${upload#\"}
@@ -487,14 +487,14 @@ else
     bad "left behind after a successful upload: $(ls -A "$WORK/tmp")"
 fi
 setup
-rc=$(TF_TEST_CURL_RC=22 run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(TF_TEST_CURL_RC=22 run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]] && [[ -z "$(ls -A "$WORK/tmp")" ]]; then
     ok "the temporary archive is removed when the upload fails"
 else
     bad "failed upload: exit $rc, left behind: $(ls -A "$WORK/tmp")"
 fi
 setup
-rc=$(TF_TEST_TAR_RC=2 run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(TF_TEST_TAR_RC=2 run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "5" ]] && [[ -z "$(ls -A "$WORK/tmp")" ]]; then
     ok "the temporary archive is removed when tar fails"
 else
@@ -508,7 +508,7 @@ fi
 setup
 odd_tmp="$WORK/tmp/a;b,c\"d\\e"
 mkdir -p "$odd_tmp"
-rc=$(TMPDIR_OVERRIDE="$odd_tmp" run_save_home "$WORK/root" "$WORK/home/tluser")
+rc=$(TMPDIR_OVERRIDE="$odd_tmp" run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && grep -q upload-file-exists "$WORK/curl.log" &&
    [[ -z "$(ls -A "$odd_tmp")" ]]; then
     ok "netboot upload works from a \$TMPDIR holding ; , \" and \\"
@@ -532,7 +532,7 @@ TF_TEST_CURL_LOG="$WORK/curl.log" \
 TF_TEST_SUDO_LOG="$WORK/sudo.log" \
 TF_TEST_CURL_BLOCK="$ready" \
 HOME="$WORK/root" \
-TF_HOME_DIR="$WORK/home/tluser" \
+TF_HOME_DIR="$WORK/home/tfuser" \
 TF_STATE_DIR="$WORK/state" \
 TF_CMDLINE="$WORK/cmdline" \
 TMPDIR="$WORK/tmp" \
@@ -574,7 +574,7 @@ setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 rm -f "$WORK/esp/home.tar.gz"
-H="$WORK/home/tluser"
+H="$WORK/home/tfuser"
 big "$H/stray.iso"
 big "$H/.config/exact" 10485760
 big "$H/a*b"
@@ -607,8 +607,8 @@ fi
 
 # The netboot path builds the same tar arguments.
 setup
-big "$WORK/home/tluser/stray.iso"
-rc=$(run_save_home "$WORK/root" "$WORK/home/tluser")
+big "$WORK/home/tfuser/stray.iso"
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == 0 ]] && grep -q -- '--exclude=./stray.iso' "$WORK/tar.log"; then
     ok "a netboot save leaves large files out too"
 else
@@ -623,7 +623,7 @@ names_setup() {
     echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
     mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
     rm -f "$WORK/esp/home.tar.gz"
-    H="$WORK/home/tluser"
+    H="$WORK/home/tfuser"
     echo 1 >"$H/.thinfloe-home-version"
     echo env >"$H/.thinfloe-environment"
     echo hash >"$H/.thinfloe-password"
