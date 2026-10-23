@@ -15,6 +15,10 @@ Before=getty@tty1.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/thinfloe-addon boot
+# Each dpkg or tar gets 25 s at boot (BOOT_TOOL_TIMEOUT in thinfloe-addon),
+# so a hung one is killed and the next add-on still installs; this bounds
+# how long the tty1 autologin waits.
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

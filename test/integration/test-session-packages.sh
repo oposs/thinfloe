@@ -469,6 +469,14 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/addonunit" "$SQSH" \
         echo "FAIL - thinfloe-addons.service Before= lines: ${before:-none}"
         fail=1
     fi
+    # A hung dpkg must not hold the tty1 autologin forever; thinfloe-addon
+    # gives each install 25 s at boot, so the next add-on still gets its turn.
+    if grep -qxE 'TimeoutStartSec=120' "$ADDONUNIT"; then
+        echo "ok   - thinfloe-addons.service has TimeoutStartSec=120"
+    else
+        echo "FAIL - thinfloe-addons.service has no TimeoutStartSec=120"
+        fail=1
+    fi
 else
     echo "FAIL - could not extract thinfloe-addons.service"
     fail=1

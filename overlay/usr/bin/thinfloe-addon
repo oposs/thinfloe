@@ -761,6 +761,10 @@ CHUNK_BYTES = 1024 * 1024
 LOG_KEEP_LINES = 500
 MAX_LOG_TEXT = 1024
 TOOL_TIMEOUT = 600
+# thinfloe-addons.service has TimeoutStartSec=120. At boot each dpkg or tar
+# gets this much, so a hung one is killed in time for the next add-on: two
+# add-ons whose next and current copies both hang take 4 * 25 s.
+BOOT_TOOL_TIMEOUT = 25
 FORMATS = ("deb", "tar")
 
 # vfat ignores case and strips trailing dots: ids differing only so would
@@ -1185,10 +1189,21 @@ def _download_apt(src: Source, found: Found, dest: str, space_dir: str) -> str:
             return _copy_out(f.read, dest, space_dir, size, found.url, NO_MEMORY)[1]
 
 
-def _tool(cmd: List[str], timeout: int = TOOL_TIMEOUT) -> subprocess.CompletedProcess:
+def _tool(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    """Run cmd in a session of its own. On timeout the whole process group is
+    killed: a maintainer script dpkg started would otherwise keep the pipes
+    open and the wait would not end."""
     env = dict(os.environ, LC_ALL="C.UTF-8", DEBIAN_FRONTEND="noninteractive")
-    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
-                          env=env, timeout=timeout)
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=TOOL_TIMEOUT if timeout is None else timeout)
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 def tar_members(path: str, what: str) -> List[str]:
@@ -1780,27 +1795,81 @@ def seed(run: Run) -> None:
         run.failed = True
 
 
+def _drop_slot(d: str, slot: str) -> None:
+    """Delete a slot, meta first, so a power loss leaves it incomplete
+    rather than a payload under the wrong meta. Call with esp_lock held."""
+    _unlink(os.path.join(d, slot + ".meta"))
+    _fsync_dir(d)
+    for fmt in FORMATS:
+        _unlink(os.path.join(d, "%s.%s" % (slot, fmt)))
+    _fsync_dir(d)
+
+
+def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
+    """Install next.*; only once that worked does it become current.*. If it
+    fails, next.* is deleted and current.*, if there is one, is installed
+    again, so the version that worked before stays."""
+    new = _label(a, nxt.meta.get("version"))
+    with install_lock():
+        log("%s: installing %s" % (a.name, new))
+        try:
+            install_stored(a.id, nxt)
+        except InstallError as e:
+            reason = str(e)
+        else:
+            with esp_lock():
+                promote(d, nxt.meta)
+            message = "%s installed" % new
+            log(message)
+            set_result(a.id, None, message)
+            return
+        failed = "%s could not be installed: %s" % (new, reason)
+        log(failed)
+        run.failed = True
+        with esp_lock():
+            _drop_slot(d, "next")
+        cur = stored(d, "current")
+        if cur is None:
+            run.fail(a, "install-failed", "install of %s failed: %s" % (new, reason))
+            return
+        old = _label(a, cur.meta.get("version"))
+        log("%s: installing %s" % (a.name, old))
+        try:
+            install_stored(a.id, cur)
+        except InstallError as e:
+            run.fail(a, "install-failed", "%s; %s failed too: %s" % (failed, old, e))
+            return
+    message = "%s; %s installed" % (failed, old)
+    log("%s installed" % old)
+    set_result(a.id, None, message)
+
+
 def cmd_boot(run: Run) -> None:
-    """Seed the ticks, then, on USB, make each ticked add-on's next.*
-    current.* and install current.* from the ESP. Sends no request. On
-    netboot the store is empty at boot; thinfloe-addon-check.service
-    fetches and installs once the network is up."""
+    """Seed the ticks, then, on USB, install each ticked add-on from the
+    ESP: next.* when there is one (it becomes current.* once installed),
+    else current.*. Sends no request. On netboot the store is empty at
+    boot; thinfloe-addon-check.service fetches and installs once the
+    network is up."""
+    global TOOL_TIMEOUT
     seed(run)
     if not esp_mounted():
         return
-    for aid in run.ticks:
-        a = run.by_id.get(aid)
-        if a is None:
-            continue
-        d = _addon_dir(a.id)
-        if stored(d, "next") is not None:
-            with install_lock():
-                with esp_lock():
-                    promote(d)
-        if stored(d, "current") is None:
-            log("%s: nothing stored on the boot stick yet; the check fetches it" % a.name)
-            continue
-        _install_slot(run, a, d, "current")
+    saved, TOOL_TIMEOUT = TOOL_TIMEOUT, BOOT_TOOL_TIMEOUT
+    try:
+        for aid in run.ticks:
+            a = run.by_id.get(aid)
+            if a is None:
+                continue
+            d = _addon_dir(a.id)
+            nxt = stored(d, "next")
+            if nxt is not None:
+                _boot_next(run, a, d, nxt)
+            elif stored(d, "current") is None:
+                log("%s: nothing stored on the boot stick yet; the check fetches it" % a.name)
+            else:
+                _install_slot(run, a, d, "current")
+    finally:
+        TOOL_TIMEOUT = saved
 
 
 def status_lines(run: Run) -> List[str]:

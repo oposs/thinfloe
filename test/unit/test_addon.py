@@ -555,8 +555,16 @@ if ! mkdir "$(dirname "$0")/dpkg.running" 2>/dev/null; then
     echo concurrent >> "$(dirname "$0")/dpkg.clash"
 fi
 if [ -e "$(dirname "$0")/dpkg.slow" ]; then sleep 0.5; fi
+# dpkg.hang-on / dpkg.fail-on: hang or fail when the arguments hold its text.
+if [ -e "$(dirname "$0")/dpkg.hang-on" ]; then
+    case "$*" in *"$(cat "$(dirname "$0")/dpkg.hang-on")"*) sleep 30 ;; esac
+fi
+if [ -e "$(dirname "$0")/dpkg.fail-on" ]; then
+    case "$*" in *"$(cat "$(dirname "$0")/dpkg.fail-on")"*) touch "$(dirname "$0")/dpkg.fail" ;; esac
+fi
 rmdir "$(dirname "$0")/dpkg.running" 2>/dev/null
 if [ -e "$(dirname "$0")/dpkg.fail" ]; then
+    [ -e "$(dirname "$0")/dpkg.fail-on" ] && rm -f "$(dirname "$0")/dpkg.fail"
     echo "dpkg: error: boom" >&2
     exit 1
 fi
@@ -1381,8 +1389,66 @@ class TestBoot(AddonEnv):
         self.assertEqual(self.files(), ["current.deb", "current.meta"])
         self.assertEqual(self.meta("current")["version"], "1.1")
         self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), self.debs["1.1"])
-        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(self.addon_dir() / "current.deb")])
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(self.addon_dir() / "next.deb")])
         self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.1\t-\t1\tDemo 1.1 installed"])
+
+    def stored_next(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.reboot()
+
+    def test_boot_failed_next_keeps_current(self):
+        self.stored_next()
+        (self.bin / "dpkg.fail-on").write_text("next.deb")
+        self.assertEqual(self.run_cmd("boot"), 1)
+        d = self.addon_dir()
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(d / "next.deb"),
+                                             DPKG_I + str(d / "current.deb")])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual((d / "current.deb").read_bytes(), self.debs["1.0"])
+        self.assertEqual(self.meta("current")["version"], "1.0")
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tinstalled\t1.0\t-\t1\t"
+            "Demo 1.1 could not be installed: dpkg: error: boom; Demo 1.0 installed"])
+        self.assertIn("Demo 1.1 could not be installed: dpkg: error: boom", self.log_lines())
+
+    def test_boot_failed_next_without_current(self):
+        self.stored_next()
+        for name in ("current.meta", "current.deb"):
+            (self.addon_dir() / name).unlink()
+        (self.bin / "dpkg.fail-on").write_text("next.deb")
+        self.assertEqual(self.run_cmd("boot"), 1)
+        self.assertEqual(len(self.dpkg_calls()), 1)
+        self.assertEqual(self.files(), [])
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tinstall-failed\t-\t-\t1\t"
+            "Demo: install of Demo 1.1 failed: dpkg: error: boom"])
+
+    def test_hung_install_is_killed_and_the_next_addon_installs(self):
+        self.stored_demo()
+        (self.tiles / "20-other.desktop").write_text(
+            "[Desktop Entry]\nName=Other\nExec=other\n"
+            "X-TF-Source-URL=%s/other.deb\n" % self.srv.base)
+        other = self.addon_dir("20-other")
+        other.mkdir(parents=True)
+        (other / "current.deb").write_bytes(b"deb")
+        (other / "current.meta").write_text(
+            "version=2.0\nfingerprint=2.0\nurl=x\nformat=deb\npackage=tf-other\n")
+        self.tick("10-demo", "20-other")
+        (self.bin / "dpkg.hang-on").write_text("10-demo")
+        start = time.monotonic()
+        with mock.patch.object(ad, "BOOT_TOOL_TIMEOUT", 1, create=True):
+            self.assertEqual(self.run_cmd("boot"), 1)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(self.ticks(), ["10-demo", "20-other"])
+        st = {l.split("\t")[0]: l.split("\t") for l in self.status()}
+        self.assertEqual(st["10-demo"][2], "install-failed")
+        self.assertIn("took longer than 1 s", st["10-demo"][6])
+        self.assertEqual(st["20-other"][2:4], ["installed", "2.0"])
+        self.assertEqual(ad.TOOL_TIMEOUT, 600, "boot's timeout leaked out of boot")
 
     def test_boot_promotes_under_the_esp_lock(self):
         self.demo_tile()
