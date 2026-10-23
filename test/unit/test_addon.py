@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Offline tests for thinfloe-addon: reading add-on definitions and checking
-their sources.
+"""Offline tests for thinfloe-addon: reading add-on definitions, checking
+their sources, storing payloads, installing and removing them.
 
 thinfloe-addon has no .py extension, so it is loaded through importlib like
 thinfloe-upgrade in test_upgrade_image.py. Its entry point is guarded, so
@@ -9,11 +9,17 @@ importing it does nothing.
 Every web source is served by an http.server bound to 127.0.0.1 in a thread.
 dpkg and apt are the real ones of the dev host; the APT check runs
 unprivileged against a flat repository built here and never touches the
-system's package lists.
+system's package lists. Installing runs unprivileged: dpkg is a fake script
+that records its arguments, tar installs into a temporary root, chown is
+patched where it is asserted.
 """
 
+import contextlib
+import fcntl
 import http.server
 import importlib.machinery
+import io
+import tarfile
 import importlib.util
 import os
 import shutil
@@ -530,6 +536,585 @@ class TestApt(ServerTest):
         with self.assertRaises(ad.CheckError):
             ad.check(src)
 
+
+# ============ Store, install, remove, status ============
+
+FAKE_DPKG = """#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/dpkg.log"
+if [ -e "$(dirname "$0")/dpkg.fail" ]; then
+    echo "dpkg: error: boom" >&2
+    exit 1
+fi
+exit 0
+"""
+
+DEMO_PATTERN = "/dl/tf-demo_(?P<version>[0-9.]+)_all\\.deb"
+
+
+def build_deb(workdir: Path, version: str, package: str = "tf-demo") -> bytes:
+    pkg = workdir / ("build-%s-%s" % (package, version))
+    (pkg / "DEBIAN").mkdir(parents=True)
+    (pkg / "DEBIAN" / "control").write_text(
+        "Package: %s\nVersion: %s\nArchitecture: all\n"
+        "Maintainer: Test <test@example.org>\nDescription: demo\n" % (package, version))
+    (pkg / "usr" / "share" / package).mkdir(parents=True)
+    (pkg / "usr" / "share" / package / "version").write_text(version + "\n")
+    out = workdir / ("%s_%s_all.deb" % (package, version))
+    subprocess.run(["dpkg-deb", "--build", "--root-owner-group", str(pkg), str(out)],
+                   check=True, capture_output=True)
+    return out.read_bytes()
+
+
+def build_tar(members: Dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        for name, data in members.items():
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            ti.mode = 0o755
+            t.addfile(ti, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class AddonEnv(ServerTest):
+    """A machine in a temporary directory: ESP, /run/thinfloe/addons, the lock,
+    a root for tar installs, tfuser's home, the shipped tiles and a fake
+    dpkg. Every http URL counts as https unless a test says otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(tempfile.mkdtemp(prefix="test-addon-store-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        self.tmp = tmp
+        self.esp = tmp / "esp"
+        self.run_dir = tmp / "run"
+        self.root = tmp / "root"
+        self.home = tmp / "home"
+        self.tiles = tmp / "tiles"
+        self.bin = tmp / "bin"
+        for d in (self.esp, self.root, self.home, self.tiles, self.bin):
+            d.mkdir()
+        self.lock = tmp / "esp.lock"
+        dpkg = self.bin / "dpkg"
+        dpkg.write_text(FAKE_DPKG)
+        dpkg.chmod(0o755)
+        patches = {
+            "ESP_DIR": str(self.esp), "RUN_DIR": str(self.run_dir),
+            "LOCK_PATH": str(self.lock), "ROOT_DIR": str(self.root),
+            "HOME_DIR": str(self.home), "DPKG": str(dpkg),
+            "SHIPPED_TILES": str(self.tiles),
+            "esp_mounted": lambda: True,
+            "tfuser_ids": lambda: (os.getuid(), os.getgid()),
+            "_secure": lambda url: True,
+        }
+        for name, value in patches.items():
+            p = mock.patch.object(ad, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.debs = {}
+
+    # -- helpers --
+
+    def demo_tile(self, extra: str = ""):
+        (self.tiles / "10-demo.desktop").write_text(
+            "[Desktop Entry]\nName=Demo\nExec=demo\n"
+            "X-TF-Source-Page=%s/dl/\nX-TF-Source-Pattern=%s\n%s"
+            % (self.srv.base, DEMO_PATTERN, extra))
+
+    def publish(self, *versions: str):
+        """The download page lists exactly these versions."""
+        links = []
+        for v in versions:
+            if v not in self.debs:
+                self.debs[v] = build_deb(self.tmp, v)
+            path = "/dl/tf-demo_%s_all.deb" % v
+            self.srv.routes[path] = Route(200, {"ETag": '"%s"' % v}, body=self.debs[v])
+            links.append('<a href="%s">%s</a>' % (path, v))
+        self.srv.routes["/dl/"] = Route(200, body="\n".join(links).encode())
+
+    def tick(self, *ids: str):
+        d = self.home / ".config" / "thinfloe"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "addons").write_text("".join(i + "\n" for i in ids))
+
+    def ticks(self) -> List[str]:
+        f = self.home / ".config" / "thinfloe" / "addons"
+        return f.read_text().split() if f.exists() else []
+
+    def run_cmd(self, *argv: str) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ad.main(list(argv))
+
+    def addon_dir(self, aid: str = "10-demo") -> Path:
+        return self.esp / "addons" / aid
+
+    def files(self, aid: str = "10-demo") -> List[str]:
+        d = self.addon_dir(aid)
+        return sorted(os.listdir(d)) if d.exists() else []
+
+    def meta(self, slot: str, aid: str = "10-demo") -> Dict[str, str]:
+        out = {}
+        for line in (self.addon_dir(aid) / (slot + ".meta")).read_text().splitlines():
+            k, v = line.split("=", 1)
+            out[k] = v
+        return out
+
+    def dpkg_calls(self) -> List[str]:
+        f = self.bin / "dpkg.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def status(self) -> List[str]:
+        return (self.run_dir / "status").read_text().splitlines()
+
+    def log_lines(self) -> List[str]:
+        f = self.run_dir / "log"
+        return [l.split("\t", 1)[1] for l in f.read_text().splitlines()] if f.exists() else []
+
+
+class TestStore(AddonEnv):
+    def test_first_install_stores_current_and_installs(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.assertEqual(self.ticks(), ["10-demo"])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), self.debs["1.0"])
+        m = self.meta("current")
+        self.assertEqual((m["version"], m["format"], m["package"], m["fingerprint"]),
+                         ("1.0", "deb", "tf-demo", "1.0"))
+        self.assertEqual(m["url"], self.srv.base + "/dl/tf-demo_1.0_all.deb")
+        self.assertTrue(m["fetched"].isdigit())
+        self.assertEqual(self.dpkg_calls(),
+                         ["-i %s" % (self.addon_dir() / "current.deb")])
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
+        self.assertIn("Demo 1.0 installed", self.log_lines())
+
+    def test_check_installs_when_there_is_no_copy_yet(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("10-demo")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(len(self.dpkg_calls()), 1)
+        self.assertTrue((self.run_dir / "last-check").read_text().strip().isdigit())
+
+    def test_newer_version_becomes_next_and_pending(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.publish("1.0", "1.1")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta", "next.deb", "next.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.0")
+        self.assertEqual(self.meta("next")["version"], "1.1")
+        self.assertEqual((self.addon_dir() / "next.deb").read_bytes(), self.debs["1.1"])
+        self.assertEqual(len(self.dpkg_calls()), 1, "the check installs nothing")
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tpending\t1.0\t1.1\t1\t"
+            "Demo 1.1 stored on the boot stick, active at next boot"])
+        # A second check finds the same version and leaves next alone.
+        before = len(self.srv.requests)
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertNotIn(("GET", "/dl/tf-demo_1.1_all.deb"), self.srv.requests[before:])
+        self.assertEqual(self.status()[0].split("\t")[2], "pending")
+
+    def test_up_to_date(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertIn("Demo: up to date", self.log_lines())
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo: up to date"])
+
+    def test_update_promotes_next(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.assertEqual(self.run_cmd("update", "10-demo"), 0)
+        self.assertEqual(self.dpkg_calls()[-1], "-i %s" % (self.addon_dir() / "next.deb"))
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.1")
+        self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), self.debs["1.1"])
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.1\t-\t1\tDemo 1.1 installed"])
+
+    def test_update_without_next_fetches_first(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.assertEqual(self.run_cmd("update", "10-demo"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.1")
+        self.assertEqual(len(self.dpkg_calls()), 2)
+
+    def test_failed_install_keeps_next(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        (self.bin / "dpkg.fail").touch()
+        self.assertEqual(self.run_cmd("update", "10-demo"), 1)
+        self.assertEqual(self.meta("current")["version"], "1.0")
+        self.assertEqual(self.meta("next")["version"], "1.1")
+
+    def test_failed_check_keeps_current(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        before = (self.addon_dir() / "current.deb").read_bytes()
+        self.srv.routes["/dl/"] = Route(500, body=b"down")
+        self.assertEqual(self.run_cmd("check"), 1)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), before)
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tfailed\t1.0\t-\t1\t"
+            "Demo: check failed: %s/dl/ answered HTTP 500" % self.srv.base])
+        self.assertEqual(len(self.dpkg_calls()), 1)
+
+    def test_html_instead_of_a_deb_is_refused(self):
+        self.demo_tile()
+        self.publish("1.0")
+        url = self.srv.base + "/dl/tf-demo_1.0_all.deb"
+        self.srv.routes["/dl/tf-demo_1.0_all.deb"] = Route(
+            200, {"ETag": '"x"'}, body=b"<html><body>Please log in</body></html>")
+        self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(self.files(), [])
+        self.assertEqual(self.dpkg_calls(), [])
+        self.assertTrue(any(url in l and "not a Debian package" in l
+                            for l in self.log_lines()), self.log_lines())
+        self.assertEqual(self.status()[0].split("\t")[:5],
+                         ["10-demo", "1", "failed", "-", "-"])
+
+    def test_cut_download_is_refused(self):
+        self.demo_tile()
+        self.publish("1.0")
+        r = self.srv.routes["/dl/tf-demo_1.0_all.deb"]
+        r.headers["Content-Length"] = str(len(r.body) + 100)
+        r.headers["Connection"] = "close"
+        self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(self.files(), [])
+
+    def test_no_space_keeps_current_and_removes_new(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        with mock.patch.object(ad, "free_bytes", lambda path: 10 * 1024 * 1024):
+            self.assertEqual(self.run_cmd("check"), 1)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.0")
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tfailed\t1.0\t-\t1\t"
+            "Demo: download failed: not enough space on the boot stick"])
+
+    def test_store_waits_for_the_esp_lock(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("10-demo")
+        fd = os.open(str(self.lock), os.O_RDWR | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        rc = []
+        t = threading.Thread(target=lambda: rc.append(ad.main(["check"])))
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.start()
+            deadline = time.monotonic() + 15
+            while ("HEAD", "/dl/tf-demo_1.0_all.deb") not in self.srv.requests:
+                self.assertLess(time.monotonic(), deadline, "the check never ran")
+                time.sleep(0.05)
+            time.sleep(0.5)
+            self.assertFalse(self.addon_dir().exists(), "wrote the ESP under a held lock")
+            self.assertNotIn(("GET", "/dl/tf-demo_1.0_all.deb"), self.srv.requests)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            t.join(30)
+        self.assertEqual(rc, [0])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+
+    def test_netboot_stores_in_the_cache(self):
+        cache = self.tmp / "cache"
+        self.demo_tile()
+        self.publish("1.0")
+        with mock.patch.object(ad, "esp_mounted", lambda: False), \
+                mock.patch.object(ad, "CACHE_DIR", str(cache)):
+            self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.assertEqual(sorted(os.listdir(cache / "10-demo")), ["current.deb", "current.meta"])
+        self.assertFalse((self.esp / "addons").exists())
+
+
+class TestTar(AddonEnv):
+    def tar_tile(self, members: Dict[str, bytes]):
+        (self.tiles / "20-tool.desktop").write_text(
+            "[Desktop Entry]\nName=Tool\nExec=/opt/tool/bin/tool\n"
+            "X-TF-Source-URL=%s/tool.tar.gz\n" % self.srv.base)
+        self.srv.routes["/tool.tar.gz"] = Route(200, {"ETag": '"t1"'}, body=build_tar(members))
+
+    def test_tar_installs_into_root_and_remove_deletes_it(self):
+        self.tar_tile({"opt/tool/bin/tool": b"#!/bin/sh\n", "opt/tool/README": b"hi\n"})
+        self.assertEqual(self.run_cmd("install", "20-tool"), 0)
+        self.assertEqual(self.files("20-tool"), ["current.meta", "current.tar"])
+        self.assertEqual((self.root / "opt/tool/README").read_bytes(), b"hi\n")
+        self.assertEqual(self.dpkg_calls(), [])
+        self.assertEqual(self.status()[0], "20-tool\t1\tinstalled\t-\t-\t1\tTool installed")
+        self.assertEqual(self.run_cmd("remove", "20-tool"), 0)
+        self.assertFalse((self.root / "opt/tool/README").exists())
+        self.assertFalse((self.root / "opt/tool/bin/tool").exists())
+        self.assertFalse(self.addon_dir("20-tool").exists())
+        self.assertEqual(self.ticks(), [])
+
+    def test_tar_must_be_relative(self):
+        for bad in ("/etc/evil", "opt/../../evil", "../evil"):
+            with self.subTest(member=bad):
+                self.tar_tile({"opt/tool/ok": b"x", bad: b"x"})
+                self.assertEqual(self.run_cmd("install", "20-tool"), 1)
+                self.assertEqual(self.files("20-tool"), [])
+                self.assertEqual(os.listdir(self.root), [])
+                self.assertTrue(any(bad in l for l in self.log_lines()), self.log_lines())
+
+    def test_tar_member_with_a_newline_is_refused(self):
+        self.tar_tile({"opt/tool/x\netc/passwd": b"x"})
+        self.assertEqual(self.run_cmd("install", "20-tool"), 1)
+        self.assertEqual(os.listdir(self.root), [])
+
+    def test_not_a_tar_is_refused(self):
+        self.tar_tile({})
+        self.srv.routes["/tool.tar.gz"] = Route(200, {"ETag": '"t"'}, body=b"<html>no</html>")
+        self.assertEqual(self.run_cmd("install", "20-tool"), 1)
+        self.assertEqual(self.files("20-tool"), [])
+
+
+class TestRemove(AddonEnv):
+    def test_remove_unticks_and_cleans(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.assertEqual(self.run_cmd("remove", "10-demo"), 0)
+        self.assertEqual(self.ticks(), [])
+        self.assertEqual(self.dpkg_calls()[-1], "-r tf-demo")
+        self.assertFalse(self.addon_dir().exists())
+        self.assertEqual(self.status(), ["10-demo\t0\tabsent\t-\t-\t1\t-"])
+        self.assertIn("Demo removed", self.log_lines())
+
+    def test_remove_keeps_other_ticks(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("05-gone", "10-demo")
+        self.run_cmd("install", "10-demo")
+        self.run_cmd("remove", "10-demo")
+        self.assertEqual(self.ticks(), ["05-gone"], "unknown ids are kept")
+        self.assertTrue(any("05-gone" in l for l in self.log_lines()))
+
+
+class TestManual(AddonEnv):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(ad, "_secure", lambda url: url.lower().startswith("https:"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_manual_source_skipped_by_check_all(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("10-demo")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertIn("Demo: not checked automatically (neither HTTPS nor signed)",
+                      self.log_lines())
+        self.assertEqual(self.srv.requests, [])
+        self.assertEqual(self.files(), [])
+        self.assertEqual(self.status(), ["10-demo\t1\tabsent\t-\t-\t0\t-"])
+
+    def test_check_with_the_id_of_a_manual_source_stores_nothing(self):
+        # Ruling R1: a stored next.* would be installed at the next boot with
+        # nobody pressing anything.
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("10-demo")
+        self.assertEqual(self.run_cmd("check", "10-demo"), 0)
+        self.assertEqual(self.files(), [], "not installed: still nothing stored")
+        self.assertEqual(self.dpkg_calls(), [])
+
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0, "Install now is manual")
+        self.publish("1.0", "1.1")
+        self.assertEqual(self.run_cmd("check", "10-demo"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(len(self.dpkg_calls()), 1)
+        self.assertNotIn(("GET", "/dl/tf-demo_1.1_all.deb"), self.srv.requests)
+        self.assertTrue(any("Demo 1.1" in l and "Update now" in l for l in self.log_lines()),
+                        self.log_lines())
+
+        self.assertEqual(self.run_cmd("update", "10-demo"), 0, "Update now is manual")
+        self.assertEqual(self.meta("current")["version"], "1.1")
+
+    def test_automatic_download_never_follows_http(self):
+        # https page and link, but the download redirects to http.
+        self.demo_tile()
+        self.publish("1.0")
+        with mock.patch.object(ad, "_secure", lambda url: True):
+            self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.tick("10-demo")
+        calls = []
+        real = ad._request
+
+        def spy(method, url, seen, https_only=False):
+            calls.append((method, https_only))
+            return real(method, url, seen, False)
+
+        with mock.patch.object(ad, "auto_allowed", lambda src, seen: True), \
+                mock.patch.object(ad, "_request", spy):
+            self.run_cmd("check")
+        self.assertIn(("GET", True), calls, "the automatic download must be https only")
+
+
+class TestStatusAndLog(AddonEnv):
+    def test_status_columns(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.assertEqual(self.run_cmd("status"), 0)
+        self.assertEqual(self.status(), ["10-demo\t0\tabsent\t-\t-\t1\t-"])
+
+        (self.bin / "dpkg.fail").touch()
+        self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tinstall-failed\t-\t-\t1\t"
+            "Demo: install failed: dpkg: error: boom"])
+        (self.bin / "dpkg.fail").unlink()
+
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
+
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tpending\t1.0\t1.1\t1\t"
+            "Demo 1.1 stored on the boot stick, active at next boot"])
+
+        self.srv.routes["/dl/"] = Route(404)
+        self.run_cmd("check")
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tfailed\t1.0\t1.1\t1\t"
+            "Demo: check failed: %s/dl/ answered HTTP 404" % self.srv.base])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ad.main(["status"]), 0)
+        self.assertEqual(out.getvalue().splitlines(), self.status())
+
+    def test_status_via_the_environment(self):
+        self.demo_tile()
+        env = dict(os.environ, TF_ADDON_ESP=str(self.esp), TF_ADDON_RUN=str(self.run_dir),
+                   TF_ADDON_LOCK=str(self.lock), TF_ADDON_ROOT=str(self.root),
+                   TF_ADDON_HOME=str(self.home), TF_ADDON_DPKG=str(self.bin / "dpkg"),
+                   TF_ADDON_TILES=str(self.tiles))
+        r = subprocess.run([str(SCRIPT), "status"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "10-demo\t0\tabsent\t-\t-\t0\t-\n")
+        self.assertEqual(self.status(), ["10-demo\t0\tabsent\t-\t-\t0\t-"])
+
+    def test_log_kept_to_500_lines(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            for i in range(600):
+                ad.log("line %d" % i)
+            ad.log("tab\there\nand newline")
+        lines = (self.run_dir / "log").read_text().splitlines()
+        self.assertEqual(len(lines), 500)
+        self.assertRegex(lines[0], r"^[0-9]+\tline 101$")
+        self.assertRegex(lines[-1], r"^[0-9]+\ttab here and newline$")
+
+    def test_unknown_command_is_usage(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_cmd("frobnicate"), 2)
+
+    def test_tile_name_that_is_no_id_is_logged_and_skipped(self):
+        (self.tiles / "my tool.desktop").write_text(
+            "[Desktop Entry]\nName=T\nExec=t\nX-TF-Source-URL=https://e.example/t.deb\n")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.status(), [])
+        self.assertTrue(any("my tool.desktop" in l for l in self.log_lines()))
+
+    def test_install_of_an_unknown_id_fails(self):
+        self.assertEqual(self.run_cmd("install", "99-nope"), 1)
+        self.assertEqual(self.ticks(), [])
+
+
+class TestTickFile(AddonEnv):
+    def test_tick_file_owned_by_tfuser(self):
+        self.demo_tile()
+        self.publish("1.0")
+        with mock.patch.object(ad, "tfuser_ids", lambda: (1000, 1001)), \
+                mock.patch.object(ad.os, "fchown") as fchown:
+            self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.assertEqual(self.ticks(), ["10-demo"])
+        owners = {c.args[1:] for c in fchown.call_args_list}
+        self.assertEqual(owners, {(1000, 1001)})
+        # ~/.config, ~/.config/thinfloe and the file itself
+        self.assertEqual(len(fchown.call_args_list), 3)
+        self.assertEqual(stat_mode(self.home / ".config/thinfloe/addons"), 0o644)
+
+    def test_tick_file_never_written_through_a_symlink(self):
+        self.demo_tile()
+        self.publish("1.0")
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.home / ".config").mkdir()
+        (self.home / ".config" / "thinfloe").symlink_to(elsewhere)
+        self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(self.files(), [])
+
+
+def stat_mode(p: Path) -> int:
+    return p.stat().st_mode & 0o777
+
+
+class TestAptStore(AddonEnv):
+    def test_apt_install_downloads_with_apt(self):
+        if not shutil.which("dpkg-scanpackages"):
+            self.skipTest("dpkg-scanpackages missing (install dpkg-dev)")
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        deb = build_deb(self.tmp, "1.10-1")
+        (repo / "tf-demo_1.10-1_all.deb").write_bytes(deb)
+        packages = subprocess.run(["dpkg-scanpackages", ".", "/dev/null"], cwd=repo,
+                                  check=True, capture_output=True).stdout
+        self.srv.routes["/flat/Packages"] = Route(200, body=packages)
+        self.srv.routes["/flat/tf-demo_1.10-1_all.deb"] = Route(200, body=deb)
+        (self.tiles / "30-apt.desktop").write_text(
+            "[Desktop Entry]\nName=AptDemo\nExec=demo\n"
+            "X-TF-Source-Apt=%s/flat ./\nX-TF-Source-Package=tf-demo\n" % self.srv.base)
+        self.assertEqual(self.run_cmd("install", "30-apt"), 0, self.log_lines())
+        self.assertEqual((self.addon_dir("30-apt") / "current.deb").read_bytes(), deb)
+        m = self.meta("current", "30-apt")
+        self.assertEqual((m["version"], m["package"], m["fingerprint"]),
+                         ("1.10-1", "tf-demo", "tf-demo=1.10-1"))
+        self.assertEqual(len(self.dpkg_calls()), 1)
+
+    def test_apt_dirs_are_open_to_the_apt_sandbox(self):
+        tmp = self.tmp / "aptdir"
+        tmp.mkdir(mode=0o700)
+        for d in ("lists/partial", "cache/archives/partial", "download"):
+            (tmp / d).mkdir(parents=True)
+        key = tmp / "key.asc"
+        key.write_text("k")
+        key.chmod(0o600)
+        apt_user = mock.Mock(pw_uid=100, pw_gid=65534)
+        with mock.patch.object(ad.os, "geteuid", lambda: 0), \
+                mock.patch.object(ad.pwd, "getpwnam", lambda n: apt_user), \
+                mock.patch.object(ad.os, "chown") as chown:
+            ad._apt_sandbox(str(tmp))
+        self.assertEqual(stat_mode(tmp), 0o755)
+        self.assertEqual(stat_mode(key), 0o644)
+        chowned = {c.args[0] for c in chown.call_args_list}
+        self.assertEqual(chowned, {str(tmp / "lists/partial"),
+                                   str(tmp / "cache/archives/partial"),
+                                   str(tmp / "download")})
+        for c in chown.call_args_list:
+            self.assertEqual(c.args[1:], (100, 0))
 
 if __name__ == "__main__":
     unittest.main()
