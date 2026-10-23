@@ -48,6 +48,17 @@ Compiles iPXE from source and exports PXE/EFI boot files to `artifacts/rootfs/`.
 dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
 ```
 
+### Publish the image for thinfloe-upgrade:
+```bash
+scripts/publish.sh
+```
+Uploads `vmlinuz`, `initrd.img`, `ramroot.sqsh` and
+`thinfloe-usb.img.zst` with its checksum to the upgrade server
+`https://tobi.oetiker.ch/dbrrg`, which kept its name through the rename.
+It also uploads the image as `dbrrg-usb.img.zst` (a hard link under
+`artifacts/images/bridge/`), because the 3.x `upgrade-image` fetches only
+that name. `vmlinuz`, `initrd.img` and `ramroot.sqsh` keep their names.
+
 ## Boot Flow Architecture
 
 The boot process involves several interconnected components:
@@ -876,17 +887,14 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   boot runs the 3.x initramfs on the 4.0 squashfs: no rename, a default
   keyboard, no SSH password, fresh host keys, the host name `dbrrg-…`, and
   every save refused with exit 4 (the archive on the ESP stays intact). The
-  next boot runs the 4.0 initramfs and migrates the home.
+  next boot runs the 4.0 initramfs and migrates the home. The owner
+  confirmed on 2026-10-23 that no stick in the field runs an image older
+  than 2026-10-07.
 - Still read, next to the new names: `rd.dbrrg.debug` (`rd.thinfloe.debug`),
   `X-DBRRG-Action`, `X-DBRRG-Save-On-Exit` and `X-DBRRG-Multiple` (the
   `X-TF-` key wins) and `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
 - Shipped tile files keep their file names (`50-upgrade-image.desktop`),
   because a user file rewording a shipped tile matches by file name.
-- Upload bridge: `scripts/publish.sh` also uploads the image as
-  `dbrrg-usb.img.zst` (a hard link under `artifacts/images/bridge/`),
-  because the 3.x `upgrade-image` fetches only that name. `vmlinuz`,
-  `initrd.img` and `ramroot.sqsh` keep their names. The upgrade server
-  `https://tobi.oetiker.ch/dbrrg` is unchanged.
 
 Guards: `test/integration/test-initramfs-home.sh` (migration and links),
 `test/integration/test-3x-fallback.sh` (frozen 3.x scripts in
