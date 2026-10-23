@@ -23,8 +23,8 @@ FILES=(
 # upgrade-image reads no checksum; dbrrg-usb.img.zst.sha256 names the old
 # file for whoever verifies a download of it by hand.
 BRIDGE_DIR="$ARTIFACT_DIR/images/bridge"
-mkdir -p "$BRIDGE_DIR"
 if [[ -f "$ARTIFACT_DIR/images/thinfloe-usb.img.zst" ]]; then
+    mkdir -p "$BRIDGE_DIR"
     ln -f "$ARTIFACT_DIR/images/thinfloe-usb.img.zst" "$BRIDGE_DIR/dbrrg-usb.img.zst"
     (cd "$BRIDGE_DIR" && sha256sum dbrrg-usb.img.zst > dbrrg-usb.img.zst.sha256)
 fi
