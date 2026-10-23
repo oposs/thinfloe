@@ -838,9 +838,13 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
 - **The marker** `/run/thinfloe/state/home-renamed` lists one old name per
   line, and only when a real 3.x file was renamed. Nothing reads it yet; it
   is meant for the add-on auto-tick.
-- **A failed listing fails the restore.** When the archive cannot be listed
-  after a successful extraction, `home-restore` is `failed`, so no save
-  overwrites the stored archive with a half-migrated home.
+- **A failed listing fails the restore.** The restore lists the archive
+  once, before extracting it, and the migration decides from that listing,
+  so a boot decompresses the archive twice. When that listing is empty the
+  archive is not extracted; when tar lists members but exits non-zero and the
+  extraction still works, the rename is not attempted and the old names are
+  not linked. Both leave `home-restore` at `failed`, so no save overwrites
+  the stored archive with a half-migrated home.
 - **The links are made at write time too.** `thinfloe-password --set` and
   `thinfloe-ssh-hostkeys` create `~/.dbrrg-password` and
   `~/.dbrrg-ssh-host-keys` when they write, owned by tluser, and `--clear`

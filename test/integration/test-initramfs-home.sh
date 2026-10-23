@@ -677,17 +677,17 @@ else
     bad "rename log lines missing: $(cat "$WORK/tflog")"
 fi
 
-# Listing fails although extraction worked: the restore counts as failed, the
-# real old files stay, and no marker is written.
+# Listing fails although extraction worked: tar lists every member and then
+# exits non-zero, so the listing cannot be trusted to decide the rename. The
+# restore counts as failed, the real old files stay, and no marker is written.
 d="$WORK/hn-listfail"; mkdefault "$d"; mkdir -p "$d/src" "$d/fakebin"
 mk3x "$d/src"; tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 REALTAR=$(command -v tar)
 cat >"$d/fakebin/tar" <<STUB
 #!/bin/bash
-# Fails only for list mode after the first call (the usability check lists too).
-n=\$(cat "$d/tarcount" 2>/dev/null || echo 0)
+# List mode prints the real listing, then fails.
 case "\$1" in
-    -t*) echo \$((n+1)) >"$d/tarcount"; [ "\$n" -ge 1 ] && exit 2 ;;
+    -t*) $REALTAR "\$@"; exit 2 ;;
 esac
 exec $REALTAR "\$@"
 STUB
@@ -704,6 +704,25 @@ else
     bad "listing failure: state=$(cat "$d/state/home-restore") ls=$(ls -la "$h" | tr '\n' ' ')"
 fi
 
+# The archive is decompressed twice per restore: one listing, one extraction.
+# A third pass (listing again for the rename) cost boot time on every boot.
+d="$WORK/hn-tarcount"; mkdefault "$d"; mkdir -p "$d/src" "$d/fakebin"
+mk3x "$d/src"; tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+cat >"$d/fakebin/tar" <<STUB
+#!/bin/bash
+echo "\$1" >>"$d/tarcalls"
+exec $REALTAR "\$@"
+STUB
+chmod +x "$d/fakebin/tar"
+( PATH="$d/fakebin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
+calls=$(tr '\n' ' ' <"$d/tarcalls")
+if [[ "$calls" == "-tzf -xzf " ]]; then
+    check_3x_result "one listing and one extraction per restore, 3.x home migrated" \
+        "$d/newroot/home/tluser" "$d/state"
+else
+    bad "tar calls per restore: $calls"
+fi
+
 # Early failed return (netboot without a boot MAC) still links the defaults.
 d="$WORK/hn-nomac"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
@@ -713,6 +732,20 @@ if [[ "$(cat "$d/state/home-restore")" == "failed" && -L "$h/.dbrrg-environment"
     ok "netboot without boot MAC: failed, old names still linked to the defaults"
 else
     bad "no-MAC path: $(ls -la "$h" | tr '\n' ' ')"
+fi
+
+# Early failed return (netboot, home URL cannot be built) still links the defaults.
+d="$WORK/hn-nourl"; mkdefault "$d"
+echo "de:ad:be:ef:00:04" >"$d/state/boot-mac"
+( tf_home_url() { return 1; }
+  restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh" )
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && -L "$h/.dbrrg-environment" \
+   && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" \
+   && -L "$h/.dbrrg-sessionrc" && ! -e "$d/state/home-renamed" ]]; then
+    ok "netboot without a home URL: failed, old names still linked to the defaults"
+else
+    bad "no-URL path: state=$(cat "$d/state/home-restore" 2>&1) $(ls -la "$h" | tr '\n' ' ')"
 fi
 
 # A real old entry replaced by the link is warned about.
@@ -918,9 +951,9 @@ d="$WORK/hn-idem"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
-tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h"
+tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h"
 snap1=$(cd "$h" && find . -printf '%p %y %l\n' | sort | tr '\n' ';')
-tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h"
+tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h"
 snap2=$(cd "$h" && find . -printf '%p %y %l\n' | sort | tr '\n' ';')
 if [[ "$snap1" == "$snap2" && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]]; then
     ok "migrate and link run twice give the same tree"
@@ -934,7 +967,7 @@ tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$d/a.tgz" "$d/state/home-renamed"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/state/home-renamed"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
 echo ok >"$d/state/home-restore"
 if [[ ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
     check_3x_result "rename and link helpers work with only the initramfs's tools" "$h" "$d/state"
@@ -949,7 +982,7 @@ tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
 if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.dbrrg-password" \
    && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
     ok "the cleared-on-3.x check works with only the initramfs's tools"
@@ -964,7 +997,7 @@ tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
 if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -L "$h/.dbrrg-password" \
    && ! -e "$d/ren" && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
     ok "the set-on-3x password rule works with only the initramfs's tools"

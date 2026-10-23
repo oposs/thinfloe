@@ -60,7 +60,7 @@ mkdir -p "$H4"
 echo default-env >"$H4/.thinfloe-environment"
 echo default-rc  >"$H4/.thinfloe-sessionrc"
 tar -xzf "$WORK/3x.tgz" -C "$H4"
-tf_migrate_home_names "$H4" "$WORK/3x.tgz" "$WORK/renamed"
+tf_migrate_home_names "$H4" "$(tar -tzf "$WORK/3x.tgz")" "$WORK/renamed"
 tf_link_old_home_names "$H4"
 
 # 4.0's save: the tar form of thinfloe-save-home, run from inside the home.

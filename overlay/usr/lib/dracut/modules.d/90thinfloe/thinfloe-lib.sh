@@ -205,8 +205,8 @@ tf_route_iface() {
 #       home in place rather than aborting the boot.
 #   2 = there WAS something and it did not restore - unusable tar, failed
 #       extraction, or the target directory could not even be created.
-#   3 = extracted, but the archive could not be listed to migrate the
-#       ~/.dbrrg-* names (treated like 2 by restore_home, which also skips
+#   3 = extracted, but the listing failed, so the ~/.dbrrg-* names could
+#       not be migrated (treated like 2 by restore_home, which also skips
 #       linking the old names).
 tf_restore_home_from_file() {
     _drhf_archive="$1"
@@ -233,7 +233,12 @@ tf_restore_home_from_file() {
     # below.) A boot server answering 200 with a gzip-encoded error page is
     # enough, and curl -f does not catch a 200. So require the archive to
     # contain at least one member before trusting it.
-    if [ -z "$(tar -tzf "$_drhf_archive" 2>/dev/null | sed -n '1p;q')" ]; then
+    #
+    # The listing is kept for tf_migrate_home_names: listing the archive
+    # there a second time decompressed it a third time on every boot.
+    _drhf_list=$(tar -tzf "$_drhf_archive" 2>/dev/null)
+    _drhf_list_rc=$?
+    if [ -z "$_drhf_list" ]; then
         warn "thinfloe: $_drhf_archive is not a usable tar archive"
         return 2
     fi
@@ -254,12 +259,13 @@ tf_restore_home_from_file() {
 
     # An archive saved by 3.x carries ~/.dbrrg-* names; give them their
     # 4.0 names now, before anything reads them. Never fails the restore.
-    # If the archive cannot be listed now, the rename cannot be decided. The
-    # home then holds 3.x names beside image defaults, and linking the old
-    # names would delete the user's real files. Return 3: the caller counts
-    # it as a failed restore (saving is refused, the archive survives) and
-    # does not link.
-    if ! tf_migrate_home_names "$_drhf_home" "$_drhf_archive" "$_drhf_renamed"; then
+    # If the listing failed (tar exited non-zero, so it may be incomplete),
+    # the rename cannot be decided. The home then holds 3.x names beside
+    # image defaults, and linking the old names would delete the user's real
+    # files. Return 3: the caller counts it as a failed restore (saving is
+    # refused, the archive survives) and does not link.
+    if [ "$_drhf_list_rc" -ne 0 ] \
+       || ! tf_migrate_home_names "$_drhf_home" "$_drhf_list" "$_drhf_renamed"; then
         warn "thinfloe: could not list $_drhf_archive after extraction, home names not migrated"
         return 3
     fi
@@ -364,7 +370,7 @@ _tf_parent_is_link() {
     return 0
 }
 
-# tf_migrate_home_names <home> <archive> [<renamed-file>]
+# tf_migrate_home_names <home> <listing> [<renamed-file>]
 #
 # Give the files of a 3.x home archive their 4.0 names, after the archive has
 # been extracted over the image's default home.
@@ -384,17 +390,17 @@ _tf_parent_is_link() {
 # one that lists both, with a real (not symlink) ~/.dbrrg-password on disk,
 # was saved by 3.x after `--clear` and `--set`, and the old file replaces the
 # new one.
-# The archive is listed once. tar and the other tools are those the
-# initramfs has: no cut, head, basename, readlink.
+# <listing> is the archive's `tar -tzf` output, which the caller already made
+# to check the archive; listing it again here would decompress it once more.
+# The tools are those the initramfs has: no cut, head, basename, readlink.
 #
-# Returns 0, except 1 when the archive cannot be listed (the caller must then
-# treat the restore as failed). A failed single rename is only warned about.
+# Returns 0, except 1 when the listing is empty (the caller must then treat
+# the restore as failed). A failed single rename is only warned about.
 tf_migrate_home_names() {
     _tmh_home="$1"
-    _tmh_archive="$2"
+    _tmh_list="$2"
     _tmh_renamed="${3:-}"
 
-    _tmh_list=$(tar -tzf "$_tmh_archive" 2>/dev/null) || true
     [ -n "$_tmh_list" ] || return 1
 
     # Newline-separated triples, split with parameter expansion: the shell
