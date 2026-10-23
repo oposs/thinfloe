@@ -75,8 +75,6 @@ STUB
 cat >"$STUBS/chown" <<'STUB'
 #!/bin/bash
 echo "chown $*" >>"$TF_TEST_LOG"
-# TF_TEST_CHOWN_LINK_FAIL makes chowning the link fail (chown -h).
-[[ -n "${TF_TEST_CHOWN_LINK_FAIL:-}" && "$1" == -h ]] && exit 1
 exit 0
 STUB
 
@@ -225,50 +223,30 @@ else
 fi
 
 # ---------------------------------------------------------------- test 11
-# 3.x reads ~/.dbrrg-password. The link is made when the hash is written, not
-# only by the next boot's initramfs: a home saved before that boot would
-# otherwise hold .thinfloe-password without .dbrrg-password, which the restore
-# reads as "cleared by 3.x" and removes. The link belongs to tluser, like the
-# file.
+# 4.0 keeps no link under the 3.x name ~/.dbrrg-password: a 3.x home is
+# migrated once by the initramfs and nothing reads the old name afterwards.
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 OLD="$WORK/home/tluser/.dbrrg-password"
-if [[ "$rc" == "0" ]] && [[ -L "$OLD" ]] &&
-   [[ "$(readlink "$OLD")" == "$STORE_NAME" ]] &&
-   grep -q "^chown -h tluser:tluser $OLD\$" "$WORK/calls.log"; then
-    ok "--set links ~/.dbrrg-password to the stored hash, owned by tluser"
+if [[ "$rc" == "0" ]] && [[ ! -e "$OLD" && ! -L "$OLD" ]] &&
+   ! grep -q '^chown -h' "$WORK/calls.log"; then
+    ok "--set makes no ~/.dbrrg-password"
 else
-    bad "--set links ~/.dbrrg-password to the stored hash, owned by tluser (exit $rc, link '$(readlink "$OLD" 2>/dev/null)', chown: $(grep '^chown -h' "$WORK/calls.log" 2>/dev/null | head -1))"
+    bad "--set makes no ~/.dbrrg-password (exit $rc, link '$(readlink "$OLD" 2>/dev/null)')"
 fi
 
 # ---------------------------------------------------------------- test 12
-# --clear removes the link as well as the file; a dangling link left behind
-# would be carried into every save.
+# --clear removes the stored hash only. A ~/.dbrrg-password that a 3.x
+# fallback save left in the home is 3.x's own file; 4.0 never reads it.
 setup
 echo "$FAKE_HASH" >"$STORE"
-ln -s "$STORE_NAME" "$WORK/home/tluser/.dbrrg-password"
+echo "3x-hash" >"$WORK/home/tluser/.dbrrg-password"
 rc=$(run_password "$WORK/root" '' --clear)
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
-   [[ ! -L "$WORK/home/tluser/.dbrrg-password" ]]; then
-    ok "--clear removes ~/.dbrrg-password as well"
+   [[ "$(cat "$WORK/home/tluser/.dbrrg-password")" == "3x-hash" ]]; then
+    ok "--clear removes only ~/.thinfloe-password"
 else
-    bad "--clear removes ~/.dbrrg-password as well (exit $rc, link left: $([[ -L "$WORK/home/tluser/.dbrrg-password" ]] && echo yes || echo no))"
-fi
-
-# ---------------------------------------------------------------- test 13
-# When the link cannot be made, the password is already in effect; it is lost
-# only if a save runs before the next boot (that boot then reads the home as
-# "cleared by 3.x"). The message says so instead of claiming the next boot
-# clears it regardless.
-setup
-rc=$(TF_TEST_CHOWN_LINK_FAIL=1 run_password "$WORK/root" $'swordfish\nswordfish\n')
-if [[ "$rc" != "0" ]] &&
-   grep -qF "The password is set and works now" "$WORK/err" &&
-   grep -qF "if the home is saved before the next boot, that boot clears it" "$WORK/err" &&
-   ! grep -qF "would be cleared at the next boot" "$WORK/err"; then
-    ok "a failed link says the password works now and when it would be cleared"
-else
-    bad "a failed link says the password works now and when it would be cleared (exit $rc, err: $(cat "$WORK/err"))"
+    bad "--clear removes only ~/.thinfloe-password (exit $rc)"
 fi
 
 if [[ "$fail" == "0" ]]; then
