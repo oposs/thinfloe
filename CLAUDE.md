@@ -853,10 +853,15 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   `~/.thinfloe-password` and logs `thinfloe: ~/.dbrrg-password was removed by
   the previous version; clearing ~/.thinfloe-password`. If the reading is
   wrong, the user sets the password again; a revoked password never returns.
-- **Accepted loss.** A 3.x fallback that runs `dbrrg-password --clear` and
-  then `--set` replaces the link with a real file. Back on 4.0 the new name
-  wins and the 4.0 password returns; the real old entry is replaced by a link
-  and a warning is logged.
+- **A password set again on 3.x wins.** A 3.x fallback that runs
+  `dbrrg-password --clear` and then `--set` leaves a real
+  `~/.dbrrg-password` beside the revoked hash in `~/.thinfloe-password`. 4.0
+  never leaves a real `~/.dbrrg-password`, so when the archive lists both
+  names and the old one comes out as a real file, the restore moves it over
+  `~/.thinfloe-password`, logs `thinfloe: ~/.dbrrg-password was set by the
+  previous version; it replaces ~/.thinfloe-password` and makes the link
+  again. No `home-renamed` entry: the home went to 3.x and back. For every
+  other name the new name still wins.
 - `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
   upgrade copy never carries either machine identity. 3.x's fresh install
   excludes only `./.dbrrg-ssh-host-keys`, which is now a link, and copies

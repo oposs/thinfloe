@@ -129,6 +129,7 @@ cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
 case "$1" in
     passwd) echo "tluser:x:1000:1000:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
+    shadow) echo "tluser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
     *)      exit 2 ;;
 esac
 STUB
@@ -202,6 +203,50 @@ if [[ ! -e "$H5/.thinfloe-password" && ! -L "$H5/.dbrrg-password" \
     ok "4.0 restore after a 3.x --clear: no ~/.thinfloe-password, the rest kept"
 else
     bad "4.0 restore after 3.x --clear: pw=$(cat "$H5/.thinfloe-password" 2>&1) env=$(cat "$H5/.thinfloe-environment" 2>&1)"
+fi
+
+# --- a password set again on 3.x wins on 4.0 ------------------------------
+# On a 3.x fallback the user runs `dbrrg-password --clear` and then `--set`:
+# the clear removes the link, the set writes a real ~/.dbrrg-password beside
+# the revoked hash in ~/.thinfloe-password. The next 4.0 restore must install
+# the hash set on 3.x, not the revoked one.
+NEW_HASH='$y$j9T$ccccccccccccccccccccc$ddddddddddddddddddddddddddddddddddddddddddd'
+H6="$WORK/home6"
+mkdir -p "$H6"
+(
+    _DBRRG_LIB_LOADED=""
+    # shellcheck source=/dev/null
+    . "$FIX/dbrrg-lib.sh"
+    dbrrg_log() { :; }
+    dbrrg_restore_home_from_file "$WORK/home4.tgz" "$H6"
+) 2>>"$WORK/warnings"
+env PATH="$STUBS:$PATH" TF_TEST_PASSWD_HOME="$H6" HOME=/root \
+    "$FIX/dbrrg-password" --clear >"$WORK/pw.out" 2>&1
+printf 'secret\nsecret\n' | env PATH="$STUBS:$PATH" TF_TEST_PASSWD_HOME="$H6" \
+    TF_TEST_SHADOW_HASH="$NEW_HASH" HOME=/root \
+    "$FIX/dbrrg-password" --set >>"$WORK/pw.out" 2>&1
+rc=$?
+if [[ $rc -eq 0 && -f "$H6/.dbrrg-password" && ! -L "$H6/.dbrrg-password" \
+   && "$(cat "$H6/.dbrrg-password")" == "$NEW_HASH" \
+   && "$(cat "$H6/.thinfloe-password")" == "$FAKE_HASH" ]]; then
+    ok "3.x --clear then --set writes a real ~/.dbrrg-password (fixture behaves as in the field)"
+else
+    bad "3.x --clear/--set (rc $rc): $(ls -la "$H6" | tr '\n' ' ') out: $(cat "$WORK/pw.out")"
+fi
+( cd "$H6" && tar --warning=no-file-changed -zcf - . ) >"$WORK/home6.tgz"
+
+NR="$WORK/newroot-after-set"
+mkdir -p "$NR/newroot/home/tluser" "$NR/efi" "$NR/state"
+echo default-env >"$NR/newroot/home/tluser/.thinfloe-environment"
+cp "$WORK/home6.tgz" "$NR/efi/home.tar.gz"
+restore_home "$NR/newroot" "$NR/efi" "$NR/state" "tl/ramroot.sqsh"
+H7="$NR/newroot/home/tluser"
+if [[ "$(cat "$H7/.thinfloe-password" 2>/dev/null)" == "$NEW_HASH" \
+   && -L "$H7/.dbrrg-password" && "$(readlink "$H7/.dbrrg-password")" == ".thinfloe-password" \
+   && ! -e "$NR/state/home-renamed" ]]; then
+    ok "4.0 restore after a 3.x --clear and --set: ~/.thinfloe-password holds the 3.x hash"
+else
+    bad "4.0 restore after 3.x --clear/--set: pw=$(cat "$H7/.thinfloe-password" 2>&1) link=$(readlink "$H7/.dbrrg-password") renamed=$(cat "$NR/state/home-renamed" 2>&1)"
 fi
 
 exit "$fail"

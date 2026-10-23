@@ -378,9 +378,12 @@ _tf_parent_is_link() {
 #     and each name renamed is appended to <renamed-file>, one per line;
 #   - an old name that is a symlink is what a previous 4.0 boot left behind
 #     (see tf_link_old_home_names); it is never a 3.x file and is left alone.
-# One more rule, for the password only: an archive that lists
+# Two more rules, for the password only: an archive that lists
 # .thinfloe-password but not .dbrrg-password was saved by 3.x after a
-# `dbrrg-password --clear`, and ~/.thinfloe-password is removed (see below).
+# `dbrrg-password --clear`, and ~/.thinfloe-password is removed (see below);
+# one that lists both, with a real (not symlink) ~/.dbrrg-password on disk,
+# was saved by 3.x after `--clear` and `--set`, and the old file replaces the
+# new one.
 # The archive is listed once. tar and the other tools are those the
 # initramfs has: no cut, head, basename, readlink.
 #
@@ -411,7 +414,25 @@ tf_migrate_home_names() {
         _tmh_new="${_tmh_tail%%:*}"
 
         _tf_parent_is_link "$_tmh_home" "$_tmh_old" && continue
-        _tf_archive_lists "$_tmh_list" "$_tmh_new" && continue
+        if _tf_archive_lists "$_tmh_list" "$_tmh_new"; then
+            # The new name wins, except for a password set on a 3.x fallback.
+            # 4.0 never leaves a real ~/.dbrrg-password (thinfloe-password
+            # --set and every restore make it a link), so a real one beside
+            # ~/.thinfloe-password was written by 3.x's `dbrrg-password
+            # --clear` and `--set` and is the newer password. The home did not
+            # come from 3.x, so no home-renamed entry; tf_link_old_home_names
+            # makes the link again.
+            if [ "$_tmh_old" = .dbrrg-password ] \
+               && _tf_archive_lists "$_tmh_list" "$_tmh_old" \
+               && [ -f "$_tmh_home/$_tmh_old" ] && [ ! -L "$_tmh_home/$_tmh_old" ]; then
+                if mv "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new" 2>/dev/null; then
+                    tf_log "thinfloe: ~/.dbrrg-password was set by the previous version; it replaces ~/.thinfloe-password"
+                else
+                    warn "thinfloe: could not move ~/.dbrrg-password over ~/.thinfloe-password"
+                fi
+            fi
+            continue
+        fi
         _tf_archive_lists "$_tmh_list" "$_tmh_old" || continue
         [ -L "$_tmh_home/$_tmh_old" ] && continue
         [ -e "$_tmh_home/$_tmh_old" ] || continue

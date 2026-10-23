@@ -752,18 +752,43 @@ else
     bad "old-name symlink was treated as a 3.x file"
 fi
 
-# Both names as real files: the new name wins, the old becomes a link.
+# Both names as real files: the new name wins, the old becomes a link. Any
+# entry but the password (see the next test for that one).
 d="$WORK/hn-both"; mkdefault "$d"; mkdir -p "$d/src"
-echo old >"$d/src/.dbrrg-password"; echo new >"$d/src/.thinfloe-password"
+echo old >"$d/src/.dbrrg-sessionrc"; echo new >"$d/src/.thinfloe-sessionrc"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-password")" == "new" && -L "$h/.dbrrg-password" \
-   && "$(cat "$h/.dbrrg-password")" == "new" ]] \
-   && ! grep -qxF .dbrrg-password "$d/state/home-renamed" 2>/dev/null; then
+if [[ "$(cat "$h/.thinfloe-sessionrc")" == "new" && -L "$h/.dbrrg-sessionrc" \
+   && "$(cat "$h/.dbrrg-sessionrc")" == "new" ]] \
+   && ! grep -qxF .dbrrg-sessionrc "$d/state/home-renamed" 2>/dev/null; then
     ok "both names real in the archive: new wins, old becomes a link"
 else
-    bad "both names: new=$(cat "$h/.thinfloe-password") old=$(cat "$h/.dbrrg-password")"
+    bad "both names: new=$(cat "$h/.thinfloe-sessionrc") old=$(cat "$h/.dbrrg-sessionrc")"
+fi
+
+# Both password names as real files. 4.0 never leaves a real ~/.dbrrg-password
+# (every write and every restore makes it a link), so a real one was written
+# by 3.x after a fallback: `dbrrg-password --clear` removed the link, `--set`
+# wrote a new file. That password is the newer one and wins; the home did not
+# come from 3.x, so no home-renamed marker.
+d="$WORK/hn-pwboth"; mkdefault "$d"; mkdir -p "$d/src"
+echo set-on-3x >"$d/src/.dbrrg-password"; echo revoked-4x >"$d/src/.thinfloe-password"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+tf_log() { echo "$@" >>"$WORK/tflog"; }
+: >"$WORK/tflog"; : >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+tf_log() { :; }
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -f "$h/.thinfloe-password" \
+   && ! -L "$h/.thinfloe-password" && -L "$h/.dbrrg-password" \
+   && "$(readlink "$h/.dbrrg-password")" == ".thinfloe-password" \
+   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" ]] \
+   && grep -qxF "thinfloe: ~/.dbrrg-password was set by the previous version; it replaces ~/.thinfloe-password" "$WORK/tflog" \
+   && ! grep -q "replacing real" "$WORK/warnings"; then
+    ok "both password names real: the 3.x password wins, link afterwards, logged, no marker"
+else
+    bad "both password names: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password") renamed=$(cat "$d/state/home-renamed" 2>&1) log=$(cat "$WORK/tflog") warnings=$(cat "$WORK/warnings")"
 fi
 
 # A password cleared on 3.x: 3.x's `dbrrg-password --clear` removes only the
@@ -930,6 +955,21 @@ if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.dbrrg-password" \
     ok "the cleared-on-3.x check works with only the initramfs's tools"
 else
     bad "sandboxed clear: pw=$(cat "$h/.thinfloe-password" 2>&1) stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
+fi
+
+# The set-on-3.x password rule with only the initramfs's tools.
+d="$WORK/hn-sb-pwset"; mkdefault "$d"; mkdir -p "$d/src"
+echo set-on-3x >"$d/src/.dbrrg-password"; echo revoked >"$d/src/.thinfloe-password"
+tar -C "$d/src" -czf "$d/a.tgz" .
+h="$d/newroot/home/tluser"
+tar -xzf "$d/a.tgz" -C "$h"
+: >"$WORK/warnings"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$d/a.tgz" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -L "$h/.dbrrg-password" \
+   && ! -e "$d/ren" && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
+    ok "the set-on-3x password rule works with only the initramfs's tools"
+else
+    bad "sandboxed 3.x set: pw=$(cat "$h/.thinfloe-password" 2>&1) stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
 fi
 
 # --- tf_finalize_upgrade, inside the same sandbox ---------------------
