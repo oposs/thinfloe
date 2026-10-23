@@ -9,6 +9,9 @@ the version on offer, stores what they offer on the boot stick, installs
 it and removes it. It runs as root; tile files in the home are user data.
 
 Commands (exit 0 on success, 1 on a failure that is in the log):
+  boot              at boot, with no network: tick the add-ons of a home
+                    from 3.x, make next.* current.*, install every ticked
+                    current.* from the boot stick
   status            rewrite /run/thinfloe/addons/status and print it
   check [ID...]     no ids: every ticked add-on whose source is HTTPS or
                     signed; a copy that is not stored yet is installed now,
@@ -743,6 +746,7 @@ ROOT_DIR = os.environ.get("TF_ADDON_ROOT", "/")  # where tar add-ons are unpacke
 HOME_DIR = os.environ.get("TF_ADDON_HOME")  # unset: the home of tfuser (getent passwd)
 DPKG = os.environ.get("TF_ADDON_DPKG", "dpkg")
 SHIPPED_TILES = os.environ.get("TF_ADDON_TILES", "/etc/thinfloe/menu")
+STATE_DIR = os.environ.get("TF_ADDON_STATE", "/run/thinfloe/state")  # the initramfs's records
 # Netboot has no ESP: the same layout in RAM, rebuilt each boot.
 CACHE_DIR = "/run/thinfloe/addons-cache"
 
@@ -764,7 +768,7 @@ FORMATS = ("deb", "tar")
 ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
 
-USAGE = "usage: thinfloe-addon status | check [ID...] | install ID | update ID | remove ID"
+USAGE = "usage: thinfloe-addon boot | status | check [ID...] | install ID | update ID | remove ID"
 
 
 class InstallError(Exception):
@@ -1008,6 +1012,19 @@ def write_ticks(ids: List[str]) -> None:
             os.fsync(f.fileno())
         os.replace(tmp, TICK_FILE, src_dir_fd=dfd, dst_dir_fd=dfd)
         os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def tick_file_exists() -> bool:
+    dfd = _tick_dir_fd(False)
+    if dfd is None:
+        return False
+    try:
+        os.stat(TICK_FILE, dir_fd=dfd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
     finally:
         os.close(dfd)
 
@@ -1700,6 +1717,92 @@ def cmd_remove(run: Run, aid: str) -> None:
         log("%s removed" % name)
 
 
+# ============ Boot ============
+
+def _state(name: str) -> Optional[str]:
+    """A value the initramfs recorded in STATE_DIR, None when missing."""
+    try:
+        with open(os.path.join(STATE_DIR, name), encoding="utf-8", errors="replace") as f:
+            return f.read(256).strip()
+    except OSError:
+        return None
+
+
+def _seed_marker() -> str:
+    return os.path.join(ESP_DIR, "config", "addons-seeded")
+
+
+def seed(run: Run) -> None:
+    """The first boot from 3.x ticks the add-ons the home used, before
+    anything is installed. It fires when there is no tick file and either
+    the initramfs renamed 3.x files in this home, or a 3.x stick was
+    upgraded without a stored home (home-restore absent, tl.old/ on the
+    ESP) and the ESP has no addons-seeded marker. Then every shipped add-on
+    whose X-TF-Source-Config exists in the home is ticked, or, with no
+    stored home, every shipped add-on that has the key. The marker is
+    written on USB only."""
+    restore = _state("home-restore")
+    renamed = os.path.exists(os.path.join(STATE_DIR, "home-renamed"))
+    upgraded = (esp_mounted() and restore == "absent"
+                and os.path.isdir(os.path.join(ESP_DIR, "tl.old"))
+                and not os.path.lexists(_seed_marker()))
+    if not (renamed or upgraded):
+        return
+    home = home_dir()
+    ids = [a.id for a in run.addons if a.shipped and a.source.config
+           and (restore == "absent" or os.path.lexists(os.path.join(home, a.source.config)))]
+    try:
+        with _run_lock():
+            if tick_file_exists():
+                return
+            if ids:
+                write_ticks(ids)
+    except (OSError, KeyError) as e:
+        log("cannot tick the add-ons of this home from 3.x: %s"
+            % (getattr(e, "strerror", None) or e))
+        run.failed = True
+        return
+    run.ticks = ids
+    for aid in ids:
+        log("%s ticked: this home came from ThinFloe 3.x" % run.by_id[aid].name)
+    if not esp_mounted():
+        return
+    try:
+        with esp_lock():
+            # A plain write, not _write_atomic: vfat refuses fchmod.
+            os.makedirs(os.path.dirname(_seed_marker()), exist_ok=True)
+            with open(_seed_marker(), "w", encoding="utf-8") as f:
+                f.write("%d\n" % int(time.time()))
+                f.flush()
+                os.fsync(f.fileno())
+    except OSError as e:
+        log("cannot write %s: %s" % (_seed_marker(), e.strerror or e))
+        run.failed = True
+
+
+def cmd_boot(run: Run) -> None:
+    """Seed the ticks, then, on USB, make each ticked add-on's next.*
+    current.* and install current.* from the ESP. Sends no request. On
+    netboot the store is empty at boot; thinfloe-addon-check.service
+    fetches and installs once the network is up."""
+    seed(run)
+    if not esp_mounted():
+        return
+    for aid in run.ticks:
+        a = run.by_id.get(aid)
+        if a is None:
+            continue
+        d = _addon_dir(a.id)
+        if stored(d, "next") is not None:
+            with install_lock():
+                with esp_lock():
+                    promote(d)
+        if stored(d, "current") is None:
+            log("%s: nothing stored on the boot stick yet; the check fetches it" % a.name)
+            continue
+        _install_slot(run, a, d, "current")
+
+
 def status_lines(run: Run) -> List[str]:
     """One line per add-on: id ticked state installed_version pending_version
     auto message, tab-separated, "-" for an empty field."""
@@ -1734,7 +1837,7 @@ def write_status(run: Run) -> str:
     return text
 
 
-COMMANDS = {"status": (0, 0), "check": (0, None), "install": (1, 1),
+COMMANDS = {"boot": (0, 0), "status": (0, 0), "check": (0, None), "install": (1, 1),
             "update": (1, 1), "remove": (1, 1)}
 
 
@@ -1758,7 +1861,9 @@ def main(argv: List[str]) -> int:
         sys.stdout.write(write_status(run))
         return 0
     try:
-        if cmd == "check":
+        if cmd == "boot":
+            cmd_boot(run)
+        elif cmd == "check":
             cmd_check(run, args)
         elif cmd in ("install", "update"):
             a = run.addon(args[0])

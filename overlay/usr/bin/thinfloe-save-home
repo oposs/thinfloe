@@ -17,6 +17,10 @@ TF_CMDLINE="${TF_CMDLINE:-/proc/cmdline}"
 # home was written there. It also mounted the same vfat filesystem a second time.
 TF_EFI_MOUNT="${TF_EFI_MOUNT:-/run/thinfloe/storage/efi}"
 TF_EXCLUDE_DEFAULT="${TF_EXCLUDE_DEFAULT:-/etc/thinfloe/save-home-exclude}"
+# flock()ed by thinfloe-addon for every write it makes to the ESP (tmpfiles,
+# 0644 root). The USB save holds it too, so an add-on download being stored
+# and the home archive never fill the ESP between them.
+TF_ESP_LOCK="${TF_ESP_LOCK:-/run/thinfloe/esp.lock}"
 
 # Exit codes, read by thinfloe-menu to tell the user what happened:
 #
@@ -270,6 +274,14 @@ elif mountpoint -q "$TF_EFI_MOUNT"; then
   # tfuser cannot create files there. tar still runs in the home directory, so
   # the members stay relative.
   _dsh_new="$TF_EFI_MOUNT/home.tar.gz.new"
+  # Read-only, because the file is root's; flock works on any open fd. It is
+  # released when this script exits. A missing lock file (tmpfiles did not
+  # run) must not cost the save, so the save goes on without it.
+  if [ -r "$TF_ESP_LOCK" ] && exec 9<"$TF_ESP_LOCK" && flock 9; then
+    :
+  else
+    echo "thinfloe: cannot lock $TF_ESP_LOCK - saving without it." >&2
+  fi
   if ! sudo rm -f "$_dsh_new"; then
     echo "thinfloe: could not clear the staging file - your home was NOT saved," >&2
     echo "       and the previous archive is untouched." >&2

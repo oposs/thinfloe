@@ -437,6 +437,43 @@ else
     fail=1
 fi
 
+# Add-ons: thinfloe-addons.service installs the stored copies at boot, the
+# timer runs the daily check. Both must be enabled, and the boot unit may be
+# ordered before getty@tty1.service only: it is a multi-user.target unit, so
+# a Before= on anything earlier is an ordering cycle (see CLAUDE.md).
+present "thinfloe-addon"             'usr/bin/thinfloe-addon$'
+present "add-on boot unit"           'etc/systemd/system/thinfloe-addons\.service$'
+present "add-on check unit"          'etc/systemd/system/thinfloe-addon-check\.service$'
+present "add-on check timer"         'etc/systemd/system/thinfloe-addon-check\.timer$'
+present "add-on tmpfiles"            'usr/lib/tmpfiles\.d/thinfloe-addons\.conf$'
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-addons\.service$' "$LIST"; then
+    echo "ok   - thinfloe-addons.service is enabled"
+else
+    echo "FAIL - thinfloe-addons.service is not enabled; stored add-ons would not install at boot"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-addon-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-addon-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-addon-check.timer is not enabled; add-ons would never be checked"
+    fail=1
+fi
+ADDONUNIT="$DPKG_TMP/addonunit/etc/systemd/system/thinfloe-addons.service"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/addonunit" "$SQSH" \
+        etc/systemd/system/thinfloe-addons.service >/dev/null 2>&1 &&
+   [[ -f "$ADDONUNIT" ]]; then
+    before=$(grep -E '^Before=' "$ADDONUNIT" | tr -d '\r')
+    if [[ "$before" == "Before=getty@tty1.service" ]]; then
+        echo "ok   - thinfloe-addons.service is ordered before getty@tty1.service only"
+    else
+        echo "FAIL - thinfloe-addons.service Before= lines: ${before:-none}"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract thinfloe-addons.service"
+    fail=1
+fi
+
 # The default home must carry the 4.0 home marker. Without it a home saved
 # from it lists no marker, and every boot would treat it as a 3.x home.
 MARKER="$DPKG_TMP/hv/home/tfuser/.thinfloe-home-version"

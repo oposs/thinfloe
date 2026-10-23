@@ -1315,6 +1315,189 @@ class TestPromote(unittest.TestCase):
 
 
 
+class TestBoot(AddonEnv):
+    """thinfloe-addon boot: the first boot from 3.x ticks add-ons, next.*
+    becomes current.*, every ticked current.* is installed, all from the
+    boot stick and with no network."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = self.tmp / "state"
+        self.state.mkdir()
+        p = mock.patch.object(ad, "STATE_DIR", str(self.state), create=True)
+        p.start()
+        self.addCleanup(p.stop)
+        self.marker = self.esp / "config" / "addons-seeded"
+
+    def reboot(self):
+        """What a reboot leaves: the ESP and the home, a new /run."""
+        shutil.rmtree(self.run_dir)
+        for name in ("dpkg.log", "dpkg.lockstate"):
+            with contextlib.suppress(FileNotFoundError):
+                (self.bin / name).unlink()
+
+    def stored_demo(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        self.reboot()
+
+    def client_tiles(self):
+        """Two shipped add-ons with a config path, one without."""
+        for name, config in (("10-thinlinc", ".thinlinc"), ("20-oxulnk", ".config/oxulnk")):
+            (self.tiles / (name + ".desktop")).write_text(
+                "[Desktop Entry]\nName=%s\nExec=%s\n"
+                "X-TF-Source-URL=%s/%s.deb\nX-TF-Source-Config=%s\n"
+                % (name, name, self.srv.base, name, config))
+        self.demo_tile()
+
+    def tick_file(self) -> Path:
+        return self.home / ".config" / "thinfloe" / "addons"
+
+    def test_boot_installs_from_esp_with_no_network(self):
+        self.stored_demo()
+        connects = []
+
+        def no_network(sock, address):
+            connects.append(address)
+            raise OSError("network is down")
+
+        with mock.patch("socket.socket.connect", no_network):
+            self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(connects, [])
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(self.addon_dir() / "current.deb")])
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
+
+    def test_boot_promotes_next(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.reboot()
+        before = len(self.srv.requests)
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(self.srv.requests[before:], [])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.1")
+        self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), self.debs["1.1"])
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(self.addon_dir() / "current.deb")])
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.1\t-\t1\tDemo 1.1 installed"])
+
+    def test_boot_promotes_under_the_esp_lock(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.run_cmd("check")
+        self.reboot()
+        fd = os.open(str(self.lock), os.O_RDWR | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        rc = []
+        t = threading.Thread(target=lambda: rc.append(ad.main(["boot"])))
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.start()
+            time.sleep(0.5)
+            self.assertIn("next.meta", self.files(), "promoted under a held lock")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            t.join(30)
+        self.assertEqual(rc, [0])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+
+    def test_boot_without_a_stored_copy_installs_nothing(self):
+        self.demo_tile()
+        self.tick("10-demo")
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.dpkg_calls(), [])
+        self.assertEqual(self.srv.requests, [])
+        self.assertEqual(self.status()[0].split("\t")[:3], ["10-demo", "1", "absent"])
+
+    def test_boot_installs_only_ticked_addons(self):
+        self.stored_demo()
+        self.tick()
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.dpkg_calls(), [])
+
+    def test_seed_from_home_renamed(self):
+        self.client_tiles()
+        (self.state / "home-renamed").write_text(".dbrrg-environment\n")
+        (self.state / "home-restore").write_text("restored\n")
+        (self.home / ".thinlinc").mkdir()
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(self.ticks(), ["10-thinlinc"])
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(self.srv.requests, [])
+        self.assertIn("10-thinlinc ticked: this home came from ThinFloe 3.x", self.log_lines())
+
+    def test_seed_absent_archive_after_3x_upgrade(self):
+        self.client_tiles()
+        (self.state / "home-restore").write_text("absent\n")
+        (self.esp / "tl.old").mkdir()
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(self.ticks(), ["10-thinlinc", "20-oxulnk"])
+        self.assertTrue(self.marker.exists())
+
+    def test_seed_fires_once(self):
+        self.client_tiles()
+        (self.state / "home-restore").write_text("absent\n")
+        (self.esp / "tl.old").mkdir()
+        self.marker.parent.mkdir()
+        self.marker.write_text("1\n")
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertFalse(self.tick_file().exists())
+
+    def test_seed_keeps_an_existing_tick_file(self):
+        self.client_tiles()
+        (self.state / "home-renamed").write_text(".dbrrg-environment\n")
+        (self.home / ".thinlinc").mkdir()
+        self.tick()
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.tick_file().read_text(), "")
+
+    def test_fresh_install_ticks_nothing(self):
+        self.client_tiles()
+        (self.state / "home-restore").write_text("absent\n")
+        (self.home / ".thinlinc").mkdir()
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertFalse(self.tick_file().exists())
+        self.assertFalse(self.marker.exists())
+
+    def test_boot_on_netboot_does_nothing(self):
+        cache = self.tmp / "cache"
+        self.stored_demo()
+        shutil.copytree(self.addon_dir(), cache / "10-demo")
+        (self.state / "home-restore").write_text("absent\n")
+        (self.esp / "tl.old").mkdir()
+        with mock.patch.object(ad, "esp_mounted", lambda: False), \
+                mock.patch.object(ad, "CACHE_DIR", str(cache)):
+            self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.dpkg_calls(), [])
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.ticks(), ["10-demo"])
+
+    def test_netboot_seeds_from_home_renamed(self):
+        self.client_tiles()
+        (self.state / "home-renamed").write_text(".dbrrg-environment\n")
+        (self.home / ".config" / "oxulnk").mkdir(parents=True)
+        with mock.patch.object(ad, "esp_mounted", lambda: False), \
+                mock.patch.object(ad, "CACHE_DIR", str(self.tmp / "cache")):
+            self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.ticks(), ["20-oxulnk"])
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.dpkg_calls(), [])
+        self.assertEqual(self.srv.requests, [])
+
+    def test_install_failure_hides_tile(self):
+        self.stored_demo()
+        (self.bin / "dpkg.fail").touch()
+        self.assertEqual(self.run_cmd("boot"), 1)
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tinstall-failed\t-\t-\t1\tDemo: install failed: dpkg: error: boom"])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+
+
+
 def stat_mode(p: Path) -> int:
     return p.stat().st_mode & 0o777
 

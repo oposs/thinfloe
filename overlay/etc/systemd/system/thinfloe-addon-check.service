@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the ticked ThinFloe add-ons for new versions
+# Started by thinfloe-addon-check.timer. A new version is stored on the boot
+# stick and becomes active at the next boot; an add-on with no stored copy
+# yet (always the case on netboot) is fetched and installed at once.
+Wants=network-online.target
+After=network-online.target thinfloe-addons.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/thinfloe-addon check

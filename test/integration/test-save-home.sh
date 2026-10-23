@@ -144,6 +144,7 @@ run_save_home() {
     TF_STATE_DIR="$WORK/state" \
     TF_CMDLINE="$WORK/cmdline" \
     TF_EFI_MOUNT="${TF_EFI_MOUNT_OVERRIDE:-/run/thinfloe/storage/efi}" \
+    TF_ESP_LOCK="${TF_ESP_LOCK_OVERRIDE:-$WORK/esp.lock}" \
     TF_EXCLUDE_DEFAULT="${TF_EXCLUDE_DEFAULT_OVERRIDE:-/etc/thinfloe/save-home-exclude}" \
     TF_TEST_GZIP_FAIL="${TF_TEST_GZIP_FAIL:-}" \
     TF_TEST_TAR_RC="${TF_TEST_TAR_RC:-0}" \
@@ -158,6 +159,10 @@ setup() {
     rm -rf "$WORK/home" "$WORK/root" "$WORK/state" "$WORK/tmp" \
            "$WORK/tar.log" "$WORK/curl.log" "$WORK/sudo.log"
     mkdir -p "$WORK/home/tfuser" "$WORK/root" "$WORK/state" "$WORK/tmp"
+    # root's 0644 file, which tfuser can only open read-only.
+    rm -f "$WORK/esp.lock"
+    : >"$WORK/esp.lock"
+    chmod 444 "$WORK/esp.lock"
     echo "the user's wifi password" >"$WORK/home/tfuser/.thinfloe-sessionrc"
     echo "root's shell config"      >"$WORK/root/.bashrc"
     # Netboot: a boot server in the cmdline selects the upload path, which
@@ -613,6 +618,58 @@ if [[ "$rc" == 0 ]] && grep -q -- '--exclude=./stray.iso' "$WORK/tar.log"; then
     ok "a netboot save leaves large files out too"
 else
     bad "netboot large-file exclusion: exit $rc, tar log: $(cat "$WORK/tar.log")"
+fi
+
+# ---------------------------------------------------------------- esp lock
+# thinfloe-addon holds /run/thinfloe/esp.lock while it writes the ESP; the USB
+# save waits for it before it writes home.tar.gz.new.
+setup
+echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
+rm -f "$WORK/esp/home.tar.gz" "$WORK/lock.rc"
+exec 8<"$WORK/esp.lock"
+flock 8
+( TF_EFI_MOUNT_OVERRIDE="$WORK/esp" run_save_home "$WORK/root" "$WORK/home/tfuser" \
+      >"$WORK/lock.rc" ) 8<&- &
+lock_pid=$!
+/bin/sleep 1
+if [[ ! -s "$WORK/lock.rc" && ! -e "$WORK/esp/home.tar.gz" ]] &&
+   ! grep -q 'home\.tar\.gz' "$WORK/tar.log" 2>/dev/null; then
+    waited=1
+else
+    waited=0
+fi
+flock -u 8
+exec 8<&-
+wait "$lock_pid"
+if [[ "$waited" == 1 && "$(cat "$WORK/lock.rc")" == 0 && -e "$WORK/esp/home.tar.gz" ]]; then
+    ok "save-home takes the esp lock"
+else
+    bad "save-home takes the esp lock (waited $waited, exit $(cat "$WORK/lock.rc"), err: $(cat "$WORK/err"))"
+fi
+
+# The netboot save does not touch the ESP and does not wait for the lock.
+setup
+exec 8<"$WORK/esp.lock"
+flock 8
+rc=$(run_save_home "$WORK/root" "$WORK/home/tfuser" 8<&-)
+exec 8<&-
+if [[ "$rc" == 0 ]]; then
+    ok "a netboot save does not wait for the esp lock"
+else
+    bad "netboot save under a held esp lock: exit $rc, err: $(cat "$WORK/err")"
+fi
+
+# A lock file tmpfiles never made does not cost the save.
+setup
+echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
+rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" TF_ESP_LOCK_OVERRIDE="$WORK/no-such-lock" \
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
+if [[ "$rc" == 0 ]] && grep -q 'saving without it' "$WORK/err"; then
+    ok "a missing esp lock file is named and the save goes on"
+else
+    bad "missing esp lock: exit $rc, err: $(cat "$WORK/err")"
 fi
 
 # ---------------------------------------------------------------- old names

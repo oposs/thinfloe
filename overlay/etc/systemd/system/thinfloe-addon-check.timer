@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the ticked ThinFloe add-ons once a day
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1d
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
