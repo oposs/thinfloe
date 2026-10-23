@@ -313,15 +313,13 @@ The system implements home directory persistence across reboots:
   exclude list and **always** leaves out `~/.thinfloe-ssh-host-keys` and
   `~/wg0.conf` (`IDENTITY_EXCLUDES`, outside the user-editable list). Those
   are machine identities: two machines would share one SSH host key or one
-  WireGuard private key, which breaks both tunnels. `~/.thinfloe-password`
-  travels on purpose. Like `thinfloe-save-home`, it refuses when this boot's
-  restore failed (`/run/thinfloe/state/home-restore` is `failed`), since the
-  live home is then a default one. Like `thinfloe-save-home`, it first makes
-  the missing old-name links and ignores an exclude pattern that drops one
-  (`OLD_NAME_LINKS`, `ensure_old_name_links`): without `.dbrrg-password`
-  beside `.thinfloe-password` the new stick's first boot clears the
-  password. `test/unit/test_upgrade_image.py` guards this, run via `make
-  test-unit`.
+  WireGuard private key, which breaks both tunnels. `~/.dbrrg-ssh-host-keys`
+  is left out too: a save on a 3.x fallback boot leaves the keys 3.x made
+  there. `~/.thinfloe-password` travels on purpose. Like `thinfloe-save-home`,
+  it refuses when this boot's restore failed
+  (`/run/thinfloe/state/home-restore` is `failed`), since the live home is
+  then a default one. `test/unit/test_upgrade_image.py` guards this, run via
+  `make test-unit`.
 - Before the fresh install asks to erase the drive, it compares the drive
   (`lsblk -bdno SIZE`) with the image's uncompressed size, read from the
   zstd frame header of `thinfloe-usb.img.zst` (`curl -r 0-17`), and stops when
@@ -422,13 +420,13 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 Sixteen rules in this repository look like ordinary configuration but are
 load-bearing. All but the patched-labwc, hook-order, menu-rendering,
-logout-save and old-names ones have each caused a real shipped-image bug. The
+logout-save and migrate-once ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
 reverting it silently would ship regressions in both patched behaviours. The
 hook-order one was caught in QEMU: the race it closes is present in every
 image built before it. The menu-rendering and logout-save ones are preventive
 too: the menu-rendering and logout-save ones were decided while the menu was
-designed, and no image has shipped without them. The old-names one is
+designed, and no image has shipped without them. The migrate-once one is
 preventive as well: nothing has shipped broken from it.
 
 ### No login password ships in the image
@@ -825,85 +823,53 @@ stick of 4 GB or more; sticks already in the field keep their 2000 MB.
 qemu-smoke-upgrade` boots a staged upgrade through OVMF and syslinux and
 requires the rotation and `DEFAULT current` afterwards.
 
-### Old home-file names stay as links while the migration code exists
+### A 3.x home is migrated once
 
 A 3.x home archive holds `~/.dbrrg-environment`, `~/.dbrrg-sessionrc`,
 `~/.dbrrg-password`, `~/.dbrrg-ssh-host-keys` and `~/.config/dbrrg`. The
-restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
-`TF_HOME_RENAMES`) gives them the 4.0 names `.thinfloe-environment`,
-`.thinfloe-sessionrc`, `.thinfloe-password`, `.thinfloe-ssh-host-keys` and
-`.config/thinfloe`, and logs `thinfloe: renamed ~/<old> to ~/<new>`.
+first ThinFloe boot that restores such an archive gives them the 4.0 names
+`.thinfloe-environment`, `.thinfloe-sessionrc`, `.thinfloe-password`,
+`.thinfloe-ssh-host-keys` and `.config/thinfloe` (`tf_migrate_home_names` in
+`thinfloe-lib.sh`, list in `TF_HOME_RENAMES`), logs `thinfloe: renamed
+~/<old> to ~/<new>` and writes `~/.thinfloe-home-version` (`1`). After that
+the home is native and nothing reads or keeps the old names (owner,
+2026-10-23).
 
-- **The archive decides, not the disk.** The default home already ships
-  `.thinfloe-environment` and `.thinfloe-sessionrc`, so "the new name exists"
-  is always true. A real old entry in the archive replaces the new name,
-  whether the archive lists the new name or not (see "A file written on 3.x
-  wins" below). The new name wins when the archive lists it and the old name
-  is missing or a symlink. An old name that is a symlink is what an earlier
-  4.0 boot left behind and is not touched.
-- **The old names stay as relative symlinks** (`tf_link_old_home_names`, on
-  every boot and every restore outcome). After the first 4.0 boot the
-  previous release sits in `tl.old/` and the boot entry `LABEL previous`
-  starts it; 3.x reads the old names and would otherwise find a default
-  keyboard, no password and fresh SSH host keys. The links live in the home,
-  so every save carries them.
-- **A symlinked `~/.config` is not followed.** Renaming or linking
-  `.config/dbrrg` through it would change the directory it points to, so the
-  entry is skipped with the warning `thinfloe: ~/.config is a symlink,
-  leaving ~/.config/dbrrg alone`.
-- **The marker** `/run/thinfloe/state/home-renamed` lists one old name per
-  line, and only when a real 3.x file was renamed. Nothing reads it yet; it
-  is meant for the add-on auto-tick.
+- **The archive decides, not the disk.** The default home ships
+  `.thinfloe-home-version`, `.thinfloe-environment` and `.thinfloe-sessionrc`
+  (`overlay/home/tluser/`), so all three are on disk after any extraction. An
+  archive that lists the marker is native and is not touched; a `.dbrrg-*`
+  entry in it came from a save on a 3.x fallback boot and is ignored. An
+  archive without the marker is migrated: per name, the new name stays when
+  the archive lists it, otherwise a real (not symlink) old entry replaces
+  the image default whole (`_tf_move_over`, which moves the default aside
+  and removes it only after the move worked).
+- **Idempotent.** After the renames, old names that are symlinks are removed
+  (development builds of 4.0 left them, without a marker), a real old entry
+  beside a listed new name is left alone, and the marker is written. A
+  second run changes nothing, so a marker that cannot be written is only a
+  warning: the next boot migrates again.
 - **A failed listing fails the restore.** The restore lists the archive
   once, before extracting it, and the migration decides from that listing,
-  so a boot decompresses the archive twice. When that listing is empty the
-  archive is not extracted; when tar lists members but exits non-zero and the
-  extraction still works, the rename is not attempted and the old names are
-  not linked. Both leave `home-restore` at `failed`, so no save overwrites
-  the stored archive with a half-migrated home.
-- **The links are made at write time too.** `thinfloe-password --set` and
-  `thinfloe-ssh-hostkeys` create `~/.dbrrg-password` and
-  `~/.dbrrg-ssh-host-keys` when they write, owned by tluser, and `--clear`
-  removes the link with the file. A home saved by 4.0 therefore always lists
-  `.dbrrg-password` next to `.thinfloe-password`.
-- **A password cleared on 3.x stays cleared.** 3.x's `dbrrg-password --clear`
-  removes only the `~/.dbrrg-password` link and leaves the hash in
-  `~/.thinfloe-password`. An archive that lists `.thinfloe-password` without
-  `.dbrrg-password` is read as that clear: the restore removes
-  `~/.thinfloe-password` and logs `thinfloe: ~/.dbrrg-password was removed by
-  the previous version; clearing ~/.thinfloe-password`. If the reading is
-  wrong, the user sets the password again; a revoked password never returns.
-- **A file written on 3.x wins** (owner, 2026-10-23: the newer version of
-  the dbrrg file wins). No 4.0 program leaves a real old name, so a real one
-  beside the new name was written on a 3.x fallback that replaced the link:
-  `dbrrg-password --clear` and then `--set`, or an editor that writes a new
-  `~/.dbrrg-environment` and renames it over the link. When the archive
-  lists both names and the old one comes out as a real file or directory,
-  the restore removes the new one, moves the old one over it, logs
-  `thinfloe: ~/<old> was written by the previous version; it replaces
-  ~/<new>` and makes the link again. A directory is replaced whole, not
-  merged. No `home-renamed` entry: the home went to 3.x and back.
-  `_tf_move_over` moves the new name aside and removes it only after the
-  move worked, so a failed `mv` loses neither.
-- **Every save carries the links.** The two rules above read a missing or
-  real old name in a 4.0 archive as something 3.x did. The 3.x default home
-  ships a real `~/.dbrrg-environment` and `~/.dbrrg-sessionrc`: a 4.0 archive
-  without the links (a user deleted one, an exclude pattern matched it) let
-  that default survive a 3.x boot and replace the user's setting on the next
-  4.0 boot, or cleared the password. `thinfloe-save-home` therefore, after the
-  restore-failed check, stages the host keys, makes every missing old-name
-  link whose new name exists (`TF_HOME_LINKS`, which must match
-  `TF_HOME_RENAMES`) and drops each exclude pattern that leaves out a link
-  but not its new name, logging `thinfloe: exclude pattern '<p>' ignored, it
-  would leave out ~/<name>`. tar decides the match: `tar -cf /dev/null
-  --no-recursion -v --exclude=<p> <names>` applies the exclude to
-  command-line names and prints the ones kept. A real old name is left
-  alone. `test/integration/test-save-home.sh` guards this and the two lists.
-- `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
-  upgrade copy never carries either machine identity. 3.x's fresh install
-  excludes only `./.dbrrg-ssh-host-keys`, which is now a link, and copies
-  `.thinfloe-ssh-host-keys`: run from a fallback boot of 3.x, it gives the
-  new stick this machine's SSH host keys. 3.x cannot be changed.
+  so a boot decompresses the archive twice. When the listing is empty the
+  archive is not extracted; when tar lists members but exits non-zero, or
+  the extraction fails, nothing is migrated and no marker is written. All
+  three leave `home-restore` at `failed`, so no save overwrites the stored
+  archive.
+- **A symlinked `~/.config` is not followed.** Renaming below it would
+  change the directory it points to, so `.config/dbrrg` is skipped with the
+  warning `thinfloe: ~/.config is a symlink, leaving ~/.config/dbrrg alone`,
+  once per restore.
+- **`/run/thinfloe/state/home-renamed`** lists one old name per line, and
+  only when a real 3.x file was renamed. Nothing reads it yet; it is meant
+  for the add-on auto-tick ("this home came from 3.x").
+- **A 3.x fallback boot** (`LABEL previous`, `tl.old/`) finds none of its
+  names and starts with a default keyboard, display layout and tiles, no
+  remote-access password and new SSH host keys. `~/wifi.yaml`, `~/wg0.conf`
+  and `~/.thinlinc/` never changed names and still work. What changes there
+  is not carried back to 4.0. 3.x's fresh install, run from such a boot,
+  excludes only `./.dbrrg-ssh-host-keys` and so copies
+  `.thinfloe-ssh-host-keys` to the new stick; 3.x cannot be changed.
 - A stick whose image predates 47c20bb (2026-10-07) upgrades with its old
   `upgrade-image`, which does not boot `LABEL new`, so its first ThinFloe
   boot runs the 3.x initramfs on the 4.0 squashfs: no rename, a default
@@ -912,18 +878,18 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   next boot runs the 4.0 initramfs and migrates the home. The owner
   confirmed on 2026-10-23 that no stick in the field runs an image older
   than 2026-10-07.
-- Still read, next to the new names: `rd.dbrrg.debug` (`rd.thinfloe.debug`),
-  `X-DBRRG-Action`, `X-DBRRG-Save-On-Exit` and `X-DBRRG-Multiple` (the
-  `X-TF-` key wins) and `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
+- Still read, next to the new names, because migrated user files carry
+  them: `rd.dbrrg.debug` (`rd.thinfloe.debug`), `X-DBRRG-Action`,
+  `X-DBRRG-Save-On-Exit` and `X-DBRRG-Multiple` (the `X-TF-` key wins) and
+  `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
 - Shipped tile files keep their file names (`50-upgrade-image.desktop`),
   because a user file rewording a shipped tile matches by file name.
 
-Guards: `test/integration/test-initramfs-home.sh` (migration and links),
-`test/integration/test-3x-fallback.sh` (frozen 3.x scripts in
-`test/fixtures/3.x/` run against a 4.0 home), `test/integration/test-cmdline.sh`,
-the tile tests in `src/thinfloe-menu/src/tiles.rs`,
-`test/unit/test_upgrade_image.py` (`make test-unit`) and `make
-qemu-smoke-upgrade`.
+Guards: `test/integration/test-initramfs-home.sh` (the migration, also with
+only the initramfs's tools), `test/integration/test-session-packages.sh`
+(the marker in the image), `test/integration/test-cmdline.sh`, the tile
+tests in `src/thinfloe-menu/src/tiles.rs`, `test/unit/test_upgrade_image.py`
+(`make test-unit`) and `make qemu-smoke-upgrade`.
 
 ## Known Limitations
 
