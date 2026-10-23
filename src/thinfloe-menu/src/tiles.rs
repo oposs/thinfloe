@@ -797,12 +797,9 @@ mod tests {
                 "[Desktop Entry]\nName=X\nX-DBRRG-Action=reboot\nExec=y\n",
             )],
         );
-        assert!(
-            tiles[0]
-                .problem
-                .as_deref()
-                .unwrap()
-                .contains("may only use the run action")
+        assert_eq!(
+            tiles[0].problem.as_deref(),
+            Some("60-x.desktop: a tile of your own may only use the run action, not 'reboot'")
         );
     }
 
