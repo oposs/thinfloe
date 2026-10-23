@@ -64,10 +64,12 @@ X-TF-Source-Config=.thinlinc
 
 class Route:
     def __init__(self, status: int = 200, headers: Optional[Dict[str, str]] = None,
-                 body: bytes = b""):
+                 body: bytes = b"", hold: Optional[threading.Event] = None):
         self.status = status
         self.headers = headers or {}
         self.body = body
+        # Set: half the body is sent, the rest only once the event is set.
+        self.hold = hold
 
 
 class Server:
@@ -94,7 +96,13 @@ class Server:
                 if "content-length" not in names:
                     self.send_header("Content-Length", str(len(route.body)))
                 self.end_headers()
-                if with_body:
+                if with_body and route.hold is not None:
+                    half = len(route.body) // 2
+                    self.wfile.write(route.body[:half])
+                    self.wfile.flush()
+                    route.hold.wait(30)
+                    self.wfile.write(route.body[half:])
+                elif with_body:
                     self.wfile.write(route.body)
 
             def do_GET(self):
@@ -541,6 +549,8 @@ class TestApt(ServerTest):
 
 FAKE_DPKG = """#!/bin/sh
 printf '%s\\n' "$*" >> "$(dirname "$0")/dpkg.log"
+if flock -n "$(dirname "$0")/../esp.lock" true; then echo free; else echo held; fi \\
+    >> "$(dirname "$0")/dpkg.lockstate"
 if [ -e "$(dirname "$0")/dpkg.fail" ]; then
     echo "dpkg: error: boom" >&2
     exit 1
@@ -548,6 +558,7 @@ fi
 exit 0
 """
 
+DPKG_I = "--force-confdef --force-confold -i "
 DEMO_PATTERN = "/dl/tf-demo_(?P<version>[0-9.]+)_all\\.deb"
 
 
@@ -685,7 +696,7 @@ class TestStore(AddonEnv):
         self.assertEqual(m["url"], self.srv.base + "/dl/tf-demo_1.0_all.deb")
         self.assertTrue(m["fetched"].isdigit())
         self.assertEqual(self.dpkg_calls(),
-                         ["-i %s" % (self.addon_dir() / "current.deb")])
+                         [DPKG_I + str(self.addon_dir() / "current.deb")])
         self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
         self.assertIn("Demo 1.0 installed", self.log_lines())
 
@@ -734,7 +745,7 @@ class TestStore(AddonEnv):
         self.publish("1.0", "1.1")
         self.run_cmd("check")
         self.assertEqual(self.run_cmd("update", "10-demo"), 0)
-        self.assertEqual(self.dpkg_calls()[-1], "-i %s" % (self.addon_dir() / "next.deb"))
+        self.assertEqual(self.dpkg_calls()[-1], DPKG_I + str(self.addon_dir() / "next.deb"))
         self.assertEqual(self.files(), ["current.deb", "current.meta"])
         self.assertEqual(self.meta("current")["version"], "1.1")
         self.assertEqual((self.addon_dir() / "current.deb").read_bytes(), self.debs["1.1"])
@@ -803,7 +814,9 @@ class TestStore(AddonEnv):
         self.publish("1.0")
         self.run_cmd("install", "10-demo")
         self.publish("1.0", "1.1")
-        with mock.patch.object(ad, "free_bytes", lambda path: 10 * 1024 * 1024):
+        esp = str(self.esp)
+        with mock.patch.object(ad, "free_bytes", lambda path: 10 * 1024 * 1024
+                               if str(path).startswith(esp) else 1 << 40):
             self.assertEqual(self.run_cmd("check"), 1)
         self.assertEqual(self.files(), ["current.deb", "current.meta"])
         self.assertEqual(self.meta("current")["version"], "1.0")
@@ -828,7 +841,6 @@ class TestStore(AddonEnv):
                 time.sleep(0.05)
             time.sleep(0.5)
             self.assertFalse(self.addon_dir().exists(), "wrote the ESP under a held lock")
-            self.assertNotIn(("GET", "/dl/tf-demo_1.0_all.deb"), self.srv.requests)
             fcntl.flock(fd, fcntl.LOCK_UN)
             t.join(30)
         self.assertEqual(rc, [0])
@@ -1066,6 +1078,219 @@ class TestTickFile(AddonEnv):
         self.assertEqual(self.run_cmd("install", "10-demo"), 1)
         self.assertEqual(os.listdir(elsewhere), [])
         self.assertEqual(self.files(), [])
+
+class TestFixRound1(AddonEnv):
+    def test_download_and_install_run_without_the_esp_lock(self):
+        # R4: the download goes to RAM; esp.lock only covers the copy.
+        self.demo_tile()
+        self.publish("1.0")
+        hold = threading.Event()
+        self.srv.routes["/dl/tf-demo_1.0_all.deb"].hold = hold
+        self.addCleanup(hold.set)
+        rc = []
+        t = threading.Thread(target=lambda: rc.append(ad.main(["install", "10-demo"])))
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.start()
+            deadline = time.monotonic() + 15
+            while ("GET", "/dl/tf-demo_1.0_all.deb") not in self.srv.requests:
+                self.assertLess(time.monotonic(), deadline, "the download never started")
+                time.sleep(0.05)
+            time.sleep(0.3)
+            r = subprocess.run(["flock", "-n", str(self.lock), "true"])
+            self.assertEqual(r.returncode, 0, "esp.lock is held during the download")
+            hold.set()
+            t.join(30)
+        self.assertEqual(rc, [0])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual((self.bin / "dpkg.lockstate").read_text().split(), ["free"],
+                         "dpkg -i must run without esp.lock")
+
+    def test_no_memory_for_the_download(self):
+        self.demo_tile()
+        self.publish("1.0")
+        run = str(self.run_dir)
+        with mock.patch.object(ad, "free_bytes", lambda path: 10 * 1024 * 1024
+                               if str(path).startswith(run) else 1 << 40):
+            self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(self.files(), [])
+        self.assertEqual(self.status()[0].split("\t")[6],
+                         "Demo: download failed: not enough memory for the download")
+        self.assertEqual(os.listdir(self.run_dir / "dl"), [])
+
+    def test_user_addon_differing_only_in_case_is_refused(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        menu = self.home / ".config" / "thinfloe" / "menu"
+        menu.mkdir(parents=True)
+        (menu / "10-DEMO.desktop").write_text(
+            "[Desktop Entry]\nName=Other\nExec=o\n"
+            "X-TF-Source-URL=https://e.example/o.deb\n")
+        self.assertEqual(self.run_cmd("remove", "10-DEMO"), 1)
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(len(self.dpkg_calls()), 1)
+        self.assertEqual(self.ticks(), ["10-demo"])
+        self.assertTrue(any("10-DEMO.desktop" in l and "10-demo.desktop" in l
+                            for l in self.log_lines()), self.log_lines())
+        self.assertEqual([l.split("\t")[0] for l in self.status()], ["10-demo"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_cmd("remove", "10-demo."), 2,
+                             "a trailing dot is no id (vfat strips it)")
+
+    def test_install_failed_survives_a_check_and_update_retries(self):
+        self.demo_tile()
+        self.publish("1.0")
+        (self.bin / "dpkg.fail").touch()
+        self.assertEqual(self.run_cmd("install", "10-demo"), 1)
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.status()[0].split("\t")[2], "install-failed",
+                         "an up-to-date check must not hide the failed install")
+        (self.bin / "dpkg.fail").unlink()
+        self.assertEqual(self.run_cmd("update", "10-demo"), 0)
+        self.assertEqual(len(self.dpkg_calls()), 2, "update retries the current copy")
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
+
+    def test_install_failed_survives_storing_next(self):
+        self.demo_tile()
+        self.publish("1.0")
+        (self.bin / "dpkg.fail").touch()
+        self.run_cmd("install", "10-demo")
+        self.publish("1.0", "1.1")
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.files(), ["current.deb", "current.meta", "next.deb", "next.meta"])
+        self.assertEqual(self.status()[0].split("\t")[2], "install-failed")
+
+    def test_concurrent_ticks_are_not_lost(self):
+        real = ad.read_ticks
+
+        def slow():
+            ids = real()
+            time.sleep(0.02)
+            return ids
+
+        errors = []
+
+        def add(i):
+            try:
+                ad.change_ticks(lambda t: t + ["t%d" % i])
+            except Exception as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        with mock.patch.object(ad, "read_ticks", slow):
+            threads = [threading.Thread(target=add, args=(i,)) for i in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(self.ticks()), sorted("t%d" % i for i in range(8)))
+
+    def test_concurrent_run_files_do_not_collide(self):
+        errors = []
+
+        def write(i):
+            try:
+                for n in range(30):
+                    ad.set_result("10-demo", None, "m%d-%d" % (i, n))
+            except Exception as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, [])
+        self.assertTrue(ad.get_result("10-demo")["message"].startswith("m"))
+        self.assertEqual(stat_mode(self.run_dir / "results" / "10-demo.json"), 0o644)
+        self.assertEqual([n for n in os.listdir(self.run_dir / "results")], ["10-demo.json"])
+
+    def test_dpkg_keeps_changed_conffiles(self):
+        self.demo_tile()
+        self.publish("1.0")
+        self.run_cmd("install", "10-demo")
+        self.assertTrue(self.dpkg_calls()[0].startswith("--force-confdef --force-confold -i "))
+
+
+class TestAutomaticHttps(AddonEnv):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(ad, "_secure", lambda url: url.lower().startswith("https:"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_automatic_check_never_asks_an_http_hop(self):
+        url = "https://e.example/x.deb"
+        hop = "http://mirror.example/x.deb"
+        (self.tiles / "40-x.desktop").write_text(
+            "[Desktop Entry]\nName=X\nExec=x\nX-TF-Source-URL=%s\n" % url)
+        self.tick("40-x")
+        opener = FakeRedirectOpener({url: hop})
+        with mock.patch.object(ad, "_opener", opener):
+            self.assertEqual(self.run_cmd("check"), 1)
+        self.assertEqual(opener.asked, [url], "the http hop is never requested")
+        self.assertTrue(any(hop in l for l in self.log_lines()), self.log_lines())
+        self.assertEqual(self.files("40-x"), [])
+
+
+class TestPromote(unittest.TestCase):
+    """promote() at every point a power loss can hit: each slot is either
+    whole (its payload matches its meta) or missing, never mixed."""
+
+    class Crash(Exception):
+        pass
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="test-addon-promote-"))
+        self.addCleanup(shutil.rmtree, self.d)
+
+    def fill(self, cur_fmt: str, nxt_fmt: str):
+        for name in os.listdir(self.d):
+            os.unlink(self.d / name)
+        for slot, fmt, version in (("current", cur_fmt, "1.0"), ("next", nxt_fmt, "1.1")):
+            (self.d / ("%s.%s" % (slot, fmt))).write_bytes(b"payload-" + version.encode())
+            (self.d / (slot + ".meta")).write_text(
+                "version=%s\nformat=%s\nfingerprint=%s\n" % (version, fmt, version))
+
+    def whole_or_missing(self, slot: str) -> Optional[str]:
+        st = ad.stored(str(self.d), slot)
+        if st is None:
+            return None
+        self.assertEqual(Path(st.path).read_bytes(), b"payload-" + st.meta["version"].encode(),
+                         "%s: payload and meta disagree" % slot)
+        return st.meta["version"]
+
+    def test_every_crash_point(self):
+        real_replace, real_unlink = os.replace, os.unlink
+        for cur_fmt, nxt_fmt in (("deb", "deb"), ("tar", "deb")):
+            for crash_at in range(1, 12):
+                with self.subTest(formats=(cur_fmt, nxt_fmt), crash_at=crash_at):
+                    self.fill(cur_fmt, nxt_fmt)
+                    count = [0]
+
+                    def step(real):
+                        def op(*args, **kwargs):
+                            count[0] += 1
+                            if count[0] == crash_at:
+                                raise self.Crash()
+                            return real(*args, **kwargs)
+                        return op
+
+                    crashed = False
+                    with mock.patch.object(ad.os, "replace", step(real_replace)), \
+                            mock.patch.object(ad.os, "unlink", step(real_unlink)):
+                        try:
+                            ad.promote(str(self.d))
+                        except self.Crash:
+                            crashed = True
+                    self.whole_or_missing("current")
+                    self.whole_or_missing("next")
+                    if not crashed:
+                        self.assertEqual(self.whole_or_missing("current"), "1.1")
+                        self.assertEqual(sorted(os.listdir(self.d)),
+                                         ["current.%s" % nxt_fmt, "current.meta"])
+                        break
+
 
 
 def stat_mode(p: Path) -> int:

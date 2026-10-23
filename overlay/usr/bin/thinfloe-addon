@@ -33,6 +33,7 @@ Source keys:
 import contextlib
 import errno
 import fcntl
+import hashlib
 import html
 import http.client
 import json
@@ -479,9 +480,10 @@ def format_of(src: Source, *urls: str) -> str:
                      "X-TF-Source-Format=deb or tar" % urls[0])
 
 
-def _check_head(url: str, urls_seen: List[str]) -> Tuple[str, str]:
+def _check_head(url: str, urls_seen: List[str],
+                https_only: bool = False) -> Tuple[str, str]:
     """HEAD url; returns (fingerprint, final URL)."""
-    resp = _request("HEAD", url, urls_seen)
+    resp = _request("HEAD", url, urls_seen, https_only)
     resp.close()
     final = urls_seen[-1]
     etag = resp.headers.get("ETag")
@@ -497,9 +499,9 @@ def _check_head(url: str, urls_seen: List[str]) -> Tuple[str, str]:
                      "so a new version cannot be told apart" % url)
 
 
-def _check_url(src: Source) -> Found:
+def _check_url(src: Source, https_only: bool) -> Found:
     seen: List[str] = []
-    fingerprint, final = _check_head(src.url, seen)
+    fingerprint, final = _check_head(src.url, seen, https_only)
     return Found(url=src.url, version=None, fingerprint=fingerprint,
                  fmt=format_of(src, src.url, final), urls_seen=seen)
 
@@ -563,9 +565,9 @@ def _match_links(pattern: str, text: str, page: str,
     return [(m, v) for m, v in json.loads(b"".join(chunks).decode("utf-8"))]
 
 
-def _check_page(src: Source) -> Found:
+def _check_page(src: Source, https_only: bool) -> Found:
     seen: List[str] = []
-    body = _fetch_bounded(src.url, MAX_PAGE_BYTES, "the page", seen)
+    body = _fetch_bounded(src.url, MAX_PAGE_BYTES, "the page", seen, https_only)
     base = seen[-1]
     text = body.decode("utf-8", "replace")
     has_version = "version" in re.compile(src.pattern).groupindex
@@ -590,7 +592,7 @@ def _check_page(src: Source) -> Found:
         raise CheckError("no link on %s matches the pattern" % src.url)
 
     # The link itself, and where it redirects to, decide auto_allowed too.
-    _check_head(best_url, seen)
+    _check_head(best_url, seen, https_only)
     fmt = format_of(src, best_url, seen[-1])
     return Found(url=best_url, version=best_version,
                  fingerprint=best_url if best_version is None else best_version,
@@ -717,12 +719,15 @@ def _check_apt(src: Source) -> Found:
                  urls_seen=seen)
 
 
-def check(src: Source) -> Found:
-    """What the source offers now. Raises CheckError with the reason."""
+def check(src: Source, https_only: bool = False) -> Found:
+    """What the source offers now. Raises CheckError with the reason. With
+    https_only, a URL or page source never sends a request to a hop that is
+    not https (an APT source leaves redirects to apt, which refuses https to
+    http)."""
     if src.kind == "url":
-        return _check_url(src)
+        return _check_url(src, https_only)
     if src.kind == "page":
-        return _check_page(src)
+        return _check_page(src, https_only)
     if src.kind == "apt":
         return _check_apt(src)
     raise CheckError("unknown source kind %s" % src.kind)
@@ -754,7 +759,9 @@ MAX_LOG_TEXT = 1024
 TOOL_TIMEOUT = 600
 FORMATS = ("deb", "tar")
 
-ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+# vfat ignores case and strips trailing dots: ids differing only so would
+# share one directory on the ESP. No trailing dot here; case in Run.
+ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
 
 USAGE = "usage: thinfloe-addon status | check [ID...] | install ID | update ID | remove ID"
@@ -786,12 +793,20 @@ def _fsync_dir(path: str) -> None:
 
 
 def _write_atomic(path: str, text: str) -> None:
-    tmp = path + ".new"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    """Replace path, readable by all (the menu reads these files as tfuser).
+    The temporary name is unique, so concurrent runs never share one."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                               prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), 0o644)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        _unlink(tmp)
+        raise
     _fsync_dir(os.path.dirname(path))
 
 
@@ -856,6 +871,17 @@ def set_result(aid: str, state: Optional[str], message: str,
     os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
     _write_atomic(path, json.dumps({"state": state, "message": message,
                                     "urls_seen": urls_seen}))
+
+
+def note_ok(aid: str, message: str, urls_seen: Optional[List[str]] = None) -> None:
+    """Log a success that installed nothing. It does not clear an
+    install-failed of this boot: only a working install does."""
+    log(message)
+    r = get_result(aid)
+    if r["state"] == "install-failed":
+        set_result(aid, r["state"], r["message"], urls_seen)
+    else:
+        set_result(aid, None, message, urls_seen)
 
 
 def _installed_path(aid: str) -> str:
@@ -959,6 +985,17 @@ def write_ticks(ids: List[str]) -> None:
         os.close(dfd)
 
 
+def change_ticks(change) -> List[str]:
+    """Read the tick file, apply change(ids) -> ids, write it back if it
+    changed, all under the run lock, so concurrent runs lose no tick."""
+    with _run_lock():
+        ids = read_ticks()
+        new = change(list(ids))
+        if new != ids:
+            write_ticks(new)
+        return new
+
+
 # ============ The store ============
 
 def esp_mounted() -> bool:
@@ -977,12 +1014,16 @@ def free_bytes(path: str) -> int:
 def _no_space() -> str:
     if esp_mounted():
         return "not enough space on the boot stick"
-    return "not enough memory for the download"
+    return "not enough memory to keep the add-on"
+
+
+NO_MEMORY = "not enough memory for the download"
 
 
 @contextlib.contextmanager
 def esp_lock():
-    """Held for every write to the store; thinfloe-save-home takes it too."""
+    """Held for every write to the store; thinfloe-save-home takes it too.
+    Never held across a download or an install."""
     fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1012,7 +1053,8 @@ def read_meta(path: str) -> Optional[dict]:
 
 
 def stored(d: str, slot: str) -> Optional[Stored]:
-    """The copy in slot current or next of an add-on directory, if whole."""
+    """The copy in slot current or next of an add-on directory, if whole:
+    a slot without its meta file is incomplete."""
     meta = read_meta(os.path.join(d, slot + ".meta"))
     if not meta or meta.get("format") not in FORMATS:
         return None
@@ -1035,46 +1077,55 @@ def _remove_new(d: str) -> None:
             _unlink(os.path.join(d, name))
 
 
-def _copy_out(resp_read, dest: str, space_dir: str, expected: Optional[int], what: str) -> int:
-    """Write what resp_read(n) returns into dest; stop when the store would
-    keep less than MIN_FREE_BYTES."""
+def _copy_out(read, dest: str, space_dir: str, expected: Optional[int], what: str,
+              no_space: str) -> Tuple[int, str]:
+    """Write what read(n) returns into dest; stop when space_dir would keep
+    less than MIN_FREE_BYTES. Returns (size, sha256)."""
     if expected is not None and free_bytes(space_dir) - expected < MIN_FREE_BYTES:
-        raise CheckError(_no_space())
+        raise CheckError(no_space)
     got = 0
-    with open(dest, "wb") as f:
-        while True:
-            try:
-                chunk = resp_read(CHUNK_BYTES)
-            except (OSError, http.client.HTTPException) as e:
-                raise CheckError("the download of %s broke off: %s"
-                                 % (what, e.__class__.__name__ if not str(e) else e))
-            if not chunk:
-                break
-            f.write(chunk)
-            got += len(chunk)
-            if free_bytes(space_dir) < MIN_FREE_BYTES:
-                raise CheckError(_no_space())
-        f.flush()
-        os.fsync(f.fileno())
-    return got
+    digest = hashlib.sha256()
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                try:
+                    chunk = read(CHUNK_BYTES)
+                except (OSError, http.client.HTTPException) as e:
+                    raise CheckError("the download of %s broke off: %s"
+                                     % (what, str(e) or e.__class__.__name__))
+                if not chunk:
+                    break
+                f.write(chunk)
+                digest.update(chunk)
+                got += len(chunk)
+                if free_bytes(space_dir) < MIN_FREE_BYTES:
+                    raise CheckError(no_space)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            raise CheckError(no_space)
+        raise CheckError("cannot write %s: %s" % (dest, e.strerror or e))
+    return got, digest.hexdigest()
 
 
-def _download_http(url: str, dest: str, https_only: bool, space_dir: str) -> None:
+def _download_http(url: str, dest: str, https_only: bool, space_dir: str) -> str:
     resp = _request("GET", url, [], https_only)
     try:
         try:
             expected = int(resp.headers.get("Content-Length"))
         except (TypeError, ValueError):
             expected = None
-        got = _copy_out(resp.read, dest, space_dir, expected, url)
+        got, digest = _copy_out(resp.read, dest, space_dir, expected, url, NO_MEMORY)
     finally:
         resp.close()
     if expected is not None and got != expected:
         raise CheckError("the download of %s was cut short (%d of %d bytes)"
                          % (url, got, expected))
+    return digest
 
 
-def _download_apt(src: Source, found: Found, dest: str, space_dir: str) -> None:
+def _download_apt(src: Source, found: Found, dest: str, space_dir: str) -> str:
     """apt-get download, so a signed repository's hashes vouch for the file."""
     with _apt_session(src) as (opts, env, tmp):
         where = os.path.join(tmp, "download")
@@ -1087,7 +1138,7 @@ def _download_apt(src: Source, found: Found, dest: str, space_dir: str) -> None:
             raise CheckError("apt-get download gave no package for %s" % found.url)
         with open(os.path.join(where, debs[0]), "rb") as f:
             size = os.fstat(f.fileno()).st_size
-            _copy_out(f.read, dest, space_dir, size, found.url)
+            return _copy_out(f.read, dest, space_dir, size, found.url, NO_MEMORY)[1]
 
 
 def _tool(cmd: List[str], timeout: int = TOOL_TIMEOUT) -> subprocess.CompletedProcess:
@@ -1141,26 +1192,26 @@ def verify(path: str, fmt: str, url: str) -> dict:
     return {"package": package, "version": fields.get("Version", "")}
 
 
-def fetch_into(a: Addon, found: Found, d: str, slot: str, https_only: bool) -> dict:
-    """Download into <slot>.<fmt>.new, verify, then rename it and its meta
-    into place. Call with esp_lock held. Returns the meta."""
-    os.makedirs(d, mode=0o755, exist_ok=True)
-    _remove_new(d)
-    payload = os.path.join(d, "%s.%s" % (slot, found.fmt))
-    tmp = payload + ".new"
-    meta_path = os.path.join(d, slot + ".meta")
-    meta_tmp = meta_path + ".new"
+@dataclass
+class Download:
+    path: str  # in RAM, under RUN_DIR/dl
+    meta: dict
+    sha256: str
+
+
+def download(a: Addon, found: Found, https_only: bool) -> Download:
+    """Download into RAM and verify it, without esp.lock. The caller
+    removes the file."""
+    dl = os.path.join(RUN_DIR, "dl")
+    os.makedirs(dl, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dl, prefix=a.id + ".", suffix="." + found.fmt)
+    os.close(fd)
     log("%s: downloading %s" % (a.name, found.url))
     try:
-        try:
-            if a.source.kind == "apt":
-                _download_apt(a.source, found, tmp, d)
-            else:
-                _download_http(found.url, tmp, https_only, d)
-        except OSError as e:
-            if e.errno == errno.ENOSPC:
-                raise CheckError(_no_space())
-            raise CheckError("cannot store %s: %s" % (found.url, e.strerror or e))
+        if a.source.kind == "apt":
+            digest = _download_apt(a.source, found, tmp, dl)
+        else:
+            digest = _download_http(found.url, tmp, https_only, dl)
         info = verify(tmp, found.fmt, found.url)
         if a.source.kind == "apt" and info["package"] != a.source.package:
             raise CheckError("%s holds %s, not %s"
@@ -1170,34 +1221,69 @@ def fetch_into(a: Addon, found: Found, d: str, slot: str, https_only: bool) -> d
         if found.fmt == "deb":
             meta["package"] = info["package"]
         meta["fetched"] = str(int(time.time()))
-        with open(meta_tmp, "w", encoding="utf-8") as f:
-            f.write("".join("%s=%s\n" % (k, _clean(v)) for k, v in meta.items()))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, payload)
-        os.replace(meta_tmp, meta_path)
-        for other in FORMATS:
-            if other != found.fmt:
-                _unlink(os.path.join(d, "%s.%s" % (slot, other)))
-        _fsync_dir(d)
-        return meta
+        return Download(tmp, meta, digest)
+    except BaseException:
+        _unlink(tmp)
+        raise
+
+
+def _put_slot(d: str, slot: str, payload_src: str, meta_src: str, fmt: str) -> None:
+    """Rename a payload and its meta into slot. The slot's meta goes first,
+    so a power loss in between leaves the slot incomplete (stored() is
+    None), never a new payload under an old meta; a payload of the other
+    format goes last."""
+    meta_path = os.path.join(d, slot + ".meta")
+    _unlink(meta_path)
+    _fsync_dir(d)
+    os.replace(payload_src, os.path.join(d, "%s.%s" % (slot, fmt)))
+    _fsync_dir(d)
+    os.replace(meta_src, meta_path)
+    _fsync_dir(d)
+    for other in FORMATS:
+        if other != fmt:
+            _unlink(os.path.join(d, "%s.%s" % (slot, other)))
+    _fsync_dir(d)
+
+
+def store_copy(d: str, slot: str, dl: Download) -> None:
+    """Copy a verified download into <slot>.<fmt>.new on the store, check
+    size and hash of the copy, then rename it into the slot. Call with
+    esp_lock held."""
+    os.makedirs(d, mode=0o755, exist_ok=True)
+    _remove_new(d)
+    fmt = dl.meta["format"]
+    tmp = os.path.join(d, "%s.%s.new" % (slot, fmt))
+    meta_tmp = os.path.join(d, slot + ".meta.new")
+    try:
+        with open(dl.path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            got, digest = _copy_out(f.read, tmp, d, size, dl.meta["url"], _no_space())
+        if got != size or digest != dl.sha256:
+            raise CheckError("the copy of %s on the store differs from the download"
+                             % dl.meta["url"])
+        try:
+            with open(meta_tmp, "w", encoding="utf-8") as f:
+                f.write("".join("%s=%s\n" % (k, _clean(v)) for k, v in dl.meta.items()))
+                f.flush()
+                os.fsync(f.fileno())
+            _put_slot(d, slot, tmp, meta_tmp, fmt)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise CheckError(_no_space())
+            raise CheckError("cannot store %s: %s" % (dl.meta["url"], e.strerror or e))
     finally:
         _unlink(tmp)
         _unlink(meta_tmp)
 
 
-def promote(d: str) -> None:
-    """next.* becomes current.*. Call with esp_lock held."""
+def promote(d: str, expect: Optional[dict] = None) -> bool:
+    """next.* becomes current.*, if next is still `expect` (the meta that
+    was installed). Call with esp_lock held."""
     nxt = stored(d, "next")
-    if nxt is None:
-        return
-    fmt = nxt.meta["format"]
-    os.replace(nxt.path, os.path.join(d, "current." + fmt))
-    os.replace(os.path.join(d, "next.meta"), os.path.join(d, "current.meta"))
-    for other in FORMATS:
-        if other != fmt:
-            _unlink(os.path.join(d, "current." + other))
-    _fsync_dir(d)
+    if nxt is None or (expect is not None and nxt.meta != expect):
+        return False
+    _put_slot(d, "current", nxt.path, os.path.join(d, "next.meta"), nxt.meta["format"])
+    return True
 
 
 def _newer(found: Found, meta: dict) -> bool:
@@ -1242,7 +1328,9 @@ def install_stored(aid: str, st: Stored) -> dict:
             raise InstallError("%s names no valid package" % st.path)
         record["package"] = package
         _set_installed(aid, record)
-        _run_tool([DPKG, "-i", st.path])
+        # Keep a conffile the user changed instead of asking (stdin is
+        # /dev/null, so a question fails the install).
+        _run_tool([DPKG, "--force-confdef", "--force-confold", "-i", st.path])
     else:
         try:
             files = tar_members(st.path, st.path)
@@ -1318,13 +1406,24 @@ class Run:
         user_tiles = os.path.join(home_dir(), ".config", "thinfloe", "menu")
         addons, problems = load_addons(SHIPPED_TILES, user_tiles)
         self.addons = []
-        for a in addons:
-            if ID_RE.fullmatch(a.id):
-                self.addons.append(a)
-            else:
+        # The ESP is vfat: an id differing from another only in case names
+        # the same directory there. Shipped add-ons win, then the first name.
+        by_fold: dict = {}
+        for a in sorted(addons, key=lambda a: not a.shipped):
+            if not ID_RE.fullmatch(a.id):
                 problems.append("%s: an add-on's file name may only hold letters, digits "
-                                "and . _ + -" % a.tile_path)
+                                "and . _ + -, and not end in ." % a.tile_path)
+                continue
+            other = by_fold.get(a.id.casefold())
+            if other is not None:
+                problems.append("%s: its name differs from %s only in case, so it was ignored"
+                                % (a.tile_path, other.tile_path))
+                continue
+            by_fold[a.id.casefold()] = a
+            self.addons.append(a)
+        self.addons.sort(key=lambda a: a.id)
         self.by_id = {a.id: a for a in self.addons}
+        self.by_fold = by_fold
         self.failed = False
         try:
             self.ticks = read_ticks()
@@ -1344,18 +1443,18 @@ class Run:
         set_result(a.id, state, message)
         self.failed = True
 
-    def tick(self, a: Addon) -> bool:
-        if a.id in self.ticks:
-            return True
+    def change_ticks(self, change, name: str) -> bool:
         try:
-            write_ticks(self.ticks + [a.id])
+            self.ticks = change_ticks(change)
         except (OSError, KeyError) as e:
-            log("%s: cannot tick it in ~/.config/thinfloe/addons: %s"
-                % (a.name, getattr(e, "strerror", None) or e))
+            log("%s: cannot change ~/.config/thinfloe/addons: %s"
+                % (name, getattr(e, "strerror", None) or e))
             self.failed = True
             return False
-        self.ticks.append(a.id)
         return True
+
+    def tick(self, a: Addon) -> bool:
+        return self.change_ticks(lambda t: t if a.id in t else t + [a.id], a.name)
 
     def addon(self, aid: str) -> Optional[Addon]:
         a = self.by_id.get(aid)
@@ -1364,13 +1463,24 @@ class Run:
             self.failed = True
         return a
 
+    def case_clash(self, aid: str) -> bool:
+        """An id that is no add-on but names one's directory on vfat."""
+        other = self.by_fold.get(aid.casefold())
+        if aid in self.by_id or other is None:
+            return False
+        log("%s differs from the add-on %s only in case, so it was left alone"
+            % (aid, other.id))
+        self.failed = True
+        return True
+
 
 def _addon_dir(a_id: str) -> str:
     return os.path.join(store_root(), a_id)
 
 
 def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
-    """Install current or next (then promoted). Call with esp_lock held."""
+    """Install current, or next and then promote it. The install runs
+    without esp.lock, from the stored file."""
     st = stored(d, slot)
     if st is None:
         run.fail(a, "install-failed", "install failed: no stored copy")
@@ -1382,67 +1492,91 @@ def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
         run.fail(a, "install-failed", "install failed: %s" % e)
         return False
     if slot == "next":
-        promote(d)
+        with esp_lock():
+            if not promote(d, st.meta):
+                log("%s: a newer copy was stored meanwhile; it stays for the next boot"
+                    % a.name)
     message = "%s installed" % _label(a, st.meta.get("version"))
     log(message)
     set_result(a.id, None, message)
     return True
 
 
-def _check(run: Run, a: Addon) -> Optional[Found]:
+def _check(run: Run, a: Addon, https_only: bool = False) -> Optional[Found]:
     log("%s: checking %s" % (a.name, a.source.url))
     try:
-        return check(a.source)
+        return check(a.source, https_only)
     except CheckError as e:
         run.fail(a, "failed", "check failed: %s" % e)
         return None
 
 
+def _fetch_and_store(run: Run, a: Addon, found: Found, d: str, slot: str,
+                     https_only: bool) -> Optional[dict]:
+    """Download into RAM without esp.lock, then copy into the slot under
+    it. Another run may have stored the same or a newer copy meanwhile;
+    then that one stays. Returns the slot's meta, None on failure."""
+    try:
+        dl = download(a, found, https_only)
+    except CheckError as e:
+        run.fail(a, "failed", "download failed: %s" % e)
+        return None
+    try:
+        with esp_lock():
+            there = stored(d, slot)
+            if there is not None and not _newer(found, there.meta):
+                return there.meta
+            store_copy(d, slot, dl)
+    except CheckError as e:
+        run.fail(a, "failed", "download failed: %s" % e)
+        return None
+    finally:
+        _unlink(dl.path)
+    return dl.meta
+
+
+def _keyed(src: Source) -> bool:
+    return src.kind == "apt" and bool(src.key_url)
+
+
 def check_one(run: Run, a: Addon, automatic: bool) -> None:
     """Check one ticked add-on. No copy yet: fetch and install it now.
     A newer version: store it as next.*, active at next boot. A source that
-    is not auto_allowed is never stored here (Install now / Update now)."""
+    is not auto_allowed is never stored here (Install now / Update now).
+    An automatic check sends no request to a hop that is not https."""
     src = a.source
     if automatic and not auto_allowed(src, []):
         log("%s: not checked automatically (neither HTTPS nor signed)" % a.name)
         return
-    found = _check(run, a)
+    found = _check(run, a, https_only=automatic and not _keyed(src))
     if found is None:
         return
-    allowed = auto_allowed(src, found.urls_seen)
     d = _addon_dir(a.id)
-    with esp_lock():
-        cur = stored(d, "current")
-        nxt = stored(d, "next")
-        if cur is not None and not _newer(found, (nxt or cur).meta):
-            message = (_stored_message(a, nxt.meta) if nxt
-                       else "%s: up to date" % a.name)
-            log(message)
-            set_result(a.id, None, message, found.urls_seen)
-            return
-        if not allowed:
-            log("%s is available; neither HTTPS nor signed, so only Install now or "
-                "Update now fetch it" % _label(a, found.version))
-            return
-        slot = "current" if cur is None else "next"
-        try:
-            meta = fetch_into(a, found, d, slot, https_only=not (src.kind == "apt"
-                                                                  and src.key_url))
-        except CheckError as e:
-            run.fail(a, "failed", "download failed: %s" % e)
-            return
-        set_result(a.id, None, "", found.urls_seen)
-        if slot == "current":
-            _install_slot(run, a, d, "current")
-            return
-        message = _stored_message(a, meta)
-        log(message)
-        set_result(a.id, None, message)
+    cur = stored(d, "current")
+    nxt = stored(d, "next")
+    if cur is not None and not _newer(found, (nxt or cur).meta):
+        note_ok(a.id, _stored_message(a, nxt.meta) if nxt else "%s: up to date" % a.name,
+                found.urls_seen)
+        return
+    if not auto_allowed(src, found.urls_seen):
+        log("%s is available; neither HTTPS nor signed, so only Install now or "
+            "Update now fetch it" % _label(a, found.version))
+        return
+    slot = "current" if cur is None else "next"
+    meta = _fetch_and_store(run, a, found, d, slot, https_only=not _keyed(src))
+    if meta is None:
+        return
+    if slot == "current":
+        _install_slot(run, a, d, "current")
+    else:
+        note_ok(a.id, _stored_message(a, meta), found.urls_seen)
 
 
 def cmd_check(run: Run, ids: List[str]) -> None:
     if ids:
         for aid in ids:
+            if run.case_clash(aid):
+                continue
             a = run.addon(aid)
             if a is None:
                 continue
@@ -1460,54 +1594,49 @@ def cmd_check(run: Run, ids: List[str]) -> None:
     _write_atomic(os.path.join(RUN_DIR, "last-check"), "%d\n" % int(time.time()))
 
 
+def _installed_ok(aid: str) -> bool:
+    record = installed(aid)
+    return bool(record and record.get("ok"))
+
+
 def _install_now(run: Run, a: Addon, update: bool) -> None:
     """Install now (update=False): the stored current copy, fetched first if
     there is none. Update now (update=True): next.*, fetched first if there
-    is none and the source has something newer, then promoted."""
+    is none and the source has something newer, then promoted; with nothing
+    newer, a current copy this boot failed to install is installed again."""
     if not run.tick(a):
         return
     d = _addon_dir(a.id)
-    with esp_lock():
-        cur = stored(d, "current")
-        nxt = stored(d, "next")
-    found = None
-    if cur is None or (update and nxt is None):
+    cur = stored(d, "current")
+    if update and cur is not None:
+        if stored(d, "next") is None:
+            found = _check(run, a)
+            if found is None:
+                return
+            if not _newer(found, cur.meta):
+                note_ok(a.id, "%s: up to date" % a.name, found.urls_seen)
+                if not _installed_ok(a.id):
+                    _install_slot(run, a, d, "current")
+                return
+            if _fetch_and_store(run, a, found, d, "next", https_only=False) is None:
+                return
+        _install_slot(run, a, d, "next")
+        return
+    if cur is None:
         found = _check(run, a)
         if found is None:
             return
-    with esp_lock():
-        cur = stored(d, "current")
-        nxt = stored(d, "next")
-        slot = "next" if update and cur is not None else "current"
-        if stored(d, slot) is None:
-            if found is None:
-                run.fail(a, "failed", "the stored copy went away; try again")
-                return
-            if slot == "next" and not _newer(found, cur.meta):
-                message = "%s: up to date" % a.name
-                log(message)
-                set_result(a.id, None, message, found.urls_seen)
-                return
-            try:
-                fetch_into(a, found, d, slot, https_only=False)
-            except CheckError as e:
-                run.fail(a, "failed", "download failed: %s" % e)
-                return
-            set_result(a.id, None, "", found.urls_seen)
-        _install_slot(run, a, d, slot)
+        if _fetch_and_store(run, a, found, d, "current", https_only=False) is None:
+            return
+    _install_slot(run, a, d, "current")
 
 
 def cmd_remove(run: Run, aid: str) -> None:
+    if run.case_clash(aid):
+        return
     a = run.by_id.get(aid)
     name = a.name if a else aid
-    if aid in run.ticks:
-        try:
-            write_ticks([t for t in run.ticks if t != aid])
-            run.ticks.remove(aid)
-        except (OSError, KeyError) as e:
-            log("%s: cannot untick it in ~/.config/thinfloe/addons: %s"
-                % (name, getattr(e, "strerror", None) or e))
-            run.failed = True
+    run.change_ticks(lambda t: [x for x in t if x != aid], name)
     try:
         uninstall(aid)
     except InstallError as e:
