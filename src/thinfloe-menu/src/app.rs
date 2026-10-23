@@ -82,6 +82,8 @@ pub struct App {
     /// Whether the canvas background is the frozen grid.
     frozen: bool,
     addon_log: AddonLog,
+    /// Whether the log was read once already.
+    addon_log_read: bool,
     /// Whether the window is on screen; the add-on poll rests when not.
     shown: Arc<AtomicBool>,
 }
@@ -116,6 +118,7 @@ pub fn run(cfg: Config) -> Result<i32, String> {
     watch_addons(&cfg, &shown, event_loop.create_proxy());
     let mut app = App {
         addon_log: AddonLog::new(cfg.addon_log.clone()),
+        addon_log_read: false,
         shown,
         cfg,
         ctx,
@@ -135,21 +138,17 @@ pub fn run(cfg: Config) -> Result<i32, String> {
 fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
     let (status, log) = (cfg.addon_status.clone(), cfg.addon_log.clone());
     let shown = shown.clone();
-    // Taken before the first read of the files, which the loop does when it
-    // starts: a change in between costs one extra read, never a lost one.
-    let mut seen = (addons::stamp(&status), addons::stamp(&log));
+    // The first tick reads the files whatever they hold, so a change between
+    // the menu's first read of the status and now is not lost.
+    let mut watcher = addons::Watcher::default();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(ADDON_POLL);
             if !shown.load(Ordering::Relaxed) {
                 continue;
             }
-            let now = (addons::stamp(&status), addons::stamp(&log));
-            if now != seen {
-                seen = now;
-                if waker.send_event(Wake::Addons).is_err() {
-                    return;
-                }
+            if watcher.tick(&status, &log) && waker.send_event(Wake::Addons).is_err() {
+                return;
             }
         }
     });
@@ -165,22 +164,36 @@ impl App {
             self.cfg.menu.refresh_programs(&self.cfg.program_path);
             if let Some(live) = self.live.as_mut() {
                 for i in changed {
-                    let icon = ui::load_icon(&self.ctx, &self.cfg.menu.tiles[i], &self.cfg.icon_roots);
+                    // A tile that is not drawn needs no icon.
+                    let icon = if self.cfg.menu.visible(i) {
+                        ui::load_icon(&self.ctx, &self.cfg.menu.tiles[i], &self.cfg.icon_roots)
+                    } else {
+                        None
+                    };
                     if let Some(slot) = live.icons.get_mut(i) {
                         *slot = icon;
                     }
                 }
             }
         }
+        let mut lines = Vec::new();
         for _ in 0..ADDON_LOG_POLLS {
-            let lines = self.addon_log.poll();
-            let more = lines.len() >= addons::POLL_LINES;
-            for (time, text) in lines {
-                self.cfg.menu.log.push(addons::log_line(time, &text));
-            }
+            let got = self.addon_log.poll();
+            let more = got.len() >= addons::POLL_LINES;
+            lines.extend(got);
             if !more {
                 break;
             }
+        }
+        // The first read finds what was written before the menu started:
+        // the last 200 lines are enough.
+        if !self.addon_log_read {
+            self.addon_log_read = true;
+            let skip = lines.len().saturating_sub(addons::POLL_LINES);
+            lines.drain(..skip);
+        }
+        for (time, text) in lines {
+            self.cfg.menu.log.push(addons::log_line(time, &text));
         }
     }
 

@@ -293,6 +293,25 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
     })
 }
 
+/// Decides when the status and log files need reading. Nothing is assumed
+/// about what the menu has read already: the first `tick` always says yes, so
+/// the files are read once after the loop starts and anything written before
+/// that (a boot-time install or its failure) reaches the menu. After that it
+/// says yes only when a file's stamp changed.
+#[derive(Debug, Default)]
+pub struct Watcher {
+    seen: Option<(Option<Stamp>, Option<Stamp>)>,
+}
+
+impl Watcher {
+    pub fn tick(&mut self, status: &Path, log: &Path) -> bool {
+        let now = (stamp(status), stamp(log));
+        let changed = self.seen != Some(now);
+        self.seen = Some(now);
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +493,26 @@ mod tests {
         assert_eq!(a, stamp(&p));
         fs::write(&p, "ab").unwrap();
         assert_ne!(a, stamp(&p));
+    }
+
+    #[test]
+    fn watcher_reads_once_at_start_then_only_on_change() {
+        let d = TestDir::new("addons", "watch");
+        let (status, log) = (d.join("status"), d.join("log"));
+        // Lines written before the menu started must still be read.
+        fs::write(&log, "1\tinstalled at boot\n").unwrap();
+        let mut w = Watcher::default();
+        assert!(w.tick(&status, &log));
+        assert!(!w.tick(&status, &log));
+        assert!(!w.tick(&status, &log));
+        fs::write(&status, "a\t1\tinstalled\t1\t-\t0\t-\n").unwrap();
+        assert!(w.tick(&status, &log));
+        assert!(!w.tick(&status, &log));
+        append(&log, "2\tmore\n");
+        assert!(w.tick(&status, &log));
+        // Even with no file at all, the first tick reads once.
+        let mut w = Watcher::default();
+        assert!(w.tick(&d.join("none1"), &d.join("none2")));
+        assert!(!w.tick(&d.join("none1"), &d.join("none2")));
     }
 }
