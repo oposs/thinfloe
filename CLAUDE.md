@@ -392,7 +392,7 @@ The containers/ubuntu/Dockerfile follows several important patterns:
 
 4. **Locale Generation**: `locale-gen` must run after overlay files are applied to process locale.gen configuration.
 
-5. **User Configuration**: The default user (tfuser, uid 1000; called `tluser` before 4.0) is created with no password but added to sudo group with NOPASSWD privileges for management tasks. `/home/tluser` is a symlink to `/home/tfuser`, so old paths in saved files still resolve.
+5. **User Configuration**: The default user (tfuser, uid 1001; called `tluser` before 4.0) is created with no password but added to sudo group with NOPASSWD privileges for management tasks. `/home/tluser` is a symlink to `/home/tfuser`, so old paths in saved files still resolve.
 
 ## Performance Optimizations
 
@@ -1045,7 +1045,7 @@ password login, because tfuser's shadow field is `!` and the image ships no
 autologin gets there without a password.
 
 ```bash
-XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 foot
+XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot
 ```
 
 Do not add a keybinding to launch it - that would violate the
@@ -1059,8 +1059,8 @@ keybindings there is no in-session trigger, so take them from a VT or over
 SSH.
 
 ```bash
-XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 grim /tmp/shot.png
-XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 \
+XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 grim /tmp/shot.png
+XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 \
     sh -c 'grim -g "$(slurp)" - | wl-copy'
 ```
 

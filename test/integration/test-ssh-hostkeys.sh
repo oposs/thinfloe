@@ -5,7 +5,7 @@
 # EFI partition or the boot server. That removes the need for a separate EFI
 # file or a hostkeys.pkg endpoint, but it means the keys arrive tfuser-owned
 # and must be forced to root:root 0600 before sshd will use them - the exact
-# opposite of the home restore, which must PRESERVE uid 1000.
+# opposite of the home restore, which must PRESERVE uid 1001.
 #
 # Runs without root: chown is stubbed and its invocations are recorded, so
 # the ownership fix can be asserted without actually being able to perform

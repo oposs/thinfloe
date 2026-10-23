@@ -305,14 +305,22 @@ else
     fail=1
 fi
 
-# The account is tfuser (uid 1000, home /home/tfuser). /home/tluser stays as a
+# The account is tfuser (uid 1001: ubuntu:26.04 holds 1000 for `ubuntu`, and 3.x's
+# tluser got 1001 the same way; home /home/tfuser). /home/tluser stays as a
 # symlink so a 3.x path in a saved file still resolves; tluser is no account.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
-        etc/passwd etc/sudoers home/tluser >/dev/null 2>&1; then
-    if grep -q '^tfuser:x:1000:[0-9]*:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
-        echo "ok   - tfuser exists with uid 1000, home /home/tfuser"
+        etc/passwd etc/shadow etc/sudoers home/tluser >/dev/null 2>&1; then
+    if grep -q '^tfuser:x:1001:[0-9]*:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - tfuser exists with uid 1001, home /home/tfuser"
     else
-        echo "FAIL - tfuser is not uid 1000 with home /home/tfuser"
+        echo "FAIL - tfuser is not uid 1001 with home /home/tfuser"
+        fail=1
+    fi
+    # The base image's own account sits in group sudo; its password stays locked.
+    if grep -q '^ubuntu:!:' "$DPKG_TMP/acct/etc/shadow" || ! grep -q '^ubuntu:' "$DPKG_TMP/acct/etc/shadow"; then
+        echo "ok   - the base image's ubuntu account is locked or absent"
+    else
+        echo "FAIL - the ubuntu account's shadow field is not '!'"
         fail=1
     fi
     if [[ -L "$DPKG_TMP/acct/home/tluser" && "$(readlink "$DPKG_TMP/acct/home/tluser")" == "tfuser" ]]; then

@@ -244,7 +244,7 @@ tf_restore_home_from_file() {
 
     # tar's default as root is --same-owner, and that is REQUIRED here, not
     # incidental. thinfloe-save-home writes the archive as tfuser, so members
-    # carry uid/gid 1000 numerically; preserving them is what makes the
+    # carry uid/gid 1001 numerically; preserving them is what makes the
     # restored home belong to tfuser. Do NOT add --no-same-owner.
     #
     # Note this is the exact OPPOSITE of what thinfloe-ssh-hostkeys must do a

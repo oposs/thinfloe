@@ -59,7 +59,7 @@ cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
 echo "getent $*" >>"$TF_TEST_LOG"
 case "$1" in
-    passwd) echo "tfuser:x:1000:1000:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
+    passwd) echo "tfuser:x:1001:1001:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
     shadow) echo "tfuser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
     *)      exit 2 ;;
 esac

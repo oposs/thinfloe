@@ -699,7 +699,7 @@ restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 check_3x_result "3.x archive: the restore writes the marker" \
     "$d/newroot/home/tfuser" "$d/state"
 
-# The account is tfuser; a 3.x archive (made as tluser, same uid 1000) lands
+# The account is tfuser; a 3.x archive (made as tluser, same uid 1001) lands
 # in /home/tfuser of the new root.
 d="$WORK/hn-tfuser"; mkdir -p "$d/src" "$d/efi" "$d/state" "$d/newroot/home/tfuser"
 mk3x "$d/src"

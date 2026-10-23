@@ -49,7 +49,7 @@ install_from_keystore() {
     # forced here rather than trusted.
     #
     # NOTE: this is deliberately the OPPOSITE of the home restore in
-    # thinfloe-lib.sh, which must PRESERVE uid 1000 (tar --same-owner). Same
+    # thinfloe-lib.sh, which must PRESERVE uid 1001 (tar --same-owner). Same
     # archive, two different requirements. Do not "make them consistent".
     chown root:root "$SSH_DIR"/ssh_host_* 2>/dev/null || \
         echo "thinfloe-ssh-hostkeys: WARNING could not chown host keys" >&2
