@@ -906,10 +906,19 @@ h="$d/newroot/home/tluser"
 if [[ -L "$h/.config" && -d "$d/outside/dbrrg" && ! -L "$d/outside/dbrrg" \
    && ! -L "$d/outside/thinfloe/dbrrg" && ! -e "$d/outside/thinfloe/menu" \
    && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=fr" \
-   && "$(grep -c 'is a symlink' "$WORK/warnings")" -ge 2 ]]; then
-    ok "a symlinked ~/.config: .config/dbrrg skipped and warned, the rest migrated"
+   && "$(grep -c 'is a symlink' "$WORK/warnings")" -eq 1 ]]; then
+    ok "a symlinked ~/.config: .config/dbrrg skipped and warned once, the rest migrated"
 else
     bad "symlinked .config: outside=$(ls -la "$d/outside" | tr '\n' ' ') warnings=$(cat "$WORK/warnings")"
+fi
+
+# The next restore warns again: once per restore, not once per shell.
+: >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+if [[ "$(grep -c 'is a symlink' "$WORK/warnings")" -eq 1 ]]; then
+    ok "a symlinked ~/.config is warned about once on every restore"
+else
+    bad "second restore with symlinked .config: warnings=$(cat "$WORK/warnings")"
 fi
 
 # Absent archive: links for names whose new file exists, nothing else.

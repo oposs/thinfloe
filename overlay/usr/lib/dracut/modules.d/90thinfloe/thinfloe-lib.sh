@@ -360,13 +360,22 @@ _tf_archive_lists() {
 # or linking below it would act on wherever that link points, possibly
 # outside the home: rm -rf of a real ~/.config/dbrrg would delete the target's
 # directory. Such an entry is skipped.
+#
+# The migration and the linking both ask, so the warning is given once per
+# directory and restore: _TF_LINK_WARNED remembers the path warned about, and
+# restore_home empties it. Without that every boot of such a machine logged the
+# same line twice.
+_TF_LINK_WARNED=""
 _tf_parent_is_link() {
     case "$2" in
         */*) ;;
         *) return 1 ;;
     esac
     [ -L "$1/${2%/*}" ] || return 1
-    warn "thinfloe: ~/${2%/*} is a symlink, leaving ~/$2 alone"
+    if [ "$_TF_LINK_WARNED" != "$1/${2%/*}" ]; then
+        warn "thinfloe: ~/${2%/*} is a symlink, leaving ~/$2 alone"
+        _TF_LINK_WARNED="$1/${2%/*}"
+    fi
     return 0
 }
 
@@ -556,6 +565,7 @@ restore_home() {
     _rh_ramroot="$4"
 
     _rh_home="$_rh_newroot/home/tluser"
+    _TF_LINK_WARNED=""
 
     if is_remote_url "$_rh_ramroot"; then
         _rh_mac=$(cat "$_rh_state/boot-mac" 2>/dev/null | tr -d '\012')
