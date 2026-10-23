@@ -1087,8 +1087,10 @@ class TestAbUpgradeBootDefault(unittest.TestCase):
             if cmd[0] in ("mount", "umount"):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             return run(cmd, *a, **kw)
+        work = Path(tempfile.mkdtemp(prefix="thinfloe-work-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
         with mock.patch.object(ui, "run_cmd", side_effect=fake_run), \
-             mock.patch.object(ui.tempfile, "mkdtemp", side_effect=[str(self.esp), tempfile.mkdtemp(prefix="thinfloe-work-")]), \
+             mock.patch.object(ui.tempfile, "mkdtemp", side_effect=[str(self.esp), str(work)]), \
              mock.patch.object(ui.shutil, "rmtree"), \
              contextlib.redirect_stdout(io.StringIO()):
             ui.do_ab_upgrade(self.drive(False), "http://example.invalid")
