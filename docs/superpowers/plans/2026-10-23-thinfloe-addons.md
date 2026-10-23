@@ -72,8 +72,7 @@ with a `/home/tluser` symlink for absolute paths in user files.
     else is an error.
   - `X-TF-Source-Config=<path relative to home>`: the config whose presence
     ticks this add-on on the first boot from 3.x (ThinLinc `.thinlinc`,
-    OxuLnk `.config/oxulnk` — verify the OxuLnk path against a running
-    client: the binary names `oxulnk` and `desktop.toml`).
+    OxuLnk `.config/oxulnk`, confirmed by the owner 2026-10-23).
   - All source keys are shipped-only when a user file rewords a shipped tile
     (add them to `SHIPPED_ONLY_KEYS`).
 - **Automatic allowed** (`auto_allowed`): every URL involved (page,
@@ -494,5 +493,4 @@ tluser") are rewritten to the new name; `docs/` stays untouched.
 
 ## Open questions for the owner
 
-- OxuLnk config path for the 3.x tick rule (`~/.config/oxulnk`?, from
-  strings in the binary; verify against a running client).
+None.
