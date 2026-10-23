@@ -32,9 +32,7 @@ bad() { echo "FAIL - $1"; fail=1; }
 # dracut's logging helpers are absent outside an initramfs.
 info() { :; }
 warn() { echo "warn: $*" >>"$WORK/warnings"; }
-dinfo() { :; }
 tf_log() { :; }
-die()  { return 1; }
 : >"$WORK/warnings"
 _TF_LIB_LOADED=""
 # shellcheck source=/dev/null
@@ -63,35 +61,64 @@ tar -xzf "$WORK/3x.tgz" -C "$H4"
 tf_migrate_home_names "$H4" "$(tar -tzf "$WORK/3x.tgz")" "$WORK/renamed"
 tf_link_old_home_names "$H4"
 
-# 4.0's save: the tar form of thinfloe-save-home, run from inside the home.
-if grep -E '^[^#]*tar .*(-h|--dereference)' "$SAVE4" >/dev/null; then
-    bad "thinfloe-save-home passes -h or --dereference to tar"
-else
-    ok "thinfloe-save-home does not dereference links"
+# 4.0's save: the real thinfloe-save-home, USB path, against a fake home and
+# a plain directory standing in for the mounted ESP. tar and gzip are real;
+# only the commands that need root or a real mount are stubbed.
+SAVESTUBS="$WORK/save-stubs"
+mkdir -p "$SAVESTUBS" "$WORK/esp" "$WORK/state" "$WORK/tmp"
+: >"$WORK/esp/.test-mounted"
+cat >"$SAVESTUBS/mountpoint" <<'STUB'
+#!/bin/bash
+[ "$1" = "-q" ] && shift
+[ -e "$1/.test-mounted" ]
+STUB
+cat >"$SAVESTUBS/sudo" <<'STUB'
+#!/bin/bash
+case "${1:-}" in
+    tar|gzip|mv|rm|find) exec "$@" ;;
+esac
+exit 0
+STUB
+chmod +x "$SAVESTUBS"/*
+echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+env PATH="$SAVESTUBS:$PATH" HOME=/root TMPDIR="$WORK/tmp" \
+    TF_HOME_DIR="$H4" TF_STATE_DIR="$WORK/state" TF_CMDLINE="$WORK/cmdline" \
+    TF_EFI_MOUNT="$WORK/esp" \
+    TF_EXCLUDE_DEFAULT="$REPO/overlay/etc/thinfloe/save-home-exclude" \
+    "$SAVE4" </dev/null >"$WORK/save.out" 2>&1
+rc=$?
+if [[ $rc -ne 0 || ! -f "$WORK/esp/home.tar.gz" ]]; then
+    bad "thinfloe-save-home (rc $rc): $(cat "$WORK/save.out")"
 fi
-if grep -E '^[^#]*tar .*(-h|--dereference)' "$FIX/dbrrg-save-home" >/dev/null; then
+cp "$WORK/esp/home.tar.gz" "$WORK/home4.tgz"
+
+# 3.x's own save must not dereference either. Whole options only: a bare -h
+# or --dereference, not --hard-dereference.
+if grep -E '^[^#]*tar .*([[:space:]]-[a-zA-Z]*h[a-zA-Z]*|[[:space:]]--dereference)([[:space:]]|$)' \
+        "$FIX/dbrrg-save-home" >/dev/null; then
     bad "3.x dbrrg-save-home passes -h or --dereference to tar"
 else
     ok "3.x dbrrg-save-home does not dereference links"
 fi
-( cd "$H4" && tar --warning=no-file-changed -zcf - . ) >"$WORK/home4.tgz"
 
 listing=$(tar -tvzf "$WORK/home4.tgz")
-echo "$listing" | grep -E ' \./\.(dbrrg|config/dbrrg)' | sed 's/^/     /'
 missing=""
 for n in $OLD_NAMES; do
     echo "$listing" | grep -E "^l.* \./$n -> " >/dev/null || missing+=" $n"
 done
 if [[ -z "$missing" ]]; then
-    ok "the archive holds the five old names as symlinks"
+    ok "thinfloe-save-home stores the five old names as symlinks"
 else
     bad "old names not stored as links:$missing"
+    echo "$listing" | grep -E ' \./\.(dbrrg|config/dbrrg)' | sed 's/^/     /'
 fi
 
 # --- 3.x restore keeps the links ------------------------------------------
 H3="$WORK/home3"
 mkdir -p "$H3"
+# A 3.x default home holds both as regular files.
 echo default-env >"$H3/.dbrrg-environment"
+echo default-rc  >"$H3/.dbrrg-sessionrc"
 (
     _DBRRG_LIB_LOADED=""
     # shellcheck source=/dev/null
@@ -101,8 +128,9 @@ echo default-env >"$H3/.dbrrg-environment"
 ) 2>>"$WORK/warnings"
 rc=$?
 if [[ $rc -eq 0 && -L "$H3/.dbrrg-environment" \
-   && "$(cat "$H3/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]]; then
-    ok "3.x restore keeps the links: .dbrrg-environment is a link and reads ch"
+   && "$(cat "$H3/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" \
+   && -L "$H3/.dbrrg-sessionrc" && "$(cat "$H3/.dbrrg-sessionrc")" == "user-rc" ]]; then
+    ok "3.x restore keeps the links: .dbrrg-environment and .dbrrg-sessionrc are links with the user's content"
 else
     bad "3.x restore (rc $rc): $(ls -l "$H3/.dbrrg-environment" 2>&1), content '$(cat "$H3/.dbrrg-environment" 2>&1)'"
 fi
