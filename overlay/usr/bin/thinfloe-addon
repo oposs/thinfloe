@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""
+thinfloe-addon - add-ons of ThinFloe
+
+An add-on is a tile file (.desktop) in /etc/thinfloe/menu/ or in
+~/.config/thinfloe/menu/ with X-TF-Source-* keys that name where a program
+comes from. This file reads those definitions and checks their sources for
+the version on offer. It runs as root; tile files in the home are user data.
+
+Source keys:
+  X-TF-Source-Apt=<uri> <suite> [<component>]   APT repository (flat when
+  X-TF-Source-Package=<name>                     the suite ends in "/")
+  X-TF-Source-Key=<https URL of an OpenPGP key>  optional, APT only
+  X-TF-Source-URL=<url>                          fixed address
+  X-TF-Source-Page=<url>                         web page ...
+  X-TF-Source-Pattern=<Python regex>             ... and the link to take
+  X-TF-Source-Format=deb|tar                     else taken from the URL
+  X-TF-Source-Config=<path relative to home>     seeds the tick from 3.x
+"""
+
+import html
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+# ============ Constants ============
+
+VERSION_FILE = "/etc/thinfloe/version"
+# The menu's limits (src/thinfloe-menu/src/tiles.rs), so both read the same
+# tiles from the same directories.
+MAX_USER_FILES = 32
+MAX_SHIPPED_FILES = 64
+MAX_DIR_ENTRIES = 4096
+MAX_FILE_BYTES = 64 * 1024
+MAX_TEXT_CHARS = 120
+USER_DIR_LABEL = "~/.config/thinfloe/menu"
+
+HTTP_TIMEOUT = 20
+MAX_REDIRECTS = 10
+MAX_PAGE_BYTES = 2 * 1024 * 1024
+MAX_KEY_BYTES = 1024 * 1024
+APT_TIMEOUT = 300
+
+SOURCE_PREFIX = "X-TF-Source-"
+SOURCE_KEYS = ("Apt", "Package", "Key", "URL", "Page", "Pattern", "Format", "Config")
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst")
+REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+class CheckError(Exception):
+    """A check that failed. The text is shown to the person at the machine."""
+
+
+@dataclass
+class Source:
+    kind: str  # "apt" | "url" | "page"
+    url: str  # repository URI, fixed address or page
+    pattern: Optional[str]
+    apt_suite: Optional[str]
+    apt_component: Optional[str]
+    package: Optional[str]
+    key_url: Optional[str]
+    fmt: Optional[str]  # "deb" | "tar", None: from the URL
+    config: Optional[str]
+
+
+@dataclass
+class Addon:
+    id: str
+    name: str
+    source: Source
+    shipped: bool
+    tile_path: str
+
+
+@dataclass
+class Found:
+    url: str  # what to download (APT: the .deb in the repository)
+    version: Optional[str]
+    fingerprint: str
+    fmt: str
+    urls_seen: List[str] = field(default_factory=list)
+
+
+# ============ Tile files ============
+
+def parse_desktop(text: str) -> dict:
+    """The keys of the [Desktop Entry] group, read like the menu reads them
+    (src/thinfloe-menu/src/desktop.rs). Raises ValueError naming the line."""
+    keys = {}
+    in_main = False
+    seen_main = False
+    for no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            if not line.endswith("]"):
+                raise ValueError("line %d is not a group header" % no)
+            in_main = line == "[Desktop Entry]"
+            seen_main = seen_main or in_main
+            continue
+        if "=" not in line:
+            raise ValueError("line %d is not a desktop entry line" % no)
+        if not seen_main:
+            raise ValueError("line %d comes before [Desktop Entry]" % no)
+        if not in_main:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("line %d has no key" % no)
+        if "[" in key:
+            continue
+        keys[key] = _unescape(value.strip())
+    if not seen_main:
+        raise ValueError("no [Desktop Entry] group")
+    return keys
+
+
+def _unescape(value: str) -> str:
+    out = []
+    i = 0
+    while i < len(value):
+        c = value[i]
+        if c != "\\" or i + 1 >= len(value):
+            out.append(c)
+            i += 1
+            continue
+        n = value[i + 1]
+        out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}.get(n, "\\" + n))
+        i += 2
+    return "".join(out)
+
+
+def _read_tile(path: str) -> str:
+    """A tile file, never through a symlink, never more than MAX_FILE_BYTES."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("not a regular file")
+    if st.st_size > MAX_FILE_BYTES:
+        raise ValueError("larger than %d KiB" % (MAX_FILE_BYTES // 1024))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = f.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError("larger than %d KiB" % (MAX_FILE_BYTES // 1024))
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("not UTF-8 text")
+
+
+def _list_tiles(directory: str, cap: int, label: str, log: List[str]) -> List[str]:
+    """The tile file names of a directory, sorted, at most `cap` of them."""
+    try:
+        st = os.lstat(directory)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        log.append("%s cannot be read: %s" % (label, e.strerror))
+        return []
+    if not stat.S_ISDIR(st.st_mode):
+        log.append("%s is not a directory, so it was ignored" % label)
+        return []
+    names = []
+    try:
+        with os.scandir(directory) as it:
+            for scanned, entry in enumerate(it, 1):
+                if scanned > MAX_DIR_ENTRIES:
+                    log.append("%s holds more than %d entries; only the first %d were looked at"
+                               % (label, MAX_DIR_ENTRIES, MAX_DIR_ENTRIES))
+                    break
+                name = entry.name
+                try:
+                    name.encode("utf-8")
+                except UnicodeEncodeError:
+                    continue
+                if name.endswith(".desktop") and not name.startswith("."):
+                    names.append(name)
+    except OSError as e:
+        log.append("%s cannot be read: %s" % (label, e.strerror))
+        return []
+    names.sort()
+    if len(names) > cap:
+        log.append("%s has %d tile files; only the first %d are used"
+                   % (label, len(names), cap))
+        names = names[:cap]
+    return names
+
+
+def _tf_key(keys: dict, suffix: str) -> Optional[str]:
+    """X-TF-<suffix>, else the 3.x X-DBRRG-<suffix>; the new key wins."""
+    v = keys.get("X-TF-" + suffix)
+    return v if v is not None else keys.get("X-DBRRG-" + suffix)
+
+
+def _has_source_keys(keys: dict) -> bool:
+    return any(k.startswith(SOURCE_PREFIX) for k in keys)
+
+
+def _web_url(value: str, what: str, https_only: bool = False) -> str:
+    parts = urllib.parse.urlsplit(value)
+    schemes = ("https",) if https_only else ("http", "https")
+    if parts.scheme not in schemes or not parts.netloc:
+        raise ValueError("%s must be an %s URL" % (what, " or ".join(schemes)))
+    return value
+
+
+def parse_source(keys: dict) -> Source:
+    """The Source of a tile's keys. Raises ValueError with the reason."""
+    get = {k: keys.get(SOURCE_PREFIX + k) for k in SOURCE_KEYS}
+    unknown = sorted(k for k in keys if k.startswith(SOURCE_PREFIX)
+                     and k[len(SOURCE_PREFIX):] not in SOURCE_KEYS)
+    if unknown:
+        raise ValueError("unknown key %s" % unknown[0])
+    kinds = [k for k in ("Apt", "URL", "Page") if get[k] is not None]
+    if len(kinds) != 1:
+        raise ValueError("needs exactly one of X-TF-Source-Apt, X-TF-Source-URL "
+                         "and X-TF-Source-Page")
+    kind = kinds[0]
+    for k, only in (("Package", "Apt"), ("Key", "Apt"), ("Pattern", "Page")):
+        if get[k] is not None and kind != only:
+            raise ValueError("X-TF-Source-%s belongs to X-TF-Source-%s" % (k, only))
+
+    fmt = get["Format"]
+    if fmt is not None and fmt not in ("deb", "tar"):
+        raise ValueError("X-TF-Source-Format must be deb or tar")
+
+    config = get["Config"]
+    if config is not None:
+        if (not config or config.startswith("/")
+                or ".." in config.split("/") or "\0" in config):
+            raise ValueError("X-TF-Source-Config must be a path inside the home")
+
+    pattern = suite = component = package = key_url = None
+    if kind == "Apt":
+        fields = get["Apt"].split()
+        if len(fields) not in (2, 3):
+            raise ValueError("X-TF-Source-Apt must be <uri> <suite> <component>")
+        url = _web_url(fields[0], "the repository")
+        suite = fields[1]
+        component = fields[2] if len(fields) == 3 else None
+        if component is None and not suite.endswith("/"):
+            raise ValueError("X-TF-Source-Apt needs a component unless the suite "
+                             "ends in / (flat repository)")
+        package = get["Package"]
+        if not package or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package):
+            raise ValueError("X-TF-Source-Apt needs a valid X-TF-Source-Package")
+        if get["Key"] is not None:
+            key_url = _web_url(get["Key"], "X-TF-Source-Key", https_only=True)
+        if fmt == "tar":
+            raise ValueError("an APT source provides deb only")
+        fmt = "deb"
+    elif kind == "URL":
+        url = _web_url(get["URL"], "X-TF-Source-URL")
+    else:
+        url = _web_url(get["Page"], "X-TF-Source-Page")
+        pattern = get["Pattern"]
+        if not pattern:
+            raise ValueError("X-TF-Source-Page needs X-TF-Source-Pattern")
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise ValueError("X-TF-Source-Pattern is not a valid regular expression: %s" % e)
+
+    return Source(kind={"Apt": "apt", "URL": "url", "Page": "page"}[kind], url=url,
+                  pattern=pattern, apt_suite=suite, apt_component=component,
+                  package=package, key_url=key_url, fmt=fmt, config=config)
+
+
+def load_addons(shipped_dir: str, user_dir: str) -> Tuple[List[Addon], List[str]]:
+    """Every add-on of both tile directories, sorted by id, and a log line for
+    each definition that is broken or was not taken. The menu's rules hold:
+    at most 32 user files; a user file named like a shipped one may reword
+    Name only here (the source keys stay the shipped ones); a user file may
+    only run a program."""
+    log: List[str] = []
+    found = {}
+
+    shipped_names = _list_tiles(shipped_dir, MAX_SHIPPED_FILES, shipped_dir, log)
+    shipped_keys = {}
+    for name in shipped_names:
+        path = os.path.join(shipped_dir, name)
+        try:
+            keys = parse_desktop(_read_tile(path))
+        except (OSError, ValueError) as e:
+            log.append("%s: %s" % (path, e))
+            continue
+        shipped_keys[name] = keys
+        if not _has_source_keys(keys):
+            continue
+        try:
+            src = parse_source(keys)
+        except ValueError as e:
+            log.append("%s: %s" % (path, e))
+            continue
+        aid = name[: -len(".desktop")]
+        found[name] = Addon(id=aid, name=(keys.get("Name") or aid)[:MAX_TEXT_CHARS], source=src,
+                            shipped=True, tile_path=path)
+
+    for name in _list_tiles(user_dir, MAX_USER_FILES, USER_DIR_LABEL, log):
+        path = os.path.join(user_dir, name)
+        label = "%s/%s" % (USER_DIR_LABEL, name)
+        try:
+            text = _read_tile(path)
+        except (OSError, ValueError) as e:
+            log.append("%s: %s" % (label, e))
+            continue
+        try:
+            keys = parse_desktop(text)
+        except ValueError as e:
+            if SOURCE_PREFIX in text:
+                log.append("%s: %s" % (label, e))
+            continue
+        if name in shipped_keys:
+            if _has_source_keys(keys):
+                log.append("%s: rewords a shipped tile, so its source keys were ignored"
+                           % label)
+            if name in found and keys.get("Name"):
+                found[name].name = keys["Name"][:MAX_TEXT_CHARS]
+            continue
+        if not _has_source_keys(keys):
+            continue
+        action = _tf_key(keys, "Action")
+        if action not in (None, "run"):
+            log.append("%s: a tile of your own may only run a program" % label)
+            continue
+        try:
+            src = parse_source(keys)
+        except ValueError as e:
+            log.append("%s: %s" % (label, e))
+            continue
+        aid = name[: -len(".desktop")]
+        found[name] = Addon(id=aid, name=(keys.get("Name") or aid)[:MAX_TEXT_CHARS], source=src,
+                            shipped=False, tile_path=path)
+
+    return [found[n] for n in sorted(found)], log
+
+
+# ============ Checks ============
+
+def auto_allowed(src: Source, urls_seen: List[str]) -> bool:
+    """May this source be checked and fetched with nobody pressing a button?
+    Yes when every URL involved is https, or when it is APT with a key."""
+    if src.kind == "apt" and src.key_url:
+        return True
+    return all(u.lower().startswith("https:") for u in [src.url] + list(urls_seen))
+
+
+def version_gt(a: str, b: str) -> bool:
+    """a > b in dpkg's ordering. Raises ValueError for a bad version."""
+    r = subprocess.run(["dpkg", "--compare-versions", a, "gt", b],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    raise ValueError(r.stderr.decode("utf-8", "replace").strip()
+                     or "cannot compare %s with %s" % (a, b))
+
+
+def user_agent() -> str:
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            version = f.read(64).strip()
+    except OSError:
+        version = ""
+    if not re.fullmatch(r"[A-Za-z0-9.+~_-]+", version):
+        version = "dev"
+    return "thinfloe-addon/" + version
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _request(method: str, url: str, urls_seen: List[str]):
+    """Open url, following at most MAX_REDIRECTS redirects. Every URL asked
+    for is appended to urls_seen. Returns the open response."""
+    for _ in range(MAX_REDIRECTS + 1):
+        urls_seen.append(url)
+        req = urllib.request.Request(url, method=method,
+                                     headers={"User-Agent": user_agent()})
+        try:
+            resp = _opener.open(req, timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            location = e.headers.get("Location") if e.code in REDIRECT_CODES else None
+            e.close()
+            if not location:
+                raise CheckError("%s answered HTTP %d" % (url, e.code))
+            url = urllib.parse.urljoin(url, location)
+            if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+                raise CheckError("%s redirects to %s, which is not a web address"
+                                 % (urls_seen[-1], url))
+            continue
+        except urllib.error.URLError as e:
+            raise CheckError("cannot reach %s: %s" % (url, e.reason))
+        except (OSError, ValueError) as e:
+            raise CheckError("cannot reach %s: %s" % (url, e))
+        return resp
+    raise CheckError("%s redirects more than %d times" % (urls_seen[0], MAX_REDIRECTS))
+
+
+def _fetch_bounded(url: str, limit: int, what: str, urls_seen: List[str]) -> bytes:
+    resp = _request("GET", url, urls_seen)
+    try:
+        body = resp.read(limit + 1)
+    except OSError as e:
+        raise CheckError("cannot read %s: %s" % (url, e))
+    finally:
+        resp.close()
+    if len(body) > limit:
+        raise CheckError("%s at %s is larger than %d MiB" % (what, url, limit // (1024 * 1024)))
+    return body
+
+
+def format_of(src: Source, *urls: str) -> str:
+    """deb or tar: the format key, else the suffix of the first URL that has
+    a known one."""
+    if src.fmt:
+        return src.fmt
+    for u in urls:
+        path = urllib.parse.urlsplit(u).path.lower()
+        if path.endswith(".deb"):
+            return "deb"
+        if path.endswith(TAR_SUFFIXES):
+            return "tar"
+    raise CheckError("the format of %s is unknown: name it with "
+                     "X-TF-Source-Format=deb or tar" % urls[0])
+
+
+def _check_head(url: str, urls_seen: List[str]) -> Tuple[str, str]:
+    """HEAD url; returns (fingerprint, final URL)."""
+    resp = _request("HEAD", url, urls_seen)
+    resp.close()
+    final = urls_seen[-1]
+    etag = resp.headers.get("ETag")
+    if etag:
+        return "etag:" + etag, final
+    modified = resp.headers.get("Last-Modified")
+    if modified:
+        return "last-modified:" + modified, final
+    length = resp.headers.get("Content-Length")
+    if length:
+        return "length:%s %s" % (length.strip(), final), final
+    raise CheckError("%s gives neither ETag, Last-Modified nor Content-Length, "
+                     "so a new version cannot be told apart" % url)
+
+
+def _check_url(src: Source) -> Found:
+    seen: List[str] = []
+    fingerprint, final = _check_head(src.url, seen)
+    return Found(url=src.url, version=None, fingerprint=fingerprint,
+                 fmt=format_of(src, src.url, final), urls_seen=seen)
+
+
+def _check_page(src: Source) -> Found:
+    seen: List[str] = []
+    body = _fetch_bounded(src.url, MAX_PAGE_BYTES, "the page", seen)
+    base = seen[-1]
+    text = body.decode("utf-8", "replace")
+    regex = re.compile(src.pattern)
+    has_version = "version" in regex.groupindex
+
+    best_url = best_version = None
+    for m in regex.finditer(text):
+        link = urllib.parse.urljoin(base, html.unescape(m.group(0)).strip())
+        if urllib.parse.urlsplit(link).scheme not in ("http", "https"):
+            continue
+        if not has_version:
+            best_url = link
+            break
+        version = m.group("version")
+        if not version:
+            continue
+        try:
+            newer = best_version is None or version_gt(version, best_version)
+        except ValueError:
+            raise CheckError("%s on %s is not a valid version" % (version, src.url))
+        if newer:
+            best_url, best_version = link, version
+    if best_url is None:
+        raise CheckError("no link on %s matches the pattern" % src.url)
+
+    # The link itself, and where it redirects to, decide auto_allowed too.
+    _check_head(best_url, seen)
+    fmt = format_of(src, best_url, seen[-1])
+    return Found(url=best_url, version=best_version,
+                 fingerprint=best_url if best_version is None else best_version,
+                 fmt=fmt, urls_seen=seen)
+
+
+def _apt_run(cmd: List[str], env: dict) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=APT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise CheckError("%s took longer than %d s" % (cmd[0], APT_TIMEOUT))
+    except OSError as e:
+        raise CheckError("cannot run %s: %s" % (cmd[0], e))
+
+
+def _apt_error(r: subprocess.CompletedProcess, uri: str) -> str:
+    lines = r.stderr.decode("utf-8", "replace").splitlines()
+    errors = [l[3:].strip() for l in lines if l.startswith("E: ")]
+    return errors[0] if errors else "apt-get update failed for %s" % uri
+
+
+def _check_apt(src: Source) -> Found:
+    """Read the repository's index with apt, in a directory of its own: the
+    system's sources, lists, cache, preferences, apt.conf.d hooks and dpkg
+    status are never read or written."""
+    seen = [src.url]
+    with tempfile.TemporaryDirectory(prefix="thinfloe-addon-apt-") as tmp:
+        for d in ("lists/partial", "cache/archives/partial", "parts", "prefs"):
+            os.makedirs(os.path.join(tmp, d))
+        options = "trusted=yes"
+        if src.key_url:
+            key = _fetch_bounded(src.key_url, MAX_KEY_BYTES, "the key", [])
+            armored = b"-----BEGIN PGP PUBLIC KEY BLOCK-----" in key
+            key_path = os.path.join(tmp, "key.asc" if armored else "key.gpg")
+            with open(key_path, "wb") as f:
+                f.write(key)
+            options = "signed-by=" + key_path
+        line = "deb [%s] %s %s" % (options, src.url, src.apt_suite)
+        if src.apt_component:
+            line += " " + src.apt_component
+        sources = os.path.join(tmp, "sources.list")
+        with open(sources, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+        conf = os.path.join(tmp, "apt.conf")
+        settings = {
+            "Dir::Etc::sourcelist": sources,
+            "Dir::Etc::sourceparts": "-",
+            "Dir::Etc::parts": os.path.join(tmp, "parts"),
+            "Dir::Etc::preferences": "/dev/null",
+            "Dir::Etc::preferencesparts": os.path.join(tmp, "prefs"),
+            "Dir::State::Lists": os.path.join(tmp, "lists"),
+            "Dir::State::status": "/dev/null",
+            "Dir::Cache": os.path.join(tmp, "cache"),
+            "Debug::NoLocking": "true",
+            "Acquire::http::Timeout": str(HTTP_TIMEOUT),
+            "Acquire::https::Timeout": str(HTTP_TIMEOUT),
+            "Acquire::http::User-Agent": user_agent(),
+            "Acquire::https::User-Agent": user_agent(),
+            "Acquire::Languages": "none",
+        }
+        with open(conf, "w", encoding="utf-8") as f:
+            for k, v in settings.items():
+                f.write('%s "%s";\n' % (k, v))
+        env = dict(os.environ, APT_CONFIG=conf, LC_ALL="C.UTF-8")
+        # The -o options repeat the file: apt reads APT_CONFIG before the
+        # parts directory, and a command-line option always wins.
+        opts = []
+        for k, v in settings.items():
+            opts += ["-o", "%s=%s" % (k, v)]
+
+        r = _apt_run(["apt-get", "-q"] + opts + ["--error-on=any", "update"], env)
+        if r.returncode != 0:
+            raise CheckError(_apt_error(r, src.url))
+        r = _apt_run(["apt-cache"] + opts + ["policy", src.package], env)
+        candidate = None
+        for l in r.stdout.decode("utf-8", "replace").splitlines():
+            l = l.strip()
+            if l.startswith("Candidate:"):
+                candidate = l.split(":", 1)[1].strip()
+        if not candidate or candidate == "(none)":
+            raise CheckError("%s has no package %s" % (src.url, src.package))
+        r = _apt_run(["apt-cache"] + opts + ["show", "%s=%s" % (src.package, candidate)], env)
+        filename = None
+        for l in r.stdout.decode("utf-8", "replace").splitlines():
+            if l.startswith("Filename:"):
+                filename = l.split(":", 1)[1].strip()
+                break
+        if not filename:
+            raise CheckError("%s lists %s %s without a file"
+                             % (src.url, src.package, candidate))
+    return Found(url=src.url.rstrip("/") + "/" + filename, version=candidate,
+                 fingerprint="%s=%s" % (src.package, candidate), fmt="deb",
+                 urls_seen=seen)
+
+
+def check(src: Source) -> Found:
+    """What the source offers now. Raises CheckError with the reason."""
+    if src.kind == "url":
+        return _check_url(src)
+    if src.kind == "page":
+        return _check_page(src)
+    if src.kind == "apt":
+        return _check_apt(src)
+    raise CheckError("unknown source kind %s" % src.kind)
+
+
+if __name__ == "__main__":
+    import sys
+    print("thinfloe-addon: no command yet", file=sys.stderr)
+    sys.exit(2)
