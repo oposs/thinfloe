@@ -183,9 +183,12 @@ done
 
 # An exclude pattern that leaves out a link but not its 4.0 name is ignored,
 # with a line in the menu's log. tar decides, because tar's matching
-# (unanchored, * across /, a parent directory taking its members along) is
-# what the save uses: it applies --exclude to names given on its command line
-# too, and -v prints the ones it keeps.
+# (unanchored, * across /) is what the save uses: it applies --exclude to
+# names given on its command line too, and -v prints the ones it keeps.
+# --no-recursion means ./.config does not take ./.config/dbrrg along here;
+# that is still right, because the names of each pair are siblings. -v prints
+# a directory with a trailing /, which sed removes, or a directory's new name
+# (.thinfloe-ssh-host-keys, .config/thinfloe) never counts as kept.
 dsh_drops_link() {
   _dsh_names=""
   for _dsh_pair in $_dsh_pairs; do
@@ -193,7 +196,7 @@ dsh_drops_link() {
   done
   [ -n "$_dsh_names" ] || return 1
   # shellcheck disable=SC2086 # names hold no blanks
-  _dsh_kept=$(tar -cf /dev/null --no-recursion -v "$1" $_dsh_names 2>/dev/null) || true
+  _dsh_kept=$(tar -cf /dev/null --no-recursion -v "$1" $_dsh_names 2>/dev/null | sed 's|/$||') || true
   for _dsh_pair in $_dsh_pairs; do
     case "
 $_dsh_kept

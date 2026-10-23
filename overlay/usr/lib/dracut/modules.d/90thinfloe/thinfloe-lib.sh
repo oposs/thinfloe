@@ -387,8 +387,10 @@ _tf_parent_is_link() {
 # would find no keystore, make new keys and delete ~/.dbrrg-ssh-host-keys
 # while staging them.
 _tf_move_over() {
+    # A leftover from an interrupted boot would travel in every save; for the
+    # host keys it holds private keys outside IDENTITY_EXCLUDES.
+    rm -rf "$2.tf-aside" 2>/dev/null || true
     if [ -e "$2" ] || [ -L "$2" ]; then
-        rm -rf "$2.tf-aside" 2>/dev/null || true
         mv "$2" "$2.tf-aside" 2>/dev/null || return 1
         if ! mv "$1" "$2" 2>/dev/null; then
             mv "$2.tf-aside" "$2" 2>/dev/null || true

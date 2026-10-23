@@ -844,6 +844,16 @@ if [[ "$(cat "$d/new/key")" == k3 && ! -e "$d/old" && ! -e "$d/new.tf-aside" ]];
 else
     bad "move over: $(ls -la "$d")"
 fi
+# A leftover aside from an interrupted boot goes, even when there is no new
+# name to move aside.
+d="$WORK/hn-moveleft"; mkdir -p "$d/old" "$d/new.tf-aside"; echo k3 >"$d/old/key"
+echo stale >"$d/new.tf-aside/key"
+_tf_move_over "$d/old" "$d/new"
+if [[ "$(cat "$d/new/key")" == k3 && ! -e "$d/new.tf-aside" ]]; then
+    ok "a leftover .tf-aside is removed"
+else
+    bad "leftover aside: $(ls -la "$d")"
+fi
 
 # Both password names as real files. 4.0 never leaves a real ~/.dbrrg-password
 # (every write and every restore makes it a link), so a real one was written

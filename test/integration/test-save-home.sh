@@ -687,6 +687,26 @@ else
     bad "link-dropping pattern: exit $rc, out: $(cat "$WORK/out") listing: $listing"
 fi
 
+# The same for the two directory pairs: tar -v prints a kept directory with a
+# trailing /, which must still count as its new name being kept.
+for pat in './.dbrrg-ssh-host-keys' './.config/dbrrg' 'dbrrg'; do
+    links_setup
+    mkdir -p "$H/.thinfloe-ssh-host-keys" && echo key >"$H/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
+    printf '%s\n' "$pat" >"$H/.save-home-exclude"
+    links_run
+    case "$pat" in
+        *ssh*) want_link=".dbrrg-ssh-host-keys .thinfloe-ssh-host-keys" ;;
+        *)     want_link=".config/dbrrg thinfloe" ;;
+    esac
+    # shellcheck disable=SC2086
+    if [[ "$rc" == 0 ]] && has_link $want_link \
+       && grep -qxF "thinfloe: exclude pattern '$pat' ignored, it would leave out ~/${want_link%% *}" "$WORK/out"; then
+        ok "an exclude pattern '$pat' over a directory link is ignored and named"
+    else
+        bad "directory link pattern '$pat': exit $rc, out: $(cat "$WORK/out") listing: $listing"
+    fi
+done
+
 # A pattern that leaves out both names (all of ~/.config) stays.
 links_setup
 printf '%s\n' './.config' >"$H/.save-home-exclude"
