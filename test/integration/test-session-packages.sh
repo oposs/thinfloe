@@ -537,6 +537,7 @@ else
     echo "FAIL - cannot extract usr/bin/thinfloe-menu from $SQSH"
     fail=1
 fi
+chmod -R u+rwX "$MENU_TMP" 2>/dev/null
 rm -rf "$MENU_TMP"
 
 # The session body is the menu now; tlclient is one of its tiles.
