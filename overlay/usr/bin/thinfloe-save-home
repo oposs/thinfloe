@@ -21,6 +21,9 @@ TF_EXCLUDE_DEFAULT="${TF_EXCLUDE_DEFAULT:-/etc/thinfloe/save-home-exclude}"
 # 0644 root). The USB save holds it too, so an add-on download being stored
 # and the home archive never fill the ESP between them.
 TF_ESP_LOCK="${TF_ESP_LOCK:-/run/thinfloe/esp.lock}"
+# Seconds to wait for it. A thinfloe-addon that hangs holding it must not
+# block the save behind Restart and Power off for good.
+TF_ESP_LOCK_WAIT="${TF_ESP_LOCK_WAIT:-30}"
 
 # Exit codes, read by thinfloe-menu to tell the user what happened:
 #
@@ -276,11 +279,12 @@ elif mountpoint -q "$TF_EFI_MOUNT"; then
   _dsh_new="$TF_EFI_MOUNT/home.tar.gz.new"
   # Read-only, because the file is root's; flock works on any open fd. It is
   # released when this script exits. A missing lock file (tmpfiles did not
-  # run) must not cost the save, so the save goes on without it.
-  if [ -r "$TF_ESP_LOCK" ] && exec 9<"$TF_ESP_LOCK" && flock 9; then
+  # run) or a lock still held after TF_ESP_LOCK_WAIT seconds must not cost
+  # the save, so the save goes on without it.
+  if [ -r "$TF_ESP_LOCK" ] && exec 9<"$TF_ESP_LOCK" && flock -w "$TF_ESP_LOCK_WAIT" 9; then
     :
   else
-    echo "thinfloe: cannot lock $TF_ESP_LOCK - saving without it." >&2
+    echo "thinfloe: cannot lock $TF_ESP_LOCK within ${TF_ESP_LOCK_WAIT}s - saving without it." >&2
   fi
   if ! sudo rm -f "$_dsh_new"; then
     echo "thinfloe: could not clear the staging file - your home was NOT saved," >&2

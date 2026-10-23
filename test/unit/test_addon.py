@@ -1448,7 +1448,37 @@ class TestBoot(AddonEnv):
         self.assertEqual(st["10-demo"][2], "install-failed")
         self.assertIn("took longer than 1 s", st["10-demo"][6])
         self.assertEqual(st["20-other"][2:4], ["installed", "2.0"])
-        self.assertEqual(ad.TOOL_TIMEOUT, 600, "boot's timeout leaked out of boot")
+        self.assertEqual(ad.TOOL_TIMEOUT, 600)
+        self.assertIsNone(ad._boot_deadline, "boot's deadline leaked out of boot")
+
+    def test_boot_stops_when_its_time_is_spent(self):
+        self.stored_demo()
+        for aid, name in (("20-other", "Other"), ("30-third", "Third")):
+            (self.tiles / (aid + ".desktop")).write_text(
+                "[Desktop Entry]\nName=%s\nExec=x\nX-TF-Source-URL=%s/x.deb\n"
+                % (name, self.srv.base))
+            d = self.addon_dir(aid)
+            d.mkdir(parents=True)
+            (d / "current.deb").write_bytes(b"deb")
+            (d / "current.meta").write_text(
+                "version=2.0\nfingerprint=2.0\nurl=x\nformat=deb\npackage=tf-other\n")
+        self.tick("10-demo", "20-other", "30-third")
+        (self.bin / "dpkg.hang-on").write_text("10-demo")
+        start = time.monotonic()
+        with mock.patch.object(ad, "BOOT_BUDGET", 1.5, create=True), \
+                mock.patch.object(ad, "BOOT_TOOL_TIMEOUT", 25):
+            self.assertEqual(self.run_cmd("boot"), 1)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(len(self.dpkg_calls()), 1, "nothing ran after the time was spent")
+        self.assertIn("the time for add-ons at boot is used up; not installed: Other, Third",
+                      self.log_lines())
+        st = {l.split("\t")[0]: l.split("\t") for l in self.status()}
+        self.assertIn("took longer than", st["10-demo"][6])
+        for aid, name in (("20-other", "Other"), ("30-third", "Third")):
+            self.assertEqual(st[aid][2:4], ["install-failed", "-"])
+            self.assertEqual(st[aid][6], "%s: not installed at boot: the time for add-ons "
+                                         "was used up" % name)
+        self.assertIsNone(ad._boot_deadline)
 
     def test_boot_promotes_under_the_esp_lock(self):
         self.demo_tile()
@@ -1495,6 +1525,7 @@ class TestBoot(AddonEnv):
         self.assertTrue(self.marker.exists())
         self.assertEqual(self.srv.requests, [])
         self.assertIn("10-thinlinc ticked: this home came from ThinFloe 3.x", self.log_lines())
+        self.assertNotIn("ticked: the boot stick", "\n".join(self.log_lines()))
 
     def test_seed_absent_archive_after_3x_upgrade(self):
         self.client_tiles()
@@ -1503,6 +1534,8 @@ class TestBoot(AddonEnv):
         self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
         self.assertEqual(self.ticks(), ["10-thinlinc", "20-oxulnk"])
         self.assertTrue(self.marker.exists())
+        self.assertIn("10-thinlinc ticked: the boot stick was upgraded from ThinFloe 3.x "
+                      "without a saved home", self.log_lines())
 
     def test_seed_fires_once(self):
         self.client_tiles()
@@ -1527,11 +1560,31 @@ class TestBoot(AddonEnv):
         (self.home / ".thinlinc").mkdir()
         self.assertEqual(self.run_cmd("boot"), 0)
         self.assertFalse(self.tick_file().exists())
-        self.assertFalse(self.marker.exists())
+        self.assertTrue(self.marker.exists(), "every USB boot writes the marker")
+
+    def test_fresh_4x_stick_upgrade_does_not_seed(self):
+        self.client_tiles()
+        (self.state / "home-restore").write_text("absent\n")
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertTrue(self.marker.exists())
+        self.reboot()
+        # A 4.x upgrade rotated tl/ to tl.old/; the home was never saved.
+        (self.esp / "tl.old").mkdir()
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertFalse(self.tick_file().exists())
+
+    def test_marker_written_when_a_tick_file_blocks_seeding(self):
+        self.client_tiles()
+        (self.state / "home-renamed").write_text(".dbrrg-environment\n")
+        self.tick("10-demo")
+        self.assertEqual(self.run_cmd("boot"), 0)
+        self.assertEqual(self.ticks(), ["10-demo"])
+        self.assertTrue(self.marker.exists())
 
     def test_boot_on_netboot_does_nothing(self):
         cache = self.tmp / "cache"
         self.stored_demo()
+        before = len(self.srv.requests)
         shutil.copytree(self.addon_dir(), cache / "10-demo")
         (self.state / "home-restore").write_text("absent\n")
         (self.esp / "tl.old").mkdir()
@@ -1541,6 +1594,7 @@ class TestBoot(AddonEnv):
         self.assertEqual(self.dpkg_calls(), [])
         self.assertFalse(self.marker.exists())
         self.assertEqual(self.ticks(), ["10-demo"])
+        self.assertEqual(self.srv.requests[before:], [])
 
     def test_netboot_seeds_from_home_renamed(self):
         self.client_tiles()

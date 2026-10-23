@@ -145,6 +145,7 @@ run_save_home() {
     TF_CMDLINE="$WORK/cmdline" \
     TF_EFI_MOUNT="${TF_EFI_MOUNT_OVERRIDE:-/run/thinfloe/storage/efi}" \
     TF_ESP_LOCK="${TF_ESP_LOCK_OVERRIDE:-$WORK/esp.lock}" \
+    TF_ESP_LOCK_WAIT="${TF_ESP_LOCK_WAIT_OVERRIDE:-}" \
     TF_EXCLUDE_DEFAULT="${TF_EXCLUDE_DEFAULT_OVERRIDE:-/etc/thinfloe/save-home-exclude}" \
     TF_TEST_GZIP_FAIL="${TF_TEST_GZIP_FAIL:-}" \
     TF_TEST_TAR_RC="${TF_TEST_TAR_RC:-0}" \
@@ -641,6 +642,16 @@ else
 fi
 flock -u 8
 exec 8<&-
+# Bounded: a save that never ends fails this test instead of hanging the suite.
+for _ in $(seq 100); do
+    kill -0 "$lock_pid" 2>/dev/null || break
+    /bin/sleep 0.1
+done
+if kill -0 "$lock_pid" 2>/dev/null; then
+    pkill -P "$lock_pid" 2>/dev/null
+    kill "$lock_pid" 2>/dev/null
+    echo hung >"$WORK/lock.rc"
+fi
 wait "$lock_pid"
 if [[ "$waited" == 1 && "$(cat "$WORK/lock.rc")" == 0 && -e "$WORK/esp/home.tar.gz" ]]; then
     ok "save-home takes the esp lock"
@@ -658,6 +669,25 @@ if [[ "$rc" == 0 ]]; then
     ok "a netboot save does not wait for the esp lock"
 else
     bad "netboot save under a held esp lock: exit $rc, err: $(cat "$WORK/err")"
+fi
+
+# A lock held for longer than TF_ESP_LOCK_WAIT does not cost the save.
+setup
+echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
+rm -f "$WORK/esp/home.tar.gz"
+exec 8<"$WORK/esp.lock"
+flock 8
+start=$SECONDS
+rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" TF_ESP_LOCK_WAIT_OVERRIDE=1 \
+     run_save_home "$WORK/root" "$WORK/home/tfuser" 8<&-)
+took=$((SECONDS - start))
+exec 8<&-
+if [[ "$rc" == 0 && -e "$WORK/esp/home.tar.gz" && "$took" -lt 10 ]] &&
+   grep -q 'within 1s - saving without it' "$WORK/err"; then
+    ok "a lock held too long is named and the save goes on"
+else
+    bad "held esp lock: exit $rc after ${took}s, err: $(cat "$WORK/err")"
 fi
 
 # A lock file tmpfiles never made does not cost the save.

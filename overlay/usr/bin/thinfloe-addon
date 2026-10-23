@@ -761,10 +761,14 @@ CHUNK_BYTES = 1024 * 1024
 LOG_KEEP_LINES = 500
 MAX_LOG_TEXT = 1024
 TOOL_TIMEOUT = 600
-# thinfloe-addons.service has TimeoutStartSec=120. At boot each dpkg or tar
-# gets this much, so a hung one is killed in time for the next add-on: two
-# add-ons whose next and current copies both hang take 4 * 25 s.
+# thinfloe-addons.service has TimeoutStartSec=120. Boot spends at most
+# BOOT_BUDGET seconds on installs, which leaves 20 s for the start, the seed
+# and the status file; each dpkg or tar call gets BOOT_TOOL_TIMEOUT or what
+# is left of the budget, whichever is less. Add-ons whose turn comes after
+# the budget is spent are not installed at this boot.
+BOOT_BUDGET = 100
 BOOT_TOOL_TIMEOUT = 25
+_boot_deadline: Optional[float] = None  # monotonic; set while boot runs
 FORMATS = ("deb", "tar")
 
 # vfat ignores case and strips trailing dots: ids differing only so would
@@ -1193,11 +1197,16 @@ def _tool(cmd: List[str], timeout: Optional[int] = None) -> subprocess.Completed
     """Run cmd in a session of its own. On timeout the whole process group is
     killed: a maintainer script dpkg started would otherwise keep the pipes
     open and the wait would not end."""
+    if timeout is None:
+        timeout = TOOL_TIMEOUT
+    if _boot_deadline is not None:
+        timeout = min(timeout, BOOT_TOOL_TIMEOUT,
+                      max(_boot_deadline - time.monotonic(), 0.1))
     env = dict(os.environ, LC_ALL="C.UTF-8", DEBIAN_FRONTEND="noninteractive")
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, env=env, start_new_session=True)
     try:
-        out, err = p.communicate(timeout=TOOL_TIMEOUT if timeout is None else timeout)
+        out, err = p.communicate(timeout=timeout)
     except BaseException:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(p.pid, signal.SIGKILL)
@@ -1206,13 +1215,17 @@ def _tool(cmd: List[str], timeout: Optional[int] = None) -> subprocess.Completed
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
+def _seconds(t: float) -> str:
+    return "%d s" % max(1, round(t))
+
+
 def tar_members(path: str, what: str) -> List[str]:
     """The member names of a tar archive, each a plain relative path.
     Raises CheckError naming `what` otherwise."""
     try:
         r = _tool(["tar", "--quoting-style=escape", "-tf", path])
-    except subprocess.TimeoutExpired:
-        raise CheckError("listing %s took longer than %d s" % (what, TOOL_TIMEOUT))
+    except subprocess.TimeoutExpired as e:
+        raise CheckError("listing %s took longer than %s" % (what, _seconds(e.timeout)))
     if r.returncode != 0:
         raise CheckError("%s is not a tar archive" % what)
     names = r.stdout.decode("utf-8", "replace").splitlines()
@@ -1363,8 +1376,8 @@ def _newer(found: Found, meta: dict) -> bool:
 def _run_tool(cmd: List[str]) -> None:
     try:
         r = _tool(cmd)
-    except subprocess.TimeoutExpired:
-        raise InstallError("%s took longer than %d s" % (cmd[0], TOOL_TIMEOUT))
+    except subprocess.TimeoutExpired as e:
+        raise InstallError("%s took longer than %s" % (cmd[0], _seconds(e.timeout)))
     except OSError as e:
         raise InstallError("cannot run %s: %s" % (cmd[0], e.strerror or e))
     if r.returncode != 0:
@@ -1544,6 +1557,20 @@ def _already_installed(aid: str, st: Optional[Stored]) -> bool:
                 and record.get("fingerprint") == st.meta.get("fingerprint"))
 
 
+def _install_locked(a: Addon, d: str, st: Stored) -> None:
+    """Install a stored copy unless it is installed already; a next.* copy
+    then becomes current.*. Call with install_lock held. Raises
+    InstallError."""
+    if not _already_installed(a.id, st):
+        log("%s: installing %s" % (a.name, _label(a, st.meta.get("version"))))
+        install_stored(a.id, st)
+    if os.path.basename(st.path).startswith("next."):
+        with esp_lock():
+            if not promote(d, st.meta):
+                log("%s: a newer copy was stored meanwhile; it stays for the next boot"
+                    % a.name)
+
+
 def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
     """Install current, or next and then promote it, under install_lock and
     without esp.lock, from the stored file. The state is read again once the
@@ -1559,18 +1586,11 @@ def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
         if st is None:
             run.fail(a, "install-failed", "install failed: no stored copy")
             return False
-        if not _already_installed(a.id, st):
-            log("%s: installing %s" % (a.name, _label(a, st.meta.get("version"))))
-            try:
-                install_stored(a.id, st)
-            except InstallError as e:
-                run.fail(a, "install-failed", "install failed: %s" % e)
-                return False
-        if os.path.basename(st.path).startswith("next."):
-            with esp_lock():
-                if not promote(d, st.meta):
-                    log("%s: a newer copy was stored meanwhile; it stays for the next boot"
-                        % a.name)
+        try:
+            _install_locked(a, d, st)
+        except InstallError as e:
+            run.fail(a, "install-failed", "install failed: %s" % e)
+            return False
     message = "%s installed" % _label(a, st.meta.get("version"))
     log(message)
     set_result(a.id, None, message)
@@ -1747,6 +1767,31 @@ def _seed_marker() -> str:
     return os.path.join(ESP_DIR, "config", "addons-seeded")
 
 
+def _seed_ticks(run: Run, no_home: bool) -> bool:
+    """Write the seeded tick file unless one exists. False when it could
+    not be written, so the next boot tries again."""
+    home = home_dir()
+    ids = [a.id for a in run.addons if a.shipped and a.source.config
+           and (no_home or os.path.lexists(os.path.join(home, a.source.config)))]
+    try:
+        with _run_lock():
+            if tick_file_exists():
+                return True
+            if ids:
+                write_ticks(ids)
+    except (OSError, KeyError) as e:
+        log("cannot tick the add-ons of this home from 3.x: %s"
+            % (getattr(e, "strerror", None) or e))
+        run.failed = True
+        return False
+    run.ticks = ids
+    why = ("the boot stick was upgraded from ThinFloe 3.x without a saved home" if no_home
+           else "this home came from ThinFloe 3.x")
+    for aid in ids:
+        log("%s ticked: %s" % (run.by_id[aid].name, why))
+    return True
+
+
 def seed(run: Run) -> None:
     """The first boot from 3.x ticks the add-ons the home used, before
     anything is installed. It fires when there is no tick file and either
@@ -1755,32 +1800,17 @@ def seed(run: Run) -> None:
     ESP) and the ESP has no addons-seeded marker. Then every shipped add-on
     whose X-TF-Source-Config exists in the home is ticked, or, with no
     stored home, every shipped add-on that has the key. The marker is
-    written on USB only."""
+    written on every USB boot that finds it missing, so a stick that booted
+    4.x once never seeds again: a later 4.x upgrade also leaves tl.old/
+    and, without a saved home, home-restore absent."""
     restore = _state("home-restore")
     renamed = os.path.exists(os.path.join(STATE_DIR, "home-renamed"))
     upgraded = (esp_mounted() and restore == "absent"
                 and os.path.isdir(os.path.join(ESP_DIR, "tl.old"))
                 and not os.path.lexists(_seed_marker()))
-    if not (renamed or upgraded):
+    if (renamed or upgraded) and not _seed_ticks(run, restore == "absent"):
         return
-    home = home_dir()
-    ids = [a.id for a in run.addons if a.shipped and a.source.config
-           and (restore == "absent" or os.path.lexists(os.path.join(home, a.source.config)))]
-    try:
-        with _run_lock():
-            if tick_file_exists():
-                return
-            if ids:
-                write_ticks(ids)
-    except (OSError, KeyError) as e:
-        log("cannot tick the add-ons of this home from 3.x: %s"
-            % (getattr(e, "strerror", None) or e))
-        run.failed = True
-        return
-    run.ticks = ids
-    for aid in ids:
-        log("%s ticked: this home came from ThinFloe 3.x" % run.by_id[aid].name)
-    if not esp_mounted():
+    if not esp_mounted() or os.path.lexists(_seed_marker()):
         return
     try:
         with esp_lock():
@@ -1811,14 +1841,11 @@ def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
     again, so the version that worked before stays."""
     new = _label(a, nxt.meta.get("version"))
     with install_lock():
-        log("%s: installing %s" % (a.name, new))
         try:
-            install_stored(a.id, nxt)
+            _install_locked(a, d, nxt)
         except InstallError as e:
             reason = str(e)
         else:
-            with esp_lock():
-                promote(d, nxt.meta)
             message = "%s installed" % new
             log(message)
             set_result(a.id, None, message)
@@ -1833,33 +1860,38 @@ def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
             run.fail(a, "install-failed", "install of %s failed: %s" % (new, reason))
             return
         old = _label(a, cur.meta.get("version"))
-        log("%s: installing %s" % (a.name, old))
         try:
-            install_stored(a.id, cur)
+            _install_locked(a, d, cur)
         except InstallError as e:
             run.fail(a, "install-failed", "%s; %s failed too: %s" % (failed, old, e))
             return
-    message = "%s; %s installed" % (failed, old)
     log("%s installed" % old)
-    set_result(a.id, None, message)
+    set_result(a.id, None, "%s; %s installed" % (failed, old))
 
 
 def cmd_boot(run: Run) -> None:
     """Seed the ticks, then, on USB, install each ticked add-on from the
     ESP: next.* when there is one (it becomes current.* once installed),
-    else current.*. Sends no request. On netboot the store is empty at
-    boot; thinfloe-addon-check.service fetches and installs once the
-    network is up."""
-    global TOOL_TIMEOUT
+    else current.*, within BOOT_BUDGET seconds. Sends no request. On netboot
+    the store is empty at boot; thinfloe-addon-check.service fetches and
+    installs once the network is up."""
+    global _boot_deadline
     seed(run)
     if not esp_mounted():
         return
-    saved, TOOL_TIMEOUT = TOOL_TIMEOUT, BOOT_TOOL_TIMEOUT
+    todo = [run.by_id[aid] for aid in run.ticks if aid in run.by_id]
+    _boot_deadline = time.monotonic() + BOOT_BUDGET
     try:
-        for aid in run.ticks:
-            a = run.by_id.get(aid)
-            if a is None:
-                continue
+        while todo:
+            if _boot_deadline - time.monotonic() < 1:
+                log("the time for add-ons at boot is used up; not installed: %s"
+                    % ", ".join(a.name for a in todo))
+                for a in todo:
+                    set_result(a.id, "install-failed", "%s: not installed at boot: "
+                               "the time for add-ons was used up" % a.name)
+                run.failed = True
+                break
+            a = todo.pop(0)
             d = _addon_dir(a.id)
             nxt = stored(d, "next")
             if nxt is not None:
@@ -1869,7 +1901,7 @@ def cmd_boot(run: Run) -> None:
             else:
                 _install_slot(run, a, d, "current")
     finally:
-        TOOL_TIMEOUT = saved
+        _boot_deadline = None
 
 
 def status_lines(run: Run) -> List[str]:

@@ -445,6 +445,7 @@ present "thinfloe-addon"             'usr/bin/thinfloe-addon$'
 present "add-on boot unit"           'etc/systemd/system/thinfloe-addons\.service$'
 present "add-on check unit"          'etc/systemd/system/thinfloe-addon-check\.service$'
 present "add-on check timer"         'etc/systemd/system/thinfloe-addon-check\.timer$'
+present "add-on boot check timer"    'etc/systemd/system/thinfloe-addon-boot-check\.timer$'
 present "add-on tmpfiles"            'usr/lib/tmpfiles\.d/thinfloe-addons\.conf$'
 if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-addons\.service$' "$LIST"; then
     echo "ok   - thinfloe-addons.service is enabled"
@@ -456,6 +457,34 @@ if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-addon-check\.time
     echo "ok   - thinfloe-addon-check.timer is enabled"
 else
     echo "FAIL - thinfloe-addon-check.timer is not enabled; add-ons would never be checked"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-addon-boot-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-addon-boot-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-addon-boot-check.timer is not enabled; netboot would not install add-ons"
+    fail=1
+fi
+# systemd applies RandomizedDelaySec to every trigger of a timer, so the
+# check after boot (which installs the add-ons on netboot) has a timer of
+# its own without one, and the daily timer has no OnBootSec.
+TIMERS="$DPKG_TMP/addontimers/etc/systemd/system"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/addontimers" "$SQSH" \
+        etc/systemd/system/thinfloe-addon-check.timer \
+        etc/systemd/system/thinfloe-addon-boot-check.timer >/dev/null 2>&1 &&
+   [[ -f "$TIMERS/thinfloe-addon-check.timer" && -f "$TIMERS/thinfloe-addon-boot-check.timer" ]]; then
+    if grep -qx 'OnBootSec=1min' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       grep -qx 'Unit=thinfloe-addon-check.service' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       ! grep -q '^OnBootSec' "$TIMERS/thinfloe-addon-check.timer" &&
+       grep -qx 'OnUnitActiveSec=1d' "$TIMERS/thinfloe-addon-check.timer"; then
+        echo "ok   - the add-on check runs 1 min after boot without random delay, then daily"
+    else
+        echo "FAIL - the add-on timers do not split the boot check from the daily check"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract the add-on timers"
     fail=1
 fi
 ADDONUNIT="$DPKG_TMP/addonunit/etc/systemd/system/thinfloe-addons.service"

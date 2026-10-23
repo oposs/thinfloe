@@ -1,8 +1,12 @@
 [Unit]
 Description=Check the ticked ThinFloe add-ons once a day
 
+# The check after boot is thinfloe-addon-boot-check.timer: systemd applies
+# RandomizedDelaySec to every time a timer fires, so an OnBootSec= here
+# would delay the first check, which installs the add-ons on netboot, by up
+# to an hour. OnUnitActiveSec counts from the last run of
+# thinfloe-addon-check.service, which the boot-check timer starts first.
 [Timer]
-OnBootSec=1min
 OnUnitActiveSec=1d
 RandomizedDelaySec=1h
 
