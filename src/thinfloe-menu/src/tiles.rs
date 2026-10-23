@@ -91,6 +91,9 @@ pub struct Tile {
     pub problem: Option<String>,
     /// Shown on the tile without disabling it.
     pub note: Option<String>,
+    /// The tile has source keys: the program comes from an add-on that the
+    /// user may not have ticked, so a missing program is not a defect.
+    pub addon: bool,
 }
 
 impl Tile {
@@ -108,6 +111,7 @@ impl Tile {
             origin,
             problem: Some(why),
             note: None,
+            addon: false,
         }
     }
 
@@ -263,12 +267,13 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
         origin,
         problem: None,
         note: None,
+        addon: entry.has_key_prefix("X-TF-Source-"),
     }
 }
 
 /// Keys only a shipped file may set. A user file that rewords a shipped tile
 /// and sets one of them still rewords it; the key is named on the tile.
-const SHIPPED_ONLY_KEYS: [&str; 8] = [
+const SHIPPED_ONLY_KEYS: [&str; 16] = [
     "Exec",
     "Terminal",
     "X-TF-Action",
@@ -277,6 +282,14 @@ const SHIPPED_ONLY_KEYS: [&str; 8] = [
     "X-DBRRG-Action",
     "X-DBRRG-Save-On-Exit",
     "X-DBRRG-Multiple",
+    "X-TF-Source-Apt",
+    "X-TF-Source-Package",
+    "X-TF-Source-Key",
+    "X-TF-Source-URL",
+    "X-TF-Source-Page",
+    "X-TF-Source-Pattern",
+    "X-TF-Source-Format",
+    "X-TF-Source-Config",
 ];
 
 fn reword(mut tile: Tile, user: &SourceFile) -> Tile {
@@ -489,6 +502,29 @@ mod tests {
             "[Desktop Entry]\nName=ThinLinc\nIcon=/opt/thinlinc/lib/tlclient/thinlinc_128.png\n\
              Exec=/opt/thinlinc/bin/tlclient\nX-TF-Save-On-Exit=true\n",
         )
+    }
+
+    #[test]
+    fn source_keys_mark_a_tile_as_an_addon_and_stay_shipped_only() {
+        let shipped = src(
+            "10-x.desktop",
+            "[Desktop Entry]\nName=X\nExec=/opt/x/bin/x\nX-TF-Source-URL=https://e.example/x.deb\n",
+        );
+        let user = src(
+            "10-x.desktop",
+            "[Desktop Entry]\nName=Y\nExec=y\nX-TF-Source-URL=http://evil.example/y.deb\n",
+        );
+        let tiles = merge(&[shipped], &[user]);
+        assert!(tiles[0].addon);
+        assert_eq!(tiles[0].name, "Y");
+        assert_eq!(
+            tiles[0].origin,
+            Origin::Reworded {
+                ignored: vec!["Exec".into(), "X-TF-Source-URL".into()]
+            }
+        );
+        let plain = merge(&[src("30-t.desktop", "[Desktop Entry]\nName=T\nExec=t\n")], &[]);
+        assert!(!plain[0].addon);
     }
 
     fn save_home() -> SourceFile {

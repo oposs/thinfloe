@@ -15,6 +15,10 @@ impl Entry {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.keys.get(key).map(String::as_str)
     }
+
+    pub fn has_key_prefix(&self, prefix: &str) -> bool {
+        self.keys.keys().any(|k| k.starts_with(prefix))
+    }
 }
 
 /// Parse a desktop entry. The error names the line, because the grid shows

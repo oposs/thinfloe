@@ -36,10 +36,10 @@ STUB
 chmod +x "$RUNTIME"
 
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/vendor" "$TREE/src/thinfloe-menu/src" \
+mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/src/thinfloe-menu/src" \
     "$TREE/artifacts/rootfs" "$TREE/artifacts/images" "$TREE/configs" "$TREE/scripts/lib"
 cp "$REPO/Makefile" "$TREE/Makefile"
-inputs=(containers/ubuntu/Dockerfile containers/image-builder/Dockerfile vendor/oxulnk-desktop.deb src/thinfloe-menu/src/main.rs
+inputs=(containers/ubuntu/Dockerfile containers/image-builder/Dockerfile src/thinfloe-menu/src/main.rs
         configs/syslinux.cfg scripts/make-bootable-image.sh scripts/lib/common.sh)
 for f in "${inputs[@]}"; do : >"$TREE/$f"; done
 (cd "$TREE" && touch -d '2020-01-01' "${inputs[@]}" containers/ubuntu/patches \

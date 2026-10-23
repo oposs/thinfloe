@@ -1143,6 +1143,25 @@ class TestAbUpgradeSpace(TestAbUpgradeBootDefault):
             ui.do_ab_upgrade(self.drive(True), "http://example.invalid")
         self.assertTrue((self.esp / "tl.new" / "ramroot.sqsh").is_file())
 
+    def test_space_check_counts_addon_copies(self):
+        # Each installed add-on may need room for a next.* beside its current.*.
+        # The same free space that fits the release alone no longer does.
+        addon = self.esp / "addons" / "10-thinlinc"
+        addon.mkdir(parents=True)
+        with mock.patch.object(ui, "free_bytes", return_value=100), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ui.do_ab_upgrade(self.drive(True), "http://example.invalid")
+        shutil.rmtree(self.esp / "tl.new")
+        (addon / "current.deb").write_bytes(b"x" * 1000)
+        (addon / "current.meta").write_text("version=1\n")
+        with mock.patch.object(ui, "free_bytes", return_value=100), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as err, \
+             self.assertRaises(SystemExit):
+            ui.do_ab_upgrade(self.drive(True), "http://example.invalid")
+        self.assertIn("space", err.getvalue())
+        self.assertFalse((self.esp / "tl.new").exists())
+
     def test_the_staged_message_names_the_current_entry(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

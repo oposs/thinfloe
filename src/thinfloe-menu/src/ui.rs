@@ -592,6 +592,7 @@ mod tests {
             origin: Origin::User,
             problem: None,
             note: None,
+            addon: false,
         };
         let menu = Menu::new(
             Grid {
@@ -704,6 +705,7 @@ mod tests {
                     origin: Origin::User,
                     problem: None,
                     note: None,
+                    addon: false,
                 }],
                 banner: vec![],
             },
@@ -770,6 +772,7 @@ mod tests {
             origin: Origin::Shipped,
             problem: None,
             note: None,
+            addon: false,
         }
     }
 

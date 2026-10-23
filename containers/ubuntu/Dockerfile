@@ -151,15 +151,25 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
 # Set ping setuid
 RUN chmod u+s /usr/bin/ping
 
-# Install ThinLinc
-RUN wget https://www.cendio.com/downloads/clients/thinlinc-client_4.21.0-4588_amd64.deb && \
-    apt install -y ./thinlinc-client_4.21.0-*_amd64.deb && \
-    rm -f thinlinc-client_*.deb
-
-# Install locally built packages staged by the Makefile into vendor/
-COPY vendor/oxulnk-desktop.deb /tmp/oxulnk-desktop.deb
-RUN apt-get install -yq --no-install-recommends /tmp/oxulnk-desktop.deb && \
-    rm -f /tmp/oxulnk-desktop.deb
+# ThinLinc and OxuLnk are add-ons: the user ticks them in Settings and
+# thinfloe-addon installs them at boot from the boot stick. The image carries
+# the libraries they need and neither client. ThinLinc has no Depends:.
+# OxuLnk's Depends: are listed here; libxrandr2 is for vncviewer, which
+# dlopens libXrandr.so.2 and so declares nothing.
+# test/integration/test-addon-deps.sh installs both clients and runs ldd.
+RUN apt-get install -yq --no-install-recommends \
+    libasound2t64 \
+    libopus0 \
+    libva-drm2 \
+    libva2 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcursor1 \
+    libxi6 \
+    libxkbcommon-x11-0 \
+    libxkbcommon0 \
+    libxrandr2
 
 # labwc comes from the local rebuild above, not the archive. apt resolves its
 # dependencies from the .deb's own control fields. 0.9.3-1+thinfloe1 sorts above

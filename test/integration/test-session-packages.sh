@@ -54,6 +54,13 @@ present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'
 absent  "restore-home script" 'usr/local/bin/thinfloe-restore-home$'
 absent  "old save-home path"  'opt/thinlinc/bin/save-home$'
+# ThinLinc and OxuLnk are add-ons: the image carries their tiles, never the
+# clients. libXrandr stays: vncviewer dlopens it, and the add-on brings none.
+absent  "/opt/thinlinc"    '(^|/)opt/thinlinc(/|$)'
+absent  "oxulnk-desktop"   'oxulnk-desktop'
+present "libXrandr.so.2"   'libXrandr\.so\.2$'
+present "ThinLinc audio shim"    'usr/libexec/thinfloe/tlclient-pulseaudio$'
+present "ThinLinc post-install"  'usr/libexec/thinfloe/addon-post/10-thinlinc$'
 present "labwc rc.xml"     'etc/thinfloe/labwc/rc\.xml$'
 present "tty1 autologin"   'getty@tty1\.service\.d/autologin\.conf$'
 present "ssh host key helper" 'usr/bin/thinfloe-ssh-hostkeys$'

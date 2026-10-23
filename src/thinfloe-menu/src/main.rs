@@ -65,7 +65,9 @@ fn check() -> ExitCode {
             Some((path, Err(e))) => (format!("letter fallback ({}: {e})", path.display()), false),
         };
         println!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
-        if shipped && (t.problem.is_some() || !drawn) {
+        // An add-on's program and icon arrive with the add-on; until it is
+        // ticked and installed, the grey tile with a letter is correct.
+        if shipped && !t.addon && (t.problem.is_some() || !drawn) {
             bad = true;
         }
     }

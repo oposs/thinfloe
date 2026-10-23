@@ -609,6 +609,19 @@ def tree_bytes(path: str) -> int:
     return total
 
 
+def addon_copy_bytes(efi_mount: str) -> int:
+    """Bytes of every addons/<id>/current.* (not the .meta files); 0 if none."""
+    total = 0
+    for path in glob.glob(os.path.join(efi_mount, "addons", "*", "current.*")):
+        if path.endswith(".meta"):
+            continue
+        try:
+            total += os.lstat(path).st_size
+        except OSError:
+            pass
+    return total
+
+
 def do_ab_upgrade(drive: DriveInfo, base_url: str) -> None:
     """Perform A/B upgrade on existing ThinFloe drive"""
 
@@ -645,6 +658,9 @@ def do_ab_upgrade(drive: DriveInfo, base_url: str) -> None:
     # take the release keeps its fallback.
     need = int(sum(os.path.getsize(os.path.join(firmware_dir, f))
                    for f in FIRMWARE_FILES) * UPGRADE_SPACE_MARGIN)
+    # Room for one next.* beside every installed add-on's current.*, so the
+    # daily check can still fetch an update after the upgrade.
+    need += addon_copy_bytes(efi_mount)
     have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
     if have < need:
         die(f"Not enough space on {drive.device}: the new release needs "
