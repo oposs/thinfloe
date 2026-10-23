@@ -207,6 +207,72 @@ class TestHomeArchiveContents(unittest.TestCase):
 
 
 
+class TestHomeArchiveOldNameLinks(unittest.TestCase):
+    """The copy holds the 3.x names as links, or the new stick's first boot
+    reads .thinfloe-password without .dbrrg-password as "cleared on 3.x"."""
+
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        root = Path(self.work.name)
+        self.home = root / "home"
+        self.home.mkdir()
+        self.dest = root / "home.tar.gz"
+        patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        (self.home / ".thinfloe-password").write_text("hash\n")
+        (self.home / ".thinfloe-environment").write_text("XKB_DEFAULT_LAYOUT=ch\n")
+        (self.home / ".config" / "thinfloe" / "menu").mkdir(parents=True)
+
+    def _links(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            subprocess.run(
+                ui.home_archive_argv(str(self.home), str(self.dest)), check=True
+            )
+        self.log = out.getvalue()
+        with tarfile.open(self.dest, "r:gz") as tf:
+            return {m.name: m.linkname for m in tf.getmembers() if m.issym()}
+
+    def test_a_deleted_link_is_made_again(self):
+        links = self._links()
+        self.assertEqual(links.get("./.dbrrg-password"), ".thinfloe-password")
+        self.assertEqual(links.get("./.dbrrg-environment"), ".thinfloe-environment")
+        self.assertEqual(links.get("./.config/dbrrg"), "thinfloe")
+        self.assertNotIn("./.dbrrg-sessionrc", links)
+
+    def test_a_pattern_that_drops_a_link_is_ignored_and_named(self):
+        (self.home / ".save-home-exclude").write_text("./.dbrrg-*\ndbrrg\n")
+        links = self._links()
+        self.assertEqual(links.get("./.dbrrg-password"), ".thinfloe-password")
+        self.assertEqual(links.get("./.config/dbrrg"), "thinfloe")
+        self.assertIn("exclude pattern './.dbrrg-*' ignored, it would leave out "
+                      "~/.dbrrg-environment", self.log)
+        self.assertIn("exclude pattern 'dbrrg' ignored, it would leave out "
+                      "~/.config/dbrrg", self.log)
+
+    def test_a_pattern_over_both_names_applies(self):
+        (self.home / ".save-home-exclude").write_text("./.config\n")
+        links = self._links()
+        self.assertNotIn("./.config/dbrrg", links)
+        self.assertNotIn("ignored", self.log)
+
+    def test_a_real_old_name_is_left_alone(self):
+        (self.home / ".dbrrg-environment").write_text("edited on 3.x\n")
+        self._links()
+        self.assertFalse((self.home / ".dbrrg-environment").is_symlink())
+
+    def test_the_pairs_match_the_initramfs(self):
+        lib = (REPO / "overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh").read_text()
+        block = lib.split('TF_HOME_RENAMES="', 1)[1].split('"', 1)[0]
+        pairs = [tuple(line.split(":")[:2]) for line in block.splitlines()]
+        host_keys = (".dbrrg-ssh-host-keys", ".thinfloe-ssh-host-keys")
+        self.assertIn(host_keys, pairs)
+        self.assertEqual([p for p in pairs if p != host_keys],
+                         list(ui.OLD_NAME_LINKS))
+
+
 class TestHomeArchiveExcludes(unittest.TestCase):
     """The exclude list is the one thinfloe-save-home uses, plus machine identity."""
 

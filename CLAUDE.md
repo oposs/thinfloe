@@ -316,8 +316,12 @@ The system implements home directory persistence across reboots:
   WireGuard private key, which breaks both tunnels. `~/.thinfloe-password`
   travels on purpose. Like `thinfloe-save-home`, it refuses when this boot's
   restore failed (`/run/thinfloe/state/home-restore` is `failed`), since the
-  live home is then a default one. `test/unit/test_upgrade_image.py` guards
-  this, run via `make test-unit`.
+  live home is then a default one. Like `thinfloe-save-home`, it first makes
+  the missing old-name links and ignores an exclude pattern that drops one
+  (`OLD_NAME_LINKS`, `ensure_old_name_links`): without `.dbrrg-password`
+  beside `.thinfloe-password` the new stick's first boot clears the
+  password. `test/unit/test_upgrade_image.py` guards this, run via `make
+  test-unit`.
 - Before the fresh install asks to erase the drive, it compares the drive
   (`lsblk -bdno SIZE`) with the image's uncompressed size, read from the
   zstd frame header of `thinfloe-usb.img.zst` (`curl -r 0-17`), and stops when

@@ -40,6 +40,18 @@ SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
 # ~/.thinfloe-password is deliberately NOT here: the user set it for remote
 # access and it travels with the home on purpose.
 IDENTITY_EXCLUDES = ("./.thinfloe-ssh-host-keys", "./.dbrrg-ssh-host-keys", "./wg0.conf")
+# The 3.x names the copy keeps as links to the 4.0 ones, (old, new) relative
+# to the home. The restore reads .thinfloe-password without .dbrrg-password
+# as "cleared on 3.x" and removes it, so a copy without the link loses the
+# password on the new stick's first boot. Same list as TF_HOME_LINKS in
+# thinfloe-save-home and TF_HOME_RENAMES in the initramfs; the host keys are
+# left out because IDENTITY_EXCLUDES drops both names anyway.
+OLD_NAME_LINKS = (
+    (".dbrrg-environment", ".thinfloe-environment"),
+    (".dbrrg-sessionrc", ".thinfloe-sessionrc"),
+    (".dbrrg-password", ".thinfloe-password"),
+    (".config/dbrrg", ".config/thinfloe"),
+)
 # The home archive carries configuration, not data. A file above this size is
 # a download or a binary left in the home; thinfloe-save-home uses the same limit.
 SAVE_HOME_MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -772,6 +784,62 @@ def tar_literal(name: str) -> str:
     return re.sub(r"([\\*?\[\]])", r"\\\1", name)
 
 
+def ensure_old_name_links(home_dir: str) -> List[Tuple[str, str]]:
+    """Make each missing OLD_NAME_LINKS link whose new name exists.
+
+    Returns the ("./old", "./new") pairs that are links now. A real old name
+    is left alone (the restore lets it win), and nothing is made below a
+    symlinked directory (~/.config), which would land wherever it points.
+    Called as root, the link gets the owner of the file it points to, like
+    thinfloe-save-home does.
+    """
+    pairs = []
+    for old, new in OLD_NAME_LINKS:
+        if "/" in old and os.path.islink(
+                os.path.join(home_dir, os.path.dirname(old))):
+            continue
+        old_path = os.path.join(home_dir, old)
+        new_path = os.path.join(home_dir, new)
+        if not os.path.lexists(new_path):
+            continue
+        if not os.path.lexists(old_path):
+            try:
+                os.symlink(os.path.basename(new), old_path)
+                if os.geteuid() == 0:
+                    st = os.lstat(new_path)
+                    os.lchown(old_path, st.st_uid, st.st_gid)
+            except OSError as e:
+                log(f"WARNING: could not link ~/{old} to ~/{new}: {e}")
+        if os.path.islink(old_path):
+            pairs.append((f"./{old}", f"./{new}"))
+    return pairs
+
+
+def drops_old_name_link(home_dir: str, pattern: str,
+                        pairs: List[Tuple[str, str]]) -> str:
+    """The old name `pattern` leaves out while keeping its new name, or "".
+
+    tar decides, as in thinfloe-save-home: it applies --exclude to names
+    given on its command line, and -v prints the ones it keeps, a directory
+    with a trailing slash. A failed probe keeps the pattern.
+    """
+    if not pairs:
+        return ""
+    names = [n for pair in pairs for n in pair]
+    try:
+        r = subprocess.run(
+            ["tar", "-C", home_dir, "-cf", "/dev/null", "--no-recursion", "-v",
+             f"--exclude={pattern}", *names],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return ""
+    kept = {line.rstrip("/") for line in r.stdout.splitlines()}
+    for old, new in pairs:
+        if new in kept and old not in kept:
+            return old[2:]
+    return ""
+
+
 def home_archive_argv(home_dir: str, dest: str) -> List[str]:
     """Build the tar command line for a new stick's home.tar.gz.
 
@@ -779,8 +847,20 @@ def home_archive_argv(home_dir: str, dest: str) -> List[str]:
     directory itself, so the members must be relative: -C <home> with a bare
     ".". The excludes are the save-home list plus IDENTITY_EXCLUDES, plus
     every file above SAVE_HOME_MAX_FILE_BYTES, each one named in the log.
+
+    It first makes the missing old-name links in the live home and drops
+    each user pattern that would leave one out (ensure_old_name_links): the
+    copy must hold .dbrrg-password next to .thinfloe-password.
     """
-    patterns = load_exclude_patterns(home_dir) + list(IDENTITY_EXCLUDES)
+    pairs = ensure_old_name_links(home_dir)
+    patterns = []
+    for p in load_exclude_patterns(home_dir):
+        dropped = drops_old_name_link(home_dir, p, pairs)
+        if dropped:
+            log(f"exclude pattern '{p}' ignored, it would leave out ~/{dropped}")
+            continue
+        patterns.append(p)
+    patterns += list(IDENTITY_EXCLUDES)
     excludes = [f"--exclude={p}" for p in patterns]
     limit_mb = SAVE_HOME_MAX_FILE_BYTES // (1024 * 1024)
     for size, rel in large_files(home_dir, patterns):
