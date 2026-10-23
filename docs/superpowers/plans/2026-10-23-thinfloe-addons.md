@@ -364,11 +364,13 @@ tluser") are rewritten to the new name; `docs/` stays untouched.
     `$OXULNK_DEB` is set.
   - `test_upgrade_image.py`: `test_space_check_counts_addon_copies`.
 - [ ] **Step 2: Run**; FAIL.
-- [ ] **Step 3: Change the image.** OxuLnk's APT address and key are not
-  known yet (open question to the owner). Until they are, `20-oxulnk.desktop`
-  is **removed** from the image; the task that adds it back writes
-  `X-TF-Source-Apt`, `X-TF-Source-Package=oxulnk-desktop`,
-  `X-TF-Source-Key`, `X-TF-Source-Config=.config/oxulnk`.
+- [ ] **Step 3: Change the image.** `20-oxulnk.desktop` becomes an APT
+  add-on (owner, 2026-10-23; the package is not published yet, so its check
+  fails with "not in the repository" until it is):
+  `X-TF-Source-Apt=https://gitea.oetiker.ch/api/packages/oposs/debian stable main`,
+  `X-TF-Source-Package=oxulnk-desktop`,
+  `X-TF-Source-Key=https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key`,
+  `X-TF-Source-Config=.config/oxulnk`.
 - [ ] **Step 4: Rebuild** (`make image` under the build flock) and run
   `make test`; PASS.
 - [ ] **Step 5: CHANGES.md** under `### Changed`: ThinLinc is no longer in
@@ -490,8 +492,7 @@ tluser") are rewritten to the new name; `docs/` stays untouched.
 
 ---
 
-## Open questions for the owner (do not block Tasks 1-4, 6-8)
+## Open questions for the owner
 
-- OxuLnk: APT repository URL, suite, component and key URL; is it public?
-  Without them OxuLnk is not shipped as an add-on (Task 5 Step 3).
-- OxuLnk config path for the 3.x tick rule (`~/.config/oxulnk`?).
+- OxuLnk config path for the 3.x tick rule (`~/.config/oxulnk`?, from
+  strings in the binary; verify against a running client).
