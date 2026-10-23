@@ -20,7 +20,11 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
+from unittest import mock
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -363,6 +367,17 @@ class TestPage(ServerTest):
             ad.check(page_source(self.srv.base + "/gone", "x"))
         self.assertIn("404", str(cm.exception))
 
+    def test_catastrophic_pattern_is_cut_off(self):
+        # (a+)+$ backtracks exponentially on a run of a's without a match.
+        self.srv.routes["/p"] = Route(200, body=b"a" * 40 + b"!")
+        page = self.srv.base + "/p"
+        start = time.monotonic()
+        with self.assertRaises(ad.CheckError) as cm:
+            ad.check(page_source(page, "(a+)+$"))
+        elapsed = time.monotonic() - start
+        self.assertIn("the pattern took too long on %s" % page, str(cm.exception))
+        self.assertLess(elapsed, 8, "the match must be stopped after about 5 s")
+
     def test_user_agent(self):
         seen = []
         self.srv.routes["/p"] = Route(200, body=b'<a href="/f.deb">')
@@ -436,6 +451,36 @@ class TestUrl(ServerTest):
             self.srv.routes["/o" + suffix] = Route(200, {"ETag": '"t"'})
             self.assertEqual(ad.check(url_source(self.srv.base + "/o" + suffix)).fmt,
                              "tar", suffix)
+
+
+class FakeRedirectOpener:
+    """Answers every https URL in `redirects` with a 302 to its target and
+    records each URL asked for; no network."""
+
+    def __init__(self, redirects):
+        self.redirects = redirects
+        self.asked = []
+
+    def open(self, req, timeout=None):
+        url = req.full_url
+        self.asked.append(url)
+        if url in self.redirects:
+            raise urllib.error.HTTPError(url, 302, "Found",
+                                         {"Location": self.redirects[url]}, None)
+        raise AssertionError("must not be asked for %s" % url)
+
+
+class TestKeyFetch(unittest.TestCase):
+    def test_key_redirect_to_http_is_refused(self):
+        key = "https://repo.example/key.asc"
+        hop = "http://mirror.example/key.asc"
+        opener = FakeRedirectOpener({key: hop})
+        src = apt_source("https://repo.example/debian", key)
+        with mock.patch.object(ad, "_opener", opener):
+            with self.assertRaises(ad.CheckError) as cm:
+                ad.check(src)
+        self.assertIn(hop, str(cm.exception))
+        self.assertEqual(opener.asked, [key], "the http hop is never requested")
 
 
 class TestApt(ServerTest):

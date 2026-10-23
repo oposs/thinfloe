@@ -19,11 +19,15 @@ Source keys:
 """
 
 import html
+import json
 import os
 import re
+import select
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,6 +50,10 @@ HTTP_TIMEOUT = 20
 MAX_REDIRECTS = 10
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_KEY_BYTES = 1024 * 1024
+# The pattern is user data run as root over up to 2 MiB; (a+)+$ backtracks
+# for hours. The match runs in a child that is killed after this many seconds.
+PATTERN_TIMEOUT = 5
+MAX_PATTERN_MATCHES = 10000
 APT_TIMEOUT = 300
 
 SOURCE_PREFIX = "X-TF-Source-"
@@ -388,10 +396,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
-def _request(method: str, url: str, urls_seen: List[str]):
+def _request(method: str, url: str, urls_seen: List[str], https_only: bool = False):
     """Open url, following at most MAX_REDIRECTS redirects. Every URL asked
-    for is appended to urls_seen. Returns the open response."""
+    for is appended to urls_seen. With https_only, a hop that is not https is
+    refused before it is asked for. Returns the open response."""
     for _ in range(MAX_REDIRECTS + 1):
+        if https_only and urllib.parse.urlsplit(url).scheme != "https":
+            where = " (redirected from %s)" % urls_seen[-1] if urls_seen else ""
+            raise CheckError("%s is not https%s, so it was not fetched" % (url, where))
         urls_seen.append(url)
         req = urllib.request.Request(url, method=method,
                                      headers={"User-Agent": user_agent()})
@@ -415,8 +427,9 @@ def _request(method: str, url: str, urls_seen: List[str]):
     raise CheckError("%s redirects more than %d times" % (urls_seen[0], MAX_REDIRECTS))
 
 
-def _fetch_bounded(url: str, limit: int, what: str, urls_seen: List[str]) -> bytes:
-    resp = _request("GET", url, urls_seen)
+def _fetch_bounded(url: str, limit: int, what: str, urls_seen: List[str],
+                   https_only: bool = False) -> bytes:
+    resp = _request("GET", url, urls_seen, https_only)
     try:
         body = resp.read(limit + 1)
     except OSError as e:
@@ -468,23 +481,80 @@ def _check_url(src: Source) -> Found:
                  fmt=format_of(src, src.url, final), urls_seen=seen)
 
 
+def _match_links(pattern: str, text: str, page: str,
+                 has_version: bool) -> List[Tuple[str, Optional[str]]]:
+    """(whole match, version group) of every match of pattern in text, in a
+    forked child killed after PATTERN_TIMEOUT seconds. Without a version
+    group, the matches up to the first web link are enough."""
+    rfd, wfd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            # Ends the child also when the parent dies before killing it.
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            signal.alarm(PATTERN_TIMEOUT + 2)
+            os.close(rfd)
+            out = []
+            for m in re.compile(pattern).finditer(text):
+                out.append((m.group(0), m.group("version") if has_version else None))
+                if len(out) >= MAX_PATTERN_MATCHES:
+                    break
+                if not has_version and urllib.parse.urlsplit(
+                        html.unescape(m.group(0)).strip()).scheme in ("", "http", "https"):
+                    break
+            data = json.dumps(out).encode("utf-8")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(wfd, view):]
+            status = 0
+        finally:
+            os._exit(status)
+    os.close(wfd)
+    chunks = []
+    deadline = time.monotonic() + PATTERN_TIMEOUT
+    timed_out = False
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([rfd], [], [], left)
+            if not ready:
+                timed_out = True
+                break
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(rfd)
+        if timed_out:
+            os.kill(pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+    if timed_out:
+        raise CheckError("the pattern took too long on %s" % page)
+    if os.waitstatus_to_exitcode(status) != 0:
+        raise CheckError("the pattern could not be matched on %s" % page)
+    return [(m, v) for m, v in json.loads(b"".join(chunks).decode("utf-8"))]
+
+
 def _check_page(src: Source) -> Found:
     seen: List[str] = []
     body = _fetch_bounded(src.url, MAX_PAGE_BYTES, "the page", seen)
     base = seen[-1]
     text = body.decode("utf-8", "replace")
-    regex = re.compile(src.pattern)
-    has_version = "version" in regex.groupindex
+    has_version = "version" in re.compile(src.pattern).groupindex
 
     best_url = best_version = None
-    for m in regex.finditer(text):
-        link = urllib.parse.urljoin(base, html.unescape(m.group(0)).strip())
+    for match, version in _match_links(src.pattern, text, src.url, has_version):
+        link = urllib.parse.urljoin(base, html.unescape(match).strip())
         if urllib.parse.urlsplit(link).scheme not in ("http", "https"):
             continue
         if not has_version:
             best_url = link
             break
-        version = m.group("version")
         if not version:
             continue
         try:
@@ -530,7 +600,10 @@ def _check_apt(src: Source) -> Found:
             os.makedirs(os.path.join(tmp, d))
         options = "trusted=yes"
         if src.key_url:
-            key = _fetch_bounded(src.key_url, MAX_KEY_BYTES, "the key", [])
+            # Every hop https: auto_allowed trusts an APT source with a key,
+            # so a key swapped on an http hop would sign anything.
+            key = _fetch_bounded(src.key_url, MAX_KEY_BYTES, "the key", [],
+                                 https_only=True)
             armored = b"-----BEGIN PGP PUBLIC KEY BLOCK-----" in key
             key_path = os.path.join(tmp, "key.asc" if armored else "key.gpg")
             with open(key_path, "wb") as f:
