@@ -395,6 +395,18 @@ else
     fail=1
 fi
 
+# The default home must carry the 4.0 home marker. Without it a home saved
+# from it lists no marker, and every boot would treat it as a 3.x home.
+MARKER="$DPKG_TMP/hv/home/tluser/.thinfloe-home-version"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/hv" "$SQSH" \
+        home/tluser/.thinfloe-home-version >/dev/null 2>&1 &&
+   [[ -f "$MARKER" && "$(cat "$MARKER")" == "1" ]]; then
+    echo "ok   - the default home carries ~/.thinfloe-home-version 1"
+else
+    echo "FAIL - the default home has no ~/.thinfloe-home-version holding 1"
+    fail=1
+fi
+
 # --- the NUC7i3BNK field report, in the built image ---
 
 # 1. The KMS wait script and unit must be present.

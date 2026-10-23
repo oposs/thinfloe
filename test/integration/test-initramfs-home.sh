@@ -613,25 +613,22 @@ fi
 # --- home names: dbrrg -> thinfloe ---------------------------------------
 #
 # A stick in the field carries a home saved by 3.x with ~/.dbrrg-* names. The
-# first 4.0 boot must rename them inside the initramfs restore, and leave the
-# old names as symlinks so that 3.x in tl.old/ still finds its settings.
-# Precedence is decided by what is in the archive: the default home already
-# holds .thinfloe-environment and .thinfloe-sessionrc.
+# first ThinFloe boot that restores it renames them once, inside the
+# initramfs restore, and writes ~/.thinfloe-home-version. After that the home
+# is native and the old names mean nothing. The archive decides, never the
+# disk: the default home already holds the marker, .thinfloe-environment and
+# .thinfloe-sessionrc.
 
 OLD_NAMES=".dbrrg-environment .dbrrg-sessionrc .dbrrg-password .dbrrg-ssh-host-keys .config/dbrrg"
-declare -A LINK_TARGET=(
-    [.dbrrg-environment]=.thinfloe-environment
-    [.dbrrg-sessionrc]=.thinfloe-sessionrc
-    [.dbrrg-password]=.thinfloe-password
-    [.dbrrg-ssh-host-keys]=.thinfloe-ssh-host-keys
-    [.config/dbrrg]=thinfloe
-)
 
-# mkdefault <dir>: a fake newroot holding the 4.0 default home; echoes the home.
+# mkdefault <dir> [nomarker]: a fake newroot holding the 4.0 default home.
+# With nomarker the default home lacks the marker, so a test can see whether
+# the restore wrote one.
 mkdefault() {
     mkdir -p "$1/newroot/home/tluser" "$1/efi" "$1/state"
     echo default-env >"$1/newroot/home/tluser/.thinfloe-environment"
     echo default-rc  >"$1/newroot/home/tluser/.thinfloe-sessionrc"
+    [[ "${2:-}" == nomarker ]] || echo 1 >"$1/newroot/home/tluser/.thinfloe-home-version"
 }
 
 # mk3x <srcdir>: the content of a 3.x home archive.
@@ -644,6 +641,16 @@ mk3x() {
     echo "[Desktop Entry]" >"$1/.config/dbrrg/menu/x.desktop"
 }
 
+# no_old_names <home>: true when none of the 3.x names is left, not even as
+# a symlink.
+no_old_names() {
+    local n
+    for n in $OLD_NAMES; do
+        [[ -e "$1/$n" || -L "$1/$n" ]] && return 1
+    done
+    return 0
+}
+
 # check_3x_result <label> <home> <state>
 check_3x_result() {
     local label="$1" h="$2" st="$3" n problems=""
@@ -652,23 +659,30 @@ check_3x_result() {
     [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "pw-hash" ]] || problems+=" pw-content"
     [[ -f "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key" ]] || problems+=" hostkey"
     [[ -f "$h/.config/thinfloe/menu/x.desktop" ]] || problems+=" menu"
-    for n in $OLD_NAMES; do
-        [[ -L "$h/$n" && "$(readlink "$h/$n")" == "${LINK_TARGET[$n]}" ]] || problems+=" link:$n"
-    done
+    no_old_names "$h" || problems+=" old-names-left"
     for n in $OLD_NAMES; do
         grep -qxF "$n" "$st/home-renamed" 2>/dev/null || problems+=" renamed:$n"
     done
+    [[ "$(cat "$h/.thinfloe-home-version" 2>/dev/null)" == "1" ]] || problems+=" marker"
     [[ "$(cat "$st/home-restore" 2>/dev/null)" == "ok" ]] || problems+=" state"
     if [[ -z "$problems" ]]; then ok "$label"; else bad "$label:$problems"; fi
 }
 
+if [[ "$(cat "$REPO/overlay/home/tluser/.thinfloe-home-version" 2>/dev/null)" == "1" ]]; then
+    ok "the image's default home carries ~/.thinfloe-home-version 1"
+else
+    bad "overlay/home/tluser/.thinfloe-home-version missing or not 1"
+fi
+
+# The default home ships the marker, so after extraction it is on disk
+# whatever the archive held. The 3.x archive does not list it: migrated.
 d="$WORK/hn-usb"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 tf_log() { echo "$@" >>"$WORK/tflog"; }
 : >"$WORK/tflog"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 tf_log() { :; }
-check_3x_result "3.x archive with a user XKB layout over the 4.0 default home" \
+check_3x_result "3.x archive over a default home that ships the marker: migrated" \
     "$d/newroot/home/tluser" "$d/state"
 if grep -qxF "thinfloe: renamed ~/.dbrrg-environment to ~/.thinfloe-environment" "$WORK/tflog" \
    && grep -qxF "thinfloe: renamed ~/.config/dbrrg to ~/.config/thinfloe" "$WORK/tflog"; then
@@ -677,10 +691,94 @@ else
     bad "rename log lines missing: $(cat "$WORK/tflog")"
 fi
 
+# The same 3.x archive over a default home without the marker: the restore
+# writes it.
+d="$WORK/hn-usb-nomarker"; mkdefault "$d" nomarker; mkdir -p "$d/src"; mk3x "$d/src"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+check_3x_result "3.x archive: the restore writes the marker" \
+    "$d/newroot/home/tluser" "$d/state"
+
+# A native archive (it lists the marker) with real .dbrrg-* entries beside
+# the new names: a 3.x fallback save put them there. Nothing is renamed or
+# removed; the old entries stay exactly as extracted.
+d="$WORK/hn-native"; mkdefault "$d"; mkdir -p "$d/src/.dbrrg-ssh-host-keys"
+echo 1 >"$d/src/.thinfloe-home-version"
+echo mine >"$d/src/.thinfloe-environment"
+echo pw-4x >"$d/src/.thinfloe-password"
+echo written-by-3x >"$d/src/.dbrrg-environment"
+echo pw-3x >"$d/src/.dbrrg-password"
+echo k3 >"$d/src/.dbrrg-ssh-host-keys/ssh_host_ed25519_key"
+ln -s .thinfloe-sessionrc "$d/src/.dbrrg-sessionrc"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+tf_log() { echo "$@" >>"$WORK/tflog"; }
+: >"$WORK/tflog"; : >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+tf_log() { :; }
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && "$(cat "$h/.thinfloe-password")" == "pw-4x" \
+   && "$(cat "$h/.thinfloe-sessionrc")" == "default-rc" && ! -e "$h/.thinfloe-ssh-host-keys" \
+   && -f "$h/.dbrrg-environment" && ! -L "$h/.dbrrg-environment" \
+   && "$(cat "$h/.dbrrg-environment")" == "written-by-3x" \
+   && "$(cat "$h/.dbrrg-password")" == "pw-3x" && ! -L "$h/.dbrrg-password" \
+   && -d "$h/.dbrrg-ssh-host-keys" && ! -L "$h/.dbrrg-ssh-host-keys" \
+   && "$(readlink "$h/.dbrrg-sessionrc")" == ".thinfloe-sessionrc" \
+   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" \
+   && ! -s "$WORK/warnings" ]] && ! grep -q "renamed\|replaces" "$WORK/tflog"; then
+    ok "native archive: new files untouched, .dbrrg-* left as extracted, no home-renamed"
+else
+    bad "native archive: env=$(cat "$h/.thinfloe-environment") pw=$(cat "$h/.thinfloe-password") $(ls -la "$h" | tr '\n' ' ') renamed=$(cat "$d/state/home-renamed" 2>&1) log=$(cat "$WORK/tflog") warnings=$(cat "$WORK/warnings")"
+fi
+
+# An archive saved by a development build of 4.0: the new names, the old
+# names as symlinks, no marker. The new files stay, the symlinks go, the
+# marker is written, and nothing counts as renamed.
+d="$WORK/hn-devbuild"; mkdefault "$d" nomarker
+mkdir -p "$d/src/.thinfloe-ssh-host-keys" "$d/src/.config/thinfloe/menu"
+echo mine >"$d/src/.thinfloe-environment"
+echo pw >"$d/src/.thinfloe-password"
+echo k4 >"$d/src/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
+echo "[Desktop Entry]" >"$d/src/.config/thinfloe/menu/y.desktop"
+ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
+ln -s .thinfloe-password "$d/src/.dbrrg-password"
+ln -s .thinfloe-ssh-host-keys "$d/src/.dbrrg-ssh-host-keys"
+ln -s thinfloe "$d/src/.config/dbrrg"
+ln -s elsewhere "$d/src/.dbrrg-sessionrc"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+: >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && "$(cat "$h/.thinfloe-password")" == "pw" \
+   && "$(cat "$h/.thinfloe-sessionrc")" == "default-rc" \
+   && "$(cat "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key")" == "k4" \
+   && -f "$h/.config/thinfloe/menu/y.desktop" \
+   && "$(cat "$h/.thinfloe-home-version" 2>/dev/null)" == "1" \
+   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" \
+   && ! -s "$WORK/warnings" ]] && no_old_names "$h"; then
+    ok "development-build archive: new files kept, old symlinks removed, marker written"
+else
+    bad "development-build archive: $(ls -la "$h" "$h/.config" 2>&1 | tr '\n' ' ') renamed=$(cat "$d/state/home-renamed" 2>&1) warnings=$(cat "$WORK/warnings")"
+fi
+
+# Both names real in an unmarked archive, which only a development build can
+# have produced: the new file stays, and the real old one is left alone.
+d="$WORK/hn-both"; mkdefault "$d"; mkdir -p "$d/src"
+echo old >"$d/src/.dbrrg-sessionrc"; echo new >"$d/src/.thinfloe-sessionrc"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-sessionrc")" == "new" && "$(cat "$h/.dbrrg-sessionrc")" == "old" \
+   && ! -L "$h/.dbrrg-sessionrc" && ! -e "$d/state/home-renamed" \
+   && "$(cat "$h/.thinfloe-home-version")" == "1" && "$(cat "$d/state/home-restore")" == "ok" ]]; then
+    ok "unmarked archive with both names real: the new one wins, the old one stays"
+else
+    bad "both names: new=$(cat "$h/.thinfloe-sessionrc") old=$(cat "$h/.dbrrg-sessionrc" 2>&1)"
+fi
+
 # Listing fails although extraction worked: tar lists every member and then
 # exits non-zero, so the listing cannot be trusted to decide the rename. The
 # restore counts as failed, the real old files stay, and no marker is written.
-d="$WORK/hn-listfail"; mkdefault "$d"; mkdir -p "$d/src" "$d/fakebin"
+d="$WORK/hn-listfail"; mkdefault "$d" nomarker; mkdir -p "$d/src" "$d/fakebin"
 mk3x "$d/src"; tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 REALTAR=$(command -v tar)
 cat >"$d/fakebin/tar" <<STUB
@@ -697,11 +795,59 @@ chmod +x "$d/fakebin/tar"
 h="$d/newroot/home/tluser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
    && -f "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
-   && "$(cat "$h/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]] \
+   && "$(cat "$h/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" \
+   && ! -e "$h/.thinfloe-home-version" ]] \
    && grep -q "listing of .* failed, home names not migrated" "$WORK/warnings"; then
-    ok "listing failure after extraction: restore failed, real old files kept, warned"
+    ok "listing failure after extraction: restore failed, real old files kept, no marker"
 else
     bad "listing failure: state=$(cat "$d/state/home-restore") ls=$(ls -la "$h" | tr '\n' ' ')"
+fi
+
+# Extraction fails: failed, and no marker.
+d="$WORK/hn-xfail"; mkdefault "$d" nomarker; mkdir -p "$d/src" "$d/fakebin"
+mk3x "$d/src"; tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+cat >"$d/fakebin/tar" <<STUB
+#!/bin/bash
+case "\$1" in
+    -x*) $REALTAR "\$@"; exit 2 ;;
+esac
+exec $REALTAR "\$@"
+STUB
+chmod +x "$d/fakebin/tar"
+( PATH="$d/fakebin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
+   && ! -e "$h/.thinfloe-home-version" ]]; then
+    ok "extraction failure: restore failed, no marker, no home-renamed"
+else
+    bad "extraction failure: state=$(cat "$d/state/home-restore") ls=$(ls -la "$h" | tr '\n' ' ')"
+fi
+
+# A corrupt archive (empty listing): failed, no marker, no home-renamed.
+d="$WORK/hn-corrupt"; mkdefault "$d" nomarker; echo "not a tarball" >"$d/efi/home.tar.gz"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
+   && ! -e "$h/.thinfloe-home-version" ]] && no_old_names "$h"; then
+    ok "corrupt archive: failed, no marker, no home-renamed"
+else
+    bad "corrupt archive: $(ls -la "$h" 2>&1 | tr '\n' ' ')"
+fi
+
+# Writing the marker fails: a warning, not a failed restore. The next boot
+# migrates again, which changes nothing.
+d="$WORK/hn-markfail"; mkdefault "$d" nomarker; mkdir -p "$d/src"; mk3x "$d/src"
+mkdir "$d/newroot/home/tluser/.thinfloe-home-version"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+: >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$d/state/home-restore")" == "ok" \
+   && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]] \
+   && grep -q "could not write ~/.thinfloe-home-version" "$WORK/warnings"; then
+    ok "a marker that cannot be written is a warning, the restore is ok"
+else
+    bad "marker write failure: state=$(cat "$d/state/home-restore") warnings=$(cat "$WORK/warnings")"
 fi
 
 # The archive is decompressed twice per restore: one listing, one extraction.
@@ -723,105 +869,38 @@ else
     bad "tar calls per restore: $calls"
 fi
 
-# Early failed return (netboot without a boot MAC) still links the defaults.
+# Early failed returns (netboot without a boot MAC, or without a home URL)
+# make no old names.
 d="$WORK/hn-nomac"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$d/state/home-restore")" == "failed" && -L "$h/.dbrrg-environment" \
-   && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" ]]; then
-    ok "netboot without boot MAC: failed, old names still linked to the defaults"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" ]] \
+   && no_old_names "$h"; then
+    ok "netboot without boot MAC: failed, no old names made"
 else
     bad "no-MAC path: $(ls -la "$h" | tr '\n' ' ')"
 fi
-
-# Early failed return (netboot, home URL cannot be built) still links the defaults.
 d="$WORK/hn-nourl"; mkdefault "$d"
 echo "de:ad:be:ef:00:04" >"$d/state/boot-mac"
 ( tf_home_url() { return 1; }
   restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh" )
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$d/state/home-restore")" == "failed" && -L "$h/.dbrrg-environment" \
-   && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" \
-   && -L "$h/.dbrrg-sessionrc" && ! -e "$d/state/home-renamed" ]]; then
-    ok "netboot without a home URL: failed, old names still linked to the defaults"
+if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" ]] \
+   && no_old_names "$h"; then
+    ok "netboot without a home URL: failed, no old names made"
 else
     bad "no-URL path: state=$(cat "$d/state/home-restore" 2>&1) $(ls -la "$h" | tr '\n' ' ')"
 fi
 
-# A real old entry replaced by the link is warned about.
-d="$WORK/hn-warnreal"; mkdefault "$d"; echo old >"$d/newroot/home/tluser/.dbrrg-environment"
-: >"$WORK/warnings"
-tf_link_old_home_names "$d/newroot/home/tluser"
-if grep -q "replacing real ~/.dbrrg-environment" "$WORK/warnings"; then
-    ok "replacing a real old entry by a link is warned about"
-else
-    bad "no warning for the removed real entry"
-fi
-
-# Second boot: the saved 4.0 archive holds the new names and the old links.
-d="$WORK/hn-4x"; mkdefault "$d"; mkdir -p "$d/src"
-echo mine >"$d/src/.thinfloe-environment"
-ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+# Absent archive: the default home stays as it is.
+d="$WORK/hn-absent"; mkdefault "$d"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && -L "$h/.dbrrg-environment" \
-   && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" \
-   && ! -e "$d/state/home-renamed" ]]; then
-    ok "4.0 archive: new file kept, old link intact, no home-renamed marker"
+if [[ "$(cat "$d/state/home-restore")" == "absent" && ! -e "$d/state/home-renamed" \
+   && "$(cat "$h/.thinfloe-environment")" == "default-env" ]] && no_old_names "$h"; then
+    ok "absent archive: default home untouched, no old names, no home-renamed"
 else
-    bad "4.0 archive second boot: env=$(cat "$h/.thinfloe-environment") renamed=$(cat "$d/state/home-renamed" 2>&1)"
-fi
-
-# A 4.0 archive whose old name is a symlink to something else is still not 3.x.
-d="$WORK/hn-4x-only"; mkdefault "$d"; mkdir -p "$d/src"
-ln -s elsewhere "$d/src/.dbrrg-sessionrc"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-sessionrc")" == "default-rc" && ! -e "$d/state/home-renamed" ]]; then
-    ok "a symlink under the old name is never renamed over the default"
-else
-    bad "old-name symlink was treated as a 3.x file"
-fi
-
-# Both names as real files. 4.0 never leaves a real old name, so a 3.x
-# fallback replaced the link (an editor that writes a new file and renames it
-# over ~/.dbrrg-sessionrc). That file is the newer one and wins; the old name
-# becomes a link again, no home-renamed marker.
-d="$WORK/hn-both"; mkdefault "$d"; mkdir -p "$d/src"
-echo old >"$d/src/.dbrrg-sessionrc"; echo new >"$d/src/.thinfloe-sessionrc"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-tf_log() { echo "$@" >>"$WORK/tflog"; }
-: >"$WORK/tflog"; : >"$WORK/warnings"
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-tf_log() { :; }
-h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-sessionrc")" == "old" && ! -L "$h/.thinfloe-sessionrc" \
-   && -L "$h/.dbrrg-sessionrc" && "$(readlink "$h/.dbrrg-sessionrc")" == ".thinfloe-sessionrc" \
-   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" ]] \
-   && grep -qxF "thinfloe: ~/.dbrrg-sessionrc was written by the previous version; it replaces ~/.thinfloe-sessionrc" "$WORK/tflog" \
-   && ! grep -q "replacing real" "$WORK/warnings"; then
-    ok "both names real in the archive: the 3.x file wins, old becomes a link"
-else
-    bad "both names: new=$(cat "$h/.thinfloe-sessionrc") old=$(readlink "$h/.dbrrg-sessionrc") log=$(cat "$WORK/tflog") warnings=$(cat "$WORK/warnings")"
-fi
-
-# The same for a directory: a real ~/.dbrrg-ssh-host-keys beside the new one
-# replaces it whole, so no key of the two sets is mixed with the other.
-d="$WORK/hn-bothdir"; mkdefault "$d"; mkdir -p "$d/src/.dbrrg-ssh-host-keys" "$d/src/.thinfloe-ssh-host-keys"
-echo k3 >"$d/src/.dbrrg-ssh-host-keys/ssh_host_ed25519_key"
-echo k4 >"$d/src/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
-echo k4only >"$d/src/.thinfloe-ssh-host-keys/ssh_host_rsa_key"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key")" == "k3" \
-   && ! -e "$h/.thinfloe-ssh-host-keys/ssh_host_rsa_key" \
-   && -L "$h/.dbrrg-ssh-host-keys" && "$(cat "$d/state/home-restore")" == "ok" ]]; then
-    ok "both directory names real: the 3.x directory replaces the new one whole"
-else
-    bad "both directory names: $(ls -la "$h/.thinfloe-ssh-host-keys" 2>&1) old=$(readlink "$h/.dbrrg-ssh-host-keys")"
+    bad "absent archive: $(ls -la "$h" 2>&1 | tr '\n' ' ')"
 fi
 
 # _tf_move_over keeps both names when the move itself fails: the new name is
@@ -855,68 +934,6 @@ else
     bad "leftover aside: $(ls -la "$d")"
 fi
 
-# Both password names as real files. 4.0 never leaves a real ~/.dbrrg-password
-# (every write and every restore makes it a link), so a real one was written
-# by 3.x after a fallback: `dbrrg-password --clear` removed the link, `--set`
-# wrote a new file. That password is the newer one and wins; the home did not
-# come from 3.x, so no home-renamed marker.
-d="$WORK/hn-pwboth"; mkdefault "$d"; mkdir -p "$d/src"
-echo set-on-3x >"$d/src/.dbrrg-password"; echo revoked-4x >"$d/src/.thinfloe-password"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-tf_log() { echo "$@" >>"$WORK/tflog"; }
-: >"$WORK/tflog"; : >"$WORK/warnings"
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-tf_log() { :; }
-h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -f "$h/.thinfloe-password" \
-   && ! -L "$h/.thinfloe-password" && -L "$h/.dbrrg-password" \
-   && "$(readlink "$h/.dbrrg-password")" == ".thinfloe-password" \
-   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" ]] \
-   && grep -qxF "thinfloe: ~/.dbrrg-password was written by the previous version; it replaces ~/.thinfloe-password" "$WORK/tflog" \
-   && ! grep -q "replacing real" "$WORK/warnings"; then
-    ok "both password names real: the 3.x password wins, link afterwards, logged, no marker"
-else
-    bad "both password names: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password") renamed=$(cat "$d/state/home-renamed" 2>&1) log=$(cat "$WORK/tflog") warnings=$(cat "$WORK/warnings")"
-fi
-
-# A password cleared on 3.x: 3.x's `dbrrg-password --clear` removes only the
-# ~/.dbrrg-password link, so its save holds .thinfloe-password without the old
-# name. Every 4.0 write and restore creates the link, so this shape means
-# "cleared by 3.x"; the restore must not bring the revoked password back.
-d="$WORK/hn-pwcleared"; mkdefault "$d"; mkdir -p "$d/src"
-echo mine >"$d/src/.thinfloe-environment"
-ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
-echo revoked >"$d/src/.thinfloe-password"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-tf_log() { echo "$@" >>"$WORK/tflog"; }
-: >"$WORK/tflog"
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-tf_log() { :; }
-h="$d/newroot/home/tluser"
-if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.thinfloe-password" \
-   && ! -e "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
-   && "$(cat "$h/.thinfloe-environment")" == "mine" && -L "$h/.dbrrg-environment" \
-   && "$(cat "$d/state/home-restore")" == "ok" ]] \
-   && grep -qxF "thinfloe: ~/.dbrrg-password was removed by the previous version; clearing ~/.thinfloe-password" "$WORK/tflog"; then
-    ok "password cleared on 3.x: ~/.thinfloe-password removed, no link, logged"
-else
-    bad "password cleared on 3.x: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password") log=$(cat "$WORK/tflog")"
-fi
-
-# A home saved by 4.0 holds both names, the old one a link: the password stays.
-d="$WORK/hn-pwkept"; mkdefault "$d"; mkdir -p "$d/src"
-echo kept >"$d/src/.thinfloe-password"
-ln -s .thinfloe-password "$d/src/.dbrrg-password"
-tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "kept" && -L "$h/.dbrrg-password" \
-   && "$(readlink "$h/.dbrrg-password")" == ".thinfloe-password" ]]; then
-    ok "4.0 archive with the password and its link: the password is kept"
-else
-    bad "4.0 password with link: pw=$(cat "$h/.thinfloe-password" 2>&1) link=$(readlink "$h/.dbrrg-password")"
-fi
-
 # Members without ./ (tar -C dir -czf archive .dbrrg-environment).
 d="$WORK/hn-noslash"; mkdefault "$d"; mkdir -p "$d/src"
 echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
@@ -924,10 +941,22 @@ tar -C "$d/src" -czf "$d/efi/home.tar.gz" .dbrrg-environment
 tar -tzf "$d/efi/home.tar.gz" | grep -qxF .dbrrg-environment || bad "fixture: member has a ./ prefix"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=de" && -L "$h/.dbrrg-environment" ]]; then
+if [[ "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=de" && ! -e "$h/.dbrrg-environment" ]]; then
     ok "members listed without ./ are renamed"
 else
     bad "members without ./: env=$(cat "$h/.thinfloe-environment")"
+fi
+
+# A marker listed without ./ makes the archive native too.
+d="$WORK/hn-noslash-native"; mkdefault "$d"; mkdir -p "$d/src"
+echo 1 >"$d/src/.thinfloe-home-version"; echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .thinfloe-home-version .dbrrg-environment
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-environment")" == "default-env" && -f "$h/.dbrrg-environment" ]]; then
+    ok "a marker listed without ./ makes the archive native"
+else
+    bad "marker without ./: env=$(cat "$h/.thinfloe-environment")"
 fi
 
 # A directory listed only through its members, no entry of its own.
@@ -941,13 +970,13 @@ fi
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
 if [[ -f "$h/.config/thinfloe/menu/x.desktop" && ! -e "$h/.config/thinfloe/menu/default.desktop" \
-   && -L "$h/.config/dbrrg" && "$(readlink "$h/.config/dbrrg")" == "thinfloe" ]]; then
+   && ! -e "$h/.config/dbrrg" && ! -L "$h/.config/dbrrg" ]]; then
     ok "a directory listed only through its members is renamed over the default"
 else
     bad "deep members only: $(ls -R "$h/.config" 2>&1 | tr '\n' ' ')"
 fi
 
-# A ~/.config that is a symlink: renaming or linking below it would act on
+# A ~/.config that is a symlink: renaming or removing below it would act on
 # whatever it points to, possibly outside the home. The .config/dbrrg entry is
 # skipped with a warning; the other names are handled as usual.
 d="$WORK/hn-cfglink"; mkdefault "$d"; mkdir -p "$d/src" "$d/outside/dbrrg/menu" "$d/outside/thinfloe"
@@ -959,7 +988,7 @@ tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
 if [[ -L "$h/.config" && -d "$d/outside/dbrrg" && ! -L "$d/outside/dbrrg" \
-   && ! -L "$d/outside/thinfloe/dbrrg" && ! -e "$d/outside/thinfloe/menu" \
+   && ! -e "$d/outside/thinfloe/menu" \
    && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=fr" \
    && "$(grep -c 'is a symlink' "$WORK/warnings")" -eq 1 ]]; then
     ok "a symlinked ~/.config: .config/dbrrg skipped and warned once, the rest migrated"
@@ -967,38 +996,14 @@ else
     bad "symlinked .config: outside=$(ls -la "$d/outside" | tr '\n' ' ') warnings=$(cat "$WORK/warnings")"
 fi
 
-# The next restore warns again: once per restore, not once per shell.
+# The same archive restored again warns again: once per restore, not once
+# per shell.
 : >"$WORK/warnings"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 if [[ "$(grep -c 'is a symlink' "$WORK/warnings")" -eq 1 ]]; then
     ok "a symlinked ~/.config is warned about once on every restore"
 else
     bad "second restore with symlinked .config: warnings=$(cat "$WORK/warnings")"
-fi
-
-# Absent archive: links for names whose new file exists, nothing else.
-d="$WORK/hn-absent"; mkdefault "$d"
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
-if [[ -L "$h/.dbrrg-environment" && "$(readlink "$h/.dbrrg-environment")" == ".thinfloe-environment" \
-   && -L "$h/.dbrrg-sessionrc" && "$(readlink "$h/.dbrrg-sessionrc")" == ".thinfloe-sessionrc" \
-   && ! -e "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
-   && ! -L "$h/.dbrrg-ssh-host-keys" && ! -L "$h/.config/dbrrg" \
-   && ! -e "$d/state/home-renamed" \
-   && "$(cat "$d/state/home-restore")" == "absent" ]]; then
-    ok "absent archive: links only for the defaults that exist, no home-renamed"
-else
-    bad "absent archive: $(ls -la "$h" 2>&1 | tr '\n' ' ')"
-fi
-
-d="$WORK/hn-corrupt"; mkdefault "$d"; echo "not a tarball" >"$d/efi/home.tar.gz"
-restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
-h="$d/newroot/home/tluser"
-if [[ -L "$h/.dbrrg-environment" && ! -L "$h/.dbrrg-password" && ! -e "$d/state/home-renamed" \
-   && "$(cat "$d/state/home-restore")" == "failed" ]]; then
-    ok "corrupt archive: links to the defaults, no home-renamed, state failed"
-else
-    bad "corrupt archive: $(ls -la "$h" 2>&1 | tr '\n' ' ')"
 fi
 
 # Netboot: the same 3.x archive through the curl stub.
@@ -1015,58 +1020,45 @@ d="$WORK/hn-idem"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
-tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h"
+tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"
 snap1=$(cd "$h" && find . -printf '%p %y %l\n' | sort | tr '\n' ';')
-tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h"
+tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"
 snap2=$(cd "$h" && find . -printf '%p %y %l\n' | sort | tr '\n' ';')
 if [[ "$snap1" == "$snap2" && "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]]; then
-    ok "migrate and link run twice give the same tree"
+    ok "the migration run twice gives the same tree"
 else
     bad "not idempotent: $snap1 <> $snap2"
 fi
 
-# Same helpers with only the initramfs's tools, on the 3.x archive.
+# The migration with only the initramfs's tools, on the 3.x archive.
 d="$WORK/hn-sb"; mkdefault "$d"; mkdir -p "$d/src"; mk3x "$d/src"
 tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/state/home-renamed"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/state/home-renamed" ) 2>"$d/stderr"
 echo ok >"$d/state/home-restore"
 if [[ ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
-    check_3x_result "rename and link helpers work with only the initramfs's tools" "$h" "$d/state"
+    check_3x_result "the migration works with only the initramfs's tools" "$h" "$d/state"
 else
     bad "sandboxed rename: stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
 fi
 
-# The cleared-on-3.x check with only the initramfs's tools.
-d="$WORK/hn-sb-pw"; mkdefault "$d"; mkdir -p "$d/src"
-echo revoked >"$d/src/.thinfloe-password"
+# Removing a development build's old-name symlinks with only those tools.
+d="$WORK/hn-sb-dev"; mkdefault "$d" nomarker; mkdir -p "$d/src/.config/thinfloe"
+echo mine >"$d/src/.thinfloe-environment"
+ln -s .thinfloe-environment "$d/src/.dbrrg-environment"
+ln -s thinfloe "$d/src/.config/dbrrg"
 tar -C "$d/src" -czf "$d/a.tgz" .
 h="$d/newroot/home/tluser"
 tar -xzf "$d/a.tgz" -C "$h"
 : >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
-if [[ ! -e "$h/.thinfloe-password" && ! -L "$h/.dbrrg-password" \
-   && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
-    ok "the cleared-on-3.x check works with only the initramfs's tools"
+( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren" ) 2>"$d/stderr"
+if [[ "$(cat "$h/.thinfloe-environment")" == "mine" && "$(cat "$h/.thinfloe-home-version")" == "1" \
+   && ! -e "$d/ren" && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]] && no_old_names "$h"; then
+    ok "old-name symlinks are removed with only the initramfs's tools"
 else
-    bad "sandboxed clear: pw=$(cat "$h/.thinfloe-password" 2>&1) stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
-fi
-
-# The set-on-3.x password rule with only the initramfs's tools.
-d="$WORK/hn-sb-pwset"; mkdefault "$d"; mkdir -p "$d/src"
-echo set-on-3x >"$d/src/.dbrrg-password"; echo revoked >"$d/src/.thinfloe-password"
-tar -C "$d/src" -czf "$d/a.tgz" .
-h="$d/newroot/home/tluser"
-tar -xzf "$d/a.tgz" -C "$h"
-: >"$WORK/warnings"
-( PATH="$BIN"; tf_migrate_home_names "$h" "$(tar -tzf "$d/a.tgz")" "$d/ren"; tf_link_old_home_names "$h" ) 2>"$d/stderr"
-if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -L "$h/.dbrrg-password" \
-   && ! -e "$d/ren" && ! -s "$d/stderr" && ! -s "$WORK/warnings" ]]; then
-    ok "the set-on-3x password rule works with only the initramfs's tools"
-else
-    bad "sandboxed 3.x set: pw=$(cat "$h/.thinfloe-password" 2>&1) stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
+    bad "sandboxed symlink removal: $(ls -la "$h" | tr '\n' ' ') stderr=$(cat "$d/stderr") warnings=$(cat "$WORK/warnings")"
 fi
 
 # --- tf_finalize_upgrade, inside the same sandbox ---------------------
