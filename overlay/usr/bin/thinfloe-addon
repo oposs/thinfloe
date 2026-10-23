@@ -810,13 +810,40 @@ def _write_atomic(path: str, text: str) -> None:
     _fsync_dir(os.path.dirname(path))
 
 
+# Locks, always taken in this order and never an earlier one while a later
+# one is held: install_lock (RUN_DIR/install.lock: dpkg/tar, promotion, the
+# installed record) -> esp_lock (LOCK_PATH: store writes, shared with
+# thinfloe-save-home, so a save never waits for dpkg) -> _run_lock
+# (RUN_DIR/.lock: log, status, results, ticks).
+
+def _flock(path: str):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextlib.contextmanager
+def install_lock():
+    """Serializes installs between runs: dpkg's own lock would fail the
+    second one, and two tar -x of one add-on would interleave."""
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    fd = _flock(os.path.join(RUN_DIR, "install.lock"))
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def _run_lock():
     """Serializes the log and the status file between runs."""
     os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
-    fd = os.open(os.path.join(RUN_DIR, ".lock"), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    fd = _flock(os.path.join(RUN_DIR, ".lock"))
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         os.close(fd)
@@ -1023,10 +1050,10 @@ NO_MEMORY = "not enough memory for the download"
 @contextlib.contextmanager
 def esp_lock():
     """Held for every write to the store; thinfloe-save-home takes it too.
-    Never held across a download or an install."""
-    fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    Never held across a download or an install (see the lock order above
+    install_lock)."""
+    fd = _flock(LOCK_PATH)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         os.close(fd)
@@ -1320,7 +1347,8 @@ def install_stored(aid: str, st: Stored) -> dict:
     tar -x into ROOT_DIR of a tar. Records what was installed, also when it
     fails, so remove can undo a partial install."""
     meta = st.meta
-    record = {"format": meta["format"], "version": meta.get("version", ""), "ok": False}
+    record = {"format": meta["format"], "version": meta.get("version", ""),
+              "fingerprint": meta.get("fingerprint", ""), "ok": False}
     old = installed(aid) or {}
     if meta["format"] == "deb":
         package = meta.get("package", "")
@@ -1478,24 +1506,39 @@ def _addon_dir(a_id: str) -> str:
     return os.path.join(store_root(), a_id)
 
 
+def _already_installed(aid: str, st: Optional[Stored]) -> bool:
+    record = installed(aid)
+    return bool(st is not None and record and record.get("ok")
+                and record.get("fingerprint") == st.meta.get("fingerprint"))
+
+
 def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
-    """Install current, or next and then promote it. The install runs
-    without esp.lock, from the stored file."""
-    st = stored(d, slot)
-    if st is None:
-        run.fail(a, "install-failed", "install failed: no stored copy")
-        return False
-    log("%s: installing %s" % (a.name, _label(a, st.meta.get("version"))))
-    try:
-        install_stored(a.id, st)
-    except InstallError as e:
-        run.fail(a, "install-failed", "install failed: %s" % e)
-        return False
-    if slot == "next":
-        with esp_lock():
-            if not promote(d, st.meta):
-                log("%s: a newer copy was stored meanwhile; it stays for the next boot"
-                    % a.name)
+    """Install current, or next and then promote it, under install_lock and
+    without esp.lock, from the stored file. The state is read again once the
+    lock is held: what another run installed meanwhile is not installed
+    again."""
+    with install_lock():
+        st = stored(d, slot)
+        if st is None and slot == "next":
+            # Another run installed and promoted it while this one waited.
+            st = stored(d, "current")
+            if not _already_installed(a.id, st):
+                st = None
+        if st is None:
+            run.fail(a, "install-failed", "install failed: no stored copy")
+            return False
+        if not _already_installed(a.id, st):
+            log("%s: installing %s" % (a.name, _label(a, st.meta.get("version"))))
+            try:
+                install_stored(a.id, st)
+            except InstallError as e:
+                run.fail(a, "install-failed", "install failed: %s" % e)
+                return False
+        if os.path.basename(st.path).startswith("next."):
+            with esp_lock():
+                if not promote(d, st.meta):
+                    log("%s: a newer copy was stored meanwhile; it stays for the next boot"
+                        % a.name)
     message = "%s installed" % _label(a, st.meta.get("version"))
     log(message)
     set_result(a.id, None, message)
@@ -1638,7 +1681,8 @@ def cmd_remove(run: Run, aid: str) -> None:
     name = a.name if a else aid
     run.change_ticks(lambda t: [x for x in t if x != aid], name)
     try:
-        uninstall(aid)
+        with install_lock():
+            uninstall(aid)
     except InstallError as e:
         log("%s: could not be removed from the running system: %s" % (name, e))
         run.failed = True

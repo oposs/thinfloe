@@ -551,6 +551,11 @@ FAKE_DPKG = """#!/bin/sh
 printf '%s\\n' "$*" >> "$(dirname "$0")/dpkg.log"
 if flock -n "$(dirname "$0")/../esp.lock" true; then echo free; else echo held; fi \\
     >> "$(dirname "$0")/dpkg.lockstate"
+if ! mkdir "$(dirname "$0")/dpkg.running" 2>/dev/null; then
+    echo concurrent >> "$(dirname "$0")/dpkg.clash"
+fi
+if [ -e "$(dirname "$0")/dpkg.slow" ]; then sleep 0.5; fi
+rmdir "$(dirname "$0")/dpkg.running" 2>/dev/null
 if [ -e "$(dirname "$0")/dpkg.fail" ]; then
     echo "dpkg: error: boom" >&2
     exit 1
@@ -1204,6 +1209,23 @@ class TestFixRound1(AddonEnv):
         self.assertTrue(ad.get_result("10-demo")["message"].startswith("m"))
         self.assertEqual(stat_mode(self.run_dir / "results" / "10-demo.json"), 0o644)
         self.assertEqual([n for n in os.listdir(self.run_dir / "results")], ["10-demo.json"])
+
+    def test_concurrent_installs_are_serialized(self):
+        self.demo_tile()
+        self.publish("1.0")
+        (self.bin / "dpkg.slow").touch()
+        rc = []
+        threads = [threading.Thread(target=lambda: rc.append(ad.main(["install", "10-demo"])))
+                   for _ in range(2)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(60)
+        self.assertEqual(rc, [0, 0])
+        self.assertFalse((self.bin / "dpkg.clash").exists(), "dpkg ran twice at once")
+        self.assertEqual(len(self.dpkg_calls()), 1, "the waiting run reinstalls nothing")
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
 
     def test_dpkg_keeps_changed_conffiles(self):
         self.demo_tile()
