@@ -74,10 +74,16 @@ impl Log {
 
 /// The local time of day, HH:MM:SS.
 pub fn local_time() -> String {
-    // SAFETY: time(NULL) has no preconditions; localtime_r writes only into
-    // the struct passed to it, and a failure leaves it zeroed.
+    // SAFETY: time(NULL) has no preconditions.
+    local_time_at(unsafe { libc::time(std::ptr::null_mut()) } as i64)
+}
+
+/// The local time of day at `epoch` seconds, HH:MM:SS.
+pub fn local_time_at(epoch: i64) -> String {
+    let now = epoch as libc::time_t;
+    // SAFETY: localtime_r writes only into the struct passed to it, and a
+    // failure leaves it zeroed.
     unsafe {
-        let now = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&now, &mut tm);
         format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)

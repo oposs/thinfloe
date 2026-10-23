@@ -91,6 +91,12 @@ pub fn load_icons(ctx: &egui::Context, tiles: &[Tile], roots: &IconRoots) -> Vec
         .collect()
 }
 
+/// One tile's icon, rendered again in a renderer process: the add-on's icon
+/// file arrives while the menu runs.
+pub fn load_icon(ctx: &egui::Context, tile: &Tile, roots: &IconRoots) -> Option<TextureHandle> {
+    load_icons(ctx, std::slice::from_ref(tile), roots).pop().flatten()
+}
+
 fn elapsed(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
@@ -266,7 +272,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         }
         None => {}
     }
-    let l = layout(ui.max_rect(), menu.tiles.len());
+    let shown = menu.visible_tiles();
+    let l = layout(ui.max_rect(), shown.len());
     let mut clicked = None;
     let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
     egui::ScrollArea::vertical()
@@ -277,11 +284,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
             // add_space moves the cursor by exactly its amount; the item
             // spacing comes only between the rows and tiles that follow.
             ui.add_space(l.grid.top() - l.area.top());
-            for (row, chunk) in menu.tiles.chunks(COLUMNS).enumerate() {
+            for chunk in shown.chunks(COLUMNS) {
                 ui.horizontal(|ui| {
                     ui.add_space(l.grid.left() - l.area.left());
-                    for (col, tile) in chunk.iter().enumerate() {
-                        let index = row * COLUMNS + col;
+                    for &index in chunk {
+                        let tile = &menu.tiles[index];
                         let enabled = menu.can_activate(index);
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
                         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(l.side), sense);

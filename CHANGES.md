@@ -5,6 +5,7 @@
 ### New
 
 - Add-ons listed in `~/.config/thinfloe/addons` are installed at every boot from their copy on the boot stick, with no network, and are checked for new versions one minute after boot and once a day at a random time within an hour; a new version becomes active at the next boot. On netboot, that check fetches and installs them once the network is up. The first boot after an upgrade from 3.x lists ThinLinc and OxuLnk when the home holds their settings (`~/.thinlinc`, `~/.config/oxulnk`), or both when the stick had no saved home.
+- The menu shows the tile of an add-on only while the add-on is installed, marks it "update" when a new version waits for the next boot, and enables it as soon as an install finishes, without a restart. Everything the add-on tool does (checks, downloads, installs, failures) appears in the menu log under `add-ons`.
 
 ### Changed
 

@@ -10,6 +10,7 @@
 //! failed and the person at the machine chose to log out anyway. Restart
 //! and Power off take the same steps and exit 10 and 11.
 
+use crate::addons::{AddonState, AddonStatus};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
 use crate::tiles::{Action, Grid, Tile};
@@ -101,6 +102,9 @@ pub struct Menu {
     pub log: Log,
     restore_failed: bool,
     next_id: JobId,
+    /// The last status of the add-ons. An add-on tile with no line here is
+    /// not drawn.
+    addons: Vec<AddonStatus>,
 }
 
 impl Menu {
@@ -127,6 +131,52 @@ impl Menu {
             log,
             restore_failed,
             next_id: 1,
+            addons: Vec::new(),
+        }
+    }
+
+    /// The status line of the add-on a tile belongs to: the id is the tile's
+    /// file name without `.desktop`.
+    fn addon_of(&self, index: usize) -> Option<&AddonStatus> {
+        let tile = self.tiles.get(index).filter(|t| t.addon)?;
+        let id = tile.file.trim_end_matches(".desktop");
+        self.addons.iter().find(|a| a.id == id)
+    }
+
+    /// Whether the grid draws the tile. An add-on tile is drawn while its
+    /// add-on has a copy on this machine, a failed check included.
+    pub fn visible(&self, index: usize) -> bool {
+        match self.tiles.get(index) {
+            Some(t) if t.addon => self.addon_of(index).is_some_and(AddonStatus::present),
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// The indices of the tiles the grid draws, in order.
+    pub fn visible_tiles(&self) -> Vec<usize> {
+        (0..self.tiles.len()).filter(|&i| self.visible(i)).collect()
+    }
+
+    /// Take a new status. Returns the add-on tiles whose installed version
+    /// changed: their program and icon may have appeared or gone.
+    pub fn set_addons(&mut self, status: Vec<AddonStatus>) -> Vec<usize> {
+        let before: Vec<Option<String>> = (0..self.tiles.len())
+            .map(|i| self.addon_of(i).and_then(|a| a.installed.clone()))
+            .collect();
+        self.addons = status;
+        (0..self.tiles.len())
+            .filter(|&i| self.tiles[i].addon && before[i] != self.addon_of(i).and_then(|a| a.installed.clone()))
+            .collect()
+    }
+
+    /// Look again for the programs of the add-on tiles: they are installed
+    /// while the menu runs. An add-on tile has no other reason to be
+    /// disabled than its program.
+    pub fn refresh_programs(&mut self, path: &std::ffi::OsStr) {
+        for t in self.tiles.iter_mut().filter(|t| t.addon && t.action == Action::Run) {
+            t.problem = None;
+            crate::tiles::mark_missing_programs(std::slice::from_mut(t), path);
         }
     }
 
@@ -148,7 +198,7 @@ impl Menu {
         let Some(tile) = self.tiles.get(index) else {
             return false;
         };
-        if self.logout.is_some() || !tile.usable() {
+        if self.logout.is_some() || !tile.usable() || !self.visible(index) {
             return false;
         }
         match tile.action {
@@ -162,6 +212,7 @@ impl Menu {
     pub fn status(&self, index: usize) -> Option<String> {
         match self.running(index) {
             0 if self.tiles.get(index)?.action == Action::SaveHome && self.save.running => Some("running".into()),
+            0 if self.addon_of(index).is_some_and(|a| a.state == AddonState::Pending) => Some("update".into()),
             0 => None,
             1 => Some("running".into()),
             n => Some(format!("{n} running")),
@@ -377,6 +428,7 @@ mod tests {
     use crate::jobs::{JobId, Signal};
     use crate::log::Kind;
     use crate::tiles::{SourceFile, merge};
+    use std::os::unix::fs::PermissionsExt as _;
 
     /// The log as (kind, text), oldest first.
     fn log(m: &Menu) -> Vec<(Kind, String)> {
@@ -902,5 +954,111 @@ mod tests {
         assert_eq!(m.logout, Some(Logout::Confirm));
         assert_eq!(ran(&mut m, b, 0, now), None);
         assert_eq!(m.logout, Some(Logout::WaitSave));
+    }
+
+    fn addon_menu(bin: &std::path::Path) -> Menu {
+        let f = |n: &str, t: &str| SourceFile {
+            name: n.into(),
+            entry: desktop::parse(t),
+        };
+        let exec = bin.join("tlclient");
+        let mut m = Menu::new(
+            Grid {
+                tiles: merge(
+                    &[
+                        f(
+                            "10-thinlinc.desktop",
+                            &format!(
+                                "[Desktop Entry]\nName=ThinLinc\nExec={}\nX-TF-Source-URL=https://e.example/t.deb\n",
+                                exec.display()
+                            ),
+                        ),
+                        f("30-terminal.desktop", "[Desktop Entry]\nName=Terminal\nExec=foot\n"),
+                    ],
+                    &[],
+                ),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        m.refresh_programs(bin.as_os_str());
+        m
+    }
+
+    fn st(state: AddonState, installed: Option<&str>) -> AddonStatus {
+        AddonStatus {
+            id: "10-thinlinc".into(),
+            ticked: true,
+            state,
+            installed: installed.map(String::from),
+            pending: None,
+            auto: true,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn uninstalled_addon_tile_hidden() {
+        let bin = crate::testdir::TestDir::new("menu", "hidden");
+        let mut m = addon_menu(&bin);
+        // No status at all: hidden, and it cannot be activated.
+        assert_eq!(m.visible_tiles(), [1]);
+        assert!(!m.can_activate(0));
+        for s in [
+            st(AddonState::Absent, None),
+            st(AddonState::InstallFailed, None),
+            st(AddonState::Failed, None),
+            st(AddonState::Installed, None),
+        ] {
+            m.set_addons(vec![s]);
+            assert_eq!(m.visible_tiles(), [1]);
+        }
+        // A status line for another add-on does not draw it.
+        let mut other = st(AddonState::Installed, Some("1"));
+        other.id = "20-other".into();
+        m.set_addons(vec![other]);
+        assert_eq!(m.visible_tiles(), [1]);
+        m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]);
+        assert_eq!(m.visible_tiles(), [0, 1]);
+        assert_eq!(m.status(0), None);
+    }
+
+    #[test]
+    fn pending_addon_tile_has_marker() {
+        let bin = crate::testdir::TestDir::new("menu", "pending");
+        let mut m = addon_menu(&bin);
+        m.set_addons(vec![st(AddonState::Pending, Some("4.21.0"))]);
+        assert!(m.visible(0));
+        assert_eq!(m.status(0).as_deref(), Some("update"));
+        assert_eq!(m.status(1), None);
+    }
+
+    #[test]
+    fn failed_check_keeps_installed_tile() {
+        let bin = crate::testdir::TestDir::new("menu", "failed");
+        let mut m = addon_menu(&bin);
+        m.set_addons(vec![st(AddonState::Failed, Some("4.21.0"))]);
+        assert!(m.visible(0));
+        assert_eq!(m.status(0), None);
+    }
+
+    #[test]
+    fn a_program_installed_after_the_menu_started_enables_the_tile() {
+        let bin = crate::testdir::TestDir::new("menu", "late");
+        let mut m = addon_menu(&bin);
+        assert!(m.tiles[0].problem.is_some());
+        let changed = m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]);
+        assert_eq!(changed, [0]);
+        // The status says installed, the program is not there yet.
+        assert!(!m.can_activate(0));
+        std::fs::write(bin.join("tlclient"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(bin.join("tlclient"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        m.refresh_programs(bin.as_os_str());
+        assert!(m.tiles[0].usable());
+        assert!(m.can_activate(0));
+        // The same version again changes nothing.
+        assert!(m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]).is_empty());
+        // A new version does.
+        assert_eq!(m.set_addons(vec![st(AddonState::Pending, Some("4.22.0"))]), [0]);
     }
 }

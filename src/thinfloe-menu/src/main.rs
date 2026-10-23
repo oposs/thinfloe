@@ -8,6 +8,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
@@ -30,6 +31,14 @@ fn user_dir() -> PathBuf {
     home.join(".config/thinfloe/menu")
 }
 
+fn program_path() -> OsString {
+    std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into())
+}
+
+fn addon_status_path() -> PathBuf {
+    env_path("TF_ADDON_STATUS", addons::STATUS_PATH)
+}
+
 fn build_menu() -> (Menu, Paths, IconRoots) {
     let shipped = env_path("TF_MENU_SHIPPED_DIR", "/etc/thinfloe/menu");
     let paths = Paths {
@@ -37,9 +46,13 @@ fn build_menu() -> (Menu, Paths, IconRoots) {
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
-    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    let path = program_path();
     tiles::mark_missing_programs(&mut grid.tiles, &path);
-    let menu = Menu::new(grid, jobs::restore_failed(&paths.state_dir));
+    let mut menu = Menu::new(grid, jobs::restore_failed(&paths.state_dir));
+    // Before the first icon is drawn, so an add-on that is installed has its
+    // tile, program and icon from the start.
+    menu.set_addons(addons::read_status(&addon_status_path()));
+    menu.refresh_programs(&path);
     (menu, paths, IconRoots::system())
 }
 
@@ -98,6 +111,9 @@ fn main() -> ExitCode {
         paths,
         icon_roots,
         debug,
+        addon_status: addon_status_path(),
+        addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
+        program_path: program_path(),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {

@@ -4,6 +4,7 @@
 //! GPU. The rules this file follows are in the spec under "Rendering
 //! without a GPU".
 
+use crate::addons::{self, AddonLog};
 use crate::damage::Tracker;
 use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
@@ -12,9 +13,12 @@ use crate::menu::{Effect, Job, Menu};
 use crate::raster::{Background, Canvas, Textures};
 use crate::ui;
 use egui::{TextureHandle, ViewportId};
+use std::ffi::OsString;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent};
@@ -34,13 +38,24 @@ pub enum Wake {
     Job(JobResult),
     /// Lines are waiting in the feed.
     Output,
+    /// The add-on status or log file changed.
+    Addons,
 }
+
+/// How often the add-on files are looked at, while the window is visible.
+const ADDON_POLL: Duration = Duration::from_secs(1);
+/// Polls of the log in one wake-up: a log of 500 lines read at 200 a poll.
+const ADDON_LOG_POLLS: usize = 5;
 
 pub struct Config {
     pub menu: Menu,
     pub paths: Paths,
     pub icon_roots: IconRoots,
     pub debug: bool,
+    pub addon_status: PathBuf,
+    pub addon_log: PathBuf,
+    /// Where the programs of add-on tiles are looked for.
+    pub program_path: OsString,
 }
 
 struct Live {
@@ -66,6 +81,9 @@ pub struct App {
     exit: Option<i32>,
     /// Whether the canvas background is the frozen grid.
     frozen: bool,
+    addon_log: AddonLog,
+    /// Whether the window is on screen; the add-on poll rests when not.
+    shown: Arc<AtomicBool>,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -94,7 +112,11 @@ pub fn run(cfg: Config) -> Result<i32, String> {
             std::thread::sleep(OUTPUT_PACE);
         }
     });
+    let shown = Arc::new(AtomicBool::new(true));
+    watch_addons(&cfg, &shown, event_loop.create_proxy());
     let mut app = App {
+        addon_log: AddonLog::new(cfg.addon_log.clone()),
+        shown,
         cfg,
         ctx,
         proxy: event_loop.create_proxy(),
@@ -108,7 +130,60 @@ pub fn run(cfg: Config) -> Result<i32, String> {
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
 }
 
+/// A thread that looks at the status and log files once a second and wakes
+/// the loop only when one of them changed: the loop sleeps in between.
+fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
+    let (status, log) = (cfg.addon_status.clone(), cfg.addon_log.clone());
+    let shown = shown.clone();
+    // Taken before the first read of the files, which the loop does when it
+    // starts: a change in between costs one extra read, never a lost one.
+    let mut seen = (addons::stamp(&status), addons::stamp(&log));
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(ADDON_POLL);
+            if !shown.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = (addons::stamp(&status), addons::stamp(&log));
+            if now != seen {
+                seen = now;
+                if waker.send_event(Wake::Addons).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
 impl App {
+    /// Read the add-on files again. A program or icon that appeared
+    /// (the install runs while the menu does) is picked up here, the icon in
+    /// a renderer process like every other.
+    fn refresh_addons(&mut self) {
+        let changed = self.cfg.menu.set_addons(addons::read_status(&self.cfg.addon_status));
+        if !changed.is_empty() {
+            self.cfg.menu.refresh_programs(&self.cfg.program_path);
+            if let Some(live) = self.live.as_mut() {
+                for i in changed {
+                    let icon = ui::load_icon(&self.ctx, &self.cfg.menu.tiles[i], &self.cfg.icon_roots);
+                    if let Some(slot) = live.icons.get_mut(i) {
+                        *slot = icon;
+                    }
+                }
+            }
+        }
+        for _ in 0..ADDON_LOG_POLLS {
+            let lines = self.addon_log.poll();
+            let more = lines.len() >= addons::POLL_LINES;
+            for (time, text) in lines {
+                self.cfg.menu.log.push(addons::log_line(time, &text));
+            }
+            if !more {
+                break;
+            }
+        }
+    }
+
     fn start(&self, job: Job) {
         let proxy = self.proxy.clone();
         let feed = self.feed.clone();
@@ -314,9 +389,13 @@ impl ApplicationHandler<Wake> for App {
         for line in self.feed.drain() {
             self.cfg.menu.log.push(line);
         }
-        if let Wake::Job(result) = wake {
-            let effect = self.cfg.menu.finished(result, Instant::now());
-            self.apply(effect, event_loop);
+        match wake {
+            Wake::Job(result) => {
+                let effect = self.cfg.menu.finished(result, Instant::now());
+                self.apply(effect, event_loop);
+            }
+            Wake::Addons => self.refresh_addons(),
+            Wake::Output => {}
         }
         if let Some(live) = self.live.as_ref() {
             live.window.request_redraw();
@@ -348,6 +427,7 @@ impl ApplicationHandler<Wake> for App {
             // only comes from a client asking. Ending here would be exit 0,
             // which thinfloe-session reads as logout.
             WindowEvent::CloseRequested => return,
+            WindowEvent::Occluded(hidden) => self.shown.store(!hidden, Ordering::Relaxed),
             _ => {}
         }
         // While the dialog is up, input is refused rather than handled.

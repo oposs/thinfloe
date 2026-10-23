@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn source_keys_mark_a_tile_as_an_addon_and_stay_shipped_only() {
+    fn reword_cannot_set_source_keys() {
         let shipped = src(
             "10-x.desktop",
             "[Desktop Entry]\nName=X\nExec=/opt/x/bin/x\nX-TF-Source-URL=https://e.example/x.deb\n",
@@ -525,6 +525,19 @@ mod tests {
         );
         let plain = merge(&[src("30-t.desktop", "[Desktop Entry]\nName=T\nExec=t\n")], &[]);
         assert!(!plain[0].addon);
+    }
+
+    #[test]
+    fn user_file_may_carry_source_keys() {
+        let user = src(
+            "90-mine.desktop",
+            "[Desktop Entry]\nName=Mine\nExec=/opt/mine/bin/mine\n\
+             X-TF-Source-Page=https://e.example/dl\nX-TF-Source-Pattern=mine-(?P<version>[0-9.]+)[.]deb\n",
+        );
+        let tiles = merge(&[], &[user]);
+        assert_eq!(tiles[0].origin, Origin::User);
+        assert!(tiles[0].addon);
+        assert!(tiles[0].usable());
     }
 
     fn save_home() -> SourceFile {

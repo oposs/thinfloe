@@ -1,5 +1,6 @@
 //! thinfloe-menu: the tile grid that is the body of the thinfloe session.
 
+pub mod addons;
 pub mod app;
 pub mod bounded;
 pub mod damage;
