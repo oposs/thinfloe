@@ -425,8 +425,8 @@ patched-labwc one is preventive - nothing has shipped broken from it yet, but
 reverting it silently would ship regressions in both patched behaviours. The
 hook-order one was caught in QEMU: the race it closes is present in every
 image built before it. The menu-rendering and logout-save ones are preventive
-too: the menu-rendering and logout-save ones were decided while the menu was
-designed, and no image has shipped without them. The migrate-once one is
+too: they were decided while the menu was designed, and no image has shipped
+without them. The migrate-once one is
 preventive as well: nothing has shipped broken from it.
 
 ### No login password ships in the image
@@ -848,7 +848,13 @@ the home is native and nothing reads or keeps the old names (owner,
   (development builds of 4.0 left them, without a marker), a real old entry
   beside a listed new name is left alone, and the marker is written. A
   second run changes nothing, so a marker that cannot be written is only a
-  warning: the next boot migrates again.
+  warning: the next boot migrates again. The same holds for a
+  `~/.save-home-exclude` pattern that leaves the marker out of the save:
+  every boot then migrates again, harmlessly.
+- **`sudo thinfloe-password --clear` also removes `~/.dbrrg-password`.** A
+  save on a 3.x fallback boot can leave one in the home. 4.0 never reads it,
+  but the next 3.x boot would install it, and so would a migration on a
+  boot whose archive lost the marker.
 - **A failed listing fails the restore.** The restore lists the archive
   once, before extracting it, and the migration decides from that listing,
   so a boot decompresses the archive twice. When the listing is empty the

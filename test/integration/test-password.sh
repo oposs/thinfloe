@@ -236,17 +236,19 @@ else
 fi
 
 # ---------------------------------------------------------------- test 12
-# --clear removes the stored hash only. A ~/.dbrrg-password that a 3.x
-# fallback save left in the home is 3.x's own file; 4.0 never reads it.
+# --clear also removes a ~/.dbrrg-password that a save on a 3.x fallback
+# boot left in the home. 4.0 never reads it, but the next 3.x boot would
+# install it, and so would a migration on a boot whose archive lost the
+# home-version marker: a cleared password must not come back.
 setup
 echo "$FAKE_HASH" >"$STORE"
 echo "3x-hash" >"$WORK/home/tluser/.dbrrg-password"
 rc=$(run_password "$WORK/root" '' --clear)
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
-   [[ "$(cat "$WORK/home/tluser/.dbrrg-password")" == "3x-hash" ]]; then
-    ok "--clear removes only ~/.thinfloe-password"
+   [[ ! -e "$WORK/home/tluser/.dbrrg-password" ]]; then
+    ok "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password"
 else
-    bad "--clear removes only ~/.thinfloe-password (exit $rc)"
+    bad "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password (exit $rc)"
 fi
 
 if [[ "$fail" == "0" ]]; then
