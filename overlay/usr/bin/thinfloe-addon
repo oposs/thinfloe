@@ -746,8 +746,9 @@ ROOT_DIR = os.environ.get("TF_ADDON_ROOT", "/")  # where tar add-ons are unpacke
 HOME_DIR = os.environ.get("TF_ADDON_HOME")  # unset: the home of tfuser (getent passwd)
 DPKG = os.environ.get("TF_ADDON_DPKG", "dpkg")
 # A program named like an add-on id runs after its install; the package may
-# have overwritten something the image needs to adjust.
-POST_DIR = os.environ.get("TF_ADDON_POST", "/usr/libexec/thinfloe/addon-post")
+# have overwritten something the image needs to adjust. The directory is
+# fixed in the image: a hook path never comes from a tile or the home.
+HOOKS_DIR = os.environ.get("TF_ADDON_HOOKS", "/usr/libexec/thinfloe/addon-hooks")
 SHIPPED_TILES = os.environ.get("TF_ADDON_TILES", "/etc/thinfloe/menu")
 STATE_DIR = os.environ.get("TF_ADDON_STATE", "/run/thinfloe/state")  # the initramfs's records
 # Netboot has no ESP: the same layout in RAM, rebuilt each boot.
@@ -1390,16 +1391,12 @@ def _run_tool(cmd: List[str]) -> None:
                            % (os.path.basename(cmd[0]), r.returncode))
 
 
-def _post_install(aid: str) -> None:
-    """Run POST_DIR/<id>, if there is one. A failure is logged, not raised:
-    the add-on is installed, and a failed hook must not undo that."""
-    hook = os.path.join(POST_DIR, aid)
-    if not os.access(hook, os.X_OK):
-        return
-    try:
+def _run_hook(aid: str) -> None:
+    """Run HOOKS_DIR/<id>, if there is one, with the timeout and process-group
+    kill of the other tools. A failing hook fails the install."""
+    hook = os.path.join(HOOKS_DIR, aid)
+    if ID_RE.fullmatch(aid) and os.access(hook, os.X_OK):
         _run_tool([hook])
-    except InstallError as e:
-        log("%s: post-install step failed: %s" % (aid, e))
 
 
 def install_stored(aid: str, st: Stored) -> dict:
@@ -1431,7 +1428,7 @@ def install_stored(aid: str, st: Stored) -> dict:
         _set_installed(aid, record)
         _run_tool(["tar", "-x", "--no-same-owner", "--no-overwrite-dir",
                    "--keep-directory-symlink", "-C", ROOT_DIR, "-f", st.path])
-    _post_install(aid)
+    _run_hook(aid)
     record["ok"] = True
     _set_installed(aid, record)
     return record

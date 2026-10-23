@@ -47,9 +47,9 @@ print(best[1] if best else "")
     echo "$file"
 }
 
-# $1 label, $2 deb path, $3 package, $4 command that must exit 0
+# $1 label, $2 deb path, $3 package, $4 command that must exit 0, $5 add-on id
 check_addon() {
-    local label=$1 deb=$2 pkg=$3 cmd=$4 out
+    local label=$1 deb=$2 pkg=$3 cmd=$4 id=$5 out
     if [[ ! -s "$deb" ]]; then
         bad "$label: no package at $deb"
         return
@@ -57,6 +57,9 @@ check_addon() {
     out=$(podman run --rm --network=none -v "$deb:/in/addon.deb:ro,Z" "$IMAGE" /bin/bash -c '
         set -u
         dpkg -i /in/addon.deb >/dev/null 2>&1 || { echo "dpkg -i failed"; dpkg -i /in/addon.deb 2>&1 | tail -5; exit 3; }
+        # thinfloe-addon runs the add-on'"'"'s hook after dpkg.
+        hook=/usr/libexec/thinfloe/addon-hooks/'"$id"'
+        if [ -x "$hook" ]; then "$hook" || { echo "hook $hook failed"; exit 6; }; fi
         # A client keeps private libraries in its own directories and finds
         # them through its wrapper; give ldd the same directories.
         LD_LIBRARY_PATH=$(dpkg -L '"$pkg"' | grep -E "\.so(\.|$)" | while read -r f; do [ -f "$f" ] && dirname "$f"; done | sort -u | paste -sd:)
@@ -69,6 +72,10 @@ check_addon() {
         cat /tmp/missing
         [ -s /tmp/missing ] && exit 4
         '"$cmd"' >/dev/null 2>&1 || { echo "'"${cmd%% *}"' exited non-zero"; exit 5; }
+        if [ '"$id"' = 10-thinlinc ]; then
+            cmp -s /usr/libexec/thinfloe/tlclient-pulseaudio /opt/thinlinc/lib/tlclient/pulseaudio \
+                || { echo "pulseaudio is not the PipeWire shim after the hook"; exit 7; }
+        fi
         exit 0' 2>&1)
     if [[ $? -eq 0 ]]; then
         ok "$label: every library resolves and the client starts"
@@ -85,11 +92,11 @@ fi
 if [[ -z "$deb" ]]; then
     bad "ThinLinc: THINLINC_DEB not set and the download from the tile's page failed"
 else
-    check_addon ThinLinc "$deb" thinlinc-client "/opt/thinlinc/bin/tlclient --version"
+    check_addon ThinLinc "$deb" thinlinc-client "/opt/thinlinc/bin/tlclient --version" 10-thinlinc
 fi
 
 if [[ -n "${OXULNK_DEB:-}" ]]; then
-    check_addon OxuLnk "$OXULNK_DEB" oxulnk-desktop "oxulnk-desktop --version"
+    check_addon OxuLnk "$OXULNK_DEB" oxulnk-desktop "oxulnk-desktop --version" 20-oxulnk
 else
     echo "skip - OxuLnk: OXULNK_DEB not set"
 fi

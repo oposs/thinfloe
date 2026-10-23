@@ -43,6 +43,13 @@ fn build_menu() -> (Menu, Paths, IconRoots) {
     (menu, paths, IconRoots::system())
 }
 
+/// Whether `--check` fails for a tile. An add-on's program and icon arrive
+/// with the add-on; until it is ticked and installed, the grey tile with a
+/// letter is correct.
+fn is_defect(t: &tiles::Tile, shipped: bool, icon_drawn: bool) -> bool {
+    shipped && !t.addon && (t.problem.is_some() || !icon_drawn)
+}
+
 /// `thinfloe-menu --check`: print every tile and how its icon draws, and fail
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
@@ -56,6 +63,7 @@ fn check() -> ExitCode {
     for (t, icon) in menu.tiles.iter().zip(icons) {
         let shipped = t.origin != tiles::Origin::User;
         let state = match &t.problem {
+            Some(p) if t.addon => format!("DISABLED ({p}; add-on, not installed)"),
             Some(p) => format!("DISABLED ({p})"),
             None => "ok".to_string(),
         };
@@ -65,9 +73,7 @@ fn check() -> ExitCode {
             Some((path, Err(e))) => (format!("letter fallback ({}: {e})", path.display()), false),
         };
         println!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
-        // An add-on's program and icon arrive with the add-on; until it is
-        // ticked and installed, the grey tile with a letter is correct.
-        if shipped && !t.addon && (t.problem.is_some() || !drawn) {
+        if is_defect(t, shipped, drawn) {
             bad = true;
         }
     }
@@ -98,5 +104,33 @@ fn main() -> ExitCode {
             eprintln!("thinfloe-menu: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tile(addon: bool, problem: Option<&str>) -> tiles::Tile {
+        let mut t = tiles::merge(
+            &[tiles::SourceFile {
+                name: "10-x.desktop".into(),
+                entry: thinfloe_menu::desktop::parse("[Desktop Entry]\nName=X\nExec=x\n"),
+            }],
+            &[],
+        )
+        .remove(0);
+        t.addon = addon;
+        t.problem = problem.map(String::from);
+        t
+    }
+
+    #[test]
+    fn check_fails_for_a_broken_shipped_tile_but_not_for_a_missing_addon() {
+        assert!(is_defect(&tile(false, Some("x is not installed")), true, true));
+        assert!(is_defect(&tile(false, None), true, false));
+        assert!(!is_defect(&tile(true, Some("x is not installed")), true, false));
+        assert!(!is_defect(&tile(false, Some("broken")), false, false));
+        assert!(!is_defect(&tile(false, None), true, true));
     }
 }

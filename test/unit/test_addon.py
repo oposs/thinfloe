@@ -1241,26 +1241,25 @@ class TestFixRound1(AddonEnv):
         self.run_cmd("install", "10-demo")
         self.assertTrue(self.dpkg_calls()[0].startswith("--force-confdef --force-confold -i "))
 
-    def test_post_install_hook_runs_after_the_install(self):
-        # An add-on may need a fix-up the package overwrites (ThinLinc's audio
-        # shim). The hook named like the add-on runs after dpkg; one that
-        # fails is logged and does not fail the install.
+    def test_hook_runs_after_install_and_its_failure_fails_the_install(self):
         self.demo_tile()
         self.publish("1.0")
-        post = self.root / "post"
-        post.mkdir()
-        hook = post / "10-demo"
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        hook = hooks / "10-demo"
         hook.write_text("#!/bin/sh\necho ran > %s\n" % (self.root / "hook-ran"))
         hook.chmod(0o755)
-        with mock.patch.object(ad, "POST_DIR", str(post)):
+        with mock.patch.object(ad, "HOOKS_DIR", str(hooks)):
             self.assertEqual(self.run_cmd("install", "10-demo"), 0)
         self.assertEqual((self.root / "hook-ran").read_text(), "ran\n")
-        hook.write_text("#!/bin/sh\nexit 7\n")
-        self.publish("1.1")
-        with mock.patch.object(ad, "POST_DIR", str(post)):
-            self.assertEqual(self.run_cmd("update", "10-demo"), 0)
-        self.assertIn("10-demo: post-install step failed", (self.run_dir / "log").read_text())
         self.assertEqual(self.status()[0].split("\t")[2], "installed")
+        hook.write_text("#!/bin/sh\necho first >&2\necho broken hook >&2\nexit 7\n")
+        self.publish("1.1")
+        with mock.patch.object(ad, "HOOKS_DIR", str(hooks)):
+            self.run_cmd("update", "10-demo")
+        fields = self.status()[0].split("\t")
+        self.assertEqual(fields[2], "install-failed")
+        self.assertIn("broken hook", fields[6])
 
 
 class TestAutomaticHttps(AddonEnv):

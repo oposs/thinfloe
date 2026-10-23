@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs after thinfloe-addon installs the ThinLinc client. The client starts
+# Hook run by thinfloe-addon after it installs the ThinLinc client. The client starts
 # its own PulseAudio 6.0 from /opt/thinlinc/lib/tlclient/pulseaudio; the
 # package puts that daemon there, so put the PipeWire shim over it.
 set -e
