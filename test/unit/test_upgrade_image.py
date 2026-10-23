@@ -132,6 +132,11 @@ class TestHomeArchiveArgv(unittest.TestCase):
         patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # These tests name /home/tluser; on a ThinFloe machine that home
+        # exists, and the link step must not touch it.
+        patcher = mock.patch.object(ui, "ensure_old_name_links", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_excludes_the_ssh_host_keys(self):
         argv = ui.home_archive_argv("/home/tluser", "/mnt/home.tar.gz")

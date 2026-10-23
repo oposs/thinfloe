@@ -805,11 +805,16 @@ def ensure_old_name_links(home_dir: str) -> List[Tuple[str, str]]:
         if not os.path.lexists(old_path):
             try:
                 os.symlink(os.path.basename(new), old_path)
-                if os.geteuid() == 0:
-                    st = os.lstat(new_path)
-                    os.lchown(old_path, st.st_uid, st.st_gid)
             except OSError as e:
                 log(f"WARNING: could not link ~/{old} to ~/{new}: {e}")
+            else:
+                if os.geteuid() == 0:
+                    try:
+                        st = os.lstat(new_path)
+                        os.lchown(old_path, st.st_uid, st.st_gid)
+                    except OSError as e:
+                        log(f"WARNING: could not give ~/{old} the owner of "
+                            f"~/{new}: {e}")
         if os.path.islink(old_path):
             pairs.append((f"./{old}", f"./{new}"))
     return pairs
