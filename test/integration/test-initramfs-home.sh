@@ -698,7 +698,7 @@ h="$d/newroot/home/tluser"
 if [[ "$(cat "$d/state/home-restore")" == "failed" && ! -e "$d/state/home-renamed" \
    && -f "$h/.dbrrg-password" && ! -L "$h/.dbrrg-password" \
    && "$(cat "$h/.dbrrg-environment")" == "XKB_DEFAULT_LAYOUT=ch" ]] \
-   && grep -q "could not list" "$WORK/warnings"; then
+   && grep -q "listing of .* failed, home names not migrated" "$WORK/warnings"; then
     ok "listing failure after extraction: restore failed, real old files kept, warned"
 else
     bad "listing failure: state=$(cat "$d/state/home-restore") ls=$(ls -la "$h" | tr '\n' ' ')"
@@ -822,6 +822,27 @@ if [[ "$(cat "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key")" == "k3" \
     ok "both directory names real: the 3.x directory replaces the new one whole"
 else
     bad "both directory names: $(ls -la "$h/.thinfloe-ssh-host-keys" 2>&1) old=$(readlink "$h/.dbrrg-ssh-host-keys")"
+fi
+
+# _tf_move_over keeps both names when the move itself fails: the new name is
+# moved aside first and moved back, never removed before the move worked.
+d="$WORK/hn-moveover"; mkdir -p "$d/old" "$d/new"
+echo k3 >"$d/old/key"; echo k4 >"$d/new/key"
+_mo_n=0
+mv() { _mo_n=$((_mo_n + 1)); [ "$_mo_n" -eq 2 ] && return 1; command mv "$@"; }
+_tf_move_over "$d/old" "$d/new"; _mo_rc=$?
+unset -f mv
+if [[ "$_mo_rc" -ne 0 && "$(cat "$d/old/key")" == k3 && "$(cat "$d/new/key")" == k4 \
+      && ! -e "$d/new.tf-aside" ]]; then
+    ok "a failed move over a directory keeps both names"
+else
+    bad "failed move: rc=$_mo_rc $(ls -la "$d")"
+fi
+_tf_move_over "$d/old" "$d/new"
+if [[ "$(cat "$d/new/key")" == k3 && ! -e "$d/old" && ! -e "$d/new.tf-aside" ]]; then
+    ok "a move over a directory replaces it whole"
+else
+    bad "move over: $(ls -la "$d")"
 fi
 
 # Both password names as real files. 4.0 never leaves a real ~/.dbrrg-password

@@ -37,8 +37,15 @@ mkdir -p "$STUBS"
 
 # tar records the directory it was invoked in, which is the whole point of
 # these tests, and creates its output file so the script's later rm succeeds.
+# The probe that asks which exclude pattern drops an old-name link
+# (--no-recursion) writes no archive; it runs the real tar and is not logged.
+TF_TEST_PROBE_TAR=$(command -v tar) || { echo "FAIL - the test needs tar" >&2; exit 1; }
+export TF_TEST_PROBE_TAR
 cat >"$STUBS/tar" <<'STUB'
 #!/bin/bash
+case " $* " in
+    *" --no-recursion "*) exec "$TF_TEST_PROBE_TAR" "$@" ;;
+esac
 { echo "tar $*"; echo "PWD=$PWD"; } >>"$TF_TEST_TAR_LOG"
 # Only the argument after a -f / -zcf style flag is an output file; --exclude=
 # patterns also contain slashes and must not be created.
@@ -613,6 +620,104 @@ if [[ "$rc" == 0 ]] && grep -q -- '--exclude=./stray.iso' "$WORK/tar.log"; then
     ok "a netboot save leaves large files out too"
 else
     bad "netboot large-file exclusion: exit $rc, tar log: $(cat "$WORK/tar.log")"
+fi
+
+# ---------------------------------------------------------------- old-name links
+# Every archive holds the 3.x names as links. The restore reads a real
+# ~/.dbrrg-* beside its 4.0 name as written on 3.x (it wins), and
+# .thinfloe-password without .dbrrg-password as cleared on 3.x, so a save
+# without the links lets 3.x's default ~/.dbrrg-environment replace the
+# user's setting, or clears the password.
+links_setup() {
+    setup
+    echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+    mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
+    rm -f "$WORK/esp/home.tar.gz"
+    H="$WORK/home/tluser"
+    echo env >"$H/.thinfloe-environment"
+    echo hash >"$H/.thinfloe-password"
+    mkdir -p "$H/.config/thinfloe/menu" "$H/Downloads"
+    echo note >"$H/Downloads/note.txt"
+}
+links_run() {
+    rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
+         TF_EXCLUDE_DEFAULT_OVERRIDE="$REPO/overlay/etc/thinfloe/save-home-exclude" \
+         TF_TEST_REAL_TAR="$REAL_TAR" \
+         run_save_home "$WORK/root" "$H")
+    listing=$("$REAL_TAR" -tvzf "$WORK/esp/home.tar.gz" 2>/dev/null)
+}
+has_link() {  # has_link <member> <target>
+    grep -qE "^l.* \./$1 -> $2\$" <<<"$listing"
+}
+
+links_setup
+links_run
+if [[ "$rc" == 0 ]] && has_link .dbrrg-environment .thinfloe-environment \
+   && has_link .dbrrg-sessionrc .thinfloe-sessionrc \
+   && has_link .dbrrg-password .thinfloe-password \
+   && has_link .config/dbrrg thinfloe \
+   && ! grep -q 'dbrrg-ssh-host-keys' <<<"$listing"; then
+    ok "a save makes the missing old-name links, only where the new name exists"
+else
+    bad "old-name links: exit $rc, listing: $listing err: $(cat "$WORK/err")"
+fi
+
+# A real old name stays real: the restore lets it win.
+links_setup
+echo edited-on-3x >"$H/.dbrrg-environment"
+links_run
+if [[ "$rc" == 0 ]] && grep -qE '^-.* \./\.dbrrg-environment$' <<<"$listing" \
+   && [[ ! -L "$H/.dbrrg-environment" && "$(cat "$H/.dbrrg-environment")" == edited-on-3x ]]; then
+    ok "a real old name is left alone"
+else
+    bad "real old name: exit $rc, listing: $listing"
+fi
+
+# A pattern that leaves out a link but not its new name is ignored and named;
+# the other patterns still apply.
+links_setup
+printf '%s\n' './.dbrrg-*' './Downloads' >"$H/.save-home-exclude"
+links_run
+if [[ "$rc" == 0 ]] && has_link .dbrrg-environment .thinfloe-environment \
+   && has_link .dbrrg-password .thinfloe-password \
+   && ! grep -q 'Downloads' <<<"$listing" \
+   && grep -qxF "thinfloe: exclude pattern './.dbrrg-*' ignored, it would leave out ~/.dbrrg-environment" "$WORK/out"; then
+    ok "an exclude pattern that drops an old-name link is ignored and named"
+else
+    bad "link-dropping pattern: exit $rc, out: $(cat "$WORK/out") listing: $listing"
+fi
+
+# A pattern that leaves out both names (all of ~/.config) stays.
+links_setup
+printf '%s\n' './.config' >"$H/.save-home-exclude"
+links_run
+if [[ "$rc" == 0 ]] && ! grep -q '\.config' <<<"$listing" \
+   && has_link .dbrrg-environment .thinfloe-environment \
+   && ! grep -q 'ignored' "$WORK/out"; then
+    ok "a pattern that leaves out both names applies"
+else
+    bad "pattern over both names: exit $rc, out: $(cat "$WORK/out") listing: $listing"
+fi
+
+# A symlinked ~/.config: no link is made through it.
+links_setup
+rm -rf "$H/.config"; mkdir -p "$WORK/elsewhere/thinfloe"; ln -s "$WORK/elsewhere" "$H/.config"
+links_run
+if [[ "$rc" == 0 && ! -e "$WORK/elsewhere/dbrrg" && ! -L "$WORK/elsewhere/dbrrg" ]]; then
+    ok "no link is made below a symlinked ~/.config"
+else
+    bad "symlinked .config: exit $rc, $(ls -la "$WORK/elsewhere")"
+fi
+rm -rf "$WORK/elsewhere"
+
+# The pairs here and TF_HOME_RENAMES in the initramfs must agree.
+lib_pairs=$(sed -n '/^TF_HOME_RENAMES="/,/"$/p' "$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh" \
+    | sed 's/^TF_HOME_RENAMES="//; s/"$//' | awk -F: '{ print $1 ":" $2 }')
+save_pairs=$(sed -n '/^TF_HOME_LINKS="/,/"$/p' "$SCRIPT" | sed 's/^TF_HOME_LINKS="//; s/"$//')
+if [[ -n "$lib_pairs" && "$lib_pairs" == "$save_pairs" ]]; then
+    ok "the save's name pairs match the restore's TF_HOME_RENAMES"
+else
+    bad "name pairs differ: lib '$lib_pairs' save '$save_pairs'"
 fi
 
 exit $fail

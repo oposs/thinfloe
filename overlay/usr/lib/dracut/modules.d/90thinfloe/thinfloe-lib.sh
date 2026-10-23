@@ -266,7 +266,7 @@ tf_restore_home_from_file() {
     # refused, the archive survives) and does not link.
     if [ "$_drhf_list_rc" -ne 0 ] \
        || ! tf_migrate_home_names "$_drhf_home" "$_drhf_list" "$_drhf_renamed"; then
-        warn "thinfloe: could not list $_drhf_archive after extraction, home names not migrated"
+        warn "thinfloe: listing of $_drhf_archive failed, home names not migrated"
         return 3
     fi
 
@@ -379,6 +379,27 @@ _tf_parent_is_link() {
     return 0
 }
 
+# _tf_move_over <from> <to>
+#
+# Move <from> to <to>, replacing a file or a whole directory there. <to> is
+# moved aside first and only removed once the move worked; on failure it is
+# moved back, so neither name is lost. With both gone, thinfloe-ssh-hostkeys
+# would find no keystore, make new keys and delete ~/.dbrrg-ssh-host-keys
+# while staging them.
+_tf_move_over() {
+    if [ -e "$2" ] || [ -L "$2" ]; then
+        rm -rf "$2.tf-aside" 2>/dev/null || true
+        mv "$2" "$2.tf-aside" 2>/dev/null || return 1
+        if ! mv "$1" "$2" 2>/dev/null; then
+            mv "$2.tf-aside" "$2" 2>/dev/null || true
+            return 1
+        fi
+        rm -rf "$2.tf-aside" 2>/dev/null || true
+        return 0
+    fi
+    mv "$1" "$2" 2>/dev/null
+}
+
 # tf_migrate_home_names <home> <listing> [<renamed-file>]
 #
 # Give the files of a 3.x home archive their 4.0 names, after the archive has
@@ -440,8 +461,7 @@ tf_migrate_home_names() {
             # tf_link_old_home_names makes the link again.
             if _tf_archive_lists "$_tmh_list" "$_tmh_old" \
                && [ -e "$_tmh_home/$_tmh_old" ] && [ ! -L "$_tmh_home/$_tmh_old" ]; then
-                rm -rf "$_tmh_home/$_tmh_new" 2>/dev/null || true
-                if mv "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new" 2>/dev/null; then
+                if _tf_move_over "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new"; then
                     tf_log "thinfloe: ~/$_tmh_old was written by the previous version; it replaces ~/$_tmh_new"
                 else
                     warn "thinfloe: could not move ~/$_tmh_old over ~/$_tmh_new"
@@ -453,8 +473,7 @@ tf_migrate_home_names() {
         [ -L "$_tmh_home/$_tmh_old" ] && continue
         [ -e "$_tmh_home/$_tmh_old" ] || continue
 
-        rm -rf "$_tmh_home/$_tmh_new" 2>/dev/null || true
-        if mv "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new" 2>/dev/null; then
+        if _tf_move_over "$_tmh_home/$_tmh_old" "$_tmh_home/$_tmh_new"; then
             tf_log "thinfloe: renamed ~/$_tmh_old to ~/$_tmh_new"
             if [ -n "$_tmh_renamed" ]; then
                 echo "$_tmh_old" >> "$_tmh_renamed" 2>/dev/null || true

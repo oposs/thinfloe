@@ -136,6 +136,91 @@ if [ "$TF_RESTORE_STATE" = "failed" ]; then
   exit 2
 fi
 
+# Capture the live SSH host keys into the home directory so they travel with
+# the archive. This is the ONLY place they are persisted - see
+# /usr/bin/thinfloe-ssh-hostkeys and CLAUDE.md. It runs before the links below
+# are checked, because it creates ~/.thinfloe-ssh-host-keys on a first save.
+sudo /usr/bin/thinfloe-ssh-hostkeys --stage || true
+
+# Every archive holds the 3.x names as links to the 4.0 ones.
+#
+# The restore reads a real ~/.dbrrg-* name beside its 4.0 name as "written on
+# a 3.x fallback" and lets it win, and reads .thinfloe-password without
+# .dbrrg-password as "cleared on 3.x". Both rely on 4.0 never saving a home
+# without the links. A user who deleted a link, or an exclude pattern that
+# matches it, broke that: 3.x's own default home ships a real
+# ~/.dbrrg-environment, which then survived a 3.x boot and replaced the user's
+# setting on the next 4.0 boot. The pairs are TF_HOME_RENAMES in
+# 90thinfloe/thinfloe-lib.sh; test/integration/test-save-home.sh checks that
+# both lists agree. A real old name is left alone: the restore lets it win.
+TF_HOME_LINKS=".dbrrg-environment:.thinfloe-environment
+.dbrrg-sessionrc:.thinfloe-sessionrc
+.dbrrg-password:.thinfloe-password
+.dbrrg-ssh-host-keys:.thinfloe-ssh-host-keys
+.config/dbrrg:.config/thinfloe"
+_dsh_pairs=""
+for _dsh_pair in $TF_HOME_LINKS; do
+  _dsh_old=${_dsh_pair%%:*}
+  _dsh_new=${_dsh_pair#*:}
+  # Below a symlinked directory (~/.config) the link would land wherever that
+  # points, and tar archives the directory as a link anyway.
+  case "$_dsh_old" in
+    */*) [ -L "${_dsh_old%/*}" ] && continue ;;
+  esac
+  [ -e "$_dsh_new" ] || [ -L "$_dsh_new" ] || continue
+  if [ ! -e "$_dsh_old" ] && [ ! -L "$_dsh_old" ]; then
+    # Relative to the old name's directory, like the restore's links.
+    if ln -s "${_dsh_new##*/}" "$_dsh_old" 2>/dev/null; then
+      # Called by root from thinfloe-upgrade: the link is tluser's, like the
+      # file it points to.
+      [ "$(id -u)" != 0 ] || chown -h --reference="$_dsh_new" "$_dsh_old" 2>/dev/null || true
+    else
+      echo "thinfloe: could not link ~/$_dsh_old to ~/$_dsh_new" >&2
+    fi
+  fi
+  [ -L "$_dsh_old" ] && _dsh_pairs="$_dsh_pairs ./$_dsh_old:./$_dsh_new"
+done
+
+# An exclude pattern that leaves out a link but not its 4.0 name is ignored,
+# with a line in the menu's log. tar decides, because tar's matching
+# (unanchored, * across /, a parent directory taking its members along) is
+# what the save uses: it applies --exclude to names given on its command line
+# too, and -v prints the ones it keeps.
+dsh_drops_link() {
+  _dsh_names=""
+  for _dsh_pair in $_dsh_pairs; do
+    _dsh_names="$_dsh_names ${_dsh_pair%%:*} ${_dsh_pair#*:}"
+  done
+  [ -n "$_dsh_names" ] || return 1
+  # shellcheck disable=SC2086 # names hold no blanks
+  _dsh_kept=$(tar -cf /dev/null --no-recursion -v "$1" $_dsh_names 2>/dev/null) || true
+  for _dsh_pair in $_dsh_pairs; do
+    case "
+$_dsh_kept
+" in
+      *"
+${_dsh_pair#*:}
+"*) ;;
+      *) continue ;;
+    esac
+    case "
+$_dsh_kept
+" in
+      *"
+${_dsh_pair%%:*}
+"*) ;;
+      *) _dsh_old=${_dsh_pair%%:*}
+         echo "thinfloe: exclude pattern '${1#--exclude=}' ignored, it would leave out ~/${_dsh_old#./}"
+         return 0 ;;
+    esac
+  done
+  return 1
+}
+for _dsh_arg do
+  shift
+  dsh_drops_link "$_dsh_arg" || set -- "$@" "$_dsh_arg"
+done
+
 # Leave out every file over 10 MB, and name it.
 #
 # The archive is for configuration: WiFi, ThinLinc settings, keys, dotfiles.
@@ -180,10 +265,6 @@ done <<EOF
 $_dsh_large
 EOF
 
-# Capture the live SSH host keys into the home directory so they travel with
-# the archive. This is the ONLY place they are persisted - see
-# /usr/bin/thinfloe-ssh-hostkeys and CLAUDE.md.
-sudo /usr/bin/thinfloe-ssh-hostkeys --stage || true
 if [ "" != "$BOOT_SRV" ]; then
   # Bounded, not "while true": an unreachable server at logout used to hang
   # the session forever - zero labwc keybindings and no menu mean the only

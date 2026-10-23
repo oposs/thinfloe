@@ -870,7 +870,7 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   the previous version; clearing ~/.thinfloe-password`. If the reading is
   wrong, the user sets the password again; a revoked password never returns.
 - **A file written on 3.x wins** (owner, 2026-10-23: the newer version of
-  the dbrrg file wins). 4.0 never leaves a real old name, so a real one
+  the dbrrg file wins). No 4.0 program leaves a real old name, so a real one
   beside the new name was written on a 3.x fallback that replaced the link:
   `dbrrg-password --clear` and then `--set`, or an editor that writes a new
   `~/.dbrrg-environment` and renames it over the link. When the archive
@@ -879,6 +879,22 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   `thinfloe: ~/<old> was written by the previous version; it replaces
   ~/<new>` and makes the link again. A directory is replaced whole, not
   merged. No `home-renamed` entry: the home went to 3.x and back.
+  `_tf_move_over` moves the new name aside and removes it only after the
+  move worked, so a failed `mv` loses neither.
+- **Every save carries the links.** The two rules above read a missing or
+  real old name in a 4.0 archive as something 3.x did. The 3.x default home
+  ships a real `~/.dbrrg-environment` and `~/.dbrrg-sessionrc`: a 4.0 archive
+  without the links (a user deleted one, an exclude pattern matched it) let
+  that default survive a 3.x boot and replace the user's setting on the next
+  4.0 boot, or cleared the password. `thinfloe-save-home` therefore, after the
+  restore-failed check, stages the host keys, makes every missing old-name
+  link whose new name exists (`TF_HOME_LINKS`, which must match
+  `TF_HOME_RENAMES`) and drops each exclude pattern that leaves out a link
+  but not its new name, logging `thinfloe: exclude pattern '<p>' ignored, it
+  would leave out ~/<name>`. tar decides the match: `tar -cf /dev/null
+  --no-recursion -v --exclude=<p> <names>` applies the exclude to
+  command-line names and prints the ones kept. A real old name is left
+  alone. `test/integration/test-save-home.sh` guards this and the two lists.
 - `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
   upgrade copy never carries either machine identity. 3.x's fresh install
   excludes only `./.dbrrg-ssh-host-keys`, which is now a link, and copies
