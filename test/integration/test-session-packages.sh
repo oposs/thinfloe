@@ -68,10 +68,10 @@ present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
 absent  "old regenerate unit" 'regenerate_ssh_host_keys\.service$'
 present "thinfloe-menu"          'usr/bin/thinfloe-menu$'
 present "session verdict"     'usr/libexec/thinfloe/session-verdict$'
-for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 80-reboot 81-poweroff; do
+for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 60-settings 80-reboot 81-poweroff; do
     present "tile $t" "etc/thinfloe/menu/$t\.desktop$"
 done
-for i in hard-drive-download usb log-out rotate-ccw power; do
+for i in hard-drive-download usb log-out rotate-ccw power settings; do
     present "Lucide icon $i" "usr/share/thinfloe/icons/$i\.svg$"
 done
 present "Lucide licence"      'usr/share/thinfloe/icons/LICENSE$'

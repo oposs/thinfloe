@@ -29,6 +29,8 @@ pub enum Action {
     Logout,
     Reboot,
     Poweroff,
+    /// The Settings screen, with the add-ons.
+    Settings,
 }
 
 impl Action {
@@ -39,6 +41,7 @@ impl Action {
             Some("logout") => Ok(Action::Logout),
             Some("reboot") => Ok(Action::Reboot),
             Some("poweroff") => Ok(Action::Poweroff),
+            Some("settings") => Ok(Action::Settings),
             Some(other) => Err(format!("unknown action '{other}'")),
         }
     }
@@ -52,7 +55,7 @@ impl Action {
             Action::Logout => Some(0),
             Action::Reboot => Some(10),
             Action::Poweroff => Some(11),
-            Action::Run | Action::SaveHome => None,
+            Action::Run | Action::SaveHome | Action::Settings => None,
         }
     }
 
@@ -94,6 +97,8 @@ pub struct Tile {
     /// The tile has source keys: the program comes from an add-on that the
     /// user may not have ticked, so a missing program is not a defect.
     pub addon: bool,
+    /// Where an add-on comes from, as the Settings screen shows it.
+    pub source: Option<String>,
 }
 
 impl Tile {
@@ -112,6 +117,7 @@ impl Tile {
             problem: Some(why),
             note: None,
             addon: false,
+            source: None,
         }
     }
 
@@ -268,7 +274,19 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
         problem: None,
         note: None,
         addon: entry.has_key_prefix("X-TF-Source-"),
+        source: source_text(entry),
     }
+}
+
+/// The source of an add-on in one line: `apt · <uri> <suite> · <package>`,
+/// the page, or the fixed address.
+fn source_text(entry: &Entry) -> Option<String> {
+    if let Some(apt) = non_empty(entry, "X-TF-Source-Apt") {
+        let repo: Vec<&str> = apt.split_whitespace().take(2).collect();
+        let package = non_empty(entry, "X-TF-Source-Package").unwrap_or_default();
+        return Some(format!("apt · {} · {package}", repo.join(" ")));
+    }
+    non_empty(entry, "X-TF-Source-Page").or_else(|| non_empty(entry, "X-TF-Source-URL"))
 }
 
 /// Keys only a shipped file may set. A user file that rewords a shipped tile
@@ -659,6 +677,84 @@ mod tests {
     }
 
     #[test]
+    fn settings_tile_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("60-settings.desktop")).unwrap();
+        let t = merge(&[src("60-settings.desktop", &text)], &[]).remove(0);
+        assert_eq!(t.action, Action::Settings);
+        assert_eq!(t.name, "Settings");
+        assert_eq!(t.icon.as_deref(), Some("settings"));
+        assert!(t.usable() && !t.addon && !t.multiple && !t.save_on_exit);
+        assert_eq!(Action::Settings.exit_code(), None);
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("icons/settings.svg")
+                .is_file(),
+            "the Lucide icon is shipped"
+        );
+    }
+
+    #[test]
+    fn user_file_cannot_use_settings_action() {
+        let tiles = merge(
+            &[],
+            &[src(
+                "61-mine.desktop",
+                "[Desktop Entry]\nName=Mine\nX-TF-Action=settings\n",
+            )],
+        );
+        assert_eq!(
+            tiles[0].problem.as_deref(),
+            Some("61-mine.desktop: a tile of your own may only use the run action, not 'settings'")
+        );
+        // A reword of the shipped tile keeps the action.
+        let shipped = src(
+            "60-settings.desktop",
+            "[Desktop Entry]\nName=Settings\nIcon=settings\nX-TF-Action=settings\n",
+        );
+        let tiles = merge(
+            &[shipped],
+            &[src(
+                "60-settings.desktop",
+                "[Desktop Entry]\nName=Einstellungen\nExec=x\n",
+            )],
+        );
+        assert_eq!(tiles[0].action, Action::Settings);
+        assert_eq!(tiles[0].name, "Einstellungen");
+    }
+
+    #[test]
+    fn addon_source_text() {
+        let tiles = merge(
+            &[
+                src(
+                    "10-a.desktop",
+                    "[Desktop Entry]\nName=A\nExec=a\nX-TF-Source-Apt=https://r.example/deb stable main\n\
+                     X-TF-Source-Package=a-pkg\n",
+                ),
+                src(
+                    "11-b.desktop",
+                    "[Desktop Entry]\nName=B\nExec=b\nX-TF-Source-Page=https://e.example/dl\n\
+                     X-TF-Source-Pattern=b.deb\n",
+                ),
+                src(
+                    "12-c.desktop",
+                    "[Desktop Entry]\nName=C\nExec=c\nX-TF-Source-URL=http://e.example/c.tar\n",
+                ),
+                src("13-d.desktop", "[Desktop Entry]\nName=D\nExec=d\n"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            tiles[0].source.as_deref(),
+            Some("apt · https://r.example/deb stable · a-pkg")
+        );
+        assert_eq!(tiles[1].source.as_deref(), Some("https://e.example/dl"));
+        assert_eq!(tiles[2].source.as_deref(), Some("http://e.example/c.tar"));
+        assert_eq!(tiles[3].source, None);
+    }
+
+    #[test]
     fn multiple_only_on_run_tiles() {
         let tiles = merge(
             &[
@@ -693,6 +789,7 @@ mod tests {
         for f in [
             "40-save-home.desktop",
             "50-upgrade-image.desktop",
+            "60-settings.desktop",
             "80-reboot.desktop",
             "81-poweroff.desktop",
         ] {

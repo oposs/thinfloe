@@ -95,6 +95,11 @@ pub enum JobResult {
         id: JobId,
         status: Result<Option<i32>, String>,
     },
+    /// An add-on job ended; `args` are the ones it was started with.
+    Addon {
+        args: Vec<String>,
+        status: Result<Option<i32>, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +132,14 @@ pub fn stop(pgid: i32, signal: Signal) {
 pub struct Paths {
     pub save_home: PathBuf,
     pub state_dir: PathBuf,
+    /// The add-on tool and what runs it as root; the job's arguments follow.
+    pub addon_cmd: Vec<String>,
+}
+
+/// thinfloe-addon runs as root. tfuser has sudo without a password; `-n`
+/// fails at once instead of waiting for a password nobody can type.
+pub fn default_addon_cmd() -> Vec<String> {
+    ["sudo", "-n", "/usr/bin/thinfloe-addon"].map(String::from).to_vec()
 }
 
 /// Copy one output pipe into the feed, line by line, until it closes.
@@ -153,19 +166,18 @@ fn pump(mut pipe: impl Read, source: String, feed: Arc<Feed>, done: Sender<()>) 
     let _ = done.send(());
 }
 
-/// Start `cmd` with stdout and stderr each read by a thread of its own into
-/// the feed, wait for it, then give its output `DRAIN_GRACE` to arrive.
+/// Start `cmd` with stdout (unless `quiet`) and stderr each read by a
+/// thread of its own into the feed, wait for it, then give its output
+/// `DRAIN_GRACE` to arrive.
 fn run_logged(
     mut cmd: Command,
     source: &str,
     feed: &Arc<Feed>,
+    quiet: bool,
     on_spawn: impl FnOnce(u32),
 ) -> std::io::Result<ExitStatus> {
-    let mut child: Child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let stdout = if quiet { Stdio::null() } else { Stdio::piped() };
+    let mut child: Child = cmd.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::piped()).spawn()?;
     on_spawn(child.id());
     let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
     let mut pumps = 0;
@@ -194,7 +206,7 @@ fn run_logged(
 
 /// Run thinfloe-save-home. Its output goes to the log as "save-home".
 pub fn save(paths: &Paths, feed: &Arc<Feed>) -> SaveOutcome {
-    match run_logged(Command::new(&paths.save_home), "save-home", feed, |_| {}) {
+    match run_logged(Command::new(&paths.save_home), "save-home", feed, false, |_| {}) {
         Ok(st) => SaveOutcome::from_status(st.code()),
         Err(e) => SaveOutcome::Broken(format!("{} could not be started: {e}", paths.save_home.display())),
     }
@@ -208,10 +220,25 @@ pub fn run(id: JobId, name: &str, argv: &[String], feed: &Arc<Feed>, on_spawn: i
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).process_group(0);
-    let status = run_logged(cmd, name, feed, |pid| on_spawn(pid as i32))
+    let status = run_logged(cmd, name, feed, false, |pid| on_spawn(pid as i32))
         .map(|st| st.code())
         .map_err(|e| format!("{} could not be started: {e}", argv[0]));
     JobResult::Ran { id, status }
+}
+
+/// Run the add-on tool with `args`. Its stdout repeats the add-on log, which
+/// the menu reads already; stderr (sudo refusing, a Python error) is not in
+/// that log, so it goes to the menu log under `add-ons`.
+pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>) -> JobResult {
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..]).args(args);
+    let status = run_logged(c, crate::addons::LOG_SOURCE, feed, true, |_| {})
+        .map(|st| st.code())
+        .map_err(|e| format!("{} could not be started: {e}", cmd[0]));
+    JobResult::Addon {
+        args: args.to_vec(),
+        status,
+    }
 }
 
 #[cfg(test)]
@@ -275,16 +302,19 @@ mod tests {
         let ok = Paths {
             save_home: "/bin/true".into(),
             state_dir: d.to_path_buf(),
+            addon_cmd: default_addon_cmd(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
             save_home: "/bin/false".into(),
             state_dir: d.to_path_buf(),
+            addon_cmd: default_addon_cmd(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
             save_home: d.join("nope"),
             state_dir: d.to_path_buf(),
+            addon_cmd: default_addon_cmd(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -459,18 +489,45 @@ mod tests {
     }
 
     #[test]
+    fn addon_logs_stderr_only_and_passes_the_args() {
+        let feed = Arc::new(Feed::default());
+        let cmd = sh("echo out; echo \"err $0 $1\" >&2; exit 3");
+        let r = addon(&cmd, &["install".into(), "10-x".into()], &feed);
+        assert_eq!(
+            r,
+            JobResult::Addon {
+                args: vec!["install".into(), "10-x".into()],
+                status: Ok(Some(3)),
+            }
+        );
+        let got: Vec<_> = feed
+            .drain()
+            .into_iter()
+            .map(|l| (l.source.clone(), l.plain()))
+            .collect();
+        assert_eq!(got, [(Some("add-ons".to_string()), "err install 10-x".to_string())]);
+        let JobResult::Addon { status, .. } = addon(&["/nonexistent/sudo".into()], &["check".into()], &feed) else {
+            panic!()
+        };
+        assert!(status.unwrap_err().contains("could not be started"));
+        assert_eq!(default_addon_cmd(), ["sudo", "-n", "/usr/bin/thinfloe-addon"]);
+    }
+
+    #[test]
     fn save_streams_its_output_as_save_home() {
         let d = dir("save-out");
         let feed = Arc::new(Feed::default());
         let p = Paths {
             save_home: "/bin/sh".into(),
             state_dir: d.to_path_buf(),
+            addon_cmd: default_addon_cmd(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
         let p = Paths {
             save_home: "/bin/ls".into(),
             state_dir: d.to_path_buf(),
+            addon_cmd: default_addon_cmd(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();

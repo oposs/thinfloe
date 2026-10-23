@@ -54,6 +54,7 @@ pub struct Config {
     pub debug: bool,
     pub addon_status: PathBuf,
     pub addon_log: PathBuf,
+    pub addon_last_check: PathBuf,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
 }
@@ -68,6 +69,8 @@ struct Live {
     icons: Vec<Option<TextureHandle>>,
     /// The scale the last frame was laid out and damaged at.
     ppp: f32,
+    /// Whether a frame reached the screen.
+    presented: bool,
 }
 
 pub struct App {
@@ -160,6 +163,7 @@ impl App {
     /// a renderer process like every other.
     fn refresh_addons(&mut self) {
         let changed = self.cfg.menu.set_addons(addons::read_status(&self.cfg.addon_status));
+        self.cfg.menu.last_check = addons::read_last_check(&self.cfg.addon_last_check);
         if !changed.is_empty() {
             self.cfg.menu.refresh_programs(&self.cfg.program_path);
             if let Some(live) = self.live.as_mut() {
@@ -203,6 +207,7 @@ impl App {
         let paths = Paths {
             save_home: self.cfg.paths.save_home.clone(),
             state_dir: self.cfg.paths.state_dir.clone(),
+            addon_cmd: self.cfg.paths.addon_cmd.clone(),
         };
         std::thread::spawn(move || {
             let result = match job {
@@ -213,6 +218,7 @@ impl App {
                         let _ = started.send_event(Wake::Job(JobResult::Started { id, pgid }));
                     })
                 }
+                Job::Addon { args } => jobs::addon(&paths.addon_cmd, &args, &feed),
             };
             // The loop is gone only when the menu is exiting; nothing to tell.
             let _ = proxy.send_event(Wake::Job(result));
@@ -280,8 +286,9 @@ impl App {
             let t0 = Instant::now();
             live.canvas.restore_background(rect);
             live.canvas.draw(&prims, &live.textures, ppp, rect);
-            if let Err(e) = present(&mut live.surface, &live.canvas) {
-                eprintln!("thinfloe-menu: present failed: {e}");
+            match present(&mut live.surface, &live.canvas) {
+                Ok(()) => live.presented = true,
+                Err(e) => eprintln!("thinfloe-menu: present failed: {e}"),
             }
             if self.cfg.debug {
                 eprintln!("thinfloe-menu: raster {:?} in {:?}", rect, t0.elapsed());
@@ -293,6 +300,14 @@ impl App {
         // screen in fallback fonts until the mouse moves, because the font
         // atlas lands one frame late.
         let delay = out.viewport_output.get(&ViewportId::ROOT).map(|v| v.repaint_delay);
+        // The retry question freezes what is on screen behind it, so it
+        // waits for a grid that is presented and settled (no repaint asked
+        // for at once: the font atlas lands one frame late).
+        let settled = !delay.is_some_and(|d| d.is_zero());
+        if self.cfg.menu.retry_held() && live.presented && settled {
+            self.cfg.menu.hold_retry(false);
+            live.window.request_redraw();
+        }
         match delay {
             Some(d) if d.is_zero() => live.window.request_redraw(),
             Some(d) if d < std::time::Duration::from_secs(3600) => {
@@ -301,9 +316,11 @@ impl App {
             _ => event_loop.set_control_flow(ControlFlow::Wait),
         }
 
-        let effect = match event {
+        let effect = match event.clone() {
             Some(ui::UiEvent::Tile(i)) => self.cfg.menu.activate(i, now),
             Some(ui::UiEvent::Chose(c)) => self.cfg.menu.choose(c, now),
+            Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
+            Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
             None => self.cfg.menu.tick(now),
         };
         if effect.is_some() || event.is_some() {
@@ -368,10 +385,13 @@ impl ApplicationHandler<Wake> for App {
             None,
             None,
         );
+        // Hidden add-on tiles too: the Settings screen shows their icon when
+        // it renders.
         let icons = ui::load_icons(&self.ctx, &self.cfg.menu.tiles, &self.cfg.icon_roots);
         if self.cfg.debug {
-            let drawn = icons.iter().filter(|i| i.is_some()).count();
-            eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", icons.len());
+            let shown = self.cfg.menu.visible_tiles();
+            let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();
+            eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
         }
         let bg = egui_shadcn::Theme::dark().palette.background;
         self.live = Some(Live {
@@ -383,6 +403,7 @@ impl ApplicationHandler<Wake> for App {
             tracker: Tracker::default(),
             icons,
             ppp: 0.0,
+            presented: false,
         });
         window.request_redraw();
     }
@@ -404,8 +425,14 @@ impl ApplicationHandler<Wake> for App {
         }
         match wake {
             Wake::Job(result) => {
+                // The status changed with the job; the watcher would see it
+                // only a second later.
+                let addon = matches!(result, JobResult::Addon { .. });
                 let effect = self.cfg.menu.finished(result, Instant::now());
                 self.apply(effect, event_loop);
+                if addon {
+                    self.refresh_addons();
+                }
             }
             Wake::Addons => self.refresh_addons(),
             Wake::Output => {}

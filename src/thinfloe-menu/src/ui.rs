@@ -1,9 +1,11 @@
-//! Drawing the grid, the log under it, and the save dialog. Everything that decides something
-//! lives in menu.rs; this file only paints it and reports clicks.
+//! Drawing the grid, the Settings screen in its place, the log under them,
+//! and the dialogs. Everything that decides something lives in menu.rs; this
+//! file only paints it and reports clicks.
 
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
-use crate::menu::{Choice, Logout, Menu};
+use crate::menu::{Choice, Logout, Menu, Screen};
+use crate::settings::{self, RowButton, SettingsEvent};
 use crate::tiles::{Action, Origin, Tile};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
@@ -15,8 +17,9 @@ use egui_shadcn::components::button::{Button, ButtonVariant};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Four, so the seven shipped tiles take two rows and fit above the log on
-/// 1280x720; with three columns the third row went under it.
+/// Four, so the eight shipped tiles (every add-on installed) take two rows
+/// and fit above the log on 1280x720; with three columns the third row went
+/// under it.
 pub const COLUMNS: usize = 4;
 pub const GAP: f32 = 16.0;
 /// Tiles are squares of this side, smaller only when the screen is.
@@ -103,10 +106,13 @@ fn elapsed(d: Duration) -> String {
 }
 
 /// What the person did this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEvent {
     Tile(usize),
     Chose(Choice),
+    Settings(SettingsEvent),
+    /// Retry (true) or Later in the retry dialog.
+    Retry(bool),
 }
 
 /// Where the grid and the log go on a screen.
@@ -272,8 +278,34 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         }
         None => {}
     }
+    if let Some(r) = &menu.retry {
+        let mut chose = None;
+        let text = match &r.message {
+            Some(m) => format!("{} could not be installed: {m}", r.name),
+            None => format!("{} could not be installed.", r.name),
+        };
+        dialog(ui, "Add-on not installed", |ui, t| {
+            ui.label(egui::RichText::new(text).color(WARN));
+            ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette.muted_foreground));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add(Button::new("Retry")).clicked() {
+                    chose = Some(true);
+                }
+                if ui.add(Button::new("Later").variant(ButtonVariant::Secondary)).clicked() {
+                    chose = Some(false);
+                }
+            });
+        });
+        return chose.map(UiEvent::Retry);
+    }
     let shown = menu.visible_tiles();
     let l = layout(ui.max_rect(), shown.len());
+    if menu.screen == Screen::Settings {
+        let event = show_settings(ui, menu, icons, l.area);
+        show_log(ui, &menu.log, l.log);
+        return event.map(UiEvent::Settings);
+    }
     let mut clicked = None;
     let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
     egui::ScrollArea::vertical()
@@ -311,6 +343,138 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         });
     show_log(ui, &menu.log, l.log);
     clicked
+}
+
+/// The side of a row's icon on the Settings screen.
+const ROW_ICON: f32 = 40.0;
+
+/// The Settings screen in `area`: the add-ons, one row each.
+fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area: Rect) -> Option<SettingsEvent> {
+    let t = Theme::current(ui.ctx());
+    let mut event = None;
+    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(area.shrink(GAP)));
+    s_ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Add-ons").size(20.0).color(t.palette.foreground));
+        ui.add_space(12.0);
+        // SAFETY: time(NULL) has no preconditions.
+        let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+        ui.label(egui::RichText::new(settings::last_checked(menu.last_check, now)).color(t.palette.muted_foreground));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(Button::new("Back").variant(ButtonVariant::Secondary)).clicked() {
+                event = Some(SettingsEvent::Back);
+            }
+            if ui.add_enabled(!menu.checking(), Button::new("Check now")).clicked() {
+                event = Some(SettingsEvent::CheckNow);
+            }
+        });
+    });
+    s_ui.add_space(GAP);
+    egui::ScrollArea::vertical()
+        .id_salt("settings")
+        .auto_shrink([false, false])
+        .show(&mut s_ui, |ui| {
+            let rows = settings::rows(menu);
+            if rows.is_empty() {
+                ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette.muted_foreground));
+            }
+            for row in rows {
+                egui::Frame::new()
+                    .fill(t.palette.card)
+                    .stroke(Stroke::new(1.0, t.palette.border))
+                    .corner_radius(t.radius_md())
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if let Some(e) = settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t) {
+                            event = Some(e);
+                        }
+                    });
+                ui.add_space(8.0);
+            }
+        });
+    event
+}
+
+/// One add-on: tick box, icon, name, source, state, and its button.
+fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, t: &Theme) -> Option<SettingsEvent> {
+    let mut event = None;
+    ui.horizontal(|ui| {
+        let mut ticked = row.ticked;
+        let tick = ui.add_enabled_ui(!row.busy, |ui| {
+            egui_shadcn::components::checkbox::checkbox(ui, &mut ticked)
+        });
+        if tick.inner.changed() {
+            event = Some(SettingsEvent::Tick {
+                id: row.id.clone(),
+                on: ticked,
+            });
+        }
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_ICON), Sense::hover());
+        match icon {
+            Some(tex) => {
+                ui.painter().image(
+                    tex.id(),
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => {
+                ui.painter().rect_filled(rect, t.radius_sm(), t.palette.muted);
+                let letter: String = row
+                    .name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().collect())
+                    .unwrap_or_default();
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    letter,
+                    FontId::proportional(ROW_ICON * 0.5),
+                    t.palette.foreground,
+                );
+            }
+        }
+        // The button first from the right, so the texts get what is left
+        // and a long source is cut instead of pushing it off the row.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = match row.button {
+                Some(RowButton::InstallNow) => Some("Install now"),
+                Some(RowButton::UpdateNow) => Some("Update now"),
+                None => None,
+            };
+            if let Some(label) = label
+                && ui.add_enabled(!row.busy, Button::new(label)).clicked()
+            {
+                event = Some(match row.button {
+                    Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
+                    _ => SettingsEvent::InstallNow(row.id.clone()),
+                });
+            }
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                let one_line = |ui: &mut Ui, text: &str, size: f32, color: Color32| {
+                    let mut job = LayoutJob::simple_singleline(text.to_string(), FontId::proportional(size), color);
+                    job.wrap = TextWrapping::truncate_at_width(ui.available_width());
+                    ui.label(job);
+                };
+                one_line(ui, &row.name, 16.0, t.palette.foreground);
+                if let Some(source) = &row.source {
+                    one_line(ui, source, 13.0, t.palette.muted_foreground);
+                }
+                let state = if row.busy {
+                    format!("{} · working…", row.state)
+                } else {
+                    row.state.clone()
+                };
+                one_line(ui, &state, 13.0, t.palette.foreground);
+                if row.manual {
+                    one_line(ui, settings::MANUAL_NOTE, 12.0, WARN);
+                }
+            });
+        });
+    });
+    event
 }
 
 /// The log: one line per row, newest at the bottom, following new lines
@@ -600,6 +764,7 @@ mod tests {
             problem: None,
             note: None,
             addon: false,
+            source: None,
         };
         let menu = Menu::new(
             Grid {
@@ -670,6 +835,108 @@ mod tests {
     }
 
     #[test]
+    fn eight_tiles_fit_1280x720() {
+        // Every shipped tile with every add-on installed.
+        let l = layout(screen(1280.0, 720.0), 8);
+        assert_eq!(l.side, TILE_MAX);
+        assert!(l.grid.bottom() <= l.log.top(), "{:?}", l);
+        assert!(l.grid.top() >= GAP && l.grid.right() <= 1280.0 - GAP, "{:?}", l);
+        assert!(l.grid.height() <= l.area.height(), "no scrolling: {:?}", l);
+    }
+
+    fn texts_of(menu: &Menu, icons: &[Option<TextureHandle>]) -> Vec<String> {
+        let ctx = egui::Context::default();
+        Theme::dark().apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let mut out = None;
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, menu, icons, Instant::now());
+            });
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.unwrap()
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn addon_grid() -> Grid {
+        let f = |n: &str, t: &str| crate::tiles::SourceFile {
+            name: n.into(),
+            entry: crate::desktop::parse(t),
+        };
+        Grid {
+            tiles: crate::tiles::merge(
+                &[
+                    f(
+                        "10-thinlinc.desktop",
+                        "[Desktop Entry]\nName=ThinLinc\nExec=tlclient\nX-TF-Source-Page=https://e.example/dl\n\
+                         X-TF-Source-Pattern=x\n",
+                    ),
+                    f(
+                        "60-settings.desktop",
+                        "[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n",
+                    ),
+                ],
+                &[],
+            ),
+            banner: vec![],
+        }
+    }
+
+    fn failed() -> crate::addons::AddonStatus {
+        crate::addons::AddonStatus {
+            id: "10-thinlinc".into(),
+            ticked: true,
+            state: crate::addons::AddonState::InstallFailed,
+            installed: None,
+            pending: None,
+            auto: false,
+            message: Some("HTTP 404".into()),
+        }
+    }
+
+    #[test]
+    fn the_settings_screen_draws_a_row_per_addon() {
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.activate(1, Instant::now());
+        menu.set_addons(vec![failed()]);
+        let texts = texts_of(&menu, &[None, None]);
+        for want in [
+            "Add-ons",
+            "not checked yet",
+            "Check now",
+            "Back",
+            "ThinLinc",
+            "https://e.example/dl",
+            "not installed · install failed: HTTP 404",
+            "updates only by hand",
+            "Install now",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn the_retry_dialog_names_the_addon_and_why() {
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.set_addons(vec![failed()]);
+        let texts = texts_of(&menu, &[None, None]);
+        for want in ["ThinLinc could not be installed: HTTP 404", "Retry", "Later"] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+    }
+
+    #[test]
     fn tiles_shrink_to_fit_but_not_below_the_minimum() {
         let l = layout(screen(800.0, 600.0), 6);
         assert!(l.side < TILE_MAX && l.side >= TILE_MIN, "{}", l.side);
@@ -713,6 +980,7 @@ mod tests {
                     problem: None,
                     note: None,
                     addon: false,
+                    source: None,
                 }],
                 banner: vec![],
             },
@@ -780,6 +1048,7 @@ mod tests {
             problem: None,
             note: None,
             addon: false,
+            source: None,
         }
     }
 

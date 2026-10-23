@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod log;
 pub mod menu;
 pub mod raster;
+pub mod settings;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;

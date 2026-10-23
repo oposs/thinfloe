@@ -13,7 +13,7 @@ use thinfloe_menu::app::{self, Config};
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{tiles, ui};
+use thinfloe_menu::{settings, tiles, ui};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -39,16 +39,27 @@ fn addon_status_path() -> PathBuf {
     env_path("TF_ADDON_STATUS", addons::STATUS_PATH)
 }
 
-fn build_menu() -> (Menu, Paths, IconRoots) {
+fn addon_last_check_path() -> PathBuf {
+    env_path("TF_ADDON_LAST_CHECK", addons::LAST_CHECK_PATH)
+}
+
+/// `marker` remembers the add-ons offered a retry; `--check` passes one in
+/// memory, so that listing the tiles asks nothing away.
+fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     let shipped = env_path("TF_MENU_SHIPPED_DIR", "/etc/thinfloe/menu");
     let paths = Paths {
         save_home: env_path("TF_SAVE_HOME", "/usr/bin/thinfloe-save-home"),
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
+        addon_cmd: jobs::default_addon_cmd(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
     tiles::mark_missing_programs(&mut grid.tiles, &path);
     let mut menu = Menu::new(grid, jobs::restore_failed(&paths.state_dir));
+    menu.set_retry_marker(marker);
+    // The app lets it go once the grid is on screen.
+    menu.hold_retry(true);
+    menu.last_check = addons::read_last_check(&addon_last_check_path());
     // Before the first icon is drawn, so an add-on that is installed has its
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
@@ -67,7 +78,7 @@ fn is_defect(t: &tiles::Tile, shipped: bool, icon_drawn: bool) -> bool {
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
 fn check() -> ExitCode {
-    let (menu, _, roots) = build_menu();
+    let (menu, _, roots) = build_menu(settings::RetryMarker::memory());
     let mut bad = false;
     for line in &menu.banner {
         println!("banner: {line}");
@@ -101,7 +112,7 @@ fn main() -> ExitCode {
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();
     }
-    let (menu, paths, icon_roots) = build_menu();
+    let (menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();
     if debug {
         eprintln!("thinfloe-menu: {} tiles", menu.tiles.len());
@@ -113,6 +124,7 @@ fn main() -> ExitCode {
         debug,
         addon_status: addon_status_path(),
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
+        addon_last_check: addon_last_check_path(),
         program_path: program_path(),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),

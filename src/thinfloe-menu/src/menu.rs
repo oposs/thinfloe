@@ -4,6 +4,10 @@
 //! save; nothing here blocks the event loop. The dialog shows only during
 //! a logout.
 //!
+//! The Settings tile swaps the grid for the Settings screen, whose rows
+//! start thinfloe-addon. A ticked add-on that failed to install is offered a
+//! retry in a dialog over the grid, once per boot.
+//!
 //! Log out saves the home directory here, behind the dialog, before the
 //! menu exits (decided 2026-10-02). thinfloe-session no longer saves after a
 //! logout: by the time the menu exits 0 the save has been done, or it
@@ -13,6 +17,7 @@
 use crate::addons::{AddonState, AddonStatus};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
+use crate::settings::{RetryMarker, SettingsEvent};
 use crate::tiles::{Action, Grid, Tile};
 use std::time::{Duration, Instant};
 
@@ -77,7 +82,37 @@ pub enum Choice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
     Save,
-    Run { id: JobId, name: String, argv: Vec<String> },
+    Run {
+        id: JobId,
+        name: String,
+        argv: Vec<String>,
+    },
+    /// `sudo -n /usr/bin/thinfloe-addon <args>`. What it does is in the
+    /// add-on log already, so its stdout is not logged a second time.
+    Addon {
+        args: Vec<String>,
+    },
+}
+
+/// What fills the space above the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Grid,
+    Settings,
+}
+
+/// The question over the grid: a ticked add-on that has no copy, because
+/// its install or its check failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retry {
+    pub id: String,
+    pub name: String,
+    pub message: Option<String>,
+}
+
+/// The add-on id of a tile: its file name without `.desktop`.
+pub fn addon_id(tile: &Tile) -> &str {
+    tile.file.trim_end_matches(".desktop")
 }
 
 /// What the event loop must do after a state change.
@@ -105,6 +140,16 @@ pub struct Menu {
     /// The last status of the add-ons. An add-on tile with no line here is
     /// not drawn.
     addons: Vec<AddonStatus>,
+    pub screen: Screen,
+    pub retry: Option<Retry>,
+    /// The arguments of each add-on job that runs.
+    addon_runs: Vec<Vec<String>>,
+    /// When the add-ons were last checked, from the tool's last-check file.
+    pub last_check: Option<u64>,
+    retry_marker: RetryMarker,
+    /// No retry is offered while set: at startup the status is read before
+    /// the grid was ever on screen, and the dialog would dim an empty one.
+    retry_held: bool,
 }
 
 impl Menu {
@@ -132,15 +177,131 @@ impl Menu {
             restore_failed,
             next_id: 1,
             addons: Vec::new(),
+            screen: Screen::Grid,
+            retry: None,
+            addon_runs: Vec::new(),
+            last_check: None,
+            retry_marker: RetryMarker::memory(),
+            retry_held: false,
         }
     }
 
-    /// The status line of the add-on a tile belongs to: the id is the tile's
-    /// file name without `.desktop`.
+    /// Where the add-ons offered a retry in this boot are remembered.
+    pub fn set_retry_marker(&mut self, marker: RetryMarker) {
+        self.retry_marker = marker;
+    }
+
+    /// The status line of the add-on a tile belongs to.
     fn addon_of(&self, index: usize) -> Option<&AddonStatus> {
         let tile = self.tiles.get(index).filter(|t| t.addon)?;
-        let id = tile.file.trim_end_matches(".desktop");
+        let id = addon_id(tile);
         self.addons.iter().find(|a| a.id == id)
+    }
+
+    pub fn addons(&self) -> &[AddonStatus] {
+        &self.addons
+    }
+
+    /// Whether a check of every add-on runs.
+    pub fn checking(&self) -> bool {
+        self.addon_runs.iter().any(|a| *a == ["check"])
+    }
+
+    /// Whether an add-on job for `id` runs, or a check of every add-on.
+    pub fn addon_busy(&self, id: &str) -> bool {
+        self.checking() || self.addon_runs.iter().any(|a| a.iter().skip(1).any(|x| x == id))
+    }
+
+    fn is_addon(&self, id: &str) -> bool {
+        self.tiles.iter().any(|t| t.addon && addon_id(t) == id)
+    }
+
+    fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
+        self.addon_runs.push(args.clone());
+        Some(Effect::Start(Job::Addon { args }))
+    }
+
+    /// A click on the Settings screen.
+    pub fn settings(&mut self, event: SettingsEvent) -> Option<Effect> {
+        if self.logout.is_some() || self.screen != Screen::Settings {
+            return None;
+        }
+        let (verb, id) = match event {
+            SettingsEvent::Back => {
+                self.screen = Screen::Grid;
+                self.offer_retry();
+                return None;
+            }
+            // No ids: the tool then checks only the sources it may check by
+            // itself. With ids it would also store what a manual-only source
+            // offers, and the next boot would install that unattended.
+            SettingsEvent::CheckNow if self.checking() => return None,
+            SettingsEvent::CheckNow => return self.start_addon(vec!["check".into()]),
+            SettingsEvent::Tick { id, on: true } | SettingsEvent::InstallNow(id) => ("install", id),
+            SettingsEvent::Tick { id, on: false } => ("remove", id),
+            SettingsEvent::UpdateNow(id) => ("update", id),
+        };
+        if !self.is_addon(&id) || self.addon_busy(&id) {
+            return None;
+        }
+        self.start_addon(vec![verb.into(), id])
+    }
+
+    /// Put up the retry question for the first ticked add-on without a copy
+    /// whose install or check failed and that was not offered in this boot.
+    /// On the Settings screen the row shows the same, so it is only noted.
+    fn offer_retry(&mut self) {
+        if self.retry_held || self.retry.is_some() || self.logout.is_some() {
+            return;
+        }
+        let failed: Vec<Retry> = self
+            .tiles
+            .iter()
+            .filter(|t| t.addon)
+            .filter_map(|t| {
+                let id = addon_id(t);
+                let s = self.addons.iter().find(|a| a.id == id)?;
+                let failed = matches!(s.state, AddonState::Failed | AddonState::InstallFailed);
+                (s.ticked && failed && s.installed.is_none() && !self.addon_busy(id) && !self.retry_marker.seen(id))
+                    .then(|| Retry {
+                        id: id.to_string(),
+                        name: t.name.clone(),
+                        message: s.message.clone(),
+                    })
+            })
+            .collect();
+        if self.screen == Screen::Settings {
+            for r in &failed {
+                self.retry_marker.record(&r.id);
+            }
+            return;
+        }
+        if let Some(r) = failed.into_iter().next() {
+            self.retry_marker.record(&r.id);
+            self.retry = Some(r);
+        }
+    }
+
+    /// Hold back the retry question, or offer it now that it is let go.
+    pub fn hold_retry(&mut self, held: bool) {
+        self.retry_held = held;
+        self.offer_retry();
+    }
+
+    pub fn retry_held(&self) -> bool {
+        self.retry_held
+    }
+
+    /// Retry or Later in the retry dialog.
+    pub fn answer_retry(&mut self, retry: bool) -> Option<Effect> {
+        let r = self.retry.take()?;
+        let effect = if retry && !self.addon_busy(&r.id) {
+            self.start_addon(vec!["install".into(), r.id])
+        } else {
+            None
+        };
+        self.offer_retry();
+        effect
     }
 
     /// Whether the grid draws the tile. An add-on tile is drawn while its
@@ -165,9 +326,11 @@ impl Menu {
             .map(|i| self.addon_of(i).and_then(|a| a.installed.clone()))
             .collect();
         self.addons = status;
-        (0..self.tiles.len())
+        let changed = (0..self.tiles.len())
             .filter(|&i| self.tiles[i].addon && before[i] != self.addon_of(i).and_then(|a| a.installed.clone()))
-            .collect()
+            .collect();
+        self.offer_retry();
+        changed
     }
 
     /// Look again for the programs of the add-on tiles: they are installed
@@ -180,9 +343,9 @@ impl Menu {
         }
     }
 
-    /// Whether the dialog is up, so the grid behind it is frozen and dimmed.
+    /// Whether a dialog is up, so the grid behind it is frozen and dimmed.
     pub fn dialog(&self) -> bool {
-        self.logout.is_some()
+        self.logout.is_some() || self.retry.is_some()
     }
 
     /// Whether input is dropped before egui sees it.
@@ -198,13 +361,13 @@ impl Menu {
         let Some(tile) = self.tiles.get(index) else {
             return false;
         };
-        if self.logout.is_some() || !tile.usable() || !self.visible(index) {
+        if self.dialog() || self.screen != Screen::Grid || !tile.usable() || !self.visible(index) {
             return false;
         }
         match tile.action {
             Action::Run => tile.multiple || self.running(index) == 0,
             Action::SaveHome => !self.save.running,
-            Action::Logout | Action::Reboot | Action::Poweroff => true,
+            Action::Logout | Action::Reboot | Action::Poweroff | Action::Settings => true,
         }
     }
 
@@ -242,6 +405,10 @@ impl Menu {
                 }))
             }
             Action::SaveHome => self.request_save(),
+            Action::Settings => {
+                self.screen = Screen::Settings;
+                None
+            }
             Action::Logout | Action::Reboot | Action::Poweroff => {
                 self.ending = tile.action;
                 if self.jobs.is_empty() {
@@ -331,6 +498,21 @@ impl Menu {
                 }
                 self.request_save()
             }
+            JobResult::Addon { args, status } => {
+                let pos = self.addon_runs.iter().position(|a| *a == args)?;
+                self.addon_runs.remove(pos);
+                // Exit 1 is a failure the tool logged itself.
+                let line = match status {
+                    Ok(Some(0 | 1)) => None,
+                    Ok(Some(n)) => Some(format!("thinfloe-addon {} exited with status {n}.", args.join(" "))),
+                    Ok(None) => Some(format!("thinfloe-addon {} was killed by a signal.", args.join(" "))),
+                    Err(e) => Some(format!("{e}.")),
+                };
+                if let Some(line) = line {
+                    self.log.note(Kind::Warn, line);
+                }
+                None
+            }
             JobResult::Saved(outcome) => {
                 self.save.running = false;
                 let (kind, text) = save_message(&outcome);
@@ -369,6 +551,7 @@ impl Menu {
         match (&self.logout, choice) {
             (Some(Logout::Confirm | Logout::Failed { .. }), Choice::Stay) => {
                 self.logout = None;
+                self.offer_retry();
                 None
             }
             (Some(Logout::Confirm), Choice::StopAndLeave) => {
@@ -427,6 +610,7 @@ mod tests {
     use crate::desktop;
     use crate::jobs::{JobId, Signal};
     use crate::log::Kind;
+    use crate::settings::{RetryMarker, RowButton, SettingsEvent};
     use crate::tiles::{SourceFile, merge};
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1060,5 +1244,242 @@ mod tests {
         assert!(m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]).is_empty());
         // A new version does.
         assert_eq!(m.set_addons(vec![st(AddonState::Pending, Some("4.22.0"))]), [0]);
+    }
+
+    fn addon(args: &[&str]) -> Option<Effect> {
+        Some(Effect::Start(Job::Addon {
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }))
+    }
+
+    fn addon_done(m: &mut Menu, args: &[&str], code: i32) -> Option<Effect> {
+        m.finished(
+            JobResult::Addon {
+                args: args.iter().map(|s| s.to_string()).collect(),
+                status: Ok(Some(code)),
+            },
+            Instant::now(),
+        )
+    }
+
+    /// The add-on menu with the settings tile, on the Settings screen.
+    fn settings_menu(tag: &str) -> (crate::testdir::TestDir, Menu) {
+        let bin = crate::testdir::TestDir::new("menu", tag);
+        let mut m = addon_menu(&bin);
+        m.tiles.push(
+            merge(
+                &[SourceFile {
+                    name: "60-settings.desktop".into(),
+                    entry: desktop::parse("[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n"),
+                }],
+                &[],
+            )
+            .remove(0),
+        );
+        assert_eq!(m.screen, Screen::Grid);
+        assert_eq!(m.activate(2, Instant::now()), None);
+        assert_eq!(m.screen, Screen::Settings);
+        (bin, m)
+    }
+
+    #[test]
+    fn tick_starts_install() {
+        let (_d, mut m) = settings_menu("tick");
+        let mut s = st(AddonState::Absent, None);
+        s.ticked = false;
+        m.set_addons(vec![s]);
+        assert_eq!(
+            m.settings(SettingsEvent::Tick {
+                id: "10-thinlinc".into(),
+                on: true
+            }),
+            addon(&["install", "10-thinlinc"])
+        );
+        // Install now does the same for an add-on that is not installed.
+        assert_eq!(addon_done(&mut m, &["install", "10-thinlinc"], 0), None);
+        assert_eq!(
+            m.settings(SettingsEvent::InstallNow("10-thinlinc".into())),
+            addon(&["install", "10-thinlinc"])
+        );
+        // An id that is no add-on tile starts nothing.
+        assert_eq!(
+            m.settings(SettingsEvent::Tick {
+                id: "30-terminal".into(),
+                on: true
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn untick_starts_remove() {
+        let (_d, mut m) = settings_menu("untick");
+        m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]);
+        assert_eq!(
+            m.settings(SettingsEvent::Tick {
+                id: "10-thinlinc".into(),
+                on: false
+            }),
+            addon(&["remove", "10-thinlinc"])
+        );
+    }
+
+    #[test]
+    fn update_now_starts_update() {
+        let (_d, mut m) = settings_menu("update");
+        m.set_addons(vec![st(AddonState::Pending, Some("4.21.0"))]);
+        let rows = crate::settings::rows(&m);
+        assert_eq!(rows.len(), 1, "one row per add-on tile");
+        assert_eq!(rows[0].button, Some(RowButton::UpdateNow));
+        assert_eq!(
+            m.settings(SettingsEvent::UpdateNow("10-thinlinc".into())),
+            addon(&["update", "10-thinlinc"])
+        );
+    }
+
+    #[test]
+    fn check_now_checks_ticked() {
+        // `check` with no ids: the tool checks every ticked add-on whose
+        // source may be checked automatically, and only reports the others.
+        let (_d, mut m) = settings_menu("check");
+        m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]);
+        assert_eq!(m.settings(SettingsEvent::CheckNow), addon(&["check"]));
+        assert!(m.checking());
+        assert_eq!(m.settings(SettingsEvent::CheckNow), None, "one check at a time");
+        assert_eq!(addon_done(&mut m, &["check"], 1), None);
+        assert!(!m.checking());
+        assert_eq!(m.settings(SettingsEvent::Back), None);
+        assert_eq!(m.screen, Screen::Grid);
+    }
+
+    #[test]
+    fn buttons_disabled_while_job_runs() {
+        let (_d, mut m) = settings_menu("busy");
+        m.set_addons(vec![st(AddonState::Pending, Some("4.21.0"))]);
+        assert!(!crate::settings::rows(&m)[0].busy);
+        assert!(m.settings(SettingsEvent::UpdateNow("10-thinlinc".into())).is_some());
+        assert!(crate::settings::rows(&m)[0].busy);
+        for ev in [
+            SettingsEvent::UpdateNow("10-thinlinc".into()),
+            SettingsEvent::InstallNow("10-thinlinc".into()),
+            SettingsEvent::Tick {
+                id: "10-thinlinc".into(),
+                on: false,
+            },
+        ] {
+            assert_eq!(m.settings(ev), None);
+        }
+        assert_eq!(addon_done(&mut m, &["update", "10-thinlinc"], 0), None);
+        assert!(!crate::settings::rows(&m)[0].busy);
+        // A check of every add-on holds every row.
+        m.settings(SettingsEvent::CheckNow);
+        assert!(crate::settings::rows(&m)[0].busy);
+        assert_eq!(m.settings(SettingsEvent::UpdateNow("10-thinlinc".into())), None);
+    }
+
+    #[test]
+    fn an_addon_job_that_cannot_start_is_logged() {
+        let (_d, mut m) = settings_menu("nostart");
+        m.settings(SettingsEvent::CheckNow);
+        m.finished(
+            JobResult::Addon {
+                args: vec!["check".into()],
+                status: Err("sudo could not be started: x".into()),
+            },
+            Instant::now(),
+        );
+        assert_eq!(log(&m).last().unwrap(), &warn("sudo could not be started: x."));
+        assert!(!m.checking());
+    }
+
+    fn failed_install(message: &str) -> AddonStatus {
+        let mut s = st(AddonState::InstallFailed, None);
+        s.message = Some(message.into());
+        s
+    }
+
+    #[test]
+    fn retry_dialog_once_per_boot() {
+        let d = crate::testdir::TestDir::new("menu", "retry");
+        let marker = d.join("retry-shown");
+        let mut m = addon_menu(&d);
+        m.set_retry_marker(RetryMarker::load(&marker));
+        m.set_addons(vec![failed_install("HTTP 404")]);
+        assert_eq!(
+            m.retry,
+            Some(Retry {
+                id: "10-thinlinc".into(),
+                name: "ThinLinc".into(),
+                message: Some("HTTP 404".into()),
+            })
+        );
+        assert!(m.dialog() && !m.refuses_input());
+        assert!(!m.can_activate(1), "the grid is frozen");
+        assert_eq!(m.answer_retry(true), addon(&["install", "10-thinlinc"]));
+        assert_eq!(m.retry, None);
+        addon_done(&mut m, &["install", "10-thinlinc"], 1);
+        m.set_addons(vec![failed_install("HTTP 500")]);
+        assert_eq!(m.retry, None, "not twice in one boot");
+        // A menu started again in the same boot remembers it.
+        let mut again = addon_menu(&d);
+        again.set_retry_marker(RetryMarker::load(&marker));
+        again.set_addons(vec![failed_install("HTTP 500")]);
+        assert_eq!(again.retry, None);
+        // Not for an add-on that is not ticked, has a copy, or did not fail.
+        for s in [
+            {
+                let mut s = failed_install("x");
+                s.ticked = false;
+                s
+            },
+            st(AddonState::Failed, Some("4.21.0")),
+            st(AddonState::Absent, None),
+        ] {
+            let mut fresh = addon_menu(&d);
+            fresh.set_addons(vec![s]);
+            assert_eq!(fresh.retry, None);
+        }
+        // A failed check with no copy asks too.
+        let mut fresh = addon_menu(&d);
+        fresh.set_addons(vec![st(AddonState::Failed, None)]);
+        assert!(fresh.retry.is_some());
+    }
+
+    #[test]
+    fn a_held_retry_is_offered_when_let_go() {
+        let d = crate::testdir::TestDir::new("menu", "held");
+        let mut m = addon_menu(&d);
+        m.hold_retry(true);
+        m.set_addons(vec![failed_install("x")]);
+        assert_eq!(m.retry, None);
+        assert!(!m.dialog());
+        m.hold_retry(false);
+        assert!(m.retry.is_some());
+    }
+
+    #[test]
+    fn later_closes_retry() {
+        let d = crate::testdir::TestDir::new("menu", "later");
+        let mut m = addon_menu(&d);
+        m.set_addons(vec![failed_install("dpkg failed")]);
+        assert!(m.retry.is_some());
+        assert_eq!(m.answer_retry(false), None);
+        assert_eq!(m.retry, None);
+        assert!(!m.dialog());
+        assert!(m.can_activate(1));
+        m.set_addons(vec![failed_install("dpkg failed")]);
+        assert_eq!(m.retry, None);
+        // An answer without the dialog does nothing.
+        assert_eq!(m.answer_retry(true), None);
+    }
+
+    #[test]
+    fn a_failure_seen_on_the_settings_screen_asks_no_more() {
+        // The row shows the same state.
+        let (_d, mut m) = settings_menu("seen");
+        m.set_addons(vec![failed_install("x")]);
+        assert_eq!(m.retry, None);
+        m.settings(SettingsEvent::Back);
+        assert_eq!(m.retry, None);
     }
 }

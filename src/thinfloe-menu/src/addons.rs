@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const STATUS_PATH: &str = "/run/thinfloe/addons/status";
 pub const LOG_PATH: &str = "/run/thinfloe/addons/log";
+/// The epoch of the last full check.
+pub const LAST_CHECK_PATH: &str = "/run/thinfloe/addons/last-check";
 /// The source column of the menu log for everything from the add-on tool.
 pub const LOG_SOURCE: &str = "add-ons";
 
@@ -93,7 +95,7 @@ fn flag(s: &str) -> Option<bool> {
     }
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()
@@ -137,6 +139,12 @@ pub fn read_status(path: &Path) -> Vec<AddonStatus> {
         text.truncate(text.rfind('\n').map_or(0, |i| i + 1));
     }
     text.lines().take(STATUS_LINES).filter_map(parse_status_line).collect()
+}
+
+/// The epoch in the last-check file, or `None` when there is none.
+pub fn read_last_check(path: &Path) -> Option<u64> {
+    let bytes = crate::bounded::read_bounded(path, 64, false).ok()?;
+    std::str::from_utf8(&bytes).ok()?.trim().parse().ok()
 }
 
 /// Follows the log file by offset, returning only lines not seen before.
@@ -396,6 +404,19 @@ mod tests {
             ),
         );
         assert_eq!(read_status(&p).len(), 1);
+    }
+
+    #[test]
+    fn last_check_is_read_tolerantly() {
+        let d = TestDir::new("addons", "lastcheck");
+        let p = d.join("last-check");
+        assert_eq!(read_last_check(&p), None);
+        fs::write(&p, "1800000000\n").unwrap();
+        assert_eq!(read_last_check(&p), Some(1_800_000_000));
+        fs::write(&p, "junk").unwrap();
+        assert_eq!(read_last_check(&p), None);
+        fs::write(&p, "1".repeat(1000)).unwrap();
+        assert_eq!(read_last_check(&p), None, "too large");
     }
 
     fn append(p: &Path, text: &str) {
