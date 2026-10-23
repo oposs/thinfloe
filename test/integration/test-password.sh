@@ -75,6 +75,8 @@ STUB
 cat >"$STUBS/chown" <<'STUB'
 #!/bin/bash
 echo "chown $*" >>"$TF_TEST_LOG"
+# TF_TEST_CHOWN_LINK_FAIL makes chowning the link fail (chown -h).
+[[ -n "${TF_TEST_CHOWN_LINK_FAIL:-}" && "$1" == -h ]] && exit 1
 exit 0
 STUB
 
@@ -251,6 +253,22 @@ if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
     ok "--clear removes ~/.dbrrg-password as well"
 else
     bad "--clear removes ~/.dbrrg-password as well (exit $rc, link left: $([[ -L "$WORK/home/tluser/.dbrrg-password" ]] && echo yes || echo no))"
+fi
+
+# ---------------------------------------------------------------- test 13
+# When the link cannot be made, the password is already in effect; it is lost
+# only if a save runs before the next boot (that boot then reads the home as
+# "cleared by 3.x"). The message says so instead of claiming the next boot
+# clears it regardless.
+setup
+rc=$(TF_TEST_CHOWN_LINK_FAIL=1 run_password "$WORK/root" $'swordfish\nswordfish\n')
+if [[ "$rc" != "0" ]] &&
+   grep -qF "The password is set and works now" "$WORK/err" &&
+   grep -qF "if the home is saved before the next boot, that boot clears it" "$WORK/err" &&
+   ! grep -qF "would be cleared at the next boot" "$WORK/err"; then
+    ok "a failed link says the password works now and when it would be cleared"
+else
+    bad "a failed link says the password works now and when it would be cleared (exit $rc, err: $(cat "$WORK/err"))"
 fi
 
 if [[ "$fail" == "0" ]]; then
