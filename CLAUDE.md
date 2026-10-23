@@ -832,10 +832,11 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
 
 - **The archive decides, not the disk.** The default home already ships
   `.thinfloe-environment` and `.thinfloe-sessionrc`, so "the new name exists"
-  is always true. The new name wins when the archive lists it. Otherwise a
-  real old entry in the archive replaces the image default at the new name.
-  An old name that is a symlink is what an earlier 4.0 boot left behind and
-  is not touched.
+  is always true. A real old entry in the archive replaces the new name,
+  whether the archive lists the new name or not (see "A file written on 3.x
+  wins" below). The new name wins when the archive lists it and the old name
+  is missing or a symlink. An old name that is a symlink is what an earlier
+  4.0 boot left behind and is not touched.
 - **The old names stay as relative symlinks** (`tf_link_old_home_names`, on
   every boot and every restore outcome). After the first 4.0 boot the
   previous release sits in `tl.old/` and the boot entry `LABEL previous`
@@ -868,15 +869,16 @@ restore (`tf_migrate_home_names` in `thinfloe-lib.sh`, list in
   `~/.thinfloe-password` and logs `thinfloe: ~/.dbrrg-password was removed by
   the previous version; clearing ~/.thinfloe-password`. If the reading is
   wrong, the user sets the password again; a revoked password never returns.
-- **A password set again on 3.x wins.** A 3.x fallback that runs
-  `dbrrg-password --clear` and then `--set` leaves a real
-  `~/.dbrrg-password` beside the revoked hash in `~/.thinfloe-password`. 4.0
-  never leaves a real `~/.dbrrg-password`, so when the archive lists both
-  names and the old one comes out as a real file, the restore moves it over
-  `~/.thinfloe-password`, logs `thinfloe: ~/.dbrrg-password was set by the
-  previous version; it replaces ~/.thinfloe-password` and makes the link
-  again. No `home-renamed` entry: the home went to 3.x and back. For every
-  other name the new name still wins.
+- **A file written on 3.x wins** (owner, 2026-10-23: the newer version of
+  the dbrrg file wins). 4.0 never leaves a real old name, so a real one
+  beside the new name was written on a 3.x fallback that replaced the link:
+  `dbrrg-password --clear` and then `--set`, or an editor that writes a new
+  `~/.dbrrg-environment` and renames it over the link. When the archive
+  lists both names and the old one comes out as a real file or directory,
+  the restore removes the new one, moves the old one over it, logs
+  `thinfloe: ~/<old> was written by the previous version; it replaces
+  ~/<new>` and makes the link again. A directory is replaced whole, not
+  merged. No `home-renamed` entry: the home went to 3.x and back.
 - `IDENTITY_EXCLUDES` in `thinfloe-upgrade` lists both host-key names, so an
   upgrade copy never carries either machine identity. 3.x's fresh install
   excludes only `./.dbrrg-ssh-host-keys`, which is now a link, and copies

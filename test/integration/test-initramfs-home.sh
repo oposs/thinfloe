@@ -785,19 +785,43 @@ else
     bad "old-name symlink was treated as a 3.x file"
 fi
 
-# Both names as real files: the new name wins, the old becomes a link. Any
-# entry but the password (see the next test for that one).
+# Both names as real files. 4.0 never leaves a real old name, so a 3.x
+# fallback replaced the link (an editor that writes a new file and renames it
+# over ~/.dbrrg-sessionrc). That file is the newer one and wins; the old name
+# becomes a link again, no home-renamed marker.
 d="$WORK/hn-both"; mkdefault "$d"; mkdir -p "$d/src"
 echo old >"$d/src/.dbrrg-sessionrc"; echo new >"$d/src/.thinfloe-sessionrc"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+tf_log() { echo "$@" >>"$WORK/tflog"; }
+: >"$WORK/tflog"; : >"$WORK/warnings"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+tf_log() { :; }
+h="$d/newroot/home/tluser"
+if [[ "$(cat "$h/.thinfloe-sessionrc")" == "old" && ! -L "$h/.thinfloe-sessionrc" \
+   && -L "$h/.dbrrg-sessionrc" && "$(readlink "$h/.dbrrg-sessionrc")" == ".thinfloe-sessionrc" \
+   && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" ]] \
+   && grep -qxF "thinfloe: ~/.dbrrg-sessionrc was written by the previous version; it replaces ~/.thinfloe-sessionrc" "$WORK/tflog" \
+   && ! grep -q "replacing real" "$WORK/warnings"; then
+    ok "both names real in the archive: the 3.x file wins, old becomes a link"
+else
+    bad "both names: new=$(cat "$h/.thinfloe-sessionrc") old=$(readlink "$h/.dbrrg-sessionrc") log=$(cat "$WORK/tflog") warnings=$(cat "$WORK/warnings")"
+fi
+
+# The same for a directory: a real ~/.dbrrg-ssh-host-keys beside the new one
+# replaces it whole, so no key of the two sets is mixed with the other.
+d="$WORK/hn-bothdir"; mkdefault "$d"; mkdir -p "$d/src/.dbrrg-ssh-host-keys" "$d/src/.thinfloe-ssh-host-keys"
+echo k3 >"$d/src/.dbrrg-ssh-host-keys/ssh_host_ed25519_key"
+echo k4 >"$d/src/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
+echo k4only >"$d/src/.thinfloe-ssh-host-keys/ssh_host_rsa_key"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tluser"
-if [[ "$(cat "$h/.thinfloe-sessionrc")" == "new" && -L "$h/.dbrrg-sessionrc" \
-   && "$(cat "$h/.dbrrg-sessionrc")" == "new" ]] \
-   && ! grep -qxF .dbrrg-sessionrc "$d/state/home-renamed" 2>/dev/null; then
-    ok "both names real in the archive: new wins, old becomes a link"
+if [[ "$(cat "$h/.thinfloe-ssh-host-keys/ssh_host_ed25519_key")" == "k3" \
+   && ! -e "$h/.thinfloe-ssh-host-keys/ssh_host_rsa_key" \
+   && -L "$h/.dbrrg-ssh-host-keys" && "$(cat "$d/state/home-restore")" == "ok" ]]; then
+    ok "both directory names real: the 3.x directory replaces the new one whole"
 else
-    bad "both names: new=$(cat "$h/.thinfloe-sessionrc") old=$(cat "$h/.dbrrg-sessionrc")"
+    bad "both directory names: $(ls -la "$h/.thinfloe-ssh-host-keys" 2>&1) old=$(readlink "$h/.dbrrg-ssh-host-keys")"
 fi
 
 # Both password names as real files. 4.0 never leaves a real ~/.dbrrg-password
@@ -817,7 +841,7 @@ if [[ "$(cat "$h/.thinfloe-password" 2>/dev/null)" == "set-on-3x" && -f "$h/.thi
    && ! -L "$h/.thinfloe-password" && -L "$h/.dbrrg-password" \
    && "$(readlink "$h/.dbrrg-password")" == ".thinfloe-password" \
    && ! -e "$d/state/home-renamed" && "$(cat "$d/state/home-restore")" == "ok" ]] \
-   && grep -qxF "thinfloe: ~/.dbrrg-password was set by the previous version; it replaces ~/.thinfloe-password" "$WORK/tflog" \
+   && grep -qxF "thinfloe: ~/.dbrrg-password was written by the previous version; it replaces ~/.thinfloe-password" "$WORK/tflog" \
    && ! grep -q "replacing real" "$WORK/warnings"; then
     ok "both password names real: the 3.x password wins, link afterwards, logged, no marker"
 else
