@@ -34,7 +34,7 @@ IPXE_EFI := $(ROOTFS_DIR)/ipxe.efi
 
 # Configuration
 SQUASHFS_COMP ?= zstd
-SQUASHFS_COMP_LEVEL ?= 3
+SQUASHFS_COMP_LEVEL ?= 19
 EFI_PARTITION_SIZE ?= 3000
 
 # QEMU settings
@@ -67,7 +67,7 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  SQUASHFS_COMP=zstd         - Compression algorithm"
-	@echo "  SQUASHFS_COMP_LEVEL=3      - Compression level"
+	@echo "  SQUASHFS_COMP_LEVEL=19     - Compression level"
 	@echo "  EFI_PARTITION_SIZE=3000    - EFI partition size (MB)"
 	@echo "  QEMU_MEMORY=2G             - QEMU RAM allocation"
 	@echo "  QCOW2_TEST_SIZE=4G         - Size for qemu-test"
@@ -368,6 +368,7 @@ test: test-unit rootfs
 	@test/integration/test-firmware.sh
 	@test/integration/test-wifi-stack.sh
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
+	@test/integration/test-squashfs-format.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-initramfs-home.sh
 	@test/integration/test-initramfs-commands.sh
