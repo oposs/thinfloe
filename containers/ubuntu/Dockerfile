@@ -213,10 +213,17 @@ RUN passwd -d root && passwd -l root
 #
 # `passwd -l` would NOT be a substitute for leaving it unset. It prefixes the
 # existing hash with `!` and leaves it recoverable.
+#
+# tfuser must be uid and gid 1001: field home archives carry 1001 and the
+# restore keeps numeric owners. adduser takes the lowest free id, and the
+# base image's unused `ubuntu` account holds 1000, so it is removed only
+# after tfuser exists.
 RUN adduser --disabled-password --gecos "ThinUser" tfuser && \
     adduser tfuser sudo && \
     echo "tfuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    adduser tfuser audio
+    adduser tfuser audio && \
+    userdel -r ubuntu && \
+    sed -i '/^ubuntu:/d' /etc/subuid /etc/subgid
 
 # Apply overlay
 ADD overlay/ /__overlay
