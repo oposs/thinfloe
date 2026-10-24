@@ -17,6 +17,8 @@
 #   - the rotation's "Complete" line in the log,
 #   - a 3.x home.tar.gz on the stick is migrated: one "thinfloe: renamed"
 #     line per renamed name (environment, sessionrc, host keys, menu dir),
+#   - the 3.x home ticks ThinLinc (it has .thinlinc, not .config/oxulnk); the
+#     VM has no network, so the check's status for it says "failed",
 #   - afterwards: no tl.new, tl.old holding the former tl, and both
 #     syslinux.cfg copies back on DEFAULT current.
 
@@ -55,26 +57,29 @@ mcopy -i "$ESP" "$tmp/marker" ::tl/marker || exit 2
 # The stick carries a 3.x home: this boot is the first ThinFloe boot after an
 # upgrade, so the initramfs has to rename these on restore.
 home="$tmp/home"
-mkdir -p "$home/.dbrrg-ssh-host-keys" "$home/.config/dbrrg/menu" || exit 2
+mkdir -p "$home/.dbrrg-ssh-host-keys" "$home/.config/dbrrg/menu" "$home/.thinlinc" || exit 2
+echo '# 3.x ThinLinc config' >"$home/.thinlinc/tlclient.conf"
 echo 'XKB_DEFAULT_LAYOUT=ch' >"$home/.dbrrg-environment"
 echo '# 3.x session rc' >"$home/.dbrrg-sessionrc"
 ssh-keygen -q -t ed25519 -N '' -f "$home/.dbrrg-ssh-host-keys/ssh_host_ed25519_key" || exit 2
 printf '[Desktop Entry]\nType=Application\nName=X\nExec=true\n' >"$home/.config/dbrrg/menu/x.desktop"
 tar -C "$home" -czf "$tmp/home.tar.gz" . || exit 2
 mcopy -o -i "$ESP" "$tmp/home.tar.gz" ::home.tar.gz || exit 2
+mcopy -o -i "$ESP" "$DIR/smoke-addons-report.sh" ::smoke-report.sh || exit 2
+REPORT='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run="/bin/sh /run/thinfloe/storage/efi/smoke-report.sh check"'
 
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mtype -i "$ESP" "$cfg" | tr -d '\r' >"$tmp/cfg" || exit 2
-    awk -v append="$APPEND" '
+    awk -v append="$APPEND" -v report="$REPORT" '
         /^DEFAULT / { print "DEFAULT new"; next }
         /^LABEL /   { in_new = ($2 == "new") }
-        in_new && /^[[:space:]]+APPEND / { print "    APPEND ramroot=tl.new/ramroot.sqsh " append; next }
+        in_new && /^[[:space:]]+APPEND / { print "    APPEND ramroot=tl.new/ramroot.sqsh " append " " report; next }
         { print }' "$tmp/cfg" >"$tmp/cfg.new"
     grep -q '^LABEL new' "$tmp/cfg.new" || { echo "no LABEL new in $cfg" >&2; exit 2; }
     mcopy -o -i "$ESP" "$tmp/cfg.new" "$cfg" || exit 2
 done
 
-"$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
+SMOKE_WAIT_FOR='^SMOKE-ADDON-DONE' "$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
     qemu-system-x86_64 \
     -machine type=q35,accel=kvm \
     -cpu host,migratable=off \
@@ -85,7 +90,7 @@ done
     -no-reboot \
     -object rng-random,filename=/dev/urandom,id=rng0 \
     -device virtio-rng-pci,rng=rng0 \
-    -net nic,model=virtio -net user \
+    -net nic,model=virtio -net user,restrict=on \
     -drive "file=$WORK,format=raw,if=virtio" || exit 2
 
 if "$DIR/check-boot-smoke.sh" "$LOG"; then
@@ -112,6 +117,20 @@ for pair in ".dbrrg-environment .thinfloe-environment" \
         bad "no '$line' in $LOG"
     fi
 done
+
+clean="$tmp/log"
+LC_ALL=C sed -E -e 's#\x1b\[[0-9;?!>=]*[ -/]*[@-~]##g' -e 's#\r##g' "$LOG" >"$clean"
+if grep -qaE '^10-thinlinc\|1\|failed\|' "$clean"; then
+    ok "the 3.x home ticked ThinLinc, and with no network its status says failed"
+else
+    bad "no '10-thinlinc|1|failed' status line in $LOG"
+    sed -n '/SMOKE-ADDON-STATUS-BEGIN/,/SMOKE-ADDON-STATUS-END/p' "$clean" | sed 's/^/         /'
+fi
+if grep -qaE '^20-oxulnk\|0\|' "$clean"; then
+    ok "OxuLnk stayed unticked: the 3.x home had no OxuLnk config"
+else
+    bad "no '20-oxulnk|0' status line in $LOG"
+fi
 
 if mdir -i "$ESP" ::tl.new >/dev/null 2>&1; then
     bad "tl.new is still on the stick"

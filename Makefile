@@ -41,7 +41,7 @@ EFI_PARTITION_SIZE ?= 3000
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-upgrade test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -58,6 +58,7 @@ help:
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
+	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test              - Run integration guard tests against rootfs"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -335,6 +336,20 @@ qemu-smoke-upgrade: $(USB_IMAGE)
 		scripts/run-qemu-upgrade-smoke.sh $(USB_IMAGE) $(QEMU_UPGRADE_IMAGE) \
 		$(QEMU_UPGRADE_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
 		"$(QEMU_SMOKE_APPEND)"
+
+# Headless boot of a stick that carries a ticked add-on (a tiny .deb in
+# addons/90-smoke/ on the ESP). Requires thinfloe-addons.service to install it
+# before getty@tty1.service starts, with no network. See
+# scripts/run-qemu-addons-smoke.sh.
+QEMU_ADDONS_LOG := $(IMAGE_DIR)/qemu-addons-smoke.log
+QEMU_ADDONS_IMAGE := $(IMAGE_DIR)/$(PROJECT_NAME)-addons-smoke.img
+
+qemu-smoke-addons: $(USB_IMAGE) $(KERNEL) $(INITRD)
+	@echo "Running headless add-ons boot smoke test..."
+	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-addons-smoke.sh $(USB_IMAGE) $(QEMU_ADDONS_IMAGE) \
+		$(KERNEL) $(INITRD) $(QEMU_ADDONS_LOG) $(QEMU_SMOKE_TIMEOUT) \
+		$(QEMU_SMOKE_GRACE) "$(QEMU_SMOKE_APPEND)"
 
 # Host-side tests. No image, no container, no network: the fast feedback
 # loop for the scripts in overlay/usr/bin and for thinfloe-menu's rules.

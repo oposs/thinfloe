@@ -12,6 +12,11 @@
 # QEMU. A boot that never gets there still runs until TIMEOUT and is then
 # failed by check-boot-smoke.sh, exactly as before.
 #
+# SMOKE_WAIT_FOR, if set, is a grep pattern the log must also contain before
+# the VM is stopped, for a smoke test whose VM reports on the console after
+# the target (the add-on smokes); the TIMEOUT still ends a boot that never
+# prints it.
+#
 # The exit status is always 0 once QEMU has been started: the verdict is
 # check-boot-smoke.sh's, run on the log afterwards. QEMU failing to start at
 # all is reported with its status, since there is no log to judge then.
@@ -41,7 +46,8 @@ while kill -0 "$qemu" 2>/dev/null; do
         echo "run-qemu-smoke: multi-user target reached after ${elapsed}s," \
              "stopping in ${GRACE}s"
     fi
-    if [[ -n "$reached_at" ]] && (( elapsed - reached_at >= GRACE )); then
+    if [[ -n "$reached_at" ]] && (( elapsed - reached_at >= GRACE )) \
+       && { [[ -z "${SMOKE_WAIT_FOR:-}" ]] || grep -aqE -- "$SMOKE_WAIT_FOR" "$LOG"; }; then
         break
     fi
     if (( elapsed >= TIMEOUT )); then
