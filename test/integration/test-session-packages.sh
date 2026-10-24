@@ -131,8 +131,37 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/x" "$SQSH" var/lib/dpkg/status >/dev/null
         echo "FAIL - labwc is '$labwc_version', expected a +thinfloe1 rebuild"
         fail=1
     fi
+    # vim-tiny instead of vim (Part 3): vim brought vim-runtime and
+    # libpython3.14, 52 MiB. vim-tiny registers vi, view, ex and editor but not
+    # vim, so the Dockerfile adds a vim alternative for admins who type vim.
+    pkg_status() {
+        awk -v p="$1" '$0 == "Package: " p {f=1; next} f && /^Status:/ {print; exit} /^$/ {f=0}' \
+            "$DPKG_TMP/x/var/lib/dpkg/status"
+    }
+    if [[ "$(pkg_status vim-tiny)" == "Status: install ok installed" ]]; then
+        echo "ok   - vim-tiny installed"
+    else
+        echo "FAIL - vim-tiny is not installed"
+        fail=1
+    fi
+    if [[ "$(pkg_status vim)" == "Status: install ok installed" ]]; then
+        echo "FAIL - the full vim package is installed (vim-runtime, libpython3.14)"
+        fail=1
+    else
+        echo "ok   - the full vim package is not installed"
+    fi
 else
     echo "FAIL - cannot extract var/lib/dpkg/status from $SQSH"
+    fail=1
+fi
+if unsquashfs -no-xattrs -d "$DPKG_TMP/alt" "$SQSH" \
+        etc/alternatives/vim usr/bin/vim usr/bin/vim.tiny >/dev/null 2>&1 &&
+   [[ "$(readlink "$DPKG_TMP/alt/usr/bin/vim")" == "/etc/alternatives/vim" ]] &&
+   [[ "$(readlink "$DPKG_TMP/alt/etc/alternatives/vim")" == "/usr/bin/vim.tiny" ]] &&
+   [[ -f "$DPKG_TMP/alt/usr/bin/vim.tiny" ]]; then
+    echo "ok   - the command vim starts vim.tiny"
+else
+    echo "FAIL - /usr/bin/vim does not lead to /usr/bin/vim.tiny through etc/alternatives"
     fail=1
 fi
 
@@ -305,23 +334,47 @@ else
     fail=1
 fi
 
-# The account is tfuser (uid 1001: ubuntu:26.04 holds 1000 for `ubuntu`, and 3.x's
-# tluser got 1001 the same way; home /home/tfuser). /home/tluser stays as a
-# symlink so a 3.x path in a saved file still resolves; tluser is no account.
+# The account is tfuser, uid and gid 1001, home /home/tfuser. 1001 is fixed:
+# 3.x's tluser had it, field home archives carry it, and the restore keeps
+# numeric owners. /home/tluser stays as a symlink so a 3.x path in a saved
+# file still resolves; tluser is no account.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
-        etc/passwd etc/shadow etc/sudoers home/tluser >/dev/null 2>&1; then
-    if grep -q '^tfuser:x:1001:[0-9]*:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
-        echo "ok   - tfuser exists with uid 1001, home /home/tfuser"
+        etc/passwd etc/shadow etc/group etc/subuid etc/subgid etc/sudoers \
+        home/tluser >/dev/null 2>&1; then
+    if grep -q '^tfuser:x:1001:1001:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - tfuser exists with uid and gid 1001, home /home/tfuser"
     else
-        echo "FAIL - tfuser is not uid 1001 with home /home/tfuser"
+        echo "FAIL - tfuser is not uid 1001, gid 1001 with home /home/tfuser"
         fail=1
     fi
-    # The base image's own account sits in group sudo; its password stays locked.
-    if grep -q '^ubuntu:!:' "$DPKG_TMP/acct/etc/shadow" || ! grep -q '^ubuntu:' "$DPKG_TMP/acct/etc/shadow"; then
-        echo "ok   - the base image's ubuntu account is locked or absent"
+    if grep -q '^tfuser:x:1001:' "$DPKG_TMP/acct/etc/group"; then
+        echo "ok   - group tfuser is gid 1001"
     else
-        echo "FAIL - the ubuntu account's shadow field is not '!'"
+        echo "FAIL - group tfuser is not gid 1001"
         fail=1
+    fi
+    for g in sudo audio; do
+        if grep -qE "^$g:[^:]*:[0-9]+:(.*,)?tfuser(,|$)" "$DPKG_TMP/acct/etc/group"; then
+            echo "ok   - tfuser is in group $g"
+        else
+            echo "FAIL - tfuser is not in group $g"
+            fail=1
+        fi
+    done
+    # The base image's own account (uid 1000, in group sudo) is removed.
+    for f in passwd shadow group subuid subgid; do
+        if grep -q '^ubuntu:' "$DPKG_TMP/acct/etc/$f"; then
+            echo "FAIL - etc/$f still has the base image's ubuntu entry"
+            fail=1
+        else
+            echo "ok   - no ubuntu entry in etc/$f"
+        fi
+    done
+    if grep -qE '^squashfs-root/home/ubuntu$' "$LIST"; then
+        echo "FAIL - /home/ubuntu is still in the image"
+        fail=1
+    else
+        echo "ok   - no /home/ubuntu"
     fi
     if [[ -L "$DPKG_TMP/acct/home/tluser" && "$(readlink "$DPKG_TMP/acct/home/tluser")" == "tfuser" ]]; then
         echo "ok   - /home/tluser is a symlink to tfuser"

@@ -96,8 +96,8 @@ rd.debug rd.shell rd.thinfloe.debug rd.break=pre-mount
 
 Edit `Makefile` variables:
 - `SQUASHFS_COMP=zstd` - Compression algorithm (zstd, xz, lz4)
-- `SQUASHFS_COMP_LEVEL=3` - Compression level (1-19, lower = faster)
-- `EFI_PARTITION_SIZE=2000` - EFI partition size in MB
+- `SQUASHFS_COMP_LEVEL=19` - Compression level (1-22; higher = smaller download and slower build, reading is equally fast)
+- `EFI_PARTITION_SIZE=3000` - EFI partition size in MB
 
 ## Deployment
 

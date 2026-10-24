@@ -916,6 +916,16 @@ Its command extractor (`test/integration/initramfs-commands.py`) is a
 heuristic: it skips comments, quoted text, `for` lists and `case` patterns,
 and descends into `$( )`; a command it cannot see is not checked.
 
+The initrd carries no WiFi drivers and no WiFi firmware (2026-10-24).
+`instmods iwlwifi iwlmvm cfg80211` in `90thinfloe/module-setup.sh` brought
+82 MB of Intel firmware that nothing in the initrd used: it has no
+`wpa_supplicant`, and netboot runs over a cable. The initrd shrank from
+179.4 MB to 93.9 MB. The running system loads WiFi drivers and firmware
+from the squashfs after switch-root. `test-initramfs-commands.sh` fails
+on `iwlwifi.ko` or `firmware/intel/iwlwifi/` in the initrd. **Not
+verified on hardware** until a USB boot on an Intel WiFi machine (the
+8265) associates from `~/wifi.yaml`.
+
 ### The ThinFloe pre-mount and mount hooks run after dracut-cmdline
 
 `90thinfloe/module-setup.sh` installs `thinfloe-after-cmdline.conf` as a drop-in
@@ -988,7 +998,8 @@ unconditionally and then fails to find `tl.new/ramroot.sqsh`; type `current`
 at the boot prompt, and set `DEFAULT current` in both copies by hand.
 
 A stick holds at most two releases. One release (`vmlinuz`, `initrd.img`,
-`ramroot.sqsh`) was 775 MB in 2026-10, and the ESP was 2000 MB: with
+`ramroot.sqsh`) was 775 MB in 2026-10 (611 MB after the Part 3 slim-down,
+2026-10-24), and the ESP was 2000 MB: with
 `tl.old/` still present, staging `tl.new/` needed room for three and failed.
 `thinfloe-upgrade` therefore removes `tl.old/` before it stages `tl.new/`;
 while an upgrade is staged the fallback is `tl/`, the `current` entry. Before

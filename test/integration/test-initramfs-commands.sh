@@ -162,6 +162,23 @@ else
     done
 fi
 
+# --- no WiFi in the initrd ------------------------------------------------
+#
+# Nothing in the initrd uses WiFi: it has no wpa_supplicant, and netboot runs
+# over a cable. `instmods iwlwifi` once pulled in 82 MB of Intel WiFi firmware,
+# a sixth of the download. The running system loads the drivers and firmware
+# from the squashfs after switch-root.
+if grep -qE '(^|/)iwlwifi\.ko' "$WORK/initrd.list"; then
+    bad "the initrd carries iwlwifi.ko; WiFi drivers belong in the squashfs only"
+else
+    ok "no iwlwifi driver in the initrd"
+fi
+if grep -q 'usr/lib/firmware/intel/iwlwifi/' "$WORK/initrd.list"; then
+    bad "the initrd carries Intel WiFi firmware (82 MB that nothing in the initrd uses)"
+else
+    ok "no Intel WiFi firmware in the initrd"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - initramfs commands"

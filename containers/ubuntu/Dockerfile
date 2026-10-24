@@ -79,7 +79,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     --no-install-recommends --no-install-suggests \
     systemd-sysv \
     systemd-resolved \
-    vim \
+    vim-tiny \
     wireguard \
     resolvconf-admin \
     openssh-server \
@@ -148,6 +148,9 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     intel-media-va-driver \
     i965-va-driver
 
+# vim-tiny registers vi, view, ex and editor, but not vim. Admins type vim.
+RUN update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10
+
 # Set ping setuid
 RUN chmod u+s /usr/bin/ping
 
@@ -210,10 +213,17 @@ RUN passwd -d root && passwd -l root
 #
 # `passwd -l` would NOT be a substitute for leaving it unset. It prefixes the
 # existing hash with `!` and leaves it recoverable.
+#
+# tfuser must be uid and gid 1001: field home archives carry 1001 and the
+# restore keeps numeric owners. adduser takes the lowest free id, and the
+# base image's unused `ubuntu` account holds 1000, so it is removed only
+# after tfuser exists.
 RUN adduser --disabled-password --gecos "ThinUser" tfuser && \
     adduser tfuser sudo && \
     echo "tfuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    adduser tfuser audio
+    adduser tfuser audio && \
+    userdel -r ubuntu && \
+    sed -i '/^ubuntu:/d' /etc/subuid /etc/subgid
 
 # Apply overlay
 ADD overlay/ /__overlay
