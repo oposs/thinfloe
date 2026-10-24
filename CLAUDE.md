@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ThinFloe creates bootable diskless client images that run entirely from RAM. The name is an ice floe: the system floats in RAM, carries you for a while, and is gone at power-off, except for the saved home. Releases before 4.0 called the project dbrrg (Docker-Based RamRoot Generator); the old name survives in a few places listed under Standing Constraints. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments using ThinLinc.
+ThinFloe creates bootable diskless client images that run entirely from RAM. The name is an ice floe: the system floats in RAM, carries you for a while, and is gone at power-off, except for the saved home. Releases before 4.0 called the project dbrrg (Docker-Based RamRoot Generator); the old name survives in a few places listed under Standing Constraints. The system builds Ubuntu-based images using Podman/Docker containers, packages them into bootable formats (USB/PXE), and includes a custom initramfs boot system. The final images are designed for thin client deployments; ThinLinc and OxuLnk are add-ons the user ticks, not part of the image (see [Add-ons](#add-ons)).
 
 ## Build System Architecture
 
 The build process uses containers in `containers/` directory:
 
-1. **containers/ubuntu/Dockerfile** - Base system container that creates the Ubuntu rootfs with all packages, ThinLinc client, and custom overlay files
+1. **containers/ubuntu/Dockerfile** - Base system container that creates the Ubuntu rootfs with all packages and custom overlay files (no ThinLinc client and no OxuLnk: those are add-ons)
 2. **containers/ipxe/Dockerfile** - Builds iPXE network boot loaders (PXE, KPXE, EFI formats)
 3. **containers/image-builder/Dockerfile** - Final packaging container with tools to create bootable EFI images
 
@@ -135,7 +135,7 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
   a program. `X-TF-Multiple=true` lets a run tile start again while a
-  copy of it still runs (ThinLinc, oxulnk and Terminal set it); without it a
+  copy of it still runs (the ThinLinc, oxulnk and Terminal tiles set it); without it a
   tile runs once at a time. A user file rewording a shipped tile cannot set
   it. A user file named like a shipped one may reword `Name`, `Comment`
   and `Icon` only; its other keys are ignored. The files travel with the home
@@ -374,6 +374,134 @@ slirp's host address 10.0.2.2 reaches. The test therefore needs unprivileged
 user namespaces on the host. With the name left unanswered the boot stops at
 `dracut: FATAL: Download failed`. **Not verified on hardware.**
 
+## Add-ons
+
+ThinLinc and OxuLnk are not in the image. They are add-ons: the user ticks
+them in the menu's Settings screen, and the root tool
+`/usr/bin/thinfloe-addon` (`overlay/usr/bin/thinfloe-addon`, its top
+docstring lists the commands) fetches, stores and installs them. The image
+carries only the libraries they need (see
+[Standing Constraints](#add-on-runtime-libraries-are-listed-by-name-in-the-dockerfile)).
+`overlay/home/tfuser/.thinlinc/tlclient.conf` still ships in the default
+home; removing it is later work.
+
+- **What an add-on is.** A tile file (`.desktop`) with `X-TF-Source-*` keys,
+  in `/etc/thinfloe/menu/` or `~/.config/thinfloe/menu/`. Its id is the file
+  name without `.desktop` (`10-thinlinc`). Sources: APT
+  (`X-TF-Source-Apt`, `-Package`, optional `-Key`), a fixed address
+  (`-URL`), or a page plus a Python regex (`-Page`, `-Pattern`, named group
+  `version` optional). `X-TF-Source-Format=deb|tar` overrides the format,
+  taken from the URL otherwise. `X-TF-Source-Config=<path in home>` seeds the
+  tick from 3.x. A user file rewording a shipped tile cannot set any source
+  key (`SHIPPED_ONLY_KEYS`); a user file that matches no shipped one may.
+- **Tick state:** `~/.config/thinfloe/addons`, one id per line, owned by
+  tfuser, written only by `thinfloe-addon` (the menu calls `sudo -n
+  /usr/bin/thinfloe-addon <verb> <id>`). It travels with the home archive.
+- **Commands:** `boot`, `status`, `check [ID...]`, `install ID`, `update ID`,
+  `remove ID`. Exit 0 on success, 1 on a failure that is in the log, 2 on
+  misuse.
+- **ESP layout**, `/run/thinfloe/storage/efi/addons/<id>/`: `current.<ext>`
+  + `current.meta` (the installed copy), `next.<ext>` + `next.meta` (ready
+  for the next boot), `*.new` while downloading. `meta` is `key=value`
+  lines: `version`, `fingerprint`, `url`, `format`, `package` (deb),
+  `fetched` (epoch). A slot without its meta is incomplete and ignored. A
+  download is stored only if the ESP keeps 64 MiB free after it, else the
+  status says `not enough space on the boot stick`. On netboot there is no
+  ESP: the same layout lives in `/run/thinfloe/addons-cache/`, rebuilt each
+  boot. `thinfloe-upgrade`'s space check adds the size of every `current.*`,
+  room for one `next.*` each.
+- **Locks.** Order is `install.lock` (dpkg/tar, promotion, the installed
+  record) -> `/run/thinfloe/esp.lock` (every ESP write, tmpfiles, 0644 root)
+  -> `.lock` (log, status, ticks), all under `/run/thinfloe/addons/`, and
+  never an earlier one while a later one is held. `thinfloe-save-home` takes
+  only `esp.lock` (`flock -w 30`), so a save never waits for dpkg.
+- **Status file** `/run/thinfloe/addons/status`, rewritten atomically, one
+  line per known add-on, tab-separated: `id ticked state installed_version
+  pending_version auto message`. `ticked` and `auto` are `0`/`1`; `state` is
+  `absent`, `installed`, `pending`, `failed` or `install-failed`; an empty
+  field is `-`. `last-check` holds the epoch of the last full check.
+- **Log file** `/run/thinfloe/addons/log`: `epoch<TAB>text`, appended by
+  every run (boot unit and timers included), also printed to stdout, kept to
+  the last 500 lines. The menu shows these lines with source `add-ons`.
+- **Boot order.** `thinfloe-addons.service` runs `thinfloe-addon boot` with
+  no network, `Before=getty@tty1.service`, and deliberately no `Before=` on
+  a sysinit unit (see the hook-order constraint). It seeds the ticks, then
+  per ticked add-on installs `next.*` first and promotes it to `current.*`
+  only after it installed; if it fails, `next.*` is deleted and `current.*`
+  is installed again. With no `next.*` it installs `current.*`. Budget:
+  `TimeoutStartSec=120`; boot spends at most `BOOT_BUDGET` 100 s on installs
+  and gives each dpkg or tar call at most `BOOT_TOOL_TIMEOUT` 25 s. An
+  add-on whose turn comes after the budget is spent is not installed at that
+  boot and its status says `install-failed`. An installed add-on boots from
+  its ESP copy with no network.
+- **Checks.** `thinfloe-addon-boot-check.timer` (`OnBootSec=1min`, no random
+  delay) and `thinfloe-addon-check.timer` (`OnUnitActiveSec=1d`,
+  `RandomizedDelaySec=1h`) start `thinfloe-addon-check.service`
+  (`After=network-online.target`), which runs `check` with no ids. The two
+  timers are separate because systemd applies `RandomizedDelaySec` to every
+  firing, and on netboot the first check is what installs the add-ons. An
+  update found by a check is stored as `next.*` and becomes active at the
+  next boot. A ticked add-on with no `current.*` (always so on netboot) is
+  fetched and installed at once. A failed check or download leaves the
+  installed copy and logs why.
+- **The auto rule.** A source is fetched automatically only when every URL
+  involved (page, matched link, fixed URL, APT URI, every redirect hop) is
+  `https:`, or the source is APT with a key (`auto_allowed`). Any other
+  source is never checked or fetched by `check` with no ids, nor by the
+  timers; only Install now / Update now (`install ID` / `update ID`) change
+  it, and its Settings row says "updates only by hand". Check now in
+  Settings runs `check` with no ids, so it follows the same rule. `check
+  ID` on such a source only reports.
+- **First-boot seeding.** `boot` creates the tick file when none exists and
+  either `/run/thinfloe/state/home-renamed` exists (a 3.x home was migrated)
+  or `home-restore` is `absent`, `tl.old/` is on the ESP and
+  `/config/addons-seeded` is not (a 3.x stick upgraded without a saved
+  home). It ticks every shipped add-on whose `X-TF-Source-Config` exists in
+  the home (ThinLinc `.thinlinc`, OxuLnk `.config/oxulnk`), or every shipped
+  add-on with that key when no home was stored. On every USB boot that
+  finds `/config/addons-seeded` missing, the marker is written, so a stick
+  that booted 4.x once is never seeded again. Netboot seeds too; its check
+  unit then installs. `make qemu-smoke-upgrade` requires ThinLinc ticked
+  from a 3.x home, with status `failed` (no network).
+- **dpkg timing.** Measured 2026-10-23 in the built image: `dpkg -i` of the
+  ThinLinc client takes about 4 s. Reinstall at boot is `dpkg -i` of the
+  stored `.deb` (`--force-confdef --force-confold`, stdin `/dev/null`) or
+  `tar -x -C /` of a stored tar. sysext was rejected: it skips maintainer
+  scripts and cannot carry a tar overlay that writes `/etc`.
+- **Post-install hooks.** After a successful install the tool runs
+  `/usr/libexec/thinfloe/addon-hooks/<id>` if that root-owned file is
+  executable; a hook path never comes from a tile or the home. A failing
+  hook fails the install. Hook `10-thinlinc` puts the PipeWire shim
+  (`/usr/libexec/thinfloe/tlclient-pulseaudio`) over the client's own
+  `/opt/thinlinc/lib/tlclient/pulseaudio`, because `dpkg -i` overwrites the
+  file the old overlay put there.
+- **Removing a tar add-on** deletes the files its listing named, even if
+  they overwrote image files; those come back at the next reboot. A tar
+  overlay should therefore not overwrite image files.
+- **The menu.** The Settings tile is `60-settings.desktop` with
+  `X-TF-Action=settings`, honoured only in shipped files. Each row has a tick
+  box (on runs `install`, off runs `remove`) and shows the state; Install now,
+  Update now and Check now run the verbs above.
+  Add-on tiles are drawn only when an installed version exists; a pending
+  one shows the update marker. A failed install asks Retry once per boot per
+  add-on, remembered in `/tmp/thinfloe-addon-retry.<uid>` (`TF_RETRY_MARKER`
+  overrides). The menu reads the add-on files once at start.
+- **Add-ons run as root, by design.** Tar and deb add-ons write anywhere on
+  the system. With the tile files and the tick file in the home archive this
+  means a home archive can bring software onto a machine: whoever can write
+  `home.tar.gz` on the ESP (or `home.pkg` on the boot server) and name a
+  source can have that source's package installed as root at the next boot
+  or check. A source that is neither HTTPS nor signed is fetched only by a
+  manual Install now, but it is then installed with no further check.
+
+Guards: `test/integration/test-addon-deps.sh`, `test/unit/` (the tool, via
+`make test-unit`), the tile and settings tests in `src/thinfloe-menu`, `make
+qemu-smoke-addons` (a stored test `.deb` ticked by the home archive is
+installed before `getty@tty1.service` starts, with no network, no ordering
+cycle, status `installed`) and `make qemu-smoke-upgrade`. The smoke VMs
+report through `systemd.run=` and `scripts/smoke-addons-report.sh` on the
+ESP, so the image carries no test code.
+
 ## Container Build Best Practices
 
 The containers/ubuntu/Dockerfile follows several important patterns:
@@ -418,16 +546,16 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 ## Standing Constraints
 
-Sixteen rules in this repository look like ordinary configuration but are
+Seventeen rules in this repository look like ordinary configuration but are
 load-bearing. All but the patched-labwc, hook-order, menu-rendering,
-logout-save and migrate-once ones have each caused a real shipped-image bug. The
+logout-save, migrate-once and add-on-libraries ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
 reverting it silently would ship regressions in both patched behaviours. The
 hook-order one was caught in QEMU: the race it closes is present in every
 image built before it. The menu-rendering and logout-save ones are preventive
 too: they were decided while the menu was designed, and no image has shipped
-without them. The migrate-once one is
-preventive as well: nothing has shipped broken from it.
+without them. The migrate-once and add-on-libraries ones are
+preventive as well: nothing has shipped broken from them.
 
 ### No login password ships in the image
 
@@ -822,6 +950,25 @@ stick of 4 GB or more; sticks already in the field keep their 2000 MB.
 `test/integration/test-initramfs-home.sh` guard both halves, and `make
 qemu-smoke-upgrade` boots a staged upgrade through OVMF and syslinux and
 requires the rotation and `DEFAULT current` afterwards.
+
+### Add-on runtime libraries are listed by name in the Dockerfile
+
+`containers/ubuntu/Dockerfile` installs the libraries ThinLinc and OxuLnk
+need by name, in one `apt-get install` block next to the comment that says
+so. An add-on `.deb` is installed with `dpkg -i`, which resolves nothing, so
+whatever its `Depends:` would have pulled in must already be in the image.
+ThinLinc's `.deb` has no `Depends:` at all, and its `vncviewer` dlopens
+`libXrandr.so.2`, so `libxrandr2` is installed by name for it; nothing but
+this list keeps it there. OxuLnk's `Depends:` are `libasound2t64 libc6
+libopus0 libstdc++6 libva-drm2 libva2 libx11-6 libx11-xcb1 libxcb1
+libxcursor1 libxi6 libxkbcommon-x11-0 libxkbcommon0`. Dropping a line
+leaves the add-on installed and its tile drawn, and the client fails when it
+starts. A new add-on that needs another library needs a line here.
+`test/integration/test-addon-deps.sh` installs each client the way
+`thinfloe-addon` does into a throw-away container of the built image, checks
+that every ELF file resolves its libraries and that the client starts; run
+via `make test` with `THINLINC_DEB` (else the page and pattern of the shipped
+tile are used) and, for OxuLnk, `OXULNK_DEB` set.
 
 ### A 3.x home is migrated once
 

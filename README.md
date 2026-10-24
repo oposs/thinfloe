@@ -131,10 +131,22 @@ Upgrade modes:
 
 ### The session menu
 
-After login the session opens a grid of tiles. ThinLinc is one click.
-Other shipped tiles start oxulnk, a terminal, a home backup, `thinfloe-upgrade`
-and the logout. Logging out saves the home directory first; if the save
-fails, the menu asks whether to stay or to log out anyway.
+After login the session opens a grid of tiles. The shipped tiles start a
+terminal, a home backup, `thinfloe-upgrade`, Settings, Restart and Power off.
+Restart and Power off save the home directory first; if the save fails, the
+menu asks whether to stay or to go on anyway.
+
+ThinLinc and OxuLnk are not in the image. Tick them in Settings: the image
+fetches the program from its source, keeps a copy on the boot stick and
+installs it at every boot, before the session starts. A new version found
+by the daily check becomes active at the next boot. Install now and Update now
+act at once. A source that is not HTTPS and not signed is never fetched
+automatically; its row says "updates only by hand".
+
+An add-on is installed as root and may write anywhere on the system. The
+tick list and the tile that names the source are part of the home directory,
+so whoever can change the saved home of a machine can bring software onto it.
+Keep the boot stick, and the home archive on the boot server, to yourself.
 
 Add a tile for one machine as a `.desktop` file in `~/.config/thinfloe/menu/`:
 
