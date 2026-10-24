@@ -8,6 +8,9 @@
 - The menu shows the tile of an add-on only while the add-on is installed, marks it "update" when a new version waits for the next boot, and enables it as soon as an install finishes, without a restart. Everything the add-on tool does (checks, downloads, installs, failures) appears in the menu log under `add-ons`.
 - A new Settings tile opens the Add-ons screen: ticking an add-on installs it at once, unticking removes it, and each row shows its source, its installed version and any update ready for the next boot, with Install now and Update now buttons. Check now looks for updates of every ticked add-on whose source is HTTPS or signed; any other source shows "updates only by hand" and changes only through its buttons.
 - When a ticked add-on could not be installed, the menu asks once per boot "<Name> could not be installed: <reason>" with Retry and Later.
+- A ticked add-on that the boot had no time to install, or whose install at boot failed, is installed from the boot stick by the check one minute after boot, without anyone pressing Retry. An update whose install at boot ran out of time stays on the stick for that check instead of being deleted.
+- Log out, Restart and Power off wait for an add-on install, update, removal or check started from Settings: the dialog names it ("Installing ThinLinc"), and Stay stays available while it finishes. Running programs are stopped as before.
+- An add-on tile file name may contain `+`. On the Add-ons screen, a tile whose file name cannot be used (over 64 characters, not starting with a letter or digit, ending in a dot, or the same as another add-on's name apart from case) shows "file name not usable", with its tick box off and no button.
 
 ### Changed
 

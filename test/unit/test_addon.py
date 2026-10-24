@@ -953,6 +953,21 @@ class TestManual(AddonEnv):
         self.assertEqual(self.files(), [])
         self.assertEqual(self.status(), ["10-demo\t1\tabsent\t-\t-\t0\t-"])
 
+    def test_check_installs_a_stored_manual_copy_without_a_request(self):
+        # R20: installing what is on the boot stick is no fetch, so R1 allows
+        # it, as boot does.
+        self.demo_tile()
+        self.publish("1.0")
+        self.assertEqual(self.run_cmd("install", "10-demo"), 0)
+        shutil.rmtree(self.run_dir)
+        (self.bin / "dpkg.log").unlink()
+        before = len(self.srv.requests)
+        self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(self.srv.requests[before:], [])
+        self.assertEqual(self.dpkg_calls(),
+                         [DPKG_I + str(self.addon_dir() / "current.deb")])
+        self.assertEqual(self.status()[0].split("\t")[2:4], ["installed", "1.0"])
+
     def test_check_with_the_id_of_a_manual_source_stores_nothing(self):
         # Ruling R1: a stored next.* would be installed at the next boot with
         # nobody pressing anything.
@@ -1062,6 +1077,34 @@ class TestStatusAndLog(AddonEnv):
         self.assertEqual(self.status(), [])
         self.assertTrue(any("my tool.desktop" in l for l in self.log_lines()))
 
+    def test_ids_follow_the_menus_rule(self):
+        # src/thinfloe-menu/src/addons.rs checks valid_id against this table.
+        rows = [l.split("\t", 1) for l in
+                (REPO / "test" / "unit" / "addon-ids.tsv").read_text().splitlines()
+                if not l.startswith("#")]
+        self.assertGreaterEqual(len(rows), 20)
+        for verdict, aid in rows:
+            with self.subTest(aid=aid):
+                self.assertEqual(bool(ad.ID_RE.fullmatch(aid)), verdict == "accept")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_cmd("install", "y" * 65), 2)
+
+    def test_the_addons_taken_match_the_menus_settings_rows(self):
+        # The same tiles as menu.rs settings_rows_follow_the_tools_id_rule.
+        def tile(d, n):
+            (d / ("%s.desktop" % n)).write_text(
+                "[Desktop Entry]\nName=%s\nExec=true\n"
+                "X-TF-Source-URL=https://e.example/%s.deb\n" % (n, n))
+        tile(self.tiles, "10-thinlinc")
+        menu = self.home / ".config" / "thinfloe" / "menu"
+        menu.mkdir(parents=True)
+        for n in ["10-ThinLinc", "my+app", "-lead", "trail.", "A-B", "a-b",
+                  "x" * 64, "y" * 65]:
+            tile(menu, n)
+        self.assertEqual(self.run_cmd("status"), 0)
+        self.assertEqual(sorted(l.split("\t")[0] for l in self.status()),
+                         sorted(["10-thinlinc", "A-B", "my+app", "x" * 64]))
+
     def test_install_of_an_unknown_id_fails(self):
         self.assertEqual(self.run_cmd("install", "99-nope"), 1)
         self.assertEqual(self.ticks(), [])
@@ -1155,12 +1198,14 @@ class TestFixRound1(AddonEnv):
         self.publish("1.0")
         (self.bin / "dpkg.fail").touch()
         self.assertEqual(self.run_cmd("install", "10-demo"), 1)
-        self.assertEqual(self.run_cmd("check"), 0)
+        # The check installs the stored copy again (R20); it fails again.
+        self.assertEqual(self.run_cmd("check"), 1)
+        self.assertEqual(len(self.dpkg_calls()), 2)
         self.assertEqual(self.status()[0].split("\t")[2], "install-failed",
                          "an up-to-date check must not hide the failed install")
         (self.bin / "dpkg.fail").unlink()
         self.assertEqual(self.run_cmd("update", "10-demo"), 0)
-        self.assertEqual(len(self.dpkg_calls()), 2, "update retries the current copy")
+        self.assertEqual(len(self.dpkg_calls()), 3, "update retries the current copy")
         self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo 1.0 installed"])
 
     def test_install_failed_survives_storing_next(self):
@@ -1169,7 +1214,7 @@ class TestFixRound1(AddonEnv):
         (self.bin / "dpkg.fail").touch()
         self.run_cmd("install", "10-demo")
         self.publish("1.0", "1.1")
-        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(self.run_cmd("check"), 1, "the retried install failed")
         self.assertEqual(self.files(), ["current.deb", "current.meta", "next.deb", "next.meta"])
         self.assertEqual(self.status()[0].split("\t")[2], "install-failed")
 
@@ -1497,8 +1542,56 @@ class TestBoot(AddonEnv):
         for aid, name in (("20-other", "Other"), ("30-third", "Third")):
             self.assertEqual(st[aid][2:4], ["install-failed", "-"])
             self.assertEqual(st[aid][6], "%s: not installed at boot: the time for add-ons "
-                                         "was used up" % name)
+                                         "was used up; the check after boot installs it" % name)
         self.assertIsNone(ad._boot_deadline)
+        # The check after boot installs all three from the boot stick
+        # (ruling R20, the R13 gap), with no Retry pressed.
+        (self.bin / "dpkg.hang-on").unlink()
+        (self.bin / "dpkg.log").unlink()
+        self.run_cmd("check")
+        self.assertEqual(sorted(self.dpkg_calls()), sorted(
+            DPKG_I + str(self.addon_dir(aid) / "current.deb")
+            for aid in ("10-demo", "20-other", "30-third")))
+        st = {l.split("\t")[0]: l.split("\t") for l in self.status()}
+        self.assertEqual(st["10-demo"][3], "1.0")
+        for aid in ("20-other", "30-third"):
+            self.assertEqual(st[aid][3], "2.0", st[aid])
+
+    def test_a_timeout_at_boot_keeps_next(self):
+        # m7: running out of time says nothing about the copy. next.* stays,
+        # current.* gets no time it does not have, and the check after boot
+        # installs next.* with the full timeout.
+        self.stored_next()
+        (self.bin / "dpkg.hang-on").write_text("next.deb")
+        with mock.patch.object(ad, "BOOT_TOOL_TIMEOUT", 1, create=True):
+            self.assertEqual(self.run_cmd("boot"), 1)
+        d = self.addon_dir()
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(d / "next.deb")])
+        self.assertEqual(self.files(), ["current.deb", "current.meta", "next.deb", "next.meta"])
+        self.assertEqual(self.status(), [
+            "10-demo\t1\tinstall-failed\t-\t1.1\t1\tDemo: Demo 1.1 not installed at boot: "
+            + str(self.bin / "dpkg") + " took longer than 1 s; the check after boot installs it"])
+        (self.bin / "dpkg.hang-on").unlink()
+        (self.bin / "dpkg.log").unlink()
+        before = len(self.srv.requests)
+        self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(d / "next.deb")])
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.1")
+        self.assertNotIn(("GET", "/dl/tf-demo_1.1_all.deb"), self.srv.requests[before:])
+        self.assertEqual(self.status()[0].split("\t")[2:4], ["installed", "1.1"])
+
+    def test_the_check_installs_a_copy_whose_boot_install_failed(self):
+        self.stored_demo()
+        (self.bin / "dpkg.fail-on").write_text("current.deb")
+        self.assertEqual(self.run_cmd("boot"), 1)
+        (self.bin / "dpkg.fail-on").unlink()
+        self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(len(self.dpkg_calls()), 2)
+        self.assertEqual(self.status(), ["10-demo\t1\tinstalled\t1.0\t-\t1\tDemo: up to date"])
+        # Installed now: the next check installs nothing.
+        self.assertEqual(self.run_cmd("check"), 0)
+        self.assertEqual(len(self.dpkg_calls()), 2)
 
     def test_boot_promotes_under_the_esp_lock(self):
         self.demo_tile()

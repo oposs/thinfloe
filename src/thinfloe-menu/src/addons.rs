@@ -95,11 +95,15 @@ fn flag(s: &str) -> Option<bool> {
     }
 }
 
+/// The id rule of thinfloe-addon (`ID_RE`): 1 to 64 letters, digits and
+/// `. _ + -`, starting with a letter or digit and not ending in `.` (vfat
+/// strips a trailing dot). `test/unit/addon-ids.tsv` pins both sides.
 pub(crate) fn valid_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
+    (1..=64).contains(&s.len())
+        && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && !s.ends_with('.')
         && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
 }
 
 /// `id ticked state installed pending auto message`, tab separated.
@@ -365,6 +369,22 @@ mod tests {
         assert_eq!(s[3].state, AddonState::Failed);
         assert_eq!(s[4].state, AddonState::InstallFailed);
         assert!(read_status(&p.with_file_name("missing")).is_empty());
+    }
+
+    #[test]
+    fn ids_follow_the_tools_rule() {
+        // test_addon.py checks ID_RE against the same table.
+        let table = include_str!("../../../test/unit/addon-ids.tsv");
+        let mut n = 0;
+        for line in table.lines().filter(|l| !l.starts_with('#')) {
+            let (verdict, id) = line.split_once('\t').expect("verdict<TAB>id");
+            assert_eq!(valid_id(id), verdict == "accept", "{verdict} {id:?}");
+            n += 1;
+        }
+        assert!(n >= 20, "{n} rows");
+        // A status line with `+` in its id is read, so its tile is drawn.
+        let (_d, p) = status_file("plus", "my+app\t1\tinstalled\t1\t-\t1\t-\n");
+        assert_eq!(read_status(&p)[0].id, "my+app");
     }
 
     #[test]

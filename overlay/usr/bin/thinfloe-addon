@@ -776,8 +776,10 @@ _boot_deadline: Optional[float] = None  # monotonic; set while boot runs
 FORMATS = ("deb", "tar")
 
 # vfat ignores case and strips trailing dots: ids differing only so would
-# share one directory on the ESP. No trailing dot here; case in Run.
-ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9_+-])?")
+# share one directory on the ESP. No trailing dot here; case in Run. At most
+# 64 characters. The menu's valid_id applies the same rule;
+# test/unit/addon-ids.tsv pins both.
+ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9_+-])?")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
 
 USAGE = "usage: thinfloe-addon boot | status | check [ID...] | install ID | update ID | remove ID"
@@ -785,6 +787,11 @@ USAGE = "usage: thinfloe-addon boot | status | check [ID...] | install ID | upda
 
 class InstallError(Exception):
     """An install or removal that failed. The text is shown at the machine."""
+
+
+class BootTimeout(InstallError):
+    """A dpkg, tar or hook call at boot ran out of time. That says nothing
+    about the copy, so a next.* copy is kept for the check after boot."""
 
 
 # ============ Log and files in RUN_DIR ============
@@ -1323,7 +1330,8 @@ def _put_slot(d: str, slot: str, payload_src: str, meta_src: str, fmt: str) -> N
 
 def store_copy(d: str, slot: str, dl: Download) -> None:
     """Copy a verified download into <slot>.<fmt>.new on the store, check
-    size and hash of the copy, then rename it into the slot. Call with
+    the size and hash of the bytes written (as they left RAM; the copy is
+    not read back from the ESP), then rename it into the slot. Call with
     esp_lock held."""
     os.makedirs(d, mode=0o755, exist_ok=True)
     _remove_new(d)
@@ -1381,7 +1389,8 @@ def _run_tool(cmd: List[str]) -> None:
     try:
         r = _tool(cmd)
     except subprocess.TimeoutExpired as e:
-        raise InstallError("%s took longer than %s" % (cmd[0], _seconds(e.timeout)))
+        error = BootTimeout if _boot_deadline is not None else InstallError
+        raise error("%s took longer than %s" % (cmd[0], _seconds(e.timeout)))
     except OSError as e:
         raise InstallError("cannot run %s: %s" % (cmd[0], e.strerror or e))
     if r.returncode != 0:
@@ -1497,8 +1506,9 @@ class Run:
         by_fold: dict = {}
         for a in sorted(addons, key=lambda a: not a.shipped):
             if not ID_RE.fullmatch(a.id):
-                problems.append("%s: an add-on's file name may only hold letters, digits "
-                                "and . _ + -, and not end in ." % a.tile_path)
+                problems.append("%s: an add-on's file name may only hold up to 64 letters, "
+                                "digits and . _ + -, start with a letter or digit and "
+                                "not end in ." % a.tile_path)
                 continue
             other = by_fold.get(a.id.casefold())
             if other is not None:
@@ -1680,7 +1690,23 @@ def check_one(run: Run, a: Addon, automatic: bool) -> None:
         note_ok(a.id, _stored_message(a, meta), found.urls_seen)
 
 
+def install_missing(run: Run, a: Addon) -> None:
+    """Install a ticked add-on's stored copy that this boot has not
+    installed: boot ran out of time for it, or its install failed. This
+    is what boot would have done; it fetches nothing, so it holds for a
+    manual-only source too."""
+    if _installed_ok(a.id):
+        return
+    d = _addon_dir(a.id)
+    nxt = stored(d, "next")
+    if nxt is not None:
+        _boot_next(run, a, d, nxt)
+    elif stored(d, "current") is not None:
+        _install_slot(run, a, d, "current")
+
+
 def cmd_check(run: Run, ids: List[str]) -> None:
+    """Install what boot left out, then look for updates."""
     if ids:
         for aid in ids:
             if run.case_clash(aid):
@@ -1692,11 +1718,13 @@ def cmd_check(run: Run, ids: List[str]) -> None:
                 log("%s is not ticked, so it was not checked" % a.name)
                 run.failed = True
                 continue
+            install_missing(run, a)
             check_one(run, a, automatic=False)
         return
     for aid in run.ticks:
         a = run.by_id.get(aid)
         if a is not None:
+            install_missing(run, a)
             check_one(run, a, automatic=True)
     os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
     _write_atomic(os.path.join(RUN_DIR, "last-check"), "%d\n" % int(time.time()))
@@ -1851,11 +1879,18 @@ def _drop_slot(d: str, slot: str) -> None:
 def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
     """Install next.*; only once that worked does it become current.*. If it
     fails, next.* is deleted and current.*, if there is one, is installed
-    again, so the version that worked before stays."""
+    again, so the version that worked before stays. Boot calls it, and the
+    check for what boot left out."""
     new = _label(a, nxt.meta.get("version"))
     with install_lock():
         try:
             _install_locked(a, d, nxt)
+        except BootTimeout as e:
+            # Out of time, not broken: current.* would get no more time, and
+            # the check after boot installs next.* with the full timeout.
+            run.fail(a, "install-failed", "%s not installed at boot: %s; the check "
+                     "after boot installs it" % (new, e))
+            return
         except InstallError as e:
             reason = str(e)
         else:
@@ -1901,7 +1936,8 @@ def cmd_boot(run: Run) -> None:
                     % ", ".join(a.name for a in todo))
                 for a in todo:
                     set_result(a.id, "install-failed", "%s: not installed at boot: "
-                               "the time for add-ons was used up" % a.name)
+                               "the time for add-ons was used up; the check after "
+                               "boot installs it" % a.name)
                 run.failed = True
                 break
             a = todo.pop(0)

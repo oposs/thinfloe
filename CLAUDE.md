@@ -48,6 +48,13 @@ Compiles iPXE from source and exports PXE/EFI boot files to `artifacts/rootfs/`.
 dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
 ```
 
+### Boot a stick with a ticked add-on (headless QEMU):
+```bash
+make qemu-smoke-addons
+```
+Requires a stored test `.deb`, ticked by the home archive, to be installed
+before `getty@tty1.service` starts, with no network. See [Add-ons](#add-ons).
+
 ### Publish the image for thinfloe-upgrade:
 ```bash
 scripts/publish.sh
@@ -412,8 +419,9 @@ home; removing it is later work.
   room for one `next.*` each.
 - **Locks.** Order is `install.lock` (dpkg/tar, promotion, the installed
   record) -> `/run/thinfloe/esp.lock` (every ESP write, tmpfiles, 0644 root)
-  -> `.lock` (log, status, ticks), all under `/run/thinfloe/addons/`, and
-  never an earlier one while a later one is held. `thinfloe-save-home` takes
+  -> `.lock` (log, status, ticks); `install.lock` and `.lock` are under
+  `/run/thinfloe/addons/`, `esp.lock` is not. Never take an earlier one
+  while a later one is held. `thinfloe-save-home` takes
   only `esp.lock` (`flock -w 30`), so a save never waits for dpkg.
 - **Status file** `/run/thinfloe/addons/status`, rewritten atomically, one
   line per known add-on, tab-separated: `id ticked state installed_version
@@ -432,8 +440,10 @@ home; removing it is later work.
   `TimeoutStartSec=120`; boot spends at most `BOOT_BUDGET` 100 s on installs
   and gives each dpkg or tar call at most `BOOT_TOOL_TIMEOUT` 25 s. An
   add-on whose turn comes after the budget is spent is not installed at that
-  boot and its status says `install-failed`. An installed add-on boots from
-  its ESP copy with no network.
+  boot and its status says `install-failed`. A `next.*` whose install runs
+  out of time is kept (a timeout says nothing about the copy) and
+  `current.*` is not tried. The check after boot installs what boot left
+  out (below). An installed add-on boots from its ESP copy with no network.
 - **Checks.** `thinfloe-addon-boot-check.timer` (`OnBootSec=1min`, no random
   delay) and `thinfloe-addon-check.timer` (`OnUnitActiveSec=1d`,
   `RandomizedDelaySec=1h`) start `thinfloe-addon-check.service`
@@ -442,7 +452,11 @@ home; removing it is later work.
   firing, and on netboot the first check is what installs the add-ons. An
   update found by a check is stored as `next.*` and becomes active at the
   next boot. A ticked add-on with no `current.*` (always so on netboot) is
-  fetched and installed at once. A failed check or download leaves the
+  fetched and installed at once. Before it looks for updates, every check
+  installs a ticked add-on's stored copy that this boot has not installed
+  (boot ran out of time, or the install failed): `next.*` the way boot
+  does, else `current.*`. That fetches nothing, so it applies to a
+  manual-only source too (the auto rule below forbids only fetching). A failed check or download leaves the
   installed copy and logs why.
 - **The auto rule.** A source is fetched automatically only when every URL
   involved (page, matched link, fixed URL, APT URI, every redirect hop) is
@@ -469,8 +483,10 @@ home; removing it is later work.
   `tar -x -C /` of a stored tar. sysext was rejected: it skips maintainer
   scripts and cannot carry a tar overlay that writes `/etc`.
 - **Post-install hooks.** After a successful install the tool runs
-  `/usr/libexec/thinfloe/addon-hooks/<id>` if that root-owned file is
-  executable; a hook path never comes from a tile or the home. A failing
+  `/usr/libexec/thinfloe/addon-hooks/<id>` if that file, shipped in the
+  image, is executable (the tool checks only that; tfuser can become root
+  anyway, so an owner check would add nothing); a hook path never comes
+  from a tile or the home. A failing
   hook fails the install. Hook `10-thinlinc` puts the PipeWire shim
   (`/usr/libexec/thinfloe/tlclient-pulseaudio`) over the client's own
   `/opt/thinlinc/lib/tlclient/pulseaudio`, because `dpkg -i` overwrites the
@@ -485,7 +501,21 @@ home; removing it is later work.
   Add-on tiles are drawn only when an installed version exists; a pending
   one shows the update marker. A failed install asks Retry once per boot per
   add-on, remembered in `/tmp/thinfloe-addon-retry.<uid>` (`TF_RETRY_MARKER`
-  overrides). The menu reads the add-on files once at start.
+  overrides). The menu reads the add-on files at start and again whenever
+  they change. A tile whose file name `thinfloe-addon` refuses (see ids
+  below) is never drawn; its Settings row says "file name not usable", with
+  the tick box disabled and no button. Log out, Restart and Power off list a running
+  add-on job (Install now, Update now, a tick, Check now) by the add-on's
+  name and wait for it after stopping the programs, with Stay offered;
+  the job is never signalled, because it runs as root and a dpkg cut short
+  leaves a half-installed package for the rest of the boot.
+- **Ids.** An add-on's id is its tile's file name without `.desktop`: 1 to
+  64 letters, digits and `. _ + -`, starting with a letter or digit and not
+  ending in `.` (vfat strips it). An id that differs from another add-on's
+  only in case is refused, since both would share one directory on the
+  ESP; shipped tiles win, then user tiles in file-name order. `ID_RE` in
+  the tool and `valid_id` in the menu apply the rule, and
+  `test/unit/addon-ids.tsv` pins both sides.
 - **Add-ons run as root, by design.** Tar and deb add-ons write anywhere on
   the system. With the tile files and the tick file in the home archive this
   means a home archive can bring software onto a machine: whoever can write

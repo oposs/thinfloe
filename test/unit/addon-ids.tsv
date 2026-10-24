@@ -1,0 +1,23 @@
+# Add-on ids: thinfloe-addon (ID_RE) and the menu (valid_id) must agree.
+# Read by test/unit/test_addon.py and src/thinfloe-menu/src/addons.rs.
+accept	a
+accept	10-thinlinc
+accept	my+app
+accept	c++
+accept	a_
+accept	x-
+accept	a.b
+accept	Z9
+accept	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+reject	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+reject	
+reject	-a
+reject	.a
+reject	_a
+reject	+a
+reject	a.
+reject	a b
+reject	a/b
+reject	ä
+reject	a:b
+reject	--version

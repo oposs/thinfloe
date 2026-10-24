@@ -184,26 +184,58 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
     match &menu.logout {
         Some(Logout::Confirm) => {
             let mut chose = None;
-            dialog(ui, "Programs are still running", |ui, t| {
+            let addon_jobs = menu.addon_jobs();
+            let title = if menu.jobs.is_empty() {
+                "Add-ons are being changed"
+            } else {
+                "Programs are still running"
+            };
+            dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
                     ui.label(egui::RichText::new(&job.name).color(t.palette.foreground));
                 }
-                ui.label(
-                    egui::RichText::new("They are stopped before the home directory is saved.")
-                        .color(t.palette.muted_foreground),
-                );
+                for job in &addon_jobs {
+                    ui.label(egui::RichText::new(job).color(t.palette.foreground));
+                }
+                if !menu.jobs.is_empty() {
+                    ui.label(
+                        egui::RichText::new("They are stopped before the home directory is saved.")
+                            .color(t.palette.muted_foreground),
+                    );
+                }
+                if !addon_jobs.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("The add-on work is finished before you {verb}."))
+                            .color(t.palette.muted_foreground),
+                    );
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
                     }
-                    if ui
-                        .add(Button::new(format!("Stop them and {verb}")).variant(ButtonVariant::Destructive))
-                        .clicked()
-                    {
+                    let leave = if menu.jobs.is_empty() {
+                        format!("{} when done", capitalized(verb))
+                    } else {
+                        format!("Stop them and {verb}")
+                    };
+                    if ui.add(Button::new(leave).variant(ButtonVariant::Destructive)).clicked() {
                         chose = Some(Choice::StopAndLeave);
                     }
                 });
+            });
+            return chose.map(UiEvent::Chose);
+        }
+        Some(Logout::WaitAddons) => {
+            let mut chose = None;
+            dialog(ui, &format!("Waiting for the add-ons before {verbing}"), |ui, t| {
+                for job in menu.addon_jobs() {
+                    ui.label(egui::RichText::new(job).color(t.palette.muted_foreground));
+                }
+                ui.add_space(8.0);
+                if ui.add(Button::new("Stay")).clicked() {
+                    chose = Some(Choice::Stay);
+                }
             });
             return chose.map(UiEvent::Chose);
         }
@@ -400,7 +432,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
     let mut event = None;
     ui.horizontal(|ui| {
         let mut ticked = row.ticked;
-        let tick = ui.add_enabled_ui(!row.busy, |ui| {
+        let tick = ui.add_enabled_ui(!row.busy && !row.unusable, |ui| {
             egui_shadcn::components::checkbox::checkbox(ui, &mut ticked)
         });
         if tick.inner.changed() {

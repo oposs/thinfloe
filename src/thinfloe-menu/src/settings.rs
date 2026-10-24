@@ -44,9 +44,14 @@ pub struct Row {
     pub manual: bool,
     /// An add-on job for this row runs; its tick box and button are off.
     pub busy: bool,
+    /// thinfloe-addon refuses the tile's file name: tick box off, no button.
+    pub unusable: bool,
 }
 
 pub const MANUAL_NOTE: &str = "updates only by hand";
+
+/// Why is in the add-on log: thinfloe-addon names the file and the rule.
+pub const UNUSABLE_TEXT: &str = "file name not usable";
 
 fn with_reason(text: &str, message: Option<&str>) -> String {
     match message {
@@ -92,6 +97,20 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
         .filter(|(_, t)| t.addon)
         .map(|(i, t)| {
             let id = crate::menu::addon_id(t).to_string();
+            if !menu.addon_usable(i) {
+                return Row {
+                    tile: i,
+                    name: t.name.clone(),
+                    source: t.source.clone(),
+                    ticked: false,
+                    state: UNUSABLE_TEXT.to_string(),
+                    button: None,
+                    manual: false,
+                    busy: false,
+                    unusable: true,
+                    id,
+                };
+            }
             let status = menu.addons().iter().find(|a| a.id == id);
             Row {
                 tile: i,
@@ -102,6 +121,7 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
                 button: button(status),
                 manual: status.is_some_and(|s| !s.auto),
                 busy: menu.addon_busy(&id),
+                unusable: false,
                 id,
             }
         })

@@ -12,13 +12,14 @@
 //! menu exits (decided 2026-10-02). thinfloe-session no longer saves after a
 //! logout: by the time the menu exits 0 the save has been done, or it
 //! failed and the person at the machine chose to log out anyway. Restart
-//! and Power off take the same steps and exit 10 and 11.
+//! and Power off take the same steps and exit 10 and 11. A running add-on
+//! job is listed in the dialog too; it is waited for, never stopped.
 
-use crate::addons::{AddonState, AddonStatus};
+use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
 use crate::settings::{RetryMarker, SettingsEvent};
-use crate::tiles::{Action, Grid, Tile};
+use crate::tiles::{Action, Grid, Origin, Tile};
 use std::time::{Duration, Instant};
 
 /// How long "Home directory saved. Logging out." stays on screen.
@@ -50,10 +51,14 @@ pub struct SaveState {
 /// frozen behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Logout {
-    /// Programs still run: Stay, or Stop them and log out.
+    /// Programs or add-on jobs still run: Stay, or Stop them and log out.
     Confirm,
     /// SIGTERM sent; SIGKILL at `kill_at` to what is left.
     Stopping { kill_at: Instant, killed: bool },
+    /// The programs are gone; an add-on job still runs. It is not stopped:
+    /// it runs as root, and a dpkg cut short leaves a half-installed
+    /// package for the rest of the boot. Stay is offered.
+    WaitAddons,
     /// The programs are gone; a background save is still running.
     WaitSave,
     /// The logout save runs.
@@ -67,7 +72,7 @@ pub enum Logout {
 impl Logout {
     /// The steps without buttons drop input before egui sees it.
     fn refuses_input(&self) -> bool {
-        !matches!(self, Logout::Confirm | Logout::Failed { .. })
+        !matches!(self, Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. })
     }
 }
 
@@ -212,8 +217,48 @@ impl Menu {
         self.checking() || self.addon_runs.iter().any(|a| a.iter().skip(1).any(|x| x == id))
     }
 
+    /// Whether thinfloe-addon takes the add-on of this tile. It refuses an
+    /// id `valid_id` refuses, and one that differs from another add-on's
+    /// only in case, since both would share one directory on the vfat ESP:
+    /// shipped tiles win, then the user's in file-name order.
+    pub fn addon_usable(&self, index: usize) -> bool {
+        let Some(t) = self.tiles.get(index).filter(|t| t.addon) else {
+            return false;
+        };
+        let id = addon_id(t);
+        fn rank(t: &Tile) -> (bool, &str) {
+            (t.origin == Origin::User, &t.file)
+        }
+        valid_id(id)
+            && !self
+                .tiles
+                .iter()
+                .any(|o| o.addon && valid_id(addon_id(o)) && rank(o) < rank(t) && addon_id(o).eq_ignore_ascii_case(id))
+    }
+
     fn is_addon(&self, id: &str) -> bool {
-        self.tiles.iter().any(|t| t.addon && addon_id(t) == id)
+        (0..self.tiles.len()).any(|i| self.addon_usable(i) && addon_id(&self.tiles[i]) == id)
+    }
+
+    /// What each running add-on job does, by the add-on's name, for the
+    /// end-of-session dialog.
+    pub fn addon_jobs(&self) -> Vec<String> {
+        let name = |id: &str| {
+            self.tiles
+                .iter()
+                .find(|t| t.addon && addon_id(t) == id)
+                .map_or(id, |t| t.name.as_str())
+                .to_string()
+        };
+        self.addon_runs
+            .iter()
+            .map(|a| match a.as_slice() {
+                [verb, id] if verb == "install" => format!("Installing {}", name(id)),
+                [verb, id] if verb == "update" => format!("Updating {}", name(id)),
+                [verb, id] if verb == "remove" => format!("Removing {}", name(id)),
+                _ => "Checking the add-ons".to_string(),
+            })
+            .collect()
     }
 
     fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
@@ -411,7 +456,7 @@ impl Menu {
             }
             Action::Logout | Action::Reboot | Action::Poweroff => {
                 self.ending = tile.action;
-                if self.jobs.is_empty() {
+                if self.jobs.is_empty() && self.addon_runs.is_empty() {
                     self.logout_after_jobs(now)
                 } else {
                     self.logout = Some(Logout::Confirm);
@@ -432,7 +477,17 @@ impl Menu {
         Some(Effect::Start(Job::Save))
     }
 
-    /// The programs are gone: wait for a background save, or save now.
+    /// The programs are gone: wait for the add-on jobs, then go on.
+    fn after_programs(&mut self, now: Instant) -> Option<Effect> {
+        if self.addon_runs.is_empty() {
+            return self.logout_after_jobs(now);
+        }
+        self.logout = Some(Logout::WaitAddons);
+        None
+    }
+
+    /// The programs and add-on jobs are gone: wait for a background save,
+    /// or save now.
     fn logout_after_jobs(&mut self, now: Instant) -> Option<Effect> {
         // A save that is refused anyway is not attempted: the person is
         // asked straight away.
@@ -479,14 +534,15 @@ impl Menu {
                 self.log.note(kind, text);
                 if let Some(Logout::Stopping { .. }) = self.logout {
                     return if self.jobs.is_empty() {
-                        self.logout_after_jobs(now)
+                        self.after_programs(now)
                     } else {
                         None
                     };
                 }
-                // Log out was clicked and nothing is left to stop: go on
-                // without asking. The logout save covers Save-On-Exit.
-                if self.logout == Some(Logout::Confirm) && self.jobs.is_empty() {
+                // Log out was clicked and nothing is left to stop or wait
+                // for: go on without asking. The logout save covers
+                // Save-On-Exit.
+                if self.logout == Some(Logout::Confirm) && self.jobs.is_empty() && self.addon_runs.is_empty() {
                     return self.logout_after_jobs(now);
                 }
                 if !self.tiles[job.tile].save_on_exit {
@@ -511,6 +567,12 @@ impl Menu {
                 if let Some(line) = line {
                     self.log.note(Kind::Warn, line);
                 }
+                // The last thing the logout waited for has ended.
+                let waiting = matches!(self.logout, Some(Logout::WaitAddons))
+                    || (self.logout == Some(Logout::Confirm) && self.jobs.is_empty());
+                if waiting && self.addon_runs.is_empty() {
+                    return self.logout_after_jobs(now);
+                }
                 None
             }
             JobResult::Saved(outcome) => {
@@ -532,7 +594,7 @@ impl Menu {
                     }
                     Some(Logout::WaitSave) => self.logout_after_jobs(now),
                     // The logout save follows; a queued one would only repeat it.
-                    Some(Logout::Stopping { .. }) => {
+                    Some(Logout::Stopping { .. } | Logout::WaitAddons) => {
                         self.save.again = false;
                         None
                     }
@@ -549,14 +611,14 @@ impl Menu {
     /// An answer in the logout dialog. Ignored when it does not fit the step.
     pub fn choose(&mut self, choice: Choice, now: Instant) -> Option<Effect> {
         match (&self.logout, choice) {
-            (Some(Logout::Confirm | Logout::Failed { .. }), Choice::Stay) => {
+            (Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. }), Choice::Stay) => {
                 self.logout = None;
                 self.offer_retry();
                 None
             }
             (Some(Logout::Confirm), Choice::StopAndLeave) => {
                 if self.jobs.is_empty() {
-                    return self.logout_after_jobs(now);
+                    return self.after_programs(now);
                 }
                 let names: Vec<&str> = self.jobs.iter().map(|j| j.name.as_str()).collect();
                 self.log.note(Kind::Event, format!("Stopping {}.", names.join(", ")));
@@ -1481,5 +1543,173 @@ mod tests {
         assert_eq!(m.retry, None);
         m.settings(SettingsEvent::Back);
         assert_eq!(m.retry, None);
+    }
+
+    #[test]
+    fn settings_rows_follow_the_tools_id_rule() {
+        // The same table as test_addon.py's case-twin and id tests: a row the
+        // tool would refuse has no buttons, and a click on it starts nothing.
+        let f = |n: &str| SourceFile {
+            name: format!("{n}.desktop"),
+            entry: desktop::parse(&format!(
+                "[Desktop Entry]\nName={n}\nExec=true\nX-TF-Source-URL=https://e.example/{n}.deb\n"
+            )),
+        };
+        let mut m = Menu::new(
+            Grid {
+                tiles: merge(
+                    &[f("10-thinlinc")],
+                    &[
+                        f("10-ThinLinc"),
+                        f("my+app"),
+                        f("-lead"),
+                        f("trail."),
+                        f("A-B"),
+                        f("a-b"),
+                        f(&"x".repeat(64)),
+                        f(&"y".repeat(65)),
+                    ],
+                ),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        m.screen = Screen::Settings;
+        let rows = crate::settings::rows(&m);
+        let usable: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), !r.unusable)).collect();
+        let x64 = "x".repeat(64);
+        let y65 = "y".repeat(65);
+        let mut want = vec![
+            ("-lead", false),
+            ("10-ThinLinc", false),
+            ("10-thinlinc", true),
+            ("A-B", true),
+            ("a-b", false),
+            ("my+app", true),
+            ("trail.", false),
+            (x64.as_str(), true),
+            (y65.as_str(), false),
+        ];
+        want.sort();
+        let mut got = usable.clone();
+        got.sort();
+        assert_eq!(got, want);
+        for r in rows.iter().filter(|r| r.unusable) {
+            assert_eq!(r.button, None, "{}", r.id);
+            assert_eq!(r.state, crate::settings::UNUSABLE_TEXT);
+            assert_eq!(m.settings(SettingsEvent::InstallNow(r.id.clone())), None, "{}", r.id);
+            assert_eq!(
+                m.settings(SettingsEvent::Tick {
+                    id: r.id.clone(),
+                    on: true
+                }),
+                None
+            );
+        }
+        // `+` reaches the tool, and its tile is drawn once installed.
+        assert_eq!(
+            m.settings(SettingsEvent::InstallNow("my+app".into())),
+            addon(&["install", "my+app"])
+        );
+        let mut s = st(AddonState::Installed, Some("1"));
+        s.id = "my+app".into();
+        m.set_addons(vec![s]);
+        let i = m.tiles.iter().position(|t| t.file == "my+app.desktop").unwrap();
+        assert!(m.visible(i));
+    }
+
+    /// The Settings menu with a Restart tile (index 3), back on the grid,
+    /// with an install of ThinLinc running.
+    fn installing_menu(tag: &str) -> (crate::testdir::TestDir, Menu) {
+        let (d, mut m) = settings_menu(tag);
+        m.tiles.push(
+            merge(
+                &[SourceFile {
+                    name: "80-reboot.desktop".into(),
+                    entry: desktop::parse("[Desktop Entry]\nName=Restart\nX-TF-Action=reboot\n"),
+                }],
+                &[],
+            )
+            .remove(0),
+        );
+        assert_eq!(
+            m.settings(SettingsEvent::InstallNow("10-thinlinc".into())),
+            addon(&["install", "10-thinlinc"])
+        );
+        m.settings(SettingsEvent::Back);
+        assert_eq!(m.screen, Screen::Grid);
+        (d, m)
+    }
+
+    #[test]
+    fn restart_waits_for_an_addon_job() {
+        let (_d, mut m) = installing_menu("wait-addon");
+        let now = Instant::now();
+        assert_eq!(m.activate(3, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.addon_jobs(), ["Installing ThinLinc"]);
+        assert!(!m.refuses_input());
+        // Nothing to signal: the job is waited for.
+        assert_eq!(m.choose(Choice::StopAndLeave, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert!(!m.refuses_input(), "Stay stays available");
+        assert_eq!(m.tick(now + STOP_GRACE * 2), None);
+        assert_eq!(
+            addon_done(&mut m, &["install", "10-thinlinc"], 0),
+            Some(Effect::Start(Job::Save))
+        );
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+    }
+
+    #[test]
+    fn stay_while_waiting_for_an_addon_job() {
+        let (_d, mut m) = installing_menu("stay-addon");
+        let now = Instant::now();
+        m.activate(3, now);
+        m.choose(Choice::StopAndLeave, now);
+        assert_eq!(m.choose(Choice::Stay, now), None);
+        assert_eq!(m.logout, None);
+        // The job ending afterwards does not resume the restart.
+        assert_eq!(addon_done(&mut m, &["install", "10-thinlinc"], 0), None);
+        assert_eq!(m.logout, None);
+    }
+
+    #[test]
+    fn an_addon_job_ending_while_asked_goes_on() {
+        let (_d, mut m) = installing_menu("addon-ends");
+        let now = Instant::now();
+        m.activate(3, now);
+        assert_eq!(
+            addon_done(&mut m, &["install", "10-thinlinc"], 1),
+            Some(Effect::Start(Job::Save))
+        );
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+    }
+
+    #[test]
+    fn programs_are_stopped_and_addon_jobs_waited_for() {
+        let (_d, mut m) = installing_menu("both");
+        let now = Instant::now();
+        let id = started(&mut m, 1, now);
+        m.activate(3, now);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        // Only the program's group is signalled.
+        assert_eq!(
+            m.choose(Choice::StopAndLeave, now),
+            Some(Effect::Signal(vec![1000 + id as i32], Signal::Term))
+        );
+        assert_eq!(ran(&mut m, id, 143, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(
+            addon_done(&mut m, &["install", "10-thinlinc"], 0),
+            Some(Effect::Start(Job::Save))
+        );
+        // A program ending while asked does not go on while the job runs.
+        let (_d, mut m) = installing_menu("both-asked");
+        let id = started(&mut m, 1, now);
+        m.activate(3, now);
+        assert_eq!(ran(&mut m, id, 0, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.addon_jobs(), ["Installing ThinLinc"]);
     }
 }
