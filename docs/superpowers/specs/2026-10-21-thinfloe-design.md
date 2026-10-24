@@ -369,19 +369,143 @@ regular checks keep retrying too. No owner-hosted fallback copy.
 ## Part 3: Slim down
 
 - Goal: a smaller download (`thinfloe-usb.img.zst`, and `vmlinuz` +
-  `initrd.img` + `ramroot.sqsh` for an upgrade). Today: 771.8 MB compressed
-  USB image (2026-10-08 build), initrd 179.3 MB.
-- Secondary: RAM use.
-- Method: first a survey with no changes. Largest packages in
-  `ramroot.sqsh` (`dpkg-query` sizes), largest directories, largest parts of
-  the initrd (`lsinitramfs`), and for each whether ThinFloe needs it. Bring
-  the list to the owner before cutting.
+  `initrd.img` + `ramroot.sqsh` for an upgrade). Secondary: RAM use.
 - Cuts must respect the Standing Constraints: firmware is selected by
   package, never by a cleanup sweep; no `find`/`rm` over `/usr/lib/firmware`;
   `--no-hostonly` stays; the WiFi core stack comes from the kernel. Every
-  cut is a package-list change or an explicit dracut option, with the size
-  delta measured and recorded in CHANGES.md and the commit.
-- Part 2 removes ThinLinc and OxuLnk from the image; measure after it.
+  cut is a package-list change, a build option or an explicit dracut
+  option, with the size delta measured and recorded in CHANGES.md and the
+  commit.
+
+### Survey (done 2026-10-24, no changes)
+
+Measured on the gate build of `main` @ 208e758 (ThinLinc and OxuLnk already
+out). The download is three files on the ESP:
+
+| file | size | content |
+| --- | --- | --- |
+| `ramroot.sqsh` | 552 MB | 1114 MB of files, zstd **level 3**, `-b 1M` |
+| `initrd.img` | 179 MB | 22 MB early microcode cpio + 158 MB main archive (zstd -3, 227 MB unpacked) |
+| `vmlinuz` | 17 MB | |
+
+`thinfloe-usb.img.zst` is 772 MB (2026-10-08 build; the ESP is mostly these
+three files).
+
+Findings that led to the cuts:
+
+- The initrd carries **82 MB of Intel WiFi firmware** (`intel/iwlwifi/`,
+  174 files, already zstd-compressed, so it does not shrink further). It
+  comes in through `instmods iwlwifi iwlmvm cfg80211` in
+  `90thinfloe/module-setup.sh`. Nothing in the initrd uses WiFi: there is
+  no `wpa_supplicant` in it, and netboot runs over a cable. The line
+  `inst_multiple -o /usr/lib/firmware/iwlwifi-*` next to it matches nothing
+  on 26.04 (the files moved to `intel/iwlwifi/`).
+- Recompressing the same tree at other levels (`-b 1M`, 4 processors):
+  zstd 3: 554.7 MB (2 s); 15: 537.0 MB (15 s); **19: 514.3 MB (50 s)**;
+  22: 514.3 MB (64 s); xz with `-Xbcj x86`: 491.2 MB (99 s).
+  zstd decompresses at the same speed at every level; xz costs CPU on every
+  page read at runtime, for the life of the session.
+- The initrd main archive at zstd 19 instead of 3: about 10 MB smaller.
+- `vim` brings `vim-runtime` (38 MB), `libpython3.14` (8 MB), `libsodium23`,
+  `vim-common`: 52 MiB in five packages. `joe` is also in the image.
+  `vim-tiny` (26.04: 2 MB, `Depends: vim-common`, `Provides: editor`)
+  exists.
+- The ubuntu:26.04 base carries the account `ubuntu` (uid 1000, group 1000,
+  `/home/ubuntu`, in `sudo`, `adm` and others, entries in `/etc/subuid` and
+  `/etc/subgid`). Its password is locked; it is unused.
+- Hard dependencies that a package-list change cannot remove: the kernel
+  modules (163 MB) and `intel-microcode` (21 MB) via `linux-image-generic`;
+  `libllvm21` (139 MB of files, about 31 MB at zstd 19) via mesa, which
+  both `libwlroots` and `xwayland` need (`libgbm1`, `libegl1`);
+  `rust-coreutils` via `dracut-core` and `tzdata`.
+- waybar alone pulls 36 packages, 43 MiB (GTK 3, gtkmm, Adwaita icons).
+  The image loaders `glycin-loaders`, `libjxl`, `libaom` stay without
+  waybar, because labwc needs `libgdk-pixbuf`.
+- Removing labwc, Xwayland and waybar together would remove 108 packages,
+  276 MiB, mesa and LLVM included; see Non-goals of this part.
+
+Raw survey output is not kept in the repo; rerun it from the commands
+above when needed.
+
+### Cuts (decided 2026-10-24)
+
+1. **No WiFi in the initrd.** Remove `instmods iwlwifi iwlmvm cfg80211` and
+   the dead `inst_multiple -o /usr/lib/firmware/iwlwifi-*` from
+   `90thinfloe/module-setup.sh`. The built initrd must contain no
+   `iwlwifi.ko*` and no `usr/lib/firmware/intel/iwlwifi/`. The running
+   system is unchanged: udev loads the WiFi drivers and firmware from the
+   squashfs after switch-root, and `install_local_network()` copies
+   `~/wifi.yaml` as files, which needs no driver. Expected: about 80 MB.
+   *Builder's call:* whether the few other wireless modules that arrive
+   through other dracut modules (`mt76` SDIO, `libertas` SDIO, `mac80211`;
+   no firmware of theirs is in the initrd) also go via `--omit-drivers`.
+2. **squashfs at zstd level 19.** `SQUASHFS_COMP_LEVEL ?= 19` in the
+   `Makefile` (and the default in `scripts/export-rootfs.sh`). Expected:
+   about 40 MB; the build takes about 50 s longer.
+3. **`vim-tiny` instead of `vim`** in `containers/ubuntu/Dockerfile`.
+   Expected: about 50 MiB of files, roughly 15 MB of download (estimate;
+   measure). `vim-tiny` puts `vim.tiny` behind `vi`, `view`, `ex` and
+   `editor`, not behind `vim`. *My call:* `vim` stays a working command
+   (a link to `vim.tiny`, asserted by a test), so an admin typing `vim`
+   in the Terminal tile or over SSH still gets an editor.
+4. **No `ubuntu` account.** Delete the account, its group, `/home/ubuntu`
+   and its `/etc/subuid` / `/etc/subgid` lines in
+   `containers/ubuntu/Dockerfile`. tfuser must stay uid **1001**: field
+   archives carry 1001 and the restore keeps numeric owners. `adduser`
+   picks the lowest free uid, so either delete `ubuntu` only after tfuser
+   exists, or create tfuser with `--uid 1001` (and a matching gid);
+   *builder's call* which, but the uid and gid must be asserted by a test.
+   The existing check in `test/integration/test-session-packages.sh`
+   ("locked or absent") becomes "absent". No size effect; it removes an
+   unused sudo-capable account.
+
+*My call:* the initrd keeps zstd -3. The 10 MB of a higher level would be
+paid with a slower start on every boot, the place where speed is felt.
+
+*My call:* `hwdb.bin` (13 MB unpacked, about 2 MB compressed) and `zfs.ko`
+(2 MB) stay in the initrd: small gain, and the hwdb carries keyboard
+mappings udev applies before switch-root.
+
+Every cut is its own commit with the measured delta of `ramroot.sqsh`,
+`initrd.img` and `thinfloe-usb.img.zst`. Expected total: about 772 →
+635 MB (estimate; the CHANGES entry carries the measured figure).
+
+### Guards
+
+- A test (in `test/integration/test-initramfs-commands.sh`, which already
+  reads `lsinitramfs`, or next to it) fails when the initrd contains
+  `iwlwifi.ko*` or `usr/lib/firmware/intel/iwlwifi/`.
+  `test/integration/test-firmware.sh` keeps asserting the WiFi firmware in
+  the squashfs, and `test/integration/test-wifi-stack.sh` the in-tree
+  drivers there.
+- A test asserts the squashfs compression (`unsquashfs -s` reports
+  compressor and level; *builder* checks the exact output).
+- `test/integration/test-session-packages.sh`: `vim` not installed,
+  `vim-tiny` installed; `ubuntu` absent from passwd, group, shadow,
+  subuid and subgid, no `/home/ubuntu`; tfuser uid and gid 1001.
+- All existing gates stay green: `make test`, `make test-unit`, the four
+  QEMU smokes, `make test-runtime`.
+- **On hardware:** a USB boot on an Intel WiFi machine (the Intel 8265
+  that confirmed the WiFi stack on 2026-10-01) associates with the WiFi
+  from `~/wifi.yaml`. Until that is done, record the cut as not verified on
+  hardware in CLAUDE.md.
+
+### Non-goals of this part
+
+- **Taskbar:** moves into `thinfloe-menu` in Part 4 (decided 2026-10-24);
+  waybar and GTK 3 leave the image then (about 43 MiB).
+- **Own compositor** (Smithay, CPU rendering) plus an own Xwayland build
+  without glamor, which would drop labwc, wlroots, mesa and LLVM (about
+  276 MiB of files, perhaps 70-80 MB of download): parked until after 4.0.
+  It would have to rebuild what labwc and our two patches do (multi-monitor,
+  hotplug, DPMS, input, Xwayland window handling, fullscreen span, keyboard
+  grabs), composite on the CPU, and it is unknown whether `oxulnk-desktop`
+  needs GL or Vulkan.
+- A rebuilt mesa without LLVM; trimming the kernel module set; dropping
+  `intel-microcode` or `rust-coreutils` (hard dependencies).
+- Dropping `firmware-sof-signed` (44 MB, Intel audio DSP firmware): the
+  owner's machines need the sound (decided 2026-10-24).
+- xz for the squashfs.
 
 ---
 
@@ -431,8 +555,15 @@ and fall back to the version alone where the name is not yet known.
   corner. No slanted shapes on tiles.
 - **Log:** bottom 30 % as now, same colour roles (time grey, source ice
   blue, warnings amber, success green).
-- **Taskbar (waybar):** same near-black; the active window has an ice-blue
-  underline.
+- **Taskbar:** built into `thinfloe-menu` (decided 2026-10-24, from the
+  Part 3 survey); waybar and GTK 3 leave the image. Same near-black; the
+  active window has an ice-blue underline. The menu is a normal window
+  kept at the bottom, and winit cannot make a layer-shell surface, so a
+  bar that stays above other windows needs a second surface (for example
+  via `smithay-client-toolkit`); the alternative is a window list inside
+  the menu, visible only when nothing covers it. *Open for the Part 4
+  design.* The bar's job stays the one waybar has today: a minimized
+  window must always be reachable.
 - **labwc title bars and the menu dialogs:** same palette, Geo for titles
   (no separate mockup; *builder's call* within that palette).
 - The menu still draws on the CPU (Standing Constraint). Geo is embedded in
@@ -552,7 +683,10 @@ ThinLinc configuration; site-specific defaults leave the image. From the
 pushback review (2026-10-22): a failed first ThinLinc download shows an
 error with Retry, no owner-hosted fallback; `~/.dbrrg-*` symlinks keep a
 3.x fallback boot working; sources that are neither HTTPS nor signed are
-never updated automatically; no 3.x maintenance branch.
+never updated automatically; no 3.x maintenance branch. Part 3
+(2026-10-24): no WiFi in the initrd, squashfs at zstd 19, `vim-tiny`, no
+`ubuntu` account; the taskbar moves into the menu in Part 4; an own
+compositor is parked until after 4.0.
 
 My calls (check while reading): `X-TF-` key prefix; old docs unchanged;
 migration code kept until removed on purpose; ice blue `#7cc4ff`; first
