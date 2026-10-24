@@ -138,7 +138,9 @@ menu asks whether to stay or to go on anyway.
 
 ThinLinc and OxuLnk are not in the image. Tick them in Settings: the image
 fetches the program from its source, keeps a copy on the boot stick and
-installs it at every boot, before the session starts. A new version found
+installs it at every boot, before the session starts. A network-booted
+machine has no boot stick: it fetches and installs its add-ons about a
+minute after boot, once the network is up. A new version found
 by the daily check becomes active at the next boot. Install now and Update now
 act at once. A source that is not HTTPS and not signed is never fetched
 automatically; its row says "updates only by hand".

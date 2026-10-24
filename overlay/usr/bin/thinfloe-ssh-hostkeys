@@ -71,7 +71,8 @@ stage_to_keystore() {
     cp -p "$SSH_DIR"/ssh_host_* "$KEYSTORE"/ 2>/dev/null || return 1
 
     # Owned by tfuser like the rest of the home. thinfloe-save-home archives as
-    # root now, but until 2026-10 the netboot save ran tar as tfuser, and an
+    # root now, but until 2026-10 the netboot save ran tar as tluser (the
+    # account's name before 4.0), and an
     # unreadable root-owned file failed the whole save.
     chown -R "$KEY_OWNER:$KEY_OWNER" "$KEYSTORE" 2>/dev/null || \
         echo "thinfloe-ssh-hostkeys: WARNING could not chown $KEYSTORE" >&2

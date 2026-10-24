@@ -708,8 +708,9 @@ fi
 # itself: --check resolves each Icon= and renders it in the same rlimited,
 # time-limited renderer process the session uses, so an icon that is missing
 # or that the renderer refuses or cannot finish fails here, not as a letter
-# on the screen. thinlinc_128.png is an absolute path into /opt/thinlinc,
-# which has moved across client versions before.
+# on the screen. An add-on tile's icon is skipped while the add-on is not
+# installed, which it never is in the image: test-addon-deps.sh checks
+# ThinLinc's thinlinc_128.png after installing the client.
 IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
 if check_out=$(podman run --rm --network=none "$IMAGE" /usr/bin/thinfloe-menu --check 2>&1); then
     echo "ok   - every shipped tile is usable and its icon renders"

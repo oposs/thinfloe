@@ -60,6 +60,13 @@ check_addon() {
         # thinfloe-addon runs the add-on'"'"'s hook after dpkg.
         hook=/usr/libexec/thinfloe/addon-hooks/'"$id"'
         if [ -x "$hook" ]; then "$hook" || { echo "hook $hook failed"; exit 6; }; fi
+        # thinfloe-menu --check skips the icon of an add-on that is not
+        # installed, so an absolute Icon= (thinlinc_128.png has moved across
+        # client versions) is checked here, against the installed package.
+        icon=$(sed -n "s/^Icon=//p" /etc/thinfloe/menu/'"$id"'.desktop | head -n1)
+        case "$icon" in
+            /*) [ -f "$icon" ] || { echo "the tile icon $icon is not in the package"; exit 8; } ;;
+        esac
         # A client keeps private libraries in its own directories and finds
         # them through its wrapper; give ldd the same directories.
         LD_LIBRARY_PATH=$(dpkg -L '"$pkg"' | grep -E "\.so(\.|$)" | while read -r f; do [ -f "$f" ] && dirname "$f"; done | sort -u | paste -sd:)
@@ -78,7 +85,7 @@ check_addon() {
         fi
         exit 0' 2>&1)
     if [[ $? -eq 0 ]]; then
-        ok "$label: every library resolves and the client starts"
+        ok "$label: every library resolves, the client starts and the tile icon exists"
     else
         bad "$label:"
         echo "$out" | head -20
