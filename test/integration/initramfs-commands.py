@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the command names a shell script runs, one per line.
 
-Used by test-initramfs-commands.sh to check the 90dbrrg dracut hooks against
+Used by test-initramfs-commands.sh to check the 90thinfloe dracut hooks against
 the commands that actually exist in the built initrd. It is a heuristic
 reader, not a shell parser: it finds the word in command position after
 newlines, ; && || | ( ) { } ! and the shell keywords that start a command,

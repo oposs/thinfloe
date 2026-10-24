@@ -1,0 +1,24 @@
+[Unit]
+Description=Install the ticked ThinFloe add-ons from the boot stick
+# Installs what is stored on the ESP, with no network, before the session
+# starts, so a ticked tile works at once. The home and the ESP come from the
+# initramfs, so there is nothing to wait for beyond the default ordering.
+Before=getty@tty1.service
+
+# Deliberately no Before= on anything in sysinit.target. This unit is
+# WantedBy=multi-user.target and so implicitly After=basic.target, which comes
+# after sysinit.target: a Before= on a sysinit unit would order it both before
+# and after the same target, and systemd breaks that cycle by deleting a job
+# on every boot. See CLAUDE.md, "A multi-user.target unit must never declare
+# Before= on a sysinit.target unit".
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/thinfloe-addon boot
+# Each dpkg or tar gets 25 s at boot (BOOT_TOOL_TIMEOUT in thinfloe-addon),
+# so a hung one is killed and the next add-on still installs; this bounds
+# how long the tty1 autologin waits.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

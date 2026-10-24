@@ -1,0 +1,15 @@
+[Unit]
+Description=Install or generate persistent SSH host keys
+# The keys come out of /home/tfuser, which the initramfs restored before the
+# pivot - so there is nothing to wait for here beyond the filesystem.
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/thinfloe-ssh-hostkeys
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+# last line

@@ -1,4 +1,6 @@
-# dbrrg - Docker-Based RamRoot Generator v3.0
+# ThinFloe
+
+ThinFloe boots a thin client from a USB stick or the network into RAM. Like an ice floe it carries you for a while and is gone at power-off, except for the saved home. Releases before 4.0 were called dbrrg (Docker-Based RamRoot Generator).
 
 Modern diskless Linux system using SquashFS + OverlayFS + ZRAM + Dracut.
 
@@ -44,7 +46,7 @@ make clean && make
 ## Directory Structure
 
 ```
-dbrrg/
+thinfloe/
 ├── Makefile                    # Build system
 ├── build/                      # Build scripts
 │   ├── lib/common.sh
@@ -57,8 +59,8 @@ dbrrg/
 ├── configs/                    # Configuration files
 │   └── syslinux.cfg
 ├── overlay/                    # Rootfs customizations
-│   ├── usr/lib/dracut/modules.d/90dbrrg/  # Dracut module
-│   └── etc/sysctl.d/99-dbrrg-memory.conf  # Memory tuning
+│   ├── usr/lib/dracut/modules.d/90thinfloe/  # Dracut module
+│   └── etc/sysctl.d/99-thinfloe-memory.conf  # Memory tuning
 └── artifacts/                  # Build outputs (gitignored)
     ├── rootfs/
     │   ├── vmlinuz
@@ -68,9 +70,9 @@ dbrrg/
     │   ├── undionly.kpxe
     │   └── ipxe.efi
     └── images/
-        ├── dbrrg-usb.img
-        ├── dbrrg-usb.img.zst
-        └── dbrrg-usb.img.zst.sha256
+        ├── thinfloe-usb.img
+        ├── thinfloe-usb.img.zst
+        └── thinfloe-usb.img.zst.sha256
 ```
 
 ## Boot Parameters
@@ -87,7 +89,7 @@ ramroot=http://server/boot/ramroot.sqsh rd.neednet=1 ip=dhcp
 
 ### Debug Mode
 ```
-rd.debug rd.shell rd.dbrrg.debug rd.break=pre-mount
+rd.debug rd.shell rd.thinfloe.debug rd.break=pre-mount
 ```
 
 ## Configuration
@@ -102,18 +104,18 @@ Edit `Makefile` variables:
 ### USB Stick
 ```bash
 # Write compressed image to USB (recommended)
-zstd -d < artifacts/images/dbrrg-usb.img.zst | dd of=/dev/sdX bs=1M status=progress conv=fsync
+zstd -d < artifacts/images/thinfloe-usb.img.zst | dd of=/dev/sdX bs=1M status=progress conv=fsync
 
 # Or write uncompressed image
-dd if=artifacts/images/dbrrg-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
+dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
 ```
 
 ### Upgrading Firmware
 
-Use the interactive `upgrade-image` script on a running system:
+Use the interactive `thinfloe-upgrade` script on a running system:
 
 ```bash
-sudo upgrade-image
+sudo thinfloe-upgrade
 ```
 
 Features:
@@ -129,18 +131,32 @@ Upgrade modes:
 
 ### The session menu
 
-After login the session opens a grid of tiles. ThinLinc is one click.
-Other shipped tiles start oxulnk, a terminal, a home backup, `upgrade-image`
-and the logout. Logging out saves the home directory first; if the save
-fails, the menu asks whether to stay or to log out anyway.
+After login the session opens a grid of tiles. The shipped tiles start a
+terminal, a home backup, `thinfloe-upgrade`, Settings, Restart and Power off.
+Restart and Power off save the home directory first; if the save fails, the
+menu asks whether to stay or to go on anyway.
 
-Add a tile for one machine as a `.desktop` file in `~/.config/dbrrg/menu/`:
+ThinLinc and OxuLnk are not in the image. Tick them in Settings: the image
+fetches the program from its source, keeps a copy on the boot stick and
+installs it at every boot, before the session starts. A network-booted
+machine has no boot stick: it fetches and installs its add-ons about a
+minute after boot, once the network is up. A new version found
+by the daily check becomes active at the next boot. Install now and Update now
+act at once. A source that is not HTTPS and not signed is never fetched
+automatically; its row says "updates only by hand".
+
+An add-on is installed as root and may write anywhere on the system. The
+tick list and the tile that names the source are part of the home directory,
+so whoever can change the saved home of a machine can bring software onto it.
+Keep the boot stick, and the home archive on the boot server, to yourself.
+
+Add a tile for one machine as a `.desktop` file in `~/.config/thinfloe/menu/`:
 
 ```ini
 [Desktop Entry]
 Type=Application
 Name=Screenshot
-Exec=grim /home/tluser/screenshot.png
+Exec=grim /home/tfuser/screenshot.png
 ```
 
 Without an `Icon` the tile shows the first letter of `Name`. The program must
@@ -148,11 +164,11 @@ be in the image; a tile whose program is not installed is drawn grey.
 
 - `Name`, `Icon`, `Exec`: Label, icon and command of the tile.
 - `Terminal=true`: Run the command in a terminal window.
-- `X-DBRRG-Save-On-Exit=true`: Save the home directory when the program exits.
+- `X-TF-Save-On-Exit=true`: Save the home directory when the program exits.
 
 The files are saved with the home directory. A file with the name of a
 shipped tile (for example `10-thinlinc.desktop`) rewords that tile's `Name`,
-`Comment` and `Icon`; its other keys are ignored. `dbrrg-menu --check` run
+`Comment` and `Icon`; its other keys are ignored. `thinfloe-menu --check` run
 from a VT explains why a tile is grey.
 
 ### Network Boot (PXE/iPXE)
@@ -188,15 +204,15 @@ make clean && make
 ### Boot Issues
 ```bash
 # Use debug mode in syslinux.cfg
-rd.debug rd.shell rd.dbrrg.debug
+rd.debug rd.shell rd.thinfloe.debug
 
 # Check logs after boot
 cat /var/log/dracut-boot.log
-cat /var/log/dbrrg/*
+cat /var/log/thinfloe/*
 ```
 
 ### Memory Issues
-Edit `overlay/etc/sysctl.d/99-dbrrg-memory.conf`:
+Edit `overlay/etc/sysctl.d/99-thinfloe-memory.conf`:
 - Increase `vm.vfs_cache_pressure` to 200 (more aggressive cache eviction)
 - Decrease ZRAM size in dracut module
 
@@ -205,16 +221,16 @@ Edit `overlay/etc/sysctl.d/99-dbrrg-memory.conf`:
 ### Test Dracut Module
 ```bash
 # Rebuild initramfs quickly
-dracut --force --add dbrrg
+dracut --force --add thinfloe
 
 # Test in QEMU
 qemu-system-x86_64 -m 4G -enable-kvm \
-  -drive file=artifacts/images/dbrrg-usb.img,format=raw
+  -drive file=artifacts/images/thinfloe-usb.img,format=raw
 ```
 
 ### Modify Boot Process
-Edit files in `overlay/usr/lib/dracut/modules.d/90dbrrg/`:
-- `parse-dbrrg.sh` - Command line parsing
+Edit files in `overlay/usr/lib/dracut/modules.d/90thinfloe/`:
+- `parse-thinfloe.sh` - Command line parsing
 - `finalize-upgrade.sh` - Activate pending tl.new/ upgrades
 - `mount-squashfs.sh` - SquashFS mounting
 - `setup-overlay.sh` - Overlay setup

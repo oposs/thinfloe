@@ -5,5 +5,5 @@
 !containers/ubuntu/patches
 !syslinux.cfg
 !vendor
-!src/dbrrg-menu
-src/dbrrg-menu/target
+!src/thinfloe-menu
+src/thinfloe-menu/target

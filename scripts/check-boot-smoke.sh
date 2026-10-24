@@ -98,8 +98,8 @@ unwant "no dracut emergency shell"   'Entering emergency mode|dracut: FATAL'
 unwant "no kernel panic"             'Kernel panic'
 unwant "no systemd ordering cycle"   'Found ordering cycle'
 
-# The dbrrg pre-mount and mount hooks need what the cmdline hook sets up
-# (root=dbrrg, /tmp/dbrrg-ramroot). Without the 90dbrrg drop-ins ordering them
+# The ThinFloe pre-mount and mount hooks need what the cmdline hook sets up
+# (root=thinfloe, /tmp/thinfloe-ramroot). Without the 90thinfloe drop-ins ordering them
 # After=dracut-cmdline.service they started in parallel with it, and a boot
 # that lost that race ended in the emergency shell.
 line_of() {

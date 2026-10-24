@@ -1,6 +1,6 @@
-# Makefile for dbrrg - SquashFS + OverlayFS + ZRAM + Dracut
+# Makefile for ThinFloe - SquashFS + OverlayFS + ZRAM + Dracut
 
-PROJECT_NAME := dbrrg
+PROJECT_NAME := thinfloe
 VERSION := 3.0.0
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 BUILD_ID := $(shell date -u +%Y%m%d-%H%M%S)
@@ -37,40 +37,17 @@ SQUASHFS_COMP ?= zstd
 SQUASHFS_COMP_LEVEL ?= 3
 EFI_PARTITION_SIZE ?= 3000
 
-# Local (non-archive) packages staged into the container build context.
-#
-# vendor/oxulnk-desktop.deb is the file the Dockerfile reads. OXULNK_DEB only
-# refreshes it from a local build, and is unset by default: the default used to
-# be an absolute path into one branch's build directory under
-# /scratch/oetiker/cargo-target, and once cargo-sweep removed that directory
-# every make target stopped with "No rule to make target", `test` included,
-# although the staged copy in vendor/ was present and current.
-OXULNK_DEB ?=
-VENDOR_DEB := vendor/oxulnk-desktop.deb
-
-# Checked here rather than in the recipe below. Make resolves the prerequisite
-# graph before it runs anything, so a `test -f "$(OXULNK_DEB)"` inside the
-# recipe can never fire: make has already stopped with its own message.
-ifneq ($(strip $(OXULNK_DEB)),)
-ifeq ($(wildcard $(OXULNK_DEB)),)
-$(error OXULNK_DEB=$(OXULNK_DEB) does not exist)
-endif
-ifeq ($(abspath $(OXULNK_DEB)),$(abspath $(VENDOR_DEB)))
-$(error OXULNK_DEB points at $(VENDOR_DEB) itself; the copy would truncate it)
-endif
-endif
-
 # QEMU settings
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-upgrade test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
 
 help:
-	@echo "dbrrg Build System"
+	@echo "ThinFloe Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all (default)     - Build complete USB image"
@@ -81,6 +58,7 @@ help:
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
+	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test              - Run integration guard tests against rootfs"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -94,7 +72,6 @@ help:
 	@echo "  QEMU_MEMORY=2G             - QEMU RAM allocation"
 	@echo "  QCOW2_TEST_SIZE=4G         - Size for qemu-test"
 	@echo "  QEMU_EXTRA_ARGS=\"\"          - Additional QEMU arguments"
-	@echo "  OXULNK_DEB=path/to.deb     - Restage vendor/oxulnk-desktop.deb from a local build"
 
 $(ARTIFACT_DIR) $(ROOTFS_DIR) $(IMAGE_DIR):
 	mkdir -p $@
@@ -118,7 +95,7 @@ OVERLAY_FILES := $(shell find overlay -type f ! -name '*~' 2>/dev/null)
 # changed.
 PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 
-# dbrrg-menu is built from source in the ubuntu container's menu-build stage.
+# thinfloe-menu is built from source in the ubuntu container's menu-build stage.
 # Like PATCH_FILES, its sources must be prerequisites of .ubuntu-container:
 # OVERLAY_FILES only finds files under overlay/, and the crate cannot live
 # there because overlay/ is copied into the shipped rootfs. Without this,
@@ -126,14 +103,14 @@ PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 # do, and 'make test' validates a stale binary while printing green. The
 # directories are listed as well, so deleting a file still changes a
 # prerequisite's mtime.
-MENU_FILES := $(shell find src/dbrrg-menu -path src/dbrrg-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
-MENU_DIRS := $(shell find src/dbrrg-menu -path src/dbrrg-menu/target -prune -o -type d -print 2>/dev/null)
+MENU_FILES := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
+MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type d -print 2>/dev/null)
 
 # Each container stamp holds the ID of the image its build produced, and is
 # removed at parse time unless the tag still names exactly that image.
 #
 # The stamp is per checkout, but the tag is not: every checkout of this repo
-# builds dbrrg-ubuntu:$(VERSION). The old check only asked whether the tag
+# builds thinfloe-ubuntu:$(VERSION). The old check only asked whether the tag
 # existed, so after another checkout built and re-tagged the image, this
 # checkout's stamp still said "up to date" and `make test` ran its guards
 # against the other checkout's image and reported green. A stamp from before
@@ -145,22 +122,7 @@ $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
-ifeq ($(strip $(OXULNK_DEB)),)
-# Nothing to refresh from, so the staged copy is the whole input. No
-# prerequisites: make leaves an existing file alone and runs this only when it
-# is missing.
-$(VENDOR_DEB):
-	@echo "ERROR: no oxulnk-desktop package staged at $@"
-	@echo "Stage one with:"
-	@echo "  make $@ OXULNK_DEB=/path/to/oxulnk-desktop_*.deb"
-	@exit 1
-else
-$(VENDOR_DEB): $(OXULNK_DEB)
-	@mkdir -p vendor
-	cp $< $@
-endif
-
-.ubuntu-container: containers/ubuntu/Dockerfile $(VENDOR_DEB) $(OVERLAY_FILES) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(OVERLAY_FILES) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
@@ -274,11 +236,11 @@ $(QCOW2_EMPTY_IMAGE):
 
 qemu-test: $(QCOW2_BOOT_IMAGE) $(QCOW2_TARGET_IMAGE) $(QCOW2_EMPTY_IMAGE)
 	@echo "Starting QEMU with 3 drives for upgrade testing..."
-	@echo "  Boot drive:   $(QCOW2_BOOT_IMAGE) (vda) - current dbrrg"
-	@echo "  Target drive: $(QCOW2_TARGET_IMAGE) (vdb) - dbrrg for A/B test"
+	@echo "  Boot drive:   $(QCOW2_BOOT_IMAGE) (vda) - current ThinFloe"
+	@echo "  Target drive: $(QCOW2_TARGET_IMAGE) (vdb) - ThinFloe for A/B test"
 	@echo "  Empty drive:  $(QCOW2_EMPTY_IMAGE) (vdc) - fresh install test"
 	@echo ""
-	@echo "Run 'upgrade-image' to test upgrade workflow"
+	@echo "Run 'thinfloe-upgrade' to test upgrade workflow"
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
 	qemu-system-x86_64 \
@@ -304,7 +266,7 @@ qemu-test: $(QCOW2_BOOT_IMAGE) $(QCOW2_TARGET_IMAGE) $(QCOW2_EMPTY_IMAGE)
 # -kernel/-initrd rather than going through syslinux. That is deliberate:
 # driving the bootloader menu over a serial line is racy, and booting
 # directly is deterministic while still exercising everything that matters -
-# the kernel, the initramfs, the dbrrg dracut module, the squashfs mount, the
+# the kernel, the initramfs, the ThinFloe dracut module, the squashfs mount, the
 # overlay setup and systemd startup. Syslinux itself is covered by the
 # interactive qemu-test target.
 #
@@ -362,7 +324,7 @@ qemu-smoke-netboot: $(KERNEL) $(INITRD) $(SQUASHFS) | $(IMAGE_DIR)
 		-device virtio-rng-pci,rng=rng0
 
 # Headless first boot of a staged upgrade: tl.new/ on the stick and
-# syslinux.cfg on DEFAULT new, as upgrade-image leaves them, booted through
+# syslinux.cfg on DEFAULT new, as thinfloe-upgrade leaves them, booted through
 # OVMF and syslinux. Requires the initramfs to rotate tl.new into tl/ and set
 # DEFAULT current again. See scripts/run-qemu-upgrade-smoke.sh.
 QEMU_UPGRADE_LOG := $(IMAGE_DIR)/qemu-upgrade-smoke.log
@@ -375,14 +337,28 @@ qemu-smoke-upgrade: $(USB_IMAGE)
 		$(QEMU_UPGRADE_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
 		"$(QEMU_SMOKE_APPEND)"
 
+# Headless boot of a stick that carries a ticked add-on (a tiny .deb in
+# addons/90-smoke/ on the ESP). Requires thinfloe-addons.service to install it
+# before getty@tty1.service starts, with no network. See
+# scripts/run-qemu-addons-smoke.sh.
+QEMU_ADDONS_LOG := $(IMAGE_DIR)/qemu-addons-smoke.log
+QEMU_ADDONS_IMAGE := $(IMAGE_DIR)/$(PROJECT_NAME)-addons-smoke.img
+
+qemu-smoke-addons: $(USB_IMAGE) $(KERNEL) $(INITRD)
+	@echo "Running headless add-ons boot smoke test..."
+	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-addons-smoke.sh $(USB_IMAGE) $(QEMU_ADDONS_IMAGE) \
+		$(KERNEL) $(INITRD) $(QEMU_ADDONS_LOG) $(QEMU_SMOKE_TIMEOUT) \
+		$(QEMU_SMOKE_GRACE) "$(QEMU_SMOKE_APPEND)"
+
 # Host-side tests. No image, no container, no network: the fast feedback
-# loop for the scripts in overlay/usr/bin and for dbrrg-menu's rules.
+# loop for the scripts in overlay/usr/bin and for thinfloe-menu's rules.
 # Deliberately not dependent on 'rootfs'.
 #
 # MEMCAP bounds the cargo tests: the tile-file and icon tests feed
 # deliberately oversized input, and a broken bound must fail the test rather
 # than take the machine's memory. Set MEMCAP= where systemd-run is missing.
-MENU_DIR := src/dbrrg-menu
+MENU_DIR := src/thinfloe-menu
 MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
 test-unit:
 	@python3 -m unittest discover -s test/unit -v
@@ -391,7 +367,7 @@ test-unit:
 test: test-unit rootfs
 	@test/integration/test-firmware.sh
 	@test/integration/test-wifi-stack.sh
-	@DBRRG_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
+	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-initramfs-home.sh
 	@test/integration/test-initramfs-commands.sh
@@ -400,11 +376,13 @@ test: test-unit rootfs
 	@test/integration/test-save-home.sh
 	@test/integration/test-password.sh
 	@test/integration/test-field-report.sh
+	@test/integration/test-cmdline.sh
 	@test/integration/test-session-lifecycle.sh
 	@test/integration/test-container-stamp.sh
 	@test/integration/test-usb-image-deps.sh
 	@test/integration/test-format-bytes.sh
 	@test/integration/test-make-clean.sh
+	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
 
 # Runtime session tests. Needs network (installs python3-xlib into a
 # test-only image) and runs a compositor, so it is deliberately not part of

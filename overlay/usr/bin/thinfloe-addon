@@ -1,0 +1,2109 @@
+#!/usr/bin/env python3
+"""
+thinfloe-addon - add-ons of ThinFloe
+
+An add-on is a tile file (.desktop) in /etc/thinfloe/menu/ or in
+~/.config/thinfloe/menu/ with X-TF-Source-* keys that name where a program
+comes from. This file reads those definitions and checks their sources for
+the version on offer, stores what they offer on the boot stick, installs
+it and removes it. It runs as root; tile files in the home are user data.
+
+Commands (exit 0 on success, 1 on a failure that is in the log):
+  boot              at boot, with no network: tick the add-ons of a home
+                    from 3.x, make next.* current.*, install every ticked
+                    current.* from the boot stick
+  status            rewrite /run/thinfloe/addons/status and print it
+  check [ID...]     no ids: every ticked add-on whose source is HTTPS or
+                    signed; a copy that is not stored yet is installed now,
+                    a newer version becomes next.*, active at next boot;
+                    with ids: those ticked add-ons, but a source that is
+                    neither HTTPS nor signed is only reported, never stored
+  install ID        tick, fetch if needed, install now
+  update ID         install next.* now (fetched first if there is none)
+  remove ID         untick, uninstall, delete the stored copies
+
+Source keys:
+  X-TF-Source-Apt=<uri> <suite> [<component>]   APT repository (flat when
+  X-TF-Source-Package=<name>                     the suite ends in "/")
+  X-TF-Source-Key=<https URL of an OpenPGP key>  optional, APT only
+  X-TF-Source-URL=<url>                          fixed address
+  X-TF-Source-Page=<url>                         web page ...
+  X-TF-Source-Pattern=<Python regex>             ... and the link to take
+  X-TF-Source-Format=deb|tar                     else taken from the URL
+  X-TF-Source-Config=<path relative to home>     seeds the tick from 3.x
+"""
+
+import contextlib
+import errno
+import fcntl
+import hashlib
+import html
+import http.client
+import json
+import os
+import pwd
+import re
+import select
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+# ============ Constants ============
+
+VERSION_FILE = "/etc/thinfloe/version"
+# The menu's limits (src/thinfloe-menu/src/tiles.rs), so both read the same
+# tiles from the same directories.
+MAX_USER_FILES = 32
+MAX_SHIPPED_FILES = 64
+MAX_DIR_ENTRIES = 4096
+MAX_FILE_BYTES = 64 * 1024
+MAX_TEXT_CHARS = 120
+USER_DIR_LABEL = "~/.config/thinfloe/menu"
+
+HTTP_TIMEOUT = 20
+MAX_REDIRECTS = 10
+MAX_PAGE_BYTES = 2 * 1024 * 1024
+MAX_KEY_BYTES = 1024 * 1024
+# The pattern is user data run as root over up to 2 MiB; (a+)+$ backtracks
+# for hours. The match runs in a child that is killed after this many seconds.
+PATTERN_TIMEOUT = 5
+MAX_PATTERN_MATCHES = 10000
+APT_TIMEOUT = 300
+
+SOURCE_PREFIX = "X-TF-Source-"
+SOURCE_KEYS = ("Apt", "Package", "Key", "URL", "Page", "Pattern", "Format", "Config")
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst")
+REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+class CheckError(Exception):
+    """A check that failed. The text is shown to the person at the machine."""
+
+
+@dataclass
+class Source:
+    kind: str  # "apt" | "url" | "page"
+    url: str  # repository URI, fixed address or page
+    pattern: Optional[str]
+    apt_suite: Optional[str]
+    apt_component: Optional[str]
+    package: Optional[str]
+    key_url: Optional[str]
+    fmt: Optional[str]  # "deb" | "tar", None: from the URL
+    config: Optional[str]
+
+
+@dataclass
+class Addon:
+    id: str
+    name: str
+    source: Source
+    shipped: bool
+    tile_path: str
+
+
+@dataclass
+class Found:
+    url: str  # what to download (APT: the .deb in the repository)
+    version: Optional[str]
+    fingerprint: str
+    fmt: str
+    urls_seen: List[str] = field(default_factory=list)
+
+
+# ============ Tile files ============
+
+def parse_desktop(text: str) -> dict:
+    """The keys of the [Desktop Entry] group, read like the menu reads them
+    (src/thinfloe-menu/src/desktop.rs). Raises ValueError naming the line."""
+    keys = {}
+    in_main = False
+    seen_main = False
+    for no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            if not line.endswith("]"):
+                raise ValueError("line %d is not a group header" % no)
+            in_main = line == "[Desktop Entry]"
+            seen_main = seen_main or in_main
+            continue
+        if "=" not in line:
+            raise ValueError("line %d is not a desktop entry line" % no)
+        if not seen_main:
+            raise ValueError("line %d comes before [Desktop Entry]" % no)
+        if not in_main:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("line %d has no key" % no)
+        if "[" in key:
+            continue
+        keys[key] = _unescape(value.strip())
+    if not seen_main:
+        raise ValueError("no [Desktop Entry] group")
+    return keys
+
+
+def _unescape(value: str) -> str:
+    out = []
+    i = 0
+    while i < len(value):
+        c = value[i]
+        if c != "\\" or i + 1 >= len(value):
+            out.append(c)
+            i += 1
+            continue
+        n = value[i + 1]
+        out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}.get(n, "\\" + n))
+        i += 2
+    return "".join(out)
+
+
+def _read_tile(path: str) -> str:
+    """A tile file, never through a symlink, never more than MAX_FILE_BYTES."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("not a regular file")
+    if st.st_size > MAX_FILE_BYTES:
+        raise ValueError("larger than %d KiB" % (MAX_FILE_BYTES // 1024))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = f.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError("larger than %d KiB" % (MAX_FILE_BYTES // 1024))
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("not UTF-8 text")
+
+
+def _list_tiles(directory: str, cap: int, label: str, log: List[str]) -> List[str]:
+    """The tile file names of a directory, sorted, at most `cap` of them."""
+    try:
+        st = os.lstat(directory)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        log.append("%s cannot be read: %s" % (label, e.strerror))
+        return []
+    if not stat.S_ISDIR(st.st_mode):
+        log.append("%s is not a directory, so it was ignored" % label)
+        return []
+    names = []
+    try:
+        with os.scandir(directory) as it:
+            for scanned, entry in enumerate(it, 1):
+                if scanned > MAX_DIR_ENTRIES:
+                    log.append("%s holds more than %d entries; only the first %d were looked at"
+                               % (label, MAX_DIR_ENTRIES, MAX_DIR_ENTRIES))
+                    break
+                name = entry.name
+                try:
+                    name.encode("utf-8")
+                except UnicodeEncodeError:
+                    continue
+                if name.endswith(".desktop") and not name.startswith("."):
+                    names.append(name)
+    except OSError as e:
+        log.append("%s cannot be read: %s" % (label, e.strerror))
+        return []
+    names.sort()
+    if len(names) > cap:
+        log.append("%s has %d tile files; only the first %d are used"
+                   % (label, len(names), cap))
+        names = names[:cap]
+    return names
+
+
+def _tf_key(keys: dict, suffix: str) -> Optional[str]:
+    """X-TF-<suffix>, else the 3.x X-DBRRG-<suffix>; the new key wins."""
+    v = keys.get("X-TF-" + suffix)
+    return v if v is not None else keys.get("X-DBRRG-" + suffix)
+
+
+def _has_source_keys(keys: dict) -> bool:
+    return any(k.startswith(SOURCE_PREFIX) for k in keys)
+
+
+def _web_url(value: str, what: str, https_only: bool = False) -> str:
+    parts = urllib.parse.urlsplit(value)
+    schemes = ("https",) if https_only else ("http", "https")
+    if parts.scheme not in schemes or not parts.netloc:
+        raise ValueError("%s must be an %s URL" % (what, " or ".join(schemes)))
+    return value
+
+
+def parse_source(keys: dict) -> Source:
+    """The Source of a tile's keys. Raises ValueError with the reason."""
+    get = {k: keys.get(SOURCE_PREFIX + k) for k in SOURCE_KEYS}
+    unknown = sorted(k for k in keys if k.startswith(SOURCE_PREFIX)
+                     and k[len(SOURCE_PREFIX):] not in SOURCE_KEYS)
+    if unknown:
+        raise ValueError("unknown key %s" % unknown[0])
+    kinds = [k for k in ("Apt", "URL", "Page") if get[k] is not None]
+    if len(kinds) != 1:
+        raise ValueError("needs exactly one of X-TF-Source-Apt, X-TF-Source-URL "
+                         "and X-TF-Source-Page")
+    kind = kinds[0]
+    for k, only in (("Package", "Apt"), ("Key", "Apt"), ("Pattern", "Page")):
+        if get[k] is not None and kind != only:
+            raise ValueError("X-TF-Source-%s belongs to X-TF-Source-%s" % (k, only))
+
+    fmt = get["Format"]
+    if fmt is not None and fmt not in ("deb", "tar"):
+        raise ValueError("X-TF-Source-Format must be deb or tar")
+
+    config = get["Config"]
+    if config is not None:
+        if (not config or config.startswith("/")
+                or ".." in config.split("/") or "\0" in config):
+            raise ValueError("X-TF-Source-Config must be a path inside the home")
+
+    pattern = suite = component = package = key_url = None
+    if kind == "Apt":
+        fields = get["Apt"].split()
+        if len(fields) not in (2, 3):
+            raise ValueError("X-TF-Source-Apt must be <uri> <suite> <component>")
+        url = _web_url(fields[0], "the repository")
+        suite = fields[1]
+        component = fields[2] if len(fields) == 3 else None
+        if component is None and not suite.endswith("/"):
+            raise ValueError("X-TF-Source-Apt needs a component unless the suite "
+                             "ends in / (flat repository)")
+        package = get["Package"]
+        if not package or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package):
+            raise ValueError("X-TF-Source-Apt needs a valid X-TF-Source-Package")
+        if get["Key"] is not None:
+            key_url = _web_url(get["Key"], "X-TF-Source-Key", https_only=True)
+        if fmt == "tar":
+            raise ValueError("an APT source provides deb only")
+        fmt = "deb"
+    elif kind == "URL":
+        url = _web_url(get["URL"], "X-TF-Source-URL")
+    else:
+        url = _web_url(get["Page"], "X-TF-Source-Page")
+        pattern = get["Pattern"]
+        if not pattern:
+            raise ValueError("X-TF-Source-Page needs X-TF-Source-Pattern")
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise ValueError("X-TF-Source-Pattern is not a valid regular expression: %s" % e)
+
+    return Source(kind={"Apt": "apt", "URL": "url", "Page": "page"}[kind], url=url,
+                  pattern=pattern, apt_suite=suite, apt_component=component,
+                  package=package, key_url=key_url, fmt=fmt, config=config)
+
+
+def load_addons(shipped_dir: str, user_dir: str) -> Tuple[List[Addon], List[str]]:
+    """Every add-on of both tile directories, sorted by id, and a log line for
+    each definition that is broken or was not taken. The menu's rules hold:
+    at most 32 user files; a user file named like a shipped one may reword
+    Name only here (the source keys stay the shipped ones); a user file may
+    only run a program."""
+    log: List[str] = []
+    found = {}
+
+    shipped_names = _list_tiles(shipped_dir, MAX_SHIPPED_FILES, shipped_dir, log)
+    shipped_keys = {}
+    for name in shipped_names:
+        path = os.path.join(shipped_dir, name)
+        try:
+            keys = parse_desktop(_read_tile(path))
+        except (OSError, ValueError) as e:
+            log.append("%s: %s" % (path, e))
+            continue
+        shipped_keys[name] = keys
+        if not _has_source_keys(keys):
+            continue
+        try:
+            src = parse_source(keys)
+        except ValueError as e:
+            log.append("%s: %s" % (path, e))
+            continue
+        aid = name[: -len(".desktop")]
+        found[name] = Addon(id=aid, name=(keys.get("Name") or aid)[:MAX_TEXT_CHARS], source=src,
+                            shipped=True, tile_path=path)
+
+    for name in _list_tiles(user_dir, MAX_USER_FILES, USER_DIR_LABEL, log):
+        path = os.path.join(user_dir, name)
+        label = "%s/%s" % (USER_DIR_LABEL, name)
+        try:
+            text = _read_tile(path)
+        except (OSError, ValueError) as e:
+            log.append("%s: %s" % (label, e))
+            continue
+        try:
+            keys = parse_desktop(text)
+        except ValueError as e:
+            if SOURCE_PREFIX in text:
+                log.append("%s: %s" % (label, e))
+            continue
+        if name in shipped_keys:
+            if _has_source_keys(keys):
+                log.append("%s: rewords a shipped tile, so its source keys were ignored"
+                           % label)
+            if name in found and keys.get("Name"):
+                found[name].name = keys["Name"][:MAX_TEXT_CHARS]
+            continue
+        if not _has_source_keys(keys):
+            continue
+        action = _tf_key(keys, "Action")
+        if action not in (None, "run"):
+            log.append("%s: a tile of your own may only run a program" % label)
+            continue
+        try:
+            src = parse_source(keys)
+        except ValueError as e:
+            log.append("%s: %s" % (label, e))
+            continue
+        aid = name[: -len(".desktop")]
+        found[name] = Addon(id=aid, name=(keys.get("Name") or aid)[:MAX_TEXT_CHARS], source=src,
+                            shipped=False, tile_path=path)
+
+    return [found[n] for n in sorted(found)], log
+
+
+# ============ Checks ============
+
+def _secure(url: str) -> bool:
+    return urllib.parse.urlsplit(url).scheme.lower() == "https"
+
+
+def auto_allowed(src: Source, urls_seen: List[str]) -> bool:
+    """May this source be checked and fetched with nobody pressing a button?
+    Yes when every URL involved is https, or when it is APT with a key."""
+    if src.kind == "apt" and src.key_url:
+        return True
+    return all(_secure(u) for u in [src.url] + list(urls_seen))
+
+
+def version_gt(a: str, b: str) -> bool:
+    """a > b in dpkg's ordering. Raises ValueError for a bad version."""
+    r = subprocess.run(["dpkg", "--compare-versions", a, "gt", b],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    raise ValueError(r.stderr.decode("utf-8", "replace").strip()
+                     or "cannot compare %s with %s" % (a, b))
+
+
+def user_agent() -> str:
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            version = f.read(64).strip()
+    except OSError:
+        version = ""
+    if not re.fullmatch(r"[A-Za-z0-9.+~_-]+", version):
+        version = "dev"
+    return "thinfloe-addon/" + version
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _request(method: str, url: str, urls_seen: List[str], https_only: bool = False):
+    """Open url, following at most MAX_REDIRECTS redirects. Every URL asked
+    for is appended to urls_seen. With https_only, a hop that is not https is
+    refused before it is asked for. Returns the open response."""
+    for _ in range(MAX_REDIRECTS + 1):
+        if https_only and not _secure(url):
+            where = " (redirected from %s)" % urls_seen[-1] if urls_seen else ""
+            raise CheckError("%s is not https%s, so it was not fetched" % (url, where))
+        urls_seen.append(url)
+        req = urllib.request.Request(url, method=method,
+                                     headers={"User-Agent": user_agent()})
+        try:
+            resp = _opener.open(req, timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            location = e.headers.get("Location") if e.code in REDIRECT_CODES else None
+            e.close()
+            if not location:
+                raise CheckError("%s answered HTTP %d" % (url, e.code))
+            url = urllib.parse.urljoin(url, location)
+            if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+                raise CheckError("%s redirects to %s, which is not a web address"
+                                 % (urls_seen[-1], url))
+            continue
+        except urllib.error.URLError as e:
+            raise CheckError("cannot reach %s: %s" % (url, e.reason))
+        except (OSError, ValueError) as e:
+            raise CheckError("cannot reach %s: %s" % (url, e))
+        return resp
+    raise CheckError("%s redirects more than %d times" % (urls_seen[0], MAX_REDIRECTS))
+
+
+def _fetch_bounded(url: str, limit: int, what: str, urls_seen: List[str],
+                   https_only: bool = False) -> bytes:
+    resp = _request("GET", url, urls_seen, https_only)
+    try:
+        body = resp.read(limit + 1)
+    except OSError as e:
+        raise CheckError("cannot read %s: %s" % (url, e))
+    finally:
+        resp.close()
+    if len(body) > limit:
+        raise CheckError("%s at %s is larger than %d MiB" % (what, url, limit // (1024 * 1024)))
+    return body
+
+
+def format_of(src: Source, *urls: str) -> str:
+    """deb or tar: the format key, else the suffix of the first URL that has
+    a known one."""
+    if src.fmt:
+        return src.fmt
+    for u in urls:
+        path = urllib.parse.urlsplit(u).path.lower()
+        if path.endswith(".deb"):
+            return "deb"
+        if path.endswith(TAR_SUFFIXES):
+            return "tar"
+    raise CheckError("the format of %s is unknown: name it with "
+                     "X-TF-Source-Format=deb or tar" % urls[0])
+
+
+def _check_head(url: str, urls_seen: List[str],
+                https_only: bool = False) -> Tuple[str, str]:
+    """HEAD url; returns (fingerprint, final URL)."""
+    resp = _request("HEAD", url, urls_seen, https_only)
+    resp.close()
+    final = urls_seen[-1]
+    etag = resp.headers.get("ETag")
+    if etag:
+        return "etag:" + etag, final
+    modified = resp.headers.get("Last-Modified")
+    if modified:
+        return "last-modified:" + modified, final
+    length = resp.headers.get("Content-Length")
+    if length:
+        return "length:%s %s" % (length.strip(), final), final
+    raise CheckError("%s gives neither ETag, Last-Modified nor Content-Length, "
+                     "so a new version cannot be told apart" % url)
+
+
+def _check_url(src: Source, https_only: bool) -> Found:
+    seen: List[str] = []
+    fingerprint, final = _check_head(src.url, seen, https_only)
+    return Found(url=src.url, version=None, fingerprint=fingerprint,
+                 fmt=format_of(src, src.url, final), urls_seen=seen)
+
+
+def _match_links(pattern: str, text: str, page: str,
+                 has_version: bool) -> List[Tuple[str, Optional[str]]]:
+    """(whole match, version group) of every match of pattern in text, in a
+    forked child killed after PATTERN_TIMEOUT seconds. Without a version
+    group, the matches up to the first web link are enough."""
+    rfd, wfd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            # Ends the child also when the parent dies before killing it.
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            signal.alarm(PATTERN_TIMEOUT + 2)
+            os.close(rfd)
+            out = []
+            for m in re.compile(pattern).finditer(text):
+                out.append((m.group(0), m.group("version") if has_version else None))
+                if len(out) >= MAX_PATTERN_MATCHES:
+                    break
+                if not has_version and urllib.parse.urlsplit(
+                        html.unescape(m.group(0)).strip()).scheme in ("", "http", "https"):
+                    break
+            data = json.dumps(out).encode("utf-8")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(wfd, view):]
+            status = 0
+        finally:
+            os._exit(status)
+    os.close(wfd)
+    chunks = []
+    deadline = time.monotonic() + PATTERN_TIMEOUT
+    timed_out = False
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([rfd], [], [], left)
+            if not ready:
+                timed_out = True
+                break
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(rfd)
+        if timed_out:
+            os.kill(pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+    if timed_out:
+        raise CheckError("the pattern took too long on %s" % page)
+    if os.waitstatus_to_exitcode(status) != 0:
+        raise CheckError("the pattern could not be matched on %s" % page)
+    return [(m, v) for m, v in json.loads(b"".join(chunks).decode("utf-8"))]
+
+
+def _check_page(src: Source, https_only: bool) -> Found:
+    seen: List[str] = []
+    body = _fetch_bounded(src.url, MAX_PAGE_BYTES, "the page", seen, https_only)
+    base = seen[-1]
+    text = body.decode("utf-8", "replace")
+    has_version = "version" in re.compile(src.pattern).groupindex
+
+    best_url = best_version = None
+    for match, version in _match_links(src.pattern, text, src.url, has_version):
+        link = urllib.parse.urljoin(base, html.unescape(match).strip())
+        if urllib.parse.urlsplit(link).scheme not in ("http", "https"):
+            continue
+        if not has_version:
+            best_url = link
+            break
+        if not version:
+            continue
+        try:
+            newer = best_version is None or version_gt(version, best_version)
+        except ValueError:
+            raise CheckError("%s on %s is not a valid version" % (version, src.url))
+        if newer:
+            best_url, best_version = link, version
+    if best_url is None:
+        raise CheckError("no link on %s matches the pattern" % src.url)
+
+    # The link itself, and where it redirects to, decide auto_allowed too.
+    _check_head(best_url, seen, https_only)
+    fmt = format_of(src, best_url, seen[-1])
+    return Found(url=best_url, version=best_version,
+                 fingerprint=best_url if best_version is None else best_version,
+                 fmt=fmt, urls_seen=seen)
+
+
+def _apt_run(cmd: List[str], env: dict,
+             cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, cwd=cwd,
+                              capture_output=True, timeout=APT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise CheckError("%s took longer than %d s" % (cmd[0], APT_TIMEOUT))
+    except OSError as e:
+        raise CheckError("cannot run %s: %s" % (cmd[0], e))
+
+
+def _apt_error(r: subprocess.CompletedProcess, otherwise: str) -> str:
+    lines = r.stderr.decode("utf-8", "replace").splitlines()
+    errors = [l[3:].strip() for l in lines if l.startswith("E: ")]
+    return errors[0] if errors else otherwise
+
+
+def _apt_sandbox(tmp: str) -> None:
+    """Let apt's download sandbox user _apt read the private directory and
+    write where apt downloads, as it may in /var/cache/apt. Without this,
+    apt run as root warns and downloads unsandboxed as root."""
+    os.chmod(tmp, 0o755)
+    for name in ("key.asc", "key.gpg"):
+        path = os.path.join(tmp, name)
+        if os.path.exists(path):
+            os.chmod(path, 0o644)
+    if os.geteuid() != 0:
+        return
+    try:
+        apt_uid = pwd.getpwnam("_apt").pw_uid
+    except KeyError:
+        return
+    for d in ("lists/partial", "cache/archives/partial", "download"):
+        os.chown(os.path.join(tmp, d), apt_uid, 0)
+
+
+@contextlib.contextmanager
+def _apt_session(src: Source):
+    """apt with the repository's index read, in a directory of its own: the
+    system's sources, lists, cache, preferences, apt.conf.d hooks and dpkg
+    status are never read or written. Yields (options, env, directory)."""
+    with tempfile.TemporaryDirectory(prefix="thinfloe-addon-apt-") as tmp:
+        for d in ("lists/partial", "cache/archives/partial", "parts", "prefs", "download"):
+            os.makedirs(os.path.join(tmp, d))
+        options = "trusted=yes"
+        if src.key_url:
+            # Every hop https: auto_allowed trusts an APT source with a key,
+            # so a key swapped on an http hop would sign anything.
+            key = _fetch_bounded(src.key_url, MAX_KEY_BYTES, "the key", [],
+                                 https_only=True)
+            armored = b"-----BEGIN PGP PUBLIC KEY BLOCK-----" in key
+            key_path = os.path.join(tmp, "key.asc" if armored else "key.gpg")
+            with open(key_path, "wb") as f:
+                f.write(key)
+            options = "signed-by=" + key_path
+        line = "deb [%s] %s %s" % (options, src.url, src.apt_suite)
+        if src.apt_component:
+            line += " " + src.apt_component
+        sources = os.path.join(tmp, "sources.list")
+        with open(sources, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+        conf = os.path.join(tmp, "apt.conf")
+        settings = {
+            "Dir::Etc::sourcelist": sources,
+            "Dir::Etc::sourceparts": "-",
+            "Dir::Etc::parts": os.path.join(tmp, "parts"),
+            "Dir::Etc::preferences": "/dev/null",
+            "Dir::Etc::preferencesparts": os.path.join(tmp, "prefs"),
+            "Dir::State::Lists": os.path.join(tmp, "lists"),
+            "Dir::State::status": "/dev/null",
+            "Dir::Cache": os.path.join(tmp, "cache"),
+            "Debug::NoLocking": "true",
+            "Acquire::http::Timeout": str(HTTP_TIMEOUT),
+            "Acquire::https::Timeout": str(HTTP_TIMEOUT),
+            "Acquire::http::User-Agent": user_agent(),
+            "Acquire::https::User-Agent": user_agent(),
+            "Acquire::Languages": "none",
+        }
+        with open(conf, "w", encoding="utf-8") as f:
+            for k, v in settings.items():
+                f.write('%s "%s";\n' % (k, v))
+        env = dict(os.environ, APT_CONFIG=conf, LC_ALL="C.UTF-8")
+        # The -o options repeat the file: apt reads APT_CONFIG before the
+        # parts directory, and a command-line option always wins.
+        opts = []
+        for k, v in settings.items():
+            opts += ["-o", "%s=%s" % (k, v)]
+
+        _apt_sandbox(tmp)
+        r = _apt_run(["apt-get", "-q"] + opts + ["--error-on=any", "update"], env)
+        if r.returncode != 0:
+            raise CheckError(_apt_error(r, "apt-get update failed for %s" % src.url))
+        yield opts, env, tmp
+
+
+def _check_apt(src: Source) -> Found:
+    seen = [src.url]
+    with _apt_session(src) as (opts, env, tmp):
+        r = _apt_run(["apt-cache"] + opts + ["policy", src.package], env)
+        candidate = None
+        for l in r.stdout.decode("utf-8", "replace").splitlines():
+            l = l.strip()
+            if l.startswith("Candidate:"):
+                candidate = l.split(":", 1)[1].strip()
+        if not candidate or candidate == "(none)":
+            raise CheckError("%s has no package %s" % (src.url, src.package))
+        r = _apt_run(["apt-cache"] + opts + ["show", "%s=%s" % (src.package, candidate)], env)
+        filename = None
+        for l in r.stdout.decode("utf-8", "replace").splitlines():
+            if l.startswith("Filename:"):
+                filename = l.split(":", 1)[1].strip()
+                break
+        if not filename:
+            raise CheckError("%s lists %s %s without a file"
+                             % (src.url, src.package, candidate))
+    return Found(url=src.url.rstrip("/") + "/" + filename, version=candidate,
+                 fingerprint="%s=%s" % (src.package, candidate), fmt="deb",
+                 urls_seen=seen)
+
+
+def check(src: Source, https_only: bool = False) -> Found:
+    """What the source offers now. Raises CheckError with the reason. With
+    https_only, a URL or page source never sends a request to a hop that is
+    not https (an APT source leaves redirects to apt, which refuses https to
+    http)."""
+    if src.kind == "url":
+        return _check_url(src, https_only)
+    if src.kind == "page":
+        return _check_page(src, https_only)
+    if src.kind == "apt":
+        return _check_apt(src)
+    raise CheckError("unknown source kind %s" % src.kind)
+
+
+# ============ Paths ============
+
+# Module constants; the environment overrides them for the tests.
+ESP_DIR = os.environ.get("TF_ADDON_ESP", "/run/thinfloe/storage/efi")
+RUN_DIR = os.environ.get("TF_ADDON_RUN", "/run/thinfloe/addons")
+LOCK_PATH = os.environ.get("TF_ADDON_LOCK", "/run/thinfloe/esp.lock")
+ROOT_DIR = os.environ.get("TF_ADDON_ROOT", "/")  # where tar add-ons are unpacked
+HOME_DIR = os.environ.get("TF_ADDON_HOME")  # unset: the home of tfuser (getent passwd)
+DPKG = os.environ.get("TF_ADDON_DPKG", "dpkg")
+# A program named like an add-on id runs after its install; the package may
+# have overwritten something the image needs to adjust. The directory is
+# fixed in the image: a hook path never comes from a tile or the home.
+HOOKS_DIR = os.environ.get("TF_ADDON_HOOKS", "/usr/libexec/thinfloe/addon-hooks")
+SHIPPED_TILES = os.environ.get("TF_ADDON_TILES", "/etc/thinfloe/menu")
+STATE_DIR = os.environ.get("TF_ADDON_STATE", "/run/thinfloe/state")  # the initramfs's records
+# Netboot has no ESP: the same layout in RAM, rebuilt each boot.
+CACHE_DIR = "/run/thinfloe/addons-cache"
+
+USER = "tfuser"
+TICK_DIRS = (".config", "thinfloe")
+TICK_FILE = "addons"
+MAX_TICK_BYTES = 64 * 1024
+MAX_META_BYTES = 64 * 1024
+# A download is stored only if the store keeps this much free after it; on
+# the ESP also the size of home.tar.gz (store_reserve).
+MIN_FREE_BYTES = 64 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
+LOG_KEEP_LINES = 500
+MAX_LOG_TEXT = 1024
+TOOL_TIMEOUT = 600
+# thinfloe-addons.service has TimeoutStartSec=120. Boot spends at most
+# BOOT_BUDGET seconds on installs, which leaves 20 s for the start, the seed
+# and the status file; each dpkg or tar call gets BOOT_TOOL_TIMEOUT or what
+# is left of the budget, whichever is less. Add-ons whose turn comes after
+# the budget is spent are not installed at this boot.
+BOOT_BUDGET = 100
+BOOT_TOOL_TIMEOUT = 25
+_boot_deadline: Optional[float] = None  # monotonic; set while boot runs
+FORMATS = ("deb", "tar")
+
+# vfat ignores case and strips trailing dots: ids differing only so would
+# share one directory on the ESP. No trailing dot here; case in Run. At most
+# 64 characters. The menu's valid_id applies the same rule;
+# test/unit/addon-ids.tsv pins both.
+ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9_+-])?")
+PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+
+USAGE = "usage: thinfloe-addon boot | status | check [ID...] | install ID | update ID | remove ID"
+
+
+class InstallError(Exception):
+    """An install or removal that failed. The text is shown at the machine."""
+
+
+class BootTimeout(InstallError):
+    """A dpkg, tar or hook call at boot ran out of time. That says nothing
+    about the copy, so a next.* copy is kept for the check after boot."""
+
+
+# ============ Log and files in RUN_DIR ============
+
+def _clean(text: str, limit: int = MAX_LOG_TEXT) -> str:
+    """One line of printable text: tabs, newlines and other control
+    characters become spaces, so line and column formats hold."""
+    return "".join(c if c.isprintable() else " " for c in str(text))[:limit]
+
+
+def _fsync_dir(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _write_atomic(path: str, text: str) -> None:
+    """Replace path, readable by all (the menu reads these files as tfuser).
+    The temporary name is unique, so concurrent runs never share one."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                               prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), 0o644)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        _unlink(tmp)
+        raise
+    _fsync_dir(os.path.dirname(path))
+
+
+# Locks, always taken in this order and never an earlier one while a later
+# one is held: install_lock (RUN_DIR/install.lock: dpkg/tar, promotion, the
+# installed record) -> esp_lock (LOCK_PATH: store writes, shared with
+# thinfloe-save-home, so a save never waits for dpkg) -> _run_lock
+# (RUN_DIR/.lock: log, status, results, ticks).
+
+def _flock(path: str):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextlib.contextmanager
+def install_lock():
+    """Serializes installs between runs: dpkg's own lock would fail the
+    second one, and two tar -x of one add-on would interleave."""
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    fd = _flock(os.path.join(RUN_DIR, "install.lock"))
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _run_lock():
+    """Serializes the log and the status file between runs."""
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    fd = _flock(os.path.join(RUN_DIR, ".lock"))
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+def log(text: str) -> None:
+    """Print a line and append it to the log the menu shows (epoch<TAB>text),
+    which keeps its last LOG_KEEP_LINES lines."""
+    text = _clean(text)
+    print(text, flush=True)
+    try:
+        with _run_lock():
+            path = os.path.join(RUN_DIR, "log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("%d\t%s\n" % (int(time.time()), text))
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if len(lines) > LOG_KEEP_LINES:
+                _write_atomic(path, "".join(lines[-LOG_KEEP_LINES:]))
+    except OSError as e:
+        print("thinfloe-addon: cannot write the log: %s" % e, file=sys.stderr)
+
+
+def _read_json(path: str) -> Optional[dict]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _result_path(aid: str) -> str:
+    return os.path.join(RUN_DIR, "results", aid + ".json")
+
+
+def get_result(aid: str) -> dict:
+    """The outcome of the last action on an add-on in this boot."""
+    r = _read_json(_result_path(aid)) or {}
+    seen = r.get("urls_seen")
+    return {"state": r.get("state"), "message": str(r.get("message") or ""),
+            "urls_seen": [str(u) for u in seen] if isinstance(seen, list) else []}
+
+
+def set_result(aid: str, state: Optional[str], message: str,
+               urls_seen: Optional[List[str]] = None) -> None:
+    """state: None (the stored and installed copies speak), failed or
+    install-failed."""
+    if urls_seen is None:
+        urls_seen = get_result(aid)["urls_seen"]
+    path = _result_path(aid)
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    _write_atomic(path, json.dumps({"state": state, "message": message,
+                                    "urls_seen": urls_seen}))
+
+
+def note_ok(aid: str, message: str, urls_seen: Optional[List[str]] = None) -> None:
+    """Log a success that installed nothing. It does not clear an
+    install-failed of this boot: only a working install does."""
+    log(message)
+    r = get_result(aid)
+    if r["state"] == "install-failed":
+        set_result(aid, r["state"], r["message"], urls_seen)
+    else:
+        set_result(aid, None, message, urls_seen)
+
+
+def _installed_path(aid: str) -> str:
+    return os.path.join(RUN_DIR, "installed", aid + ".json")
+
+
+def installed(aid: str) -> Optional[dict]:
+    """What this boot installed: format, version, package or files, ok."""
+    return _read_json(_installed_path(aid))
+
+
+def _set_installed(aid: str, record: dict) -> None:
+    path = _installed_path(aid)
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    _write_atomic(path, json.dumps(record))
+
+
+# ============ The tick file ============
+
+def tfuser_ids() -> Tuple[int, int]:
+    p = pwd.getpwnam(USER)
+    return p.pw_uid, p.pw_gid
+
+
+def home_dir() -> str:
+    return HOME_DIR or pwd.getpwnam(USER).pw_dir
+
+
+def _tick_dir_fd(create: bool) -> Optional[int]:
+    """An fd of ~/.config/thinfloe, reached without following a symlink: the
+    home is tfuser's and this runs as root. Missing directories are made
+    (owned by tfuser) when create is set, else None is returned."""
+    fd = os.open(home_dir(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        for part in TICK_DIRS:
+            try:
+                nfd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                os.mkdir(part, 0o755, dir_fd=fd)
+                nfd = os.open(part, flags, dir_fd=fd)
+                uid, gid = tfuser_ids()
+                os.fchown(nfd, uid, gid)
+            os.close(fd)
+            fd = nfd
+        result, fd = fd, -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def read_ticks() -> List[str]:
+    """The ticked add-on ids, in file order."""
+    dfd = _tick_dir_fd(False)
+    if dfd is None:
+        return []
+    try:
+        try:
+            fd = os.open(TICK_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=dfd)
+        except FileNotFoundError:
+            return []
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise OSError("~/.config/thinfloe/addons is not a regular file")
+            data = f.read(MAX_TICK_BYTES)
+    finally:
+        os.close(dfd)
+    ids: List[str] = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if ID_RE.fullmatch(line) and line not in ids:
+            ids.append(line)
+    return ids
+
+
+def write_ticks(ids: List[str]) -> None:
+    """Replace the tick file, owned by tfuser, never through a symlink."""
+    dfd = _tick_dir_fd(True)
+    tmp = TICK_FILE + ".new"
+    try:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=dfd)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            uid, gid = tfuser_ids()
+            os.fchown(f.fileno(), uid, gid)
+            os.fchmod(f.fileno(), 0o644)
+            f.write("".join(i + "\n" for i in ids))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TICK_FILE, src_dir_fd=dfd, dst_dir_fd=dfd)
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def tick_file_exists() -> bool:
+    dfd = _tick_dir_fd(False)
+    if dfd is None:
+        return False
+    try:
+        os.stat(TICK_FILE, dir_fd=dfd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(dfd)
+
+
+def change_ticks(change) -> List[str]:
+    """Read the tick file, apply change(ids) -> ids, write it back if it
+    changed, all under the run lock, so concurrent runs lose no tick."""
+    with _run_lock():
+        ids = read_ticks()
+        new = change(list(ids))
+        if new != ids:
+            write_ticks(new)
+        return new
+
+
+# ============ The store ============
+
+def esp_mounted() -> bool:
+    return os.path.ismount(ESP_DIR)
+
+
+def store_root() -> str:
+    return os.path.join(ESP_DIR, "addons") if esp_mounted() else CACHE_DIR
+
+
+def free_bytes(path: str) -> int:
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def _no_space() -> str:
+    if esp_mounted():
+        return "not enough space on the boot stick"
+    return "not enough memory to keep the add-on"
+
+
+NO_MEMORY = "not enough memory for the download"
+
+
+def store_reserve() -> int:
+    """What a store keeps free after a copy: MIN_FREE_BYTES, and on the ESP
+    also the size of home.tar.gz, since a save writes home.tar.gz.new beside
+    it before the rename."""
+    if not esp_mounted():
+        return MIN_FREE_BYTES
+    try:
+        home = os.stat(os.path.join(ESP_DIR, "home.tar.gz")).st_size
+    except OSError:
+        home = 0
+    return MIN_FREE_BYTES + home
+
+
+@contextlib.contextmanager
+def esp_lock():
+    """Held for every write to the store; thinfloe-save-home takes it too.
+    Never held across a download or an install (see the lock order above
+    install_lock)."""
+    fd = _flock(LOCK_PATH)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+@dataclass
+class Stored:
+    path: str  # the payload
+    meta: dict
+
+
+def read_meta(path: str) -> Optional[dict]:
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_META_BYTES)
+    except OSError:
+        return None
+    meta = {}
+    for line in data.decode("utf-8", "replace").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            meta[k.strip()] = v.strip()
+    return meta
+
+
+def stored(d: str, slot: str) -> Optional[Stored]:
+    """The copy in slot current or next of an add-on directory, if whole:
+    a slot without its meta file is incomplete."""
+    meta = read_meta(os.path.join(d, slot + ".meta"))
+    if not meta or meta.get("format") not in FORMATS:
+        return None
+    path = os.path.join(d, "%s.%s" % (slot, meta["format"]))
+    if not os.path.isfile(path):
+        return None
+    return Stored(path, meta)
+
+
+def _unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _remove_new(d: str) -> None:
+    for name in os.listdir(d):
+        if name.endswith(".new"):
+            _unlink(os.path.join(d, name))
+
+
+def _copy_out(read, dest: str, space_dir: str, expected: Optional[int], what: str,
+              no_space: str, reserve: int = MIN_FREE_BYTES) -> Tuple[int, str]:
+    """Write what read(n) returns into dest; stop when space_dir would keep
+    less than `reserve` bytes. Returns (size, sha256)."""
+    if expected is not None and free_bytes(space_dir) - expected < reserve:
+        raise CheckError(no_space)
+    got = 0
+    digest = hashlib.sha256()
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                try:
+                    chunk = read(CHUNK_BYTES)
+                except (OSError, http.client.HTTPException) as e:
+                    raise CheckError("the download of %s broke off: %s"
+                                     % (what, str(e) or e.__class__.__name__))
+                if not chunk:
+                    break
+                f.write(chunk)
+                digest.update(chunk)
+                got += len(chunk)
+                if free_bytes(space_dir) < reserve:
+                    raise CheckError(no_space)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            raise CheckError(no_space)
+        raise CheckError("cannot write %s: %s" % (dest, e.strerror or e))
+    return got, digest.hexdigest()
+
+
+def _download_http(url: str, dest: str, https_only: bool, space_dir: str) -> str:
+    resp = _request("GET", url, [], https_only)
+    try:
+        try:
+            expected = int(resp.headers.get("Content-Length"))
+        except (TypeError, ValueError):
+            expected = None
+        got, digest = _copy_out(resp.read, dest, space_dir, expected, url, NO_MEMORY)
+    finally:
+        resp.close()
+    if expected is not None and got != expected:
+        raise CheckError("the download of %s was cut short (%d of %d bytes)"
+                         % (url, got, expected))
+    return digest
+
+
+def _download_apt(src: Source, found: Found, dest: str, space_dir: str) -> str:
+    """apt-get download, so a signed repository's hashes vouch for the file."""
+    with _apt_session(src) as (opts, env, tmp):
+        where = os.path.join(tmp, "download")
+        r = _apt_run(["apt-get", "-q"] + opts
+                     + ["download", "%s=%s" % (src.package, found.version)], env, cwd=where)
+        if r.returncode != 0:
+            raise CheckError(_apt_error(r, "apt-get download failed for %s" % found.url))
+        debs = [n for n in os.listdir(where) if n.endswith(".deb")]
+        if len(debs) != 1:
+            raise CheckError("apt-get download gave no package for %s" % found.url)
+        with open(os.path.join(where, debs[0]), "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            return _copy_out(f.read, dest, space_dir, size, found.url, NO_MEMORY)[1]
+
+
+def _tool(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    """Run cmd in a session of its own. On timeout the whole process group is
+    killed: a maintainer script dpkg started would otherwise keep the pipes
+    open and the wait would not end."""
+    if timeout is None:
+        timeout = TOOL_TIMEOUT
+    if _boot_deadline is not None:
+        timeout = min(timeout, BOOT_TOOL_TIMEOUT,
+                      max(_boot_deadline - time.monotonic(), 0.1))
+    env = dict(os.environ, LC_ALL="C.UTF-8", DEBIAN_FRONTEND="noninteractive")
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def _seconds(t: float) -> str:
+    return "%d s" % max(1, round(t))
+
+
+def tar_members(path: str, what: str) -> List[str]:
+    """The member names of a tar archive, each a plain relative path.
+    Raises CheckError naming `what` otherwise."""
+    try:
+        r = _tool(["tar", "--quoting-style=escape", "-tf", path])
+    except subprocess.TimeoutExpired as e:
+        text = "listing %s took longer than %s" % (what, _seconds(e.timeout))
+        # At boot this is a timeout like dpkg's: the copy is kept.
+        raise BootTimeout(text) if _boot_deadline is not None else CheckError(text)
+    if r.returncode != 0:
+        raise CheckError("%s is not a tar archive" % what)
+    names = r.stdout.decode("utf-8", "replace").splitlines()
+    if not names:
+        raise CheckError("%s is an empty tar archive" % what)
+    for n in names:
+        # A backslash is tar's escape for a control character, a newline or
+        # a backslash in the name: refused, so the list stays one name a line.
+        if n.startswith("/") or ".." in n.split("/") or "\\" in n:
+            raise CheckError("%s holds %s, which is not a plain path inside the archive"
+                             % (what, n))
+    return names
+
+
+def verify(path: str, fmt: str, url: str) -> dict:
+    """Refuse what is not a package of the format (a captive portal's HTML
+    page, a cut transfer). Returns package and version of a deb."""
+    if fmt == "tar":
+        tar_members(path, url)
+        return {}
+    try:
+        r = _tool(["dpkg-deb", "--info", path], timeout=120)
+        if r.returncode != 0:
+            raise CheckError("%s is not a Debian package" % url)
+        r = _tool(["dpkg-deb", "--field", path, "Package", "Version"], timeout=120)
+    except subprocess.TimeoutExpired:
+        raise CheckError("reading %s took too long" % url)
+    fields = {}
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fields[k.strip()] = v.strip()
+    package = fields.get("Package", "")
+    if r.returncode != 0 or not PACKAGE_RE.fullmatch(package):
+        raise CheckError("%s names no valid package" % url)
+    return {"package": package, "version": fields.get("Version", "")}
+
+
+@dataclass
+class Download:
+    path: str  # in RAM, under RUN_DIR/dl
+    meta: dict
+    sha256: str
+
+
+def download(a: Addon, found: Found, https_only: bool) -> Download:
+    """Download into RAM and verify it, without esp.lock. The caller
+    removes the file."""
+    dl = os.path.join(RUN_DIR, "dl")
+    os.makedirs(dl, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dl, prefix=a.id + ".", suffix="." + found.fmt)
+    os.close(fd)
+    log("%s: downloading %s" % (a.name, found.url))
+    try:
+        if a.source.kind == "apt":
+            digest = _download_apt(a.source, found, tmp, dl)
+        else:
+            digest = _download_http(found.url, tmp, https_only, dl)
+        info = verify(tmp, found.fmt, found.url)
+        if a.source.kind == "apt" and info["package"] != a.source.package:
+            raise CheckError("%s holds %s, not %s"
+                             % (found.url, info["package"], a.source.package))
+        meta = {"version": found.version or info.get("version", ""),
+                "fingerprint": found.fingerprint, "url": found.url, "format": found.fmt}
+        if found.fmt == "deb":
+            meta["package"] = info["package"]
+        meta["fetched"] = str(int(time.time()))
+        return Download(tmp, meta, digest)
+    except BaseException:
+        _unlink(tmp)
+        raise
+
+
+def _put_slot(d: str, slot: str, payload_src: str, meta_src: str, fmt: str) -> None:
+    """Rename a payload and its meta into slot. The slot's meta goes first,
+    so a power loss in between leaves the slot incomplete (stored() is
+    None), never a new payload under an old meta; a payload of the other
+    format goes last."""
+    meta_path = os.path.join(d, slot + ".meta")
+    _unlink(meta_path)
+    _fsync_dir(d)
+    os.replace(payload_src, os.path.join(d, "%s.%s" % (slot, fmt)))
+    _fsync_dir(d)
+    os.replace(meta_src, meta_path)
+    _fsync_dir(d)
+    for other in FORMATS:
+        if other != fmt:
+            _unlink(os.path.join(d, "%s.%s" % (slot, other)))
+    _fsync_dir(d)
+
+
+def store_copy(d: str, slot: str, dl: Download) -> None:
+    """Copy a verified download into <slot>.<fmt>.new on the store, check
+    the size and hash of the bytes written (as they left RAM; the copy is
+    not read back from the ESP), then rename it into the slot. Call with
+    esp_lock held."""
+    os.makedirs(d, mode=0o755, exist_ok=True)
+    _remove_new(d)
+    fmt = dl.meta["format"]
+    tmp = os.path.join(d, "%s.%s.new" % (slot, fmt))
+    meta_tmp = os.path.join(d, slot + ".meta.new")
+    try:
+        with open(dl.path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            got, digest = _copy_out(f.read, tmp, d, size, dl.meta["url"], _no_space(),
+                                    store_reserve())
+        if got != size or digest != dl.sha256:
+            raise CheckError("the copy of %s on the store differs from the download"
+                             % dl.meta["url"])
+        try:
+            with open(meta_tmp, "w", encoding="utf-8") as f:
+                f.write("".join("%s=%s\n" % (k, _clean(v)) for k, v in dl.meta.items()))
+                f.flush()
+                os.fsync(f.fileno())
+            _put_slot(d, slot, tmp, meta_tmp, fmt)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise CheckError(_no_space())
+            raise CheckError("cannot store %s: %s" % (dl.meta["url"], e.strerror or e))
+    finally:
+        _unlink(tmp)
+        _unlink(meta_tmp)
+
+
+def finish_promote(d: str) -> Optional[str]:
+    """Finish a promote that a power loss cut between its two renames:
+    current.meta is gone, next.<F> is already current.<F>, and next.meta
+    (format F) still waits. Only promote leaves exactly this: store_copy
+    renames a payload before its meta, so a new next.meta always has its
+    payload, and _drop_slot and cmd_remove delete a meta before its payload.
+    Returns the version made current, None when nothing was to do. Call with
+    esp_lock held: a live promote passes through the same state."""
+    meta_path = os.path.join(d, "current.meta")
+    next_meta = os.path.join(d, "next.meta")
+    if os.path.lexists(meta_path):
+        return None
+    meta = read_meta(next_meta)
+    if not meta or meta.get("format") not in FORMATS:
+        return None
+    fmt = meta["format"]
+    if os.path.lexists(os.path.join(d, "next." + fmt)) \
+            or not os.path.isfile(os.path.join(d, "current." + fmt)):
+        return None
+    os.replace(next_meta, meta_path)
+    _fsync_dir(d)
+    for other in FORMATS:
+        if other != fmt:
+            _unlink(os.path.join(d, "current." + other))
+    _fsync_dir(d)
+    return meta.get("version") or "?"
+
+
+def recover_store() -> None:
+    """Finish every promote a power loss interrupted. Boot and check call it
+    first, before anything reads a slot."""
+    root = store_root()
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return
+    with esp_lock():
+        for name in names:
+            d = os.path.join(root, name)
+            if not ID_RE.fullmatch(name) or os.path.islink(d) or not os.path.isdir(d):
+                continue
+            try:
+                version = finish_promote(d)
+            except OSError as e:
+                log("%s: cannot finish the interrupted update on the boot stick: %s"
+                    % (name, e.strerror or e))
+                continue
+            if version is not None:
+                log("%s: version %s was being made current when the power went; "
+                    "it is current now" % (name, version))
+
+
+def promote(d: str, expect: Optional[dict] = None) -> bool:
+    """next.* becomes current.*, if next is still `expect` (the meta that
+    was installed). Call with esp_lock held."""
+    nxt = stored(d, "next")
+    if nxt is None or (expect is not None and nxt.meta != expect):
+        return False
+    _put_slot(d, "current", nxt.path, os.path.join(d, "next.meta"), nxt.meta["format"])
+    return True
+
+
+def _newer(found: Found, meta: dict) -> bool:
+    """Does the source offer something else than the stored copy? With
+    versions on both sides, only a higher version counts."""
+    if found.fingerprint == meta.get("fingerprint"):
+        return False
+    if found.version and meta.get("version"):
+        try:
+            return version_gt(found.version, meta["version"])
+        except ValueError:
+            return True
+    return True
+
+
+# ============ Install and remove ============
+
+def _run_tool(cmd: List[str]) -> None:
+    try:
+        r = _tool(cmd)
+    except subprocess.TimeoutExpired as e:
+        error = BootTimeout if _boot_deadline is not None else InstallError
+        raise error("%s took longer than %s" % (cmd[0], _seconds(e.timeout)))
+    except OSError as e:
+        raise InstallError("cannot run %s: %s" % (cmd[0], e.strerror or e))
+    if r.returncode != 0:
+        lines = [l.strip() for l in (r.stderr + r.stdout).decode("utf-8", "replace").splitlines()
+                 if l.strip()]
+        raise InstallError(lines[-1] if lines else "%s exited with %d"
+                           % (os.path.basename(cmd[0]), r.returncode))
+
+
+def _run_hook(aid: str) -> None:
+    """Run HOOKS_DIR/<id>, if there is one, with the timeout and process-group
+    kill of the other tools. A failing hook fails the install."""
+    hook = os.path.join(HOOKS_DIR, aid)
+    if ID_RE.fullmatch(aid) and os.access(hook, os.X_OK):
+        _run_tool([hook])
+
+
+def install_stored(aid: str, st: Stored) -> dict:
+    """Install a stored copy into the running system: dpkg -i of a deb,
+    tar -x into ROOT_DIR of a tar. Records what was installed, also when it
+    fails, so remove can undo a partial install."""
+    meta = st.meta
+    record = {"format": meta["format"], "version": meta.get("version", ""),
+              "fingerprint": meta.get("fingerprint", ""), "ok": False}
+    old = installed(aid) or {}
+    if meta["format"] == "deb":
+        package = meta.get("package", "")
+        if not PACKAGE_RE.fullmatch(package):
+            raise InstallError("%s names no valid package" % st.path)
+        record["package"] = package
+        _set_installed(aid, record)
+        # Keep a conffile the user changed instead of asking (stdin is
+        # /dev/null, so a question fails the install).
+        _run_tool([DPKG, "--force-confdef", "--force-confold", "-i", st.path])
+    else:
+        try:
+            files = tar_members(st.path, st.path)
+        except CheckError as e:
+            raise InstallError(str(e))
+        # Files of an older version stay until removal or reboot.
+        if old.get("format") == "tar":
+            files += [f for f in old.get("files", []) if f not in files]
+        record["files"] = files
+        _set_installed(aid, record)
+        _run_tool(["tar", "-x", "--no-same-owner", "--no-overwrite-dir",
+                   "--keep-directory-symlink", "-C", ROOT_DIR, "-f", st.path])
+    _run_hook(aid)
+    record["ok"] = True
+    _set_installed(aid, record)
+    return record
+
+
+def _remove_files(names: List[str]) -> None:
+    dirs = []
+    for name in names:
+        rel = os.path.normpath(name)
+        if rel in ("", ".") or rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        path = os.path.join(ROOT_DIR, rel)
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            dirs.append(path)
+        else:
+            os.unlink(path)
+    # Directories of the archive go when empty, deepest first.
+    for path in sorted(dirs, key=lambda p: p.count("/"), reverse=True):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
+def uninstall(aid: str) -> None:
+    """Undo what this boot installed. Raises InstallError."""
+    record = installed(aid)
+    if record is None:
+        return
+    if record.get("format") == "deb":
+        package = str(record.get("package", ""))
+        if PACKAGE_RE.fullmatch(package):
+            _run_tool([DPKG, "-r", package])
+    else:
+        try:
+            _remove_files([str(f) for f in record.get("files", [])])
+        except OSError as e:
+            raise InstallError("cannot remove %s: %s" % (e.filename, e.strerror))
+    _unlink(_installed_path(aid))
+
+
+# ============ Commands ============
+
+def _label(a: Addon, version: Optional[str]) -> str:
+    return "%s %s" % (a.name, version) if version else a.name
+
+
+def _stored_message(a: Addon, meta: dict) -> str:
+    where = "stored on the boot stick" if esp_mounted() else "found"
+    return "%s %s, active at next boot" % (_label(a, meta.get("version")), where)
+
+
+class Run:
+    """One run: the add-ons, the ticks, and whether anything failed."""
+
+    def __init__(self, quiet: bool = False):
+        user_tiles = os.path.join(home_dir(), ".config", "thinfloe", "menu")
+        addons, problems = load_addons(SHIPPED_TILES, user_tiles)
+        self.addons = []
+        # The ESP is vfat: an id differing from another only in case names
+        # the same directory there. Shipped add-ons win, then the first name.
+        by_fold: dict = {}
+        for a in sorted(addons, key=lambda a: not a.shipped):
+            if not ID_RE.fullmatch(a.id):
+                problems.append("%s: an add-on's file name may only hold up to 64 letters, "
+                                "digits and . _ + -, start with a letter or digit and "
+                                "not end in ." % a.tile_path)
+                continue
+            other = by_fold.get(a.id.casefold())
+            if other is not None:
+                problems.append("%s: its name differs from %s only in case, so it was ignored"
+                                % (a.tile_path, other.tile_path))
+                continue
+            by_fold[a.id.casefold()] = a
+            self.addons.append(a)
+        self.addons.sort(key=lambda a: a.id)
+        self.by_id = {a.id: a for a in self.addons}
+        self.by_fold = by_fold
+        self.failed = False
+        try:
+            self.ticks = read_ticks()
+        except OSError as e:
+            problems.append("~/.config/thinfloe/addons cannot be read: %s" % (e.strerror or e))
+            self.ticks = []
+        for aid in self.ticks:
+            if aid not in self.by_id:
+                problems.append("%s is ticked, but no tile defines it" % aid)
+        if not quiet:
+            for p in problems:
+                log(p)
+
+    def fail(self, a: Addon, state: str, text: str) -> None:
+        message = "%s: %s" % (a.name, text)
+        log(message)
+        set_result(a.id, state, message)
+        self.failed = True
+
+    def change_ticks(self, change, name: str) -> bool:
+        try:
+            self.ticks = change_ticks(change)
+        except (OSError, KeyError) as e:
+            log("%s: cannot change ~/.config/thinfloe/addons: %s"
+                % (name, getattr(e, "strerror", None) or e))
+            self.failed = True
+            return False
+        return True
+
+    def tick(self, a: Addon) -> bool:
+        return self.change_ticks(lambda t: t if a.id in t else t + [a.id], a.name)
+
+    def addon(self, aid: str) -> Optional[Addon]:
+        a = self.by_id.get(aid)
+        if a is None:
+            log("there is no add-on %s" % aid)
+            self.failed = True
+        return a
+
+    def case_clash(self, aid: str) -> bool:
+        """An id that is no add-on but names one's directory on vfat."""
+        other = self.by_fold.get(aid.casefold())
+        if aid in self.by_id or other is None:
+            return False
+        log("%s differs from the add-on %s only in case, so it was left alone"
+            % (aid, other.id))
+        self.failed = True
+        return True
+
+
+def _addon_dir(a_id: str) -> str:
+    return os.path.join(store_root(), a_id)
+
+
+def _already_installed(aid: str, st: Optional[Stored]) -> bool:
+    record = installed(aid)
+    return bool(st is not None and record and record.get("ok")
+                and record.get("fingerprint") == st.meta.get("fingerprint"))
+
+
+def _install_locked(a: Addon, d: str, st: Stored) -> None:
+    """Install a stored copy unless it is installed already; a next.* copy
+    then becomes current.*. Call with install_lock held. Raises
+    InstallError."""
+    if not _already_installed(a.id, st):
+        log("%s: installing %s" % (a.name, _label(a, st.meta.get("version"))))
+        install_stored(a.id, st)
+    if os.path.basename(st.path).startswith("next."):
+        with esp_lock():
+            if not promote(d, st.meta):
+                log("%s: a newer copy was stored meanwhile; it stays for the next boot"
+                    % a.name)
+
+
+def _install_slot(run: Run, a: Addon, d: str, slot: str) -> bool:
+    """Install current, or next and then promote it, under install_lock and
+    without esp.lock, from the stored file. The state is read again once the
+    lock is held: what another run installed meanwhile is not installed
+    again."""
+    with install_lock():
+        st = stored(d, slot)
+        if st is None and slot == "next":
+            # Another run installed and promoted it while this one waited.
+            st = stored(d, "current")
+            if not _already_installed(a.id, st):
+                st = None
+        if st is None:
+            run.fail(a, "install-failed", "install failed: no stored copy")
+            return False
+        try:
+            _install_locked(a, d, st)
+        except InstallError as e:
+            run.fail(a, "install-failed", "install failed: %s" % e)
+            return False
+    message = "%s installed" % _label(a, st.meta.get("version"))
+    log(message)
+    set_result(a.id, None, message)
+    return True
+
+
+def _check(run: Run, a: Addon, https_only: bool = False) -> Optional[Found]:
+    log("%s: checking %s" % (a.name, a.source.url))
+    try:
+        return check(a.source, https_only)
+    except CheckError as e:
+        run.fail(a, "failed", "check failed: %s" % e)
+        return None
+
+
+def _fetch_and_store(run: Run, a: Addon, found: Found, d: str, slot: str,
+                     https_only: bool) -> Optional[dict]:
+    """Download into RAM without esp.lock, then copy into the slot under
+    it. Another run may have stored the same or a newer copy meanwhile;
+    then that one stays. Returns the slot's meta, None on failure."""
+    try:
+        dl = download(a, found, https_only)
+    except CheckError as e:
+        run.fail(a, "failed", "download failed: %s" % e)
+        return None
+    try:
+        with esp_lock():
+            there = stored(d, slot)
+            if there is not None and not _newer(found, there.meta):
+                return there.meta
+            store_copy(d, slot, dl)
+    except CheckError as e:
+        run.fail(a, "failed", "download failed: %s" % e)
+        return None
+    finally:
+        _unlink(dl.path)
+    return dl.meta
+
+
+def _keyed(src: Source) -> bool:
+    return src.kind == "apt" and bool(src.key_url)
+
+
+def check_one(run: Run, a: Addon, automatic: bool) -> None:
+    """Check one ticked add-on. No copy yet: fetch and install it now.
+    A newer version: store it as next.*, active at next boot. A source that
+    is not auto_allowed is never stored here (Install now / Update now).
+    An automatic check sends no request to a hop that is not https."""
+    src = a.source
+    if automatic and not auto_allowed(src, []):
+        log("%s: not checked automatically (neither HTTPS nor signed)" % a.name)
+        return
+    found = _check(run, a, https_only=automatic and not _keyed(src))
+    if found is None:
+        return
+    d = _addon_dir(a.id)
+    cur = stored(d, "current")
+    nxt = stored(d, "next")
+    if cur is not None and not _newer(found, (nxt or cur).meta):
+        note_ok(a.id, _stored_message(a, nxt.meta) if nxt else "%s: up to date" % a.name,
+                found.urls_seen)
+        return
+    if not auto_allowed(src, found.urls_seen):
+        log("%s is available; neither HTTPS nor signed, so only Install now or "
+            "Update now fetch it" % _label(a, found.version))
+        return
+    slot = "current" if cur is None else "next"
+    meta = _fetch_and_store(run, a, found, d, slot, https_only=not _keyed(src))
+    if meta is None:
+        return
+    if slot == "current":
+        _install_slot(run, a, d, "current")
+    else:
+        note_ok(a.id, _stored_message(a, meta), found.urls_seen)
+
+
+def install_missing(run: Run, a: Addon) -> None:
+    """Install a ticked add-on's stored copy that this boot has not
+    installed: boot ran out of time for it, or its install failed. This
+    is what boot would have done; it fetches nothing, so it holds for a
+    manual-only source too."""
+    if _installed_ok(a.id):
+        return
+    d = _addon_dir(a.id)
+    nxt = stored(d, "next")
+    if nxt is not None:
+        _boot_next(run, a, d, nxt)
+    elif stored(d, "current") is not None:
+        _install_slot(run, a, d, "current")
+
+
+def cmd_check(run: Run, ids: List[str]) -> None:
+    """Install what boot left out, then look for updates."""
+    if esp_mounted():
+        recover_store()
+    if ids:
+        for aid in ids:
+            if run.case_clash(aid):
+                continue
+            a = run.addon(aid)
+            if a is None:
+                continue
+            if aid not in run.ticks:
+                log("%s is not ticked, so it was not checked" % a.name)
+                run.failed = True
+                continue
+            install_missing(run, a)
+            check_one(run, a, automatic=False)
+        return
+    for aid in run.ticks:
+        a = run.by_id.get(aid)
+        if a is not None:
+            install_missing(run, a)
+            check_one(run, a, automatic=True)
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    _write_atomic(os.path.join(RUN_DIR, "last-check"), "%d\n" % int(time.time()))
+
+
+def _installed_ok(aid: str) -> bool:
+    record = installed(aid)
+    return bool(record and record.get("ok"))
+
+
+def _install_now(run: Run, a: Addon, update: bool) -> None:
+    """Install now (update=False): the stored current copy, fetched first if
+    there is none. Update now (update=True): next.*, fetched first if there
+    is none and the source has something newer, then promoted; with nothing
+    newer, a current copy this boot failed to install is installed again."""
+    if not run.tick(a):
+        return
+    d = _addon_dir(a.id)
+    cur = stored(d, "current")
+    if update and cur is not None:
+        if stored(d, "next") is None:
+            found = _check(run, a)
+            if found is None:
+                return
+            if not _newer(found, cur.meta):
+                note_ok(a.id, "%s: up to date" % a.name, found.urls_seen)
+                if not _installed_ok(a.id):
+                    _install_slot(run, a, d, "current")
+                return
+            if _fetch_and_store(run, a, found, d, "next", https_only=False) is None:
+                return
+        _install_slot(run, a, d, "next")
+        return
+    if cur is None:
+        found = _check(run, a)
+        if found is None:
+            return
+        if _fetch_and_store(run, a, found, d, "current", https_only=False) is None:
+            return
+    _install_slot(run, a, d, "current")
+
+
+def cmd_remove(run: Run, aid: str) -> None:
+    if run.case_clash(aid):
+        return
+    a = run.by_id.get(aid)
+    name = a.name if a else aid
+    run.change_ticks(lambda t: [x for x in t if x != aid], name)
+    try:
+        with install_lock():
+            uninstall(aid)
+    except InstallError as e:
+        log("%s: could not be removed from the running system: %s" % (name, e))
+        run.failed = True
+    d = _addon_dir(aid)
+    with esp_lock():
+        try:
+            # The metas first: a power loss in rmtree then leaves payloads
+            # without a meta, which no one reads (see finish_promote).
+            if os.path.isdir(d) and not os.path.islink(d):
+                _drop_slot(d, "next")
+                _drop_slot(d, "current")
+            shutil.rmtree(d)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log("%s: cannot delete %s: %s" % (name, d, e.strerror or e))
+            run.failed = True
+    _unlink(_result_path(aid))
+    if not run.failed:
+        log("%s removed" % name)
+
+
+# ============ Boot ============
+
+def _state(name: str) -> Optional[str]:
+    """A value the initramfs recorded in STATE_DIR, None when missing."""
+    try:
+        with open(os.path.join(STATE_DIR, name), encoding="utf-8", errors="replace") as f:
+            return f.read(256).strip()
+    except OSError:
+        return None
+
+
+def _seed_marker() -> str:
+    return os.path.join(ESP_DIR, "config", "addons-seeded")
+
+
+def _seed_ticks(run: Run, no_home: bool) -> bool:
+    """Write the seeded tick file unless one exists. False when it could
+    not be written, so the next boot tries again."""
+    home = home_dir()
+    ids = [a.id for a in run.addons if a.shipped and a.source.config
+           and (no_home or os.path.lexists(os.path.join(home, a.source.config)))]
+    try:
+        with _run_lock():
+            if tick_file_exists():
+                return True
+            if ids:
+                write_ticks(ids)
+    except (OSError, KeyError) as e:
+        log("cannot tick the add-ons of this home from 3.x: %s"
+            % (getattr(e, "strerror", None) or e))
+        run.failed = True
+        return False
+    run.ticks = ids
+    why = ("the boot stick was upgraded from ThinFloe 3.x without a saved home" if no_home
+           else "this home came from ThinFloe 3.x")
+    for aid in ids:
+        log("%s ticked: %s" % (run.by_id[aid].name, why))
+    return True
+
+
+def seed(run: Run) -> None:
+    """The first boot from 3.x ticks the add-ons the home used, before
+    anything is installed. It fires when there is no tick file and either
+    the initramfs renamed 3.x files in this home, or a 3.x stick was
+    upgraded without a stored home (home-restore absent, tl.old/ on the
+    ESP) and the ESP has no addons-seeded marker. Then every shipped add-on
+    whose X-TF-Source-Config exists in the home is ticked, or, with no
+    stored home, every shipped add-on that has the key. The marker is
+    written on every USB boot that finds it missing, so a stick that booted
+    4.x once never seeds again: a later 4.x upgrade also leaves tl.old/
+    and, without a saved home, home-restore absent."""
+    restore = _state("home-restore")
+    renamed = os.path.exists(os.path.join(STATE_DIR, "home-renamed"))
+    upgraded = (esp_mounted() and restore == "absent"
+                and os.path.isdir(os.path.join(ESP_DIR, "tl.old"))
+                and not os.path.lexists(_seed_marker()))
+    if (renamed or upgraded) and not _seed_ticks(run, restore == "absent"):
+        return
+    if not esp_mounted() or os.path.lexists(_seed_marker()):
+        return
+    try:
+        with esp_lock():
+            # A plain write, not _write_atomic: vfat refuses fchmod.
+            os.makedirs(os.path.dirname(_seed_marker()), exist_ok=True)
+            with open(_seed_marker(), "w", encoding="utf-8") as f:
+                f.write("%d\n" % int(time.time()))
+                f.flush()
+                os.fsync(f.fileno())
+    except OSError as e:
+        log("cannot write %s: %s" % (_seed_marker(), e.strerror or e))
+        run.failed = True
+
+
+def _drop_slot(d: str, slot: str) -> None:
+    """Delete a slot, meta first, so a power loss leaves it incomplete
+    rather than a payload under the wrong meta. Call with esp_lock held."""
+    _unlink(os.path.join(d, slot + ".meta"))
+    _fsync_dir(d)
+    for fmt in FORMATS:
+        _unlink(os.path.join(d, "%s.%s" % (slot, fmt)))
+    _fsync_dir(d)
+
+
+def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
+    """Install next.*; only once that worked does it become current.*. If it
+    fails, next.* is deleted and current.*, if there is one, is installed
+    again, so the version that worked before stays. Boot calls it, and the
+    check for what boot left out."""
+    new = _label(a, nxt.meta.get("version"))
+    with install_lock():
+        try:
+            _install_locked(a, d, nxt)
+        except BootTimeout as e:
+            # Out of time, not broken: current.* would get no more time, and
+            # the check after boot installs next.* with the full timeout.
+            run.fail(a, "install-failed", "%s not installed at boot: %s; the check "
+                     "after boot installs it" % (new, e))
+            return
+        except InstallError as e:
+            reason = str(e)
+        else:
+            message = "%s installed" % new
+            log(message)
+            set_result(a.id, None, message)
+            return
+        failed = "%s could not be installed: %s" % (new, reason)
+        log(failed)
+        run.failed = True
+        with esp_lock():
+            _drop_slot(d, "next")
+        cur = stored(d, "current")
+        if cur is None:
+            run.fail(a, "install-failed", "install of %s failed: %s" % (new, reason))
+            return
+        old = _label(a, cur.meta.get("version"))
+        try:
+            _install_locked(a, d, cur)
+        except InstallError as e:
+            run.fail(a, "install-failed", "%s; %s failed too: %s" % (failed, old, e))
+            return
+    log("%s installed" % old)
+    set_result(a.id, None, "%s; %s installed" % (failed, old))
+
+
+def cmd_boot(run: Run) -> None:
+    """Seed the ticks, then, on USB, install each ticked add-on from the
+    ESP: next.* when there is one (it becomes current.* once installed),
+    else current.*, within BOOT_BUDGET seconds. Sends no request. On netboot
+    the store is empty at boot; thinfloe-addon-check.service fetches and
+    installs once the network is up."""
+    global _boot_deadline
+    seed(run)
+    if not esp_mounted():
+        return
+    recover_store()
+    todo = [run.by_id[aid] for aid in run.ticks if aid in run.by_id]
+    _boot_deadline = time.monotonic() + BOOT_BUDGET
+    try:
+        while todo:
+            if _boot_deadline - time.monotonic() < 1:
+                log("the time for add-ons at boot is used up; not installed: %s"
+                    % ", ".join(a.name for a in todo))
+                for a in todo:
+                    set_result(a.id, "install-failed", "%s: not installed at boot: "
+                               "the time for add-ons was used up; the check after "
+                               "boot installs it" % a.name)
+                run.failed = True
+                break
+            a = todo.pop(0)
+            d = _addon_dir(a.id)
+            nxt = stored(d, "next")
+            if nxt is not None:
+                _boot_next(run, a, d, nxt)
+            elif stored(d, "current") is None:
+                log("%s: nothing stored on the boot stick yet; the check fetches it" % a.name)
+            else:
+                _install_slot(run, a, d, "current")
+    finally:
+        _boot_deadline = None
+
+
+def status_lines(run: Run) -> List[str]:
+    """One line per add-on: id ticked state installed_version pending_version
+    auto message, tab-separated, "-" for an empty field."""
+    lines = []
+    for a in run.addons:
+        d = _addon_dir(a.id)
+        result = get_result(a.id)
+        record = installed(a.id)
+        record = record if record and record.get("ok") else None
+        nxt = stored(d, "next")
+        if result["state"] in ("failed", "install-failed"):
+            state = result["state"]
+        elif nxt is not None:
+            state = "pending"
+        elif record is not None:
+            state = "installed"
+        else:
+            state = "absent"
+        fields = [a.id, "1" if a.id in run.ticks else "0", state,
+                  record.get("version", "") if record else "",
+                  nxt.meta.get("version", "") if nxt else "",
+                  "1" if auto_allowed(a.source, result["urls_seen"]) else "0",
+                  result["message"]]
+        lines.append("\t".join(_clean(f) or "-" for f in fields))
+    return lines
+
+
+def write_status(run: Run) -> str:
+    text = "".join(l + "\n" for l in status_lines(run))
+    with _run_lock():
+        _write_atomic(os.path.join(RUN_DIR, "status"), text)
+    return text
+
+
+COMMANDS = {"boot": (0, 0), "status": (0, 0), "check": (0, None), "install": (1, 1),
+            "update": (1, 1), "remove": (1, 1)}
+
+
+def main(argv: List[str]) -> int:
+    """Exit 0 on success, 1 on a failure that is in the log, 2 on misuse."""
+    if not argv or argv[0] not in COMMANDS:
+        print(USAGE, file=sys.stderr)
+        return 2
+    cmd, args = argv[0], argv[1:]
+    least, most = COMMANDS[cmd]
+    if len(args) < least or (most is not None and len(args) > most) \
+            or not all(ID_RE.fullmatch(x) for x in args):
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        run = Run(quiet=cmd == "status")
+    except (OSError, KeyError) as e:
+        log("cannot read the add-ons: %s" % (getattr(e, "strerror", None) or e))
+        return 1
+    if cmd == "status":
+        sys.stdout.write(write_status(run))
+        return 0
+    try:
+        if cmd == "boot":
+            cmd_boot(run)
+        elif cmd == "check":
+            cmd_check(run, args)
+        elif cmd in ("install", "update"):
+            a = run.addon(args[0])
+            if a is not None:
+                _install_now(run, a, update=cmd == "update")
+        else:
+            cmd_remove(run, args[0])
+    except OSError as e:
+        log("thinfloe-addon %s failed: %s" % (cmd, e))
+        run.failed = True
+    write_status(run)
+    return 1 if run.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

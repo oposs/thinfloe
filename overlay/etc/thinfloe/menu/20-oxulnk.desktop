@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OxuLnk
+Icon=oxulnk-desktop
+Exec=oxulnk-desktop
+X-TF-Save-On-Exit=true
+X-TF-Multiple=true
+X-TF-Source-Apt=https://gitea.oetiker.ch/api/packages/oposs/debian stable main
+X-TF-Source-Package=oxulnk-desktop
+X-TF-Source-Key=https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key
+X-TF-Source-Config=.config/oxulnk

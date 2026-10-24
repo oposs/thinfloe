@@ -44,31 +44,38 @@ present "grim"             'usr/bin/grim$'
 present "slurp"            'usr/bin/slurp$'
 present "wl-copy"          'usr/bin/wl-copy$'
 present "waybar"           'usr/bin/waybar$'
-present "waybar config"    'etc/dbrrg/waybar/config\.jsonc$'
-present "waybar style"     'etc/dbrrg/waybar/style\.css$'
+present "waybar config"    'etc/thinfloe/waybar/config\.jsonc$'
+present "waybar style"     'etc/thinfloe/waybar/style\.css$'
 absent  "waybar user unit enabled" 'systemd/user/graphical-session\.target\.wants/waybar\.service$'
-present "session script"    'usr/bin/dbrrg-session$'
-present "save-home"         'usr/bin/dbrrg-save-home$'
-present "labwc config merge" 'usr/bin/dbrrg-compose-labwc-config$'
+present "session script"    'usr/bin/thinfloe-session$'
+present "save-home"         'usr/bin/thinfloe-save-home$'
+present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
 present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'
-absent  "restore-home script" 'usr/local/bin/dbrrg-restore-home$'
+absent  "restore-home script" 'usr/local/bin/thinfloe-restore-home$'
 absent  "old save-home path"  'opt/thinlinc/bin/save-home$'
-present "labwc rc.xml"     'etc/dbrrg/labwc/rc\.xml$'
+# ThinLinc and OxuLnk are add-ons: the image carries their tiles, never the
+# clients. libXrandr stays: vncviewer dlopens it, and the add-on brings none.
+absent  "/opt/thinlinc"    '(^|/)opt/thinlinc(/|$)'
+absent  "oxulnk-desktop"   'oxulnk-desktop'
+present "libXrandr.so.2"   'libXrandr\.so\.2$'
+present "ThinLinc audio shim"    'usr/libexec/thinfloe/tlclient-pulseaudio$'
+present "ThinLinc post-install"  'usr/libexec/thinfloe/addon-hooks/10-thinlinc$'
+present "labwc rc.xml"     'etc/thinfloe/labwc/rc\.xml$'
 present "tty1 autologin"   'getty@tty1\.service\.d/autologin\.conf$'
-present "ssh host key helper" 'usr/bin/dbrrg-ssh-hostkeys$'
-present "ssh host key unit"   'dbrrg-ssh-hostkeys\.service$'
+present "ssh host key helper" 'usr/bin/thinfloe-ssh-hostkeys$'
+present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
 absent  "old regenerate unit" 'regenerate_ssh_host_keys\.service$'
-present "dbrrg-menu"          'usr/bin/dbrrg-menu$'
-present "session verdict"     'usr/libexec/dbrrg/session-verdict$'
-for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 80-reboot 81-poweroff; do
-    present "tile $t" "etc/dbrrg/menu/$t\.desktop$"
+present "thinfloe-menu"          'usr/bin/thinfloe-menu$'
+present "session verdict"     'usr/libexec/thinfloe/session-verdict$'
+for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 60-settings 80-reboot 81-poweroff; do
+    present "tile $t" "etc/thinfloe/menu/$t\.desktop$"
 done
-for i in hard-drive-download usb log-out rotate-ccw power; do
-    present "Lucide icon $i" "usr/share/dbrrg/icons/$i\.svg$"
+for i in hard-drive-download usb log-out rotate-ccw power settings; do
+    present "Lucide icon $i" "usr/share/thinfloe/icons/$i\.svg$"
 done
-present "Lucide licence"      'usr/share/dbrrg/icons/LICENSE$'
-present "Oxanium licence"     'usr/share/dbrrg/fonts/Oxanium-OFL\.txt$'
+present "Lucide licence"      'usr/share/thinfloe/icons/LICENSE$'
+present "Oxanium licence"     'usr/share/thinfloe/fonts/Oxanium-OFL\.txt$'
 
 absent  "Xorg server"      'usr/lib/xorg/Xorg$'
 absent  "nodm"             'usr/sbin/nodm$'
@@ -84,16 +91,16 @@ absent  "lxterminal"       'usr/bin/lxterminal$'
 # have zero keybindings".
 RC=$(mktemp -d)
 trap 'chmod -R u+rwX "$RC" 2>/dev/null; rm -rf "$LIST" "$RC"' EXIT
-unsquashfs -q -f -d "$RC" "$SQSH" 'etc/dbrrg/labwc/rc.xml' >/dev/null 2>&1
+unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' >/dev/null 2>&1
 # Test for the extracted FILE, not unsquashfs's exit code: extracting a path
 # that does not exist in the image still exits 0 (it simply extracts nothing).
 # Trusting that exit code made this guard pass vacuously - grep on a missing
 # file exits 2, the inner test went false, and the suite printed
 # "rc.xml registers no keybindings" for an image that had no rc.xml at all.
-if [[ ! -f "$RC/etc/dbrrg/labwc/rc.xml" ]]; then
+if [[ ! -f "$RC/etc/thinfloe/labwc/rc.xml" ]]; then
     echo "FAIL - rc.xml is not present in the image at all"
     fail=1
-elif grep -qE '<keybind|<default */>' "$RC/etc/dbrrg/labwc/rc.xml"; then
+elif grep -qE '<keybind|<default */>' "$RC/etc/thinfloe/labwc/rc.xml"; then
     echo "FAIL - rc.xml registers keybindings (breaks remote key passthrough)"
     fail=1
 else
@@ -102,12 +109,12 @@ fi
 
 # The menu is the bottom window: a program clicked away must not go behind
 # it, and the taskbar must not offer to minimise it. Matched by app_id.
-if [[ -f "$RC/etc/dbrrg/labwc/rc.xml" ]] &&
-   tr -d '\n' < "$RC/etc/dbrrg/labwc/rc.xml" |
-   grep -qE '<windowRule[^>]*identifier="dbrrg-menu"[^>]*skipTaskbar="yes"[^>]*>[[:space:]]*<action name="ToggleAlwaysOnBottom"'; then
-    echo "ok   - rc.xml keeps dbrrg-menu at the bottom and off the taskbar"
+if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
+   tr -d '\n' < "$RC/etc/thinfloe/labwc/rc.xml" |
+   grep -qE '<windowRule[^>]*identifier="thinfloe-menu"[^>]*skipTaskbar="yes"[^>]*>[[:space:]]*<action name="ToggleAlwaysOnBottom"'; then
+    echo "ok   - rc.xml keeps thinfloe-menu at the bottom and off the taskbar"
 else
-    echo "FAIL - rc.xml has no ToggleAlwaysOnBottom/skipTaskbar rule for dbrrg-menu"
+    echo "FAIL - rc.xml has no ToggleAlwaysOnBottom/skipTaskbar rule for thinfloe-menu"
     fail=1
 fi
 
@@ -118,10 +125,10 @@ trap 'chmod -R u+rwX "$RC" "$DPKG_TMP" 2>/dev/null; rm -f "$LIST"; rm -rf "$RC" 
 if unsquashfs -no-xattrs -d "$DPKG_TMP/x" "$SQSH" var/lib/dpkg/status >/dev/null 2>&1; then
     labwc_version=$(awk '/^Package: labwc$/{f=1} f&&/^Version:/{print $2; exit}' \
         "$DPKG_TMP/x/var/lib/dpkg/status")
-    if [[ "$labwc_version" == *"+dbrrg1" ]]; then
+    if [[ "$labwc_version" == *"+thinfloe1" ]]; then
         echo "ok   - labwc is the local rebuild ($labwc_version)"
     else
-        echo "FAIL - labwc is '$labwc_version', expected a +dbrrg1 rebuild"
+        echo "FAIL - labwc is '$labwc_version', expected a +thinfloe1 rebuild"
         fail=1
     fi
 else
@@ -130,11 +137,11 @@ else
 fi
 
 present "fullscreen span enabled in labwc environment" \
-        "etc/dbrrg/labwc/environment"
+        "etc/thinfloe/labwc/environment"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/env" "$SQSH" \
-        etc/dbrrg/labwc/environment >/dev/null 2>&1 &&
+        etc/thinfloe/labwc/environment >/dev/null 2>&1 &&
    grep -q '^LABWC_FULLSCREEN_SPAN_OUTPUTS=1' \
-        "$DPKG_TMP/env/etc/dbrrg/labwc/environment"; then
+        "$DPKG_TMP/env/etc/thinfloe/labwc/environment"; then
     echo "ok   - LABWC_FULLSCREEN_SPAN_OUTPUTS is set"
 else
     echo "FAIL - LABWC_FULLSCREEN_SPAN_OUTPUTS not set in the shipped environment"
@@ -176,30 +183,30 @@ done
 # *management* protocol and disables the output outright - that changes the
 # monitor layout and resizes the fullscreen ThinLinc client. wlopm speaks
 # output *power* management, which is real DPMS and leaves the layout alone.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/dbrrg-session >/dev/null 2>&1 &&
-   [[ -f "$DPKG_TMP/idle/usr/bin/dbrrg-session" ]]; then
-    SESS="$DPKG_TMP/idle/usr/bin/dbrrg-session"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/thinfloe-session >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/idle/usr/bin/thinfloe-session" ]]; then
+    SESS="$DPKG_TMP/idle/usr/bin/thinfloe-session"
     if grep -q 'swayidle' "$SESS"; then
         echo "ok   - session starts swayidle"
     else
-        echo "FAIL - dbrrg-session does not start swayidle (screen never blanks)"
+        echo "FAIL - thinfloe-session does not start swayidle (screen never blanks)"
         fail=1
     fi
     if grep -qE 'wlopm --(off|on)' "$SESS"; then
         echo "ok   - session blanks via wlopm"
     else
-        echo "FAIL - dbrrg-session does not blank via wlopm"
+        echo "FAIL - thinfloe-session does not blank via wlopm"
         fail=1
     fi
     if grep -vE '^[[:space:]]*#' "$SESS" | grep -qE 'wlr-randr[^|]*--off'; then
-        echo "FAIL - dbrrg-session blanks with 'wlr-randr --off' (disables the"
+        echo "FAIL - thinfloe-session blanks with 'wlr-randr --off' (disables the"
         echo "       output and reflows the layout); use wlopm instead"
         fail=1
     else
         echo "ok   - session does not disable outputs to blank"
     fi
 else
-    echo "FAIL - cannot extract usr/bin/dbrrg-session from $SQSH"
+    echo "FAIL - cannot extract usr/bin/thinfloe-session from $SQSH"
     fail=1
 fi
 
@@ -245,7 +252,7 @@ fi
 
 # sshd-keygen.service ships Wants=-enabled from BOTH ssh.socket.wants/ and
 # ssh.service.wants/; disabling ssh.socket only removes the first symlink.
-# Left unmasked it races dbrrg-ssh-hostkeys.service on a genuine first boot
+# Left unmasked it races thinfloe-ssh-hostkeys.service on a genuine first boot
 # and can win, leaving generated keys unstaged and lost on the next reboot.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/keygen" "$SQSH" \
         etc/systemd/system/sshd-keygen.service >/dev/null 2>&1 &&
@@ -253,7 +260,7 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/keygen" "$SQSH" \
    [[ "$(readlink "$DPKG_TMP/keygen/etc/systemd/system/sshd-keygen.service")" == "/dev/null" ]]; then
     echo "ok   - sshd-keygen.service is masked"
 else
-    echo "FAIL - sshd-keygen.service is not masked - it can race dbrrg-ssh-hostkeys.service on first boot"
+    echo "FAIL - sshd-keygen.service is not masked - it can race thinfloe-ssh-hostkeys.service on first boot"
     fail=1
 fi
 
@@ -262,23 +269,23 @@ fi
 # route. If the config ever loses the taskbar module, minimized windows
 # become unreachable again.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/wb" "$SQSH" \
-        etc/dbrrg/waybar/config.jsonc >/dev/null 2>&1 &&
-   grep -q 'wlr/taskbar' "$DPKG_TMP/wb/etc/dbrrg/waybar/config.jsonc"; then
+        etc/thinfloe/waybar/config.jsonc >/dev/null 2>&1 &&
+   grep -q 'wlr/taskbar' "$DPKG_TMP/wb/etc/thinfloe/waybar/config.jsonc"; then
     echo "ok   - waybar config declares the wlr/taskbar module"
 else
     echo "FAIL - waybar config has no wlr/taskbar module"
     fail=1
 fi
 
-# dbrrg-session must both start waybar and kill it: labwc terminates when
+# thinfloe-session must both start waybar and kill it: labwc terminates when
 # its -S command returns, and a surviving waybar would be orphaned.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/sess" "$SQSH" \
-        usr/bin/dbrrg-session >/dev/null 2>&1 &&
-   grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/dbrrg-session" &&
-   grep -q 'trap .*kill' "$DPKG_TMP/sess/usr/bin/dbrrg-session"; then
-    echo "ok   - dbrrg-session starts waybar and kills it on exit"
+        usr/bin/thinfloe-session >/dev/null 2>&1 &&
+   grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/thinfloe-session" &&
+   grep -q 'trap .*kill' "$DPKG_TMP/sess/usr/bin/thinfloe-session"; then
+    echo "ok   - thinfloe-session starts waybar and kills it on exit"
 else
-    echo "FAIL - dbrrg-session does not start and clean up waybar"
+    echo "FAIL - thinfloe-session does not start and clean up waybar"
     fail=1
 fi
 
@@ -298,18 +305,68 @@ else
     fail=1
 fi
 
-# No password ships for tluser. adduser --disabled-password leaves `!` in the
+# The account is tfuser (uid 1001: ubuntu:26.04 holds 1000 for `ubuntu`, and 3.x's
+# tluser got 1001 the same way; home /home/tfuser). /home/tluser stays as a
+# symlink so a 3.x path in a saved file still resolves; tluser is no account.
+if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
+        etc/passwd etc/shadow etc/sudoers home/tluser >/dev/null 2>&1; then
+    if grep -q '^tfuser:x:1001:[0-9]*:[^:]*:/home/tfuser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - tfuser exists with uid 1001, home /home/tfuser"
+    else
+        echo "FAIL - tfuser is not uid 1001 with home /home/tfuser"
+        fail=1
+    fi
+    # The base image's own account sits in group sudo; its password stays locked.
+    if grep -q '^ubuntu:!:' "$DPKG_TMP/acct/etc/shadow" || ! grep -q '^ubuntu:' "$DPKG_TMP/acct/etc/shadow"; then
+        echo "ok   - the base image's ubuntu account is locked or absent"
+    else
+        echo "FAIL - the ubuntu account's shadow field is not '!'"
+        fail=1
+    fi
+    if [[ -L "$DPKG_TMP/acct/home/tluser" && "$(readlink "$DPKG_TMP/acct/home/tluser")" == "tfuser" ]]; then
+        echo "ok   - /home/tluser is a symlink to tfuser"
+    else
+        echo "FAIL - /home/tfuser is not a symlink to tfuser"
+        fail=1
+    fi
+    if ! grep -q '^tluser:' "$DPKG_TMP/acct/etc/passwd"; then
+        echo "ok   - no tluser in /etc/passwd"
+    else
+        echo "FAIL - tluser is still in /etc/passwd"
+        fail=1
+    fi
+    if grep -qx 'tfuser ALL=(ALL) NOPASSWD:ALL' "$DPKG_TMP/acct/etc/sudoers"; then
+        echo "ok   - sudoers grants tfuser NOPASSWD"
+    else
+        echo "FAIL - sudoers does not grant tfuser NOPASSWD:ALL"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract passwd, sudoers and home/tluser"
+    fail=1
+fi
+if unsquashfs -no-xattrs -d "$DPKG_TMP/gty" "$SQSH" \
+        etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null 2>&1 &&
+   grep -q -- '--autologin tfuser ' \
+        "$DPKG_TMP/gty/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
+    echo "ok   - getty autologin is tfuser"
+else
+    echo "FAIL - getty autologin is not tfuser"
+    fail=1
+fi
+
+# No password ships for tfuser. adduser --disabled-password leaves `!` in the
 # shadow field; an image that carries a hash there has a login every machine
-# in the field shares, and tluser has NOPASSWD:ALL, so that login is root.
+# in the field shares, and tfuser has NOPASSWD:ALL, so that login is root.
 # `passwd -l` is NOT a fix for this: it prefixes the existing hash with `!`
 # and leaves it recoverable. The field must hold `!` and nothing else.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/shadow" "$SQSH" \
         etc/shadow >/dev/null 2>&1; then
-    tl_field=$(sed -n 's/^tluser:\([^:]*\):.*/\1/p' "$DPKG_TMP/shadow/etc/shadow")
+    tl_field=$(sed -n 's/^tfuser:\([^:]*\):.*/\1/p' "$DPKG_TMP/shadow/etc/shadow")
     if [[ "$tl_field" == "!" ]]; then
-        echo "ok   - tluser ships with no password hash"
+        echo "ok   - tfuser ships with no password hash"
     else
-        echo "FAIL - tluser ships a password field of '$tl_field'; the image has a shared login"
+        echo "FAIL - tfuser ships a password field of '$tl_field'; the image has a shared login"
         fail=1
     fi
     # root's field must be `!`, not empty. Empty plus the `nullok` that
@@ -332,42 +389,42 @@ fi
 # PermitEmptyPasswords is no, which is exactly why it is easy to leave
 # wrong: the day anyone sets a root password, root is on the network.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/sshd" "$SQSH" \
-        etc/ssh/sshd_config.d/01-dbrrg.conf >/dev/null 2>&1; then
+        etc/ssh/sshd_config.d/01-thinfloe.conf >/dev/null 2>&1; then
     if grep -qE '^[[:space:]]*PermitRootLogin[[:space:]]+no[[:space:]]*$' \
-            "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-dbrrg.conf"; then
+            "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-thinfloe.conf"; then
         echo "ok   - PermitRootLogin is no"
     else
-        echo "FAIL - PermitRootLogin is not no: $(grep -i permitrootlogin "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-dbrrg.conf" | tr -d '\r')"
+        echo "FAIL - PermitRootLogin is not no: $(grep -i permitrootlogin "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-thinfloe.conf" | tr -d '\r')"
         fail=1
     fi
     # PasswordAuthentication stays yes on purpose: it cannot succeed while no
-    # password is set, and the user needs it once dbrrg-password sets one.
+    # password is set, and the user needs it once thinfloe-password sets one.
     if grep -qE '^[[:space:]]*PasswordAuthentication[[:space:]]+yes[[:space:]]*$' \
-            "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-dbrrg.conf"; then
-        echo "ok   - PasswordAuthentication stays yes for dbrrg-password"
+            "$DPKG_TMP/sshd/etc/ssh/sshd_config.d/01-thinfloe.conf"; then
+        echo "ok   - PasswordAuthentication stays yes for thinfloe-password"
     else
         echo "FAIL - PasswordAuthentication is not yes; a set password could not be used"
         fail=1
     fi
 else
-    echo "FAIL - cannot extract etc/ssh/sshd_config.d/01-dbrrg.conf from $SQSH"
+    echo "FAIL - cannot extract etc/ssh/sshd_config.d/01-thinfloe.conf from $SQSH"
     fail=1
 fi
 
-# dbrrg-password and its unit must both ship, and the unit must be enabled.
-present "dbrrg-password"  'usr/bin/dbrrg-password$'
+# thinfloe-password and its unit must both ship, and the unit must be enabled.
+present "thinfloe-password"  'usr/bin/thinfloe-password$'
 
 # The -f test is not redundant: unsquashfs exits 0 for a path it did not
 # find, so without it the negative ordering check below greps a file that
 # does not exist, returns non-zero, and reports ok on a missing unit.
-PWUNIT="$DPKG_TMP/pwunit/etc/systemd/system/dbrrg-password.service"
+PWUNIT="$DPKG_TMP/pwunit/etc/systemd/system/thinfloe-password.service"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/pwunit" "$SQSH" \
-        etc/systemd/system/dbrrg-password.service >/dev/null 2>&1 &&
+        etc/systemd/system/thinfloe-password.service >/dev/null 2>&1 &&
    [[ -f "$PWUNIT" ]]; then
     if grep -qE '^Before=ssh\.service[[:space:]]*$' "$PWUNIT"; then
-        echo "ok   - dbrrg-password.service is ordered before ssh.service"
+        echo "ok   - thinfloe-password.service is ordered before ssh.service"
     else
-        echo "FAIL - dbrrg-password.service is not ordered before ssh.service"
+        echo "FAIL - thinfloe-password.service is not ordered before ssh.service"
         fail=1
     fi
     # A multi-user.target unit is implicitly After=basic.target, so a
@@ -375,44 +432,130 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/pwunit" "$SQSH" \
     # the same target and systemd silently deletes a job on every boot. Two
     # instances of this have shipped in this repo; see CLAUDE.md.
     if grep -qE '^Before=.*(sysinit|local-fs|systemd-hwdb|sockets|udev)' "$PWUNIT"; then
-        echo "FAIL - dbrrg-password.service declares Before= on an early-boot unit: $(grep '^Before=' "$PWUNIT" | tr -d '\r')"
+        echo "FAIL - thinfloe-password.service declares Before= on an early-boot unit: $(grep '^Before=' "$PWUNIT" | tr -d '\r')"
         fail=1
     else
-        echo "ok   - dbrrg-password.service has no early-boot ordering cycle"
+        echo "ok   - thinfloe-password.service has no early-boot ordering cycle"
     fi
 else
-    echo "FAIL - could not extract dbrrg-password.service"
+    echo "FAIL - could not extract thinfloe-password.service"
     fail=1
 fi
 
 # Greps $LIST, not a fresh `unsquashfs -l | grep -q` pipeline. With pipefail
 # set, grep -q exits on the first match, unsquashfs dies of SIGPIPE, and the
 # pipeline reports failure although the file is there.
-if grep -qE 'etc/systemd/system/multi-user\.target\.wants/dbrrg-password\.service$' "$LIST"; then
-    echo "ok   - dbrrg-password.service is enabled"
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-password\.service$' "$LIST"; then
+    echo "ok   - thinfloe-password.service is enabled"
 else
-    echo "FAIL - dbrrg-password.service is not enabled; a set password would not survive a reboot"
+    echo "FAIL - thinfloe-password.service is not enabled; a set password would not survive a reboot"
+    fail=1
+fi
+
+# Add-ons: thinfloe-addons.service installs the stored copies at boot, the
+# timer runs the daily check. Both must be enabled, and the boot unit may be
+# ordered before getty@tty1.service only: it is a multi-user.target unit, so
+# a Before= on anything earlier is an ordering cycle (see CLAUDE.md).
+present "thinfloe-addon"             'usr/bin/thinfloe-addon$'
+present "add-on boot unit"           'etc/systemd/system/thinfloe-addons\.service$'
+present "add-on check unit"          'etc/systemd/system/thinfloe-addon-check\.service$'
+present "add-on check timer"         'etc/systemd/system/thinfloe-addon-check\.timer$'
+present "add-on boot check timer"    'etc/systemd/system/thinfloe-addon-boot-check\.timer$'
+present "add-on tmpfiles"            'usr/lib/tmpfiles\.d/thinfloe-addons\.conf$'
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-addons\.service$' "$LIST"; then
+    echo "ok   - thinfloe-addons.service is enabled"
+else
+    echo "FAIL - thinfloe-addons.service is not enabled; stored add-ons would not install at boot"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-addon-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-addon-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-addon-check.timer is not enabled; add-ons would never be checked"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-addon-boot-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-addon-boot-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-addon-boot-check.timer is not enabled; netboot would not install add-ons"
+    fail=1
+fi
+# systemd applies RandomizedDelaySec to every trigger of a timer, so the
+# check after boot (which installs the add-ons on netboot) has a timer of
+# its own without one, and the daily timer has no OnBootSec.
+TIMERS="$DPKG_TMP/addontimers/etc/systemd/system"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/addontimers" "$SQSH" \
+        etc/systemd/system/thinfloe-addon-check.timer \
+        etc/systemd/system/thinfloe-addon-boot-check.timer >/dev/null 2>&1 &&
+   [[ -f "$TIMERS/thinfloe-addon-check.timer" && -f "$TIMERS/thinfloe-addon-boot-check.timer" ]]; then
+    if grep -qx 'OnBootSec=1min' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       grep -qx 'Unit=thinfloe-addon-check.service' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$TIMERS/thinfloe-addon-boot-check.timer" &&
+       ! grep -q '^OnBootSec' "$TIMERS/thinfloe-addon-check.timer" &&
+       grep -qx 'OnUnitActiveSec=1d' "$TIMERS/thinfloe-addon-check.timer"; then
+        echo "ok   - the add-on check runs 1 min after boot without random delay, then daily"
+    else
+        echo "FAIL - the add-on timers do not split the boot check from the daily check"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract the add-on timers"
+    fail=1
+fi
+ADDONUNIT="$DPKG_TMP/addonunit/etc/systemd/system/thinfloe-addons.service"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/addonunit" "$SQSH" \
+        etc/systemd/system/thinfloe-addons.service >/dev/null 2>&1 &&
+   [[ -f "$ADDONUNIT" ]]; then
+    before=$(grep -E '^Before=' "$ADDONUNIT" | tr -d '\r')
+    if [[ "$before" == "Before=getty@tty1.service" ]]; then
+        echo "ok   - thinfloe-addons.service is ordered before getty@tty1.service only"
+    else
+        echo "FAIL - thinfloe-addons.service Before= lines: ${before:-none}"
+        fail=1
+    fi
+    # A hung dpkg must not hold the tty1 autologin forever; thinfloe-addon
+    # gives each install 25 s at boot, so the next add-on still gets its turn.
+    if grep -qxE 'TimeoutStartSec=120' "$ADDONUNIT"; then
+        echo "ok   - thinfloe-addons.service has TimeoutStartSec=120"
+    else
+        echo "FAIL - thinfloe-addons.service has no TimeoutStartSec=120"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract thinfloe-addons.service"
+    fail=1
+fi
+
+# The default home must carry the 4.0 home marker. Without it a home saved
+# from it lists no marker, and every boot would treat it as a 3.x home.
+MARKER="$DPKG_TMP/hv/home/tfuser/.thinfloe-home-version"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/hv" "$SQSH" \
+        home/tfuser/.thinfloe-home-version >/dev/null 2>&1 &&
+   [[ -f "$MARKER" && "$(cat "$MARKER")" == "1" ]]; then
+    echo "ok   - the default home carries ~/.thinfloe-home-version 1"
+else
+    echo "FAIL - the default home has no ~/.thinfloe-home-version holding 1"
     fail=1
 fi
 
 # --- the NUC7i3BNK field report, in the built image ---
 
 # 1. The KMS wait script and unit must be present.
-present "wait-kms script"           'usr/libexec/dbrrg/wait-kms$'
-present "wait-kms unit"             'etc/systemd/system/dbrrg-wait-kms\.service$'
-present "save-home exclude list"    'etc/dbrrg/save-home-exclude$'
+present "wait-kms script"           'usr/libexec/thinfloe/wait-kms$'
+present "wait-kms unit"             'etc/systemd/system/thinfloe-wait-kms\.service$'
+present "save-home exclude list"    'etc/thinfloe/save-home-exclude$'
 
 # 2. The wait-kms unit must be enabled (WantedBy=multi-user.target).
-if grep -qE 'etc/systemd/system/multi-user\.target\.wants/dbrrg-wait-kms\.service$' "$LIST"; then
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-wait-kms\.service$' "$LIST"; then
     echo "ok   - wait-kms is enabled in multi-user.target"
 else
     echo "FAIL - wait-kms is not enabled (missing from multi-user.target.wants)"
     fail=1
 fi
 
-# 3. The rejected dbrrg-local-network design must not return.
-absent  "dbrrg-local-network unit" 'etc/systemd/system/dbrrg-local-network\.service$'
-absent  "local-network installer"   'usr/libexec/dbrrg/install-local-network$'
+# 3. The rejected thinfloe-local-network design must not return.
+absent  "thinfloe-local-network unit" 'etc/systemd/system/thinfloe-local-network\.service$'
+absent  "local-network installer"   'usr/libexec/thinfloe/install-local-network$'
 
 # 4. The container ID must not be baked in; hostname is set by initramfs.
 absent  "baked-in hostname"         '^squashfs-root/etc/hostname$'
@@ -438,23 +581,23 @@ fi
 # overwrite the home archive while it is being read: check for the atomic
 # .new file pattern and absence of the legacy by-partlabel path.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/saveh" "$SQSH" \
-        usr/bin/dbrrg-save-home >/dev/null 2>&1 &&
-   [[ -f "$DPKG_TMP/saveh/usr/bin/dbrrg-save-home" ]]; then
-    save_home="$DPKG_TMP/saveh/usr/bin/dbrrg-save-home"
+        usr/bin/thinfloe-save-home >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/saveh/usr/bin/thinfloe-save-home" ]]; then
+    save_home="$DPKG_TMP/saveh/usr/bin/thinfloe-save-home"
     if grep -q 'home\.tar\.gz\.new' "$save_home"; then
-        echo "ok   - dbrrg-save-home uses atomic .new file writes"
+        echo "ok   - thinfloe-save-home uses atomic .new file writes"
     else
-        echo "FAIL - dbrrg-save-home does not use home.tar.gz.new (atomic write pattern)"
+        echo "FAIL - thinfloe-save-home does not use home.tar.gz.new (atomic write pattern)"
         fail=1
     fi
     if grep -q 'by-partlabel' "$save_home"; then
-        echo "FAIL - dbrrg-save-home still references by-partlabel (legacy path)"
+        echo "FAIL - thinfloe-save-home still references by-partlabel (legacy path)"
         fail=1
     else
-        echo "ok   - dbrrg-save-home does not reference by-partlabel"
+        echo "ok   - thinfloe-save-home does not reference by-partlabel"
     fi
 else
-    echo "FAIL - cannot extract usr/bin/dbrrg-save-home from $SQSH"
+    echo "FAIL - cannot extract usr/bin/thinfloe-save-home from $SQSH"
     fail=1
 fi
 
@@ -463,10 +606,10 @@ fi
 if unsquashfs -no-xattrs -d "$DPKG_TMP/autologin" "$SQSH" \
         etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null 2>&1 &&
    [[ -f "$DPKG_TMP/autologin/etc/systemd/system/getty@tty1.service.d/autologin.conf" ]]; then
-    if grep -q 'dbrrg-wait-kms' "$DPKG_TMP/autologin/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
+    if grep -q 'thinfloe-wait-kms' "$DPKG_TMP/autologin/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
         echo "ok   - autologin drop-in pulls in wait-kms"
     else
-        echo "FAIL - autologin drop-in does not reference dbrrg-wait-kms"
+        echo "FAIL - autologin drop-in does not reference thinfloe-wait-kms"
         fail=1
     fi
 else
@@ -474,35 +617,35 @@ else
     fail=1
 fi
 
-# 8. upgrade-image: the save before finishing and the home copy onto a fresh
+# 8. thinfloe-upgrade: the save before finishing and the home copy onto a fresh
 # drive. A stale image would keep the old 60 s save whose bare except hid a
 # failed save, and would copy no home at all.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/upg" "$SQSH" usr/bin/upgrade-image >/dev/null 2>&1 &&
-   [[ -f "$DPKG_TMP/upg/usr/bin/upgrade-image" ]]; then
-    UPG="$DPKG_TMP/upg/usr/bin/upgrade-image"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/upg" "$SQSH" usr/bin/thinfloe-upgrade >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/upg/usr/bin/thinfloe-upgrade" ]]; then
+    UPG="$DPKG_TMP/upg/usr/bin/thinfloe-upgrade"
     if grep -q 'def save_home_before_finish' "$UPG" && grep -q 'SAVE_HOME_TIMEOUT = 600' "$UPG"; then
-        echo "ok   - upgrade-image saves the home with a 600 s bound and reports failure"
+        echo "ok   - thinfloe-upgrade saves the home with a 600 s bound and reports failure"
     else
-        echo "FAIL - upgrade-image has no save_home_before_finish with SAVE_HOME_TIMEOUT = 600"
+        echo "FAIL - thinfloe-upgrade has no save_home_before_finish with SAVE_HOME_TIMEOUT = 600"
         fail=1
     fi
     if grep -qE 'timeout=60[,)]' "$UPG"; then
-        echo "FAIL - upgrade-image still calls dbrrg-save-home with timeout=60 (kills a netboot upload)"
+        echo "FAIL - thinfloe-upgrade still calls thinfloe-save-home with timeout=60 (kills a netboot upload)"
         fail=1
     else
-        echo "ok   - upgrade-image no longer uses the 60 s save timeout"
+        echo "ok   - thinfloe-upgrade no longer uses the 60 s save timeout"
     fi
     if grep -q 'def copy_home_to_drive' "$UPG"; then
-        echo "ok   - upgrade-image can copy the home onto a fresh drive"
+        echo "ok   - thinfloe-upgrade can copy the home onto a fresh drive"
     else
-        echo "FAIL - upgrade-image has no copy_home_to_drive"
+        echo "FAIL - thinfloe-upgrade has no copy_home_to_drive"
         fail=1
     fi
     # Both identity files must never travel to another machine.
-    if grep -q '"./.dbrrg-ssh-host-keys"' "$UPG"; then
+    if grep -q '"./.thinfloe-ssh-host-keys"' "$UPG"; then
         echo "ok   - home copy excludes the SSH host keystore"
     else
-        echo "FAIL - home copy does not exclude ./.dbrrg-ssh-host-keys (two machines would share a host key)"
+        echo "FAIL - home copy does not exclude ./.thinfloe-ssh-host-keys (two machines would share a host key)"
         fail=1
     fi
     if grep -q '"./wg0.conf"' "$UPG"; then
@@ -512,46 +655,47 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/upg" "$SQSH" usr/bin/upgrade-image >/dev/
         fail=1
     fi
 else
-    echo "FAIL - cannot extract usr/bin/upgrade-image from $SQSH"
+    echo "FAIL - cannot extract usr/bin/thinfloe-upgrade from $SQSH"
     fail=1
 fi
-# dbrrg-menu rasterises on the CPU. The images this is built for have no
+# thinfloe-menu rasterises on the CPU. The images this is built for have no
 # Vulkan driver at all, and a GL path would make the menu's start depend on
 # EGL context creation. A later switch to a GPU backend must fail here, not
 # on a client. Both linking and dlopen are checked: winit and wgpu load
 # their libraries at runtime.
 MENU_TMP=$(mktemp -d)
-if unsquashfs -no-xattrs -d "$MENU_TMP/x" "$SQSH" usr/bin/dbrrg-menu >/dev/null 2>&1 &&
-   [[ -f "$MENU_TMP/x/usr/bin/dbrrg-menu" ]]; then
-    MB="$MENU_TMP/x/usr/bin/dbrrg-menu"
+if unsquashfs -no-xattrs -d "$MENU_TMP/x" "$SQSH" usr/bin/thinfloe-menu >/dev/null 2>&1 &&
+   [[ -f "$MENU_TMP/x/usr/bin/thinfloe-menu" ]]; then
+    MB="$MENU_TMP/x/usr/bin/thinfloe-menu"
     if readelf -d "$MB" | grep NEEDED | grep -qiE 'vulkan|libGL|libEGL|GLES'; then
-        echo "FAIL - dbrrg-menu links a GPU library"
+        echo "FAIL - thinfloe-menu links a GPU library"
         fail=1
     elif grep -aqE 'libvulkan\.so|libEGL\.so|libGLESv2\.so|libGL\.so' "$MB"; then
-        echo "FAIL - dbrrg-menu names a GPU library it may dlopen"
+        echo "FAIL - thinfloe-menu names a GPU library it may dlopen"
         fail=1
     else
-        echo "ok   - dbrrg-menu uses no GPU library"
+        echo "ok   - thinfloe-menu uses no GPU library"
     fi
 else
-    echo "FAIL - cannot extract usr/bin/dbrrg-menu from $SQSH"
+    echo "FAIL - cannot extract usr/bin/thinfloe-menu from $SQSH"
     fail=1
 fi
+chmod -R u+rwX "$MENU_TMP" 2>/dev/null
 rm -rf "$MENU_TMP"
 
 # The session body is the menu now; tlclient is one of its tiles.
 if [[ -n "${SESS:-}" && -f "$SESS" ]] &&
-   grep -q 'DBRRG_MENU:-/usr/bin/dbrrg-menu' "$SESS" &&
+   grep -q 'TF_MENU:-/usr/bin/thinfloe-menu' "$SESS" &&
    ! grep -v '^[[:space:]]*#' "$SESS" | grep -q '/opt/thinlinc/bin/tlclient'; then
-    echo "ok   - dbrrg-session launches dbrrg-menu, not tlclient"
+    echo "ok   - thinfloe-session launches thinfloe-menu, not tlclient"
 else
-    echo "FAIL - dbrrg-session does not launch dbrrg-menu"
+    echo "FAIL - thinfloe-session does not launch thinfloe-menu"
     fail=1
 fi
 
 # Cargo.lock is committed, so the image builds what was tested, and it
 # carries no smithay-clipboard, which segfaults on Wayland.
-LOCK=src/dbrrg-menu/Cargo.lock
+LOCK=src/thinfloe-menu/Cargo.lock
 if git ls-files --error-unmatch "$LOCK" >/dev/null 2>&1 &&
    ! grep -q '^name = "smithay-clipboard"$' "$LOCK"; then
     echo "ok   - $LOCK is committed and has no smithay-clipboard"
@@ -564,13 +708,14 @@ fi
 # itself: --check resolves each Icon= and renders it in the same rlimited,
 # time-limited renderer process the session uses, so an icon that is missing
 # or that the renderer refuses or cannot finish fails here, not as a letter
-# on the screen. thinlinc_128.png is an absolute path into /opt/thinlinc,
-# which has moved across client versions before.
-IMAGE="${DBRRG_UBUNTU_IMAGE:-localhost/dbrrg-ubuntu:3.0.0}"
-if check_out=$(podman run --rm --network=none "$IMAGE" /usr/bin/dbrrg-menu --check 2>&1); then
+# on the screen. An add-on tile's icon is skipped while the add-on is not
+# installed, which it never is in the image: test-addon-deps.sh checks
+# ThinLinc's thinlinc_128.png after installing the client.
+IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
+if check_out=$(podman run --rm --network=none "$IMAGE" /usr/bin/thinfloe-menu --check 2>&1); then
     echo "ok   - every shipped tile is usable and its icon renders"
 else
-    echo "FAIL - dbrrg-menu --check in $IMAGE:"
+    echo "FAIL - thinfloe-menu --check in $IMAGE:"
     echo "$check_out"
     fail=1
 fi

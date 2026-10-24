@@ -19,8 +19,8 @@ win = screen.root.create_window(
     0, 0, 400, 300, 0, screen.root_depth,
     X.InputOutput, X.CopyFromParent,
     event_mask=X.StructureNotifyMask)
-win.set_wm_name("dbrrg-x11-probe")
-win.set_wm_class("dbrrg-probe", "dbrrg-probe")
+win.set_wm_name("thinfloe-x11-probe")
+win.set_wm_class("thinfloe-probe", "thinfloe-probe")
 win.map()
 d.sync()
 time.sleep(1)

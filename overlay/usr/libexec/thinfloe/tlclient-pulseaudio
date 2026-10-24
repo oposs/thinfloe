@@ -1,0 +1,103 @@
+#!/bin/sh
+# Replacement for the PulseAudio 6.0 daemon that Cendio bundles with the
+# ThinLinc client at /opt/thinlinc/lib/tlclient/pulseaudio.
+#
+# The client spawns this binary expecting a PulseAudio daemon that loads a
+# module such as
+#     module-native-protocol-tcp listen=127.0.0.1 port=4713 cookie='/path'
+# and then stays in the foreground until killed.
+#
+# We do not start a second sound daemon. Instead we load the equivalent
+# module into the session's PipeWire pulse server and block until told to
+# stop.
+#
+# Argument translation: 'cookie=' is not a valid argument for either
+# PulseAudio 17 or PipeWire's module-native-protocol-tcp - PulseAudio accepts
+# auth-cookie/auth-cookie-enabled/auth-anonymous/auth-ip-acl/port/listen, and
+# PipeWire accepts only port/listen/auth-anonymous. It is presumably an
+# argument Cendio's patched PulseAudio 6.0 understands. We therefore drop it
+# and authenticate anonymously. The listener is bound to loopback only, and
+# this is a single-user kiosk, so the exposure is limited to local processes.
+#
+# The module spec is rebuilt into the argument list positionally rather than
+# re-split from the original string, so no eval is needed and the quoting in
+# cookie='...' cannot leak through.
+
+set -u
+unset LD_LIBRARY_PATH
+
+log() { echo "thinfloe-tlclient-audio: $*" >&2; }
+
+# --- locate the module specification among the arguments --------------------
+# Match only module-native-protocol-tcp, the module this wrapper knows how to
+# translate. tlclient.bin's argv can contain other module-* literals
+# (module-tunnel-sink-new, module-always-sink, module-suspend-on-idle, ...);
+# matching any module-* and taking the last one risked translating the wrong
+# module if a future client version passed more than one -L spec, silently
+# appending auth-anonymous=true to a module with no such argument.
+spec=
+for arg in "$@"; do
+    case "$arg" in
+        module-native-protocol-tcp*) spec="$arg" ;;
+    esac
+done
+
+if [ -z "$spec" ]; then
+    log "no module specification found in arguments: $*"
+    exit 1
+fi
+
+# --- translate it -----------------------------------------------------------
+module_name=${spec%% *}
+listen=
+port=
+set -f
+for token in $spec; do
+    case "$token" in
+        listen=*) listen=$token ;;
+        port=*)   port=$token ;;
+    esac
+done
+set +f
+
+set -- "$module_name"
+[ -n "$listen" ] && set -- "$@" "$listen"
+[ -n "$port" ] && set -- "$@" "$port"
+set -- "$@" auth-anonymous=true
+
+# --- make sure the pulse-compatible server is running -----------------------
+systemctl --user start pipewire.socket pipewire-pulse.socket wireplumber.service \
+    >/dev/null 2>&1 || true
+
+i=0
+until pactl info >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 100 ]; then
+        log "pipewire-pulse did not become available after 10s"
+        exit 1
+    fi
+    sleep 0.1
+done
+
+# --- load the module --------------------------------------------------------
+index=$(pactl load-module "$@")
+if [ -z "$index" ]; then
+    log "load-module failed: $*"
+    exit 1
+fi
+log "loaded '$*' as module index $index"
+
+cleanup() {
+    pactl unload-module "$index" >/dev/null 2>&1 || true
+    exit 0
+}
+trap cleanup TERM INT HUP
+
+# --- behave like the daemon the client thinks it started --------------------
+# Poll rather than sleep forever: a POSIX shell only runs traps between
+# commands, so a short sleep bounds teardown latency.
+while pactl info >/dev/null 2>&1; do
+    sleep 1
+done
+
+cleanup

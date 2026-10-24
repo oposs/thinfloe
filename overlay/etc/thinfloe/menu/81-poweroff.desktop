@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Power off
+Icon=power
+X-TF-Action=poweroff

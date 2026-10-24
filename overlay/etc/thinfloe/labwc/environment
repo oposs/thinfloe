@@ -1,0 +1,35 @@
+# Keyboard configuration. Replaces the Xorg InputClass that used to live in
+# /etc/X11/xorg.conf.d/00-keyboard.conf.
+#
+# Compose is on right-Alt, not the Menu key. The old Xorg config said
+# compose:menu and the 26.04 migration carried that over verbatim; it was
+# changed here deliberately, so this is an intentional divergence from the
+# migration table in docs/superpowers/specs/, not an oversight.
+XKB_DEFAULT_MODEL=pc105
+XKB_DEFAULT_LAYOUT=us
+XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps
+
+# Cursor theme. Without this labwc finds no usable theme: the x-cursor-theme
+# alternative defaults to core.theme (priority 30), which inherits from "core"
+# - the X server's built-in cursor font, which does not exist on disk and means
+# nothing to a Wayland compositor. xcursor-themes installs at priority 20 and
+# therefore never wins the alternative. Setting it explicitly is what actually
+# gives the session a visible pointer.
+XCURSOR_THEME=whiteglass
+XCURSOR_SIZE=24
+
+# Make fullscreen Xwayland windows (the ThinLinc client) cover every monitor
+# instead of one. Requires the local labwc patch; harmless on a stock labwc,
+# which ignores the variable. Set to 0 in ~/.thinfloe-environment for
+# single-monitor fullscreen on a particular machine - that file is sourced
+# after this one and is persisted by save-home.
+#
+# No "export" here: this file is read two ways, and both require plain
+# KEY=VALUE. 10-thinfloe-session.sh sources it with "set -a" (which exports
+# bare assignments for it), and its contents also end up in the merged
+# environment file that thinfloe-compose-labwc-config writes for labwc's own
+# -C config dir - parsed by labwc's naive parser (src/config/session.c,
+# read_environment_file/process_line) that splits on the first "=" - an
+# "export " prefix would become part of the key and the variable would
+# never be set.
+LABWC_FULLSCREEN_SPAN_OUTPUTS=1

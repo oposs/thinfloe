@@ -18,8 +18,8 @@ Description: implement zwp_xwayland_keyboard_grab_manager_v1
  zero (see rc.xml) pending confirmation of the grab-forwarding path on real
  hardware with a keyboard attached.
  .
- dbrrg-specific: not proposed for upstream inclusion, see Forwarded below.
-Author: dbrrg maintainers
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
 Origin: vendor
 Forwarded: not-needed
 Last-Update: 2026-07-27
@@ -46,7 +46,7 @@ index fae462d..4792380 100644
  	enum lab_edge edges_visible;
  	bool inhibits_keybinds; /* also inhibits mousebinds */
 +	/*
-+	 * dbrrg: set while an X11 client holds a keyboard grab forwarded by
++	 * thinfloe: set while an X11 client holds a keyboard grab forwarded by
 +	 * Xwayland. Kept separate from inhibits_keybinds, which the user
 +	 * toggles via the ToggleKeybinds action and which drives an SSD
 +	 * indicator - a grab must not clobber that state.
@@ -86,7 +86,7 @@ index 0000000..bdd72f4
 @@ -0,0 +1,123 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
-+ * dbrrg: zwp_xwayland_keyboard_grab_manager_v1
++ * thinfloe: zwp_xwayland_keyboard_grab_manager_v1
 + *
 + * Rootless Xwayland forwards X11 keyboard grabs (XGrabKeyboard) with this
 + * protocol. It never uses zwp_keyboard_shortcuts_inhibit_manager_v1 - that
@@ -259,7 +259,7 @@ index c439b44..d584834 100644
 +		return false;
 +	}
 +	/*
-+	 * dbrrg: a forwarded X11 grab takes everything, including
++	 * thinfloe: a forwarded X11 grab takes everything, including
 +	 * ToggleKeybinds - the client asked for every key.
 +	 */
 +	if (view->keybinds_inhibited_by_grab) {

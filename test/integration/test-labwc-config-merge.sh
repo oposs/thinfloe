@@ -1,12 +1,12 @@
 #!/bin/bash
-# Regression test for the ~/.dbrrg-environment override bug.
+# Regression test for the ~/.thinfloe-environment override bug.
 #
 # labwc, run with -C, re-reads <config_dir>/environment itself
 # (src/config/session.c, session_environment_init()) and setenv()s every
-# key with overwrite=1. Since 10-dbrrg-session.sh used to point -C straight
-# at /etc/dbrrg/labwc, that re-read clobbered any key the user had also set
-# in ~/.dbrrg-environment - even though the shell had already exported the
-# user's value moments before. dbrrg-compose-labwc-config fixes this by
+# key with overwrite=1. Since 10-thinfloe-session.sh used to point -C straight
+# at /etc/thinfloe/labwc, that re-read clobbered any key the user had also set
+# in ~/.thinfloe-environment - even though the shell had already exported the
+# user's value moments before. thinfloe-compose-labwc-config fixes this by
 # building a merged config directory whose environment file has the
 # system defaults first and the user's overrides last, so the file labwc
 # itself parses already has the user's values winning.
@@ -21,7 +21,7 @@
 
 set -uo pipefail
 
-HELPER="$(cd "$(dirname "$0")/../.." && pwd)/overlay/usr/bin/dbrrg-compose-labwc-config"
+HELPER="$(cd "$(dirname "$0")/../.." && pwd)/overlay/usr/bin/thinfloe-compose-labwc-config"
 
 if [[ ! -x "$HELPER" ]]; then
     echo "FAIL: $HELPER not found or not executable" >&2

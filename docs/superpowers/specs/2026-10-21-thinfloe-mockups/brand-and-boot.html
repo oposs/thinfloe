@@ -1,0 +1,81 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geo:ital@0;1&display=swap');
+.tf-row{display:flex;gap:24px;align-items:center;flex-wrap:wrap}
+.tf-geo{font-family:'Geo',sans-serif;font-style:italic}
+.card-image{display:block!important;aspect-ratio:auto!important;background:#000!important}
+.screen{position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;color:#fff}
+.screen .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+.screen .foot{position:absolute;left:0;right:0;bottom:6%;text-align:center;font-family:'Geo',sans-serif;font-style:italic;color:#8a97a6;font-size:13px;letter-spacing:.06em}
+.bar{width:28%;height:3px;background:#1e2630;overflow:hidden;transform:skewX(calc(var(--slant) * -1))}
+.bar i{display:block;height:100%;width:45%;background:var(--ice);animation:fill 3s ease-in-out infinite}
+@keyframes fill{0%{width:5%}100%{width:100%}}
+.floe{position:absolute;inset:0;background:radial-gradient(ellipse at 50% 120%,#12324a 0%,#000 60%)}
+.vendor{position:absolute;top:30%;left:50%;transform:translate(-50%,-50%);border:1px dashed #555;color:#777;padding:14px 28px;font-size:12px}
+.spinner{width:22px;height:22px;border:2px solid #333;border-top-color:var(--ice);border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.swatch{display:inline-block;width:18px;height:18px;border-radius:3px;vertical-align:middle;margin-right:6px;border:1px solid #444}
+:root{--slant:9deg;--ice:#7cc4ff}
+</style>
+
+<h2>ThinFloe: brand and boot screen (v2)</h2>
+<p class="subtitle">Logo slant now 9°, measured from the font. Each letter of the logo is one solid shape, so there are no seams.</p>
+
+<div class="section">
+  <h3>Logo + wordmark</h3>
+  <div class="mockup"><div class="mockup-header">Logo at 9° next to Geo Italic</div>
+  <div class="mockup-body" style="background:#000;color:#fff">
+    <div class="tf-row" style="justify-content:center;padding:24px 0">
+      <svg class="tflogo" viewBox="250 370 420 280" width="150"></svg>
+      <span class="tf-geo" style="font-size:72px;line-height:1">ThinFloe</span>
+    </div>
+    <div class="tf-row" style="justify-content:center;padding-bottom:16px;color:#aaa;font-size:13px">
+      <label>Slant: <input id="slant" type="range" min="0" max="20" step="0.5" value="9"> <b id="slantv">9°</b></label>
+      <span class="tf-geo" style="font-size:22px;color:#fff">tf_ thinfloe-menu 1.0</span>
+    </div>
+  </div></div>
+  <p style="font-size:13px;color:#999">Accent colour proposal: <span class="swatch" style="background:#7cc4ff"></span>ice blue #7cc4ff on near-black. The logo stays pure white.</p>
+</div>
+
+<h3>Boot screen (Plymouth)</h3>
+<p class="subtitle">Click the one you like. All three replace the current vendor logo + spinner.</p>
+<div class="cards">
+  <div class="card" data-choice="boot-a" onclick="toggleSelect(this)">
+    <div class="card-image"><div class="screen">
+      <div class="center"><svg class="tflogo" viewBox="250 370 420 280" width="22%"></svg><div class="bar"><i></i></div></div>
+    </div></div>
+    <div class="card-body"><h3>A · Pure</h3><p>Logo alone on black, a slanted ice-blue progress line under it. Quiet and fast-looking.</p></div>
+  </div>
+  <div class="card" data-choice="boot-b" onclick="toggleSelect(this)">
+    <div class="card-image"><div class="screen"><div class="floe"></div>
+      <div class="center"><div class="tf-row" style="gap:12px"><svg class="tflogo" viewBox="250 370 420 280" width="60"></svg><span class="tf-geo" style="font-size:36px">ThinFloe</span></div><div class="bar"><i></i></div></div>
+      <div class="foot">thinfloe-3f9a2c · 2026.10.21</div>
+    </div></div>
+    <div class="card-body"><h3>B · Wordmark + floe glow</h3><p>Logo and name, a faint ice-blue glow rising from the bottom. Host name and version at the foot, useful for support calls.</p></div>
+  </div>
+  <div class="card" data-choice="boot-c" onclick="toggleSelect(this)">
+    <div class="card-image"><div class="screen">
+      <div class="vendor">vendor logo (from firmware)</div>
+      <div class="center" style="top:35%"><div class="spinner"></div></div>
+      <div class="foot" style="display:flex;justify-content:center;gap:10px;align-items:center"><svg class="tflogo" viewBox="250 370 420 280" width="28"></svg><span style="color:#fff;font-size:16px">ThinFloe</span></div>
+    </div></div>
+    <div class="card-body"><h3>C · Keep vendor logo</h3><p>Like today (bgrt), so no flicker from the firmware logo. ThinFloe signs small at the bottom.</p></div>
+  </div>
+</div>
+
+<script>
+const LOGO = `<g class="sk" fill="currentColor">
+  <path d="M278 388H625V447H433V632H360V447H278Z"/>
+  <path d="M498 502H624V562H570V632H498Z"/>
+</g>`;
+function setSlant(deg){
+  document.querySelectorAll('svg.tflogo').forEach(s=>{
+    if(!s.innerHTML) s.innerHTML = LOGO;
+    s.querySelector('.sk').setAttribute('transform',`translate(0 632) skewX(${-deg}) translate(0 -632)`);
+    s.style.color = '#fff';
+  });
+  document.documentElement.style.setProperty('--slant', deg+'deg');
+  document.getElementById('slantv').textContent = deg+'°';
+}
+document.getElementById('slant').addEventListener('input',e=>setSlant(+e.target.value));
+setSlant(9);
+</script>

@@ -1,0 +1,37 @@
+// ThinFloe taskbar.
+//
+// This exists for exactly one reason: labwc draws an iconify button on its
+// server-side decorations, and with zero keybindings and no root menu a
+// minimized window is otherwise unreachable for the rest of the session.
+// Clicking its entry here brings it back.
+//
+// Deliberately minimal - no clock, tray or workspaces. This is a recovery
+// affordance on a kiosk, not a desktop panel.
+//
+// It lives in /etc/thinfloe, NOT under $HOME: the home directory is captured
+// wholesale by thinfloe-save-home and restored wholesale by the initramfs, so
+// a config file in $HOME would be pinned forever on an already-deployed
+// machine and a corrected file in a later image would never reach it. Same
+// reasoning as /etc/thinfloe/labwc/rc.xml.
+//
+// Known behaviour: a fullscreen ThinLinc client COVERS this bar. wlroots
+// places fullscreen surfaces above the layer-shell top layer and ignores
+// exclusive zones. That is fine - the bar is visible exactly when no window
+// is fullscreen, which is when a window can go missing. Not a
+// misconfiguration; do not "fix" it.
+{
+    "layer": "top",
+    "position": "bottom",
+    "height": 32,
+    "modules-left": ["wlr/taskbar"],
+    "modules-center": [],
+    "modules-right": [],
+    "wlr/taskbar": {
+        "all-outputs": true,
+        "format": "{icon} {title:.40}",
+        "icon-size": 20,
+        "tooltip-format": "{title}",
+        "on-click": "activate",
+        "on-click-middle": "close"
+    }
+}

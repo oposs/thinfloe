@@ -1,24 +1,24 @@
 #!/bin/bash
-# Offline tests for dbrrg-password.
+# Offline tests for thinfloe-password.
 #
-# The image ships no password for tluser: adduser --disabled-password leaves
+# The image ships no password for tfuser: adduser --disabled-password leaves
 # `!` in the shadow field and nothing overwrites it. A person at the machine
-# sets one with `sudo dbrrg-password`, and it has to survive a reboot, so the
-# hash is stored in tluser's home directory where dbrrg-save-home captures it
-# and the initramfs restores it. dbrrg-password --apply, run before
+# sets one with `sudo thinfloe-password`, and it has to survive a reboot, so the
+# hash is stored in tfuser's home directory where thinfloe-save-home captures it
+# and the initramfs restores it. thinfloe-password --apply, run before
 # ssh.service, puts it back into the shadow file.
 #
 # Two properties are load-bearing and have each already cost this repo a bug
 # in a sibling script:
 #
-#   - The home directory is resolved from `getent passwd tluser`, never $HOME.
+#   - The home directory is resolved from `getent passwd tfuser`, never $HOME.
 #     This script runs under sudo, where env_reset makes HOME /root, so a
 #     $HOME-based path writes the hash into root's home: lost at reboot, and
 #     with the wrong owner. Same defect as the one cfe7aa0 fixed in
-#     dbrrg-save-home.
-#   - The stored file is owned by tluser, not root, like the rest of the
-#     home. Until 2026-10 the netboot save in dbrrg-save-home ran tar as
-#     tluser, and a root-owned 600 file failed that save outright.
+#     thinfloe-save-home.
+#   - The stored file is owned by tfuser, not root, like the rest of the
+#     home. Until 2026-10 the netboot save in thinfloe-save-home ran tar as
+#     tfuser, and a root-owned 600 file failed that save outright.
 #
 # Runs without root: chpasswd, getent, passwd and chown are stubbed and their
 # calls recorded.
@@ -28,7 +28,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT="$REPO/overlay/usr/bin/dbrrg-password"
+SCRIPT="$REPO/overlay/usr/bin/thinfloe-password"
 
 if [[ ! -x "$SCRIPT" ]]; then
     echo "FAIL: $SCRIPT not found or not executable" >&2
@@ -49,7 +49,7 @@ mkdir -p "$STUBS"
 # being given a plaintext password to hash; with -e a ready-made hash.
 cat >"$STUBS/chpasswd" <<'STUB'
 #!/bin/bash
-{ echo "chpasswd $*"; sed 's/^/stdin: /'; } >>"$DBRRG_TEST_LOG"
+{ echo "chpasswd $*"; sed 's/^/stdin: /'; } >>"$TF_TEST_LOG"
 exit 0
 STUB
 
@@ -57,10 +57,10 @@ STUB
 # shadow for the hash chpasswd just produced.
 cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
-echo "getent $*" >>"$DBRRG_TEST_LOG"
+echo "getent $*" >>"$TF_TEST_LOG"
 case "$1" in
-    passwd) echo "tluser:x:1000:1000:ThinUser:$DBRRG_TEST_PASSWD_HOME:/bin/bash" ;;
-    shadow) echo "tluser:$DBRRG_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
+    passwd) echo "tfuser:x:1001:1001:ThinUser:$TF_TEST_PASSWD_HOME:/bin/bash" ;;
+    shadow) echo "tfuser:$TF_TEST_SHADOW_HASH:20000:0:99999:7:::" ;;
     *)      exit 2 ;;
 esac
 exit 0
@@ -68,27 +68,27 @@ STUB
 
 cat >"$STUBS/passwd" <<'STUB'
 #!/bin/bash
-echo "passwd $*" >>"$DBRRG_TEST_LOG"
+echo "passwd $*" >>"$TF_TEST_LOG"
 exit 0
 STUB
 
 cat >"$STUBS/chown" <<'STUB'
 #!/bin/bash
-echo "chown $*" >>"$DBRRG_TEST_LOG"
+echo "chown $*" >>"$TF_TEST_LOG"
 exit 0
 STUB
 
 chmod +x "$STUBS"/*
 
-STORE_NAME=".dbrrg-password"
+STORE_NAME=".thinfloe-password"
 
 # run_password <home-for-HOME-env> <stdin-text> [args...]
 run_password() {
     local home_env="$1" input="$2"; shift 2
     printf '%s' "$input" | \
-    DBRRG_TEST_LOG="$WORK/calls.log" \
-    DBRRG_TEST_PASSWD_HOME="$WORK/home/tluser" \
-    DBRRG_TEST_SHADOW_HASH="$FAKE_HASH" \
+    TF_TEST_LOG="$WORK/calls.log" \
+    TF_TEST_PASSWD_HOME="$WORK/home/tfuser" \
+    TF_TEST_SHADOW_HASH="$FAKE_HASH" \
     HOME="$home_env" \
     PATH="$STUBS:$PATH" \
         "$SCRIPT" "$@" >"$WORK/out" 2>"$WORK/err"
@@ -96,12 +96,12 @@ run_password() {
 }
 
 FAKE_HASH='$y$j9T$aaaaaaaaaaaaaaaaaaaaa$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-STORE="$WORK/home/tluser/$STORE_NAME"
+STORE="$WORK/home/tfuser/$STORE_NAME"
 
 setup() {
     rm -rf "$WORK/home" "$WORK/root" "$WORK/calls.log" \
            "$WORK/out" "$WORK/err"
-    mkdir -p "$WORK/home/tluser" "$WORK/root"
+    mkdir -p "$WORK/home/tfuser" "$WORK/root"
     echo "root's shell config" >"$WORK/root/.bashrc"
 }
 
@@ -128,15 +128,15 @@ else
 fi
 
 # ---------------------------------------------------------------- test 3
-# The stored file belongs to tluser, like the rest of the home (see the
+# The stored file belongs to tfuser, like the rest of the home (see the
 # header).
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 mode=$(stat -c '%a' "$STORE" 2>/dev/null)
-if [[ "$mode" == "600" ]] && grep -q "^chown tluser:tluser $STORE\$" "$WORK/calls.log"; then
-    ok "--set stores mode 600 owned by tluser"
+if [[ "$mode" == "600" ]] && grep -q "^chown tfuser:tfuser $STORE\$" "$WORK/calls.log"; then
+    ok "--set stores mode 600 owned by tfuser"
 else
-    bad "--set stores mode 600 owned by tluser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
+    bad "--set stores mode 600 owned by tfuser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
 fi
 
 # ---------------------------------------------------------------- test 4
@@ -172,7 +172,7 @@ echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --clear)
 order=$(grep '^passwd ' "$WORK/calls.log" | tr '\n' ' ')
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
-   [[ "$order" == "passwd -d tluser passwd -l tluser " ]]; then
+   [[ "$order" == "passwd -d tfuser passwd -l tfuser " ]]; then
     ok "--clear removes the stored hash and deletes before locking"
 else
     bad "--clear removes the stored hash and deletes before locking (exit $rc, stored $([[ -e "$STORE" ]] && echo yes || echo no), passwd calls: '$order')"
@@ -194,7 +194,7 @@ setup
 echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --apply)
 if [[ "$rc" == "0" ]] && grep -q '^chpasswd -e$' "$WORK/calls.log" &&
-   grep -qF "stdin: tluser:$FAKE_HASH" "$WORK/calls.log"; then
+   grep -qF "stdin: tfuser:$FAKE_HASH" "$WORK/calls.log"; then
     ok "--apply feeds the stored hash to chpasswd -e"
 else
     bad "--apply feeds the stored hash to chpasswd -e (exit $rc, calls: $(grep -c . "$WORK/calls.log" 2>/dev/null))"
@@ -222,8 +222,37 @@ else
     bad "--set never writes the plaintext to the store or the terminal (exit $rc)"
 fi
 
+# ---------------------------------------------------------------- test 11
+# 4.0 keeps no link under the 3.x name ~/.dbrrg-password: a 3.x home is
+# migrated once by the initramfs and nothing reads the old name afterwards.
+setup
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+OLD="$WORK/home/tfuser/.dbrrg-password"
+if [[ "$rc" == "0" ]] && [[ ! -e "$OLD" && ! -L "$OLD" ]] &&
+   ! grep -q '^chown -h' "$WORK/calls.log"; then
+    ok "--set makes no ~/.dbrrg-password"
+else
+    bad "--set makes no ~/.dbrrg-password (exit $rc, link '$(readlink "$OLD" 2>/dev/null)')"
+fi
+
+# ---------------------------------------------------------------- test 12
+# --clear also removes a ~/.dbrrg-password that a save on a 3.x fallback
+# boot left in the home. 4.0 never reads it, but the next 3.x boot would
+# install it, and so would a migration on a boot whose archive lost the
+# home-version marker: a cleared password must not come back.
+setup
+echo "$FAKE_HASH" >"$STORE"
+echo "3x-hash" >"$WORK/home/tfuser/.dbrrg-password"
+rc=$(run_password "$WORK/root" '' --clear)
+if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
+   [[ ! -e "$WORK/home/tfuser/.dbrrg-password" ]]; then
+    ok "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password"
+else
+    bad "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password (exit $rc)"
+fi
+
 if [[ "$fail" == "0" ]]; then
     echo
-    echo "PASSED - dbrrg-password"
+    echo "PASSED - thinfloe-password"
 fi
 exit $fail

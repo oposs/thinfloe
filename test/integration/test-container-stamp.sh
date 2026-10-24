@@ -1,7 +1,7 @@
 #!/bin/bash
 # Offline tests for the Makefile's container stamps.
 #
-# .ubuntu-container is per checkout, but the image tag dbrrg-ubuntu:$(VERSION)
+# .ubuntu-container is per checkout, but the image tag thinfloe-ubuntu:$(VERSION)
 # is shared by every checkout on the machine. The stamp used to be a bare
 # `touch`, dropped only when the tag did not exist at all, so after another
 # checkout built and re-tagged the image this checkout still called its build
@@ -11,7 +11,7 @@
 #
 # Runs the real Makefile in a scratch tree with a stub container runtime: the
 # stub's "build" changes nothing, and "image inspect" reports the ID in
-# $DBRRG_TEST_IMAGE_ID (none when it is empty, i.e. no such image).
+# $TF_TEST_IMAGE_ID (none when it is empty, i.e. no such image).
 #
 # Usage: test/integration/test-container-stamp.sh
 
@@ -29,11 +29,11 @@ bad() { echo "FAIL - $1"; fail=1; }
 RUNTIME="$WORK/podman"
 cat >"$RUNTIME" <<'STUB'
 #!/bin/bash
-echo "podman $*" >>"$DBRRG_TEST_RUNTIME_LOG"
+echo "podman $*" >>"$TF_TEST_RUNTIME_LOG"
 case "$1 ${2:-}" in
     "image inspect")
-        [ -n "${DBRRG_TEST_IMAGE_ID:-}" ] || exit 125
-        echo "$DBRRG_TEST_IMAGE_ID" ;;
+        [ -n "${TF_TEST_IMAGE_ID:-}" ] || exit 125
+        echo "$TF_TEST_IMAGE_ID" ;;
     "build "*) ;;
     *) exit 125 ;;
 esac
@@ -43,15 +43,14 @@ chmod +x "$RUNTIME"
 # Just enough of a checkout for the .ubuntu-container rule: its inputs, all
 # older than the stamp, so only the stamp's content can make it stale.
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/vendor" "$TREE/artifacts/rootfs" \
-    "$TREE/src/dbrrg-menu/src"
+mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/artifacts/rootfs" \
+    "$TREE/src/thinfloe-menu/src"
 cp "$REPO/Makefile" "$TREE/Makefile"
 : >"$TREE/containers/ubuntu/Dockerfile"
-: >"$TREE/vendor/oxulnk-desktop.deb"
-: >"$TREE/src/dbrrg-menu/src/main.rs"
+: >"$TREE/src/thinfloe-menu/src/main.rs"
 touch -d '2020-01-01' "$TREE/containers/ubuntu/Dockerfile" \
-    "$TREE/vendor/oxulnk-desktop.deb" "$TREE/containers/ubuntu/patches" \
-    "$TREE/src/dbrrg-menu/src/main.rs" "$TREE/src/dbrrg-menu/src" "$TREE/src/dbrrg-menu"
+    "$TREE/containers/ubuntu/patches" \
+    "$TREE/src/thinfloe-menu/src/main.rs" "$TREE/src/thinfloe-menu/src" "$TREE/src/thinfloe-menu"
 
 STAMP="$TREE/.ubuntu-container"
 
@@ -61,7 +60,7 @@ STAMP="$TREE/.ubuntu-container"
 # only whether it built matters here.
 run_make() {
     : >"$WORK/runtime.log"
-    DBRRG_TEST_RUNTIME_LOG="$WORK/runtime.log" DBRRG_TEST_IMAGE_ID="$1" \
+    TF_TEST_RUNTIME_LOG="$WORK/runtime.log" TF_TEST_IMAGE_ID="$1" \
         make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" .ubuntu-container \
         >"$WORK/make.out" 2>&1
     if grep -q '^podman build ' "$WORK/runtime.log"; then
@@ -89,7 +88,7 @@ else
 fi
 
 # ---------------------------------------------------------------- test 3
-# Another checkout rebuilt dbrrg-ubuntu:$(VERSION) from its own sources.
+# Another checkout rebuilt thinfloe-ubuntu:$(VERSION) from its own sources.
 r=$(run_make sha256:bbbb)
 if [[ "$r" == built ]] && [[ "$(cat "$STAMP" 2>/dev/null)" == sha256:bbbb ]]; then
     ok "a different image under the same tag invalidates the stamp"
@@ -116,7 +115,7 @@ else
 fi
 
 # ---------------------------------------------------------------- test 6
-# dbrrg-menu is compiled inside the container build from src/dbrrg-menu, which
+# thinfloe-menu is compiled inside the container build from src/thinfloe-menu, which
 # OVERLAY_FILES does not cover. Editing it must make the stamp stale, or
 # 'make test' checks a binary built from the old source.
 echo sha256:aaaa >"$STAMP"
@@ -124,12 +123,12 @@ r=$(run_make sha256:aaaa)
 if [[ "$r" != up-to-date ]]; then
     bad "setup: stamp not up to date before touching the crate ($r)"
 else
-    touch "$TREE/src/dbrrg-menu/src/main.rs"
+    touch "$TREE/src/thinfloe-menu/src/main.rs"
     r=$(run_make sha256:aaaa)
     if [[ "$r" == built ]]; then
-        ok "editing a dbrrg-menu source file invalidates the stamp"
+        ok "editing a thinfloe-menu source file invalidates the stamp"
     else
-        bad "a dbrrg-menu edit left the stamp standing ($r)"
+        bad "a thinfloe-menu edit left the stamp standing ($r)"
     fi
 fi
 

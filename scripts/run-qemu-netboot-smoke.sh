@@ -1,9 +1,9 @@
 #!/bin/bash
 # Headless netboot smoke test: serve the rootfs artifacts over HTTP, boot the
 # kernel and initrd in QEMU with no disk and
-# ramroot=http://boot.dbrrg.test:<port>/ramroot.sqsh, then judge the log.
+# ramroot=http://boot.thinfloe.test:<port>/ramroot.sqsh, then judge the log.
 #
-# The name boot.dbrrg.test exists only in scripts/smoke-dns.py, so the
+# The name boot.thinfloe.test exists only in scripts/smoke-dns.py, so the
 # download proves the initramfs used the DNS server from its DHCP lease:
 # curl -> the systemd-resolved stub -> the lease's 10.0.2.3 -> slirp, which
 # forwards to the first nameserver in /etc/resolv.conf -> smoke-dns.py. To
@@ -18,11 +18,11 @@
 # Usage: scripts/run-qemu-netboot-smoke.sh ROOTFS_DIR LOG TIMEOUT GRACE QEMU_ARGS...
 #
 # Beyond check-boot-smoke.sh, a netboot must show what only netboot does:
-#   - the hostname is dbrrg-<last six hex digits of the boot MAC>;
+#   - the hostname is thinfloe-<last six hex digits of the boot MAC>;
 #   - the initramfs asked the boot server for home.pkg under that MAC, which
-#     proves /run/dbrrg/state/boot-mac was recorded. The server has no
+#     proves /run/thinfloe/state/boot-mac was recorded. The server has no
 #     archive, so the request is answered 404, the ordinary first-netboot case;
-#   - the responder was asked for boot.dbrrg.test.
+#   - the responder was asked for boot.thinfloe.test.
 
 set -uo pipefail
 
@@ -34,8 +34,8 @@ shift 4
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MAC=52:54:00:12:34:56
-HOSTNAME_WANT=dbrrg-123456
-BOOT_NAME=boot.dbrrg.test
+HOSTNAME_WANT=thinfloe-123456
+BOOT_NAME=boot.thinfloe.test
 HTTP_LOG="$LOG.http"
 DNS_LOG="$LOG.dns"
 
@@ -43,9 +43,9 @@ for f in vmlinuz initrd.img ramroot.sqsh; do
     [[ -f "$ROOTFS_DIR/$f" ]] || { echo "FAIL: $ROOTFS_DIR/$f missing" >&2; exit 1; }
 done
 
-if [[ -z "${DBRRG_NETBOOT_NS:-}" ]]; then
+if [[ -z "${TF_NETBOOT_NS:-}" ]]; then
     # --kill-child: if unshare is killed, the script inside goes with it.
-    DBRRG_NETBOOT_NS=1 exec unshare --user --map-root-user --mount --net \
+    TF_NETBOOT_NS=1 exec unshare --user --map-root-user --mount --net \
         --kill-child -- "$0" "$ROOTFS_DIR" "$LOG" "$TIMEOUT" "$GRACE" "$@"
     echo "FAIL: cannot create the user and network namespace (unshare -rmn)" >&2
     exit 1
@@ -110,16 +110,16 @@ else
     echo "FAIL - hostname is not $HOSTNAME_WANT ($(grep -aoE 'Hostname set to <[^>]*>' "$LOG" | tail -1))"
     fail=1
 fi
-if grep -qaF "dbrrg: network is up on " "$LOG"; then
+if grep -qaF "thinfloe: network is up on " "$LOG"; then
     echo "ok   - the initramfs found the interface holding the DHCP lease"
 else
-    echo "FAIL - no 'dbrrg: network is up on' line"
+    echo "FAIL - no 'thinfloe: network is up on' line"
     fail=1
 fi
-if grep -qaF "dbrrg: ramroot=http://$BOOT_NAME:" "$LOG"; then
+if grep -qaF "thinfloe: ramroot=http://$BOOT_NAME:" "$LOG"; then
     echo "ok   - the cmdline hook's ramroot= line reached the console"
 else
-    echo "FAIL - the cmdline hook's 'dbrrg: ramroot=' line is not on the console"
+    echo "FAIL - the cmdline hook's 'thinfloe: ramroot=' line is not on the console"
     fail=1
 fi
 if grep -qxF "1 $BOOT_NAME" "$DNS_LOG"; then

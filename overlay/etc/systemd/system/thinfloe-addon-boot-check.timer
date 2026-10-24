@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the ticked ThinFloe add-ons one minute after boot
+
+# Without a random delay: on netboot this check is what installs the
+# ticked add-ons. The daily check is thinfloe-addon-check.timer.
+[Timer]
+OnBootSec=1min
+Unit=thinfloe-addon-check.service
+
+[Install]
+WantedBy=timers.target

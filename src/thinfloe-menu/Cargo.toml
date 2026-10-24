@@ -1,0 +1,23 @@
+[package]
+name = "thinfloe-menu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+egui_shadcn = { path = "egui_shadcn" }
+egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
+egui-winit = { version = "0.36.2", default-features = false, features = ["links", "wayland"] }
+winit = { version = "0.30.13", default-features = false, features = ["wayland", "wayland-dlopen", "rwh_06"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["wayland", "wayland-dlopen"] }
+resvg = { version = "0.48.1", default-features = false }
+libc = "0.2.190"
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.release]
+lto = "thin"
+strip = true
