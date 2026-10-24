@@ -51,13 +51,11 @@ install() {
     # Kernel modules (only what we need)
     instmods squashfs overlay zram loop
     instmods ext4 vfat
-    # Network - be selective
+    # Network - be selective. Wired only: nothing in the initrd uses WiFi
+    # (no wpa_supplicant, netboot needs a cable), and iwlwifi brought 82 MB
+    # of firmware with it. The running system loads WiFi from the squashfs.
     instmods e1000 e1000e igb r8169 atlantic
-    instmods iwlwifi iwlmvm cfg80211
     instmods af_packet
-
-    # Firmware
-    inst_multiple -o /usr/lib/firmware/iwlwifi-*
 
     return 0
 }
