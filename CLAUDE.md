@@ -260,7 +260,8 @@ The system implements home directory persistence across reboots:
   anyway). A program stopped this way gets no Save-On-Exit save, and neither
   does the last program ending while the question is up: the menu then goes
   on without asking (if an add-on job still runs, the question stays and
-  the save is done only on Stay; see [Add-ons](#add-ons)). The menu greys the save tile out when
+  the save is left to the logout save that follows the job, or done on
+  Stay; see [Add-ons](#add-ons)). The menu greys the save tile out when
   `/run/thinfloe/state/home-restore` says `failed`; after a Save-On-Exit tile
   exits on such a boot, the save is skipped with a line in the menu's log.
 - `thinfloe-save-home` resolves the directory to archive from `getent passwd
@@ -523,7 +524,10 @@ home; removing it is later work.
   group, then the save and exit 10 / 11 once the job ended or after 5 s,
   since the shutdown ends what is left. The job runs in a process group of
   its own (`sudo -n thinfloe-addon` started with `process_group(0)`),
-  because sudo does not relay a signal sent from its own process group. A
+  because the stop signals a process group (`kill(-pgid)`), which would
+  otherwise be the menu's own. sudo keeps tfuser's real uid, so it receives
+  the SIGTERM and relays it to the tool; tfuser cannot signal the root tool
+  itself. A
   Save-On-Exit program that ends while the question waits only for an
   add-on job starts no save: the logout save follows, or, on Stay, the
   owed save starts then.

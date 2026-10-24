@@ -31,8 +31,8 @@ pub const RESTORE_FAILED_REASON: &str = "this boot's home restore failed, so sav
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// An add-on job: `sudo -n thinfloe-addon <args>`, in a process group of
-/// its own, so sudo relays a SIGTERM from the menu to the tool (it ignores
-/// one sent from its own process group).
+/// its own, because a stop signals the whole group, which would otherwise
+/// be the menu's. sudo receives the SIGTERM and relays it to the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AddonRun {
     args: Vec<String>,

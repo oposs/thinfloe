@@ -235,9 +235,9 @@ pub fn run(id: JobId, name: &str, argv: &[String], feed: &Arc<Feed>, on_spawn: i
 /// the menu reads already; stderr (sudo refusing, a Python error) is not in
 /// that log, so it goes to the menu log under `add-ons`.
 ///
-/// It gets a process group of its own, whose id `on_spawn` receives: sudo
-/// does not relay a signal sent from its own process group, which would
-/// otherwise be the menu's.
+/// It gets a process group of its own, whose id `on_spawn` receives:
+/// `stop` signals a whole group, which would otherwise be the menu's. sudo
+/// keeps the user's real uid, so it receives the signal and relays it.
 pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl FnOnce(i32)) -> JobResult {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&cmd[0]);
@@ -528,8 +528,8 @@ mod tests {
 
     #[test]
     fn an_addon_job_has_a_process_group_of_its_own() {
-        // sudo drops a signal sent from its own process group, so the menu
-        // could not stop the job if it shared the menu's group.
+        // A stop signals the job's process group; shared with the menu, that
+        // would signal the menu itself.
         let feed = Arc::new(Feed::default());
         let cmd = sh("read -r _ _ _ _ pg _ < /proc/$$/stat; [ \"$pg\" = \"$$\" ] && echo own >&2");
         let mut pgid = 0;
