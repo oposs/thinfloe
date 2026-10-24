@@ -998,7 +998,8 @@ unconditionally and then fails to find `tl.new/ramroot.sqsh`; type `current`
 at the boot prompt, and set `DEFAULT current` in both copies by hand.
 
 A stick holds at most two releases. One release (`vmlinuz`, `initrd.img`,
-`ramroot.sqsh`) was 775 MB in 2026-10, and the ESP was 2000 MB: with
+`ramroot.sqsh`) was 775 MB in 2026-10 (611 MB after the Part 3 slim-down,
+2026-10-24), and the ESP was 2000 MB: with
 `tl.old/` still present, staging `tl.new/` needed room for three and failed.
 `thinfloe-upgrade` therefore removes `tl.old/` before it stages `tl.new/`;
 while an upgrade is staged the fallback is `tl/`, the `current` entry. Before
