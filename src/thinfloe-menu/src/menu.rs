@@ -30,6 +30,16 @@ pub const RESTORE_FAILED_REASON: &str = "this boot's home restore failed, so sav
 /// How long programs get to end after SIGTERM before SIGKILL, at logout.
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// An add-on job: `sudo -n thinfloe-addon <args>`, in a process group of
+/// its own, so sudo relays a SIGTERM from the menu to the tool (it ignores
+/// one sent from its own process group).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddonRun {
+    args: Vec<String>,
+    /// Known once the worker reports the start.
+    pgid: Option<i32>,
+}
+
 /// A program a tile started that has not ended yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Running {
@@ -55,10 +65,16 @@ pub enum Logout {
     Confirm,
     /// SIGTERM sent; SIGKILL at `kill_at` to what is left.
     Stopping { kill_at: Instant, killed: bool },
-    /// The programs are gone; an add-on job still runs. It is not stopped:
-    /// it runs as root, and a dpkg cut short leaves a half-installed
-    /// package for the rest of the boot. Stay is offered.
+    /// The programs are gone; an add-on job still runs. Log out does not
+    /// stop it: the job runs as root, and a dpkg cut short leaves a
+    /// half-installed package for the rest of the boot. Stay is offered,
+    /// and for Restart and Power off also "Restart anyway": the rootfs is
+    /// in RAM and goes away with the restart.
     WaitAddons,
+    /// Restart or Power off anyway: SIGTERM went to the add-on jobs; the
+    /// menu goes on when they ended or at `go_at`, whichever comes first.
+    /// The shutdown ends what is left.
+    StoppingAddons { go_at: Instant },
     /// The programs are gone; a background save is still running.
     WaitSave,
     /// The logout save runs.
@@ -147,8 +163,11 @@ pub struct Menu {
     addons: Vec<AddonStatus>,
     pub screen: Screen,
     pub retry: Option<Retry>,
-    /// The arguments of each add-on job that runs.
-    addon_runs: Vec<Vec<String>>,
+    /// Each add-on job that runs.
+    addon_runs: Vec<AddonRun>,
+    /// A Save-On-Exit program ended while the end-of-session question
+    /// waited for an add-on job: the save is done only if the person stays.
+    deferred_save: bool,
     /// When the add-ons were last checked, from the tool's last-check file.
     pub last_check: Option<u64>,
     retry_marker: RetryMarker,
@@ -185,6 +204,7 @@ impl Menu {
             screen: Screen::Grid,
             retry: None,
             addon_runs: Vec::new(),
+            deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
             retry_held: false,
@@ -209,12 +229,12 @@ impl Menu {
 
     /// Whether a check of every add-on runs.
     pub fn checking(&self) -> bool {
-        self.addon_runs.iter().any(|a| *a == ["check"])
+        self.addon_runs.iter().any(|a| a.args == ["check"])
     }
 
     /// Whether an add-on job for `id` runs, or a check of every add-on.
     pub fn addon_busy(&self, id: &str) -> bool {
-        self.checking() || self.addon_runs.iter().any(|a| a.iter().skip(1).any(|x| x == id))
+        self.checking() || self.addon_runs.iter().any(|a| a.args.iter().skip(1).any(|x| x == id))
     }
 
     /// Whether thinfloe-addon takes the add-on of this tile. It refuses an
@@ -252,7 +272,7 @@ impl Menu {
         };
         self.addon_runs
             .iter()
-            .map(|a| match a.as_slice() {
+            .map(|a| match a.args.as_slice() {
                 [verb, id] if verb == "install" => format!("Installing {}", name(id)),
                 [verb, id] if verb == "update" => format!("Updating {}", name(id)),
                 [verb, id] if verb == "remove" => format!("Removing {}", name(id)),
@@ -262,7 +282,10 @@ impl Menu {
     }
 
     fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
-        self.addon_runs.push(args.clone());
+        self.addon_runs.push(AddonRun {
+            args: args.clone(),
+            pgid: None,
+        });
         Some(Effect::Start(Job::Addon { args }))
     }
 
@@ -489,6 +512,8 @@ impl Menu {
     /// The programs and add-on jobs are gone: wait for a background save,
     /// or save now.
     fn logout_after_jobs(&mut self, now: Instant) -> Option<Effect> {
+        // The logout save covers a deferred Save-On-Exit.
+        self.deferred_save = false;
         // A save that is refused anyway is not attempted: the person is
         // asked straight away.
         if self.restore_failed {
@@ -552,10 +577,27 @@ impl Menu {
                     self.log.note(Kind::Warn, SaveOutcome::RestoreFailed.message());
                     return None;
                 }
+                // The question now waits only for an add-on job, and goes
+                // on by itself when it ends: the logout save follows then.
+                // Only Stay still needs this save.
+                if self.logout == Some(Logout::Confirm) && self.jobs.is_empty() {
+                    self.deferred_save = true;
+                    return None;
+                }
                 self.request_save()
             }
+            JobResult::AddonStarted { args, pgid } => {
+                let run = self
+                    .addon_runs
+                    .iter_mut()
+                    .find(|a| a.args == args && a.pgid.is_none())?;
+                run.pgid = Some(pgid);
+                // Restart anyway was chosen before this job's group was known.
+                matches!(self.logout, Some(Logout::StoppingAddons { .. }))
+                    .then(|| Effect::Signal(vec![pgid], Signal::Term))
+            }
             JobResult::Addon { args, status } => {
-                let pos = self.addon_runs.iter().position(|a| *a == args)?;
+                let pos = self.addon_runs.iter().position(|a| a.args == args)?;
                 self.addon_runs.remove(pos);
                 // Exit 1 is a failure the tool logged itself.
                 let line = match status {
@@ -568,7 +610,7 @@ impl Menu {
                     self.log.note(Kind::Warn, line);
                 }
                 // The last thing the logout waited for has ended.
-                let waiting = matches!(self.logout, Some(Logout::WaitAddons))
+                let waiting = matches!(self.logout, Some(Logout::WaitAddons | Logout::StoppingAddons { .. }))
                     || (self.logout == Some(Logout::Confirm) && self.jobs.is_empty());
                 if waiting && self.addon_runs.is_empty() {
                     return self.logout_after_jobs(now);
@@ -594,7 +636,7 @@ impl Menu {
                     }
                     Some(Logout::WaitSave) => self.logout_after_jobs(now),
                     // The logout save follows; a queued one would only repeat it.
-                    Some(Logout::Stopping { .. } | Logout::WaitAddons) => {
+                    Some(Logout::Stopping { .. } | Logout::WaitAddons | Logout::StoppingAddons { .. }) => {
                         self.save.again = false;
                         None
                     }
@@ -614,7 +656,19 @@ impl Menu {
             (Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. }), Choice::Stay) => {
                 self.logout = None;
                 self.offer_retry();
+                if std::mem::take(&mut self.deferred_save) {
+                    return self.request_save();
+                }
                 None
+            }
+            (Some(Logout::WaitAddons), Choice::LeaveAnyway) if self.ending != Action::Logout => {
+                let names = self.addon_jobs().join(", ");
+                self.log.note(Kind::Warn, format!("Stopping {names}."));
+                self.logout = Some(Logout::StoppingAddons {
+                    go_at: now + STOP_GRACE,
+                });
+                let pgids: Vec<i32> = self.addon_runs.iter().filter_map(|a| a.pgid).collect();
+                (!pgids.is_empty()).then_some(Effect::Signal(pgids, Signal::Term))
             }
             (Some(Logout::Confirm), Choice::StopAndLeave) => {
                 if self.jobs.is_empty() {
@@ -639,6 +693,12 @@ impl Menu {
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
         match self.logout {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
+            // The shutdown ends what is left of the add-on jobs.
+            Some(Logout::StoppingAddons { go_at }) if now >= go_at => {
+                self.log
+                    .note(Kind::Warn, "The add-on work did not stop in time; going on anyway.");
+                self.logout_after_jobs(now)
+            }
             Some(Logout::Stopping { kill_at, killed: false }) if now >= kill_at => {
                 self.logout = Some(Logout::Stopping { kill_at, killed: true });
                 self.log
@@ -1711,5 +1771,140 @@ mod tests {
         assert_eq!(ran(&mut m, id, 0, now), None);
         assert_eq!(m.logout, Some(Logout::Confirm));
         assert_eq!(m.addon_jobs(), ["Installing ThinLinc"]);
+    }
+
+    fn push_tile(m: &mut Menu, name: &str, text: &str) -> usize {
+        m.tiles.push(
+            merge(
+                &[SourceFile {
+                    name: name.into(),
+                    entry: desktop::parse(text),
+                }],
+                &[],
+            )
+            .remove(0),
+        );
+        m.tiles.len() - 1
+    }
+
+    fn addon_started(m: &mut Menu, args: &[&str], pgid: i32) -> Option<Effect> {
+        m.finished(
+            JobResult::AddonStarted {
+                args: args.iter().map(|s| s.to_string()).collect(),
+                pgid,
+            },
+            Instant::now(),
+        )
+    }
+
+    const INSTALL: [&str; 2] = ["install", "10-thinlinc"];
+
+    #[test]
+    fn restart_anyway_stops_the_addon_job() {
+        let (_d, mut m) = installing_menu("anyway");
+        let now = Instant::now();
+        assert_eq!(addon_started(&mut m, &INSTALL, 4242), None);
+        m.activate(3, now);
+        m.choose(Choice::StopAndLeave, now);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+        assert_eq!(
+            m.logout,
+            Some(Logout::StoppingAddons {
+                go_at: now + STOP_GRACE
+            })
+        );
+        assert!(m.refuses_input());
+        assert_eq!(m.tick(now), None);
+        assert_eq!(addon_done(&mut m, &INSTALL, 143), Some(Effect::Start(Job::Save)));
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+    }
+
+    #[test]
+    fn restart_anyway_goes_on_after_the_grace() {
+        let (_d, mut m) = installing_menu("anyway-grace");
+        let now = Instant::now();
+        m.activate(3, now);
+        m.choose(Choice::StopAndLeave, now);
+        // The group is not known yet: it is signalled once it is.
+        assert_eq!(m.choose(Choice::LeaveAnyway, now), None);
+        assert_eq!(
+            addon_started(&mut m, &INSTALL, 4243),
+            Some(Effect::Signal(vec![4243], Signal::Term))
+        );
+        assert_eq!(m.tick(now + STOP_GRACE), Some(Effect::Start(Job::Save)));
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+        // The job ending later changes nothing; the save ends the menu.
+        assert_eq!(addon_done(&mut m, &INSTALL, 143), None);
+        assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Saved), now), None);
+        assert_eq!(m.tick(now + STOP_GRACE + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn power_off_anyway_too_but_log_out_only_waits() {
+        let (_d, mut m) = installing_menu("anyway-poweroff");
+        let now = Instant::now();
+        let off = push_tile(
+            &mut m,
+            "81-poweroff.desktop",
+            "[Desktop Entry]\nName=Power off\nX-TF-Action=poweroff\n",
+        );
+        addon_started(&mut m, &INSTALL, 4244);
+        m.activate(off, now);
+        m.choose(Choice::StopAndLeave, now);
+        assert!(m.choose(Choice::LeaveAnyway, now).is_some());
+        assert!(matches!(m.logout, Some(Logout::StoppingAddons { .. })));
+        let (_d, mut m) = installing_menu("anyway-logout");
+        let out = push_tile(
+            &mut m,
+            "80-logout.desktop",
+            "[Desktop Entry]\nName=Log out\nX-TF-Action=logout\n",
+        );
+        addon_started(&mut m, &INSTALL, 4245);
+        m.activate(out, now);
+        m.choose(Choice::StopAndLeave, now);
+        assert_eq!(m.choose(Choice::LeaveAnyway, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(m.tick(now + STOP_GRACE * 10), None);
+    }
+
+    #[test]
+    fn save_on_exit_while_only_an_addon_job_is_waited_for() {
+        // N3: the logout save follows once the job ends, so no extra
+        // background save; if the person stays, the save is done then.
+        let (_d, mut m) = installing_menu("deferred");
+        let now = Instant::now();
+        let sx = push_tile(
+            &mut m,
+            "15-sx.desktop",
+            "[Desktop Entry]\nName=SX\nExec=true\nX-TF-Save-On-Exit=true\n",
+        );
+        let id = started(&mut m, sx, now);
+        m.activate(3, now);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(ran(&mut m, id, 0, now), None);
+        assert!(!m.save.running);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(addon_done(&mut m, &INSTALL, 0), Some(Effect::Start(Job::Save)));
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+
+        let (_d, mut m) = installing_menu("deferred-stay");
+        let sx = push_tile(
+            &mut m,
+            "15-sx.desktop",
+            "[Desktop Entry]\nName=SX\nExec=true\nX-TF-Save-On-Exit=true\n",
+        );
+        let id = started(&mut m, sx, now);
+        m.activate(3, now);
+        assert_eq!(ran(&mut m, id, 0, now), None);
+        assert_eq!(m.choose(Choice::Stay, now), Some(Effect::Start(Job::Save)));
+        assert_eq!(m.logout, None);
+        // Stay again later owes nothing.
+        m.finished(JobResult::Saved(SaveOutcome::Saved), now);
+        m.activate(3, now);
+        assert_eq!(m.choose(Choice::Stay, now), None);
     }
 }

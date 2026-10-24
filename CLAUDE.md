@@ -259,7 +259,8 @@ The system implements home directory persistence across reboots:
   exits 10 (11); a failed save asks Stay / Restart anyway (Power off
   anyway). A program stopped this way gets no Save-On-Exit save, and neither
   does the last program ending while the question is up: the menu then goes
-  on without asking. The menu greys the save tile out when
+  on without asking (if an add-on job still runs, the question stays and
+  the save is done only on Stay; see [Add-ons](#add-ons)). The menu greys the save tile out when
   `/run/thinfloe/state/home-restore` says `failed`; after a Save-On-Exit tile
   exits on such a boot, the save is skipped with a line in the menu's log.
 - `thinfloe-save-home` resolves the directory to archive from `getent passwd
@@ -411,9 +412,18 @@ home; removing it is later work.
   + `current.meta` (the installed copy), `next.<ext>` + `next.meta` (ready
   for the next boot), `*.new` while downloading. `meta` is `key=value`
   lines: `version`, `fingerprint`, `url`, `format`, `package` (deb),
-  `fetched` (epoch). A slot without its meta is incomplete and ignored. A
-  download is stored only if the ESP keeps 64 MiB free after it, else the
-  status says `not enough space on the boot stick`. On netboot there is no
+  `fetched` (epoch). A slot without its meta is incomplete and ignored, with
+  one exception: a power loss between the two renames of a promote leaves
+  `current.<F>` (the former `next.<F>`) and `next.meta` (format `F`) with
+  no `current.meta` and no `next.<F>`, and `boot` and `check` first finish
+  that promote under `esp.lock` (`finish_promote`, logged as `version X was
+  being made current when the power went`). Nothing else leaves that state:
+  every store renames the payload before its meta, and `_drop_slot` and
+  `remove` delete the metas before the payloads. A download is stored only
+  if the ESP keeps 64 MiB plus the size of `home.tar.gz` free after it
+  (a save writes `home.tar.gz.new` beside the old archive), else the
+  status says `not enough space on the boot stick`; the RAM store on
+  netboot keeps 64 MiB. On netboot there is no
   ESP: the same layout lives in `/run/thinfloe/addons-cache/`, rebuilt each
   boot. `thinfloe-upgrade`'s space check adds the size of every `current.*`,
   room for one `next.*` each.
@@ -504,11 +514,19 @@ home; removing it is later work.
   overrides). The menu reads the add-on files at start and again whenever
   they change. A tile whose file name `thinfloe-addon` refuses (see ids
   below) is never drawn; its Settings row says "file name not usable", with
-  the tick box disabled and no button. Log out, Restart and Power off list a running
-  add-on job (Install now, Update now, a tick, Check now) by the add-on's
-  name and wait for it after stopping the programs, with Stay offered;
-  the job is never signalled, because it runs as root and a dpkg cut short
-  leaves a half-installed package for the rest of the boot.
+  the tick box disabled and no button. Log out, Restart and Power off list a
+  running add-on job (Install now, Update now, a tick, Check now) by the
+  add-on's name and wait for it after stopping the programs, with Stay
+  offered. Log out only waits: the system keeps running, and a dpkg cut
+  short would stay half-installed. Restart and Power off also offer
+  "Restart anyway" / "Power off anyway": SIGTERM to the job's process
+  group, then the save and exit 10 / 11 once the job ended or after 5 s,
+  since the shutdown ends what is left. The job runs in a process group of
+  its own (`sudo -n thinfloe-addon` started with `process_group(0)`),
+  because sudo does not relay a signal sent from its own process group. A
+  Save-On-Exit program that ends while the question waits only for an
+  add-on job starts no save: the logout save follows, or, on Stay, the
+  owed save starts then.
 - **Ids.** An add-on's id is its tile's file name without `.desktop`: 1 to
   64 letters, digits and `. _ + -`, starting with a letter or digit and not
   ending in `.` (vfat strips it). An id that differs from another add-on's

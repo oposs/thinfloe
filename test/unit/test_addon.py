@@ -837,6 +837,35 @@ class TestStore(AddonEnv):
             "10-demo\t1\tfailed\t1.0\t-\t1\t"
             "Demo: download failed: not enough space on the boot stick"])
 
+    def test_the_esp_reserve_holds_a_second_home_archive(self):
+        # m3: a save writes home.tar.gz.new beside home.tar.gz, so a store on
+        # the ESP keeps MIN_FREE_BYTES plus the archive's size free.
+        self.demo_tile()
+        self.publish("1.0")
+        self.tick("10-demo")
+        esp = str(self.esp)
+        mib = 1024 * 1024
+        free = lambda path: 100 * mib if str(path).startswith(esp) else 1 << 40
+        with open(self.esp / "home.tar.gz", "wb") as f:
+            f.truncate(50 * mib)
+        self.assertEqual(ad.store_reserve(), ad.MIN_FREE_BYTES + 50 * mib)
+        with mock.patch.object(ad, "free_bytes", free):
+            self.assertEqual(self.run_cmd("check"), 1)
+        self.assertEqual(self.files(), [])
+        self.assertIn("Demo: download failed: not enough space on the boot stick",
+                      self.log_lines())
+        # A smaller archive leaves room.
+        with open(self.esp / "home.tar.gz", "wb") as f:
+            f.truncate(10 * mib)
+        with mock.patch.object(ad, "free_bytes", free):
+            self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        # No ESP (netboot): the store is in RAM and no save writes there.
+        with mock.patch.object(ad, "esp_mounted", lambda: False):
+            self.assertEqual(ad.store_reserve(), ad.MIN_FREE_BYTES)
+        (self.esp / "home.tar.gz").unlink()
+        self.assertEqual(ad.store_reserve(), ad.MIN_FREE_BYTES)
+
     def test_store_waits_for_the_esp_lock(self):
         self.demo_tile()
         self.publish("1.0")
@@ -876,6 +905,34 @@ class TestTar(AddonEnv):
             "[Desktop Entry]\nName=Tool\nExec=/opt/tool/bin/tool\n"
             "X-TF-Source-URL=%s/tool.tar.gz\n" % self.srv.base)
         self.srv.routes["/tool.tar.gz"] = Route(200, {"ETag": '"t1"'}, body=build_tar(members))
+
+    def test_a_listing_timeout_at_boot_keeps_next_tar(self):
+        # N1, the tar case of test_a_timeout_at_boot_keeps_next.
+        self.tar_tile({"opt/tool/v": b"1\n"})
+        self.assertEqual(self.run_cmd("install", "20-tool"), 0)
+        self.srv.routes["/tool.tar.gz"] = Route(200, {"ETag": '"t2"'},
+                                                body=build_tar({"opt/tool/v": b"2\n"}))
+        self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(self.files("20-tool"),
+                         ["current.meta", "current.tar", "next.meta", "next.tar"])
+        shutil.rmtree(self.run_dir)
+        real = ad._tool
+
+        def slow_listing(cmd, timeout=None):
+            if cmd[0] == "tar" and "-tf" in cmd and cmd[-1].endswith("next.tar"):
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return real(cmd, timeout)
+
+        with mock.patch.object(ad, "_tool", slow_listing):
+            self.assertEqual(self.run_cmd("boot"), 1)
+        self.assertEqual(self.files("20-tool"),
+                         ["current.meta", "current.tar", "next.meta", "next.tar"])
+        line = self.status()[0].split("\t")
+        self.assertEqual(line[2], "install-failed")
+        self.assertIn("took longer than 1 s; the check after boot installs it", line[6])
+        self.assertEqual(self.run_cmd("check"), 0, self.log_lines())
+        self.assertEqual(self.files("20-tool"), ["current.meta", "current.tar"])
+        self.assertEqual((self.root / "opt/tool/v").read_bytes(), b"2\n")
 
     def test_tar_installs_into_root_and_remove_deletes_it(self):
         self.tar_tile({"opt/tool/bin/tool": b"#!/bin/sh\n", "opt/tool/README": b"hi\n"})
@@ -1556,6 +1613,51 @@ class TestBoot(AddonEnv):
         self.assertEqual(st["10-demo"][3], "1.0")
         for aid in ("20-other", "30-third"):
             self.assertEqual(st[aid][3], "2.0", st[aid])
+
+    def test_boot_finishes_a_promote_cut_by_a_power_loss(self):
+        # m4: promote's first rename done, its second not.
+        self.stored_next()
+        d = self.addon_dir()
+        (d / "current.meta").unlink()
+        os.replace(d / "next.deb", d / "current.deb")
+        self.assertIsNone(ad.stored(str(d), "current"))
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(self.files(), ["current.deb", "current.meta"])
+        self.assertEqual(self.meta("current")["version"], "1.1")
+        self.assertEqual((d / "current.deb").read_bytes(), self.debs["1.1"])
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(d / "current.deb")])
+        self.assertIn("10-demo: version 1.1 was being made current when the power went; "
+                      "it is current now", self.log_lines())
+
+    def test_other_half_slots_stay_incomplete(self):
+        self.stored_next()
+        d = self.addon_dir()
+        cur_meta = (d / "current.meta").read_text()
+        # Cut before promote's payload rename: next.* is whole, current.meta
+        # gone; nothing is finished, and boot installs next.* as usual.
+        (d / "current.meta").unlink()
+        with ad.esp_lock():
+            self.assertIsNone(ad.finish_promote(str(d)))
+        self.assertIsNotNone(ad.stored(str(d), "next"))
+        # Payloads without a meta: incomplete, and nothing is renamed.
+        (d / "next.meta").unlink()
+        with ad.esp_lock():
+            self.assertIsNone(ad.finish_promote(str(d)))
+        self.assertEqual(self.files(), ["current.deb", "next.deb"])
+        self.assertIsNone(ad.stored(str(d), "current"))
+        self.assertIsNone(ad.stored(str(d), "next"))
+        # A meta of the other format does not pair with this payload.
+        (d / "next.meta").write_text(cur_meta.replace("format=deb", "format=tar"))
+        (d / "next.deb").unlink()
+        with ad.esp_lock():
+            self.assertIsNone(ad.finish_promote(str(d)))
+        self.assertIsNone(ad.stored(str(d), "current"))
+
+    def test_remove_deletes_the_metas_first(self):
+        self.stored_next()
+        with mock.patch.object(ad.shutil, "rmtree", side_effect=OSError(5, "I/O error")):
+            self.assertEqual(self.run_cmd("remove", "10-demo"), 1)
+        self.assertEqual([f for f in self.files() if f.endswith(".meta")], [])
 
     def test_a_timeout_at_boot_keeps_next(self):
         # m7: running out of time says nothing about the copy. next.* stays,

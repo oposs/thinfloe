@@ -218,7 +218,13 @@ impl App {
                         let _ = started.send_event(Wake::Job(JobResult::Started { id, pgid }));
                     })
                 }
-                Job::Addon { args } => jobs::addon(&paths.addon_cmd, &args, &feed),
+                Job::Addon { args } => {
+                    let started = proxy.clone();
+                    let a = args.clone();
+                    jobs::addon(&paths.addon_cmd, &args, &feed, move |pgid| {
+                        let _ = started.send_event(Wake::Job(JobResult::AddonStarted { args: a, pgid }));
+                    })
+                }
             };
             // The loop is gone only when the menu is exiting; nothing to tell.
             let _ = proxy.send_event(Wake::Job(result));

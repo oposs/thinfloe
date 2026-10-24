@@ -233,11 +233,36 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
                     ui.label(egui::RichText::new(job).color(t.palette.muted_foreground));
                 }
                 ui.add_space(8.0);
-                if ui.add(Button::new("Stay")).clicked() {
-                    chose = Some(Choice::Stay);
-                }
+                ui.horizontal(|ui| {
+                    if ui.add(Button::new("Stay")).clicked() {
+                        chose = Some(Choice::Stay);
+                    }
+                    // Log out keeps the system running: a dpkg cut short
+                    // would stay half-installed, so it only waits.
+                    if menu.ending != Action::Logout
+                        && ui
+                            .add(
+                                Button::new(format!("{} anyway", capitalized(verb)))
+                                    .variant(ButtonVariant::Destructive),
+                            )
+                            .clicked()
+                    {
+                        chose = Some(Choice::LeaveAnyway);
+                    }
+                });
             });
             return chose.map(UiEvent::Chose);
+        }
+        Some(Logout::StoppingAddons { go_at }) => {
+            dialog(ui, "Stopping the add-on work", |ui, t| {
+                for job in menu.addon_jobs() {
+                    ui.label(egui::RichText::new(job).color(t.palette.muted_foreground));
+                }
+            });
+            // Wake for the deadline; the jobs ending arrive as events.
+            ui.ctx()
+                .request_repaint_after(go_at.saturating_duration_since(now).min(Duration::from_secs(1)));
+            return None;
         }
         Some(Logout::Stopping { kill_at, killed }) => {
             dialog(ui, "Stopping programs", |ui, t| {

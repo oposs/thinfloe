@@ -759,7 +759,8 @@ TICK_DIRS = (".config", "thinfloe")
 TICK_FILE = "addons"
 MAX_TICK_BYTES = 64 * 1024
 MAX_META_BYTES = 64 * 1024
-# A download is stored only if the ESP keeps this much free after it.
+# A download is stored only if the store keeps this much free after it; on
+# the ESP also the size of home.tar.gz (store_reserve).
 MIN_FREE_BYTES = 64 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
 LOG_KEEP_LINES = 500
@@ -1083,6 +1084,19 @@ def _no_space() -> str:
 NO_MEMORY = "not enough memory for the download"
 
 
+def store_reserve() -> int:
+    """What a store keeps free after a copy: MIN_FREE_BYTES, and on the ESP
+    also the size of home.tar.gz, since a save writes home.tar.gz.new beside
+    it before the rename."""
+    if not esp_mounted():
+        return MIN_FREE_BYTES
+    try:
+        home = os.stat(os.path.join(ESP_DIR, "home.tar.gz")).st_size
+    except OSError:
+        home = 0
+    return MIN_FREE_BYTES + home
+
+
 @contextlib.contextmanager
 def esp_lock():
     """Held for every write to the store; thinfloe-save-home takes it too.
@@ -1141,10 +1155,10 @@ def _remove_new(d: str) -> None:
 
 
 def _copy_out(read, dest: str, space_dir: str, expected: Optional[int], what: str,
-              no_space: str) -> Tuple[int, str]:
+              no_space: str, reserve: int = MIN_FREE_BYTES) -> Tuple[int, str]:
     """Write what read(n) returns into dest; stop when space_dir would keep
-    less than MIN_FREE_BYTES. Returns (size, sha256)."""
-    if expected is not None and free_bytes(space_dir) - expected < MIN_FREE_BYTES:
+    less than `reserve` bytes. Returns (size, sha256)."""
+    if expected is not None and free_bytes(space_dir) - expected < reserve:
         raise CheckError(no_space)
     got = 0
     digest = hashlib.sha256()
@@ -1161,7 +1175,7 @@ def _copy_out(read, dest: str, space_dir: str, expected: Optional[int], what: st
                 f.write(chunk)
                 digest.update(chunk)
                 got += len(chunk)
-                if free_bytes(space_dir) < MIN_FREE_BYTES:
+                if free_bytes(space_dir) < reserve:
                     raise CheckError(no_space)
             f.flush()
             os.fsync(f.fileno())
@@ -1236,7 +1250,9 @@ def tar_members(path: str, what: str) -> List[str]:
     try:
         r = _tool(["tar", "--quoting-style=escape", "-tf", path])
     except subprocess.TimeoutExpired as e:
-        raise CheckError("listing %s took longer than %s" % (what, _seconds(e.timeout)))
+        text = "listing %s took longer than %s" % (what, _seconds(e.timeout))
+        # At boot this is a timeout like dpkg's: the copy is kept.
+        raise BootTimeout(text) if _boot_deadline is not None else CheckError(text)
     if r.returncode != 0:
         raise CheckError("%s is not a tar archive" % what)
     names = r.stdout.decode("utf-8", "replace").splitlines()
@@ -1341,7 +1357,8 @@ def store_copy(d: str, slot: str, dl: Download) -> None:
     try:
         with open(dl.path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
-            got, digest = _copy_out(f.read, tmp, d, size, dl.meta["url"], _no_space())
+            got, digest = _copy_out(f.read, tmp, d, size, dl.meta["url"], _no_space(),
+                                    store_reserve())
         if got != size or digest != dl.sha256:
             raise CheckError("the copy of %s on the store differs from the download"
                              % dl.meta["url"])
@@ -1358,6 +1375,58 @@ def store_copy(d: str, slot: str, dl: Download) -> None:
     finally:
         _unlink(tmp)
         _unlink(meta_tmp)
+
+
+def finish_promote(d: str) -> Optional[str]:
+    """Finish a promote that a power loss cut between its two renames:
+    current.meta is gone, next.<F> is already current.<F>, and next.meta
+    (format F) still waits. Only promote leaves exactly this: store_copy
+    renames a payload before its meta, so a new next.meta always has its
+    payload, and _drop_slot and cmd_remove delete a meta before its payload.
+    Returns the version made current, None when nothing was to do. Call with
+    esp_lock held: a live promote passes through the same state."""
+    meta_path = os.path.join(d, "current.meta")
+    next_meta = os.path.join(d, "next.meta")
+    if os.path.lexists(meta_path):
+        return None
+    meta = read_meta(next_meta)
+    if not meta or meta.get("format") not in FORMATS:
+        return None
+    fmt = meta["format"]
+    if os.path.lexists(os.path.join(d, "next." + fmt)) \
+            or not os.path.isfile(os.path.join(d, "current." + fmt)):
+        return None
+    os.replace(next_meta, meta_path)
+    _fsync_dir(d)
+    for other in FORMATS:
+        if other != fmt:
+            _unlink(os.path.join(d, "current." + other))
+    _fsync_dir(d)
+    return meta.get("version") or "?"
+
+
+def recover_store() -> None:
+    """Finish every promote a power loss interrupted. Boot and check call it
+    first, before anything reads a slot."""
+    root = store_root()
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return
+    with esp_lock():
+        for name in names:
+            d = os.path.join(root, name)
+            if not ID_RE.fullmatch(name) or os.path.islink(d) or not os.path.isdir(d):
+                continue
+            try:
+                version = finish_promote(d)
+            except OSError as e:
+                log("%s: cannot finish the interrupted update on the boot stick: %s"
+                    % (name, e.strerror or e))
+                continue
+            if version is not None:
+                log("%s: version %s was being made current when the power went; "
+                    "it is current now" % (name, version))
 
 
 def promote(d: str, expect: Optional[dict] = None) -> bool:
@@ -1707,6 +1776,8 @@ def install_missing(run: Run, a: Addon) -> None:
 
 def cmd_check(run: Run, ids: List[str]) -> None:
     """Install what boot left out, then look for updates."""
+    if esp_mounted():
+        recover_store()
     if ids:
         for aid in ids:
             if run.case_clash(aid):
@@ -1782,6 +1853,11 @@ def cmd_remove(run: Run, aid: str) -> None:
     d = _addon_dir(aid)
     with esp_lock():
         try:
+            # The metas first: a power loss in rmtree then leaves payloads
+            # without a meta, which no one reads (see finish_promote).
+            if os.path.isdir(d) and not os.path.islink(d):
+                _drop_slot(d, "next")
+                _drop_slot(d, "current")
             shutil.rmtree(d)
         except FileNotFoundError:
             pass
@@ -1927,6 +2003,7 @@ def cmd_boot(run: Run) -> None:
     seed(run)
     if not esp_mounted():
         return
+    recover_store()
     todo = [run.by_id[aid] for aid in run.ticks if aid in run.by_id]
     _boot_deadline = time.monotonic() + BOOT_BUDGET
     try:
