@@ -131,8 +131,37 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/x" "$SQSH" var/lib/dpkg/status >/dev/null
         echo "FAIL - labwc is '$labwc_version', expected a +thinfloe1 rebuild"
         fail=1
     fi
+    # vim-tiny instead of vim (Part 3): vim brought vim-runtime and
+    # libpython3.14, 52 MiB. vim-tiny registers vi, view, ex and editor but not
+    # vim, so the Dockerfile adds a vim alternative for admins who type vim.
+    pkg_status() {
+        awk -v p="$1" '$0 == "Package: " p {f=1; next} f && /^Status:/ {print; exit} /^$/ {f=0}' \
+            "$DPKG_TMP/x/var/lib/dpkg/status"
+    }
+    if [[ "$(pkg_status vim-tiny)" == "Status: install ok installed" ]]; then
+        echo "ok   - vim-tiny installed"
+    else
+        echo "FAIL - vim-tiny is not installed"
+        fail=1
+    fi
+    if [[ "$(pkg_status vim)" == "Status: install ok installed" ]]; then
+        echo "FAIL - the full vim package is installed (vim-runtime, libpython3.14)"
+        fail=1
+    else
+        echo "ok   - the full vim package is not installed"
+    fi
 else
     echo "FAIL - cannot extract var/lib/dpkg/status from $SQSH"
+    fail=1
+fi
+if unsquashfs -no-xattrs -d "$DPKG_TMP/alt" "$SQSH" \
+        etc/alternatives/vim usr/bin/vim usr/bin/vim.tiny >/dev/null 2>&1 &&
+   [[ "$(readlink "$DPKG_TMP/alt/usr/bin/vim")" == "/etc/alternatives/vim" ]] &&
+   [[ "$(readlink "$DPKG_TMP/alt/etc/alternatives/vim")" == "/usr/bin/vim.tiny" ]] &&
+   [[ -f "$DPKG_TMP/alt/usr/bin/vim.tiny" ]]; then
+    echo "ok   - the command vim starts vim.tiny"
+else
+    echo "FAIL - /usr/bin/vim does not lead to /usr/bin/vim.tiny through etc/alternatives"
     fail=1
 fi
 

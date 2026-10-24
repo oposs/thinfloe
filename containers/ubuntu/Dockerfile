@@ -79,7 +79,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     --no-install-recommends --no-install-suggests \
     systemd-sysv \
     systemd-resolved \
-    vim \
+    vim-tiny \
     wireguard \
     resolvconf-admin \
     openssh-server \
@@ -147,6 +147,9 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     vainfo \
     intel-media-va-driver \
     i965-va-driver
+
+# vim-tiny registers vi, view, ex and editor, but not vim. Admins type vim.
+RUN update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10
 
 # Set ping setuid
 RUN chmod u+s /usr/bin/ping
