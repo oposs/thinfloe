@@ -231,6 +231,15 @@ else
     fail=1
 fi
 
+# Geo must be known to fontconfig in the built image (title bar font).
+geo_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm "$IMAGE" fc-list 2>&1)
+if echo "$geo_out" | grep -q 'Geo'; then
+    echo "ok   - fc-list lists Geo"
+else
+    echo "FAIL - fc-list does not list Geo"
+    fail=1
+fi
+
 # A folded window must stay reachable: with zero keybindings the menu is the
 # only way back. foot is folded with wlrctl; the menu (TF_MENU_DEBUG) must see
 # it, --windows must list it as folded, --unfold must bring it back.

@@ -62,6 +62,9 @@ present "libXrandr.so.2"   'libXrandr\.so\.2$'
 present "ThinLinc audio shim"    'usr/libexec/thinfloe/tlclient-pulseaudio$'
 present "ThinLinc post-install"  'usr/libexec/thinfloe/addon-hooks/10-thinlinc$'
 present "labwc rc.xml"     'etc/thinfloe/labwc/rc\.xml$'
+present "labwc title-bar theme" 'etc/thinfloe/labwc/themerc-override$'
+present "Geo font"         'usr/share/fonts/truetype/thinfloe/Geo-Oblique\.ttf$'
+present "Geo licence"      'usr/share/thinfloe/fonts/Geo-OFL\.txt$'
 present "tty1 autologin"   'getty@tty1\.service\.d/autologin\.conf$'
 present "ssh host key helper" 'usr/bin/thinfloe-ssh-hostkeys$'
 present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
@@ -91,7 +94,7 @@ absent  "lxterminal"       'usr/bin/lxterminal$'
 # have zero keybindings".
 RC=$(mktemp -d)
 trap 'chmod -R u+rwX "$RC" 2>/dev/null; rm -rf "$LIST" "$RC"' EXIT
-unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' >/dev/null 2>&1
+unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' 'etc/thinfloe/labwc/themerc-override' >/dev/null 2>&1
 # Test for the extracted FILE, not unsquashfs's exit code: extracting a path
 # that does not exist in the image still exits 0 (it simply extracts nothing).
 # Trusting that exit code made this guard pass vacuously - grep on a missing
@@ -105,6 +108,23 @@ elif grep -qE '<keybind|<default */>' "$RC/etc/thinfloe/labwc/rc.xml"; then
     fail=1
 else
     echo "ok   - rc.xml registers no keybindings"
+fi
+
+# Title bars: the theme override names the ice-blue active border, and rc.xml
+# sets the title font to Geo for both window states.
+if grep -qiE '^window\.active\.border\.color: *#7cc4ff' "$RC/etc/thinfloe/labwc/themerc-override" 2>/dev/null; then
+    echo "ok   - themerc-override gives the active border ice blue"
+else
+    echo "FAIL - themerc-override missing or without window.active.border.color: #7cc4ff"
+    fail=1
+fi
+if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
+   grep -qE '<font place="ActiveWindow" name="Geo"' "$RC/etc/thinfloe/labwc/rc.xml" &&
+   grep -qE '<font place="InactiveWindow" name="Geo"' "$RC/etc/thinfloe/labwc/rc.xml"; then
+    echo "ok   - rc.xml sets the title font to Geo"
+else
+    echo "FAIL - rc.xml does not set Geo for ActiveWindow and InactiveWindow"
+    fail=1
 fi
 
 # The menu is the bottom window: a program clicked away must not go behind

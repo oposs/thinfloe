@@ -57,7 +57,9 @@ RUN set -eu; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     install -D -m 0644 -t /out/usr/share/thinfloe/icons icons/*.svg icons/LICENSE; \
-    install -D -m 0644 egui_shadcn/assets/Oxanium-OFL.txt /out/usr/share/thinfloe/fonts/Oxanium-OFL.txt
+    install -D -m 0644 egui_shadcn/assets/Oxanium-OFL.txt /out/usr/share/thinfloe/fonts/Oxanium-OFL.txt; \
+    install -D -m 0644 assets/Geo-Oblique.ttf /out/usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf; \
+    install -D -m 0644 assets/Geo-OFL.txt /out/usr/share/thinfloe/fonts/Geo-OFL.txt
 
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -234,6 +236,9 @@ RUN chown -R tfuser:tfuser /home/tfuser
 # The account was called tluser until 4.0; saved files and local notes may
 # still name /home/tluser.
 RUN ln -s tfuser /home/tluser
+
+# Geo (window titles) arrives with the menu stage; make it known to fontconfig.
+RUN fc-cache -f
 
 # Generate locale
 RUN locale-gen

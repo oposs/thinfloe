@@ -27,6 +27,14 @@
     <repeatRate>30</repeatRate>
   </keyboard>
   <!--
+    Title bar font: Geo, shipped in /usr/share/fonts/truetype/thinfloe. The
+    colours are in themerc-override next to this file.
+  -->
+  <theme>
+    <font place="ActiveWindow" name="Geo" size="10" />
+    <font place="InactiveWindow" name="Geo" size="10" />
+  </theme>
+  <!--
     No <mouse> section. An empty one made labwc log
     "empty string is not allowed for mouse, ignoring" on every start.
     Mouse bindings are not a passthrough concern the way keybindings are:
