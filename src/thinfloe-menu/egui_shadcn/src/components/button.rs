@@ -27,11 +27,17 @@ pub struct Button {
     text: String,
     variant: ButtonVariant,
     size: ButtonSize,
+    min_width: f32,
 }
 
 impl Button {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), variant: ButtonVariant::Default, size: ButtonSize::Default }
+        Self { text: text.into(), variant: ButtonVariant::Default, size: ButtonSize::Default, min_width: 0.0 }
+    }
+    /// At least this wide, the text centred: buttons of one column line up.
+    pub fn min_width(mut self, w: f32) -> Self {
+        self.min_width = w;
+        self
     }
     pub fn variant(mut self, v: ButtonVariant) -> Self {
         self.variant = v;
@@ -86,7 +92,8 @@ impl Widget for Button {
             36.0
         } else {
             galley.size().x + pad_x * 2.0
-        };
+        }
+        .max(self.min_width);
         let desired = Vec2::new(width, height);
         let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.text));

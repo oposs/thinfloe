@@ -326,7 +326,8 @@ fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
         pos2(rect.right() - HEADER_PAD_X, mid),
         Align2::RIGHT_CENTER,
         header_text(&chrome.header, &chrome.clock),
-        brand::geo(16.0),
+        // The plain sans: Geo at this size is hard to read.
+        FontId::proportional(14.0),
         MUTED,
     );
 }
@@ -675,6 +676,9 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
 
 /// The width of the state column of a Settings row.
 const STATE_WIDTH: f32 = 230.0;
+/// Every row's button is this wide, and a row without one keeps the room,
+/// so the buttons and the states of all rows line up.
+const ROW_BUTTON_W: f32 = 120.0;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
@@ -791,18 +795,21 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                 Some(RowButton::UpdateNow) => Some("Update now"),
                 None => None,
             };
-            if let Some(label) = label
-                && ui
-                    .add_enabled(!row.busy, {
-                        let b = Button::new(label);
-                        if row.button == Some(RowButton::UpdateNow) {
-                            b
-                        } else {
-                            b.variant(ButtonVariant::Secondary)
-                        }
-                    })
-                    .clicked()
-            {
+            let slot = ui.allocate_ui_with_layout(
+                vec2(ROW_BUTTON_W, ROW_ICON),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(ROW_BUTTON_W);
+                    let b = Button::new(label?).min_width(ROW_BUTTON_W);
+                    let b = if row.button == Some(RowButton::UpdateNow) {
+                        b
+                    } else {
+                        b.variant(ButtonVariant::Secondary)
+                    };
+                    Some(ui.add_enabled(!row.busy, b).clicked())
+                },
+            );
+            if slot.inner == Some(true) {
                 event = Some(match row.button {
                     Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
                     _ => SettingsEvent::InstallNow(row.id.clone()),
@@ -1996,6 +2003,57 @@ mod tests {
         assert!(after[0].left() < before[0].left() - 300.0, "{:?} -> {:?}", before[0], after[0]);
         assert!(clicked.is_none(), "a drag is not a click: {clicked:?}");
         assert!(strip.height() > 0.0);
+    }
+
+    #[test]
+    fn settings_buttons_and_states_line_up_and_nothing_is_rounded() {
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut shapes = vec![];
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            shapes = o.shapes;
+        }
+        let mut buttons = vec![];
+        let mut states = vec![];
+        for c in &shapes {
+            match &c.shape {
+                egui::Shape::Text(t) => {
+                    let r = t.galley.rect.translate(t.pos.to_vec2());
+                    let text = t.galley.text();
+                    if text == "Install now" || text == "Update now" {
+                        buttons.push(r.center().x);
+                    } else if text.contains("up to date") || text.contains("installed") {
+                        states.push(r.right());
+                    }
+                }
+                egui::Shape::Rect(r) => {
+                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect)
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(buttons.len(), 3, "{buttons:?}");
+        assert!(
+            buttons.iter().all(|x| (x - buttons[0]).abs() < 0.5),
+            "button labels {buttons:?}"
+        );
+        assert_eq!(states.len(), 4, "{states:?}");
+        assert!(
+            states.iter().all(|x| (x - states[0]).abs() < 0.5),
+            "state columns {states:?}"
+        );
     }
 
     #[test]
