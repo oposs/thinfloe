@@ -12,7 +12,7 @@ use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu};
 use crate::raster::{Background, Canvas, Textures};
 use crate::ui;
-use egui::{TextureHandle, ViewportId};
+use egui::ViewportId;
 use std::ffi::OsString;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -70,7 +70,7 @@ struct Live {
     canvas: Canvas,
     textures: Textures,
     tracker: Tracker,
-    icons: Vec<Option<TextureHandle>>,
+    icons: Vec<Option<ui::Icon>>,
     /// What the header shows; the clock text is refreshed every frame.
     chrome: ui::Chrome,
     /// The scale the last frame was laid out and damaged at.
@@ -199,7 +199,12 @@ impl App {
                 for i in changed {
                     // A tile that is not drawn needs no icon.
                     let icon = if self.cfg.menu.visible(i) {
-                        ui::load_icon(&self.ctx, &self.cfg.menu.tiles[i], &self.cfg.icon_roots)
+                        ui::load_icon(
+                            &self.ctx,
+                            &self.cfg.menu.tiles[i],
+                            &self.cfg.icon_roots,
+                            live.window.scale_factor() as f32,
+                        )
                     } else {
                         None
                     };
@@ -451,7 +456,12 @@ impl ApplicationHandler<Wake> for App {
         );
         // Hidden add-on tiles too: the Settings screen shows their icon when
         // it renders.
-        let icons = ui::load_icons(&self.ctx, &self.cfg.menu.tiles, &self.cfg.icon_roots);
+        let icons = ui::load_icons(
+            &self.ctx,
+            &self.cfg.menu.tiles,
+            &self.cfg.icon_roots,
+            window.scale_factor() as f32,
+        );
         if self.cfg.debug {
             let shown = self.cfg.menu.visible_tiles();
             let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();

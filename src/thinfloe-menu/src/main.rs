@@ -94,7 +94,7 @@ fn check() -> ExitCode {
     for line in &menu.banner {
         println!("banner: {line}");
     }
-    let icons = ui::render_icons(&menu.tiles, &roots);
+    let icons = ui::render_icons(&menu.tiles, &roots, ui::render_side(1.0));
     for (t, icon) in menu.tiles.iter().zip(icons) {
         let shipped = t.origin != tiles::Origin::User;
         let state = match &t.problem {
