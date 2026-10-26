@@ -592,6 +592,8 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: R
     clicked
 }
 
+/// The width of the state column of a Settings row.
+const STATE_WIDTH: f32 = 230.0;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
@@ -650,7 +652,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
                         ui.set_width(ui.available_width());
                         settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t)
                     });
-                if row.button == Some(RowButton::UpdateNow) {
+                if row.update_ready {
                     let r = framed.response.rect;
                     ui.painter().rect_filled(
                         Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)),
@@ -732,24 +734,40 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                     _ => SettingsEvent::InstallNow(row.id.clone()),
                 });
             }
+            let one_line = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
+                let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+                job.wrap = TextWrapping::truncate_at_width(ui.available_width());
+                ui.label(job);
+            };
+            // The state is a right-aligned column: green when current, ice
+            // when an update waits.
+            let state = if row.busy {
+                format!("{} · working…", row.state)
+            } else {
+                row.state.clone()
+            };
+            let state_color = if row.update_ready {
+                ICE
+            } else if state.ends_with("up to date") {
+                GOOD
+            } else {
+                t.palette.foreground
+            };
+            ui.allocate_ui_with_layout(
+                vec2(STATE_WIDTH, ROW_ICON),
+                egui::Layout::top_down(egui::Align::Max).with_main_align(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(STATE_WIDTH);
+                    one_line(ui, &state, FontId::proportional(12.0), state_color);
+                    if row.manual {
+                        one_line(ui, settings::MANUAL_NOTE, FontId::proportional(12.0), WARN);
+                    }
+                },
+            );
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                let one_line = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
-                    let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-                    job.wrap = TextWrapping::truncate_at_width(ui.available_width());
-                    ui.label(job);
-                };
                 one_line(ui, &row.name, brand::geo(20.0), t.palette.foreground);
                 if let Some(source) = &row.source {
                     one_line(ui, source, FontId::monospace(11.0), MUTED);
-                }
-                let state = if row.busy {
-                    format!("{} · working…", row.state)
-                } else {
-                    row.state.clone()
-                };
-                one_line(ui, &state, FontId::proportional(12.0), t.palette.foreground);
-                if row.manual {
-                    one_line(ui, settings::MANUAL_NOTE, FontId::proportional(12.0), WARN);
                 }
             });
         });
@@ -1208,6 +1226,75 @@ mod tests {
         for want in ["ThinLinc could not be installed: HTTP 404", "Retry", "Later"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
+    }
+
+    /// Four add-ons: waiting update, current, failed install, manual.
+    fn four_addons() -> (Menu, usize) {
+        let f = |n: &str, t: &str| crate::tiles::SourceFile {
+            name: n.into(),
+            entry: crate::desktop::parse(t),
+        };
+        let tile = |file: &str, name: &str| {
+            f(
+                file,
+                &format!(
+                    "[Desktop Entry]\nName={name}\nExec=x\nX-TF-Source-Page=https://e.example/{name}\nX-TF-Source-Pattern=x\n"
+                ),
+            )
+        };
+        let grid = Grid {
+            tiles: crate::tiles::merge(
+                &[
+                    tile("10-thinlinc.desktop", "ThinLinc"),
+                    tile("20-oxulnk.desktop", "OxuLnk"),
+                    tile("30-remmina.desktop", "Remmina"),
+                    tile("40-manual.desktop", "Manual tool"),
+                    f("60-settings.desktop", "[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n"),
+                ],
+                &[],
+            ),
+            banner: vec![],
+        };
+        let n = grid.tiles.len();
+        let mut menu = Menu::new(grid, false);
+        let st = |id: &str, state, installed: Option<&str>, pending: Option<&str>, auto, message: Option<&str>| {
+            crate::addons::AddonStatus {
+                id: id.into(),
+                ticked: true,
+                state,
+                installed: installed.map(Into::into),
+                pending: pending.map(Into::into),
+                auto,
+                message: message.map(Into::into),
+            }
+        };
+        use crate::addons::AddonState::*;
+        menu.set_addons(vec![
+            st("10-thinlinc", Pending, Some("4.21.0"), Some("4.22.0"), true, None),
+            st("20-oxulnk", Installed, Some("0.1.0"), None, true, None),
+            st("30-remmina", InstallFailed, None, None, true, Some("HTTP 404")),
+            st("40-manual", Installed, Some("2.0"), None, false, None),
+        ]);
+        // The Retry question for the failed install is not under test here.
+        menu.retry = None;
+        (menu, n)
+    }
+
+    #[test]
+    fn only_a_row_with_a_waiting_update_has_the_ice_edge() {
+        let (mut menu, n) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        let edges = |m: &Menu| {
+            shapes_of(m, n, Instant::now())
+                .iter()
+                .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01))
+                .count()
+        };
+        assert_eq!(edges(&menu), 1);
+        // Nothing waits any more: no edge, though the manual row still has Update now.
+        menu.set_addons(vec![]);
+        assert_eq!(edges(&menu), 0);
     }
 
     #[test]
@@ -1873,7 +1960,7 @@ mod tests {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
         };
-        let icons: Vec<Option<TextureHandle>> = vec![None, None];
+        let icons: Vec<Option<TextureHandle>> = menu.tiles.iter().map(|_| None).collect();
         let mut textures = crate::raster::Textures::default();
         let mut canvas = crate::raster::Canvas::new(1280, 720, crate::brand::BG);
         for frame in 0..12 {
@@ -1898,9 +1985,9 @@ mod tests {
     #[test]
     #[ignore]
     fn shot_settings_and_dialog() {
-        let mut menu = Menu::new(addon_grid(), false);
-        menu.activate(1, Instant::now());
-        menu.set_addons(vec![failed()]);
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
         shot(&menu, "settings.ppm");
         let mut menu = Menu::new(addon_grid(), false);
         menu.logout = Some(Logout::Failed {
