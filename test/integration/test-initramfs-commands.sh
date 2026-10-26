@@ -29,7 +29,7 @@ for f in "$INITRD" "$SQSH"; do
         exit 1
     fi
 done
-for tool in lsinitramfs unsquashfs python3; do
+for tool in lsinitramfs unmkinitramfs unsquashfs python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "FAIL: $tool not installed (initramfs-tools-core, squashfs-tools, python3)" >&2
         exit 1
@@ -102,6 +102,18 @@ else
     bad "thinfloe-after-cmdline.conf lacks After=dracut-cmdline.service"
 fi
 
+# The initramfs's networkd must ask for the DHCP time zone (option 101), or a
+# netbooted machine shows UTC until its first lease renewal. dracut copies
+# its default network file to /run/systemd/network/zzzz-dracut-default.network;
+# the drop-in extends it. make qemu-smoke-timezone-netboot proves it end to end.
+TZ_DROPIN=etc/systemd/network/zzzz-dracut-default.network.d/50-timezone.conf
+if grep -qx "$TZ_DROPIN" "$WORK/initrd.list" &&
+   grep -qx 'UseTimezone=yes' "$MODDIR/50-timezone.conf"; then
+    ok "the initrd's networkd asks for the DHCP time zone"
+else
+    bad "no UseTimezone=yes drop-in $TZ_DROPIN in $INITRD"
+fi
+
 # Netboot networking: DHCP from systemd-networkd, names from systemd-resolved.
 for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-networkd-wait-online \
          usr/lib/systemd/systemd-resolved; do
@@ -111,6 +123,43 @@ for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-networkd-wait-
         bad "/$f is missing - netboot has no network (dracut --add systemd-networkd systemd-resolved)"
     fi
 done
+
+# The ThinFloe boot screen: the theme, its images, the script plugin, the
+# label plugin that draws the host name and the font it draws it in. The
+# default.plymouth link must name the theme, and plymouthd.conf must too,
+# because plymouthd reads Theme= before it looks at the link.
+for f in usr/share/plymouth/themes/thinfloe/thinfloe.plymouth \
+         usr/share/plymouth/themes/thinfloe/thinfloe.script \
+         usr/share/plymouth/themes/thinfloe/logo.png \
+         usr/share/plymouth/themes/thinfloe/glow.png \
+         usr/share/plymouth/themes/thinfloe/bar-track.png \
+         usr/share/plymouth/themes/thinfloe/bar-fill.png \
+         usr/lib/x86_64-linux-gnu/plymouth/script.so \
+         usr/lib/x86_64-linux-gnu/plymouth/label-pango.so \
+         usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf; do
+    if grep -qx "$f" "$WORK/initrd.list"; then
+        ok "/$f is in the initrd"
+    else
+        bad "/$f is missing from the initrd - the boot screen would fall back to text"
+    fi
+done
+# themes/default.plymouth -> /etc/alternatives/default.plymouth -> the theme
+if lsinitramfs -l "$INITRD" 2>/dev/null |
+        grep -E ' etc/alternatives/default\.plymouth -> .*/themes/thinfloe/thinfloe\.plymouth$' >/dev/null &&
+   lsinitramfs -l "$INITRD" 2>/dev/null |
+        grep -E ' usr/share/plymouth/themes/default\.plymouth -> /etc/alternatives/default\.plymouth$' >/dev/null; then
+    ok "default.plymouth in the initrd points at the thinfloe theme"
+else
+    bad "default.plymouth in the initrd does not point at the thinfloe theme"
+fi
+mkdir -p "$WORK/ex"
+unmkinitramfs "$INITRD" "$WORK/ex" >/dev/null 2>&1
+pconf=$(find "$WORK/ex" -path '*etc/plymouth/plymouthd.conf' 2>/dev/null | head -1)
+if [[ -n "$pconf" ]] && grep -qx 'Theme=thinfloe' "$pconf"; then
+    ok "plymouthd.conf in the initrd says Theme=thinfloe"
+else
+    bad "plymouthd.conf in the initrd does not say Theme=thinfloe (${pconf:-not found})"
+fi
 
 # --- names that are not files: builtins and shell functions ---------------
 #

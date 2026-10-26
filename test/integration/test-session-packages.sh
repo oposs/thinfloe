@@ -43,12 +43,18 @@ present "foot"             'usr/bin/foot$'
 present "grim"             'usr/bin/grim$'
 present "slurp"            'usr/bin/slurp$'
 present "wl-copy"          'usr/bin/wl-copy$'
-present "waybar"           'usr/bin/waybar$'
-present "waybar config"    'etc/thinfloe/waybar/config\.jsonc$'
-present "waybar style"     'etc/thinfloe/waybar/style\.css$'
+absent  "waybar"           'usr/bin/waybar$'
+absent  "waybar config"    'etc/thinfloe/waybar/'
 absent  "waybar user unit enabled" 'systemd/user/graphical-session\.target\.wants/waybar\.service$'
+absent  "GTK 3"            'usr/lib/x86_64-linux-gnu/libgtk-3\.so\.0$'
 present "session script"    'usr/bin/thinfloe-session$'
 present "save-home"         'usr/bin/thinfloe-save-home$'
+# The DHCP time zone: the lease option, the watcher and the script that
+# validates and sets it (polkit is missing, so networkd cannot).
+present "DHCP time zone option" 'etc/systemd/network/10-netplan-eth\.network\.d/50-timezone\.conf$'
+present "DHCP time zone script" 'usr/libexec/thinfloe/dhcp-timezone$'
+present "DHCP time zone path unit enabled" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.path$'
+present "DHCP time zone service enabled (boot-time run)" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.service$'
 present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
 present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'
@@ -62,6 +68,9 @@ present "libXrandr.so.2"   'libXrandr\.so\.2$'
 present "ThinLinc audio shim"    'usr/libexec/thinfloe/tlclient-pulseaudio$'
 present "ThinLinc post-install"  'usr/libexec/thinfloe/addon-hooks/10-thinlinc$'
 present "labwc rc.xml"     'etc/thinfloe/labwc/rc\.xml$'
+present "labwc title-bar theme" 'etc/thinfloe/labwc/themerc-override$'
+present "Geo font"         'usr/share/fonts/truetype/thinfloe/Geo-Oblique\.ttf$'
+present "Geo licence"      'usr/share/thinfloe/fonts/Geo-OFL\.txt$'
 present "tty1 autologin"   'getty@tty1\.service\.d/autologin\.conf$'
 present "ssh host key helper" 'usr/bin/thinfloe-ssh-hostkeys$'
 present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
@@ -91,7 +100,7 @@ absent  "lxterminal"       'usr/bin/lxterminal$'
 # have zero keybindings".
 RC=$(mktemp -d)
 trap 'chmod -R u+rwX "$RC" 2>/dev/null; rm -rf "$LIST" "$RC"' EXIT
-unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' >/dev/null 2>&1
+unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' 'etc/thinfloe/labwc/themerc-override' >/dev/null 2>&1
 # Test for the extracted FILE, not unsquashfs's exit code: extracting a path
 # that does not exist in the image still exits 0 (it simply extracts nothing).
 # Trusting that exit code made this guard pass vacuously - grep on a missing
@@ -107,12 +116,29 @@ else
     echo "ok   - rc.xml registers no keybindings"
 fi
 
+# Title bars: the theme override names the ice-blue active border, and rc.xml
+# sets the title font to Geo for both window states.
+if grep -qiE '^window\.active\.border\.color: *#7cc4ff' "$RC/etc/thinfloe/labwc/themerc-override" 2>/dev/null; then
+    echo "ok   - themerc-override gives the active border ice blue"
+else
+    echo "FAIL - themerc-override missing or without window.active.border.color: #7cc4ff"
+    fail=1
+fi
+if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
+   grep -qE '<font place="ActiveWindow" name="Geo"' "$RC/etc/thinfloe/labwc/rc.xml" &&
+   grep -qE '<font place="InactiveWindow" name="Geo"' "$RC/etc/thinfloe/labwc/rc.xml"; then
+    echo "ok   - rc.xml sets the title font to Geo"
+else
+    echo "FAIL - rc.xml does not set Geo for ActiveWindow and InactiveWindow"
+    fail=1
+fi
+
 # The menu is the bottom window: a program clicked away must not go behind
-# it, and the taskbar must not offer to minimise it. Matched by app_id.
+# it, and the window list must not offer to minimise it. Matched by app_id.
 if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
    tr -d '\n' < "$RC/etc/thinfloe/labwc/rc.xml" |
    grep -qE '<windowRule[^>]*identifier="thinfloe-menu"[^>]*skipTaskbar="yes"[^>]*>[[:space:]]*<action name="ToggleAlwaysOnBottom"'; then
-    echo "ok   - rc.xml keeps thinfloe-menu at the bottom and off the taskbar"
+    echo "ok   - rc.xml keeps thinfloe-menu at the bottom and out of the window list"
 else
     echo "FAIL - rc.xml has no ToggleAlwaysOnBottom/skipTaskbar rule for thinfloe-menu"
     fail=1
@@ -293,28 +319,17 @@ else
     fail=1
 fi
 
-# The taskbar is the ONLY way back to a minimized window: labwc draws an
-# iconify button, and with zero keybindings and no menu there is no other
-# route. If the config ever loses the taskbar module, minimized windows
-# become unreachable again.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/wb" "$SQSH" \
-        etc/thinfloe/waybar/config.jsonc >/dev/null 2>&1 &&
-   grep -q 'wlr/taskbar' "$DPKG_TMP/wb/etc/thinfloe/waybar/config.jsonc"; then
-    echo "ok   - waybar config declares the wlr/taskbar module"
-else
-    echo "FAIL - waybar config has no wlr/taskbar module"
-    fail=1
-fi
-
-# thinfloe-session must both start waybar and kill it: labwc terminates when
-# its -S command returns, and a surviving waybar would be orphaned.
+# The folded-window strip in thinfloe-menu replaced the waybar taskbar.
+# thinfloe-session must no longer start waybar, and must still kill its
+# helpers (swayidle) when it ends: labwc terminates when its -S command
+# returns, and a surviving helper would be orphaned.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/sess" "$SQSH" \
         usr/bin/thinfloe-session >/dev/null 2>&1 &&
-   grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/thinfloe-session" &&
+   ! grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/thinfloe-session" &&
    grep -q 'trap .*kill' "$DPKG_TMP/sess/usr/bin/thinfloe-session"; then
-    echo "ok   - thinfloe-session starts waybar and kills it on exit"
+    echo "ok   - thinfloe-session starts no waybar and kills its helpers on exit"
 else
-    echo "FAIL - thinfloe-session does not start and clean up waybar"
+    echo "FAIL - thinfloe-session still mentions waybar or lost its helper cleanup"
     fail=1
 fi
 

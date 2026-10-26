@@ -1,6 +1,7 @@
 *
 *~
 !overlay
+!brand
 !*.patch
 !containers/ubuntu/patches
 !syslinux.cfg

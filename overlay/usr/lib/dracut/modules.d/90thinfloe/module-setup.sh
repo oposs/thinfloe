@@ -28,6 +28,21 @@ install() {
             "$systemdsystemunitdir/$_unit.d/90-thinfloe-after-cmdline.conf"
     done
 
+    # The boot screen draws the host name in Geo. label-pango finds fonts
+    # through fontconfig, and plymouth-populate-initrd copies only the fonts a
+    # theme names in Font=, so the font is installed here. See
+    # /usr/share/plymouth/themes/thinfloe/thinfloe.script.
+    inst_simple /usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf
+
+    # Ask the DHCP server for its time zone (option 101), so the lease the
+    # initramfs's networkd writes carries TIMEZONE= and
+    # thinfloe-dhcp-timezone.service applies it right after switch-root.
+    # dracut's systemd-networkd module copies its default network file to
+    # /run/systemd/network/zzzz-dracut-default.network (no ip= on the command
+    # line); a drop-in with that name extends it.
+    inst_simple "$moddir/50-timezone.conf" \
+        /etc/systemd/network/zzzz-dracut-default.network.d/50-timezone.conf
+
     # Network tools. DHCP is systemd-networkd's job (see mount-squashfs.sh);
     # ip finds the interface that holds the lease.
     inst_multiple curl ip

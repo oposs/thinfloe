@@ -3,8 +3,10 @@
 pub mod addons;
 pub mod app;
 pub mod bounded;
+pub mod brand;
 pub mod damage;
 pub mod desktop;
+pub mod header;
 pub mod icons;
 pub mod jobs;
 pub mod log;
@@ -15,3 +17,4 @@ pub mod settings;
 mod testdir;
 pub mod tiles;
 pub mod ui;
+pub mod windows;

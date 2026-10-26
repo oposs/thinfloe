@@ -21,6 +21,8 @@ pub enum Kind {
     Output,
     /// A failure, or a warning about the tile files.
     Warn,
+    /// Something that finished well and is worth seeing: a saved home.
+    Good,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,14 +82,54 @@ pub fn local_time() -> String {
 
 /// The local time of day at `epoch` seconds, HH:MM:SS.
 pub fn local_time_at(epoch: i64) -> String {
-    let now = epoch as libc::time_t;
-    // SAFETY: localtime_r writes only into the struct passed to it, and a
-    // failure leaves it zeroed.
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&now, &mut tm);
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    let (h, m, s) = local_hms(epoch);
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Hour, minute and second at `epoch` seconds in the machine's zone: `TZ`
+/// when set, else `/etc/localtime`, else UTC.
+///
+/// Neither glibc's `localtime_r` (it keeps the zone it read first while `TZ`
+/// stays the same) nor jiff's own system-zone lookup (cached for five
+/// minutes) would show a DHCP zone that arrives after the menu started, so
+/// the zone is looked up on every call: one `readlink`.
+pub fn local_hms(epoch: i64) -> (i8, i8, i8) {
+    let zone = current_zone(std::path::Path::new("/etc/localtime"));
+    match jiff::Timestamp::from_second(epoch) {
+        Ok(ts) => {
+            let t = zone.to_datetime(ts).time();
+            (t.hour(), t.minute(), t.second())
+        }
+        Err(_) => (0, 0, 0),
     }
+}
+
+/// The zone `TZ` names, else the one `localtime` is or points to, else UTC.
+pub fn current_zone(localtime: &std::path::Path) -> jiff::tz::TimeZone {
+    use jiff::tz::TimeZone;
+    if let Some(tz) = std::env::var_os("TZ").and_then(|v| v.into_string().ok()) {
+        let name = tz.strip_prefix(':').unwrap_or(&tz);
+        if !name.is_empty() {
+            return jiff::tz::db()
+                .get(name)
+                .or_else(|_| TimeZone::posix(name))
+                .unwrap_or(TimeZone::UTC);
+        }
+    }
+    // timedatectl and `dhcp-timezone` make /etc/localtime a symlink into the
+    // zoneinfo tree; the name after "zoneinfo/" is the zone.
+    if let Ok(target) = std::fs::read_link(localtime) {
+        let target = target.to_string_lossy();
+        if let Some((_, name)) = target.rsplit_once("zoneinfo/") {
+            if let Ok(tz) = jiff::tz::db().get(name) {
+                return tz;
+            }
+        }
+    }
+    std::fs::read(localtime)
+        .ok()
+        .and_then(|data| TimeZone::tzif("localtime", &data).ok())
+        .unwrap_or(TimeZone::UTC)
 }
 
 /// The most colour runs one line keeps. Past it, colour changes are ignored

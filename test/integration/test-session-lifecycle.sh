@@ -41,7 +41,7 @@ STUB
 chmod 755 "$WORK/bin/foot" "$WORK/bin/thinfloe-save-home" "$WORK/bin/sudo"
 # The session also starts these helpers when they exist; on a dev host they
 # might, so stub them rather than launch the real ones.
-for h in waybar swayidle wlopm; do
+for h in swayidle wlopm; do
     printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/$h"
     chmod 755 "$WORK/bin/$h"
 done

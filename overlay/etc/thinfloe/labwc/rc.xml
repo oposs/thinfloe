@@ -27,6 +27,14 @@
     <repeatRate>30</repeatRate>
   </keyboard>
   <!--
+    Title bar font: Geo, shipped in /usr/share/fonts/truetype/thinfloe. The
+    colours are in themerc-override next to this file.
+  -->
+  <theme>
+    <font place="ActiveWindow" name="Geo" size="10" />
+    <font place="InactiveWindow" name="Geo" size="10" />
+  </theme>
+  <!--
     No <mouse> section. An empty one made labwc log
     "empty string is not allowed for mouse, ignoring" on every start.
     Mouse bindings are not a passthrough concern the way keybindings are:
@@ -36,7 +44,7 @@
   -->
   <!--
     thinfloe-menu is the desktop: always the bottom window, so a program
-    window can never go behind it, and never in the taskbar, where it could
+    window can never go behind it, and never in the window list, where it could
     be minimised. The menu sets this app_id in src/thinfloe-menu/src/app.rs.
   -->
   <windowRules>

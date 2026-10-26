@@ -1,0 +1,95 @@
+# ThinFloe boot screen: logo and name in the middle, a thin ice-blue progress
+# line slanted 9 degrees below them, black background with a faint ice-blue
+# glow rising from the bottom, the host name small in Geo at the foot.
+#
+# The PNGs are made for a 1920 px wide screen (brand/*.svg, rendered in the
+# plymouth-art stage of containers/ubuntu/Dockerfile); k scales them.
+#
+# The host name arrives with "plymouth display-message", which
+# tf_write_hostname (90thinfloe/thinfloe-lib.sh) calls once the name is known.
+# Until then the foot line is empty. The version is not shown (nothing writes
+# /etc/thinfloe/version yet).
+#
+# Geo comes from the initrd's /usr/share/fonts (90thinfloe/module-setup.sh);
+# the label plugin, label-pango, finds it through fontconfig.
+
+# Background #05070a
+Window.SetBackgroundTopColor(0.0196, 0.0275, 0.0392);
+Window.SetBackgroundBottomColor(0.0196, 0.0275, 0.0392);
+
+screen.w = Window.GetWidth();
+screen.h = Window.GetHeight();
+k = screen.w / 1920.0;
+if (screen.h / 1080.0 < k)
+    k = screen.h / 1080.0;
+
+glow.image = Image("glow.png");
+glow.sprite = Sprite(glow.image.Scale(screen.w, screen.h));
+glow.sprite.SetPosition(0, 0, -10);
+
+logo.image = Image("logo.png");
+logo.w = Math.Int(logo.image.GetWidth() * k);
+logo.h = Math.Int(logo.image.GetHeight() * k);
+logo.sprite = Sprite(logo.image.Scale(logo.w, logo.h));
+logo.x = Math.Int((screen.w - logo.w) / 2);
+logo.y = Math.Int(screen.h * 0.46 - logo.h / 2);
+logo.sprite.SetPosition(logo.x, logo.y, 10);
+
+# Progress line: 28 % of the width, 6 px at 1080p, 40 px under the logo.
+bar.w = Math.Int(screen.w * 0.28);
+bar.h = Math.Int(12 * k / 2);
+if (bar.h < 2)
+    bar.h = 2;
+bar.x = Math.Int((screen.w - bar.w) / 2);
+bar.y = logo.y + logo.h + Math.Int(40 * k);
+bar.track.image = Image("bar-track.png");
+bar.fill.image = Image("bar-fill.png");
+bar.track.sprite = Sprite(bar.track.image.Scale(bar.w, bar.h));
+bar.track.sprite.SetPosition(bar.x, bar.y, 10);
+bar.fill.sprite = Sprite();
+bar.fill.sprite.SetPosition(bar.x, bar.y, 11);
+bar.progress = 0.0;
+
+fun set_progress(p)
+{
+    if (p < bar.progress)
+        p = bar.progress;
+    if (p > 1.0)
+        p = 1.0;
+    bar.progress = p;
+    w = Math.Int(bar.w * p);
+    if (w < 1)
+        w = 1;
+    bar.fill.sprite.SetImage(bar.fill.image.Scale(w, bar.h));
+}
+set_progress(0.02);
+
+fun boot_progress(duration, progress)
+{
+    set_progress(progress);
+}
+Plymouth.SetBootProgressFunction(boot_progress);
+
+# Host name at the foot, #8a97a6 as in the mockup.
+foot.sprite = Sprite();
+foot.size = Math.Int(13 * k);
+if (foot.size < 9)
+    foot.size = 9;
+
+fun show_message(text)
+{
+    foot.image = Image.Text(text, 0.541, 0.592, 0.651, 1, "Geo " + foot.size);
+    foot.sprite.SetImage(foot.image);
+    foot.sprite.SetPosition(
+        Math.Int((screen.w - foot.image.GetWidth()) / 2),
+        Math.Int(screen.h * 0.94 - foot.image.GetHeight()),
+        10);
+}
+
+fun hide_message(text)
+{
+    foot.sprite.SetImage(Image.Text(" ", 0, 0, 0, 0, "Geo " + foot.size));
+}
+
+Plymouth.SetDisplayMessageFunction(show_message);
+Plymouth.SetHideMessageFunction(hide_message);

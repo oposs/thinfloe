@@ -76,6 +76,18 @@ pub enum Origin {
     User,
 }
 
+impl Origin {
+    /// "reworded; ignored: Exec, X-TF-Multiple" for a user file that
+    /// reworded a shipped tile; `None` for any other origin.
+    pub fn reworded_text(&self) -> Option<String> {
+        match self {
+            Origin::Reworded { ignored } if ignored.is_empty() => Some("reworded".to_string()),
+            Origin::Reworded { ignored } => Some(format!("reworded; ignored: {}", ignored.join(", "))),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tile {
     pub file: String,

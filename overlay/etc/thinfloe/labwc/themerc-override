@@ -1,0 +1,28 @@
+# Window decorations in the ThinFloe palette. labwc reads this file from its
+# config directory (-C) after the theme, so it wins over the stock theme.
+# Palette: background #05070a, tiles #0d1218, active tile #101b26,
+# lines #151b22, muted text #7d8996, ice blue #7cc4ff.
+border.width: 1
+padding.height: 4
+window.titlebar.padding.width: 8
+window.label.text.justify: left
+
+window.active.border.color: #7cc4ff
+window.inactive.border.color: #151b22
+
+window.active.title.bg.color: #101b26
+window.inactive.title.bg.color: #0d1218
+window.active.label.text.color: #e6edf3
+window.inactive.label.text.color: #7d8996
+
+window.active.button.unpressed.image.color: #7cc4ff
+window.inactive.button.unpressed.image.color: #7d8996
+window.active.button.hover.bg.color: #151b22
+window.inactive.button.hover.bg.color: #151b22
+window.active.button.hover.image.color: #e6edf3
+window.inactive.button.hover.image.color: #e6edf3
+
+window.active.handle.bg.color: #7cc4ff
+window.inactive.handle.bg.color: #151b22
+window.active.grip.bg.color: #7cc4ff
+window.inactive.grip.bg.color: #151b22

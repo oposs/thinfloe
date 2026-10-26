@@ -231,4 +231,89 @@ else
     fail=1
 fi
 
+# Geo must be known to fontconfig in the built image (title bar font).
+geo_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm "$IMAGE" fc-list 2>&1)
+if echo "$geo_out" | grep -q 'Geo'; then
+    echo "ok   - fc-list lists Geo"
+else
+    echo "FAIL - fc-list does not list Geo"
+    fail=1
+fi
+
+# A folded window must stay reachable: with zero keybindings the menu is the
+# only way back. foot is folded with wlrctl; the menu (TF_MENU_DEBUG) must see
+# it, --windows must list it as folded, --unfold must bring it back.
+FOLD_CONTAINER_NAME="thinfloe-runtime-test-fold-$$"
+
+# The session script travels in an environment variable and is written to a
+# file in the container, so no quoting has to survive labwc's -S.
+FOLD_SCRIPT='foot sleep 60 &
+sleep 2
+TF_MENU_DEBUG=1 timeout 20 thinfloe-menu 2>&1 &
+sleep 4
+wlrctl toplevel minimize app_id:foot
+sleep 2
+echo LIST1; thinfloe-menu --windows
+thinfloe-menu --unfold foot; echo unfold-rc=$?
+sleep 2
+echo LIST2; thinfloe-menu --windows
+sleep 1
+wait'
+
+fold_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$FOLD_CONTAINER_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=1 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e FOLD_SCRIPT="$FOLD_SCRIPT" \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           printf "%s\n" "$FOLD_SCRIPT" >/tmp/fold.sh &&
+           labwc -C /etc/thinfloe/labwc -S "sh /tmp/fold.sh"' 2>&1)
+fold_rc=$?
+
+if [[ $fold_rc -eq 124 || $fold_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during folded-window test)"
+    echo "$fold_out"
+    podman rm -f "$FOLD_CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+
+list1=$(echo "$fold_out" | sed -n '/^LIST1$/,/^unfold-rc=/p')
+list2=$(echo "$fold_out" | sed -n '/^LIST2$/,$p')
+if echo "$fold_out" | grep -q 'thinfloe-menu: folded: foot '; then
+    echo "ok   - thinfloe-menu saw foot fold"
+else
+    echo "FAIL - thinfloe-menu never printed 'folded: foot'"
+    echo "$fold_out"
+    fail=1
+fi
+if echo "$list1" | grep -Eq '^foot	.*	folded$'; then
+    echo "ok   - --windows lists the folded foot as folded"
+else
+    echo "FAIL - --windows did not list foot as folded"
+    echo "$fold_out"
+    fail=1
+fi
+if echo "$fold_out" | grep -q 'unfold-rc=0'; then
+    echo "ok   - --unfold foot exited 0"
+else
+    echo "FAIL - --unfold foot did not exit 0"
+    echo "$fold_out"
+    fail=1
+fi
+if echo "$list2" | grep -Eq '^foot	.*	open$'; then
+    echo "ok   - --windows lists foot as open after --unfold"
+else
+    echo "FAIL - foot is not open after --unfold"
+    echo "$fold_out"
+    fail=1
+fi
+if echo "$fold_out" | grep -q 'thinfloe-menu: unfolded: foot '; then
+    echo "ok   - thinfloe-menu saw foot unfold"
+else
+    echo "FAIL - thinfloe-menu never printed 'unfolded: foot'"
+    fail=1
+fi
+
 exit $fail

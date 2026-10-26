@@ -2,6 +2,8 @@
 //! and the dialogs. Everything that decides something lives in menu.rs; this
 //! file only paints it and reports clicks.
 
+use crate::brand::{self, GOOD, ICE, MUTED, TILE, TILE_ACTIVE, TILE_HOVER, TIME};
+use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
@@ -17,15 +19,35 @@ use egui_shadcn::components::button::{Button, ButtonVariant};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Four, so the eight shipped tiles (every add-on installed) take two rows
-/// and fit above the log on 1280x720; with three columns the third row went
-/// under it.
+/// Four columns of bands: the eight shipped tiles take two rows.
 pub const COLUMNS: usize = 4;
+/// Space around the log and between the groups of the screen.
 pub const GAP: f32 = 16.0;
-/// Tiles are squares of this side, smaller only when the screen is.
-pub const TILE_MAX: f32 = 220.0;
-/// The smallest tile; below it the grid scrolls instead.
-pub const TILE_MIN: f32 = 160.0;
+/// Space between two tiles.
+pub const TILE_GAP: f32 = 3.0;
+/// The tile group takes this share of the screen width...
+pub const GROUP_SHARE: f32 = 0.58;
+/// ...but never less than this, so a name and a comment fit on a small
+/// screen.
+pub const GROUP_MIN: f32 = 4.0 * 220.0 + 3.0 * TILE_GAP;
+/// A band is this tall, down to `TILE_H_MIN` when the screen is short.
+pub const TILE_H: f32 = 76.0;
+pub const TILE_H_MIN: f32 = 64.0;
+/// The header: 16 above the 52 tall logo, 12 below.
+pub const HEADER_H: f32 = 80.0;
+const HEADER_PAD_X: f32 = 32.0;
+const HEADER_PAD_TOP: f32 = 16.0;
+pub const LOGO_H: f32 = 52.0;
+const ICON_BOX: f32 = 44.0;
+/// The folded-window strip: its height, the chip height inside it, the gap
+/// to the log and the widest a chip grows.
+pub const STRIP_H: f32 = 40.0;
+pub const CHIP_H: f32 = 32.0;
+const STRIP_GAP: f32 = 8.0;
+const CHIP_MAX_W: f32 = 280.0;
+const CHIP_ICON: f32 = 20.0;
+const CHIP_FONT: f32 = 15.0;
+const EDGE_W: f32 = 5.0;
 /// The log takes this share of the screen height, and at least
 /// `LOG_MIN_ROWS` rows.
 pub const LOG_SHARE: f32 = 0.3;
@@ -35,14 +57,13 @@ pub const LOG_ROW: f32 = 18.0;
 const LOG_PAD: f32 = 10.0;
 const LOG_FONT: f32 = 13.0;
 pub const ICON_SIDE: u32 = 96;
-/// A warning amber, for reasons drawn on a disabled tile.
-pub const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
+pub use crate::brand::WARN;
 
 /// Each tile's icon, rasterised in renderer processes as the menu draws it:
 /// `None` when the tile names no icon that resolves, otherwise the path and
 /// the image or why there is none. Both draw the letter.
 pub fn render_icons(tiles: &[Tile], roots: &IconRoots) -> Vec<Option<(PathBuf, Result<ColorImage, String>)>> {
-    let fg = Theme::dark().palette.foreground;
+    let fg = crate::brand::theme().palette.foreground;
     let rgb = [fg.r(), fg.g(), fg.b()];
     let (index, jobs): (Vec<usize>, Vec<IconJob>) = tiles
         .iter()
@@ -113,47 +134,107 @@ pub enum UiEvent {
     Settings(SettingsEvent),
     /// Retry (true) or Later in the retry dialog.
     Retry(bool),
+    /// The person clicked the chip of a folded window (its toplevel id).
+    Unfold(u64),
 }
 
-/// Where the grid and the log go on a screen.
+/// Where the header, the grid and the log go on a screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
+    /// The strip along the top: logo, name, host and clock.
+    pub header: Rect,
     /// The log, along the bottom.
     pub log: Rect,
-    /// The space above the log; the grid scrolls inside it.
+    /// The space between header and log; the grid scrolls inside it.
     pub area: Rect,
     /// The grid itself, centred in `area`, or from its top when taller.
     pub grid: Rect,
-    /// The side of one square tile.
-    pub side: f32,
+    /// The size of one band.
+    pub tile: Vec2,
+    /// The row of folded-window chips at the bottom edge; `None` when no
+    /// window is folded.
+    pub strip: Option<Rect>,
 }
 
-pub fn layout(screen: Rect, tiles: usize) -> Layout {
+pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
     let log_h = (screen.height() * LOG_SHARE).max(LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD);
+    let (strip, log_bottom) = if folded == 0 {
+        (None, screen.bottom() - GAP)
+    } else {
+        let strip = Rect::from_min_max(
+            pos2(screen.left() + GAP, screen.bottom() - GAP - STRIP_H),
+            pos2(screen.right() - GAP, screen.bottom() - GAP),
+        );
+        (Some(strip), strip.top() - STRIP_GAP)
+    };
     let log = Rect::from_min_max(
-        pos2(screen.left() + GAP, screen.bottom() - GAP - log_h),
-        pos2(screen.right() - GAP, screen.bottom() - GAP),
+        pos2(screen.left() + GAP, log_bottom - log_h),
+        pos2(screen.right() - GAP, log_bottom),
     );
-    let area = Rect::from_min_max(screen.min, pos2(screen.right(), log.top()));
+    let header = Rect::from_min_size(screen.min, vec2(screen.width(), HEADER_H));
+    let area = Rect::from_min_max(pos2(screen.left(), header.bottom()), pos2(screen.right(), log.top()));
     let cols = COLUMNS.min(tiles.max(1));
     let rows = tiles.max(1).div_ceil(COLUMNS);
-    let fit = |space: f32, n: usize| (space - 2.0 * GAP - GAP * (n as f32 - 1.0)) / n as f32;
-    let side = TILE_MAX
-        .min(fit(area.width(), cols))
-        .min(fit(area.height(), rows))
-        .max(TILE_MIN);
+    let group = (GROUP_SHARE * screen.width())
+        .max(GROUP_MIN)
+        .min(screen.width() - 2.0 * GAP);
+    let tile_w = (group - (COLUMNS as f32 - 1.0) * TILE_GAP) / COLUMNS as f32;
+    let fit_h = (area.height() - 2.0 * GAP - (rows as f32 - 1.0) * TILE_GAP) / rows as f32;
+    let tile = vec2(tile_w, fit_h.clamp(TILE_H_MIN, TILE_H));
     let size = vec2(
-        cols as f32 * side + (cols as f32 - 1.0) * GAP,
-        rows as f32 * side + (rows as f32 - 1.0) * GAP,
+        cols as f32 * tile.x + (cols as f32 - 1.0) * TILE_GAP,
+        rows as f32 * tile.y + (rows as f32 - 1.0) * TILE_GAP,
     );
-    let left = (area.center().x - size.x / 2.0).max(area.left() + GAP);
+    let left = (screen.center().x - size.x / 2.0).max(area.left() + GAP.min(area.width() / 2.0));
     let top = area.top() + ((area.height() - size.y) / 2.0).max(GAP);
     Layout {
+        header,
         log,
         area,
         grid: Rect::from_min_size(pos2(left, top), size),
-        side,
+        tile,
+        strip,
     }
+}
+
+/// What the header shows besides the grid: the names, the clock and the
+/// logo texture. The logo is `None` in tests that draw without one.
+#[derive(Default)]
+pub struct Chrome {
+    pub header: Header,
+    /// `HH:MM`; the app refreshes it before every frame.
+    pub clock: String,
+    pub logo: Option<TextureHandle>,
+}
+
+/// Logo, name, host, version and clock along the top of `rect`.
+fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
+    let p = ui.painter();
+    let fg = brand::theme().palette.foreground;
+    // The mark and the name sit back at 60 %.
+    let dim = |c: Color32| c.gamma_multiply(0.6);
+    let top = rect.top() + HEADER_PAD_TOP;
+    let mut x = rect.left() + HEADER_PAD_X;
+    if let Some(tex) = &chrome.logo {
+        let size = tex.size_vec2();
+        let logo = Rect::from_min_size(pos2(x, top), vec2(LOGO_H * size.x / size.y, LOGO_H));
+        p.image(
+            tex.id(),
+            logo,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            dim(Color32::WHITE),
+        );
+        x = logo.right() + 14.0;
+    }
+    let mid = top + LOGO_H / 2.0;
+    p.text(pos2(x, mid), Align2::LEFT_CENTER, "ThinFloe", brand::geo(34.0), dim(fg));
+    p.text(
+        pos2(rect.right() - HEADER_PAD_X, mid),
+        Align2::RIGHT_CENTER,
+        header_text(&chrome.header, &chrome.clock),
+        brand::geo(16.0),
+        MUTED,
+    );
 }
 
 /// The words the dialog uses for the way the menu ends: the verb, and its
@@ -176,7 +257,16 @@ fn capitalized(text: &str) -> String {
 }
 
 /// Draw one frame.
-pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Instant) -> Option<UiEvent> {
+pub fn show(
+    ui: &mut Ui,
+    menu: &Menu,
+    icons: &[Option<TextureHandle>],
+    chrome: &Chrome,
+    now: Instant,
+) -> Option<UiEvent> {
+    // The clock changes on the minute and at no other time.
+    ui.ctx()
+        .request_repaint_after(until_next_minute(std::time::SystemTime::now()));
     let (verb, verbing) = ending_words(menu.ending);
     // No background fill here: the canvas restores the page colour itself,
     // and while the dialog is up it holds the frozen grid, which a fill
@@ -357,11 +447,13 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         return chose.map(UiEvent::Retry);
     }
     let shown = menu.visible_tiles();
-    let l = layout(ui.max_rect(), shown.len());
+    let l = layout(ui.max_rect(), shown.len(), menu.folded.len());
+    show_header(ui, chrome, l.header);
+    let unfold = l.strip.and_then(|r| show_strip(ui, menu, icons, r)).map(UiEvent::Unfold);
     if menu.screen == Screen::Settings {
         let event = show_settings(ui, menu, icons, l.area);
         show_log(ui, &menu.log, l.log);
-        return event.map(UiEvent::Settings);
+        return event.map(UiEvent::Settings).or(unfold);
     }
     let mut clicked = None;
     let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
@@ -369,7 +461,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         .id_salt("grid")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(GAP, GAP);
+            ui.spacing_mut().item_spacing = vec2(TILE_GAP, TILE_GAP);
             // add_space moves the cursor by exactly its amount; the item
             // spacing comes only between the rows and tiles that follow.
             ui.add_space(l.grid.top() - l.area.top());
@@ -380,15 +472,20 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
                         let tile = &menu.tiles[index];
                         let enabled = menu.can_activate(index);
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(l.side), sense);
+                        let (rect, resp) = ui.allocate_exact_size(l.tile, sense);
+                        let running = menu.running(index);
                         paint_tile(
                             ui,
                             rect,
                             tile,
                             icons[index].as_ref(),
-                            resp.hovered() && enabled,
-                            resp.has_focus(),
-                            menu.status(index).as_deref(),
+                            TileState {
+                                hovered: resp.hovered() && enabled,
+                                focused: resp.has_focus(),
+                                running,
+                                active: menu.active(index),
+                                update: menu.pending_update(index),
+                            },
                         );
                         if resp.clicked() {
                             clicked = Some(UiEvent::Tile(index));
@@ -399,9 +496,104 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
             ui.add_space(0.0);
         });
     show_log(ui, &menu.log, l.log);
+    clicked.or(unfold)
+}
+
+/// The folded windows as chips in one row. A row wider than the strip
+/// scrolls sideways (wheel and drag), so no chip is out of reach: with zero
+/// labwc keybindings this is the only way back to a folded window.
+/// Returns the id of the chip clicked.
+fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: Rect) -> Option<u64> {
+    let t = Theme::current(ui.ctx());
+    let mut clicked = None;
+    let mut strip_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+    // A mouse wheel turns vertically; the row only goes sideways.
+    strip_ui.style_mut().always_scroll_the_only_direction = true;
+    egui::ScrollArea::horizontal()
+        .id_salt("strip")
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(&mut strip_ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.horizontal_centered(|ui| {
+                for f in &menu.folded {
+                    // The title comes from the window: one line, cut with an
+                    // ellipsis at the chip's widest.
+                    let title = if f.title.is_empty() { &f.app_id } else { &f.title };
+                    let text_max = CHIP_MAX_W - CHIP_ICON - 3.0 * 10.0;
+                    let mut job = LayoutJob::simple_singleline(
+                        title.clone(),
+                        FontId::proportional(CHIP_FONT),
+                        t.palette.foreground,
+                    );
+                    job.wrap = TextWrapping::truncate_at_width(text_max);
+                    let galley = ui.painter().layout_job(job);
+                    let w = 10.0 + CHIP_ICON + 10.0 + galley.size().x.ceil() + 10.0;
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, CHIP_H), Sense::click_and_drag());
+                    // A chip under the pointer takes the drag from the
+                    // scroll area, so it hands the movement back.
+                    if resp.dragged() {
+                        ui.scroll_with_delta(vec2(resp.drag_delta().x, 0.0));
+                    }
+                    let p = ui.painter();
+                    let fill = if resp.hovered() { TILE_HOVER } else { TILE };
+                    p.rect_filled(rect, 0.0, fill);
+                    p.rect_stroke(rect, 0.0, Stroke::new(1.0, brand::LINE), StrokeKind::Inside);
+                    if resp.has_focus() {
+                        p.rect_stroke(
+                            rect.expand(2.0),
+                            0.0,
+                            Stroke::new(3.0, t.palette.ring),
+                            StrokeKind::Outside,
+                        );
+                    }
+                    let icon_rect = Rect::from_min_size(
+                        pos2(rect.left() + 10.0, rect.center().y - CHIP_ICON / 2.0),
+                        Vec2::splat(CHIP_ICON),
+                    );
+                    let tex = menu
+                        .tile_for_app(&f.app_id)
+                        .and_then(|i| icons.get(i))
+                        .and_then(|i| i.as_ref());
+                    match tex {
+                        Some(tex) => {
+                            p.image(
+                                tex.id(),
+                                icon_rect,
+                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        None => {
+                            p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
+                            let letter: String = title
+                                .chars()
+                                .next()
+                                .map(|c| c.to_uppercase().collect())
+                                .unwrap_or_else(|| "?".into());
+                            p.text(
+                                icon_rect.center(),
+                                Align2::CENTER_CENTER,
+                                letter,
+                                brand::geo(CHIP_ICON * 0.6),
+                                t.palette.foreground,
+                            );
+                        }
+                    }
+                    let y = rect.center().y - galley.size().y / 2.0;
+                    ui.painter_at(rect)
+                        .galley(pos2(icon_rect.right() + 10.0, y), galley, t.palette.foreground);
+                    if resp.clicked() {
+                        clicked = Some(f.id);
+                    }
+                }
+            });
+        });
     clicked
 }
 
+/// The width of the state column of a Settings row.
+const STATE_WIDTH: f32 = 230.0;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
@@ -409,9 +601,17 @@ const ROW_ICON: f32 = 40.0;
 fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area: Rect) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
-    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(area.shrink(GAP)));
+    // The panel is as wide as the tile group of the desktop, centred.
+    let inner = area.shrink(GAP);
+    let width = (GROUP_SHARE * area.width()).max(GROUP_MIN).min(inner.width());
+    let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
+    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
     s_ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Add-ons").size(20.0).color(t.palette.foreground));
+        ui.label(
+            egui::RichText::new("Add-ons")
+                .font(brand::geo(28.0))
+                .color(t.palette.foreground),
+        );
         ui.add_space(12.0);
         // SAFETY: time(NULL) has no preconditions.
         let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
@@ -420,7 +620,10 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
             if ui.add(Button::new("Back").variant(ButtonVariant::Secondary)).clicked() {
                 event = Some(SettingsEvent::Back);
             }
-            if ui.add_enabled(!menu.checking(), Button::new("Check now")).clicked() {
+            if ui
+                .add_enabled(!menu.checking(), Button::new("Check now").variant(ButtonVariant::Secondary))
+                .clicked()
+            {
                 event = Some(SettingsEvent::CheckNow);
             }
         });
@@ -434,19 +637,32 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
             if rows.is_empty() {
                 ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette.muted_foreground));
             }
+            ui.spacing_mut().item_spacing.y = TILE_GAP;
             for row in rows {
-                egui::Frame::new()
-                    .fill(t.palette.card)
-                    .stroke(Stroke::new(1.0, t.palette.border))
-                    .corner_radius(t.radius_md())
-                    .inner_margin(12.0)
+                // A TILE band; the ice edge on the left marks a waiting update.
+                let framed = egui::Frame::new()
+                    .fill(TILE)
+                    .inner_margin(egui::Margin {
+                        left: 22,
+                        right: 16,
+                        top: 12,
+                        bottom: 12,
+                    })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        if let Some(e) = settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t) {
-                            event = Some(e);
-                        }
+                        settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t)
                     });
-                ui.add_space(8.0);
+                if row.update_ready {
+                    let r = framed.response.rect;
+                    ui.painter().rect_filled(
+                        Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)),
+                        0.0,
+                        ICE,
+                    );
+                }
+                if let Some(e) = framed.inner {
+                    event = Some(e);
+                }
             }
         });
     event
@@ -477,7 +693,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 );
             }
             None => {
-                ui.painter().rect_filled(rect, t.radius_sm(), t.palette.muted);
+                ui.painter().rect_filled(rect, 0.0, TILE_HOVER);
                 let letter: String = row
                     .name
                     .chars()
@@ -488,7 +704,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                     rect.center(),
                     Align2::CENTER_CENTER,
                     letter,
-                    FontId::proportional(ROW_ICON * 0.5),
+                    brand::geo(ROW_ICON * 0.5),
                     t.palette.foreground,
                 );
             }
@@ -502,31 +718,56 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 None => None,
             };
             if let Some(label) = label
-                && ui.add_enabled(!row.busy, Button::new(label)).clicked()
+                && ui
+                    .add_enabled(!row.busy, {
+                        let b = Button::new(label);
+                        if row.button == Some(RowButton::UpdateNow) {
+                            b
+                        } else {
+                            b.variant(ButtonVariant::Secondary)
+                        }
+                    })
+                    .clicked()
             {
                 event = Some(match row.button {
                     Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
                     _ => SettingsEvent::InstallNow(row.id.clone()),
                 });
             }
+            let one_line = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
+                let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+                job.wrap = TextWrapping::truncate_at_width(ui.available_width());
+                ui.label(job);
+            };
+            // The state is a right-aligned column: green when current, ice
+            // when an update waits.
+            let state = if row.busy {
+                format!("{} · working…", row.state)
+            } else {
+                row.state.clone()
+            };
+            let state_color = if row.update_ready {
+                ICE
+            } else if state.ends_with("up to date") {
+                GOOD
+            } else {
+                t.palette.foreground
+            };
+            ui.allocate_ui_with_layout(
+                vec2(STATE_WIDTH, ROW_ICON),
+                egui::Layout::top_down(egui::Align::Max).with_main_align(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(STATE_WIDTH);
+                    one_line(ui, &state, FontId::proportional(12.0), state_color);
+                    if row.manual {
+                        one_line(ui, settings::MANUAL_NOTE, FontId::proportional(12.0), WARN);
+                    }
+                },
+            );
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                let one_line = |ui: &mut Ui, text: &str, size: f32, color: Color32| {
-                    let mut job = LayoutJob::simple_singleline(text.to_string(), FontId::proportional(size), color);
-                    job.wrap = TextWrapping::truncate_at_width(ui.available_width());
-                    ui.label(job);
-                };
-                one_line(ui, &row.name, 16.0, t.palette.foreground);
+                one_line(ui, &row.name, brand::geo(20.0), t.palette.foreground);
                 if let Some(source) = &row.source {
-                    one_line(ui, source, 13.0, t.palette.muted_foreground);
-                }
-                let state = if row.busy {
-                    format!("{} · working…", row.state)
-                } else {
-                    row.state.clone()
-                };
-                one_line(ui, &state, 13.0, t.palette.foreground);
-                if row.manual {
-                    one_line(ui, settings::MANUAL_NOTE, 12.0, WARN);
+                    one_line(ui, source, FontId::monospace(11.0), MUTED);
                 }
             });
         });
@@ -624,17 +865,18 @@ fn run_color(run: &Run, line_color: Color32, t: &Theme) -> Color32 {
 /// One log line: the time, then the program it came from, then the text.
 fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     let font = FontId::monospace(LOG_FONT);
-    let muted = TextFormat::simple(font.clone(), t.palette.muted_foreground);
     let text_color = match line.kind {
         Kind::Event => t.palette.foreground,
         Kind::Output => t.palette.muted_foreground,
         Kind::Warn => WARN,
+        Kind::Good => GOOD,
     };
     let mut job = LayoutJob::default();
-    job.append(&line.time, 0.0, muted.clone());
+    job.append(&line.time, 0.0, TextFormat::simple(font.clone(), TIME));
     let mut lead = 16.0;
     if let Some(source) = &line.source {
-        job.append(&format!("{source} | "), 16.0, muted);
+        job.append(source, 16.0, TextFormat::simple(font.clone(), ICE));
+        job.append(" | ", 0.0, TextFormat::simple(font.clone(), TIME));
         lead = 0.0;
     }
     for run in &line.runs {
@@ -648,95 +890,63 @@ fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     job
 }
 
-fn paint_tile(
-    ui: &Ui,
-    rect: Rect,
-    tile: &Tile,
-    icon: Option<&TextureHandle>,
+/// What a tile shows about the programs behind it.
+#[derive(Debug, Clone, Copy, Default)]
+struct TileState {
     hovered: bool,
     focused: bool,
-    status: Option<&str>,
-) {
+    /// Copies of its program running.
+    running: usize,
+    /// Whether the ice edge is drawn: a program runs, or the save does.
+    active: bool,
+    /// An add-on update waits for the next boot.
+    update: bool,
+}
+
+fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&TextureHandle>, state: TileState) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
-    let fill = if hovered { t.palette.accent } else { t.palette.card };
-    p.rect_filled(rect, t.radius_md(), fill);
-    let border = if usable { t.palette.border } else { WARN };
-    p.rect_stroke(rect, t.radius_md(), Stroke::new(1.0, border), StrokeKind::Inside);
-    if focused {
+    // A tile that cannot be used fades; its reason stays at full strength.
+    let fade = |c: Color32| if usable { c } else { c.gamma_multiply(0.35) };
+    let fill = if state.hovered {
+        TILE_HOVER
+    } else if state.active {
+        TILE_ACTIVE
+    } else {
+        TILE
+    };
+    p.rect_filled(rect, 0.0, fade(fill));
+    if state.active {
+        p.rect_filled(Rect::from_min_size(rect.min, vec2(EDGE_W, rect.height())), 0.0, ICE);
+    }
+    if state.focused {
         p.rect_stroke(
             rect.expand(2.0),
-            t.radius_md(),
+            0.0,
             Stroke::new(3.0, t.palette.ring),
             StrokeKind::Outside,
         );
     }
-    let fg = if usable {
-        t.palette.foreground
-    } else {
-        t.palette.muted_foreground
-    };
-    let icon_px = ICON_SIDE as f32 / ui.ctx().pixels_per_point();
-    let text_w = rect.width() - 24.0;
-    // Name and Comment come from files the user writes. Each is one line,
-    // cut with an ellipsis, and all text is clipped to the tile, so no file
-    // can paint over its neighbours.
-    let clipped = ui.painter_at(rect);
-    let mut lines = Vec::new();
-    let mut line = |text: &str, font: FontId, color: Color32, one_line: bool| {
-        let galley = if one_line {
-            let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-            job.wrap = TextWrapping::truncate_at_width(text_w);
-            clipped.layout_job(job)
-        } else {
-            clipped.layout(text.to_string(), font, color, text_w)
-        };
-        lines.push((galley, color));
-    };
-    line(&tile.name, FontId::proportional(20.0), fg, true);
-    if let Some(c) = &tile.comment {
-        line(c, FontId::proportional(14.0), t.palette.muted_foreground, true);
-    }
-    if let Some(why) = &tile.problem {
-        line(why, FontId::monospace(13.0), WARN, false);
-    }
-    if let Some(note) = &tile.note {
-        line(note, FontId::monospace(12.0), t.palette.muted_foreground, false);
-    }
-    if let Origin::Reworded { ignored } = &tile.origin {
-        let text = if ignored.is_empty() {
-            "reworded".to_string()
-        } else {
-            format!("reworded; ignored: {}", ignored.join(", "))
-        };
-        line(&text, FontId::monospace(12.0), t.palette.muted_foreground, false);
-    }
-    // Icon and text are one block in the middle of the square; a block too
-    // tall for it starts at the top and is clipped at the bottom.
-    let text_h: f32 = lines.iter().map(|(g, _)| g.size().y + 4.0).sum::<f32>() - 4.0;
-    let block_h = icon_px + 12.0 + text_h;
+    let ppp = ui.ctx().pixels_per_point();
     // On a whole pixel, or the icon texture is sampled between two pixels
     // and its edges turn ragged.
-    let ppp = ui.ctx().pixels_per_point();
-    let top = ((rect.center().y - block_h / 2.0).max(rect.top() + 16.0) * ppp).round() / ppp;
-    let icon_rect = Rect::from_center_size(pos2(rect.center().x, top + icon_px / 2.0), Vec2::splat(icon_px));
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let icon_rect = Rect::from_min_size(
+        pos2(snap(rect.left() + 22.0), snap(rect.center().y - ICON_BOX / 2.0)),
+        Vec2::splat(ICON_BOX),
+    );
     match icon {
         Some(tex) => {
-            let tint = if usable {
-                Color32::WHITE
-            } else {
-                Color32::from_gray(128)
-            };
             p.image(
                 tex.id(),
                 icon_rect,
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                tint,
+                fade(Color32::WHITE),
             );
         }
         None => {
-            p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
+            p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette.muted));
             let letter: String = tile
                 .name
                 .chars()
@@ -747,33 +957,70 @@ fn paint_tile(
                 icon_rect.center(),
                 Align2::CENTER_CENTER,
                 letter,
-                FontId::proportional(icon_px * 0.5),
-                fg,
+                brand::geo(ICON_BOX * 0.5),
+                fade(t.palette.foreground),
             );
         }
     }
-    let mut y = icon_rect.bottom() + 12.0;
-    for (galley, color) in lines {
-        clipped.galley(pos2(rect.center().x - galley.size().x / 2.0, y), galley.clone(), color);
-        y += galley.size().y + 4.0;
+    // Name and Comment come from files the user writes. Each is one line,
+    // cut with an ellipsis, and all text is clipped to the tile, so no file
+    // can paint over its neighbours.
+    let text_x = icon_rect.right() + 14.0;
+    let text_w = (rect.right() - 14.0 - text_x).max(0.0);
+    let clipped = ui.painter_at(rect);
+    let mut lines = Vec::new();
+    let mut line = |text: &str, font: FontId, color: Color32| {
+        let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+        job.wrap = TextWrapping::truncate_at_width(text_w);
+        lines.push(clipped.layout_job(job));
+    };
+    line(&tile.name, brand::geo(21.0), fade(t.palette.foreground));
+    // One second line: why the tile is grey, else its comment, else the
+    // note about its file. `--check` has the long form.
+    if let Some(why) = &tile.problem {
+        line(why, FontId::proportional(11.0), WARN);
+    } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
+        // Only a reworded file that lost keys; plain "reworded" is no news.
+        match &tile.origin {
+            Origin::Reworded { ignored } if !ignored.is_empty() => tile.origin.reworded_text(),
+            _ => None,
+        }
+    }) {
+        line(&c, FontId::proportional(11.0), fade(MUTED));
+    }
+    let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
+    let block_h = heights.iter().sum::<f32>() + 2.0 * (lines.len() as f32 - 1.0);
+    let mut y = snap(rect.center().y - block_h / 2.0);
+    for (galley, h) in lines.into_iter().zip(heights) {
+        clipped.galley(pos2(text_x, y), galley, Color32::WHITE);
+        y += h + 2.0;
+    }
+    if state.running > 1 {
+        p.text(
+            rect.right_top() + vec2(-9.0, 7.0),
+            Align2::RIGHT_TOP,
+            format!("×{}", state.running),
+            brand::geo(15.0),
+            ICE,
+        );
+    }
+    // Small marks along the bottom right.
+    let mut right = rect.right() - 9.0;
+    let mut mark = |text: &str, color: Color32| {
+        let r = p.text(
+            pos2(right, rect.bottom() - 6.0),
+            Align2::RIGHT_BOTTOM,
+            text,
+            FontId::proportional(11.0),
+            color,
+        );
+        right = r.left() - 8.0;
+    };
+    if state.update {
+        mark("update", ICE);
     }
     if tile.origin == Origin::User {
-        p.text(
-            rect.right_top() + vec2(-8.0, 6.0),
-            Align2::RIGHT_TOP,
-            "user",
-            FontId::monospace(11.0),
-            t.palette.muted_foreground,
-        );
-    }
-    if let Some(status) = status {
-        p.text(
-            rect.left_top() + vec2(8.0, 6.0),
-            Align2::LEFT_TOP,
-            status,
-            FontId::monospace(11.0),
-            t.palette.ring,
-        );
+        mark("user", MUTED);
     }
 }
 
@@ -784,13 +1031,12 @@ fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(t.palette.card)
-                .stroke(Stroke::new(1.0, t.palette.border))
-                .corner_radius(t.radius_lg())
+                .fill(TILE)
+                .stroke(Stroke::new(1.0, brand::LINE))
                 .inner_margin(24.0)
                 .show(ui, |ui| {
                     ui.set_width(460.0);
-                    ui.label(egui::RichText::new(title).size(18.0));
+                    ui.label(egui::RichText::new(title).font(brand::geo(24.0)));
                     body(ui, &t);
                 });
         });
@@ -831,13 +1077,13 @@ mod tests {
             false,
         );
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0))),
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            show(ui, &menu, &[None], Instant::now());
+            show(ui, &menu, &[None], &Chrome::default(), Instant::now());
         });
         // The font atlas upload is not applied anywhere here.
         out.textures_delta.clear();
@@ -868,42 +1114,31 @@ mod tests {
     }
 
     #[test]
-    fn seven_tiles_on_full_hd_are_square_centred_and_above_the_log() {
-        let l = layout(screen(1920.0, 1080.0), 7);
-        assert_eq!(l.side, TILE_MAX);
-        assert_eq!(l.grid.size(), vec2(4.0 * TILE_MAX + 3.0 * GAP, 2.0 * TILE_MAX + GAP));
-        assert!((l.grid.center().x - 960.0).abs() < 0.5, "{:?}", l.grid);
-        assert!(
-            (l.grid.center().y - l.area.center().y).abs() < 0.5,
-            "{:?} in {:?}",
-            l.grid,
-            l.area
-        );
-        assert!(l.grid.bottom() <= l.log.top());
+    fn eight_tiles_on_full_hd_are_two_rows_of_bands_at_58_percent() {
+        let l = layout(screen(1920.0, 1080.0), 8, 0);
+        assert!((l.grid.width() - 0.58 * 1920.0).abs() < 1.0, "{:?}", l.grid);
+        assert!((l.grid.center().x - 960.0).abs() < 1.0);
+        assert!(l.tile.x > l.tile.y * 2.5, "bands, not squares: {:?}", l.tile);
+        assert!(l.tile.y >= 64.0);
+        assert!(l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top());
         assert!(l.log.height() >= 0.3 * 1080.0 - 2.0 * GAP, "{:?}", l.log);
         assert!(l.log.bottom() <= 1080.0 && l.log.left() >= 0.0 && l.log.right() <= 1920.0);
     }
 
     #[test]
-    fn the_shipped_seven_tiles_fit_above_the_log_on_1280_by_720() {
-        let l = layout(screen(1280.0, 720.0), 7);
-        assert!(l.grid.bottom() <= l.log.top(), "{:?}", l);
-        assert!(l.grid.right() <= 1280.0, "{:?}", l);
-    }
-
-    #[test]
-    fn eight_tiles_fit_1280x720() {
-        // Every shipped tile with every add-on installed.
-        let l = layout(screen(1280.0, 720.0), 8);
-        assert_eq!(l.side, TILE_MAX);
-        assert!(l.grid.bottom() <= l.log.top(), "{:?}", l);
-        assert!(l.grid.top() >= GAP && l.grid.right() <= 1280.0 - GAP, "{:?}", l);
-        assert!(l.grid.height() <= l.area.height(), "no scrolling: {:?}", l);
+    fn nine_tiles_fit_between_header_and_log_on_1280_by_720() {
+        let l = layout(screen(1280.0, 720.0), 9, 0);
+        assert!(
+            l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top(),
+            "{l:?}"
+        );
+        assert!(l.grid.left() >= 0.0 && l.grid.right() <= 1280.0, "{l:?}");
+        assert!(l.tile.x > l.tile.y * 2.5, "{:?}", l.tile);
     }
 
     fn texts_of(menu: &Menu, icons: &[Option<TextureHandle>]) -> Vec<String> {
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -911,7 +1146,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, menu, icons, Instant::now());
+                show(ui, menu, icons, &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
@@ -993,24 +1228,101 @@ mod tests {
         }
     }
 
+    /// Four add-ons: waiting update, current, failed install, manual.
+    fn four_addons() -> (Menu, usize) {
+        let f = |n: &str, t: &str| crate::tiles::SourceFile {
+            name: n.into(),
+            entry: crate::desktop::parse(t),
+        };
+        let tile = |file: &str, name: &str| {
+            f(
+                file,
+                &format!(
+                    "[Desktop Entry]\nName={name}\nExec=x\nX-TF-Source-Page=https://e.example/{name}\nX-TF-Source-Pattern=x\n"
+                ),
+            )
+        };
+        let grid = Grid {
+            tiles: crate::tiles::merge(
+                &[
+                    tile("10-thinlinc.desktop", "ThinLinc"),
+                    tile("20-oxulnk.desktop", "OxuLnk"),
+                    tile("30-remmina.desktop", "Remmina"),
+                    tile("40-manual.desktop", "Manual tool"),
+                    f("60-settings.desktop", "[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n"),
+                ],
+                &[],
+            ),
+            banner: vec![],
+        };
+        let n = grid.tiles.len();
+        let mut menu = Menu::new(grid, false);
+        let st = |id: &str, state, installed: Option<&str>, pending: Option<&str>, auto, message: Option<&str>| {
+            crate::addons::AddonStatus {
+                id: id.into(),
+                ticked: true,
+                state,
+                installed: installed.map(Into::into),
+                pending: pending.map(Into::into),
+                auto,
+                message: message.map(Into::into),
+            }
+        };
+        use crate::addons::AddonState::*;
+        menu.set_addons(vec![
+            st("10-thinlinc", Pending, Some("4.21.0"), Some("4.22.0"), true, None),
+            st("20-oxulnk", Installed, Some("0.1.0"), None, true, None),
+            st("30-remmina", InstallFailed, None, None, true, Some("HTTP 404")),
+            st("40-manual", Installed, Some("2.0"), None, false, None),
+        ]);
+        // The Retry question for the failed install is not under test here.
+        menu.retry = None;
+        (menu, n)
+    }
+
     #[test]
-    fn tiles_shrink_to_fit_but_not_below_the_minimum() {
-        let l = layout(screen(800.0, 600.0), 6);
-        assert!(l.side < TILE_MAX && l.side >= TILE_MIN, "{}", l.side);
-        assert!(l.grid.width() <= 800.0);
-        let tiny = layout(screen(300.0, 300.0), 6);
-        assert_eq!(tiny.side, TILE_MIN);
+    fn only_a_row_with_a_waiting_update_has_the_ice_edge() {
+        let (mut menu, n) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        let edges = |m: &Menu| {
+            shapes_of(m, n, Instant::now())
+                .iter()
+                .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01))
+                .count()
+        };
+        assert_eq!(edges(&menu), 1);
+        // Nothing waits any more: no edge, though the manual row still has Update now.
+        menu.set_addons(vec![]);
+        assert_eq!(edges(&menu), 0);
+    }
+
+    #[test]
+    fn the_dialog_title_is_drawn_in_geo() {
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.set_addons(vec![failed()]);
+        let shapes = shapes_of(&menu, 2, Instant::now());
+        let family = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Add-on not installed" => {
+                    Some(t.galley.job.sections[0].format.font_id.family.clone())
+                }
+                _ => None,
+            })
+            .expect("dialog title not drawn");
+        assert_eq!(family, egui::FontFamily::Name(crate::brand::GEO.into()));
     }
 
     #[test]
     fn the_log_keeps_its_minimum_rows_on_a_short_screen() {
-        let l = layout(screen(1280.0, 480.0), 6);
+        let l = layout(screen(1280.0, 480.0), 6, 0);
         assert!(l.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW, "{:?}", l.log);
     }
 
     #[test]
     fn many_tiles_start_at_the_top_and_overflow_downwards() {
-        let l = layout(screen(1920.0, 1080.0), 38);
+        let l = layout(screen(1920.0, 1080.0), 38, 0);
         assert!(
             l.grid.top() >= l.area.top() && l.grid.height() > l.area.height(),
             "{:?}",
@@ -1050,7 +1362,7 @@ mod tests {
             kind: crate::log::Kind::Output,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1059,7 +1371,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None], Instant::now());
+                show(ui, &menu, &[None], &Chrome::default(), Instant::now());
             });
             // The font atlas upload is not applied anywhere here.
             o.textures_delta.clear();
@@ -1123,7 +1435,7 @@ mod tests {
             false,
         );
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1132,26 +1444,24 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &icons, Instant::now());
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
         }
         let out = out.unwrap();
-        let l = layout(screen(1280.0, 720.0), names.len());
+        let l = layout(screen(1280.0, 720.0), names.len(), 0);
         let tiles: Vec<Rect> = out
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
-                egui::Shape::Rect(r)
-                    if r.fill != Color32::TRANSPARENT && (r.rect.size() - Vec2::splat(l.side)).length() < 0.5 =>
-                {
+                egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT && (r.rect.size() - l.tile).length() < 0.5 => {
                     Some(r.rect)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(tiles.len(), names.len(), "one square per tile");
+        assert_eq!(tiles.len(), names.len(), "one band per tile");
         let painted = tiles.iter().fold(Rect::NOTHING, |a, r| a.union(*r));
         assert!(
             (painted.min - l.grid.min).length() < 0.5 && (painted.max - l.grid.max).length() < 0.5,
@@ -1181,7 +1491,7 @@ mod tests {
                 egui::Shape::Rect(r)
                     if r.fill != Color32::TRANSPARENT
                         && tile.contains_rect(r.rect)
-                        && r.rect.width() < l.side - 1.0 =>
+                        && r.rect.width() < l.tile.x - 1.0 =>
                 {
                     Some(r.rect)
                 }
@@ -1189,11 +1499,19 @@ mod tests {
             })
             .expect("letter placeholder drawn");
         assert_eq!(icon.top(), icon.top().round(), "icon on a whole pixel");
+        assert!(icon.left() - tile.left() >= 20.0, "icon clear of the edge");
         let above = icon.top() - tile.top();
-        let below = tile.bottom() - name.bottom();
+        let below = tile.bottom() - icon.bottom();
         assert!(
             (above - below).abs() <= 1.0,
-            "content {above} from the top, {below} from the bottom"
+            "icon {above} from the top, {below} from the bottom"
+        );
+        assert!(name.left() > icon.right(), "name {name:?} right of the icon {icon:?}");
+        let above = name.top() - tile.top();
+        let below = tile.bottom() - name.bottom();
+        assert!(
+            (above - below).abs() <= 3.0,
+            "name {above} from the top, {below} from the bottom"
         );
     }
 
@@ -1213,7 +1531,7 @@ mod tests {
             kind: crate::log::Kind::Output,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1221,7 +1539,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None], Instant::now());
+                show(ui, &menu, &[None], &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
@@ -1248,12 +1566,120 @@ mod tests {
     }
 
     #[test]
-    fn a_running_tile_shows_its_status() {
+    fn a_log_line_has_the_colour_roles() {
+        let t = Theme::current(&{
+            let c = egui::Context::default();
+            brand::apply(&c);
+            c
+        });
+        let line = |kind| crate::log::Line {
+            time: "12:00:00".into(),
+            source: Some("save-home".into()),
+            runs: vec![crate::log::Run::plain("text")],
+            kind,
+        };
+        let colour_of = |job: &LayoutJob, needle: &str| {
+            let at = job.text.find(needle).unwrap();
+            job.sections
+                .iter()
+                .find(|s| s.byte_range.contains(&egui::text::ByteIndex(at)))
+                .unwrap()
+                .format
+                .color
+        };
+        let job = log_job(&line(crate::log::Kind::Good), &t);
+        assert_eq!(colour_of(&job, "12:00"), TIME);
+        assert_eq!(colour_of(&job, "save-home"), ICE);
+        assert_eq!(colour_of(&job, "text"), GOOD);
+        assert_eq!(colour_of(&log_job(&line(crate::log::Kind::Warn), &t), "text"), WARN);
+    }
+
+    fn shapes_of(menu: &Menu, tiles: usize, now: Instant) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<TextureHandle>> = (0..tiles).map(|_| None).collect();
+        let mut out = None;
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, menu, &icons, &Chrome::default(), now);
+            });
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.unwrap().shapes
+    }
+
+    fn all_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_running_tile_with_a_pending_update_shows_the_edge_and_the_marker() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T0".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let now = Instant::now();
+        menu.activate(0, now);
+        assert!(menu.active(0) && menu.pending_update(0));
+        let shapes = shapes_of(&menu, 1, now);
+        assert!(
+            shapes.iter().any(
+                |c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01)
+            ),
+            "edge"
+        );
+        assert!(all_texts(&shapes).iter().any(|t| t == "update"), "marker");
+    }
+
+    #[test]
+    fn a_reworded_tile_that_lost_keys_says_so_when_it_has_no_comment() {
+        let mut t0 = plain_tile("T0");
+        t0.origin = Origin::Reworded {
+            ignored: vec!["Exec".into()],
+        };
+        let menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        let texts = all_texts(&shapes_of(&menu, 1, Instant::now()));
+        assert!(texts.iter().any(|t| t == "reworded; ignored: Exec"), "{texts:?}");
+    }
+
+    #[test]
+    fn a_tile_with_two_copies_shows_the_edge_and_the_count() {
         let mut t1 = plain_tile("T1");
         t1.multiple = true;
         let mut menu = Menu::new(
             Grid {
-                tiles: vec![plain_tile("T0"), t1],
+                tiles: vec![plain_tile("T0"), t1, plain_tile("T2")],
                 banner: vec![],
             },
             false,
@@ -1263,7 +1689,7 @@ mod tests {
         menu.activate(1, now);
         menu.activate(1, now);
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1271,13 +1697,31 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None, None], now);
+                show(ui, &menu, &[None, None, None], &Chrome::default(), now);
             });
             o.textures_delta.clear();
             out = Some(o);
         }
+        let out = out.unwrap();
+        let l = layout(screen(1280.0, 720.0), 3, 0);
+        // The ice edge: a 5 wide bar at the left of the band, full height.
+        let edges: Vec<Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edges.len(), 2, "an edge on each running tile only: {edges:?}");
+        for e in &edges {
+            assert!((e.height() - l.tile.y).abs() < 0.5, "{e:?}");
+            assert!(
+                (e.left() - l.grid.left()).abs() < 0.5
+                    || (e.left() - (l.grid.left() + l.tile.x + TILE_GAP)).abs() < 0.5
+            );
+        }
         let texts: Vec<String> = out
-            .unwrap()
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
@@ -1285,8 +1729,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(texts.iter().any(|t| t == "running"), "{texts:?}");
-        assert!(texts.iter().any(|t| t == "2 running"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "×2"), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with('×')).count(),
+            1,
+            "one copy shows no count"
+        );
     }
 
     #[test]
@@ -1308,7 +1756,7 @@ mod tests {
             killed: true,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1319,12 +1767,177 @@ mod tests {
             let mut frame = input.clone();
             frame.time = Some(i as f64);
             let mut o = ctx.run_ui(frame, |ui| {
-                show(ui, &menu, &[None], now + Duration::from_secs(1));
+                show(ui, &menu, &[None], &Chrome::default(), now + Duration::from_secs(1));
             });
             o.textures_delta.clear();
             delay = o.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         }
         assert!(!delay.is_zero(), "repaint delay {delay:?}");
+    }
+
+    fn folded_menu(n: usize) -> Menu {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.folded = (0..n as u64)
+            .map(|i| crate::windows::Folded {
+                id: 100 + i,
+                title: format!("ThinLinc session number {i} on a host with a very long name.example.com"),
+                app_id: "x".into(),
+            })
+            .collect();
+        menu
+    }
+
+    /// One frame of `show` with the given extra input events; returns the
+    /// chips painted (rects of height `CHIP_H` filled with TILE or hover) and
+    /// the event.
+    fn strip_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        size: Vec2,
+        events: Vec<egui::Event>,
+    ) -> (Vec<Rect>, Option<UiEvent>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), size)),
+            events,
+            // Wheel scrolling is smoothed over time.
+            time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+            ..Default::default()
+        };
+        let mut ev = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            ev = show(ui, menu, &[None], &Chrome::default(), Instant::now());
+        });
+        out.textures_delta.clear();
+        let chips = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r)
+                    if (r.rect.height() - CHIP_H).abs() < 0.01 && (r.fill == TILE || r.fill == TILE_HOVER) =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        (chips, ev)
+    }
+
+    fn click_at(p: egui::Pos2) -> Vec<egui::Event> {
+        let b = |pressed| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(p), b(true), b(false)]
+    }
+
+    #[test]
+    fn no_folded_window_means_no_strip_and_the_log_reaches_the_bottom() {
+        let l = layout(screen(1920.0, 1080.0), 8, 0);
+        assert!(l.strip.is_none());
+        assert!(1080.0 - l.log.bottom() <= GAP + 0.5);
+    }
+
+    #[test]
+    fn a_folded_window_puts_the_strip_below_the_log() {
+        let l = layout(screen(1920.0, 1080.0), 8, 2);
+        let s = l.strip.unwrap();
+        assert!(s.top() >= l.log.bottom() && s.bottom() <= 1080.0);
+        assert!(s.height() >= CHIP_H);
+    }
+
+    #[test]
+    fn a_chip_click_restores_that_window() {
+        let menu = folded_menu(2);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let (chips, _) = strip_frame(&ctx, &menu, size, vec![]);
+        let (chips2, _) = strip_frame(&ctx, &menu, size, vec![]);
+        assert_eq!(chips.len(), 2, "{chips:?}");
+        assert_eq!(chips, chips2);
+        let (_, ev) = strip_frame(&ctx, &menu, size, click_at(chips[1].center()));
+        assert_eq!(ev, Some(UiEvent::Unfold(101)));
+    }
+
+    #[test]
+    fn ten_folded_windows_on_1280_by_720_stay_reachable() {
+        let menu = folded_menu(10);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        let over = strip.center();
+        strip_frame(&ctx, &menu, size, vec![]);
+        let (first, _) = strip_frame(&ctx, &menu, size, vec![]);
+        // The first frames show the left end only: the last chip is out.
+        let reachable = |c: &Rect| strip.contains_rect(*c);
+        assert!(!first.iter().all(reachable), "ten long chips cannot fit one row");
+        // Wheel and drag both move the row; the wheel is tried here.
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -4000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        };
+        for _ in 0..12 {
+            strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(over), wheel.clone()]);
+        }
+        let (chips, _) = strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(over)]);
+        let last = chips.iter().max_by(|a, b| a.right().total_cmp(&b.right())).unwrap();
+        assert!(strip.contains(last.center()), "last chip {last:?} not inside {strip:?}");
+        assert!(last.right() <= strip.right() + 1.0);
+        let (_, ev) = strip_frame(&ctx, &menu, size, click_at(last.center()));
+        assert_eq!(ev, Some(UiEvent::Unfold(109)));
+    }
+
+    #[test]
+    fn dragging_the_strip_scrolls_it_without_clicking_a_chip() {
+        let menu = folded_menu(10);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        strip_frame(&ctx, &menu, size, vec![]);
+        let (before, _) = strip_frame(&ctx, &menu, size, vec![]);
+        let from = before[0].center();
+        let b = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(from), b(from, true)]);
+        let mut x = from.x;
+        let mut clicked = None;
+        while x > from.x - 600.0 {
+            x -= 60.0;
+            let (_, ev) = strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(pos2(x, from.y))]);
+            clicked = clicked.or(ev);
+        }
+        let (_, ev) = strip_frame(&ctx, &menu, size, vec![b(pos2(x, from.y), false)]);
+        clicked = clicked.or(ev);
+        let (after, _) = strip_frame(&ctx, &menu, size, vec![]);
+        assert!(after[0].left() < before[0].left() - 300.0, "{:?} -> {:?}", before[0], after[0]);
+        assert!(clicked.is_none(), "a drag is not a click: {clicked:?}");
+        assert!(strip.height() > 0.0);
+    }
+
+    #[test]
+    fn a_chip_takes_the_icon_of_the_tile_with_its_program() {
+        let mut menu = folded_menu(1);
+        menu.tiles[0].argv = vec!["/usr/bin/Foot".into()];
+        assert_eq!(menu.tile_for_app("foot"), Some(0));
+        assert_eq!(menu.tile_for_app("other"), None);
+        assert_eq!(menu.tile_for_app(""), None);
     }
 
     #[test]
@@ -1334,5 +1947,52 @@ mod tests {
         assert_eq!(anyway(Action::Reboot), "Restart anyway");
         assert_eq!(anyway(Action::Poweroff), "Power off anyway");
         assert_eq!(capitalized(ending_words(Action::Poweroff).1), "Powering off");
+    }
+
+    /// Writes PPM files of the Settings screen and a dialog through the real
+    /// rasteriser, for looking at. Run by hand:
+    /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
+    fn shot(menu: &Menu, name: &str) {
+        let Some(dir) = std::env::var_os("TF_SHOT_DIR") else { return };
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<TextureHandle>> = menu.tiles.iter().map(|_| None).collect();
+        let mut textures = crate::raster::Textures::default();
+        let mut canvas = crate::raster::Canvas::new(1280, 720, crate::brand::BG);
+        for frame in 0..12 {
+            let mut input = input.clone();
+            input.time = Some(frame as f64 * 0.1);
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, menu, &icons, &Chrome::default(), Instant::now());
+            });
+            textures.apply_set(&out.textures_delta);
+            out.textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, 1.0);
+            canvas.restore_background(canvas.bounds());
+            canvas.draw(&prims, &textures, 1.0, canvas.bounds());
+        }
+        let mut ppm = b"P6\n1280 720\n255\n".to_vec();
+        for px in &canvas.pixels {
+            ppm.extend([(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
+        }
+        std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn shot_settings_and_dialog() {
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        shot(&menu, "settings.ppm");
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.logout = Some(Logout::Failed {
+            message: "The home directory could not be saved: boot server unreachable.".into(),
+        });
+        shot(&menu, "dialog.ppm");
     }
 }

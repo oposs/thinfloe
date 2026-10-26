@@ -40,6 +40,8 @@ pub enum Wake {
     Output,
     /// The add-on status or log file changed.
     Addons,
+    /// The set of folded windows changed.
+    Windows,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -57,6 +59,8 @@ pub struct Config {
     pub addon_last_check: PathBuf,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
+    /// Host name and version for the header.
+    pub header: crate::header::Header,
 }
 
 struct Live {
@@ -67,6 +71,8 @@ struct Live {
     textures: Textures,
     tracker: Tracker,
     icons: Vec<Option<TextureHandle>>,
+    /// What the header shows; the clock text is refreshed every frame.
+    chrome: ui::Chrome,
     /// The scale the last frame was laid out and damaged at.
     ppp: f32,
     /// Whether a frame reached the screen.
@@ -89,10 +95,14 @@ pub struct App {
     addon_log_read: bool,
     /// Whether the window is on screen; the add-on poll rests when not.
     shown: Arc<AtomicBool>,
+    /// Folded windows; `None` when the compositor cannot tell, then no strip.
+    windows: Option<crate::windows::Windows>,
+    /// The folded list at the last wake, to name what changed.
+    folded_seen: Vec<crate::windows::Folded>,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
-pub fn run(cfg: Config) -> Result<i32, String> {
+pub fn run(mut cfg: Config) -> Result<i32, String> {
     let event_loop = EventLoop::<Wake>::with_user_event()
         .build()
         .map_err(|e| e.to_string())?;
@@ -119,7 +129,26 @@ pub fn run(cfg: Config) -> Result<i32, String> {
     });
     let shown = Arc::new(AtomicBool::new(true));
     watch_addons(&cfg, &shown, event_loop.create_proxy());
+    let windows = {
+        let waker = event_loop.create_proxy();
+        match crate::windows::Windows::connect(move || {
+            let _ = waker.send_event(Wake::Windows);
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("thinfloe-menu: no folded-window list: {e}");
+                None
+            }
+        }
+    };
+    // No change event comes for a window folded before the menu started, so
+    // the first frame reads the list itself.
+    if let Some(w) = windows.as_ref() {
+        cfg.menu.folded = w.folded();
+    }
     let mut app = App {
+        windows,
+        folded_seen: Vec::new(),
         addon_log: AddonLog::new(cfg.addon_log.clone()),
         addon_log_read: false,
         shown,
@@ -249,12 +278,13 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(live) = self.live.as_mut() else { return };
-        egui_shadcn::Theme::dark().apply(&self.ctx);
+        crate::brand::apply(&self.ctx);
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
+        live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
         let out = self.ctx.run_ui(input, |ui| {
-            event = ui::show(ui, &self.cfg.menu, &live.icons, now);
+            event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
         live.egui.handle_platform_output(&live.window, out.platform_output);
 
@@ -266,7 +296,7 @@ impl App {
             if saving {
                 live.canvas.freeze_dimmed(DIM_KEEP);
             } else {
-                let bg = egui_shadcn::Theme::dark().palette.background;
+                let bg = crate::brand::theme().palette.background;
                 live.canvas.background = Background::Solid(bg);
             }
             self.frozen = saving;
@@ -327,6 +357,12 @@ impl App {
             Some(ui::UiEvent::Chose(c)) => self.cfg.menu.choose(c, now),
             Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
             Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
+            Some(ui::UiEvent::Unfold(id)) => {
+                if let Some(Err(e)) = self.windows.as_ref().map(|w| w.restore(id)) {
+                    self.cfg.menu.log.note(crate::log::Kind::Warn, format!("could not unfold the window: {e}"));
+                }
+                None
+            }
             None => self.cfg.menu.tick(now),
         };
         if effect.is_some() || event.is_some() {
@@ -351,13 +387,35 @@ fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, canvas: &C
     buf.present().map_err(|e| e.to_string())
 }
 
+impl App {
+    /// Logs, under TF_MENU_DEBUG, the windows folded or unfolded since the
+    /// last call.
+    fn windows_changed(&mut self) {
+        let Some(w) = self.windows.as_ref() else { return };
+        let now = w.folded();
+        self.cfg.menu.folded = now.clone();
+        if let Some(live) = self.live.as_ref() {
+            live.window.request_redraw();
+        }
+        if self.cfg.debug {
+            for f in now.iter().filter(|f| !self.folded_seen.contains(f)) {
+                eprintln!("thinfloe-menu: folded: {} {}", f.app_id, f.title);
+            }
+            for f in self.folded_seen.iter().filter(|f| !now.contains(f)) {
+                eprintln!("thinfloe-menu: unfolded: {} {}", f.app_id, f.title);
+            }
+        }
+        self.folded_seen = now;
+    }
+}
+
 impl ApplicationHandler<Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.live.is_some() {
             return;
         }
         // The app_id labwc's window rule in /etc/thinfloe/labwc/rc.xml matches
-        // to keep the menu at the bottom and off the taskbar.
+        // to keep the menu at the bottom and out of the window list.
         let attrs = Window::default_attributes()
             .with_title("thinfloe-menu")
             .with_name("thinfloe-menu", "")
@@ -399,7 +457,17 @@ impl ApplicationHandler<Wake> for App {
             let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();
             eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
         }
-        let bg = egui_shadcn::Theme::dark().palette.background;
+        let logo_px = (ui::LOGO_H * window.scale_factor() as f32).round() as u32;
+        let chrome = ui::Chrome {
+            header: self.cfg.header.clone(),
+            clock: String::new(),
+            logo: Some(self.ctx.load_texture(
+                "thinfloe-logo",
+                crate::brand::logo(logo_px),
+                egui::TextureOptions::LINEAR,
+            )),
+        };
+        let bg = crate::brand::theme().palette.background;
         self.live = Some(Live {
             window: window.clone(),
             surface,
@@ -408,6 +476,7 @@ impl ApplicationHandler<Wake> for App {
             textures: Textures::default(),
             tracker: Tracker::default(),
             icons,
+            chrome,
             ppp: 0.0,
             presented: false,
         });
@@ -441,6 +510,7 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             Wake::Addons => self.refresh_addons(),
+            Wake::Windows => self.windows_changed(),
             Wake::Output => {}
         }
         if let Some(live) = self.live.as_ref() {
@@ -463,7 +533,7 @@ impl ApplicationHandler<Wake> for App {
                     if let Err(e) = live.surface.resize(w, h) {
                         eprintln!("thinfloe-menu: resize failed: {e}");
                     }
-                    let bg = egui_shadcn::Theme::dark().palette.background;
+                    let bg = crate::brand::theme().palette.background;
                     live.canvas = Canvas::new(size.width as usize, size.height as usize, bg);
                     self.frozen = false;
                     live.tracker.reset();

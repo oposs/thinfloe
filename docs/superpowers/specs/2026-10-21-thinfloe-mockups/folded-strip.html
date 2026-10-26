@@ -1,0 +1,61 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geo:ital@0;1&family=JetBrains+Mono:wght@400&family=Inter:wght@400;600&display=swap');
+:root{--ice:#7cc4ff}
+.desk{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;color:#e6edf3;font-family:Inter,sans-serif;display:flex;flex-direction:column;background:#05070a;border-radius:6px}
+.geo{font-family:'Geo',sans-serif;font-style:italic}
+.head{display:flex;align-items:center;gap:12px;padding:12px 24px 0}
+.head .host{margin-left:auto;font-size:12px;color:#8a97a6}
+.mid{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+.grid{width:58%;display:grid;grid-template-columns:repeat(4,1fr);gap:3px}
+.tile{position:relative;background:#0d1218;display:flex;align-items:center;gap:8px;padding:8px 8px 8px 12px;min-height:36px}
+.tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:transparent}
+.tile.active{background:#101b26}.tile.active::before{background:var(--ice)}
+.tile .ic{width:24px;height:24px;flex:none;display:flex;align-items:center;justify-content:center;color:#cfd8e1}
+.tile .ic img{width:24px;height:24px}.tile .ic svg{width:19px;height:19px}
+.tile .n{font-family:'Geo',sans-serif;font-style:italic;font-size:13px;line-height:1.1}
+.tile .c{font-size:8px;color:#7d8996}
+.tile .cnt{position:absolute;top:3px;right:5px;font-family:'Geo',sans-serif;font-style:italic;font-size:10px;color:var(--ice)}
+.tile.grey{opacity:.35}
+.log{height:30%;font-family:'JetBrains Mono',monospace;font-size:8px;line-height:1.6;padding:6px 24px;border-top:1px solid #151b22;white-space:pre;overflow:hidden}
+.log .t{color:#5d6976}.log .s{color:var(--ice)}
+/* folded window chips */
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:#0d1218;border:1px solid #1a2532;font-size:10px;color:#cfd8e1;white-space:nowrap}
+.chip img{width:14px;height:14px}
+.chip b{font-weight:400;color:var(--ice);font-family:'Geo',sans-serif;font-style:italic;font-size:12px}
+.lbl{font-size:9px;color:#5d6976;text-transform:uppercase;letter-spacing:.08em}
+.strip{display:flex;align-items:center;gap:6px;padding:5px 24px;border-top:1px solid #151b22}
+.row{width:58%;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.hdchips{display:flex;gap:6px;margin-left:24px}
+</style>
+
+<h2>Strip at the bottom, no label</h2>
+<p class="subtitle">Top: one ThinLinc session and OxuLnk are folded down. Bottom: nothing is folded, so there is no strip and the log goes down to the edge.</p>
+
+<div class="desk" data-v="a" style="margin-bottom:16px"></div>
+<div class="desk" data-v="n"></div>
+
+<script>
+const LOGO = `<g transform="translate(0 632) skewX(-9) translate(0 -632)" fill="#fff"><path d="M278 388H625V447H433V632H360V447H278Z"/><path d="M498 502H624V562H570V632H498Z"/></g>`;
+const L = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+const ico = {
+  thinlinc:'<img src="./thinlinc_128.png">', ox:'<img src="./oxulnk-ox.png">',
+  term:L('<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>'),
+  save:L('<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>'),
+  set:L('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
+  usb:L('<path d="M4.7 19.3 19 5"/><path d="m21 3-3 1 2 2Z"/>'),
+  restart:L('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>'),
+  power:L('<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>')
+};
+const tiles=[['thinlinc','ThinLinc','Remote desktop',2],['ox','OxuLnk','Remote access',1],['term','Terminal','Local shell',0],['save','Back up home','Save settings now',0],['set','Settings','Add-ons',0],['usb','Upgrade image','No upgrade staged',-1],['restart','Restart','',0],['power','Power off','',0]];
+const grid = `<div class="grid">${tiles.map(([i,n,c,k])=>`<div class="tile ${k>0?'active':''} ${k<0?'grey':''}"><div class="ic">${ico[i]}</div><div><div class="n">${n}</div>${c?`<div class="c">${c}</div>`:''}</div>${k>1?`<span class="cnt">×${k}</span>`:''}</div>`).join('')}</div>`;
+const chips = `<span class="chip"><img src="./thinlinc_128.png">ThinLinc – lab.example.com</span><span class="chip"><img src="./oxulnk-ox.png">OxuLnk</span>`;
+const log = `<div class="log">${[['14:02:11','menu','started ThinLinc'],['14:10:40','menu','started ThinLinc'],['14:20:03','menu','started OxuLnk'],['14:31:55','save-home','saved home to boot server']].map(([t,s,x])=>`<span class="t">${t}</span>  <span class="s">${s.padEnd(10,' ')}</span>| ${x}`).join('\n')}</div>`;
+const head = extra => `<div class="head"><span style="display:flex;align-items:center;gap:8px;opacity:.6"><svg viewBox="250 370 420 280" width="30">${LOGO}</svg><span class="geo" style="font-size:20px">ThinFloe</span></span>${extra}<span class="host geo">thinfloe-3f9a2c · 4.0.0 · 14:32</span></div>`;
+const V = {
+  a: head('') + `<div class="mid">${grid}</div>` + log + `<div class="strip">${chips}</div>`,
+  b: head('') + `<div class="mid">${grid}<div class="row"><span class="lbl">Folded</span>${chips}</div></div>` + log,
+  n: head('') + `<div class="mid">${grid}</div>` + log,
+  c: head(`<span class="hdchips">${chips}</span>`) + `<div class="mid">${grid}</div>` + log,
+};
+document.querySelectorAll('.desk').forEach(d=>d.innerHTML=V[d.dataset.v]);
+</script>

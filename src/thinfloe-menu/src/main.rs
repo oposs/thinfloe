@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
+use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{settings, tiles, ui};
+use thinfloe_menu::{settings, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -74,6 +75,16 @@ fn is_defect(t: &tiles::Tile, shipped: bool, icon_drawn: bool) -> bool {
     shipped && !t.addon && (t.problem.is_some() || !icon_drawn)
 }
 
+/// One tile's line of `--check`. A reworded tile also says which keys of
+/// the user's file were ignored.
+fn check_line(t: &tiles::Tile, state: &str, icon_text: &str) -> String {
+    let mut line = format!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
+    if let Some(r) = t.origin.reworded_text() {
+        line.push_str(&format!("\t{r}"));
+    }
+    line
+}
+
 /// `thinfloe-menu --check`: print every tile and how its icon draws, and fail
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
@@ -96,12 +107,54 @@ fn check() -> ExitCode {
             Some((path, Ok(_))) => (path.display().to_string(), true),
             Some((path, Err(e))) => (format!("letter fallback ({}: {e})", path.display()), false),
         };
-        println!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
+        println!("{}", check_line(t, &state, &icon_text));
         if is_defect(t, shipped, drawn) {
             bad = true;
         }
     }
     if bad { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+/// `--windows`: one line per toplevel, `app_id<TAB>title<TAB>folded|open`.
+fn list_windows() -> ExitCode {
+    let windows = match windows::Windows::connect(|| {}) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    for (_, app_id, title, folded) in windows.all() {
+        println!("{app_id}\t{title}\t{}", if folded { "folded" } else { "open" });
+    }
+    ExitCode::SUCCESS
+}
+
+/// `--unfold <app_id or title>`: for an operator whose window went missing.
+fn unfold(what: Option<&str>) -> ExitCode {
+    let Some(what) = what else {
+        eprintln!("usage: thinfloe-menu --unfold <app_id or title>");
+        return ExitCode::from(2);
+    };
+    let windows = match windows::Windows::connect(|| {}) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let hits: Vec<_> = windows
+        .folded()
+        .into_iter()
+        .filter(|f| f.app_id == what || f.title == what)
+        .collect();
+    for f in &hits {
+        if let Err(e) = windows.restore(f.id) {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if hits.is_empty() { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
 fn main() -> ExitCode {
@@ -111,6 +164,12 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();
+    }
+    if args.get(1).is_some_and(|a| a == "--windows") {
+        return list_windows();
+    }
+    if args.get(1).is_some_and(|a| a == "--unfold") {
+        return unfold(args.get(2).and_then(|a| a.to_str()));
     }
     let (menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();
@@ -126,6 +185,7 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         program_path: program_path(),
+        header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {
@@ -151,6 +211,20 @@ mod tests {
         t.addon = addon;
         t.problem = problem.map(String::from);
         t
+    }
+
+    #[test]
+    fn check_names_the_keys_a_reworded_tile_ignored() {
+        let mut t = tile(false, None);
+        assert_eq!(check_line(&t, "ok", "x"), "10-x.desktop\tX\tRun\tok\ticon: x");
+        t.origin = tiles::Origin::Reworded {
+            ignored: vec!["Exec".into(), "X-TF-Multiple".into()],
+        };
+        assert!(
+            check_line(&t, "ok", "x").ends_with("\treworded; ignored: Exec, X-TF-Multiple"),
+            "{}",
+            check_line(&t, "ok", "x")
+        );
     }
 
     #[test]

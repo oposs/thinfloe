@@ -127,17 +127,29 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 - SSH configuration: `overlay/etc/ssh/sshd_config.d/`
 - Session/compositor: `overlay/etc/thinfloe/labwc/` (`rc.xml`, `environment`) - kept outside `$HOME` because home is captured/restored wholesale by the persistence machinery, see [Persistent Home Directory](#persistent-home-directory).
   `rc.xml` also holds the window rule that keeps the window with app_id
-  `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the taskbar
-  (`skipTaskbar`).
-- Taskbar: `overlay/etc/thinfloe/waybar/` (`config.jsonc`, `style.css`) - a
-  single `wlr/taskbar` module, launched by `thinfloe-session`. It exists
-  because labwc draws an iconify button and, with zero keybindings and no
-  window list, a minimized window would otherwise be unreachable for the rest of
-  the session. Kept outside `$HOME` for the same reason `rc.xml` is.
-  Note a fullscreen ThinLinc client covers the bar - wlroots puts
-  fullscreen surfaces above the layer-shell top layer and ignores exclusive
-  zones - so it is visible exactly when no window is fullscreen, which is
-  when a window can go missing.
+  `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the
+  window list that feeds the menu's folded-window strip (`skipTaskbar`).
+- No window list: waybar and GTK 3 left the image. labwc draws an iconify button
+  and, with zero keybindings, a minimized window needs a way back: it shows
+  as a chip in the folded-window strip at the bottom of `thinfloe-menu`, and
+  one click restores it. A fullscreen ThinLinc client covers the menu, so
+  the strip is visible exactly when no window is fullscreen, which is when a
+  window can go missing.
+- The look (Part 4): palette, logo and Geo (OFL, `Geo-Oblique.ttf`) live in
+  `src/thinfloe-menu/src/brand.rs`; the font is compiled into the menu and also
+  installed at `/usr/share/fonts/truetype/thinfloe/` for labwc's title bars
+  (`rc.xml` `<theme>`) and for the boot screen: `90thinfloe/module-setup.sh`
+  copies it into the initrd, guarded by
+  `test/integration/test-initramfs-commands.sh`, so moving the font path breaks
+  the boot screen too. Licence at `/usr/share/thinfloe/fonts/Geo-OFL.txt`. Geo
+  draws names and titles, small text a plain sans, the log monospace. Glyphs Geo
+  lacks fall back: umlauts and emoji do, but CJK has no font in the image yet
+  and draws as boxes (egui's default fonts carry no CJK). The Plymouth theme is
+  `overlay/usr/share/plymouth/themes/thinfloe/`, a `script` theme
+  (`ModuleName=script` in `thinfloe.plymouth`) whose text label-pango draws,
+  finding Geo through fontconfig. The host name reaches it through
+  `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when
+  `/etc/thinfloe/version` exists; nothing writes it yet.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
@@ -228,6 +240,8 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   boot. Do not move the restore into `thinfloe-session`, and do not move it
   back into `10-thinfloe-session.sh` either — `thinfloe-ssh-hostkeys` now needs
   the home directory before `multi-user.target`.
+
+  **Time zone.** Order: `TZ=` in `~/.thinfloe-environment` (exported by `10-thinfloe-session.sh` with `set -a`, so it reaches labwc, `thinfloe-session` and the menu), else the DHCP zone, else UTC. An invalid `TZ=` gives UTC, not the DHCP zone, as glibc does. The drop-in `overlay/etc/systemd/network/10-netplan-eth.network.d/50-timezone.conf` makes networkd ask for option 101 on the `eth` profile of `/etc/netplan/ethernet.yaml`; profiles from `~/wifi.yaml` have user-chosen ids and get none. networkd would set the zone itself through `timedated`, which needs polkit, and the image has none, so `thinfloe-dhcp-timezone.path` watches `/run/systemd/netif/leases/` and `thinfloe-dhcp-timezone.service` runs `/usr/libexec/thinfloe/dhcp-timezone` as root. That script takes the lease's `TIMEZONE=` only if it is 1 to 64 characters of letters, digits and `/ _ + -`, has no `..`, no leading `/` or `-`, and names a TZif file whose `realpath` lies inside `/usr/share/zoneinfo`; then it runs `timedatectl set-timezone -- <zone>` and logs `thinfloe: time zone <zone> from DHCP`. Anything else logs `thinfloe: ignored DHCP time zone '<value cut to 64, printable>': <why>` and changes nothing. The service is also enabled for `multi-user.target` and ordered after the path unit, so it runs once at boot for a lease that is already there (the path unit sees only later changes) and the armed path unit catches the rest; `StartLimitIntervalSec=0` keeps a burst of lease writes from tripping the start limit. The units carry no `Before=` on a sysinit unit. **Netboot:** the initramfs's networkd runs dracut's default network file (`/run/systemd/network/zzzz-dracut-default.network`, no `ip=`), so `90thinfloe/module-setup.sh` installs a drop-in `zzzz-dracut-default.network.d/50-timezone.conf` (`UseTimezone=yes`) in the initrd; the lease it writes then carries `TIMEZONE=`, it survives the switch-root in `/run/systemd/netif/leases/`, and the boot-time run of the service applies it. (An `ip=` on the command line would use a generated file the drop-in does not cover.) Guards: `test/integration/test-dhcp-timezone.sh` (hostile values, stub `timedatectl`), the menu test `a_zone_change_reaches_the_clock_without_a_restart`, `make qemu-smoke-timezone` and `make qemu-smoke-timezone-netboot` (the same netbooted over HTTP from the namespace; dnsmasq on a tap in `podman unshare unshare --net` sends option 101 to a booted guest; a bare `unshare -rn` forbids the `setgroups` call dnsmasq makes at start-up).
 
   Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not** — see [Standing Constraints](#standing-constraints).
 - Autologin: `overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf`
@@ -1132,6 +1146,17 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - **Confirmed on hardware (2026-10-07):** tiles start their programs,
   Save-On-Exit, Back up home and the logout Stay / Log out anyway dialog
   work. The square tiles and the log area have not been run on hardware.
+- **Folded windows.** `thinfloe-menu` watches toplevels through
+  `wlr-foreign-toplevel-management` (`src/windows.rs`); a folded window
+  gets a chip in the strip below the log, and a chip click unfolds it. A
+  broken Wayland connection empties the list. From a VT or SSH,
+  `thinfloe-menu --windows` prints `app_id<TAB>title<TAB>folded|open` per
+  window and `thinfloe-menu --unfold <app_id or title>` unfolds a window
+  whose chip is gone.
+- Not verified on hardware (Part 4): the boot screen on real firmware (and
+  its host-name line), the title bars, the strip and chip clicks with a real
+  mouse, the DHCP time zone from a real DHCP server (on netboot as well; only
+  QEMU with dnsmasq has run it).
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

@@ -48,6 +48,8 @@ cat >"$SYSDIR/rc.xml" <<'EOF'
 <labwc_config/>
 EOF
 
+echo 'window.active.border.color: #7cc4ff' >"$SYSDIR/themerc-override"
+
 USERENV="$WORK/user-environment"
 cat >"$USERENV" <<'EOF'
 LABWC_FULLSCREEN_SPAN_OUTPUTS=0
@@ -103,6 +105,12 @@ if [[ -L "$OUT/rc.xml" ]]; then
     ok "rc.xml is a symlink, not a copy"
 else
     bad "rc.xml should be a symlink into the system dir"
+fi
+
+if [[ -L "$OUT/themerc-override" ]] && grep -q '#7cc4ff' "$OUT/themerc-override"; then
+    ok "themerc-override is linked into the merged directory"
+else
+    bad "themerc-override is not linked into the merged directory"
 fi
 
 # --- idempotency: run again into the SAME output dir, compare -----------

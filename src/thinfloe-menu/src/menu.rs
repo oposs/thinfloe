@@ -174,6 +174,9 @@ pub struct Menu {
     /// No retry is offered while set: at startup the status is read before
     /// the grid was ever on screen, and the dialog would dim an empty one.
     retry_held: bool,
+    /// Windows folded away, as the compositor reports them; the strip
+    /// below the log shows them.
+    pub folded: Vec<crate::windows::Folded>,
 }
 
 impl Menu {
@@ -208,6 +211,7 @@ impl Menu {
             last_check: None,
             retry_marker: RetryMarker::memory(),
             retry_held: false,
+            folded: Vec::new(),
         }
     }
 
@@ -421,7 +425,22 @@ impl Menu {
         self.logout.as_ref().is_some_and(Logout::refuses_input)
     }
 
-    fn running(&self, tile: usize) -> usize {
+    /// The tile whose program is the window's `app_id`, case-insensitively:
+    /// its icon stands for the window on the strip.
+    pub fn tile_for_app(&self, app_id: &str) -> Option<usize> {
+        if app_id.is_empty() {
+            return None;
+        }
+        self.tiles.iter().position(|t| {
+            t.action == Action::Run
+                && t.argv.first().is_some_and(|a| {
+                    let name = a.rsplit('/').next().unwrap_or(a);
+                    name.eq_ignore_ascii_case(app_id)
+                })
+        })
+    }
+
+    pub fn running(&self, tile: usize) -> usize {
         self.jobs.iter().filter(|j| j.tile == tile).count()
     }
 
@@ -439,15 +458,17 @@ impl Menu {
         }
     }
 
-    /// What the tile shows besides its text while it is at work.
-    pub fn status(&self, index: usize) -> Option<String> {
-        match self.running(index) {
-            0 if self.tiles.get(index)?.action == Action::SaveHome && self.save.running => Some("running".into()),
-            0 if self.addon_of(index).is_some_and(|a| a.state == AddonState::Pending) => Some("update".into()),
-            0 => None,
-            1 => Some("running".into()),
-            n => Some(format!("{n} running")),
-        }
+    /// Whether the tile is at work: a copy of its program runs, or, for
+    /// the save tile, a save.
+    pub fn active(&self, index: usize) -> bool {
+        self.running(index) > 0
+            || (self.tiles.get(index).is_some_and(|t| t.action == Action::SaveHome) && self.save.running)
+    }
+
+    /// Whether an add-on update waits for the next boot. Independent of
+    /// whether a copy runs now.
+    pub fn pending_update(&self, index: usize) -> bool {
+        self.addon_of(index).is_some_and(|a| a.state == AddonState::Pending)
     }
 
     pub fn activate(&mut self, index: usize, now: Instant) -> Option<Effect> {
@@ -722,7 +743,7 @@ fn run_message(name: &str, status: &Result<Option<i32>, String>) -> (Kind, Strin
 }
 
 fn save_message(outcome: &SaveOutcome) -> (Kind, String) {
-    let kind = if outcome.saved() { Kind::Event } else { Kind::Warn };
+    let kind = if outcome.saved() { Kind::Good } else { Kind::Warn };
     (kind, outcome.message())
 }
 
@@ -743,6 +764,10 @@ mod tests {
 
     fn ev(t: &str) -> (Kind, String) {
         (Kind::Event, t.to_string())
+    }
+
+    fn good(t: &str) -> (Kind, String) {
+        (Kind::Good, t.to_string())
     }
 
     fn warn(t: &str) -> (Kind, String) {
@@ -832,7 +857,8 @@ mod tests {
         started(&mut m, 0, now);
         assert!(!m.can_activate(0));
         assert_eq!(m.activate(0, now), None);
-        assert_eq!(m.status(0).as_deref(), Some("running"));
+        assert!(m.active(0));
+        assert_eq!(m.running(0), 1);
     }
 
     #[test]
@@ -842,8 +868,8 @@ mod tests {
         started(&mut m, 1, now);
         started(&mut m, 1, now);
         assert!(m.can_activate(1));
-        assert_eq!(m.status(1).as_deref(), Some("2 running"));
-        assert_eq!(m.status(2), None);
+        assert_eq!(m.running(1), 2);
+        assert!(!m.active(2));
     }
 
     #[test]
@@ -854,7 +880,7 @@ mod tests {
         assert_eq!(ran(&mut m, a, 1, now), Some(Effect::Start(Job::Save)));
         assert!(!m.dialog(), "no dialog for a background save");
         assert!(m.save.running);
-        assert_eq!(m.status(2).as_deref(), Some("running"));
+        assert!(m.active(2) && m.running(2) == 0);
         assert!(!m.can_activate(2));
         assert_eq!(m.finished(JobResult::Saved(SaveOutcome::ServerUnreachable), now), None);
         assert!(!m.save.running);
@@ -921,7 +947,10 @@ mod tests {
         assert_eq!(m.logout, Some(Logout::Saving { since: now }));
         assert!(m.refuses_input());
         assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Saved), now), None);
-        assert_eq!(log(&m), [ev("Saving the home directory…"), ev("Home directory saved.")]);
+        assert_eq!(
+            log(&m),
+            [ev("Saving the home directory…"), good("Home directory saved.")]
+        );
         assert_eq!(m.tick(now), None, "the result is shown first");
         assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(0)));
     }
@@ -1326,7 +1355,7 @@ mod tests {
         assert_eq!(m.visible_tiles(), [1]);
         m.set_addons(vec![st(AddonState::Installed, Some("4.21.0"))]);
         assert_eq!(m.visible_tiles(), [0, 1]);
-        assert_eq!(m.status(0), None);
+        assert!(!m.pending_update(0));
     }
 
     #[test]
@@ -1335,8 +1364,8 @@ mod tests {
         let mut m = addon_menu(&bin);
         m.set_addons(vec![st(AddonState::Pending, Some("4.21.0"))]);
         assert!(m.visible(0));
-        assert_eq!(m.status(0).as_deref(), Some("update"));
-        assert_eq!(m.status(1), None);
+        assert!(m.pending_update(0));
+        assert!(!m.pending_update(1));
     }
 
     #[test]
@@ -1345,7 +1374,7 @@ mod tests {
         let mut m = addon_menu(&bin);
         m.set_addons(vec![st(AddonState::Failed, Some("4.21.0"))]);
         assert!(m.visible(0));
-        assert_eq!(m.status(0), None);
+        assert!(!m.pending_update(0));
     }
 
     #[test]

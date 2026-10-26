@@ -44,6 +44,8 @@ pub struct Row {
     pub manual: bool,
     /// An add-on job for this row runs; its tick box and button are off.
     pub busy: bool,
+    /// An update waits for the next boot (state `pending`).
+    pub update_ready: bool,
     /// thinfloe-addon refuses the tile's file name: tick box off, no button.
     pub unusable: bool,
 }
@@ -107,6 +109,7 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
                     button: None,
                     manual: false,
                     busy: false,
+                    update_ready: false,
                     unusable: true,
                     id,
                 };
@@ -121,6 +124,7 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
                 button: button(status),
                 manual: status.is_some_and(|s| !s.auto),
                 busy: menu.addon_busy(&id),
+                update_ready: status.is_some_and(|s| s.state == AddonState::Pending),
                 unusable: false,
                 id,
             }

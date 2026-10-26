@@ -54,15 +54,6 @@ kill_helpers() {
 }
 trap kill_helpers EXIT INT TERM
 
-# The taskbar. Without it a window minimized via labwc's iconify button is
-# gone for the rest of the session - there are no keybindings and no menu to
-# get it back. See /etc/thinfloe/waybar/config.jsonc.
-if command -v waybar >/dev/null 2>&1; then
-    waybar -c /etc/thinfloe/waybar/config.jsonc \
-           -s /etc/thinfloe/waybar/style.css &
-    HELPER_PIDS="$HELPER_PIDS $!"
-fi
-
 # Screen blanking. Wayland splits this in two: labwc reports idleness via
 # ext_idle_notifier_v1 but has no timeout of its own, so without a policy
 # daemon listening nothing ever blanks. That is what was lost moving off X11,
