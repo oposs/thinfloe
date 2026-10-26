@@ -56,13 +56,106 @@ pub const LOG_MIN_ROWS: usize = 8;
 pub const LOG_ROW: f32 = 18.0;
 const LOG_PAD: f32 = 10.0;
 const LOG_FONT: f32 = 13.0;
-pub const ICON_SIDE: u32 = 96;
 pub use crate::brand::WARN;
+
+/// The side of an icon drawn `points` tall, in whole pixels.
+fn icon_px(points: f32, ppp: f32) -> usize {
+    ((points * ppp).round() as usize).max(1)
+}
+
+/// The side the renderer draws an icon at: twice the tile's icon, so that
+/// shrinking it to each size it is drawn at averages several samples per
+/// pixel.
+pub fn render_side(ppp: f32) -> u32 {
+    (2 * icon_px(ICON_BOX, ppp)).min(1024) as u32
+}
+
+/// One icon at each size it is drawn at: the tile, the Settings row and the
+/// chip. The rasteriser samples a texture at the nearest texel, so a texture
+/// drawn at any other size than its own drops or doubles rows and columns.
+#[derive(Clone)]
+pub struct Icon {
+    pub tile: TextureHandle,
+    pub row: TextureHandle,
+    pub chip: TextureHandle,
+}
+
+impl Icon {
+    pub fn new(ctx: &egui::Context, name: &str, img: &ColorImage, ppp: f32) -> Icon {
+        let load = |suffix: &str, points: f32| {
+            ctx.load_texture(
+                format!("{name}#{suffix}"),
+                shrink(img, icon_px(points, ppp)),
+                egui::TextureOptions::LINEAR,
+            )
+        };
+        Icon {
+            tile: load("tile", ICON_BOX),
+            row: load("row", ROW_ICON),
+            chip: load("chip", CHIP_ICON),
+        }
+    }
+}
+
+/// `img`, square, scaled to `side` pixels by averaging the area each new
+/// pixel covers. The colours are premultiplied, so averaging them is right.
+pub fn shrink(img: &ColorImage, side: usize) -> ColorImage {
+    let [w, h] = img.size;
+    let (sx, sy) = (w as f32 / side as f32, h as f32 / side as f32);
+    // For each new pixel along one axis, the source pixels it covers and
+    // how much of each.
+    let spans = |scale: f32, len: usize| -> Vec<Vec<(usize, f32)>> {
+        (0..side)
+            .map(|i| {
+                let (a, b) = (i as f32 * scale, (i + 1) as f32 * scale);
+                (a.floor() as usize..(b.ceil() as usize).min(len))
+                    .map(|j| (j, (b.min(j as f32 + 1.0) - a.max(j as f32)).max(0.0)))
+                    .filter(|&(_, f)| f > 0.0)
+                    .collect()
+            })
+            .collect()
+    };
+    let (xs, ys) = (spans(sx, w), spans(sy, h));
+    let mut pixels = Vec::with_capacity(side * side);
+    for ry in &ys {
+        for rx in &xs {
+            let mut acc = [0.0f32; 4];
+            let mut total = 0.0;
+            for &(y, fy) in ry {
+                for &(x, fx) in rx {
+                    let c = img.pixels[y * w + x];
+                    let f = fx * fy;
+                    for (k, v) in [c.r(), c.g(), c.b(), c.a()].into_iter().enumerate() {
+                        acc[k] += v as f32 * f;
+                    }
+                    total += f;
+                }
+            }
+            let ch = |k: usize| (acc[k] / total).round().min(255.0) as u8;
+            pixels.push(Color32::from_rgba_premultiplied(ch(0), ch(1), ch(2), ch(3)));
+        }
+    }
+    ColorImage::new([side, side], pixels)
+}
+
+/// Draw `tex` with its top left corner at `min`, on a whole pixel, at its own
+/// size in pixels.
+fn draw_icon(p: &egui::Painter, tex: &TextureHandle, min: egui::Pos2, tint: Color32) {
+    let ppp = p.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let [w, h] = tex.size();
+    let rect = Rect::from_min_size(pos2(snap(min.x), snap(min.y)), vec2(w as f32, h as f32) / ppp);
+    p.image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
+}
 
 /// Each tile's icon, rasterised in renderer processes as the menu draws it:
 /// `None` when the tile names no icon that resolves, otherwise the path and
 /// the image or why there is none. Both draw the letter.
-pub fn render_icons(tiles: &[Tile], roots: &IconRoots) -> Vec<Option<(PathBuf, Result<ColorImage, String>)>> {
+pub fn render_icons(
+    tiles: &[Tile],
+    roots: &IconRoots,
+    side: u32,
+) -> Vec<Option<(PathBuf, Result<ColorImage, String>)>> {
     let fg = crate::brand::theme().palette.foreground;
     let rgb = [fg.r(), fg.g(), fg.b()];
     let (index, jobs): (Vec<usize>, Vec<IconJob>) = tiles
@@ -75,7 +168,7 @@ pub fn render_icons(tiles: &[Tile], roots: &IconRoots) -> Vec<Option<(PathBuf, R
                 i,
                 IconJob {
                     path,
-                    side: ICON_SIDE,
+                    side,
                     rgb,
                     symbolic,
                 },
@@ -94,13 +187,14 @@ pub fn render_icons(tiles: &[Tile], roots: &IconRoots) -> Vec<Option<(PathBuf, R
     out
 }
 
-/// Rasterise every tile's icon once, at startup. `None` draws the letter.
-pub fn load_icons(ctx: &egui::Context, tiles: &[Tile], roots: &IconRoots) -> Vec<Option<TextureHandle>> {
-    render_icons(tiles, roots)
+/// Rasterise every tile's icon once, at startup, for a screen of `ppp`
+/// pixels per point. `None` draws the letter.
+pub fn load_icons(ctx: &egui::Context, tiles: &[Tile], roots: &IconRoots, ppp: f32) -> Vec<Option<Icon>> {
+    render_icons(tiles, roots, render_side(ppp))
         .into_iter()
         .zip(tiles)
         .map(|(icon, tile)| match icon {
-            Some((_, Ok(img))) => Some(ctx.load_texture(tile.file.clone(), img, egui::TextureOptions::LINEAR)),
+            Some((_, Ok(img))) => Some(Icon::new(ctx, &tile.file, &img, ppp)),
             Some((path, Err(e))) => {
                 eprintln!("thinfloe-menu: icon {} for {}: {e}", path.display(), tile.file);
                 None
@@ -117,8 +211,8 @@ pub fn load_icons(ctx: &egui::Context, tiles: &[Tile], roots: &IconRoots) -> Vec
 
 /// One tile's icon, rendered again in a renderer process: the add-on's icon
 /// file arrives while the menu runs.
-pub fn load_icon(ctx: &egui::Context, tile: &Tile, roots: &IconRoots) -> Option<TextureHandle> {
-    load_icons(ctx, std::slice::from_ref(tile), roots).pop().flatten()
+pub fn load_icon(ctx: &egui::Context, tile: &Tile, roots: &IconRoots, ppp: f32) -> Option<Icon> {
+    load_icons(ctx, std::slice::from_ref(tile), roots, ppp).pop().flatten()
 }
 
 fn elapsed(d: Duration) -> String {
@@ -232,7 +326,8 @@ fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
         pos2(rect.right() - HEADER_PAD_X, mid),
         Align2::RIGHT_CENTER,
         header_text(&chrome.header, &chrome.clock),
-        brand::geo(16.0),
+        // The plain sans: Geo at this size is hard to read.
+        FontId::proportional(14.0),
         MUTED,
     );
 }
@@ -257,13 +352,7 @@ fn capitalized(text: &str) -> String {
 }
 
 /// Draw one frame.
-pub fn show(
-    ui: &mut Ui,
-    menu: &Menu,
-    icons: &[Option<TextureHandle>],
-    chrome: &Chrome,
-    now: Instant,
-) -> Option<UiEvent> {
+pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
     // The clock changes on the minute and at no other time.
     ui.ctx()
         .request_repaint_after(until_next_minute(std::time::SystemTime::now()));
@@ -503,7 +592,7 @@ pub fn show(
 /// scrolls sideways (wheel and drag), so no chip is out of reach: with zero
 /// labwc keybindings this is the only way back to a folded window.
 /// Returns the id of the chip clicked.
-fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: Rect) -> Option<u64> {
+fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> Option<u64> {
     let t = Theme::current(ui.ctx());
     let mut clicked = None;
     let mut strip_ui = ui.new_child(UiBuilder::new().max_rect(rect));
@@ -556,14 +645,7 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: R
                         .and_then(|i| icons.get(i))
                         .and_then(|i| i.as_ref());
                     match tex {
-                        Some(tex) => {
-                            p.image(
-                                tex.id(),
-                                icon_rect,
-                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                        }
+                        Some(icon) => draw_icon(p, &icon.chip, icon_rect.min, Color32::WHITE),
                         None => {
                             p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
                             let letter: String = title
@@ -594,11 +676,14 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: R
 
 /// The width of the state column of a Settings row.
 const STATE_WIDTH: f32 = 230.0;
+/// Every row's button is this wide, and a row without one keeps the room,
+/// so the buttons and the states of all rows line up.
+const ROW_BUTTON_W: f32 = 120.0;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
 /// The Settings screen in `area`: the add-ons, one row each.
-fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area: Rect) -> Option<SettingsEvent> {
+fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
     // The panel is as wide as the tile group of the desktop, centred.
@@ -669,7 +754,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
 }
 
 /// One add-on: tick box, icon, name, source, state, and its button.
-fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, t: &Theme) -> Option<SettingsEvent> {
+fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme) -> Option<SettingsEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
         let mut ticked = row.ticked;
@@ -684,14 +769,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
         }
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_ICON), Sense::hover());
         match icon {
-            Some(tex) => {
-                ui.painter().image(
-                    tex.id(),
-                    rect,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
+            Some(icon) => draw_icon(ui.painter(), &icon.row, rect.min, Color32::WHITE),
             None => {
                 ui.painter().rect_filled(rect, 0.0, TILE_HOVER);
                 let letter: String = row
@@ -717,18 +795,21 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 Some(RowButton::UpdateNow) => Some("Update now"),
                 None => None,
             };
-            if let Some(label) = label
-                && ui
-                    .add_enabled(!row.busy, {
-                        let b = Button::new(label);
-                        if row.button == Some(RowButton::UpdateNow) {
-                            b
-                        } else {
-                            b.variant(ButtonVariant::Secondary)
-                        }
-                    })
-                    .clicked()
-            {
+            let slot = ui.allocate_ui_with_layout(
+                vec2(ROW_BUTTON_W, ROW_ICON),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(ROW_BUTTON_W);
+                    let b = Button::new(label?).min_width(ROW_BUTTON_W);
+                    let b = if row.button == Some(RowButton::UpdateNow) {
+                        b
+                    } else {
+                        b.variant(ButtonVariant::Secondary)
+                    };
+                    Some(ui.add_enabled(!row.busy, b).clicked())
+                },
+            );
+            if slot.inner == Some(true) {
                 event = Some(match row.button {
                     Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
                     _ => SettingsEvent::InstallNow(row.id.clone()),
@@ -903,7 +984,7 @@ struct TileState {
     update: bool,
 }
 
-fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&TextureHandle>, state: TileState) {
+fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: TileState) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
@@ -937,14 +1018,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&TextureHandle>, st
         Vec2::splat(ICON_BOX),
     );
     match icon {
-        Some(tex) => {
-            p.image(
-                tex.id(),
-                icon_rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                fade(Color32::WHITE),
-            );
-        }
+        Some(icon) => draw_icon(p, &icon.tile, icon_rect.min, fade(Color32::WHITE)),
         None => {
             p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette.muted));
             let letter: String = tile
@@ -1136,7 +1210,7 @@ mod tests {
         assert!(l.tile.x > l.tile.y * 2.5, "{:?}", l.tile);
     }
 
-    fn texts_of(menu: &Menu, icons: &[Option<TextureHandle>]) -> Vec<String> {
+    fn texts_of(menu: &Menu, icons: &[Option<Icon>]) -> Vec<String> {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let input = egui::RawInput {
@@ -1601,7 +1675,7 @@ mod tests {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
         };
-        let icons: Vec<Option<TextureHandle>> = (0..tiles).map(|_| None).collect();
+        let icons: Vec<Option<Icon>> = (0..tiles).map(|_| None).collect();
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
@@ -1932,6 +2006,132 @@ mod tests {
     }
 
     #[test]
+    fn settings_buttons_and_states_line_up_and_nothing_is_rounded() {
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut shapes = vec![];
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            shapes = o.shapes;
+        }
+        let mut buttons = vec![];
+        let mut states = vec![];
+        for c in &shapes {
+            match &c.shape {
+                egui::Shape::Text(t) => {
+                    let r = t.galley.rect.translate(t.pos.to_vec2());
+                    let text = t.galley.text();
+                    if text == "Install now" || text == "Update now" {
+                        buttons.push(r.center().x);
+                    } else if text.contains("up to date") || text.contains("installed") {
+                        states.push(r.right());
+                    }
+                }
+                egui::Shape::Rect(r) => {
+                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect)
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(buttons.len(), 3, "{buttons:?}");
+        assert!(
+            buttons.iter().all(|x| (x - buttons[0]).abs() < 0.5),
+            "button labels {buttons:?}"
+        );
+        assert_eq!(states.len(), 4, "{states:?}");
+        assert!(
+            states.iter().all(|x| (x - states[0]).abs() < 0.5),
+            "state columns {states:?}"
+        );
+    }
+
+    #[test]
+    fn shrinking_averages_the_area_each_pixel_covers() {
+        let (b, w) = (Color32::BLACK, Color32::WHITE);
+        // A 4 by 4 checkerboard of single pixels is grey at 2 by 2.
+        let checker = ColorImage::new(
+            [4, 4],
+            (0..16).map(|i| if (i + i / 4) % 2 == 0 { w } else { b }).collect(),
+        );
+        let small = shrink(&checker, 2);
+        assert_eq!(small.size, [2, 2]);
+        assert!(
+            small.pixels.iter().all(|c| c.r() == 128 && c.a() == 255),
+            "{:?}",
+            small.pixels
+        );
+        // The same size is the same image.
+        assert_eq!(shrink(&checker, 4).pixels, checker.pixels);
+        // 3 to 2: the middle source pixel is split between both.
+        let row = ColorImage::new([3, 3], [w, b, b].repeat(3));
+        let px = shrink(&row, 2).pixels;
+        assert_eq!((px[0].r(), px[1].r()), (170, 0), "{px:?}");
+    }
+
+    #[test]
+    fn every_icon_is_drawn_at_its_own_size_on_whole_pixels() {
+        for ppp in [1.0f32, 1.25, 2.0] {
+            let mut menu = folded_menu(1);
+            menu.tiles[0].argv = vec!["/usr/bin/x".into()];
+            let ctx = egui::Context::default();
+            crate::brand::apply(&ctx);
+            let side = render_side(ppp) as usize;
+            let img = ColorImage::new([side, side], vec![Color32::WHITE; side * side]);
+            let icon = Icon::new(&ctx, "t0", &img, ppp);
+            let icons = vec![Some(icon.clone())];
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen(1280.0, 720.0)),
+                ..Default::default()
+            };
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(ppp);
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            });
+            out.textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, ppp);
+            for (tex, points) in [(&icon.tile, ICON_BOX), (&icon.chip, CHIP_ICON)] {
+                assert_eq!(tex.size(), [icon_px(points, ppp); 2], "texture at ppp {ppp}");
+                let mesh = prims
+                    .iter()
+                    .find_map(|p| match &p.primitive {
+                        egui::epaint::Primitive::Mesh(m) if m.texture_id == tex.id() => Some(m),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{points} pt icon drawn at ppp {ppp}"));
+                let (mut lo, mut hi) = (pos2(f32::MAX, f32::MAX), pos2(f32::MIN, f32::MIN));
+                for v in &mesh.vertices {
+                    lo = lo.min(v.pos);
+                    hi = hi.max(v.pos);
+                }
+                let (lo, hi) = (lo.to_vec2() * ppp, hi.to_vec2() * ppp);
+                let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+                assert!(whole(lo.x) && whole(lo.y), "{points} pt icon at {lo:?} px, ppp {ppp}");
+                let size = hi - lo;
+                assert!(
+                    (size.x - tex.size()[0] as f32).abs() < 1e-3 && (size.y - tex.size()[1] as f32).abs() < 1e-3,
+                    "{points} pt icon drawn {size:?} px from a {:?} texture, ppp {ppp}",
+                    tex.size()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_chip_takes_the_icon_of_the_tile_with_its_program() {
         let mut menu = folded_menu(1);
         menu.tiles[0].argv = vec!["/usr/bin/Foot".into()];
@@ -1960,7 +2160,7 @@ mod tests {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
         };
-        let icons: Vec<Option<TextureHandle>> = menu.tiles.iter().map(|_| None).collect();
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let mut textures = crate::raster::Textures::default();
         let mut canvas = crate::raster::Canvas::new(1280, 720, crate::brand::BG);
         for frame in 0..12 {

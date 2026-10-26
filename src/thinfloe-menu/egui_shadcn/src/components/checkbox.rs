@@ -1,4 +1,4 @@
-//! shadcn Checkbox: 16px square, rounded, filled with primary + checkmark when checked.
+//! shadcn Checkbox: 16px square, rounded as the theme says, filled with primary + checkmark when checked.
 
 use crate::Theme;
 use egui::{CornerRadius, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -15,7 +15,8 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool) -> egui::Response {
         *checked = !*checked;
         resp.mark_changed();
     }
-    let corner = CornerRadius::same(4);
+    // 4 px at the default radius, square when the theme is square.
+    let corner = CornerRadius::same(t.radius_sm().min(4.0) as u8);
     if *checked {
         ui.painter().rect_filled(rect, corner, t.palette.primary);
         let c = rect.shrink(3.5);

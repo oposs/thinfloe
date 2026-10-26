@@ -554,7 +554,8 @@ version into the initrd: Plymouth runs there, and on the first boot from
 
 - **Header:** top left, logo and "ThinFloe" at 60 % opacity, logo about
   52 px tall at 1080p; top right, host name, version (when known, see
-  the boot screen) and clock in Geo.
+  the boot screen) and clock in the plain sans of the other small text
+  (owner, 2026-10-26: Geo at 16 px was hard to read).
 - **Time zone (decided 2026-10-25).** The image is UTC
   (`overlay/etc/localtime`), so the new clock, and the menu log's "local
   time", would show UTC everywhere. Two sources, in this order:

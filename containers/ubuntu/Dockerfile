@@ -178,7 +178,6 @@ RUN chmod u+s /usr/bin/ping
 # test/integration/test-addon-deps.sh installs both clients and runs ldd.
 RUN apt-get install -yq --no-install-recommends \
     libasound2t64 \
-    libopus0 \
     libva-drm2 \
     libva2 \
     libx11-6 \

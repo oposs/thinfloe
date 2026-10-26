@@ -868,12 +868,26 @@ mod tests {
     /// the name of the icon it is asked for. A renderer that lingers leaves
     /// its pid next to that name, so the test can see it was reaped; as a
     /// symlink, since RLIMIT_FSIZE kills a renderer that writes a file.
+    ///
+    /// A child shell writes the script, never this process: a test thread
+    /// that forks while this process holds the file open for writing hands
+    /// the descriptor to its child until that child execs, and starting the
+    /// renderer in that window fails with ETXTBSY ("Text file busy").
     fn fake_renderer(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
         let p = dir.join("renderer");
-        fs::write(
-            &p,
-            r#"#!/bin/sh
+        let mut sh = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(&p)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin
+            .take()
+            .unwrap()
+            .write_all(
+                br#"#!/bin/sh
 case "$5" in
 *ok) printf 'RGBA\002\000\000\000\001\000\000\000\377\000\000\377\377\000\000\377' ;;
 *hang) ln -s $$ "$5.pid"; exec sleep 60 ;;
@@ -889,9 +903,9 @@ case "$5" in
 *killed) kill -TERM $$ ;;
 esac
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            )
+            .unwrap();
+        assert!(sh.wait().unwrap().success(), "writing {}", p.display());
         p
     }
 

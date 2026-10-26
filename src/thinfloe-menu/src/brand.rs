@@ -39,6 +39,8 @@ pub fn theme() -> egui_shadcn::Theme {
     t.palette.ring = ICE;
     t.palette.border = LINE;
     t.palette.muted_foreground = MUTED;
+    // Square corners everywhere, as in the mockups.
+    t.radius = 0.0;
     t
 }
 

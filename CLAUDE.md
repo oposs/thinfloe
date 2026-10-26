@@ -1037,8 +1037,9 @@ whatever its `Depends:` would have pulled in must already be in the image.
 ThinLinc's `.deb` has no `Depends:` at all, and its `vncviewer` dlopens
 `libXrandr.so.2`, so `libxrandr2` is installed by name for it; nothing but
 this list keeps it there. OxuLnk's `Depends:` are `libasound2t64 libc6
-libopus0 libstdc++6 libva-drm2 libva2 libx11-6 libx11-xcb1 libxcb1
-libxcursor1 libxi6 libxkbcommon-x11-0 libxkbcommon0`. Dropping a line
+libstdc++6 libva-drm2 libva2 libx11-6 libx11-xcb1 libxcb1 libxcursor1
+libxi6 libxkbcommon-x11-0 libxkbcommon0` (`libopus0` left the list with the
+build of 2026-10-26; PipeWire still pulls it into the image). Dropping a line
 leaves the add-on installed and its tile drawn, and the client fails when it
 starts. A new add-on that needs another library needs a line here.
 `test/integration/test-addon-deps.sh` installs each client the way
