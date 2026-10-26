@@ -127,17 +127,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 - SSH configuration: `overlay/etc/ssh/sshd_config.d/`
 - Session/compositor: `overlay/etc/thinfloe/labwc/` (`rc.xml`, `environment`) - kept outside `$HOME` because home is captured/restored wholesale by the persistence machinery, see [Persistent Home Directory](#persistent-home-directory).
   `rc.xml` also holds the window rule that keeps the window with app_id
-  `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the taskbar
-  (`skipTaskbar`).
-- Taskbar: `overlay/etc/thinfloe/waybar/` (`config.jsonc`, `style.css`) - a
-  single `wlr/taskbar` module, launched by `thinfloe-session`. It exists
-  because labwc draws an iconify button and, with zero keybindings and no
-  window list, a minimized window would otherwise be unreachable for the rest of
-  the session. Kept outside `$HOME` for the same reason `rc.xml` is.
-  Note a fullscreen ThinLinc client covers the bar - wlroots puts
-  fullscreen surfaces above the layer-shell top layer and ignores exclusive
-  zones - so it is visible exactly when no window is fullscreen, which is
-  when a window can go missing.
+  `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the
+  window list that feeds the menu's folded-window strip (`skipTaskbar`).
+- No taskbar: waybar and GTK 3 left the image. labwc draws an iconify button
+  and, with zero keybindings, a minimized window needs a way back: it shows
+  as a chip in the folded-window strip at the bottom of `thinfloe-menu`, and
+  one click restores it. A fullscreen ThinLinc client covers the menu, so
+  the strip is visible exactly when no window is fullscreen, which is when a
+  window can go missing.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`

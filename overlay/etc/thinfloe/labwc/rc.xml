@@ -36,7 +36,7 @@
   -->
   <!--
     thinfloe-menu is the desktop: always the bottom window, so a program
-    window can never go behind it, and never in the taskbar, where it could
+    window can never go behind it, and never in the window list, where it could
     be minimised. The menu sets this app_id in src/thinfloe-menu/src/app.rs.
   -->
   <windowRules>

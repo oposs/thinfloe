@@ -111,7 +111,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     wlr-randr \
     swayidle \
     wlopm \
-    waybar \
     xfonts-base \
     fonts-dejavu-core \
     xcursor-themes \
@@ -264,17 +263,6 @@ RUN printf '#!/bin/sh\nupdate-alternatives --query default.plymouth 2>/dev/null 
 RUN if [ -e /usr/lib/systemd/system/seatd.service ]; then \
         systemctl disable seatd.service; \
     fi
-
-# waybar is started by thinfloe-session, not by systemd. The package ships a user
-# unit enabled into graphical-session.target whose ExecStart is a bare
-# `/usr/bin/waybar` with no -c/-s, so if that target ever became active it
-# would run waybar with its DEFAULT config - a full desktop panel over the
-# ThinLinc client - and Restart=on-failure would keep bringing it back.
-# It is dormant today only because Requisite=graphical-session.target fails
-# when nothing activates that target, and labwc has no systemd session
-# integration. Disabling it removes the ambiguity: thinfloe-session owns waybar's
-# lifetime, and the trap in that script is what stops it.
-RUN systemctl --global disable waybar.service || true
 
 # ssh.socket is disabled AND masked, in that order, on purpose.
 #

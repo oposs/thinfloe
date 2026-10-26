@@ -43,10 +43,10 @@ present "foot"             'usr/bin/foot$'
 present "grim"             'usr/bin/grim$'
 present "slurp"            'usr/bin/slurp$'
 present "wl-copy"          'usr/bin/wl-copy$'
-present "waybar"           'usr/bin/waybar$'
-present "waybar config"    'etc/thinfloe/waybar/config\.jsonc$'
-present "waybar style"     'etc/thinfloe/waybar/style\.css$'
+absent  "waybar"           'usr/bin/waybar$'
+absent  "waybar config"    'etc/thinfloe/waybar/'
 absent  "waybar user unit enabled" 'systemd/user/graphical-session\.target\.wants/waybar\.service$'
+absent  "GTK 3"            'usr/lib/x86_64-linux-gnu/libgtk-3\.so\.0$'
 present "session script"    'usr/bin/thinfloe-session$'
 present "save-home"         'usr/bin/thinfloe-save-home$'
 present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
@@ -293,28 +293,17 @@ else
     fail=1
 fi
 
-# The taskbar is the ONLY way back to a minimized window: labwc draws an
-# iconify button, and with zero keybindings and no menu there is no other
-# route. If the config ever loses the taskbar module, minimized windows
-# become unreachable again.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/wb" "$SQSH" \
-        etc/thinfloe/waybar/config.jsonc >/dev/null 2>&1 &&
-   grep -q 'wlr/taskbar' "$DPKG_TMP/wb/etc/thinfloe/waybar/config.jsonc"; then
-    echo "ok   - waybar config declares the wlr/taskbar module"
-else
-    echo "FAIL - waybar config has no wlr/taskbar module"
-    fail=1
-fi
-
-# thinfloe-session must both start waybar and kill it: labwc terminates when
-# its -S command returns, and a surviving waybar would be orphaned.
+# The folded-window strip in thinfloe-menu replaced the waybar taskbar.
+# thinfloe-session must no longer start waybar, and must still kill its
+# helpers (swayidle) when it ends: labwc terminates when its -S command
+# returns, and a surviving helper would be orphaned.
 if unsquashfs -no-xattrs -d "$DPKG_TMP/sess" "$SQSH" \
         usr/bin/thinfloe-session >/dev/null 2>&1 &&
-   grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/thinfloe-session" &&
+   ! grep -q 'waybar' "$DPKG_TMP/sess/usr/bin/thinfloe-session" &&
    grep -q 'trap .*kill' "$DPKG_TMP/sess/usr/bin/thinfloe-session"; then
-    echo "ok   - thinfloe-session starts waybar and kills it on exit"
+    echo "ok   - thinfloe-session starts no waybar and kills its helpers on exit"
 else
-    echo "FAIL - thinfloe-session does not start and clean up waybar"
+    echo "FAIL - thinfloe-session still mentions waybar or lost its helper cleanup"
     fail=1
 fi
 

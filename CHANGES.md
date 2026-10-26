@@ -13,7 +13,8 @@
 
 ### Changed
 
-- The image download (`thinfloe-usb.img.zst`) is now 608 MB instead of 772 MB, and an upgrade downloads 611 MB instead of 775 MB. `initrd.img` on the boot stick no longer carries WiFi firmware; the running system loads it from the main image, as it did before.
+- The taskbar at the bottom of the screen is gone. A folded window now shows in a strip at the bottom of the menu and comes back with one click.
+- The image download (`thinfloe-usb.img.zst`) is now 599 MB instead of 772 MB, and an upgrade downloads 602 MB instead of 775 MB. `initrd.img` on the boot stick no longer carries WiFi firmware; the running system loads it from the main image, as it did before.
 - The unused `ubuntu` login from the Ubuntu base image is gone. `tfuser` keeps its user ID.
 - `vim` on the machine is now the small `vim-tiny`: the command `vim` still opens it, but without syntax colours and plugins. `joe` is unchanged.
 - ThinLinc is no longer part of the image. It is installed from cendio.com when ticked in Settings, and a machine that had it is ticked on its first ThinFloe boot. OxuLnk works the same way; it comes from the oposs package repository at gitea.oetiker.ch.
