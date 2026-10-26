@@ -61,6 +61,21 @@ RUN set -eu; \
     install -D -m 0644 assets/Geo-Oblique.ttf /out/usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf; \
     install -D -m 0644 assets/Geo-OFL.txt /out/usr/share/thinfloe/fonts/Geo-OFL.txt
 
+# The boot screen's images, rendered from brand/*.svg. rsvg-convert stays in
+# this stage, so neither it nor librsvg reaches the image. The word "ThinFloe"
+# is outlines in logo-wordmark.svg (scripts/wordmark-svg.py), so no font is
+# needed here. Sizes are for a 1920 px wide screen; thinfloe.script scales them.
+FROM ubuntu:26.04 AS plymouth-art
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -yq --no-install-recommends librsvg2-bin
+COPY brand/ /brand/
+RUN set -eu; mkdir -p /out; \
+    rsvg-convert -w 640 /brand/logo-wordmark.svg -o /out/logo.png; \
+    rsvg-convert /brand/boot-glow.svg -o /out/glow.png; \
+    rsvg-convert /brand/boot-bar-track.svg -o /out/bar-track.png; \
+    rsvg-convert /brand/boot-bar-fill.svg -o /out/bar-fill.png
+
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -243,9 +258,19 @@ RUN fc-cache -f
 # Generate locale
 RUN locale-gen
 
-# Configure Plymouth theme to bgrt (keeps vendor logo, shows spinner below)
-# The default bgrt theme works with EFI framebuffer
-RUN printf '#!/bin/sh\nupdate-alternatives --query default.plymouth 2>/dev/null | grep "^Value:" | cut -d/ -f6 || echo bgrt\n' > /usr/sbin/plymouth-set-default-theme && \
+# Boot screen: the thinfloe Plymouth theme. thinfloe.plymouth and
+# thinfloe.script come from the overlay, the images from the plymouth-art stage.
+# plymouth-populate-initrd takes the theme from the default.plymouth
+# alternative, and plymouthd reads Theme= from plymouthd.conf before it looks at
+# the link, so both name thinfloe. The shim below is what the dracut plymouth
+# module's check() asks for; it has no fallback theme.
+COPY --from=plymouth-art /out/ /usr/share/plymouth/themes/thinfloe/
+RUN update-alternatives --install /usr/share/plymouth/themes/default.plymouth default.plymouth \
+        /usr/share/plymouth/themes/thinfloe/thinfloe.plymouth 1000 && \
+    update-alternatives --set default.plymouth /usr/share/plymouth/themes/thinfloe/thinfloe.plymouth && \
+    sed -i 's/^Theme=.*/Theme=thinfloe/' /etc/plymouth/plymouthd.conf && \
+    grep -qx 'Theme=thinfloe' /etc/plymouth/plymouthd.conf
+RUN printf '#!/bin/sh\nupdate-alternatives --query default.plymouth 2>/dev/null | grep "^Value:" | cut -d/ -f6\n' > /usr/sbin/plymouth-set-default-theme && \
     chmod +x /usr/sbin/plymouth-set-default-theme
 
 # Remove SSH keys and enable services

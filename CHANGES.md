@@ -13,6 +13,7 @@
 
 ### Changed
 
+- The boot screen shows the ThinFloe logo and name with a thin slanted progress line on a black background with a faint blue glow, and the host name at the foot once it is known, instead of the firmware logo and a spinner.
 - The taskbar at the bottom of the screen is gone. A folded window now shows in a strip at the bottom of the menu and comes back with one click.
 - The image download (`thinfloe-usb.img.zst`) is now 599 MB instead of 772 MB, and an upgrade downloads 602 MB instead of 775 MB. `initrd.img` on the boot stick no longer carries WiFi firmware; the running system loads it from the main image, as it did before.
 - The unused `ubuntu` login from the Ubuntu base image is gone. `tfuser` keeps its user ID.

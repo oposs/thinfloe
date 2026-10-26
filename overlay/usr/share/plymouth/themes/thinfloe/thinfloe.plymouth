@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=ThinFloe
+Description=ThinFloe logo and name, a slanted ice-blue progress line and the host name
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/thinfloe
+ScriptFile=/usr/share/plymouth/themes/thinfloe/thinfloe.script

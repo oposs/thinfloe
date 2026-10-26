@@ -510,6 +510,54 @@ else
     bad "unwritable /etc: rc=$rc warnings=$(cat "$WORK/warnings")"
 fi
 
+# --- tf_write_hostname: the Plymouth boot screen ---
+#
+# The name is also shown on the boot screen, through the daemon that runs in
+# the initramfs. A stub plymouth records its arguments.
+
+mkdir -p "$WORK/plybin" "$WORK/noply"
+cat >"$WORK/plybin/plymouth" <<'STUB'
+#!/bin/sh
+echo "$*" >>"$PLY_LOG"
+case "$1" in --ping) exit "${PLY_PING_RC:-0}" ;; esac
+exit "${PLY_RC:-0}"
+STUB
+chmod +x "$WORK/plybin/plymouth"
+ln -s "$(command -v tr)" "$WORK/noply/tr"
+export PLY_LOG="$WORK/ply.log"
+
+nr="$WORK/host-ply"; mkdir -p "$nr/etc"; : >"$PLY_LOG"
+PATH="$WORK/plybin:$PATH" tf_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$PLY_LOG")" == $'--ping\ndisplay-message --text=thinfloe-abcdef' ]]; then
+    ok "tf_write_hostname shows the name on the boot screen when the daemon answers"
+else
+    bad "boot screen message: rc=$rc log=$(cat "$PLY_LOG")"
+fi
+
+nr="$WORK/host-ply-down"; mkdir -p "$nr/etc"; : >"$PLY_LOG"
+PLY_PING_RC=1 PATH="$WORK/plybin:$PATH" tf_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$PLY_LOG")" == "--ping" && -f "$nr/etc/hostname" ]]; then
+    ok "no daemon (plymouth --ping fails): no message, hostname still written"
+else
+    bad "plymouth down: rc=$rc log=$(cat "$PLY_LOG")"
+fi
+
+nr="$WORK/host-ply-fail"; mkdir -p "$nr/etc"; : >"$PLY_LOG"
+PLY_RC=1 PATH="$WORK/plybin:$PATH" tf_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
+if [[ $rc -eq 0 && -f "$nr/etc/hostname" ]]; then
+    ok "a failing display-message does not fail tf_write_hostname"
+else
+    bad "failing display-message: rc=$rc"
+fi
+
+nr="$WORK/host-ply-none"; mkdir -p "$nr/etc"
+PATH="$WORK/noply" tf_write_hostname "$nr" "abcdef0123456789abcdef0123456789"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" ]]; then
+    ok "no plymouth binary: hostname written, returns 0"
+else
+    bad "no plymouth binary: rc=$rc"
+fi
+
 # --- tf_write_hostname: boot MAC ---
 
 mkstate() { mkdir -p "$WORK/$1/etc" "$WORK/$1/state"; echo "$WORK/$1"; }

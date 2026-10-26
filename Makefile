@@ -93,6 +93,7 @@ OVERLAY_FILES := $(shell find overlay -type f ! -name '*~' 2>/dev/null)
 # .ubuntu-container below, closes that hole - its mtime changes whenever a
 # file is added to or removed from it, even when no surviving patch file
 # changed.
+BRAND_FILES := $(wildcard brand/*)
 PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 
 # thinfloe-menu is built from source in the ubuntu container's menu-build stage.
@@ -122,7 +123,7 @@ $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
-.ubuntu-container: containers/ubuntu/Dockerfile $(OVERLAY_FILES) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \

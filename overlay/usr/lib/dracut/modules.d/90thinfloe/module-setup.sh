@@ -28,6 +28,12 @@ install() {
             "$systemdsystemunitdir/$_unit.d/90-thinfloe-after-cmdline.conf"
     done
 
+    # The boot screen draws the host name in Geo. label-pango finds fonts
+    # through fontconfig, and plymouth-populate-initrd copies only the fonts a
+    # theme names in Font=, so the font is installed here. See
+    # /usr/share/plymouth/themes/thinfloe/thinfloe.script.
+    inst_simple /usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf
+
     # Network tools. DHCP is systemd-networkd's job (see mount-squashfs.sh);
     # ip finds the interface that holds the lease.
     inst_multiple curl ip

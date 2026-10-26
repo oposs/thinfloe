@@ -770,7 +770,7 @@ fi  # end of _TF_LIB_LOADED guard
 # USB boot: no boot-mac is recorded; the first six characters of the
 # machine-id (persisted on the ESP) are used.
 #
-# Only shell builtins and tr are used: the initramfs ships no cut, basename,
+# Only shell builtins, tr and plymouth (guarded) are used: the initramfs ships no cut, basename,
 # head or install, and a missing tool here once produced the hostname "thinfloe-".
 #
 # Never fails the boot: an unusable MAC falls back to the machine-id, an
@@ -810,6 +810,13 @@ tf_write_hostname() {
 
     { printf 'thinfloe-%s\n' "$_wh_suffix" > "$_wh_root/etc/hostname"; } \
         2>/dev/null || warn "thinfloe: could not write /etc/hostname"
+
+    # Show the name at the foot of the boot screen. Only when the plymouth
+    # daemon answers (not with plymouth.enable=0, not on a rescue boot), and
+    # whatever happens the boot goes on.
+    if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+        plymouth display-message --text="thinfloe-$_wh_suffix" 2>/dev/null || true
+    fi
 
     return 0
 }
