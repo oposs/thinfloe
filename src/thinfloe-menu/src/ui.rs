@@ -39,6 +39,14 @@ const HEADER_PAD_X: f32 = 32.0;
 const HEADER_PAD_TOP: f32 = 16.0;
 pub const LOGO_H: f32 = 52.0;
 const ICON_BOX: f32 = 44.0;
+/// The folded-window strip: its height, the chip height inside it, the gap
+/// to the log and the widest a chip grows.
+pub const STRIP_H: f32 = 40.0;
+pub const CHIP_H: f32 = 32.0;
+const STRIP_GAP: f32 = 8.0;
+const CHIP_MAX_W: f32 = 280.0;
+const CHIP_ICON: f32 = 20.0;
+const CHIP_FONT: f32 = 15.0;
 const EDGE_W: f32 = 5.0;
 /// The log takes this share of the screen height, and at least
 /// `LOG_MIN_ROWS` rows.
@@ -126,6 +134,8 @@ pub enum UiEvent {
     Settings(SettingsEvent),
     /// Retry (true) or Later in the retry dialog.
     Retry(bool),
+    /// The person clicked the chip of a folded window (its toplevel id).
+    Unfold(u64),
 }
 
 /// Where the header, the grid and the log go on a screen.
@@ -141,13 +151,25 @@ pub struct Layout {
     pub grid: Rect,
     /// The size of one band.
     pub tile: Vec2,
+    /// The row of folded-window chips at the bottom edge; `None` when no
+    /// window is folded.
+    pub strip: Option<Rect>,
 }
 
-pub fn layout(screen: Rect, tiles: usize) -> Layout {
+pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
     let log_h = (screen.height() * LOG_SHARE).max(LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD);
+    let (strip, log_bottom) = if folded == 0 {
+        (None, screen.bottom() - GAP)
+    } else {
+        let strip = Rect::from_min_max(
+            pos2(screen.left() + GAP, screen.bottom() - GAP - STRIP_H),
+            pos2(screen.right() - GAP, screen.bottom() - GAP),
+        );
+        (Some(strip), strip.top() - STRIP_GAP)
+    };
     let log = Rect::from_min_max(
-        pos2(screen.left() + GAP, screen.bottom() - GAP - log_h),
-        pos2(screen.right() - GAP, screen.bottom() - GAP),
+        pos2(screen.left() + GAP, log_bottom - log_h),
+        pos2(screen.right() - GAP, log_bottom),
     );
     let header = Rect::from_min_size(screen.min, vec2(screen.width(), HEADER_H));
     let area = Rect::from_min_max(pos2(screen.left(), header.bottom()), pos2(screen.right(), log.top()));
@@ -171,6 +193,7 @@ pub fn layout(screen: Rect, tiles: usize) -> Layout {
         area,
         grid: Rect::from_min_size(pos2(left, top), size),
         tile,
+        strip,
     }
 }
 
@@ -424,12 +447,13 @@ pub fn show(
         return chose.map(UiEvent::Retry);
     }
     let shown = menu.visible_tiles();
-    let l = layout(ui.max_rect(), shown.len());
+    let l = layout(ui.max_rect(), shown.len(), menu.folded.len());
     show_header(ui, chrome, l.header);
+    let unfold = l.strip.and_then(|r| show_strip(ui, menu, icons, r)).map(UiEvent::Unfold);
     if menu.screen == Screen::Settings {
         let event = show_settings(ui, menu, icons, l.area);
         show_log(ui, &menu.log, l.log);
-        return event.map(UiEvent::Settings);
+        return event.map(UiEvent::Settings).or(unfold);
     }
     let mut clicked = None;
     let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
@@ -472,6 +496,99 @@ pub fn show(
             ui.add_space(0.0);
         });
     show_log(ui, &menu.log, l.log);
+    clicked.or(unfold)
+}
+
+/// The folded windows as chips in one row. A row wider than the strip
+/// scrolls sideways (wheel and drag), so no chip is out of reach: with zero
+/// labwc keybindings this is the only way back to a folded window.
+/// Returns the id of the chip clicked.
+fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], rect: Rect) -> Option<u64> {
+    let t = Theme::current(ui.ctx());
+    let mut clicked = None;
+    let mut strip_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+    // A mouse wheel turns vertically; the row only goes sideways.
+    strip_ui.style_mut().always_scroll_the_only_direction = true;
+    egui::ScrollArea::horizontal()
+        .id_salt("strip")
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(&mut strip_ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.horizontal_centered(|ui| {
+                for f in &menu.folded {
+                    // The title comes from the window: one line, cut with an
+                    // ellipsis at the chip's widest.
+                    let title = if f.title.is_empty() { &f.app_id } else { &f.title };
+                    let text_max = CHIP_MAX_W - CHIP_ICON - 3.0 * 10.0;
+                    let mut job = LayoutJob::simple_singleline(
+                        title.clone(),
+                        FontId::proportional(CHIP_FONT),
+                        t.palette.foreground,
+                    );
+                    job.wrap = TextWrapping::truncate_at_width(text_max);
+                    let galley = ui.painter().layout_job(job);
+                    let w = 10.0 + CHIP_ICON + 10.0 + galley.size().x.ceil() + 10.0;
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, CHIP_H), Sense::click_and_drag());
+                    // A chip under the pointer takes the drag from the
+                    // scroll area, so it hands the movement back.
+                    if resp.dragged() {
+                        ui.scroll_with_delta(vec2(resp.drag_delta().x, 0.0));
+                    }
+                    let p = ui.painter();
+                    let fill = if resp.hovered() { TILE_HOVER } else { TILE };
+                    p.rect_filled(rect, 0.0, fill);
+                    p.rect_stroke(rect, 0.0, Stroke::new(1.0, brand::LINE), StrokeKind::Inside);
+                    if resp.has_focus() {
+                        p.rect_stroke(
+                            rect.expand(2.0),
+                            0.0,
+                            Stroke::new(3.0, t.palette.ring),
+                            StrokeKind::Outside,
+                        );
+                    }
+                    let icon_rect = Rect::from_min_size(
+                        pos2(rect.left() + 10.0, rect.center().y - CHIP_ICON / 2.0),
+                        Vec2::splat(CHIP_ICON),
+                    );
+                    let tex = menu
+                        .tile_for_app(&f.app_id)
+                        .and_then(|i| icons.get(i))
+                        .and_then(|i| i.as_ref());
+                    match tex {
+                        Some(tex) => {
+                            p.image(
+                                tex.id(),
+                                icon_rect,
+                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        None => {
+                            p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
+                            let letter: String = title
+                                .chars()
+                                .next()
+                                .map(|c| c.to_uppercase().collect())
+                                .unwrap_or_else(|| "?".into());
+                            p.text(
+                                icon_rect.center(),
+                                Align2::CENTER_CENTER,
+                                letter,
+                                brand::geo(CHIP_ICON * 0.6),
+                                t.palette.foreground,
+                            );
+                        }
+                    }
+                    let y = rect.center().y - galley.size().y / 2.0;
+                    ui.painter_at(rect)
+                        .galley(pos2(icon_rect.right() + 10.0, y), galley, t.palette.foreground);
+                    if resp.clicked() {
+                        clicked = Some(f.id);
+                    }
+                }
+            });
+        });
     clicked
 }
 
@@ -948,7 +1065,7 @@ mod tests {
 
     #[test]
     fn eight_tiles_on_full_hd_are_two_rows_of_bands_at_58_percent() {
-        let l = layout(screen(1920.0, 1080.0), 8);
+        let l = layout(screen(1920.0, 1080.0), 8, 0);
         assert!((l.grid.width() - 0.58 * 1920.0).abs() < 1.0, "{:?}", l.grid);
         assert!((l.grid.center().x - 960.0).abs() < 1.0);
         assert!(l.tile.x > l.tile.y * 2.5, "bands, not squares: {:?}", l.tile);
@@ -960,7 +1077,7 @@ mod tests {
 
     #[test]
     fn nine_tiles_fit_between_header_and_log_on_1280_by_720() {
-        let l = layout(screen(1280.0, 720.0), 9);
+        let l = layout(screen(1280.0, 720.0), 9, 0);
         assert!(
             l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top(),
             "{l:?}"
@@ -1063,13 +1180,13 @@ mod tests {
 
     #[test]
     fn the_log_keeps_its_minimum_rows_on_a_short_screen() {
-        let l = layout(screen(1280.0, 480.0), 6);
+        let l = layout(screen(1280.0, 480.0), 6, 0);
         assert!(l.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW, "{:?}", l.log);
     }
 
     #[test]
     fn many_tiles_start_at_the_top_and_overflow_downwards() {
-        let l = layout(screen(1920.0, 1080.0), 38);
+        let l = layout(screen(1920.0, 1080.0), 38, 0);
         assert!(
             l.grid.top() >= l.area.top() && l.grid.height() > l.area.height(),
             "{:?}",
@@ -1197,7 +1314,7 @@ mod tests {
             out = Some(o);
         }
         let out = out.unwrap();
-        let l = layout(screen(1280.0, 720.0), names.len());
+        let l = layout(screen(1280.0, 720.0), names.len(), 0);
         let tiles: Vec<Rect> = out
             .shapes
             .iter()
@@ -1450,7 +1567,7 @@ mod tests {
             out = Some(o);
         }
         let out = out.unwrap();
-        let l = layout(screen(1280.0, 720.0), 3);
+        let l = layout(screen(1280.0, 720.0), 3, 0);
         // The ice edge: a 5 wide bar at the left of the band, full height.
         let edges: Vec<Rect> = out
             .shapes
@@ -1520,6 +1637,171 @@ mod tests {
             delay = o.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         }
         assert!(!delay.is_zero(), "repaint delay {delay:?}");
+    }
+
+    fn folded_menu(n: usize) -> Menu {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.folded = (0..n as u64)
+            .map(|i| crate::windows::Folded {
+                id: 100 + i,
+                title: format!("ThinLinc session number {i} on a host with a very long name.example.com"),
+                app_id: "x".into(),
+            })
+            .collect();
+        menu
+    }
+
+    /// One frame of `show` with the given extra input events; returns the
+    /// chips painted (rects of height `CHIP_H` filled with TILE or hover) and
+    /// the event.
+    fn strip_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        size: Vec2,
+        events: Vec<egui::Event>,
+    ) -> (Vec<Rect>, Option<UiEvent>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), size)),
+            events,
+            // Wheel scrolling is smoothed over time.
+            time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+            ..Default::default()
+        };
+        let mut ev = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            ev = show(ui, menu, &[None], &Chrome::default(), Instant::now());
+        });
+        out.textures_delta.clear();
+        let chips = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r)
+                    if (r.rect.height() - CHIP_H).abs() < 0.01 && (r.fill == TILE || r.fill == TILE_HOVER) =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        (chips, ev)
+    }
+
+    fn click_at(p: egui::Pos2) -> Vec<egui::Event> {
+        let b = |pressed| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(p), b(true), b(false)]
+    }
+
+    #[test]
+    fn no_folded_window_means_no_strip_and_the_log_reaches_the_bottom() {
+        let l = layout(screen(1920.0, 1080.0), 8, 0);
+        assert!(l.strip.is_none());
+        assert!(1080.0 - l.log.bottom() <= GAP + 0.5);
+    }
+
+    #[test]
+    fn a_folded_window_puts_the_strip_below_the_log() {
+        let l = layout(screen(1920.0, 1080.0), 8, 2);
+        let s = l.strip.unwrap();
+        assert!(s.top() >= l.log.bottom() && s.bottom() <= 1080.0);
+        assert!(s.height() >= CHIP_H);
+    }
+
+    #[test]
+    fn a_chip_click_restores_that_window() {
+        let menu = folded_menu(2);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let (chips, _) = strip_frame(&ctx, &menu, size, vec![]);
+        let (chips2, _) = strip_frame(&ctx, &menu, size, vec![]);
+        assert_eq!(chips.len(), 2, "{chips:?}");
+        assert_eq!(chips, chips2);
+        let (_, ev) = strip_frame(&ctx, &menu, size, click_at(chips[1].center()));
+        assert_eq!(ev, Some(UiEvent::Unfold(101)));
+    }
+
+    #[test]
+    fn ten_folded_windows_on_1280_by_720_stay_reachable() {
+        let menu = folded_menu(10);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        let over = strip.center();
+        strip_frame(&ctx, &menu, size, vec![]);
+        let (first, _) = strip_frame(&ctx, &menu, size, vec![]);
+        // The first frames show the left end only: the last chip is out.
+        let reachable = |c: &Rect| strip.contains_rect(*c);
+        assert!(!first.iter().all(reachable), "ten long chips cannot fit one row");
+        // Wheel and drag both move the row; the wheel is tried here.
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -4000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        };
+        for _ in 0..12 {
+            strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(over), wheel.clone()]);
+        }
+        let (chips, _) = strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(over)]);
+        let last = chips.iter().max_by(|a, b| a.right().total_cmp(&b.right())).unwrap();
+        assert!(strip.contains(last.center()), "last chip {last:?} not inside {strip:?}");
+        assert!(last.right() <= strip.right() + 1.0);
+        let (_, ev) = strip_frame(&ctx, &menu, size, click_at(last.center()));
+        assert_eq!(ev, Some(UiEvent::Unfold(109)));
+    }
+
+    #[test]
+    fn dragging_the_strip_scrolls_it_without_clicking_a_chip() {
+        let menu = folded_menu(10);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let size = vec2(1280.0, 720.0);
+        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        strip_frame(&ctx, &menu, size, vec![]);
+        let (before, _) = strip_frame(&ctx, &menu, size, vec![]);
+        let from = before[0].center();
+        let b = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(from), b(from, true)]);
+        let mut x = from.x;
+        let mut clicked = None;
+        while x > from.x - 600.0 {
+            x -= 60.0;
+            let (_, ev) = strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(pos2(x, from.y))]);
+            clicked = clicked.or(ev);
+        }
+        let (_, ev) = strip_frame(&ctx, &menu, size, vec![b(pos2(x, from.y), false)]);
+        clicked = clicked.or(ev);
+        let (after, _) = strip_frame(&ctx, &menu, size, vec![]);
+        assert!(after[0].left() < before[0].left() - 300.0, "{:?} -> {:?}", before[0], after[0]);
+        assert!(clicked.is_none(), "a drag is not a click: {clicked:?}");
+        assert!(strip.height() > 0.0);
+    }
+
+    #[test]
+    fn a_chip_takes_the_icon_of_the_tile_with_its_program() {
+        let mut menu = folded_menu(1);
+        menu.tiles[0].argv = vec!["/usr/bin/Foot".into()];
+        assert_eq!(menu.tile_for_app("foot"), Some(0));
+        assert_eq!(menu.tile_for_app("other"), None);
+        assert_eq!(menu.tile_for_app(""), None);
     }
 
     #[test]

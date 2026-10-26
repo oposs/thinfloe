@@ -102,7 +102,7 @@ pub struct App {
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
-pub fn run(cfg: Config) -> Result<i32, String> {
+pub fn run(mut cfg: Config) -> Result<i32, String> {
     let event_loop = EventLoop::<Wake>::with_user_event()
         .build()
         .map_err(|e| e.to_string())?;
@@ -141,6 +141,11 @@ pub fn run(cfg: Config) -> Result<i32, String> {
             }
         }
     };
+    // No change event comes for a window folded before the menu started, so
+    // the first frame reads the list itself.
+    if let Some(w) = windows.as_ref() {
+        cfg.menu.folded = w.folded();
+    }
     let mut app = App {
         windows,
         folded_seen: Vec::new(),
@@ -352,6 +357,12 @@ impl App {
             Some(ui::UiEvent::Chose(c)) => self.cfg.menu.choose(c, now),
             Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
             Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
+            Some(ui::UiEvent::Unfold(id)) => {
+                if let Some(Err(e)) = self.windows.as_ref().map(|w| w.restore(id)) {
+                    self.cfg.menu.log.note(crate::log::Kind::Warn, format!("could not unfold the window: {e}"));
+                }
+                None
+            }
             None => self.cfg.menu.tick(now),
         };
         if effect.is_some() || event.is_some() {
@@ -382,6 +393,10 @@ impl App {
     fn windows_changed(&mut self) {
         let Some(w) = self.windows.as_ref() else { return };
         let now = w.folded();
+        self.cfg.menu.folded = now.clone();
+        if let Some(live) = self.live.as_ref() {
+            live.window.request_redraw();
+        }
         if self.cfg.debug {
             for f in now.iter().filter(|f| !self.folded_seen.contains(f)) {
                 eprintln!("thinfloe-menu: folded: {} {}", f.app_id, f.title);

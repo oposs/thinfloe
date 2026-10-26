@@ -174,6 +174,9 @@ pub struct Menu {
     /// No retry is offered while set: at startup the status is read before
     /// the grid was ever on screen, and the dialog would dim an empty one.
     retry_held: bool,
+    /// Windows folded away, as the compositor reports them; the strip
+    /// below the log shows them.
+    pub folded: Vec<crate::windows::Folded>,
 }
 
 impl Menu {
@@ -208,6 +211,7 @@ impl Menu {
             last_check: None,
             retry_marker: RetryMarker::memory(),
             retry_held: false,
+            folded: Vec::new(),
         }
     }
 
@@ -419,6 +423,21 @@ impl Menu {
     /// Whether input is dropped before egui sees it.
     pub fn refuses_input(&self) -> bool {
         self.logout.as_ref().is_some_and(Logout::refuses_input)
+    }
+
+    /// The tile whose program is the window's `app_id`, case-insensitively:
+    /// its icon stands for the window on the strip.
+    pub fn tile_for_app(&self, app_id: &str) -> Option<usize> {
+        if app_id.is_empty() {
+            return None;
+        }
+        self.tiles.iter().position(|t| {
+            t.action == Action::Run
+                && t.argv.first().is_some_and(|a| {
+                    let name = a.rsplit('/').next().unwrap_or(a);
+                    name.eq_ignore_ascii_case(app_id)
+                })
+        })
     }
 
     pub fn running(&self, tile: usize) -> usize {
