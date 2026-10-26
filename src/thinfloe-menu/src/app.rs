@@ -57,6 +57,8 @@ pub struct Config {
     pub addon_last_check: PathBuf,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
+    /// Host name and version for the header.
+    pub header: crate::header::Header,
 }
 
 struct Live {
@@ -67,6 +69,8 @@ struct Live {
     textures: Textures,
     tracker: Tracker,
     icons: Vec<Option<TextureHandle>>,
+    /// What the header shows; the clock text is refreshed every frame.
+    chrome: ui::Chrome,
     /// The scale the last frame was laid out and damaged at.
     ppp: f32,
     /// Whether a frame reached the screen.
@@ -253,8 +257,9 @@ impl App {
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
+        live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
         let out = self.ctx.run_ui(input, |ui| {
-            event = ui::show(ui, &self.cfg.menu, &live.icons, now);
+            event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
         live.egui.handle_platform_output(&live.window, out.platform_output);
 
@@ -399,6 +404,16 @@ impl ApplicationHandler<Wake> for App {
             let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();
             eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
         }
+        let logo_px = (ui::LOGO_H * window.scale_factor() as f32).round() as u32;
+        let chrome = ui::Chrome {
+            header: self.cfg.header.clone(),
+            clock: String::new(),
+            logo: Some(self.ctx.load_texture(
+                "thinfloe-logo",
+                crate::brand::logo(logo_px),
+                egui::TextureOptions::LINEAR,
+            )),
+        };
         let bg = crate::brand::theme().palette.background;
         self.live = Some(Live {
             window: window.clone(),
@@ -408,6 +423,7 @@ impl ApplicationHandler<Wake> for App {
             textures: Textures::default(),
             tracker: Tracker::default(),
             icons,
+            chrome,
             ppp: 0.0,
             presented: false,
         });

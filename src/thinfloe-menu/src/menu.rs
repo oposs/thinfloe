@@ -421,7 +421,7 @@ impl Menu {
         self.logout.as_ref().is_some_and(Logout::refuses_input)
     }
 
-    fn running(&self, tile: usize) -> usize {
+    pub fn running(&self, tile: usize) -> usize {
         self.jobs.iter().filter(|j| j.tile == tile).count()
     }
 
@@ -722,7 +722,7 @@ fn run_message(name: &str, status: &Result<Option<i32>, String>) -> (Kind, Strin
 }
 
 fn save_message(outcome: &SaveOutcome) -> (Kind, String) {
-    let kind = if outcome.saved() { Kind::Event } else { Kind::Warn };
+    let kind = if outcome.saved() { Kind::Good } else { Kind::Warn };
     (kind, outcome.message())
 }
 
@@ -743,6 +743,10 @@ mod tests {
 
     fn ev(t: &str) -> (Kind, String) {
         (Kind::Event, t.to_string())
+    }
+
+    fn good(t: &str) -> (Kind, String) {
+        (Kind::Good, t.to_string())
     }
 
     fn warn(t: &str) -> (Kind, String) {
@@ -921,7 +925,10 @@ mod tests {
         assert_eq!(m.logout, Some(Logout::Saving { since: now }));
         assert!(m.refuses_input());
         assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Saved), now), None);
-        assert_eq!(log(&m), [ev("Saving the home directory…"), ev("Home directory saved.")]);
+        assert_eq!(
+            log(&m),
+            [ev("Saving the home directory…"), good("Home directory saved.")]
+        );
         assert_eq!(m.tick(now), None, "the result is shown first");
         assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(0)));
     }

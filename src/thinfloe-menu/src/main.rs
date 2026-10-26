@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
+use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
@@ -126,6 +127,7 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         program_path: program_path(),
+        header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {

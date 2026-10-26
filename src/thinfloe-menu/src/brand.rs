@@ -75,8 +75,11 @@ fn fonts() -> FontDefinitions {
 
 const LOGO_T: &str = "M278 388H625V447H433V632H360V447H278Z";
 const LOGO_F: &str = "M498 502H624V562H570V632H498Z";
-/// The monogram's bounds after the slant, with a 2 unit margin.
-const LOGO_BOX: (f32, f32, f32, f32) = (276.0, 386.0, 390.0, 248.0);
+/// The monogram's bounds after the slant, with a 2 unit margin. skewX(-9)
+/// moves a point at height y right by tan(9 deg) * (632 - y): the T bar's
+/// lower-left corner (278, 447) lands at x 307.3, its upper-right corner
+/// (625, 388) at x 663.6.
+const LOGO_BOX: (f32, f32, f32, f32) = (305.0, 386.0, 361.0, 248.0);
 
 /// The slanted TF monogram, white on transparent, `height_px` high.
 pub fn logo(height_px: u32) -> ColorImage {
@@ -117,7 +120,12 @@ mod tests {
             ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         }
         ctx.fonts(|f| {
-            let fam = f.definitions().families.get(&FontFamily::Name(GEO.into())).unwrap().clone();
+            let fam = f
+                .definitions()
+                .families
+                .get(&FontFamily::Name(GEO.into()))
+                .unwrap()
+                .clone();
             assert_eq!(fam[0], "Geo-Oblique");
             assert!(fam.len() >= 2, "Geo needs a fallback: {fam:?}");
             assert!(!fam.iter().any(|n| n.contains("oxanium")), "Oxanium is gone: {fam:?}");
@@ -135,6 +143,24 @@ mod tests {
         let w = img.size[0] as f32 / 52.0;
         assert!((1.2..1.8).contains(&w), "aspect {w}");
         assert!(img.pixels.iter().any(|p| *p == Color32::WHITE));
-        assert!(img.pixels.iter().all(|p| p.r() == p.g() && p.g() == p.b()), "white only");
+        assert!(
+            img.pixels.iter().all(|p| p.r() == p.g() && p.g() == p.b()),
+            "white only"
+        );
+        // The slant: the stem's left edge moves right going up.
+        let [iw, ih] = img.size;
+        let opaque = |x: usize, y: usize| img.pixels[y * iw + x].a() > 128;
+        let left = |y: usize| (0..iw).find(|&x| opaque(x, y)).expect("a row with ink");
+        assert!(left(22) > left(50) + 2, "slanted: {} vs {}", left(22), left(50));
+        // No empty margin: the ink reaches every edge within 2 px.
+        let xs: Vec<usize> = (0..ih).flat_map(|y| (0..iw).filter(move |&x| opaque(x, y))).collect();
+        let ys: Vec<usize> = (0..ih).filter(|&y| (0..iw).any(|x| opaque(x, y))).collect();
+        assert!(
+            *xs.iter().min().unwrap() <= 2,
+            "left margin {}",
+            xs.iter().min().unwrap()
+        );
+        assert!(*xs.iter().max().unwrap() >= iw - 3, "right margin");
+        assert!(ys[0] <= 2 && *ys.last().unwrap() >= ih - 3, "top/bottom margin");
     }
 }

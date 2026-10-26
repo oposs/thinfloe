@@ -21,6 +21,8 @@ pub enum Kind {
     Output,
     /// A failure, or a warning about the tile files.
     Warn,
+    /// Something that finished well and is worth seeing: a saved home.
+    Good,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

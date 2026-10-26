@@ -2,6 +2,8 @@
 //! and the dialogs. Everything that decides something lives in menu.rs; this
 //! file only paints it and reports clicks.
 
+use crate::brand::{self, GOOD, ICE, MUTED, TILE, TILE_ACTIVE, TILE_HOVER, TIME};
+use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
@@ -17,15 +19,27 @@ use egui_shadcn::components::button::{Button, ButtonVariant};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Four, so the eight shipped tiles (every add-on installed) take two rows
-/// and fit above the log on 1280x720; with three columns the third row went
-/// under it.
+/// Four columns of bands: the eight shipped tiles take two rows.
 pub const COLUMNS: usize = 4;
+/// Space around the log and between the groups of the screen.
 pub const GAP: f32 = 16.0;
-/// Tiles are squares of this side, smaller only when the screen is.
-pub const TILE_MAX: f32 = 220.0;
-/// The smallest tile; below it the grid scrolls instead.
-pub const TILE_MIN: f32 = 160.0;
+/// Space between two tiles.
+pub const TILE_GAP: f32 = 3.0;
+/// The tile group takes this share of the screen width...
+pub const GROUP_SHARE: f32 = 0.58;
+/// ...but never less than this, so a name and a comment fit on a small
+/// screen.
+pub const GROUP_MIN: f32 = 4.0 * 220.0 + 3.0 * TILE_GAP;
+/// A band is this tall, down to `TILE_H_MIN` when the screen is short.
+pub const TILE_H: f32 = 76.0;
+pub const TILE_H_MIN: f32 = 64.0;
+/// The header: 16 above the 52 tall logo, 12 below.
+pub const HEADER_H: f32 = 80.0;
+const HEADER_PAD_X: f32 = 32.0;
+const HEADER_PAD_TOP: f32 = 16.0;
+pub const LOGO_H: f32 = 52.0;
+const ICON_BOX: f32 = 44.0;
+const EDGE_W: f32 = 5.0;
 /// The log takes this share of the screen height, and at least
 /// `LOG_MIN_ROWS` rows.
 pub const LOG_SHARE: f32 = 0.3;
@@ -114,17 +128,19 @@ pub enum UiEvent {
     Retry(bool),
 }
 
-/// Where the grid and the log go on a screen.
+/// Where the header, the grid and the log go on a screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
+    /// The strip along the top: logo, name, host and clock.
+    pub header: Rect,
     /// The log, along the bottom.
     pub log: Rect,
-    /// The space above the log; the grid scrolls inside it.
+    /// The space between header and log; the grid scrolls inside it.
     pub area: Rect,
     /// The grid itself, centred in `area`, or from its top when taller.
     pub grid: Rect,
-    /// The side of one square tile.
-    pub side: f32,
+    /// The size of one band.
+    pub tile: Vec2,
 }
 
 pub fn layout(screen: Rect, tiles: usize) -> Layout {
@@ -133,26 +149,69 @@ pub fn layout(screen: Rect, tiles: usize) -> Layout {
         pos2(screen.left() + GAP, screen.bottom() - GAP - log_h),
         pos2(screen.right() - GAP, screen.bottom() - GAP),
     );
-    let area = Rect::from_min_max(screen.min, pos2(screen.right(), log.top()));
+    let header = Rect::from_min_size(screen.min, vec2(screen.width(), HEADER_H));
+    let area = Rect::from_min_max(pos2(screen.left(), header.bottom()), pos2(screen.right(), log.top()));
     let cols = COLUMNS.min(tiles.max(1));
     let rows = tiles.max(1).div_ceil(COLUMNS);
-    let fit = |space: f32, n: usize| (space - 2.0 * GAP - GAP * (n as f32 - 1.0)) / n as f32;
-    let side = TILE_MAX
-        .min(fit(area.width(), cols))
-        .min(fit(area.height(), rows))
-        .max(TILE_MIN);
+    let group = (GROUP_SHARE * screen.width())
+        .max(GROUP_MIN)
+        .min(screen.width() - 2.0 * GAP);
+    let tile_w = (group - (COLUMNS as f32 - 1.0) * TILE_GAP) / COLUMNS as f32;
+    let fit_h = (area.height() - 2.0 * GAP - (rows as f32 - 1.0) * TILE_GAP) / rows as f32;
+    let tile = vec2(tile_w, fit_h.clamp(TILE_H_MIN, TILE_H));
     let size = vec2(
-        cols as f32 * side + (cols as f32 - 1.0) * GAP,
-        rows as f32 * side + (rows as f32 - 1.0) * GAP,
+        cols as f32 * tile.x + (cols as f32 - 1.0) * TILE_GAP,
+        rows as f32 * tile.y + (rows as f32 - 1.0) * TILE_GAP,
     );
-    let left = (area.center().x - size.x / 2.0).max(area.left() + GAP);
+    let left = (screen.center().x - size.x / 2.0).max(area.left() + GAP.min(area.width() / 2.0));
     let top = area.top() + ((area.height() - size.y) / 2.0).max(GAP);
     Layout {
+        header,
         log,
         area,
         grid: Rect::from_min_size(pos2(left, top), size),
-        side,
+        tile,
     }
+}
+
+/// What the header shows besides the grid: the names, the clock and the
+/// logo texture. The logo is `None` in tests that draw without one.
+#[derive(Default)]
+pub struct Chrome {
+    pub header: Header,
+    /// `HH:MM`; the app refreshes it before every frame.
+    pub clock: String,
+    pub logo: Option<TextureHandle>,
+}
+
+/// Logo, name, host, version and clock along the top of `rect`.
+fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
+    let p = ui.painter();
+    let fg = brand::theme().palette.foreground;
+    // The mark and the name sit back at 60 %.
+    let dim = |c: Color32| c.gamma_multiply(0.6);
+    let top = rect.top() + HEADER_PAD_TOP;
+    let mut x = rect.left() + HEADER_PAD_X;
+    if let Some(tex) = &chrome.logo {
+        let size = tex.size_vec2();
+        let logo = Rect::from_min_size(pos2(x, top), vec2(LOGO_H * size.x / size.y, LOGO_H));
+        p.image(
+            tex.id(),
+            logo,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            dim(Color32::WHITE),
+        );
+        x = logo.right() + 14.0;
+    }
+    let mid = top + LOGO_H / 2.0;
+    p.text(pos2(x, mid), Align2::LEFT_CENTER, "ThinFloe", brand::geo(34.0), dim(fg));
+    p.text(
+        pos2(rect.right() - HEADER_PAD_X, mid),
+        Align2::RIGHT_CENTER,
+        header_text(&chrome.header, &chrome.clock),
+        brand::geo(16.0),
+        MUTED,
+    );
 }
 
 /// The words the dialog uses for the way the menu ends: the verb, and its
@@ -175,7 +234,16 @@ fn capitalized(text: &str) -> String {
 }
 
 /// Draw one frame.
-pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Instant) -> Option<UiEvent> {
+pub fn show(
+    ui: &mut Ui,
+    menu: &Menu,
+    icons: &[Option<TextureHandle>],
+    chrome: &Chrome,
+    now: Instant,
+) -> Option<UiEvent> {
+    // The clock changes on the minute and at no other time.
+    ui.ctx()
+        .request_repaint_after(until_next_minute(std::time::SystemTime::now()));
     let (verb, verbing) = ending_words(menu.ending);
     // No background fill here: the canvas restores the page colour itself,
     // and while the dialog is up it holds the frozen grid, which a fill
@@ -357,6 +425,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
     }
     let shown = menu.visible_tiles();
     let l = layout(ui.max_rect(), shown.len());
+    show_header(ui, chrome, l.header);
     if menu.screen == Screen::Settings {
         let event = show_settings(ui, menu, icons, l.area);
         show_log(ui, &menu.log, l.log);
@@ -368,7 +437,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
         .id_salt("grid")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(GAP, GAP);
+            ui.spacing_mut().item_spacing = vec2(TILE_GAP, TILE_GAP);
             // add_space moves the cursor by exactly its amount; the item
             // spacing comes only between the rows and tiles that follow.
             ui.add_space(l.grid.top() - l.area.top());
@@ -379,15 +448,21 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], now: Inst
                         let tile = &menu.tiles[index];
                         let enabled = menu.can_activate(index);
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(l.side), sense);
+                        let (rect, resp) = ui.allocate_exact_size(l.tile, sense);
+                        let status = menu.status(index);
+                        let running = menu.running(index);
                         paint_tile(
                             ui,
                             rect,
                             tile,
                             icons[index].as_ref(),
-                            resp.hovered() && enabled,
-                            resp.has_focus(),
-                            menu.status(index).as_deref(),
+                            TileState {
+                                hovered: resp.hovered() && enabled,
+                                focused: resp.has_focus(),
+                                running,
+                                active: running > 0 || status.as_deref() == Some("running"),
+                                update: status.as_deref() == Some("update"),
+                            },
                         );
                         if resp.clicked() {
                             clicked = Some(UiEvent::Tile(index));
@@ -623,17 +698,18 @@ fn run_color(run: &Run, line_color: Color32, t: &Theme) -> Color32 {
 /// One log line: the time, then the program it came from, then the text.
 fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     let font = FontId::monospace(LOG_FONT);
-    let muted = TextFormat::simple(font.clone(), t.palette.muted_foreground);
     let text_color = match line.kind {
         Kind::Event => t.palette.foreground,
         Kind::Output => t.palette.muted_foreground,
         Kind::Warn => WARN,
+        Kind::Good => GOOD,
     };
     let mut job = LayoutJob::default();
-    job.append(&line.time, 0.0, muted.clone());
+    job.append(&line.time, 0.0, TextFormat::simple(font.clone(), TIME));
     let mut lead = 16.0;
     if let Some(source) = &line.source {
-        job.append(&format!("{source} | "), 16.0, muted);
+        job.append(source, 16.0, TextFormat::simple(font.clone(), ICE));
+        job.append(" | ", 0.0, TextFormat::simple(font.clone(), TIME));
         lead = 0.0;
     }
     for run in &line.runs {
@@ -647,95 +723,63 @@ fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     job
 }
 
-fn paint_tile(
-    ui: &Ui,
-    rect: Rect,
-    tile: &Tile,
-    icon: Option<&TextureHandle>,
+/// What a tile shows about the programs behind it.
+#[derive(Debug, Clone, Copy, Default)]
+struct TileState {
     hovered: bool,
     focused: bool,
-    status: Option<&str>,
-) {
+    /// Copies of its program running.
+    running: usize,
+    /// Whether the ice edge is drawn: a program runs, or the save does.
+    active: bool,
+    /// An add-on update waits for the next boot.
+    update: bool,
+}
+
+fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&TextureHandle>, state: TileState) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
-    let fill = if hovered { t.palette.accent } else { t.palette.card };
-    p.rect_filled(rect, t.radius_md(), fill);
-    let border = if usable { t.palette.border } else { WARN };
-    p.rect_stroke(rect, t.radius_md(), Stroke::new(1.0, border), StrokeKind::Inside);
-    if focused {
+    // A tile that cannot be used fades; its reason stays at full strength.
+    let fade = |c: Color32| if usable { c } else { c.gamma_multiply(0.35) };
+    let fill = if state.hovered {
+        TILE_HOVER
+    } else if state.active {
+        TILE_ACTIVE
+    } else {
+        TILE
+    };
+    p.rect_filled(rect, 0.0, fade(fill));
+    if state.active {
+        p.rect_filled(Rect::from_min_size(rect.min, vec2(EDGE_W, rect.height())), 0.0, ICE);
+    }
+    if state.focused {
         p.rect_stroke(
             rect.expand(2.0),
-            t.radius_md(),
+            0.0,
             Stroke::new(3.0, t.palette.ring),
             StrokeKind::Outside,
         );
     }
-    let fg = if usable {
-        t.palette.foreground
-    } else {
-        t.palette.muted_foreground
-    };
-    let icon_px = ICON_SIDE as f32 / ui.ctx().pixels_per_point();
-    let text_w = rect.width() - 24.0;
-    // Name and Comment come from files the user writes. Each is one line,
-    // cut with an ellipsis, and all text is clipped to the tile, so no file
-    // can paint over its neighbours.
-    let clipped = ui.painter_at(rect);
-    let mut lines = Vec::new();
-    let mut line = |text: &str, font: FontId, color: Color32, one_line: bool| {
-        let galley = if one_line {
-            let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-            job.wrap = TextWrapping::truncate_at_width(text_w);
-            clipped.layout_job(job)
-        } else {
-            clipped.layout(text.to_string(), font, color, text_w)
-        };
-        lines.push((galley, color));
-    };
-    line(&tile.name, FontId::proportional(20.0), fg, true);
-    if let Some(c) = &tile.comment {
-        line(c, FontId::proportional(14.0), t.palette.muted_foreground, true);
-    }
-    if let Some(why) = &tile.problem {
-        line(why, FontId::monospace(13.0), WARN, false);
-    }
-    if let Some(note) = &tile.note {
-        line(note, FontId::monospace(12.0), t.palette.muted_foreground, false);
-    }
-    if let Origin::Reworded { ignored } = &tile.origin {
-        let text = if ignored.is_empty() {
-            "reworded".to_string()
-        } else {
-            format!("reworded; ignored: {}", ignored.join(", "))
-        };
-        line(&text, FontId::monospace(12.0), t.palette.muted_foreground, false);
-    }
-    // Icon and text are one block in the middle of the square; a block too
-    // tall for it starts at the top and is clipped at the bottom.
-    let text_h: f32 = lines.iter().map(|(g, _)| g.size().y + 4.0).sum::<f32>() - 4.0;
-    let block_h = icon_px + 12.0 + text_h;
+    let ppp = ui.ctx().pixels_per_point();
     // On a whole pixel, or the icon texture is sampled between two pixels
     // and its edges turn ragged.
-    let ppp = ui.ctx().pixels_per_point();
-    let top = ((rect.center().y - block_h / 2.0).max(rect.top() + 16.0) * ppp).round() / ppp;
-    let icon_rect = Rect::from_center_size(pos2(rect.center().x, top + icon_px / 2.0), Vec2::splat(icon_px));
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let icon_rect = Rect::from_min_size(
+        pos2(snap(rect.left() + 22.0), snap(rect.center().y - ICON_BOX / 2.0)),
+        Vec2::splat(ICON_BOX),
+    );
     match icon {
         Some(tex) => {
-            let tint = if usable {
-                Color32::WHITE
-            } else {
-                Color32::from_gray(128)
-            };
             p.image(
                 tex.id(),
                 icon_rect,
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                tint,
+                fade(Color32::WHITE),
             );
         }
         None => {
-            p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
+            p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette.muted));
             let letter: String = tile
                 .name
                 .chars()
@@ -746,33 +790,64 @@ fn paint_tile(
                 icon_rect.center(),
                 Align2::CENTER_CENTER,
                 letter,
-                FontId::proportional(icon_px * 0.5),
-                fg,
+                brand::geo(ICON_BOX * 0.5),
+                fade(t.palette.foreground),
             );
         }
     }
-    let mut y = icon_rect.bottom() + 12.0;
-    for (galley, color) in lines {
-        clipped.galley(pos2(rect.center().x - galley.size().x / 2.0, y), galley.clone(), color);
-        y += galley.size().y + 4.0;
+    // Name and Comment come from files the user writes. Each is one line,
+    // cut with an ellipsis, and all text is clipped to the tile, so no file
+    // can paint over its neighbours.
+    let text_x = icon_rect.right() + 14.0;
+    let text_w = (rect.right() - 14.0 - text_x).max(0.0);
+    let clipped = ui.painter_at(rect);
+    let mut lines = Vec::new();
+    let mut line = |text: &str, font: FontId, color: Color32| {
+        let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+        job.wrap = TextWrapping::truncate_at_width(text_w);
+        lines.push(clipped.layout_job(job));
+    };
+    line(&tile.name, brand::geo(21.0), fade(t.palette.foreground));
+    // One second line: why the tile is grey, else its comment, else the
+    // note about its file. `--check` has the long form.
+    if let Some(why) = &tile.problem {
+        line(why, FontId::proportional(11.0), WARN);
+    } else if let Some(c) = tile.comment.as_ref().or(tile.note.as_ref()) {
+        line(c, FontId::proportional(11.0), fade(MUTED));
+    }
+    let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
+    let block_h = heights.iter().sum::<f32>() + 2.0 * (lines.len() as f32 - 1.0);
+    let mut y = snap(rect.center().y - block_h / 2.0);
+    for (galley, h) in lines.into_iter().zip(heights) {
+        clipped.galley(pos2(text_x, y), galley, Color32::WHITE);
+        y += h + 2.0;
+    }
+    if state.running > 1 {
+        p.text(
+            rect.right_top() + vec2(-9.0, 7.0),
+            Align2::RIGHT_TOP,
+            format!("×{}", state.running),
+            brand::geo(15.0),
+            ICE,
+        );
+    }
+    // Small marks along the bottom right.
+    let mut right = rect.right() - 9.0;
+    let mut mark = |text: &str, color: Color32| {
+        let r = p.text(
+            pos2(right, rect.bottom() - 6.0),
+            Align2::RIGHT_BOTTOM,
+            text,
+            FontId::proportional(11.0),
+            color,
+        );
+        right = r.left() - 8.0;
+    };
+    if state.update {
+        mark("update", ICE);
     }
     if tile.origin == Origin::User {
-        p.text(
-            rect.right_top() + vec2(-8.0, 6.0),
-            Align2::RIGHT_TOP,
-            "user",
-            FontId::monospace(11.0),
-            t.palette.muted_foreground,
-        );
-    }
-    if let Some(status) = status {
-        p.text(
-            rect.left_top() + vec2(8.0, 6.0),
-            Align2::LEFT_TOP,
-            status,
-            FontId::monospace(11.0),
-            t.palette.ring,
-        );
+        mark("user", MUTED);
     }
 }
 
@@ -836,7 +911,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            show(ui, &menu, &[None], Instant::now());
+            show(ui, &menu, &[None], &Chrome::default(), Instant::now());
         });
         // The font atlas upload is not applied anywhere here.
         out.textures_delta.clear();
@@ -867,37 +942,26 @@ mod tests {
     }
 
     #[test]
-    fn seven_tiles_on_full_hd_are_square_centred_and_above_the_log() {
-        let l = layout(screen(1920.0, 1080.0), 7);
-        assert_eq!(l.side, TILE_MAX);
-        assert_eq!(l.grid.size(), vec2(4.0 * TILE_MAX + 3.0 * GAP, 2.0 * TILE_MAX + GAP));
-        assert!((l.grid.center().x - 960.0).abs() < 0.5, "{:?}", l.grid);
-        assert!(
-            (l.grid.center().y - l.area.center().y).abs() < 0.5,
-            "{:?} in {:?}",
-            l.grid,
-            l.area
-        );
-        assert!(l.grid.bottom() <= l.log.top());
+    fn eight_tiles_on_full_hd_are_two_rows_of_bands_at_58_percent() {
+        let l = layout(screen(1920.0, 1080.0), 8);
+        assert!((l.grid.width() - 0.58 * 1920.0).abs() < 1.0, "{:?}", l.grid);
+        assert!((l.grid.center().x - 960.0).abs() < 1.0);
+        assert!(l.tile.x > l.tile.y * 2.5, "bands, not squares: {:?}", l.tile);
+        assert!(l.tile.y >= 64.0);
+        assert!(l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top());
         assert!(l.log.height() >= 0.3 * 1080.0 - 2.0 * GAP, "{:?}", l.log);
         assert!(l.log.bottom() <= 1080.0 && l.log.left() >= 0.0 && l.log.right() <= 1920.0);
     }
 
     #[test]
-    fn the_shipped_seven_tiles_fit_above_the_log_on_1280_by_720() {
-        let l = layout(screen(1280.0, 720.0), 7);
-        assert!(l.grid.bottom() <= l.log.top(), "{:?}", l);
-        assert!(l.grid.right() <= 1280.0, "{:?}", l);
-    }
-
-    #[test]
-    fn eight_tiles_fit_1280x720() {
-        // Every shipped tile with every add-on installed.
-        let l = layout(screen(1280.0, 720.0), 8);
-        assert_eq!(l.side, TILE_MAX);
-        assert!(l.grid.bottom() <= l.log.top(), "{:?}", l);
-        assert!(l.grid.top() >= GAP && l.grid.right() <= 1280.0 - GAP, "{:?}", l);
-        assert!(l.grid.height() <= l.area.height(), "no scrolling: {:?}", l);
+    fn nine_tiles_fit_between_header_and_log_on_1280_by_720() {
+        let l = layout(screen(1280.0, 720.0), 9);
+        assert!(
+            l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top(),
+            "{l:?}"
+        );
+        assert!(l.grid.left() >= 0.0 && l.grid.right() <= 1280.0, "{l:?}");
+        assert!(l.tile.x > l.tile.y * 2.5, "{:?}", l.tile);
     }
 
     fn texts_of(menu: &Menu, icons: &[Option<TextureHandle>]) -> Vec<String> {
@@ -910,7 +974,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, menu, icons, Instant::now());
+                show(ui, menu, icons, &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
@@ -993,15 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn tiles_shrink_to_fit_but_not_below_the_minimum() {
-        let l = layout(screen(800.0, 600.0), 6);
-        assert!(l.side < TILE_MAX && l.side >= TILE_MIN, "{}", l.side);
-        assert!(l.grid.width() <= 800.0);
-        let tiny = layout(screen(300.0, 300.0), 6);
-        assert_eq!(tiny.side, TILE_MIN);
-    }
-
-    #[test]
     fn the_log_keeps_its_minimum_rows_on_a_short_screen() {
         let l = layout(screen(1280.0, 480.0), 6);
         assert!(l.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW, "{:?}", l.log);
@@ -1058,7 +1113,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None], Instant::now());
+                show(ui, &menu, &[None], &Chrome::default(), Instant::now());
             });
             // The font atlas upload is not applied anywhere here.
             o.textures_delta.clear();
@@ -1131,7 +1186,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &icons, Instant::now());
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
@@ -1142,15 +1197,13 @@ mod tests {
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
-                egui::Shape::Rect(r)
-                    if r.fill != Color32::TRANSPARENT && (r.rect.size() - Vec2::splat(l.side)).length() < 0.5 =>
-                {
+                egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT && (r.rect.size() - l.tile).length() < 0.5 => {
                     Some(r.rect)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(tiles.len(), names.len(), "one square per tile");
+        assert_eq!(tiles.len(), names.len(), "one band per tile");
         let painted = tiles.iter().fold(Rect::NOTHING, |a, r| a.union(*r));
         assert!(
             (painted.min - l.grid.min).length() < 0.5 && (painted.max - l.grid.max).length() < 0.5,
@@ -1180,7 +1233,7 @@ mod tests {
                 egui::Shape::Rect(r)
                     if r.fill != Color32::TRANSPARENT
                         && tile.contains_rect(r.rect)
-                        && r.rect.width() < l.side - 1.0 =>
+                        && r.rect.width() < l.tile.x - 1.0 =>
                 {
                     Some(r.rect)
                 }
@@ -1188,11 +1241,19 @@ mod tests {
             })
             .expect("letter placeholder drawn");
         assert_eq!(icon.top(), icon.top().round(), "icon on a whole pixel");
+        assert!(icon.left() - tile.left() >= 20.0, "icon clear of the edge");
         let above = icon.top() - tile.top();
-        let below = tile.bottom() - name.bottom();
+        let below = tile.bottom() - icon.bottom();
         assert!(
             (above - below).abs() <= 1.0,
-            "content {above} from the top, {below} from the bottom"
+            "icon {above} from the top, {below} from the bottom"
+        );
+        assert!(name.left() > icon.right(), "name {name:?} right of the icon {icon:?}");
+        let above = name.top() - tile.top();
+        let below = tile.bottom() - name.bottom();
+        assert!(
+            (above - below).abs() <= 3.0,
+            "name {above} from the top, {below} from the bottom"
         );
     }
 
@@ -1220,7 +1281,7 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None], Instant::now());
+                show(ui, &menu, &[None], &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             out = Some(o);
@@ -1247,12 +1308,41 @@ mod tests {
     }
 
     #[test]
-    fn a_running_tile_shows_its_status() {
+    fn a_log_line_has_the_colour_roles() {
+        let t = Theme::current(&{
+            let c = egui::Context::default();
+            brand::apply(&c);
+            c
+        });
+        let line = |kind| crate::log::Line {
+            time: "12:00:00".into(),
+            source: Some("save-home".into()),
+            runs: vec![crate::log::Run::plain("text")],
+            kind,
+        };
+        let colour_of = |job: &LayoutJob, needle: &str| {
+            let at = job.text.find(needle).unwrap();
+            job.sections
+                .iter()
+                .find(|s| s.byte_range.contains(&egui::text::ByteIndex(at)))
+                .unwrap()
+                .format
+                .color
+        };
+        let job = log_job(&line(crate::log::Kind::Good), &t);
+        assert_eq!(colour_of(&job, "12:00"), TIME);
+        assert_eq!(colour_of(&job, "save-home"), ICE);
+        assert_eq!(colour_of(&job, "text"), GOOD);
+        assert_eq!(colour_of(&log_job(&line(crate::log::Kind::Warn), &t), "text"), WARN);
+    }
+
+    #[test]
+    fn a_tile_with_two_copies_shows_the_edge_and_the_count() {
         let mut t1 = plain_tile("T1");
         t1.multiple = true;
         let mut menu = Menu::new(
             Grid {
-                tiles: vec![plain_tile("T0"), t1],
+                tiles: vec![plain_tile("T0"), t1, plain_tile("T2")],
                 banner: vec![],
             },
             false,
@@ -1270,13 +1360,31 @@ mod tests {
         let mut out = None;
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &[None, None], now);
+                show(ui, &menu, &[None, None, None], &Chrome::default(), now);
             });
             o.textures_delta.clear();
             out = Some(o);
         }
+        let out = out.unwrap();
+        let l = layout(screen(1280.0, 720.0), 3);
+        // The ice edge: a 5 wide bar at the left of the band, full height.
+        let edges: Vec<Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edges.len(), 2, "an edge on each running tile only: {edges:?}");
+        for e in &edges {
+            assert!((e.height() - l.tile.y).abs() < 0.5, "{e:?}");
+            assert!(
+                (e.left() - l.grid.left()).abs() < 0.5
+                    || (e.left() - (l.grid.left() + l.tile.x + TILE_GAP)).abs() < 0.5
+            );
+        }
         let texts: Vec<String> = out
-            .unwrap()
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
@@ -1284,8 +1392,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(texts.iter().any(|t| t == "running"), "{texts:?}");
-        assert!(texts.iter().any(|t| t == "2 running"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "×2"), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with('×')).count(),
+            1,
+            "one copy shows no count"
+        );
     }
 
     #[test]
@@ -1318,7 +1430,7 @@ mod tests {
             let mut frame = input.clone();
             frame.time = Some(i as f64);
             let mut o = ctx.run_ui(frame, |ui| {
-                show(ui, &menu, &[None], now + Duration::from_secs(1));
+                show(ui, &menu, &[None], &Chrome::default(), now + Duration::from_secs(1));
             });
             o.textures_delta.clear();
             delay = o.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
