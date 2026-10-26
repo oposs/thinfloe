@@ -415,7 +415,7 @@ impl ApplicationHandler<Wake> for App {
             return;
         }
         // The app_id labwc's window rule in /etc/thinfloe/labwc/rc.xml matches
-        // to keep the menu at the bottom and off the taskbar.
+        // to keep the menu at the bottom and out of the window list.
         let attrs = Window::default_attributes()
             .with_title("thinfloe-menu")
             .with_name("thinfloe-menu", "")

@@ -129,12 +129,22 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `rc.xml` also holds the window rule that keeps the window with app_id
   `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the
   window list that feeds the menu's folded-window strip (`skipTaskbar`).
-- No taskbar: waybar and GTK 3 left the image. labwc draws an iconify button
+- No window list: waybar and GTK 3 left the image. labwc draws an iconify button
   and, with zero keybindings, a minimized window needs a way back: it shows
   as a chip in the folded-window strip at the bottom of `thinfloe-menu`, and
   one click restores it. A fullscreen ThinLinc client covers the menu, so
   the strip is visible exactly when no window is fullscreen, which is when a
   window can go missing.
+- The look (Part 4): palette, logo and Geo (OFL, `Geo-Oblique.ttf`) live in
+  `src/thinfloe-menu/src/brand.rs`; the font is compiled into the menu and also
+  installed at `/usr/share/fonts/truetype/thinfloe/` for labwc's title bars
+  (`rc.xml` `<theme>`), licence at `/usr/share/thinfloe/fonts/Geo-OFL.txt`. Geo
+  draws names and titles, small text a plain sans, the log monospace; glyphs
+  Geo lacks (umlauts, CJK, emoji) come from the fallback font. The Plymouth
+  theme is `overlay/usr/share/plymouth/themes/thinfloe/` (label-pango); the
+  host name reaches it through `plymouth display-message` in
+  `tf_write_hostname`. The version shows in the header only when
+  `/etc/thinfloe/version` exists; nothing writes it yet.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
@@ -1131,6 +1141,17 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - **Confirmed on hardware (2026-10-07):** tiles start their programs,
   Save-On-Exit, Back up home and the logout Stay / Log out anyway dialog
   work. The square tiles and the log area have not been run on hardware.
+- **Folded windows.** `thinfloe-menu` watches toplevels through
+  `wlr-foreign-toplevel-management` (`src/windows.rs`); a folded window
+  gets a chip in the strip below the log, and a chip click unfolds it. A
+  broken Wayland connection empties the list. From a VT or SSH,
+  `thinfloe-menu --windows` prints `app_id<TAB>title<TAB>folded|open` per
+  window and `thinfloe-menu --unfold <app_id or title>` unfolds a window
+  whose chip is gone.
+- Not verified on hardware (Part 4): the boot screen on real firmware (and
+  its host-name line), the title bars, the strip and chip clicks with a real
+  mouse, the DHCP time zone from a real DHCP server (on netboot as well; only
+  QEMU with dnsmasq has run it).
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

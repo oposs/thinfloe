@@ -134,11 +134,11 @@ else
 fi
 
 # The menu is the bottom window: a program clicked away must not go behind
-# it, and the taskbar must not offer to minimise it. Matched by app_id.
+# it, and the window list must not offer to minimise it. Matched by app_id.
 if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
    tr -d '\n' < "$RC/etc/thinfloe/labwc/rc.xml" |
    grep -qE '<windowRule[^>]*identifier="thinfloe-menu"[^>]*skipTaskbar="yes"[^>]*>[[:space:]]*<action name="ToggleAlwaysOnBottom"'; then
-    echo "ok   - rc.xml keeps thinfloe-menu at the bottom and off the taskbar"
+    echo "ok   - rc.xml keeps thinfloe-menu at the bottom and out of the window list"
 else
     echo "FAIL - rc.xml has no ToggleAlwaysOnBottom/skipTaskbar rule for thinfloe-menu"
     fail=1
