@@ -16,7 +16,7 @@
 - The image download (`thinfloe-usb.img.zst`) is now 608 MB instead of 772 MB, and an upgrade downloads 611 MB instead of 775 MB. `initrd.img` on the boot stick no longer carries WiFi firmware; the running system loads it from the main image, as it did before.
 - The unused `ubuntu` login from the Ubuntu base image is gone. `tfuser` keeps its user ID.
 - `vim` on the machine is now the small `vim-tiny`: the command `vim` still opens it, but without syntax colours and plugins. `joe` is unchanged.
-- ThinLinc is no longer part of the image. It is installed from cendio.com when ticked in Settings, and a machine that had it is ticked on its first ThinFloe boot. OxuLnk works the same way once its package source is published.
+- ThinLinc is no longer part of the image. It is installed from cendio.com when ticked in Settings, and a machine that had it is ticked on its first ThinFloe boot. OxuLnk works the same way; it comes from the oposs package repository at gitea.oetiker.ch.
 - The login user is now `tfuser` instead of `tluser`, with the same user ID, home contents and saved settings. `/home/tluser` still leads to the home, and SSH logins and any `sudo thinfloe-password` password now use `tfuser`.
 - Machines are now named `thinfloe-` followed by the same six digits, instead of `dbrrg-`. DNS entries, monitoring and ThinLinc server settings that know a machine by its name need updating.
 - The commands an administrator types have new names: `sudo thinfloe-password` (was `dbrrg-password`), `thinfloe-upgrade` (was `upgrade-image`) and `thinfloe-menu --check` (was `dbrrg-menu --check`).
