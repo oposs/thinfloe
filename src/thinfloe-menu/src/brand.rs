@@ -33,6 +33,9 @@ pub fn theme() -> egui_shadcn::Theme {
     t.palette.background = BG;
     t.palette.card = TILE;
     t.palette.accent = TILE_HOVER;
+    // The primary button is ice blue with dark text, as in the mockups.
+    t.palette.primary = ICE;
+    t.palette.primary_foreground = Color32::from_rgb(0x04, 0x12, 0x1f);
     t.palette.ring = ICE;
     t.palette.border = LINE;
     t.palette.muted_foreground = MUTED;

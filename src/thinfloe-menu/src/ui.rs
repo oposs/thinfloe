@@ -599,9 +599,17 @@ const ROW_ICON: f32 = 40.0;
 fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area: Rect) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
-    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(area.shrink(GAP)));
+    // The panel is as wide as the tile group of the desktop, centred.
+    let inner = area.shrink(GAP);
+    let width = (GROUP_SHARE * area.width()).max(GROUP_MIN).min(inner.width());
+    let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
+    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
     s_ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Add-ons").size(20.0).color(t.palette.foreground));
+        ui.label(
+            egui::RichText::new("Add-ons")
+                .font(brand::geo(28.0))
+                .color(t.palette.foreground),
+        );
         ui.add_space(12.0);
         // SAFETY: time(NULL) has no preconditions.
         let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
@@ -610,7 +618,10 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
             if ui.add(Button::new("Back").variant(ButtonVariant::Secondary)).clicked() {
                 event = Some(SettingsEvent::Back);
             }
-            if ui.add_enabled(!menu.checking(), Button::new("Check now")).clicked() {
+            if ui
+                .add_enabled(!menu.checking(), Button::new("Check now").variant(ButtonVariant::Secondary))
+                .clicked()
+            {
                 event = Some(SettingsEvent::CheckNow);
             }
         });
@@ -624,19 +635,32 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<TextureHandle>], area
             if rows.is_empty() {
                 ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette.muted_foreground));
             }
+            ui.spacing_mut().item_spacing.y = TILE_GAP;
             for row in rows {
-                egui::Frame::new()
-                    .fill(t.palette.card)
-                    .stroke(Stroke::new(1.0, t.palette.border))
-                    .corner_radius(t.radius_md())
-                    .inner_margin(12.0)
+                // A TILE band; the ice edge on the left marks a waiting update.
+                let framed = egui::Frame::new()
+                    .fill(TILE)
+                    .inner_margin(egui::Margin {
+                        left: 22,
+                        right: 16,
+                        top: 12,
+                        bottom: 12,
+                    })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        if let Some(e) = settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t) {
-                            event = Some(e);
-                        }
+                        settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t)
                     });
-                ui.add_space(8.0);
+                if row.button == Some(RowButton::UpdateNow) {
+                    let r = framed.response.rect;
+                    ui.painter().rect_filled(
+                        Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)),
+                        0.0,
+                        ICE,
+                    );
+                }
+                if let Some(e) = framed.inner {
+                    event = Some(e);
+                }
             }
         });
     event
@@ -667,7 +691,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 );
             }
             None => {
-                ui.painter().rect_filled(rect, t.radius_sm(), t.palette.muted);
+                ui.painter().rect_filled(rect, 0.0, TILE_HOVER);
                 let letter: String = row
                     .name
                     .chars()
@@ -678,7 +702,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                     rect.center(),
                     Align2::CENTER_CENTER,
                     letter,
-                    FontId::proportional(ROW_ICON * 0.5),
+                    brand::geo(ROW_ICON * 0.5),
                     t.palette.foreground,
                 );
             }
@@ -692,7 +716,16 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 None => None,
             };
             if let Some(label) = label
-                && ui.add_enabled(!row.busy, Button::new(label)).clicked()
+                && ui
+                    .add_enabled(!row.busy, {
+                        let b = Button::new(label);
+                        if row.button == Some(RowButton::UpdateNow) {
+                            b
+                        } else {
+                            b.variant(ButtonVariant::Secondary)
+                        }
+                    })
+                    .clicked()
             {
                 event = Some(match row.button {
                     Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
@@ -700,23 +733,23 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&TextureHandle>, 
                 });
             }
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                let one_line = |ui: &mut Ui, text: &str, size: f32, color: Color32| {
-                    let mut job = LayoutJob::simple_singleline(text.to_string(), FontId::proportional(size), color);
+                let one_line = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
+                    let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
                     job.wrap = TextWrapping::truncate_at_width(ui.available_width());
                     ui.label(job);
                 };
-                one_line(ui, &row.name, 16.0, t.palette.foreground);
+                one_line(ui, &row.name, brand::geo(20.0), t.palette.foreground);
                 if let Some(source) = &row.source {
-                    one_line(ui, source, 13.0, t.palette.muted_foreground);
+                    one_line(ui, source, FontId::monospace(11.0), MUTED);
                 }
                 let state = if row.busy {
                     format!("{} · working…", row.state)
                 } else {
                     row.state.clone()
                 };
-                one_line(ui, &state, 13.0, t.palette.foreground);
+                one_line(ui, &state, FontId::proportional(12.0), t.palette.foreground);
                 if row.manual {
-                    one_line(ui, settings::MANUAL_NOTE, 12.0, WARN);
+                    one_line(ui, settings::MANUAL_NOTE, FontId::proportional(12.0), WARN);
                 }
             });
         });
@@ -980,13 +1013,12 @@ fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(t.palette.card)
-                .stroke(Stroke::new(1.0, t.palette.border))
-                .corner_radius(t.radius_lg())
+                .fill(TILE)
+                .stroke(Stroke::new(1.0, brand::LINE))
                 .inner_margin(24.0)
                 .show(ui, |ui| {
                     ui.set_width(460.0);
-                    ui.label(egui::RichText::new(title).size(18.0));
+                    ui.label(egui::RichText::new(title).font(brand::geo(24.0)));
                     body(ui, &t);
                 });
         });
@@ -1176,6 +1208,23 @@ mod tests {
         for want in ["ThinLinc could not be installed: HTTP 404", "Retry", "Later"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
+    }
+
+    #[test]
+    fn the_dialog_title_is_drawn_in_geo() {
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.set_addons(vec![failed()]);
+        let shapes = shapes_of(&menu, 2, Instant::now());
+        let family = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Add-on not installed" => {
+                    Some(t.galley.job.sections[0].format.font_id.family.clone())
+                }
+                _ => None,
+            })
+            .expect("dialog title not drawn");
+        assert_eq!(family, egui::FontFamily::Name(crate::brand::GEO.into()));
     }
 
     #[test]
@@ -1811,5 +1860,52 @@ mod tests {
         assert_eq!(anyway(Action::Reboot), "Restart anyway");
         assert_eq!(anyway(Action::Poweroff), "Power off anyway");
         assert_eq!(capitalized(ending_words(Action::Poweroff).1), "Powering off");
+    }
+
+    /// Writes PPM files of the Settings screen and a dialog through the real
+    /// rasteriser, for looking at. Run by hand:
+    /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
+    fn shot(menu: &Menu, name: &str) {
+        let Some(dir) = std::env::var_os("TF_SHOT_DIR") else { return };
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<TextureHandle>> = vec![None, None];
+        let mut textures = crate::raster::Textures::default();
+        let mut canvas = crate::raster::Canvas::new(1280, 720, crate::brand::BG);
+        for frame in 0..12 {
+            let mut input = input.clone();
+            input.time = Some(frame as f64 * 0.1);
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, menu, &icons, &Chrome::default(), Instant::now());
+            });
+            textures.apply_set(&out.textures_delta);
+            out.textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, 1.0);
+            canvas.restore_background(canvas.bounds());
+            canvas.draw(&prims, &textures, 1.0, canvas.bounds());
+        }
+        let mut ppm = b"P6\n1280 720\n255\n".to_vec();
+        for px in &canvas.pixels {
+            ppm.extend([(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
+        }
+        std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn shot_settings_and_dialog() {
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.activate(1, Instant::now());
+        menu.set_addons(vec![failed()]);
+        shot(&menu, "settings.ppm");
+        let mut menu = Menu::new(addon_grid(), false);
+        menu.logout = Some(Logout::Failed {
+            message: "The home directory could not be saved: boot server unreachable.".into(),
+        });
+        shot(&menu, "dialog.ppm");
     }
 }
