@@ -30,9 +30,11 @@
     Title bar font: Geo, shipped in /usr/share/fonts/truetype/thinfloe. The
     colours are in themerc-override next to this file. No window icon on
     the left (labwc's default layout is icon:iconify,max,close): it pushed
-    the title about 32 px in.
+    the title about 32 px in. Square corners, like the menu (labwc's
+    default radius is 8).
   -->
   <theme>
+    <cornerRadius>0</cornerRadius>
     <titlebar>
       <layout>:iconify,max,close</layout>
     </titlebar>

@@ -142,6 +142,13 @@ else
     echo "FAIL - rc.xml title bar layout is not ':iconify,max,close'"
     fail=1
 fi
+if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
+   grep -qE '<cornerRadius>0</cornerRadius>' "$RC/etc/thinfloe/labwc/rc.xml"; then
+    echo "ok   - rc.xml title bars have square corners"
+else
+    echo "FAIL - rc.xml does not set cornerRadius 0"
+    fail=1
+fi
 
 # The menu is the bottom window: a program clicked away must not go behind
 # it, and the window list must not offer to minimise it. Matched by app_id.
