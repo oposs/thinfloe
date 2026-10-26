@@ -3,6 +3,7 @@
 pub mod addons;
 pub mod app;
 pub mod bounded;
+pub mod brand;
 pub mod damage;
 pub mod desktop;
 pub mod icons;

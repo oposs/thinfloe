@@ -249,7 +249,7 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(live) = self.live.as_mut() else { return };
-        egui_shadcn::Theme::dark().apply(&self.ctx);
+        crate::brand::apply(&self.ctx);
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
@@ -266,7 +266,7 @@ impl App {
             if saving {
                 live.canvas.freeze_dimmed(DIM_KEEP);
             } else {
-                let bg = egui_shadcn::Theme::dark().palette.background;
+                let bg = crate::brand::theme().palette.background;
                 live.canvas.background = Background::Solid(bg);
             }
             self.frozen = saving;
@@ -399,7 +399,7 @@ impl ApplicationHandler<Wake> for App {
             let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();
             eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
         }
-        let bg = egui_shadcn::Theme::dark().palette.background;
+        let bg = crate::brand::theme().palette.background;
         self.live = Some(Live {
             window: window.clone(),
             surface,
@@ -463,7 +463,7 @@ impl ApplicationHandler<Wake> for App {
                     if let Err(e) = live.surface.resize(w, h) {
                         eprintln!("thinfloe-menu: resize failed: {e}");
                     }
-                    let bg = egui_shadcn::Theme::dark().palette.background;
+                    let bg = crate::brand::theme().palette.background;
                     live.canvas = Canvas::new(size.width as usize, size.height as usize, bg);
                     self.frozen = false;
                     live.tracker.reset();

@@ -35,14 +35,13 @@ pub const LOG_ROW: f32 = 18.0;
 const LOG_PAD: f32 = 10.0;
 const LOG_FONT: f32 = 13.0;
 pub const ICON_SIDE: u32 = 96;
-/// A warning amber, for reasons drawn on a disabled tile.
-pub const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
+pub use crate::brand::WARN;
 
 /// Each tile's icon, rasterised in renderer processes as the menu draws it:
 /// `None` when the tile names no icon that resolves, otherwise the path and
 /// the image or why there is none. Both draw the letter.
 pub fn render_icons(tiles: &[Tile], roots: &IconRoots) -> Vec<Option<(PathBuf, Result<ColorImage, String>)>> {
-    let fg = Theme::dark().palette.foreground;
+    let fg = crate::brand::theme().palette.foreground;
     let rgb = [fg.r(), fg.g(), fg.b()];
     let (index, jobs): (Vec<usize>, Vec<IconJob>) = tiles
         .iter()
@@ -831,7 +830,7 @@ mod tests {
             false,
         );
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0))),
             ..Default::default()
@@ -903,7 +902,7 @@ mod tests {
 
     fn texts_of(menu: &Menu, icons: &[Option<TextureHandle>]) -> Vec<String> {
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1050,7 +1049,7 @@ mod tests {
             kind: crate::log::Kind::Output,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1123,7 +1122,7 @@ mod tests {
             false,
         );
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1213,7 +1212,7 @@ mod tests {
             kind: crate::log::Kind::Output,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1263,7 +1262,7 @@ mod tests {
         menu.activate(1, now);
         menu.activate(1, now);
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
@@ -1308,7 +1307,7 @@ mod tests {
             killed: true,
         });
         let ctx = egui::Context::default();
-        Theme::dark().apply(&ctx);
+        crate::brand::apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             ..Default::default()
