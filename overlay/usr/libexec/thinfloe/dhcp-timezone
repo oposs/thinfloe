@@ -1,0 +1,71 @@
+#!/bin/bash
+# Set the system time zone from the TIMEZONE= line (DHCP option 101) in
+# networkd's lease files. Runs as root on a value any DHCP server on the LAN
+# can send, so the value is checked before anything uses it:
+#   - 1 to 64 characters from letters, digits and / _ + -
+#   - no ".." and no leading "/" or "-"
+#   - names a regular TZif file under the zoneinfo directory, and the file
+#     really lives there once symlinks are resolved
+# Anything else is logged, cut and with control characters replaced, and
+# changes nothing.
+#
+# THINFLOE_LEASE_DIR and THINFLOE_ZONEINFO_DIR exist for the offline test.
+set -u
+export LC_ALL=C
+
+LEASE_DIR=${THINFLOE_LEASE_DIR:-/run/systemd/netif/leases}
+ZONEINFO=${THINFLOE_ZONEINFO_DIR:-/usr/share/zoneinfo}
+
+# The value as one printable, cut line: no control characters reach the journal.
+safe() {
+    printf '%s' "${1:0:64}" | tr -c '[:print:]' '?'
+}
+
+ignored() {
+    printf "thinfloe: ignored DHCP time zone '%s': %s\n" "$(safe "$1")" "$2"
+}
+
+# Prints the reason and fails when $1 is not an acceptable zone name.
+check() {
+    local zone=$1 file root real magic
+    if [ -z "$zone" ] || [ "${#zone}" -gt 64 ]; then
+        echo "not 1 to 64 characters"; return 1
+    fi
+    case $zone in
+        *[!A-Za-z0-9/_+-]*) echo "characters outside letters, digits and / _ + -"; return 1 ;;
+        *..*|/*|-*) echo "not a plain zone name"; return 1 ;;
+    esac
+    file=$ZONEINFO/$zone
+    if [ -d "$file" ]; then echo "a directory, not a zone"; return 1; fi
+    if [ ! -f "$file" ]; then echo "no such zone in $ZONEINFO"; return 1; fi
+    root=$(realpath -e -- "$ZONEINFO") || { echo "no zone database"; return 1; }
+    real=$(realpath -e -- "$file") || { echo "no such zone in $ZONEINFO"; return 1; }
+    case $real in
+        "$root"/*) ;;
+        *) echo "points outside $ZONEINFO"; return 1 ;;
+    esac
+    IFS= read -r -N 4 magic <"$real" 2>/dev/null
+    if [ "$magic" != "TZif" ]; then echo "not a time zone file"; return 1; fi
+    return 0
+}
+
+for lease in "$LEASE_DIR"/*; do
+    [ -f "$lease" ] || continue
+    value=
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+            TIMEZONE=*) value=${line#TIMEZONE=}; break ;;
+        esac
+    done <"$lease"
+    [ -n "$value" ] || continue
+    if why=$(check "$value"); then
+        if timedatectl set-timezone -- "$value"; then
+            echo "thinfloe: time zone $value from DHCP"
+        else
+            echo "thinfloe: could not set DHCP time zone '$value'"
+        fi
+    else
+        ignored "$value" "$why"
+    fi
+done
+exit 0

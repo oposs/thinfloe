@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch the DHCP leases for a time zone
+
+# No Before= on anything: see thinfloe-dhcp-timezone.service.
+
+[Path]
+PathChanged=/run/systemd/netif/leases
+# networkd rewrites a lease file on every renewal; the directory changes only
+# when a file is created, renamed or removed, which is what a rewrite does.
+Unit=thinfloe-dhcp-timezone.service
+
+[Install]
+WantedBy=multi-user.target

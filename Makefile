@@ -41,7 +41,7 @@ EFI_PARTITION_SIZE ?= 3000
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -57,6 +57,7 @@ help:
 	@echo "  qemu-test         - Test boot image in QEMU (EFI)"
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
+	@echo "  qemu-smoke-timezone - Headless boot with a DHCP time zone (option 101)"
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
 	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
@@ -324,6 +325,29 @@ qemu-smoke-netboot: $(KERNEL) $(INITRD) $(SQUASHFS) | $(IMAGE_DIR)
 		-object rng-random,filename=/dev/urandom,id=rng0 \
 		-device virtio-rng-pci,rng=rng0
 
+# Headless boot on a tap device whose DHCP server (dnsmasq, unprivileged, in a
+# user and network namespace) sends time zone Europe/Zurich as option 101.
+# Requires the line "thinfloe: time zone Europe/Zurich from DHCP" on the
+# console. See scripts/run-qemu-timezone-smoke.sh.
+QEMU_TIMEZONE_LOG := $(IMAGE_DIR)/qemu-timezone-smoke.log
+
+qemu-smoke-timezone: $(QCOW2_BOOT_IMAGE) $(KERNEL) $(INITRD)
+	@echo "Running headless time zone smoke test..."
+	scripts/run-qemu-timezone-smoke.sh $(QEMU_TIMEZONE_LOG) \
+		$(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		-machine type=q35,accel=kvm \
+		-cpu host,migratable=off \
+		-smp $(BUILD_JOBS) \
+		-m $(QEMU_MEMORY) \
+		-display none \
+		-no-reboot \
+		-object rng-random,filename=/dev/urandom,id=rng0 \
+		-device virtio-rng-pci,rng=rng0 \
+		-drive file=$(QCOW2_BOOT_IMAGE),format=qcow2,if=virtio \
+		-kernel $(KERNEL) \
+		-initrd $(INITRD) \
+		-append "ramroot=tl/ramroot.sqsh $(QEMU_SMOKE_APPEND)"
+
 # Headless first boot of a staged upgrade: tl.new/ on the stick and
 # syslinux.cfg on DEFAULT new, as thinfloe-upgrade leaves them, booted through
 # OVMF and syslinux. Requires the initramfs to rotate tl.new into tl/ and set
@@ -377,6 +401,7 @@ test: test-unit rootfs
 	@test/integration/test-ssh-hostkeys.sh
 	@test/integration/test-save-home.sh
 	@test/integration/test-password.sh
+	@test/integration/test-dhcp-timezone.sh
 	@test/integration/test-field-report.sh
 	@test/integration/test-cmdline.sh
 	@test/integration/test-session-lifecycle.sh

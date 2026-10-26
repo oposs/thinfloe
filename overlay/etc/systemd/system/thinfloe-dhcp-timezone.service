@@ -1,0 +1,12 @@
+[Unit]
+Description=Set the time zone the DHCP server sent
+# Deliberately no Before= on anything in sysinit.target. This unit is started
+# by a path unit that is WantedBy=multi-user.target and so is implicitly
+# After=basic.target; see CLAUDE.md, "A multi-user.target unit must never
+# declare Before= on a sysinit.target unit".
+After=systemd-networkd.service
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+ExecStart=/usr/libexec/thinfloe/dhcp-timezone

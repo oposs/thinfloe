@@ -49,6 +49,11 @@ absent  "waybar user unit enabled" 'systemd/user/graphical-session\.target\.want
 absent  "GTK 3"            'usr/lib/x86_64-linux-gnu/libgtk-3\.so\.0$'
 present "session script"    'usr/bin/thinfloe-session$'
 present "save-home"         'usr/bin/thinfloe-save-home$'
+# The DHCP time zone: the lease option, the watcher and the script that
+# validates and sets it (polkit is missing, so networkd cannot).
+present "DHCP time zone option" 'etc/systemd/network/10-netplan-eth\.network\.d/50-timezone\.conf$'
+present "DHCP time zone script" 'usr/libexec/thinfloe/dhcp-timezone$'
+present "DHCP time zone path unit enabled" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.path$'
 present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
 present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'

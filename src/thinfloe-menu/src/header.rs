@@ -44,17 +44,11 @@ fn read_version(file: &Path) -> Option<String> {
     Some(line.chars().take(VERSION_MAX).collect())
 }
 
-/// `HH:MM` in local time.
+/// `HH:MM` in local time, in the zone the machine has now.
 pub fn clock_text(now: SystemTime) -> String {
-    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
-    // SAFETY: localtime_r writes only into the struct passed to it, and a
-    // zeroed tm is a valid value of it.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&secs, &mut tm);
-        tm
-    };
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (h, m, _) = crate::log::local_hms(secs);
+    format!("{h:02}:{m:02}")
 }
 
 /// How long until the clock text changes.
@@ -122,5 +116,41 @@ mod tests {
         );
         let at = UNIX_EPOCH + Duration::from_secs(600);
         assert!(until_next_minute(at) > Duration::from_secs(59));
+    }
+
+    /// The zone behind `/etc/localtime` is looked up on every call, so a
+    /// relink (what `timedatectl set-timezone` does) shows at once. Needs
+    /// `/usr/share/zoneinfo`, which the build container has.
+    #[test]
+    fn a_zone_change_reaches_the_clock_without_a_restart() {
+        let dir = TestDir::new("header", "zone");
+        let link = dir.join("localtime");
+        let point = |zone: &str| {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(format!("/usr/share/zoneinfo/{zone}"), &link).unwrap();
+        };
+        let at = |zone: &jiff::tz::TimeZone| {
+            let ts = jiff::Timestamp::from_second(12 * 3600).unwrap();
+            let t = zone.to_datetime(ts).time();
+            format!("{:02}:{:02}", t.hour(), t.minute())
+        };
+        // SAFETY: this is the only test that touches TZ; the others only
+        // format the time and accept any zone.
+        unsafe { std::env::remove_var("TZ") };
+        point("UTC");
+        assert_eq!(at(&crate::log::current_zone(&link)), "12:00");
+        point("Asia/Kolkata");
+        assert_eq!(at(&crate::log::current_zone(&link)), "17:30");
+        // A regular file instead of a symlink.
+        let copy = dir.join("copy");
+        std::fs::copy("/usr/share/zoneinfo/Asia/Kolkata", &copy).unwrap();
+        assert_eq!(at(&crate::log::current_zone(&copy)), "17:30");
+        // TZ wins over the file; an unknown TZ falls back to UTC.
+        unsafe { std::env::set_var("TZ", "Asia/Tokyo") };
+        assert_eq!(at(&crate::log::current_zone(&link)), "21:00");
+        assert_eq!(clock_text(UNIX_EPOCH + Duration::from_secs(12 * 3600)), "21:00");
+        unsafe { std::env::set_var("TZ", ":Nowhere/Land") };
+        assert_eq!(at(&crate::log::current_zone(&link)), "12:00");
+        unsafe { std::env::remove_var("TZ") };
     }
 }

@@ -45,3 +45,12 @@
 #
 #XCURSOR_THEME=whiteglass
 #XCURSOR_SIZE=32
+#
+# ---------------------------------------------------------------------------
+# TIME ZONE
+# ---------------------------------------------------------------------------
+# The clock in the menu and the programs started from it show UTC unless the
+# DHCP server sends a time zone. A TZ set here wins over the DHCP zone for
+# this session. Uncomment and adjust for this machine:
+#
+#TZ=Europe/Zurich
