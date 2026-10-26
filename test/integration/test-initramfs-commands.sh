@@ -102,6 +102,18 @@ else
     bad "thinfloe-after-cmdline.conf lacks After=dracut-cmdline.service"
 fi
 
+# The initramfs's networkd must ask for the DHCP time zone (option 101), or a
+# netbooted machine shows UTC until its first lease renewal. dracut copies
+# its default network file to /run/systemd/network/zzzz-dracut-default.network;
+# the drop-in extends it. make qemu-smoke-timezone-netboot proves it end to end.
+TZ_DROPIN=etc/systemd/network/zzzz-dracut-default.network.d/50-timezone.conf
+if grep -qx "$TZ_DROPIN" "$WORK/initrd.list" &&
+   grep -qx 'UseTimezone=yes' "$MODDIR/50-timezone.conf"; then
+    ok "the initrd's networkd asks for the DHCP time zone"
+else
+    bad "no UseTimezone=yes drop-in $TZ_DROPIN in $INITRD"
+fi
+
 # Netboot networking: DHCP from systemd-networkd, names from systemd-resolved.
 for f in usr/lib/systemd/systemd-networkd usr/lib/systemd/systemd-networkd-wait-online \
          usr/lib/systemd/systemd-resolved; do

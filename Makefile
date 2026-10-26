@@ -41,7 +41,7 @@ EFI_PARTITION_SIZE ?= 3000
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -58,6 +58,7 @@ help:
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
 	@echo "  qemu-smoke-timezone - Headless boot with a DHCP time zone (option 101)"
+	@echo "  qemu-smoke-timezone-netboot - Same, netbooted (the initramfs lease)"
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
 	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
@@ -347,6 +348,23 @@ qemu-smoke-timezone: $(QCOW2_BOOT_IMAGE) $(KERNEL) $(INITRD)
 		-kernel $(KERNEL) \
 		-initrd $(INITRD) \
 		-append "ramroot=tl/ramroot.sqsh $(QEMU_SMOKE_APPEND)"
+
+# The same over a netboot: the initramfs's networkd gets the lease, so its
+# drop-in (90thinfloe/module-setup.sh) has to ask for option 101.
+QEMU_TIMEZONE_NETBOOT_LOG := $(IMAGE_DIR)/qemu-timezone-netboot-smoke.log
+
+qemu-smoke-timezone-netboot: $(KERNEL) $(INITRD) $(SQUASHFS) | $(IMAGE_DIR)
+	@echo "Running headless netboot time zone smoke test..."
+	TF_TZ_NETBOOT_DIR=$(ROOTFS_DIR) scripts/run-qemu-timezone-smoke.sh \
+		$(QEMU_TIMEZONE_NETBOOT_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		-machine type=q35,accel=kvm \
+		-cpu host,migratable=off \
+		-smp $(BUILD_JOBS) \
+		-m 3G \
+		-display none \
+		-no-reboot \
+		-object rng-random,filename=/dev/urandom,id=rng0 \
+		-device virtio-rng-pci,rng=rng0
 
 # Headless first boot of a staged upgrade: tl.new/ on the stick and
 # syslinux.cfg on DEFAULT new, as thinfloe-upgrade leaves them, booted through

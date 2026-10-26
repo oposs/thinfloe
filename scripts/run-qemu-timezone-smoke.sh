@@ -13,6 +13,12 @@
 #
 # Usage: scripts/run-qemu-timezone-smoke.sh LOG TIMEOUT GRACE QEMU_ARGS...
 # QEMU_ARGS are the full qemu-system-x86_64 arguments except the network.
+#
+# With TF_TZ_NETBOOT_DIR=ROOTFS_DIR the guest netboots instead: the script
+# serves that directory over HTTP on 10.77.0.1 and boots its vmlinuz and
+# initrd.img with ramroot=http://10.77.0.1:<port>/ramroot.sqsh, so the lease
+# comes from the initramfs's networkd and has to carry the zone across the
+# switch-root. QEMU_ARGS then hold no -drive, -kernel, -initrd or -append.
 
 set -uo pipefail
 
@@ -67,14 +73,33 @@ dns=$!
 sleep 1
 kill -0 "$dns" 2>/dev/null || { echo "FAIL: dnsmasq did not start (log: $DNSMASQ_LOG)" >&2; cat "$DNSMASQ_LOG" >&2; exit 1; }
 
+extra=()
+if [[ -n "${TF_TZ_NETBOOT_DIR:-}" ]]; then
+    NB="$(realpath -- "$TF_TZ_NETBOOT_DIR")"
+    for f in vmlinuz initrd.img ramroot.sqsh; do
+        [[ -f "$NB/$f" ]] || { echo "FAIL: $NB/$f missing" >&2; exit 1; }
+    done
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("10.77.0.1", 0)); print(s.getsockname()[1])')
+    setpriv --pdeathsig TERM -- python3 -m http.server "$port" --bind 10.77.0.1 \
+        --directory "$NB" >"$LOG.http" 2>&1 &
+    srv=$!
+    trap 'kill $dns $srv 2>/dev/null; wait $dns $srv 2>/dev/null' EXIT
+    for _ in $(seq 50); do
+        curl -fsI "http://10.77.0.1:$port/ramroot.sqsh" >/dev/null 2>&1 && break
+        sleep 0.1
+    done
+    extra=(-kernel "$NB/vmlinuz" -initrd "$NB/initrd.img" -append
+        "ramroot=http://10.77.0.1:$port/ramroot.sqsh console=ttyS0,115200 systemd.unit=multi-user.target systemd.log_target=console systemd.mask=serial-getty@ttyS0.service")
+fi
+
 SMOKE_WAIT_FOR="$WANT" setpriv --pdeathsig TERM -- "$HERE/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
-    qemu-system-x86_64 "$@" \
+    qemu-system-x86_64 "$@" "${extra[@]}" \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no \
     -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:57 || exit $?
 
-kill "$dns" 2>/dev/null
-wait "$dns" 2>/dev/null
-dns=""
+kill $dns ${srv:-} 2>/dev/null
+wait $dns ${srv:-} 2>/dev/null
+dns="" srv=""
 
 "$HERE/check-boot-smoke.sh" "$LOG"
 fail=$?
