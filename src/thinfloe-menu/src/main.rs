@@ -149,7 +149,10 @@ fn unfold(what: Option<&str>) -> ExitCode {
         .filter(|f| f.app_id == what || f.title == what)
         .collect();
     for f in &hits {
-        windows.restore(f.id);
+        if let Err(e) = windows.restore(f.id) {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
     }
     if hits.is_empty() { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }

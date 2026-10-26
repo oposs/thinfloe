@@ -54,11 +54,24 @@ struct Entry {
 pub struct Tracker {
     entries: HashMap<u64, Entry>,
     next_seq: u64,
+    /// Set when the connection broke: the list is then unknown, so it is empty.
+    dead: bool,
 }
 
 impl Tracker {
+    /// The connection is gone. Returns true when the folded list changed.
+    pub fn stop(&mut self) -> bool {
+        let before = self.folded();
+        self.dead = true;
+        self.entries.clear();
+        !before.is_empty()
+    }
+
     /// Returns true when the folded list changed.
     pub fn apply(&mut self, e: Event) -> bool {
+        if self.dead {
+            return false;
+        }
         let before = self.folded();
         match e {
             Event::Title(id, t) => self.entry(id).pending.title = t,
@@ -251,7 +264,16 @@ impl Windows {
         state.on_change = Box::new(on_change);
         std::thread::spawn(move || {
             let _manager = _manager;
-            while queue.blocking_dispatch(&mut state).is_ok() {}
+            let err = loop {
+                if let Err(e) = queue.blocking_dispatch(&mut state) {
+                    break e;
+                }
+            };
+            // The list can no longer be trusted: show none rather than
+            // chips that cannot be restored.
+            eprintln!("thinfloe-menu: folded-window list stopped: {err}");
+            lock(&state.tracker).stop();
+            (state.on_change)();
         });
         Ok(Windows { conn, seat, tracker, handles })
     }
@@ -266,13 +288,13 @@ impl Windows {
     }
 
     /// Unfolds and activates a window. An unknown id (the window just
-    /// closed) does nothing.
-    pub fn restore(&self, id: u64) {
+    /// closed) does nothing; `Err` when the request could not be sent.
+    pub fn restore(&self, id: u64) -> Result<(), String> {
         let handles = lock(&self.handles);
-        let Some(h) = handles.get(&id) else { return };
+        let Some(h) = handles.get(&id) else { return Ok(()) };
         h.unset_minimized();
         h.activate(&self.seat);
-        let _ = self.conn.flush();
+        self.conn.flush().map_err(|e| format!("could not send the request: {e}"))
     }
 }
 
@@ -324,6 +346,18 @@ mod tests {
         assert!(t.apply(Event::Closed(1)));
         assert!(t.folded().is_empty());
         assert!(!t.apply(Event::Closed(99)));
+    }
+
+    #[test]
+    fn a_broken_connection_empties_the_list_and_ignores_later_events() {
+        let mut t = Tracker::default();
+        fold(&mut t, 1, "one");
+        assert!(t.stop());
+        assert!(t.folded().is_empty());
+        assert!(t.all().is_empty());
+        assert!(!t.apply(Event::Done(1)));
+        assert!(t.folded().is_empty());
+        assert!(!t.stop());
     }
 
     #[test]
