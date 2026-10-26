@@ -326,8 +326,7 @@ fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
         pos2(rect.right() - HEADER_PAD_X, mid),
         Align2::RIGHT_CENTER,
         header_text(&chrome.header, &chrome.clock),
-        // The plain sans: Geo at this size is hard to read.
-        FontId::proportional(14.0),
+        brand::geo(16.0),
         MUTED,
     );
 }

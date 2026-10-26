@@ -58,14 +58,21 @@ pub fn apply(ctx: &Context) {
     ctx.data_mut(|d| d.insert_temp(id, true));
 }
 
+/// Geo, unhinted. Its strokes are about 1.5 px at tile size, and egui's
+/// hinting snaps only vertically: horizontal bars rounded down to one pixel
+/// row next to vertical stems spread over two, so the bars of "e", "a" and
+/// "B" looked too thin.
+fn geo_data() -> FontData {
+    let mut data = FontData::from_static(include_bytes!("../assets/Geo-Oblique.ttf"));
+    data.tweak.hinting = Some(false);
+    data
+}
+
 fn fonts() -> FontDefinitions {
     // egui's own set: a plain sans for Proportional, Hack for Monospace,
     // and the emoji fonts at the end of both.
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(
-        GEO_FONT.into(),
-        Arc::new(FontData::from_static(include_bytes!("../assets/Geo-Oblique.ttf"))),
-    );
+    fonts.font_data.insert(GEO_FONT.into(), Arc::new(geo_data()));
     let sans = fonts.families[&FontFamily::Proportional].clone();
     // Geo has Latin only; everything else draws through the plain sans.
     let mut geo = vec![GEO_FONT.to_string()];
@@ -114,6 +121,11 @@ mod tests {
         assert_eq!(TILE_ACTIVE, Color32::from_rgb(0x10, 0x1b, 0x26));
         let t = theme();
         assert_eq!((t.palette.background, t.palette.card, t.palette.ring), (BG, TILE, ICE));
+    }
+
+    #[test]
+    fn geo_is_drawn_unhinted() {
+        assert_eq!(fonts().font_data[GEO_FONT].tweak.hinting, Some(false));
     }
 
     #[test]
