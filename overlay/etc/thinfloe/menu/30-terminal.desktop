@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
 Name=Terminal
-Icon=foot
+Icon=square-terminal
 Exec=foot
 X-TF-Multiple=true
