@@ -28,9 +28,14 @@
   </keyboard>
   <!--
     Title bar font: Geo, shipped in /usr/share/fonts/truetype/thinfloe. The
-    colours are in themerc-override next to this file.
+    colours are in themerc-override next to this file. No window icon on
+    the left (labwc's default layout is icon:iconify,max,close): it pushed
+    the title about 32 px in.
   -->
   <theme>
+    <titlebar>
+      <layout>:iconify,max,close</layout>
+    </titlebar>
     <font place="ActiveWindow" name="Geo" size="10" />
     <font place="InactiveWindow" name="Geo" size="10" />
   </theme>

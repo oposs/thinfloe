@@ -132,6 +132,16 @@ else
     echo "FAIL - rc.xml does not set Geo for ActiveWindow and InactiveWindow"
     fail=1
 fi
+# No window icon on the left of a title bar: labwc's default layout starts
+# with one, and it pushed the title in.
+if [[ -f "$RC/etc/thinfloe/labwc/rc.xml" ]] &&
+   tr -d '\n' < "$RC/etc/thinfloe/labwc/rc.xml" |
+   grep -qE '<titlebar>[[:space:]]*<layout>:iconify,max,close</layout>'; then
+    echo "ok   - rc.xml title bars have no window icon"
+else
+    echo "FAIL - rc.xml title bar layout is not ':iconify,max,close'"
+    fail=1
+fi
 
 # The menu is the bottom window: a program clicked away must not go behind
 # it, and the window list must not offer to minimise it. Matched by app_id.
