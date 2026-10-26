@@ -75,6 +75,16 @@ fn is_defect(t: &tiles::Tile, shipped: bool, icon_drawn: bool) -> bool {
     shipped && !t.addon && (t.problem.is_some() || !icon_drawn)
 }
 
+/// One tile's line of `--check`. A reworded tile also says which keys of
+/// the user's file were ignored.
+fn check_line(t: &tiles::Tile, state: &str, icon_text: &str) -> String {
+    let mut line = format!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
+    if let Some(r) = t.origin.reworded_text() {
+        line.push_str(&format!("\t{r}"));
+    }
+    line
+}
+
 /// `thinfloe-menu --check`: print every tile and how its icon draws, and fail
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
@@ -97,7 +107,7 @@ fn check() -> ExitCode {
             Some((path, Ok(_))) => (path.display().to_string(), true),
             Some((path, Err(e))) => (format!("letter fallback ({}: {e})", path.display()), false),
         };
-        println!("{}\t{}\t{:?}\t{}\ticon: {}", t.file, t.name, t.action, state, icon_text);
+        println!("{}", check_line(t, &state, &icon_text));
         if is_defect(t, shipped, drawn) {
             bad = true;
         }
@@ -153,6 +163,20 @@ mod tests {
         t.addon = addon;
         t.problem = problem.map(String::from);
         t
+    }
+
+    #[test]
+    fn check_names_the_keys_a_reworded_tile_ignored() {
+        let mut t = tile(false, None);
+        assert_eq!(check_line(&t, "ok", "x"), "10-x.desktop\tX\tRun\tok\ticon: x");
+        t.origin = tiles::Origin::Reworded {
+            ignored: vec!["Exec".into(), "X-TF-Multiple".into()],
+        };
+        assert!(
+            check_line(&t, "ok", "x").ends_with("\treworded; ignored: Exec, X-TF-Multiple"),
+            "{}",
+            check_line(&t, "ok", "x")
+        );
     }
 
     #[test]

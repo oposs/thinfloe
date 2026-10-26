@@ -449,7 +449,6 @@ pub fn show(
                         let enabled = menu.can_activate(index);
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
                         let (rect, resp) = ui.allocate_exact_size(l.tile, sense);
-                        let status = menu.status(index);
                         let running = menu.running(index);
                         paint_tile(
                             ui,
@@ -460,8 +459,8 @@ pub fn show(
                                 hovered: resp.hovered() && enabled,
                                 focused: resp.has_focus(),
                                 running,
-                                active: running > 0 || status.as_deref() == Some("running"),
-                                update: status.as_deref() == Some("update"),
+                                active: menu.active(index),
+                                update: menu.pending_update(index),
                             },
                         );
                         if resp.clicked() {
@@ -812,8 +811,14 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&TextureHandle>, st
     // note about its file. `--check` has the long form.
     if let Some(why) = &tile.problem {
         line(why, FontId::proportional(11.0), WARN);
-    } else if let Some(c) = tile.comment.as_ref().or(tile.note.as_ref()) {
-        line(c, FontId::proportional(11.0), fade(MUTED));
+    } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
+        // Only a reworded file that lost keys; plain "reworded" is no news.
+        match &tile.origin {
+            Origin::Reworded { ignored } if !ignored.is_empty() => tile.origin.reworded_text(),
+            _ => None,
+        }
+    }) {
+        line(&c, FontId::proportional(11.0), fade(MUTED));
     }
     let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
     let block_h = heights.iter().sum::<f32>() + 2.0 * (lines.len() as f32 - 1.0);
@@ -1334,6 +1339,85 @@ mod tests {
         assert_eq!(colour_of(&job, "save-home"), ICE);
         assert_eq!(colour_of(&job, "text"), GOOD);
         assert_eq!(colour_of(&log_job(&line(crate::log::Kind::Warn), &t), "text"), WARN);
+    }
+
+    fn shapes_of(menu: &Menu, tiles: usize, now: Instant) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<TextureHandle>> = (0..tiles).map(|_| None).collect();
+        let mut out = None;
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, menu, &icons, &Chrome::default(), now);
+            });
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.unwrap().shapes
+    }
+
+    fn all_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_running_tile_with_a_pending_update_shows_the_edge_and_the_marker() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T0".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let now = Instant::now();
+        menu.activate(0, now);
+        assert!(menu.active(0) && menu.pending_update(0));
+        let shapes = shapes_of(&menu, 1, now);
+        assert!(
+            shapes.iter().any(
+                |c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == ICE && (r.rect.width() - 5.0).abs() < 0.01)
+            ),
+            "edge"
+        );
+        assert!(all_texts(&shapes).iter().any(|t| t == "update"), "marker");
+    }
+
+    #[test]
+    fn a_reworded_tile_that_lost_keys_says_so_when_it_has_no_comment() {
+        let mut t0 = plain_tile("T0");
+        t0.origin = Origin::Reworded {
+            ignored: vec!["Exec".into()],
+        };
+        let menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        let texts = all_texts(&shapes_of(&menu, 1, Instant::now()));
+        assert!(texts.iter().any(|t| t == "reworded; ignored: Exec"), "{texts:?}");
     }
 
     #[test]
