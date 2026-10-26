@@ -540,12 +540,36 @@ faint ice-blue radial glow from the bottom. At the foot, small, in Geo: the
 host name and the image version (`thinfloe-3f9a2c · 3.1.0`).
 *Builder:* the host name is written by the initramfs (`tf_write_hostname`)
 before switch-root; check what Plymouth can show at which point of the boot
-and fall back to the version alone where the name is not yet known.
+and leave out what is not yet known.
+
+**Version until Part 5 (decided 2026-10-25):** nothing writes
+`/etc/thinfloe/version` yet, and Part 4 does not start writing it. The boot
+screen and the header show the version only when it is known; until Part 5
+they show the host name alone (boot screen) or host name and clock (header),
+with no empty separator. Part 5, which writes the file, must also bring the
+version into the initrd: Plymouth runs there, and on the first boot from
+`tl.new/` the screen must show the new image's version.
 
 ### Desktop: option C (decided)
 
 - **Header:** top left, logo and "ThinFloe" at 60 % opacity, logo about
-  52 px tall at 1080p; top right, host name, version and clock in Geo.
+  52 px tall at 1080p; top right, host name, version (when known, see
+  the boot screen) and clock in Geo.
+- **Time zone (decided 2026-10-25).** The image is UTC
+  (`overlay/etc/localtime`), so the new clock, and the menu log's "local
+  time", would show UTC everywhere. Two sources, in this order:
+  1. a per-machine `TZ=<zone>` in `~/.thinfloe-environment` (read before
+     the compositor starts, travels with the home archive). It wins for the
+     session. The default home carries it as a commented example.
+  2. the time zone the DHCP server sends (option 101, tzdb name, as
+     `systemd-networkd`'s `UseTimezone=` reads it) sets the system zone for
+     that boot. Without either, UTC as today.
+  The image ships no zone of its own (Part 5: no site-specific content).
+  *Builder must check:* networkd sets the zone through `timedated`, which
+  asks polkit, and this image has no polkit (see Debugging); netplan writes
+  the `.network` files and has no key for `UseTimezone`. Find a path that
+  works under both, or set the zone from the lease another way, and prove
+  it in a QEMU boot whose DHCP server sends option 101.
 - **Tiles:** flat, wide bands, 4 columns, the group centred and about 58 %
   of the screen width (not edge to edge; must not overwhelm a 43" display).
   Icon left (unchanged, upright), name in Geo Italic and comment right.
@@ -555,15 +579,41 @@ and fall back to the version alone where the name is not yet known.
   corner. No slanted shapes on tiles.
 - **Log:** bottom 30 % as now, same colour roles (time grey, source ice
   blue, warnings amber, success green).
-- **Taskbar:** built into `thinfloe-menu` (decided 2026-10-24, from the
-  Part 3 survey); waybar and GTK 3 leave the image. Same near-black; the
-  active window has an ice-blue underline. The menu is a normal window
-  kept at the bottom, and winit cannot make a layer-shell surface, so a
-  bar that stays above other windows needs a second surface (for example
-  via `smithay-client-toolkit`); the alternative is a window list inside
-  the menu, visible only when nothing covers it. *Open for the Part 4
-  design.* The bar's job stays the one waybar has today: a minimized
-  window must always be reachable.
+- **No taskbar; a strip of folded windows in the menu** (decided
+  2026-10-25, mockup `folded-strip.html`). waybar, its config in
+  `/etc/thinfloe/waybar/` and GTK 3 leave the image; `thinfloe-session` no
+  longer starts a bar. Why: the bar's only job here is to bring back a
+  window someone folded down (minimized), and a bar above the windows got
+  in the way of the window in use.
+  - The strip is the bottom row of the menu, below the log, part of the
+    menu's own surface. It never covers a window.
+  - It holds one chip per folded window: the window's icon and title, in
+    the tile colours. No label. One click restores that window and brings
+    it to the front.
+  - It lists folded windows only; open windows are on screen already.
+    With nothing folded the strip is not drawn and the log reaches the
+    bottom edge.
+  - It covers every way a window gets folded: labwc's iconify button, and
+    a client folding itself (the ThinLinc client's F8 menu). The list comes
+    from the compositor, not from the menu's own children.
+  - Accepted by the owner: the strip is visible only when no window covers
+    the menu. With two programs open and one folded, the folded one comes
+    back once the other is folded or closed too.
+  - *My call:* the menu reads windows through
+    `zwlr_foreign_toplevel_manager_v1` (labwc 0.9.3 has it), on a Wayland
+    connection of its own beside winit's, and restores with
+    `unset_minimized` plus `activate`. It leaves out its own window
+    (app_id `thinfloe-menu`; the `skipTaskbar` rule in `rc.xml` already
+    hides it from that protocol). Without the protocol (another
+    compositor) the strip is simply never drawn.
+  - *Builder's call:* chip width and how a long title is cut; which icon a
+    chip shows (the app_id's theme icon, or the matching tile's icon, else
+    the first letter as for tiles); how the chips wrap or scroll when many
+    windows are folded; the crates used for the protocol.
+  - Invariant, unchanged: with zero keybindings, a folded window must
+    always be reachable. Guard it with a runtime test against real labwc:
+    a minimized client shows up in the menu's list, and is restored by the
+    menu's restore path.
 - **labwc title bars and the menu dialogs:** same palette, Geo for titles
   (no separate mockup; *builder's call* within that palette).
 - The menu still draws on the CPU (Standing Constraint). Geo is embedded in
@@ -686,11 +736,16 @@ error with Retry, no owner-hosted fallback; `~/.dbrrg-*` symlinks keep a
 never updated automatically; no 3.x maintenance branch. Part 3
 (2026-10-24): no WiFi in the initrd, squashfs at zstd 19, `vim-tiny`, no
 `ubuntu` account; the taskbar moves into the menu in Part 4; an own
-compositor is parked until after 4.0.
+compositor is parked until after 4.0. Part 4 (2026-10-25): no taskbar;
+folded windows show as chips in a strip at the bottom of the menu, visible
+only when nothing covers the menu; clock time zone from `TZ` in
+`~/.thinfloe-environment`, else from DHCP, else UTC; the version is shown
+only once Part 5 writes it; the rest of Part 4 confirmed as written.
 
 My calls (check while reading): `X-TF-` key prefix; old docs unchanged;
 migration code kept until removed on purpose; ice blue `#7cc4ff`; first
 release 4.0.0; drafts and pre-releases ignored; shipped add-ons on HTTPS;
 the `/etc/thinfloe/version` path; tick state in the home; OxuLnk auto-ticked
 like ThinLinc; OxuLnk shipped only if its server is public; netboot
-installs add-ons from the network on every boot.
+installs add-ons from the network on every boot; the folded-window list
+through `zwlr_foreign_toplevel_manager_v1`.
