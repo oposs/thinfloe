@@ -40,6 +40,8 @@ pub enum Wake {
     Output,
     /// The add-on status or log file changed.
     Addons,
+    /// The set of folded windows changed.
+    Windows,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -93,6 +95,10 @@ pub struct App {
     addon_log_read: bool,
     /// Whether the window is on screen; the add-on poll rests when not.
     shown: Arc<AtomicBool>,
+    /// Folded windows; `None` when the compositor cannot tell, then no strip.
+    windows: Option<crate::windows::Windows>,
+    /// The folded list at the last wake, to name what changed.
+    folded_seen: Vec<crate::windows::Folded>,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -123,7 +129,21 @@ pub fn run(cfg: Config) -> Result<i32, String> {
     });
     let shown = Arc::new(AtomicBool::new(true));
     watch_addons(&cfg, &shown, event_loop.create_proxy());
+    let windows = {
+        let waker = event_loop.create_proxy();
+        match crate::windows::Windows::connect(move || {
+            let _ = waker.send_event(Wake::Windows);
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("thinfloe-menu: no folded-window list: {e}");
+                None
+            }
+        }
+    };
     let mut app = App {
+        windows,
+        folded_seen: Vec::new(),
         addon_log: AddonLog::new(cfg.addon_log.clone()),
         addon_log_read: false,
         shown,
@@ -356,6 +376,24 @@ fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, canvas: &C
     buf.present().map_err(|e| e.to_string())
 }
 
+impl App {
+    /// Logs, under TF_MENU_DEBUG, the windows folded or unfolded since the
+    /// last call.
+    fn windows_changed(&mut self) {
+        let Some(w) = self.windows.as_ref() else { return };
+        let now = w.folded();
+        if self.cfg.debug {
+            for f in now.iter().filter(|f| !self.folded_seen.contains(f)) {
+                eprintln!("thinfloe-menu: folded: {} {}", f.app_id, f.title);
+            }
+            for f in self.folded_seen.iter().filter(|f| !now.contains(f)) {
+                eprintln!("thinfloe-menu: unfolded: {} {}", f.app_id, f.title);
+            }
+        }
+        self.folded_seen = now;
+    }
+}
+
 impl ApplicationHandler<Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.live.is_some() {
@@ -457,6 +495,7 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             Wake::Addons => self.refresh_addons(),
+            Wake::Windows => self.windows_changed(),
             Wake::Output => {}
         }
         if let Some(live) = self.live.as_ref() {

@@ -17,3 +17,4 @@ pub mod settings;
 mod testdir;
 pub mod tiles;
 pub mod ui;
+pub mod windows;

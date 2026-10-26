@@ -14,7 +14,7 @@ use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{settings, tiles, ui};
+use thinfloe_menu::{settings, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -115,6 +115,45 @@ fn check() -> ExitCode {
     if bad { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
+/// `--windows`: one line per toplevel, `app_id<TAB>title<TAB>folded|open`.
+fn list_windows() -> ExitCode {
+    let windows = match windows::Windows::connect(|| {}) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    for (_, app_id, title, folded) in windows.all() {
+        println!("{app_id}\t{title}\t{}", if folded { "folded" } else { "open" });
+    }
+    ExitCode::SUCCESS
+}
+
+/// `--unfold <app_id or title>`: for an operator whose window went missing.
+fn unfold(what: Option<&str>) -> ExitCode {
+    let Some(what) = what else {
+        eprintln!("usage: thinfloe-menu --unfold <app_id or title>");
+        return ExitCode::from(2);
+    };
+    let windows = match windows::Windows::connect(|| {}) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("thinfloe-menu: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let hits: Vec<_> = windows
+        .folded()
+        .into_iter()
+        .filter(|f| f.app_id == what || f.title == what)
+        .collect();
+    for f in &hits {
+        windows.restore(f.id);
+    }
+    if hits.is_empty() { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == icons::RENDER_ICON_ARG) {
@@ -122,6 +161,12 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();
+    }
+    if args.get(1).is_some_and(|a| a == "--windows") {
+        return list_windows();
+    }
+    if args.get(1).is_some_and(|a| a == "--unfold") {
+        return unfold(args.get(2).and_then(|a| a.to_str()));
     }
     let (menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();

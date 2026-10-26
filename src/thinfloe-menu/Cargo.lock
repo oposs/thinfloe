@@ -1939,6 +1939,8 @@ dependencies = [
  "libc",
  "resvg",
  "softbuffer",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "winit",
 ]
 
