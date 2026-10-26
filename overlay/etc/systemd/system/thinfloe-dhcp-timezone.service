@@ -4,9 +4,20 @@ Description=Set the time zone the DHCP server sent
 # by a path unit that is WantedBy=multi-user.target and so is implicitly
 # After=basic.target; see CLAUDE.md, "A multi-user.target unit must never
 # declare Before= on a sysinit.target unit".
-After=systemd-networkd.service
+After=systemd-networkd.service thinfloe-dhcp-timezone.path
+# A burst of lease writes must not trip the default start limit (5 starts in
+# 10 s): the path unit would fail and stop triggering for the rest of the boot.
+StartLimitIntervalSec=0
+# Also started once at boot (WantedBy below), because the path unit only sees
+# changes made after it is armed and a fast lease, or the initramfs lease on
+# netboot, can already be there. Ordered after the path unit so a lease that
+# lands between this run and the arming is not missed either. No PathExistsGlob
+# or DirectoryNotEmpty: those retrigger in a loop.
 
 [Service]
 Type=oneshot
 StandardOutput=journal+console
 ExecStart=/usr/libexec/thinfloe/dhcp-timezone
+
+[Install]
+WantedBy=multi-user.target
