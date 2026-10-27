@@ -1049,7 +1049,8 @@ one's ID read-only, and `tf_choose_esp` picks: the one whose ID the command
 line names (several: the first, logged); else, with one partition, that
 one; else a partition without an ID (several: the first, logged), because
 a stick with an ID always boots with it; else the first, logged. While the
-wanted one is missing it waits up to `TF_ESP_MATCH_WAIT` (10 s) after the
+wanted one is missing (or, with none wanted, several sticks and all with an
+ID) it waits up to `TF_ESP_MATCH_WAIT` (10 s) after the
 first stick appeared, for a second stick that enumerates late. The answer
 is cached in `/run/thinfloe-esp-device`, so `finalize-upgrade.sh` and
 `mount-squashfs.sh` mount the same partition. Do not go back to the link.
@@ -1059,10 +1060,12 @@ stdout, and a log line inside `tf_find_esp`'s answer made
 build of this change (caught by `make qemu-smoke-upgrade`).
 
 The ID is written by `tf_stamp_stick` after the mount (the stored one,
-else the command line's, else a new one; `thinfloe: this stick is now
-<id>`), and by `thinfloe-upgrade` right after `dd` of a fresh install,
+else the command line's, only when this is the one `EFI-SYSTEM` partition
+(with two, a guessed stick would take the booted stick's ID), else a new one;
+`thinfloe: this stick is now <id>`), and by `thinfloe-upgrade` right after `dd` of a fresh install,
 independent of the home-copy question (`stamp_new_stick`). Both make the
-same edit, byte for byte (`stamp_syslinux`). A staged upgrade copies `LABEL
+same edit, byte for byte (`stamp_syslinux`), and match `APPEND` in any
+case. Each file is `sync`ed before its rename. A staged upgrade copies `LABEL
 current` into `LABEL new`, so the ID rides along.
 
 Limits: two attached sticks that both never booted and were not written by

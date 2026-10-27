@@ -68,13 +68,15 @@ tf_read_stick_id() {
 # _tf_esp_pairs <known>
 #
 # Print "<dev>=<id>" for every current candidate, reading the id only for a
-# device not already listed in <known> (the previous output), so a poll
-# does not mount every stick again each second.
+# device not already listed in <known> (the previous output) with an id, so
+# a poll does not mount every stick again each second; a pair whose id is
+# empty is read again, since the first read may have failed.
 _tf_esp_pairs() {
     for _tep_dev in $(tf_esp_candidates); do
         _tep_pair=""
         for _tep_known in $1; do
-            [ "${_tep_known%%=*}" = "$_tep_dev" ] && _tep_pair="$_tep_known"
+            [ "${_tep_known%%=*}" = "$_tep_dev" ] && [ -n "${_tep_known#*=}" ] \
+                && _tep_pair="$_tep_known"
         done
         [ -n "$_tep_pair" ] || _tep_pair="$_tep_dev=$(tf_read_stick_id "$_tep_dev")"
         echo "$_tep_pair"
@@ -84,10 +86,12 @@ _tf_esp_pairs() {
 # _tf_esp_settled <want-id> <pairs...>
 #
 # Exit 0 when waiting longer cannot improve the choice: a partition carries
-# the wanted id, or none is wanted and one partition has no id.
+# the wanted id, or none is wanted and there is one partition only or one
+# has no id.
 _tf_esp_settled() {
     _tes_want="$1"
     shift
+    [ -z "$_tes_want" ] && [ $# -eq 1 ] && return 0
     for _tes_pair in "$@"; do
         if [ -n "$_tes_want" ]; then
             [ "${_tes_pair#*=}" = "$_tes_want" ] && return 0
@@ -1028,7 +1032,9 @@ tf_set_boot_default() {
 #
 # Give the mounted stick its id, so the next boot finds this ESP by it (see
 # tf_find_esp). The id is the one in config/stick-id, else <want-id> (the
-# command line's thinfloe.stick=), else a new one from TF_UUID_SOURCE.
+# command line's thinfloe.stick=) when this is the only EFI-SYSTEM partition
+# (with two, this stick may not be the one that booted, and would take its
+# id), else a new one from TF_UUID_SOURCE.
 # config/stick-id is written when it differs. Each syslinux.cfg copy is
 # rewritten only when one of its local APPEND lines (ramroot= not a URL)
 # lacks the id at its end: any old thinfloe.stick= word goes, the new one is
@@ -1040,12 +1046,13 @@ tf_set_boot_default() {
 # failed write leaves the old file in place.
 tf_stamp_stick() {
     local _tss_efi="$1" _tss_want="$2" _tss_id="" _tss_new="" _tss_cfg
-    local _tss_tab _tss_cr _tss_ws _tss_local _tss_need
+    local _tss_tab _tss_cr _tss_ws _tss_local _tss_need _tss_dev _tss_n=0
 
     [ -r "$_tss_efi/config/stick-id" ] && read -r _tss_id <"$_tss_efi/config/stick-id"
     tf_valid_stick_id "$_tss_id" || _tss_id=""
     if [ -z "$_tss_id" ]; then
-        if tf_valid_stick_id "$_tss_want"; then
+        for _tss_dev in $(tf_esp_candidates); do _tss_n=$((_tss_n + 1)); done
+        if [ "$_tss_n" -le 1 ] && tf_valid_stick_id "$_tss_want"; then
             _tss_id="$_tss_want"
         else
             read -r _tss_id <"${TF_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"
@@ -1057,6 +1064,7 @@ tf_stamp_stick() {
         fi
         if ! { mkdir -p "$_tss_efi/config" \
                && echo "$_tss_id" >"$_tss_efi/config/stick-id.tmp" \
+               && sync \
                && mv "$_tss_efi/config/stick-id.tmp" "$_tss_efi/config/stick-id"; } 2>/dev/null; then
             tf_log "thinfloe: could not write config/stick-id, the stick keeps no id"
             rm -f "$_tss_efi/config/stick-id.tmp" 2>/dev/null
@@ -1074,7 +1082,7 @@ tf_stamp_stick() {
     # sed address: an APPEND line whose ramroot= is not a URL (no
     # <scheme>://; an alternation here reads as a command call to
     # test-initramfs-commands.sh's extractor).
-    _tss_local="/^$_tss_ws*APPEND$_tss_ws/{/${_tss_ws}ramroot=[a-z]+:\\/\\//b"
+    _tss_local="/^$_tss_ws*[Aa][Pp][Pp][Ee][Nn][Dd]$_tss_ws/{/${_tss_ws}ramroot=[a-z]+:\\/\\//b"
 
     for _tss_cfg in "$_tss_efi/syslinux.cfg" "$_tss_efi/efi/boot/syslinux.cfg"; do
         [ -f "$_tss_cfg" ] || continue
@@ -1082,6 +1090,7 @@ tf_stamp_stick() {
         [ -n "$_tss_need" ] || continue
         if sed -E "$_tss_local;s/$_tss_ws+thinfloe\\.stick=[^ $_tss_tab$_tss_cr]*//g;s/$_tss_ws*($_tss_cr?)\$/ thinfloe.stick=$_tss_id\\1/}" \
                 "$_tss_cfg" >"$_tss_cfg.tmp" 2>/dev/null \
+                && sync \
                 && mv "$_tss_cfg.tmp" "$_tss_cfg" 2>/dev/null; then
             :
         else

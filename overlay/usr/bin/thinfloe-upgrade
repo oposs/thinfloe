@@ -593,7 +593,7 @@ def set_boot_default(efi_mount: str, label: str) -> None:
 
 
 # An APPEND line of syslinux.cfg, and one whose ramroot= is a URL (netboot).
-_APPEND_RE = re.compile(r"^[ \t]*APPEND[ \t]")
+_APPEND_RE = re.compile(r"^[ \t]*APPEND[ \t]", re.I)
 _REMOTE_RAMROOT_RE = re.compile(r"[ \t]ramroot=[a-z]+://")
 _STICK_WORD_RE = re.compile(r"[ \t]+thinfloe\.stick=[^ \t\r]*")
 _LINE_END_RE = re.compile(r"[ \t]*(\r?)$")
@@ -621,7 +621,7 @@ def stamp_syslinux(text: str, stick_id: str) -> str:
 def _write_replace(path: str, text: str) -> None:
     """Write text to path through path.tmp, fsync and rename."""
     tmp = path + ".tmp"
-    with open(tmp, "w", newline="") as f:
+    with open(tmp, "w", newline="", errors="surrogateescape") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
@@ -667,7 +667,7 @@ def stamp_new_stick(device: str) -> bool:
             path = os.path.join(tmp_mount, rel)
             if not os.path.isfile(path):
                 continue
-            with open(path, newline="") as f:
+            with open(path, newline="", errors="surrogateescape") as f:
                 text = f.read()
             _write_replace(path, stamp_syslinux(text, stick_id))
         ok = True

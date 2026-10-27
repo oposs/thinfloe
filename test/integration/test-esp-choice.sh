@@ -267,6 +267,28 @@ else
 fi
 
 fresh
+mkblock vda1 EFI-SYSTEM; echo "$A" >"$WORK/ids/vda1"
+WANT=
+got=$(find_esp)
+if [[ "$got" == /dev/vda1 && $(sleeps) -eq 0 ]]; then
+    ok "one stick with an id, none wanted: no wait"
+else
+    bad "one stick with id, none wanted: got='$got' sleeps=$(sleeps)"
+fi
+
+fresh
+mkblock vda1 EFI-SYSTEM; mkblock vdb1 EFI-SYSTEM
+echo "$A" >"$WORK/ids/vda1"       # vdb1: the first read of its id failed
+echo "echo '$B' >'$WORK/ids/vdb1'" >"$WORK/on-sleep"
+WANT=$B
+got=$(find_esp)
+if [[ "$got" == /dev/vdb1 && $(sleeps) -eq 1 ]]; then
+    ok "a pair whose id read came back empty is read again during the wait"
+else
+    bad "re-read: got='$got' sleeps=$(sleeps)"
+fi
+
+fresh
 WANT=
 got=$(find_esp); rc=$?
 if [[ $rc -eq 1 && -z "$got" && -e "$TF_EFI_ABSENT_MARKER" ]]; then
@@ -383,12 +405,49 @@ else
     bad "stored id: $(grep -h APPEND "$e/syslinux.cfg")"
 fi
 
+fresh; mkblock vda1 EFI-SYSTEM
 e=$(mkesp cmdline)
 stamp "$e" "$B"
 if [[ "$(cat "$e/config/stick-id")" == "$B" ]] && stamped_once "$e/syslinux.cfg" "$B"; then
-    ok "with no stored id, the command line's id is kept"
+    ok "with no stored id on the only stick, the command line's id is kept"
 else
     bad "command line id: $(cat "$e/config/stick-id" 2>&1)"
+fi
+
+# Two sticks, the booted one (id B) not found, this one has no id: it must
+# not take B, or two sticks carry B for good.
+fresh; mkblock vda1 EFI-SYSTEM; mkblock vdb1 EFI-SYSTEM
+e=$(mkesp guess)
+stamp "$e" "$B"
+if [[ "$(cat "$e/config/stick-id")" == "$A" ]] && stamped_once "$e/syslinux.cfg" "$A" \
+   && ! grep -qF "$B" "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg"; then
+    ok "two sticks and no match: the id-less stick gets a new id, not the command line's"
+else
+    bad "wrong-stick adoption: $(cat "$e/config/stick-id" 2>&1)"
+fi
+fresh; mkblock vda1 EFI-SYSTEM
+
+# Every rename is preceded by a sync (vfat: a power cut must not leave a
+# short syslinux.cfg).
+OPS="$WORK/ops-bin"; mkdir -p "$OPS"
+for t in sync mv; do
+    printf '#!/bin/bash\necho %s >>"%s/ops"\nexec %s "$@"\n' "$t" "$WORK" "$(command -v "$t")" >"$OPS/$t"
+    chmod +x "$OPS/$t"
+done
+e=$(mkesp sync); : >"$WORK/ops"
+(PATH="$OPS:$BIN"; tf_stamp_stick "$e" "")
+prev=""; badseq=""; nmv=0
+while read -r op; do
+    if [[ $op == mv ]]; then
+        nmv=$((nmv + 1))
+        [[ $prev == sync ]] || badseq=1
+    fi
+    prev=$op
+done <"$WORK/ops"
+if [[ $nmv -eq 3 && -z "$badseq" ]]; then
+    ok "sync runs before each rename"
+else
+    bad "sync before mv: $(tr '\n' ' ' <"$WORK/ops")"
 fi
 
 e=$(mkesp invalid); mkdir -p "$e/config"; echo "x" >"$e/config/stick-id"
@@ -457,14 +516,16 @@ with open(dest, "w", newline="") as f:
 PY
 }
 
-for variant in lf crlf; do
+for variant in lf crlf lower; do
     e=$(mkesp "cross-$variant")
     [[ $variant == crlf ]] && sed -i 's/$/\r/' "$e/syslinux.cfg"
+    [[ $variant == lower ]] && sed -i -e 's/^\([ \t]*\)APPEND/\1append/' -e '0,/^[ \t]*append/s//Append/' "$e/syslinux.cfg"
     cp "$e/syslinux.cfg" "$WORK/cross-src"
     mkdir -p "$e/config"; echo "$B" >"$e/config/stick-id"
     stamp "$e" ""
     if py_stamp "$WORK/cross-src" "$B" "$WORK/cross-py" \
-       && cmp -s "$e/syslinux.cfg" "$WORK/cross-py"; then
+       && cmp -s "$e/syslinux.cfg" "$WORK/cross-py" \
+       && { [[ $variant != lower ]] || grep -qE "^[ \t]*append .* thinfloe.stick=$B\$" "$e/syslinux.cfg"; }; then
         ok "the shell and Python stamps agree ($variant)"
     else
         bad "shell and Python stamps differ ($variant): $(diff "$e/syslinux.cfg" "$WORK/cross-py" 2>&1 | head -5)"

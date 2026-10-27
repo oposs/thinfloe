@@ -1097,10 +1097,27 @@ class TestStickId(unittest.TestCase):
         self.assertEqual(out.count("\r\n"), crlf.count("\r\n"))
         self.assertIn(f"plymouth.use-simpledrm thinfloe.stick={STICK_ID}\r\n", out)
 
-    def _stamp(self, efi_partition="/dev/sdb1"):
+    def test_stamp_syslinux_keyword_is_case_insensitive(self):
+        out = ui.stamp_syslinux("LABEL x\n    append ramroot=tl/r.sqsh quiet\n", STICK_ID)
+        self.assertIn(f"append ramroot=tl/r.sqsh quiet thinfloe.stick={STICK_ID}\n", out)
+
+    def test_stamp_new_stick_survives_a_non_utf8_syslinux_cfg(self):
+        raw = self.shipped.encode().replace(b"LABEL", b"\xff\xfeLABEL", 1)
+        ok, _, _ = self._stamp(raw=raw)
+        self.assertTrue(ok)
+        stick_id = (self.esp / "config" / "stick-id").read_text().strip()
+        for c in self.copies:
+            data = c.read_bytes()
+            self.assertIn(b"\xff\xfeLABEL", data)
+            self.assertEqual(data.count(f"thinfloe.stick={stick_id}".encode()), 6)
+
+    def _stamp(self, efi_partition="/dev/sdb1", raw=None):
         """Run stamp_new_stick with the ESP mount replaced by self.esp."""
         for c in self.copies:
-            c.write_text(self.shipped)
+            if raw is None:
+                c.write_text(self.shipped)
+            else:
+                c.write_bytes(raw)
         calls = []
         with mock.patch.object(ui, "find_efi_partition", return_value=efi_partition), \
              mock.patch.object(ui.time, "sleep"), \
