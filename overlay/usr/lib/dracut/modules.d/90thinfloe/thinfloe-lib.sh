@@ -77,6 +77,78 @@ tf_dump_block_devices() {
     ls -l /dev/disk/by-partlabel/ 2>&1 | while read -r _ddbd_line; do tf_log "  $_ddbd_line"; done
 }
 
+# tf_valid_stick_id <string>
+#
+# Exit 0 when the string is a stick id: a lowercase UUID as
+# /proc/sys/kernel/random/uuid writes it. The value goes into syslinux.cfg
+# and a sed expression, so nothing else may pass.
+tf_valid_stick_id() {
+    _tvsi_h='[0-9a-f]'
+    _tvsi_4="$_tvsi_h$_tvsi_h$_tvsi_h$_tvsi_h"
+    # shellcheck disable=SC2254
+    case "$1" in
+        $_tvsi_4$_tvsi_4-$_tvsi_4-$_tvsi_4-$_tvsi_4-$_tvsi_4$_tvsi_4$_tvsi_4) return 0 ;;
+    esac
+    return 1
+}
+
+# tf_choose_esp <want-id> <dev>=<id> ...
+#
+# Pick the boot stick's ESP among the partitions named EFI-SYSTEM, given in
+# device-name order, each with its stick id (empty for none). Prints the
+# chosen <dev>. Exit 1 when there is no partition.
+#
+#   1. Exactly one partition carries the wanted id: that one.
+#   2. Several carry it (a dd copy of a used stick): the first, logged.
+#   3. Otherwise one partition is that one; else the partitions without an
+#      id, because a stick with an id always boots with it on the command
+#      line, so a boot without a matching one came from a stick that never
+#      booted; else the first, logged.
+tf_choose_esp() {
+    _tce_want="$1"
+    shift
+    [ $# -gt 0 ] || return 1
+    tf_valid_stick_id "$_tce_want" || _tce_want=""
+
+    _tce_first=""; _tce_total=0
+    _tce_match=""; _tce_nmatch=0
+    _tce_noid=""; _tce_nnoid=0
+    for _tce_arg in "$@"; do
+        _tce_dev="${_tce_arg%%=*}"
+        _tce_id="${_tce_arg#*=}"
+        [ -n "$_tce_first" ] || _tce_first="$_tce_dev"
+        _tce_total=$((_tce_total + 1))
+        if [ -n "$_tce_want" ] && [ "$_tce_id" = "$_tce_want" ]; then
+            [ -n "$_tce_match" ] || _tce_match="$_tce_dev"
+            _tce_nmatch=$((_tce_nmatch + 1))
+        fi
+        if [ -z "$_tce_id" ]; then
+            [ -n "$_tce_noid" ] || _tce_noid="$_tce_dev"
+            _tce_nnoid=$((_tce_nnoid + 1))
+        fi
+    done
+
+    if [ "$_tce_nmatch" -gt 0 ]; then
+        [ "$_tce_nmatch" -gt 1 ] && \
+            tf_log "thinfloe: $_tce_nmatch sticks carry stick id $_tce_want, using /dev/$_tce_match"
+        echo "$_tce_match"
+    elif [ "$_tce_total" -eq 1 ]; then
+        echo "$_tce_first"
+    elif [ "$_tce_nnoid" -gt 0 ]; then
+        [ "$_tce_nnoid" -gt 1 ] && \
+            tf_log "thinfloe: $_tce_nnoid sticks have no stick id, using /dev/$_tce_noid"
+        echo "$_tce_noid"
+    else
+        if [ -n "$_tce_want" ]; then
+            tf_log "thinfloe: no stick carries stick id $_tce_want, using /dev/$_tce_first"
+        else
+            tf_log "thinfloe: no stick id on the command line, using /dev/$_tce_first"
+        fi
+        echo "$_tce_first"
+    fi
+    return 0
+}
+
 tf_init_dirs() {
     dinfo "thinfloe: Creating $TF_BASE"
     mkdir -p "$TF_BASE" || die "Failed to create $TF_BASE"
