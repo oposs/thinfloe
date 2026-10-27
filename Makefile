@@ -41,7 +41,7 @@ EFI_PARTITION_SIZE ?= 3000
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -61,6 +61,7 @@ help:
 	@echo "  qemu-smoke-timezone-netboot - Same, netbooted (the initramfs lease)"
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
 	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
+	@echo "  qemu-smoke-two-sticks - Three headless boots with a second stick attached"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test              - Run integration guard tests against rootfs"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -394,6 +395,21 @@ qemu-smoke-addons: $(USB_IMAGE) $(KERNEL) $(INITRD)
 		$(KERNEL) $(INITRD) $(QEMU_ADDONS_LOG) $(QEMU_SMOKE_TIMEOUT) \
 		$(QEMU_SMOKE_GRACE) "$(QEMU_SMOKE_APPEND)"
 
+# Three headless boots through OVMF from a fresh stick while a second stick,
+# one that already carries a stick id, is attached. Requires every boot to
+# mount the ESP of the stick it booted from (not the other one, which the
+# partlabel link could name) and that stick to keep the id its first boot
+# gave it. See scripts/run-qemu-two-sticks-smoke.sh.
+QEMU_TWO_STICKS_LOG := $(IMAGE_DIR)/qemu-two-sticks-smoke.log
+QEMU_TWO_STICKS_PREFIX := $(IMAGE_DIR)/$(PROJECT_NAME)-two-sticks
+
+qemu-smoke-two-sticks: $(USB_IMAGE)
+	@echo "Running headless two-sticks boot smoke test..."
+	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-two-sticks-smoke.sh $(USB_IMAGE) $(QEMU_TWO_STICKS_PREFIX) \
+		$(QEMU_TWO_STICKS_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		"$(QEMU_SMOKE_APPEND)"
+
 # Host-side tests. No image, no container, no network: the fast feedback
 # loop for the scripts in overlay/usr/bin and for thinfloe-menu's rules.
 # Deliberately not dependent on 'rootfs'.
@@ -414,6 +430,7 @@ test: test-unit rootfs
 	@test/integration/test-squashfs-format.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-initramfs-home.sh
+	@test/integration/test-esp-choice.sh
 	@test/integration/test-initramfs-commands.sh
 	@test/integration/test-boot-smoke-check.sh
 	@test/integration/test-ssh-hostkeys.sh

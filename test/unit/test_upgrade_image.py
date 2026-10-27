@@ -763,6 +763,7 @@ class TestHomeCopyQuestion(unittest.TestCase):
              mock.patch.object(ui, "download_and_write_image",
                                side_effect=lambda *a: events.append("write")), \
              mock.patch.object(ui, "run_cmd"), \
+             mock.patch.object(ui, "stamp_new_stick", return_value=True), \
              mock.patch.object(
                  ui, "copy_home_to_drive",
                  side_effect=lambda d: events.append("copy") or True) as copy, \
@@ -793,6 +794,7 @@ class TestHomeCopyQuestion(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=["y", "y"]), \
              mock.patch.object(ui, "download_and_write_image"), \
              mock.patch.object(ui, "run_cmd"), \
+             mock.patch.object(ui, "stamp_new_stick", return_value=True), \
              mock.patch.object(ui, "copy_home_to_drive", return_value=False), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertIs(ui.do_fresh_install(_drive(), "http://x"), False)
@@ -1034,6 +1036,131 @@ class TestSetBootDefault(unittest.TestCase):
         ui.set_boot_default(str(self.esp), "new")
         self.assertIn("\nDEFAULT new\n", self.copies[0].read_text())
         self.assertFalse(self.copies[1].exists())
+
+
+STICK_ID = "11111111-1111-4111-8111-111111111111"
+OTHER_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def local_appends(cfg: str) -> List[str]:
+    """APPEND lines whose ramroot= is not a URL."""
+    return [l for l in cfg.splitlines()
+            if l.lstrip().startswith("APPEND ") and "ramroot=http" not in l]
+
+
+class TestStickId(unittest.TestCase):
+    """Each stick carries its id, so a boot with two sticks finds its own ESP."""
+
+    shipped = (REPO / "configs" / "syslinux.cfg").read_text()
+
+    def setUp(self):
+        self.esp = Path(tempfile.mkdtemp(prefix="thinfloe-esp-"))
+        self.addCleanup(shutil.rmtree, self.esp, ignore_errors=True)
+        (self.esp / "efi" / "boot").mkdir(parents=True)
+        self.copies = [self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg"]
+
+    def test_label_new_keeps_the_stick_id(self):
+        cfg = OLD_SYSLINUX_CFG.replace(
+            "APPEND ramroot=tl/ramroot.sqsh console=tty1 quiet splash",
+            f"APPEND ramroot=tl/ramroot.sqsh console=tty1 quiet splash thinfloe.stick={STICK_ID}")
+        for c in self.copies:
+            c.write_text(cfg)
+        ui.set_boot_default(str(self.esp), "new")
+        block = label_block(self.copies[0].read_text(), "new")
+        self.assertIn(
+            f"APPEND ramroot=tl.new/ramroot.sqsh console=tty1 quiet splash thinfloe.stick={STICK_ID}",
+            block)
+
+    def test_stamp_syslinux_marks_local_entries(self):
+        out = ui.stamp_syslinux(self.shipped, STICK_ID)
+        appends = local_appends(out)
+        self.assertEqual(len(appends), 6)
+        for line in appends:
+            self.assertTrue(line.endswith(f" thinfloe.stick={STICK_ID}"), line)
+            self.assertEqual(line.count("thinfloe.stick="), 1, line)
+        # Everything else, LABEL network included, is untouched.
+        rest = lambda t: [l for l in t.splitlines() if l not in local_appends(t)]
+        self.assertEqual(rest(out), rest(self.shipped))
+        self.assertIn("ramroot=http://192.168.1.100/boot/ramroot.sqsh rd.neednet=1 ip=dhcp "
+                      "console=tty1 quiet splash plymouth.use-simpledrm\n", out)
+
+    def test_stamp_syslinux_replaces_an_old_id(self):
+        out = ui.stamp_syslinux(ui.stamp_syslinux(self.shipped, STICK_ID), OTHER_ID)
+        self.assertNotIn(STICK_ID, out)
+        for line in local_appends(out):
+            self.assertEqual(line.count("thinfloe.stick="), 1, line)
+            self.assertTrue(line.endswith(f" thinfloe.stick={OTHER_ID}"), line)
+
+    def test_stamp_syslinux_keeps_crlf(self):
+        crlf = self.shipped.replace("\n", "\r\n")
+        out = ui.stamp_syslinux(crlf, STICK_ID)
+        self.assertEqual(out.count("\r\n"), crlf.count("\r\n"))
+        self.assertIn(f"plymouth.use-simpledrm thinfloe.stick={STICK_ID}\r\n", out)
+
+    def test_stamp_syslinux_keyword_is_case_insensitive(self):
+        out = ui.stamp_syslinux("LABEL x\n    append ramroot=tl/r.sqsh quiet\n", STICK_ID)
+        self.assertIn(f"append ramroot=tl/r.sqsh quiet thinfloe.stick={STICK_ID}\n", out)
+
+    def test_stamp_new_stick_survives_a_non_utf8_syslinux_cfg(self):
+        raw = self.shipped.encode().replace(b"LABEL", b"\xff\xfeLABEL", 1)
+        ok, _, _ = self._stamp(raw=raw)
+        self.assertTrue(ok)
+        stick_id = (self.esp / "config" / "stick-id").read_text().strip()
+        for c in self.copies:
+            data = c.read_bytes()
+            self.assertIn(b"\xff\xfeLABEL", data)
+            self.assertEqual(data.count(f"thinfloe.stick={stick_id}".encode()), 6)
+
+    def _stamp(self, efi_partition="/dev/sdb1", raw=None):
+        """Run stamp_new_stick with the ESP mount replaced by self.esp."""
+        for c in self.copies:
+            if raw is None:
+                c.write_text(self.shipped)
+            else:
+                c.write_bytes(raw)
+        calls = []
+        with mock.patch.object(ui, "find_efi_partition", return_value=efi_partition), \
+             mock.patch.object(ui.time, "sleep"), \
+             mock.patch.object(ui.tempfile, "mkdtemp", return_value=str(self.esp)), \
+             mock.patch.object(ui.os, "rmdir"), \
+             mock.patch.object(ui, "run_cmd", side_effect=lambda cmd, **kw: calls.append(cmd[0])), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            ok = ui.stamp_new_stick("/dev/sdb")
+        return ok, calls, out.getvalue()
+
+    def test_stamp_new_stick_writes_id_and_both_copies(self):
+        ok, calls, _ = self._stamp()
+        self.assertTrue(ok)
+        stick_id = (self.esp / "config" / "stick-id").read_text()
+        self.assertRegex(stick_id, r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n$")
+        for c in self.copies:
+            self.assertEqual(c.read_text(), ui.stamp_syslinux(self.shipped, stick_id.strip()))
+        self.assertEqual(calls, ["mount", "umount"])
+        self.assertEqual(sorted(p.name for p in self.esp.rglob("*.tmp")), [])
+
+    def test_stamp_new_stick_without_esp_warns_and_returns_false(self):
+        ok, calls, out = self._stamp(efi_partition=None)
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
+        self.assertIn("WARNING", out)
+
+    def test_fresh_install_stamps_the_new_stick(self):
+        for stamped in (False, True):
+            events = []
+            with mock.patch.object(ui, "check_drive_fits"), \
+                 mock.patch.object(ui, "confirm", side_effect=[True, False]), \
+                 mock.patch.object(ui, "download_and_write_image",
+                                   side_effect=lambda *a: events.append("write")), \
+                 mock.patch.object(ui, "run_cmd",
+                                   side_effect=lambda cmd, **kw: events.append(cmd[0])), \
+                 mock.patch.object(ui, "stamp_new_stick",
+                                   side_effect=lambda d: events.append(f"stamp {d}") or stamped), \
+                 mock.patch.object(ui, "copy_home_to_drive") as copy, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = ui.do_fresh_install(_drive(), "http://x")
+            self.assertEqual(events, ["write", "sync", "partprobe", "stamp /dev/sdb"])
+            self.assertIsNone(result)
+            copy.assert_not_called()
 
 
 class TestAbUpgradeBootDefault(unittest.TestCase):

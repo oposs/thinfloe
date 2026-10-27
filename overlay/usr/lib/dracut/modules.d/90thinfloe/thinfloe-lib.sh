@@ -11,9 +11,12 @@ type info >/dev/null 2>&1 || . /lib/dracut-lib.sh
 type dinfo >/dev/null 2>&1 || dinfo() { info "$@"; }
 
 # Also echo to /dev/console for serial output
-# Use >&2 to avoid polluting stdout (which is used for return values)
+# Use >&2 to avoid polluting stdout (which is used for return values).
+# That includes info: under systemd, dracut's info() echoes to stdout, and a
+# log line in tf_find_esp's answer once made finalize-upgrade.sh fail to
+# mount the ESP on every boot.
 tf_log() {
-    info "$@"
+    info "$@" >&2
     echo "$@" > /dev/console 2>/dev/null || true
     echo "$@" >&2
 }
@@ -23,15 +26,89 @@ readonly TF_STORAGE="$TF_BASE/storage"
 readonly TF_LAYERS="$TF_BASE/layers"
 readonly TF_STATE="$TF_BASE/state"
 
-readonly TF_EFI_DEV="/dev/disk/by-partlabel/EFI-SYSTEM"
 # Set once a wait has already exhausted its budget in this boot, so a later
 # hook fails fast instead of repeating the whole timeout.
-readonly TF_EFI_ABSENT_MARKER="/run/thinfloe-efi-absent"
+readonly TF_EFI_ABSENT_MARKER="${TF_EFI_ABSENT_MARKER:-/run/thinfloe-efi-absent}"
 
-# tf_wait_for_efi [timeout_seconds]
+# tf_esp_candidates
 #
-# Wait for the boot medium's EFI-SYSTEM partition to appear. Returns 0 as soon
-# as it exists, 1 if the budget expires.
+# Print the kernel names (vda1, sdb1) of all partitions named EFI-SYSTEM,
+# sorted, one per line. Every ThinFloe stick carries that name, so with two
+# sticks attached there are two, and /dev/disk/by-partlabel/EFI-SYSTEM is a
+# single udev link that points at either one, differently from boot to
+# boot. That link is therefore never used to choose.
+tf_esp_candidates() {
+    for _tec_dir in "${TF_SYS_BLOCK:-/sys/class/block}"/*; do
+        [ -r "$_tec_dir/uevent" ] || continue
+        while read -r _tec_line; do
+            if [ "$_tec_line" = "PARTNAME=EFI-SYSTEM" ]; then
+                echo "${_tec_dir##*/}"
+                break
+            fi
+        done <"$_tec_dir/uevent"
+    done
+}
+
+# tf_read_stick_id <dev>
+#
+# Print the stick id in config/stick-id on /dev/<dev>, or nothing when the
+# partition has none or it is not valid. Mounts read-only and unmounts again.
+tf_read_stick_id() {
+    _trsi_mnt=/run/thinfloe-probe
+    mkdir -p "$_trsi_mnt" 2>/dev/null || return 0
+    mount -t vfat -o ro "/dev/$1" "$_trsi_mnt" 2>/dev/null || return 0
+    _trsi_id=""
+    [ -r "$_trsi_mnt/config/stick-id" ] && \
+        read -r _trsi_id <"$_trsi_mnt/config/stick-id"
+    umount "$_trsi_mnt" 2>/dev/null || true
+    tf_valid_stick_id "$_trsi_id" && echo "$_trsi_id"
+    return 0
+}
+
+# _tf_esp_pairs <known>
+#
+# Print "<dev>=<id>" for every current candidate, reading the id only for a
+# device not already listed in <known> (the previous output) with an id, so
+# a poll does not mount every stick again each second; a pair whose id is
+# empty is read again, since the first read may have failed.
+_tf_esp_pairs() {
+    for _tep_dev in $(tf_esp_candidates); do
+        _tep_pair=""
+        for _tep_known in $1; do
+            [ "${_tep_known%%=*}" = "$_tep_dev" ] && [ -n "${_tep_known#*=}" ] \
+                && _tep_pair="$_tep_known"
+        done
+        [ -n "$_tep_pair" ] || _tep_pair="$_tep_dev=$(tf_read_stick_id "$_tep_dev")"
+        echo "$_tep_pair"
+    done
+}
+
+# _tf_esp_settled <want-id> <pairs...>
+#
+# Exit 0 when waiting longer cannot improve the choice: a partition carries
+# the wanted id, or none is wanted and there is one partition only or one
+# has no id.
+_tf_esp_settled() {
+    _tes_want="$1"
+    shift
+    [ -z "$_tes_want" ] && [ $# -eq 1 ] && return 0
+    for _tes_pair in "$@"; do
+        if [ -n "$_tes_want" ]; then
+            [ "${_tes_pair#*=}" = "$_tes_want" ] && return 0
+        else
+            [ -z "${_tes_pair#*=}" ] && return 0
+        fi
+    done
+    return 1
+}
+
+# tf_find_esp
+#
+# Print /dev/<dev> of the ESP of the stick this machine booted from: the
+# EFI-SYSTEM partition whose config/stick-id the kernel command line names
+# (thinfloe.stick=), chosen by tf_choose_esp. Exit 1 when no EFI-SYSTEM
+# partition appears within TF_DEVICE_TIMEOUT. The answer is cached in
+# TF_ESP_CACHE, so finalize-upgrade.sh and mount-squashfs.sh get the same.
 #
 # This polls rather than checking once. `udevadm settle` only drains events
 # that are ALREADY queued: if the USB host controller has not yet enumerated
@@ -43,28 +120,60 @@ readonly TF_EFI_ABSENT_MARKER="/run/thinfloe-efi-absent"
 #
 # The bootloader having loaded the kernel from this same partition proves
 # nothing about the kernel's view: UEFI firmware used its own USB stack, and
-# the kernel re-enumerates the bus from scratch.
-tf_wait_for_efi() {
-    _dwfe_timeout="${1:-${TF_DEVICE_TIMEOUT:-60}}"
-    _dwfe_waited=0
+# the kernel re-enumerates the bus from scratch. For the same reason a second
+# stick can appear later than the first, so after the first one appears this
+# waits up to TF_ESP_MATCH_WAIT more while the wanted one is missing.
+tf_find_esp() {
+    _tfe_cache="${TF_ESP_CACHE:-/run/thinfloe-esp-device}"
+    _tfe_timeout="${TF_DEVICE_TIMEOUT:-60}"
+    _tfe_match_wait="${TF_ESP_MATCH_WAIT:-10}"
 
-    [ -b "$TF_EFI_DEV" ] && return 0
+    if [ -s "$_tfe_cache" ]; then
+        read -r _tfe_dev <"$_tfe_cache"
+        echo "$_tfe_dev"
+        return 0
+    fi
     [ -e "$TF_EFI_ABSENT_MARKER" ] && return 1
 
-    while [ ! -b "$TF_EFI_DEV" ]; do
-        if [ "$_dwfe_waited" -ge "$_dwfe_timeout" ]; then
+    _tfe_waited=0
+    while [ -z "$(tf_esp_candidates)" ]; do
+        if [ "$_tfe_waited" -ge "$_tfe_timeout" ]; then
             : > "$TF_EFI_ABSENT_MARKER" 2>/dev/null || true
             return 1
         fi
-        if [ $((_dwfe_waited % 5)) -eq 0 ]; then
-            tf_log "Waiting for EFI-SYSTEM to appear (${_dwfe_waited}/${_dwfe_timeout}s)"
+        if [ $((_tfe_waited % 5)) -eq 0 ]; then
+            tf_log "Waiting for EFI-SYSTEM to appear (${_tfe_waited}/${_tfe_timeout}s)"
         fi
         udevadm settle --timeout=5 >/dev/null 2>&1 || true
         sleep 1
-        _dwfe_waited=$((_dwfe_waited + 1))
+        _tfe_waited=$((_tfe_waited + 1))
+    done
+    [ "$_tfe_waited" -gt 0 ] && tf_log "EFI-SYSTEM appeared after ${_tfe_waited}s"
+
+    _tfe_want="$(getarg thinfloe.stick=)"
+    tf_valid_stick_id "$_tfe_want" || _tfe_want=""
+
+    _tfe_pairs="$(_tf_esp_pairs "")"
+    _tfe_waited=0
+    # shellcheck disable=SC2086
+    while ! _tf_esp_settled "$_tfe_want" $_tfe_pairs \
+          && [ "$_tfe_waited" -lt "$_tfe_match_wait" ]; do
+        udevadm settle --timeout=5 >/dev/null 2>&1 || true
+        sleep 1
+        _tfe_waited=$((_tfe_waited + 1))
+        _tfe_pairs="$(_tf_esp_pairs "$_tfe_pairs")"
     done
 
-    [ "$_dwfe_waited" -gt 0 ] && tf_log "EFI-SYSTEM appeared after ${_dwfe_waited}s"
+    # shellcheck disable=SC2086
+    _tfe_dev="$(tf_choose_esp "$_tfe_want" $_tfe_pairs)" || return 1
+    _tfe_id="none"
+    for _tfe_pair in $_tfe_pairs; do
+        [ "${_tfe_pair%%=*}" = "$_tfe_dev" ] && [ -n "${_tfe_pair#*=}" ] && \
+            _tfe_id="${_tfe_pair#*=}"
+    done
+    tf_log "thinfloe: boot stick /dev/$_tfe_dev (stick id $_tfe_id)"
+    echo "/dev/$_tfe_dev" >"$_tfe_cache" 2>/dev/null || true
+    echo "/dev/$_tfe_dev"
     return 0
 }
 
@@ -75,6 +184,78 @@ tf_dump_block_devices() {
     blkid 2>&1 | while read -r _ddbd_line; do tf_log "  $_ddbd_line"; done
     tf_log "Partition labels present:"
     ls -l /dev/disk/by-partlabel/ 2>&1 | while read -r _ddbd_line; do tf_log "  $_ddbd_line"; done
+}
+
+# tf_valid_stick_id <string>
+#
+# Exit 0 when the string is a stick id: a lowercase UUID as
+# /proc/sys/kernel/random/uuid writes it. The value goes into syslinux.cfg
+# and a sed expression, so nothing else may pass.
+tf_valid_stick_id() {
+    _tvsi_h='[0-9a-f]'
+    _tvsi_4="$_tvsi_h$_tvsi_h$_tvsi_h$_tvsi_h"
+    # shellcheck disable=SC2254
+    case "$1" in
+        $_tvsi_4$_tvsi_4-$_tvsi_4-$_tvsi_4-$_tvsi_4-$_tvsi_4$_tvsi_4$_tvsi_4) return 0 ;;
+    esac
+    return 1
+}
+
+# tf_choose_esp <want-id> <dev>=<id> ...
+#
+# Pick the boot stick's ESP among the partitions named EFI-SYSTEM, given in
+# device-name order, each with its stick id (empty for none). Prints the
+# chosen <dev>. Exit 1 when there is no partition.
+#
+#   1. Exactly one partition carries the wanted id: that one.
+#   2. Several carry it (a dd copy of a used stick): the first, logged.
+#   3. Otherwise one partition is that one; else the partitions without an
+#      id, because a stick with an id always boots with it on the command
+#      line, so a boot without a matching one came from a stick that never
+#      booted; else the first, logged.
+tf_choose_esp() {
+    _tce_want="$1"
+    shift
+    [ $# -gt 0 ] || return 1
+    tf_valid_stick_id "$_tce_want" || _tce_want=""
+
+    _tce_first=""; _tce_total=0
+    _tce_match=""; _tce_nmatch=0
+    _tce_noid=""; _tce_nnoid=0
+    for _tce_arg in "$@"; do
+        _tce_dev="${_tce_arg%%=*}"
+        _tce_id="${_tce_arg#*=}"
+        [ -n "$_tce_first" ] || _tce_first="$_tce_dev"
+        _tce_total=$((_tce_total + 1))
+        if [ -n "$_tce_want" ] && [ "$_tce_id" = "$_tce_want" ]; then
+            [ -n "$_tce_match" ] || _tce_match="$_tce_dev"
+            _tce_nmatch=$((_tce_nmatch + 1))
+        fi
+        if [ -z "$_tce_id" ]; then
+            [ -n "$_tce_noid" ] || _tce_noid="$_tce_dev"
+            _tce_nnoid=$((_tce_nnoid + 1))
+        fi
+    done
+
+    if [ "$_tce_nmatch" -gt 0 ]; then
+        [ "$_tce_nmatch" -gt 1 ] && \
+            tf_log "thinfloe: $_tce_nmatch sticks carry stick id $_tce_want, using /dev/$_tce_match"
+        echo "$_tce_match"
+    elif [ "$_tce_total" -eq 1 ]; then
+        echo "$_tce_first"
+    elif [ "$_tce_nnoid" -gt 0 ]; then
+        [ "$_tce_nnoid" -gt 1 ] && \
+            tf_log "thinfloe: $_tce_nnoid sticks have no stick id, using /dev/$_tce_noid"
+        echo "$_tce_noid"
+    else
+        if [ -n "$_tce_want" ]; then
+            tf_log "thinfloe: no stick carries stick id $_tce_want, using /dev/$_tce_first"
+        else
+            tf_log "thinfloe: no stick id on the command line, using /dev/$_tce_first"
+        fi
+        echo "$_tce_first"
+    fi
+    return 0
 }
 
 tf_init_dirs() {
@@ -845,6 +1026,80 @@ tf_set_boot_default() {
     done
     sync
     return $_sbd_rc
+}
+
+# tf_stamp_stick <efi-mount> <want-id>
+#
+# Give the mounted stick its id, so the next boot finds this ESP by it (see
+# tf_find_esp). The id is the one in config/stick-id, else <want-id> (the
+# command line's thinfloe.stick=) when this is the only EFI-SYSTEM partition
+# (with two, this stick may not be the one that booted, and would take its
+# id), else a new one from TF_UUID_SOURCE.
+# config/stick-id is written when it differs. Each syslinux.cfg copy is
+# rewritten only when one of its local APPEND lines (ramroot= not a URL)
+# lacks the id at its end: any old thinfloe.stick= word goes, the new one is
+# appended, before a trailing CR if the file has CRLF line ends.
+# thinfloe-upgrade's stamp_syslinux makes the same edit and
+# test-esp-choice.sh compares the two.
+#
+# Always returns 0: a stick that cannot be stamped boots as before, and a
+# failed write leaves the old file in place.
+tf_stamp_stick() {
+    local _tss_efi="$1" _tss_want="$2" _tss_id="" _tss_new="" _tss_cfg
+    local _tss_tab _tss_cr _tss_ws _tss_local _tss_need _tss_dev _tss_n=0
+
+    [ -r "$_tss_efi/config/stick-id" ] && read -r _tss_id <"$_tss_efi/config/stick-id"
+    tf_valid_stick_id "$_tss_id" || _tss_id=""
+    if [ -z "$_tss_id" ]; then
+        for _tss_dev in $(tf_esp_candidates); do _tss_n=$((_tss_n + 1)); done
+        if [ "$_tss_n" -le 1 ] && tf_valid_stick_id "$_tss_want"; then
+            _tss_id="$_tss_want"
+        else
+            read -r _tss_id <"${TF_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"
+            tf_valid_stick_id "$_tss_id" || {
+                tf_log "thinfloe: no usable stick id from ${TF_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"
+                return 0
+            }
+            _tss_new=1
+        fi
+        if ! { mkdir -p "$_tss_efi/config" \
+               && echo "$_tss_id" >"$_tss_efi/config/stick-id.tmp" \
+               && sync \
+               && mv "$_tss_efi/config/stick-id.tmp" "$_tss_efi/config/stick-id"; } 2>/dev/null; then
+            tf_log "thinfloe: could not write config/stick-id, the stick keeps no id"
+            rm -f "$_tss_efi/config/stick-id.tmp" 2>/dev/null
+            return 0
+        fi
+        [ -n "$_tss_new" ] && tf_log "thinfloe: this stick is now $_tss_id"
+    fi
+
+    # Literal tab and CR: GNU sed reads \t in a bracket expression, but the
+    # Python twin in thinfloe-upgrade must match this byte for byte, so
+    # nothing is left to escape handling.
+    _tss_tab=$(printf '\t')
+    _tss_cr=$(printf '\r')
+    _tss_ws="[ $_tss_tab]"
+    # sed address: an APPEND line whose ramroot= is not a URL (no
+    # <scheme>://; an alternation here reads as a command call to
+    # test-initramfs-commands.sh's extractor).
+    _tss_local="/^$_tss_ws*[Aa][Pp][Pp][Ee][Nn][Dd]$_tss_ws/{/${_tss_ws}ramroot=[a-z]+:\\/\\//b"
+
+    for _tss_cfg in "$_tss_efi/syslinux.cfg" "$_tss_efi/efi/boot/syslinux.cfg"; do
+        [ -f "$_tss_cfg" ] || continue
+        _tss_need=$(sed -nE "$_tss_local;/${_tss_ws}thinfloe\\.stick=$_tss_id$_tss_cr?\$/b;p}" "$_tss_cfg")
+        [ -n "$_tss_need" ] || continue
+        if sed -E "$_tss_local;s/$_tss_ws+thinfloe\\.stick=[^ $_tss_tab$_tss_cr]*//g;s/$_tss_ws*($_tss_cr?)\$/ thinfloe.stick=$_tss_id\\1/}" \
+                "$_tss_cfg" >"$_tss_cfg.tmp" 2>/dev/null \
+                && sync \
+                && mv "$_tss_cfg.tmp" "$_tss_cfg" 2>/dev/null; then
+            :
+        else
+            tf_log "thinfloe: could not write thinfloe.stick=$_tss_id into $_tss_cfg"
+            rm -f "$_tss_cfg.tmp" 2>/dev/null
+        fi
+    done
+    sync
+    return 0
 }
 
 # tf_finalize_upgrade <efi-mount> <ramroot> <ramroot-file>
