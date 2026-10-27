@@ -151,7 +151,13 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   (`1 - e^(-t/5)`, `ease()` in `thinfloe.script`), never Plymouth's `progress`:
   that one divides by the boot time kept in `/var/lib/plymouth/boot-duration`,
   which a RAM system never keeps, so it assumed 60 s and ended at 7 to 15 %.
-  `test-initramfs-commands.sh` guards it. The host name reaches it through
+  `test-initramfs-commands.sh` guards it. The logo is never `Image.Scale`d:
+  the `plymouth-art` stage renders it at seven widths (320 to 1280 px,
+  `logo-<w>.png`) and the script draws the widest one that fits `640 * k`,
+  unscaled. Scaling interpolates, and the 640 px logo drawn 1280 px wide on
+  4K had edges blurred over 3 px. `DeviceScale=1` in
+  `overlay/etc/plymouth/plymouthd.conf` keeps Plymouth from guessing scale 2
+  on 4K and doubling the whole screen; the same test guards both. The host name reaches it through
   `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when
   `/etc/thinfloe/version` exists; nothing writes it yet.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,

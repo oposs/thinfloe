@@ -130,7 +130,13 @@ done
 # because plymouthd reads Theme= before it looks at the link.
 for f in usr/share/plymouth/themes/thinfloe/thinfloe.plymouth \
          usr/share/plymouth/themes/thinfloe/thinfloe.script \
-         usr/share/plymouth/themes/thinfloe/logo.png \
+         usr/share/plymouth/themes/thinfloe/logo-320.png \
+         usr/share/plymouth/themes/thinfloe/logo-427.png \
+         usr/share/plymouth/themes/thinfloe/logo-480.png \
+         usr/share/plymouth/themes/thinfloe/logo-640.png \
+         usr/share/plymouth/themes/thinfloe/logo-853.png \
+         usr/share/plymouth/themes/thinfloe/logo-960.png \
+         usr/share/plymouth/themes/thinfloe/logo-1280.png \
          usr/share/plymouth/themes/thinfloe/glow.png \
          usr/share/plymouth/themes/thinfloe/bar-track.png \
          usr/share/plymouth/themes/thinfloe/bar-fill.png \
@@ -169,6 +175,20 @@ if [[ -n "$pscript" ]] && grep -q '^ *set_progress(ease(duration));' "$pscript" 
     ok "the boot screen's bar follows the elapsed time, not Plymouth's estimate"
 else
     bad "the boot screen's bar follows Plymouth's estimate, which stops near 15 % on a RAM system"
+fi
+# Image.Scale interpolates: the 640 px logo drawn 1280 px wide on a 4K screen
+# had edges blurred over 3 px. The logo comes in fixed widths and is drawn
+# unscaled; DeviceScale=1 keeps Plymouth from doubling the whole screen.
+if [[ -n "$pscript" ]] && ! grep -q 'logo\.image\.Scale' "$pscript" &&
+   grep -q 'Image("logo-" + ' "$pscript"; then
+    ok "the boot screen draws the logo at a rendered width, unscaled"
+else
+    bad "the boot screen scales the logo, which blurs it"
+fi
+if [[ -n "$pconf" ]] && grep -qx 'DeviceScale=1' "$pconf"; then
+    ok "plymouthd.conf in the initrd says DeviceScale=1"
+else
+    bad "plymouthd.conf in the initrd does not say DeviceScale=1: a 4K screen is drawn at half size and enlarged"
 fi
 
 # --- names that are not files: builtins and shell functions ---------------

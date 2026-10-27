@@ -64,14 +64,19 @@ RUN set -eu; \
 # The boot screen's images, rendered from brand/*.svg. rsvg-convert stays in
 # this stage, so neither it nor librsvg reaches the image. The word "ThinFloe"
 # is outlines in logo-wordmark.svg (scripts/wordmark-svg.py), so no font is
-# needed here. Sizes are for a 1920 px wide screen; thinfloe.script scales them.
+# needed here. Sizes are for a 1920 px wide screen; thinfloe.script scales the
+# glow and the bar. The logo is rendered at the widths the script picks from
+# (640 px times 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2) and drawn unscaled, because
+# Image.Scale blurs its edges.
 FROM ubuntu:26.04 AS plymouth-art
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -yq --no-install-recommends librsvg2-bin
 COPY brand/ /brand/
 RUN set -eu; mkdir -p /out; \
-    rsvg-convert -w 640 /brand/logo-wordmark.svg -o /out/logo.png; \
+    for w in 320 427 480 640 853 960 1280; do \
+        rsvg-convert -w "$w" /brand/logo-wordmark.svg -o "/out/logo-$w.png"; \
+    done; \
     rsvg-convert /brand/boot-glow.svg -o /out/glow.png; \
     rsvg-convert /brand/boot-bar-track.svg -o /out/bar-track.png; \
     rsvg-convert /brand/boot-bar-fill.svg -o /out/bar-fill.png

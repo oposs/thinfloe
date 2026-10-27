@@ -3,7 +3,8 @@
 # glow rising from the bottom, the host name small in Geo at the foot.
 #
 # The PNGs are made for a 1920 px wide screen (brand/*.svg, rendered in the
-# plymouth-art stage of containers/ubuntu/Dockerfile); k scales them.
+# plymouth-art stage of containers/ubuntu/Dockerfile); k scales the glow and
+# the bar, and picks one of the rendered logo widths.
 #
 # The host name arrives with "plymouth display-message", which
 # tf_write_hostname (90thinfloe/thinfloe-lib.sh) calls once the name is known.
@@ -27,10 +28,28 @@ glow.image = Image("glow.png");
 glow.sprite = Sprite(glow.image.Scale(screen.w, screen.h));
 glow.sprite.SetPosition(0, 0, -10);
 
-logo.image = Image("logo.png");
-logo.w = Math.Int(logo.image.GetWidth() * k);
-logo.h = Math.Int(logo.image.GetHeight() * k);
-logo.sprite = Sprite(logo.image.Scale(logo.w, logo.h));
+# The logo is drawn unscaled: Image.Scale interpolates, and a 640 px logo drawn
+# 1280 px wide on a 4K screen had edges blurred over 3 px. The plymouth-art
+# stage renders it at these widths; the widest one that fits 640 * k is used.
+logo.widths[0] = 320;
+logo.widths[1] = 427;
+logo.widths[2] = 480;
+logo.widths[3] = 640;
+logo.widths[4] = 853;
+logo.widths[5] = 960;
+logo.widths[6] = 1280;
+logo.pick = logo.widths[0];
+i = 0;
+while (i < 7)
+{
+    if (logo.widths[i] <= Math.Int(640 * k + 0.5))
+        logo.pick = logo.widths[i];
+    i = i + 1;
+}
+logo.image = Image("logo-" + logo.pick + ".png");
+logo.w = logo.image.GetWidth();
+logo.h = logo.image.GetHeight();
+logo.sprite = Sprite(logo.image);
 logo.x = Math.Int((screen.w - logo.w) / 2);
 logo.y = Math.Int(screen.h * 0.46 - logo.h / 2);
 logo.sprite.SetPosition(logo.x, logo.y, 10);
