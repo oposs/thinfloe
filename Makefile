@@ -84,8 +84,12 @@ help:
 $(ARTIFACT_DIR) $(ROOTFS_DIR) $(IMAGE_DIR):
 	mkdir -p $@
 
-# Find all overlay files (excluding editor backups)
+# Find all overlay files (excluding editor backups). The directories are
+# prerequisites too: a deleted file takes its own name off OVERLAY_FILES, so
+# without them make saw nothing changed and the image kept the deleted file
+# (test-container-inputs.sh). Deleting a file changes its directory's mtime.
 OVERLAY_FILES := $(shell find overlay -type f ! -name '*~' 2>/dev/null)
+OVERLAY_DIRS := $(shell find overlay -type d 2>/dev/null)
 
 # labwc is rebuilt from source inside the ubuntu container, patched with
 # every file here (see containers/ubuntu/Dockerfile's labwc-build stage).
@@ -131,7 +135,7 @@ $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
-.ubuntu-container: containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
@@ -447,6 +451,7 @@ test: test-unit rootfs
 	@test/integration/test-session-lifecycle.sh
 	@test/integration/test-container-stamp.sh
 	@test/integration/test-usb-image-deps.sh
+	@test/integration/test-container-inputs.sh
 	@test/integration/test-format-bytes.sh
 	@test/integration/test-make-clean.sh
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh

@@ -900,6 +900,11 @@ the design spec for why it is unnecessary.
 `.ubuntu-container` target (`PATCH_FILES` in the `Makefile`). Editing a patch
 without that dependency would not trigger a rebuild, leaving `make test` and
 `make test-runtime` validating a stale image while still reporting green.
+The same holds for deleting a file: the directories of `overlay/` and
+`brand/` are prerequisites too (`OVERLAY_DIRS`), because a deleted file
+leaves the file list with it, and the image kept a removed systemd drop-in
+until they were added. `test/integration/test-container-inputs.sh` guards
+this.
 
 The same false green has a second source: the image tag. `.ubuntu-container`
 belongs to one checkout, but every checkout builds `thinfloe-ubuntu:$(VERSION)`,
