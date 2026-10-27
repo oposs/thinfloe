@@ -64,9 +64,31 @@ fun set_progress(p)
 }
 set_progress(0.02);
 
+# Plymouth's own progress divides the elapsed time by the length of earlier
+# boots, kept in /var/lib/plymouth/boot-duration. A machine running from RAM
+# never keeps that file, so Plymouth assumes 60 s and the bar ended at 7 to
+# 15 % when the session took over. The bar therefore follows the elapsed time
+# alone: 1 - e^(-t/5), 63 % at 5 s, 86 % at 10 s, 95 % at 15 s. The script
+# language has no exp: e^(-t/5) is (e^(-t/320))^64, the inner term from three
+# terms of its series, then squared six times.
+fun ease(t)
+{
+    y = t / 320.0;
+    e = 1.0 - y + y * y / 2.0 - y * y * y / 6.0;
+    if (e < 0.0)
+        e = 0.0;
+    i = 0;
+    while (i < 6)
+    {
+        e = e * e;
+        i = i + 1;
+    }
+    return 1.0 - e;
+}
+
 fun boot_progress(duration, progress)
 {
-    set_progress(progress);
+    set_progress(ease(duration));
 }
 Plymouth.SetBootProgressFunction(boot_progress);
 

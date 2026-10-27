@@ -147,7 +147,11 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   and draws as boxes (egui's default fonts carry no CJK). The Plymouth theme is
   `overlay/usr/share/plymouth/themes/thinfloe/`, a `script` theme
   (`ModuleName=script` in `thinfloe.plymouth`) whose text label-pango draws,
-  finding Geo through fontconfig. The host name reaches it through
+  finding Geo through fontconfig. Its progress line follows the elapsed time
+  (`1 - e^(-t/5)`, `ease()` in `thinfloe.script`), never Plymouth's `progress`:
+  that one divides by the boot time kept in `/var/lib/plymouth/boot-duration`,
+  which a RAM system never keeps, so it assumed 60 s and ended at 7 to 15 %.
+  `test-initramfs-commands.sh` guards it. The host name reaches it through
   `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when
   `/etc/thinfloe/version` exists; nothing writes it yet.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,

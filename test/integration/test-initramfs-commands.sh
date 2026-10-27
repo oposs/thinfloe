@@ -160,6 +160,16 @@ if [[ -n "$pconf" ]] && grep -qx 'Theme=thinfloe' "$pconf"; then
 else
     bad "plymouthd.conf in the initrd does not say Theme=thinfloe (${pconf:-not found})"
 fi
+# Plymouth's own progress assumes a 60 s boot when no boot-duration file was
+# kept, which a RAM system never has: the bar ended at 7 to 15 %. The theme
+# draws the bar from the elapsed time instead.
+pscript=$(find "$WORK/ex" -path '*themes/thinfloe/thinfloe.script' 2>/dev/null | head -1)
+if [[ -n "$pscript" ]] && grep -q '^ *set_progress(ease(duration));' "$pscript" &&
+   ! grep -q '^ *set_progress(progress);' "$pscript"; then
+    ok "the boot screen's bar follows the elapsed time, not Plymouth's estimate"
+else
+    bad "the boot screen's bar follows Plymouth's estimate, which stops near 15 % on a RAM system"
+fi
 
 # --- names that are not files: builtins and shell functions ---------------
 #
