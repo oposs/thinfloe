@@ -1097,7 +1097,9 @@ starts. A new add-on that needs another library needs a line here.
 `thinfloe-addon` does into a throw-away container of the built image, checks
 that every ELF file resolves its libraries and that the client starts; run
 via `make test` with `THINLINC_DEB` (else the page and pattern of the shipped
-tile are used) and, for OxuLnk, `OXULNK_DEB` set.
+tile are used) and `OXULNK_DEB` (else the shipped tile's signed APT source,
+fetched with `thinfloe-addon`'s own code). A client it cannot get fails the
+test.
 
 ### A 3.x home is migrated once
 

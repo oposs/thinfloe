@@ -6,7 +6,9 @@
 #
 # ThinLinc: $THINLINC_DEB, else the .deb that the shipped tile's page and
 # pattern name, downloaded once into ${TMPDIR}/thinfloe-addon-cache/.
-# Neither available: the test fails. OxuLnk: only when $OXULNK_DEB is set.
+# OxuLnk: $OXULNK_DEB, else the package the shipped tile's signed APT source
+# offers, fetched with thinfloe-addon's own code into the same cache.
+# Neither available for a client: the test fails.
 #
 # Usage: TF_UBUNTU_IMAGE=localhost/thinfloe-ubuntu:X test/integration/test-addon-deps.sh
 
@@ -15,6 +17,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
 TILE="$REPO/overlay/etc/thinfloe/menu/10-thinlinc.desktop"
+OXULNK_TILE="$REPO/overlay/etc/thinfloe/menu/20-oxulnk.desktop"
 CACHE="${TMPDIR:-/scratch/oetiker/claude-tmp}/thinfloe-addon-cache"
 
 fail=0
@@ -44,6 +47,26 @@ print(best[1] if best else "")
     if [[ ! -s "$file" ]]; then
         curl -fsSL --max-time 600 -o "$file.part" "$url" && mv "$file.part" "$file" || return 1
     fi
+    echo "$file"
+}
+
+# Downloads what the OxuLnk tile's APT source offers, through thinfloe-addon's
+# check() and _download_apt(), so apt checks the repository signature as on
+# a machine. Prints its path.
+fetch_oxulnk() {
+    mkdir -p "$CACHE" || return 1
+    local file="$CACHE/oxulnk-desktop.deb"
+    python3 -I -c '
+import importlib.machinery, importlib.util, os, sys
+tool, tile, dest = sys.argv[1:4]
+loader = importlib.machinery.SourceFileLoader("thinfloe_addon", tool)
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("thinfloe_addon", loader))
+loader.exec_module(m)
+with open(tile, encoding="utf-8") as f:
+    src = m.parse_source(m.parse_desktop(f.read()))
+m._download_apt(src, m.check(src), dest + ".part", os.path.dirname(dest))
+' "$REPO/overlay/usr/bin/thinfloe-addon" "$OXULNK_TILE" "$file" >/dev/null \
+        && mv "$file.part" "$file" || return 1
     echo "$file"
 }
 
@@ -102,10 +125,14 @@ else
     check_addon ThinLinc "$deb" thinlinc-client "/opt/thinlinc/bin/tlclient --version" 10-thinlinc
 fi
 
-if [[ -n "${OXULNK_DEB:-}" ]]; then
-    check_addon OxuLnk "$OXULNK_DEB" oxulnk-desktop "oxulnk-desktop --version" 20-oxulnk
+deb="${OXULNK_DEB:-}"
+if [[ -z "$deb" || ! -s "$deb" ]]; then
+    deb=$(fetch_oxulnk) || deb=""
+fi
+if [[ -z "$deb" ]]; then
+    bad "OxuLnk: OXULNK_DEB not set and the download from the tile's APT source failed"
 else
-    echo "skip - OxuLnk: OXULNK_DEB not set"
+    check_addon OxuLnk "$deb" oxulnk-desktop "oxulnk-desktop --version" 20-oxulnk
 fi
 
 [[ $fail -eq 0 ]] || { echo "FAILED - add-on dependencies"; exit 1; }
