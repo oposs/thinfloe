@@ -1021,6 +1021,73 @@ tf_set_boot_default() {
     return $_sbd_rc
 }
 
+# tf_stamp_stick <efi-mount> <want-id>
+#
+# Give the mounted stick its id, so the next boot finds this ESP by it (see
+# tf_find_esp). The id is the one in config/stick-id, else <want-id> (the
+# command line's thinfloe.stick=), else a new one from TF_UUID_SOURCE.
+# config/stick-id is written when it differs. Each syslinux.cfg copy is
+# rewritten only when one of its local APPEND lines (ramroot= not a URL)
+# lacks the id at its end: any old thinfloe.stick= word goes, the new one is
+# appended, before a trailing CR if the file has CRLF line ends.
+# thinfloe-upgrade's stamp_syslinux makes the same edit and
+# test-esp-choice.sh compares the two.
+#
+# Always returns 0: a stick that cannot be stamped boots as before, and a
+# failed write leaves the old file in place.
+tf_stamp_stick() {
+    local _tss_efi="$1" _tss_want="$2" _tss_id="" _tss_new="" _tss_cfg
+    local _tss_tab _tss_cr _tss_ws _tss_local _tss_need
+
+    [ -r "$_tss_efi/config/stick-id" ] && read -r _tss_id <"$_tss_efi/config/stick-id"
+    tf_valid_stick_id "$_tss_id" || _tss_id=""
+    if [ -z "$_tss_id" ]; then
+        if tf_valid_stick_id "$_tss_want"; then
+            _tss_id="$_tss_want"
+        else
+            read -r _tss_id <"${TF_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"
+            tf_valid_stick_id "$_tss_id" || {
+                tf_log "thinfloe: no usable stick id from ${TF_UUID_SOURCE:-/proc/sys/kernel/random/uuid}"
+                return 0
+            }
+            _tss_new=1
+        fi
+        if ! { mkdir -p "$_tss_efi/config" \
+               && echo "$_tss_id" >"$_tss_efi/config/stick-id.tmp" \
+               && mv "$_tss_efi/config/stick-id.tmp" "$_tss_efi/config/stick-id"; } 2>/dev/null; then
+            tf_log "thinfloe: could not write config/stick-id, the stick keeps no id"
+            rm -f "$_tss_efi/config/stick-id.tmp" 2>/dev/null
+            return 0
+        fi
+        [ -n "$_tss_new" ] && tf_log "thinfloe: this stick is now $_tss_id"
+    fi
+
+    # Literal tab and CR: GNU sed reads \t in a bracket expression, but the
+    # Python twin in thinfloe-upgrade must match this byte for byte, so
+    # nothing is left to escape handling.
+    _tss_tab=$(printf '\t')
+    _tss_cr=$(printf '\r')
+    _tss_ws="[ $_tss_tab]"
+    # sed address: an APPEND line whose ramroot= is not a URL.
+    _tss_local="/^$_tss_ws*APPEND$_tss_ws/{/${_tss_ws}ramroot=(https?|ftp):\\/\\//b"
+
+    for _tss_cfg in "$_tss_efi/syslinux.cfg" "$_tss_efi/efi/boot/syslinux.cfg"; do
+        [ -f "$_tss_cfg" ] || continue
+        _tss_need=$(sed -nE "$_tss_local;/${_tss_ws}thinfloe\\.stick=$_tss_id$_tss_cr?\$/b;p}" "$_tss_cfg")
+        [ -n "$_tss_need" ] || continue
+        if sed -E "$_tss_local;s/$_tss_ws+thinfloe\\.stick=[^ $_tss_tab$_tss_cr]*//g;s/$_tss_ws*($_tss_cr?)\$/ thinfloe.stick=$_tss_id\\1/}" \
+                "$_tss_cfg" >"$_tss_cfg.tmp" 2>/dev/null \
+                && mv "$_tss_cfg.tmp" "$_tss_cfg" 2>/dev/null; then
+            :
+        else
+            tf_log "thinfloe: could not write thinfloe.stick=$_tss_id into $_tss_cfg"
+            rm -f "$_tss_cfg.tmp" 2>/dev/null
+        fi
+    done
+    sync
+    return 0
+}
+
 # tf_finalize_upgrade <efi-mount> <ramroot> <ramroot-file>
 #
 # Rotate a pending upgrade on the mounted ESP: tl.old is removed, tl becomes

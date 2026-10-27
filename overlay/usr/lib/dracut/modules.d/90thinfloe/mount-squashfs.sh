@@ -85,6 +85,10 @@ else
     fsck.vfat -a "$efi_dev" > /dev/kmsg 2>&1 || true
     mount -t vfat "$efi_dev" "$efi_mount" || die "Failed to mount EFI"
 
+    # Give this stick its id, so the next boot finds this ESP by it even
+    # with a second stick attached. Never fails the boot.
+    tf_stamp_stick "$efi_mount" "$(getarg thinfloe.stick=)"
+
     sqsh_path="$efi_mount/$ramroot"
     [ -f "$sqsh_path" ] || die "SquashFS not found: $sqsh_path"
 fi

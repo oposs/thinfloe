@@ -282,4 +282,127 @@ else
     bad "second call without partition: rc=$rc sleeps=$(sleeps)"
 fi
 
+# --- tf_stamp_stick -----------------------------------------------------
+#
+# A fake ESP with both syslinux.cfg copies from configs/syslinux.cfg. The
+# local entries (ramroot=tl..., tl.old, tl.new) get thinfloe.stick=<id>;
+# LABEL network (ramroot=http://...) and every other line stay as they are.
+
+CFG="$REPO/configs/syslinux.cfg"
+echo "$A" >"$WORK/uuid"
+export TF_UUID_SOURCE="$WORK/uuid"
+
+# mkesp <name>: a fresh fake ESP, path on stdout
+mkesp() {
+    local e="$WORK/esp-$1"
+    rm -rf "$e"
+    mkdir -p "$e/efi/boot"
+    cp "$CFG" "$e/syslinux.cfg"
+    cp "$CFG" "$e/efi/boot/syslinux.cfg"
+    echo "$e"
+}
+stamp() { (PATH="$BIN"; tf_stamp_stick "$@"); }
+# local_appends <file>: the APPEND lines whose ramroot is not a URL
+local_appends() { grep -E '^[[:space:]]*APPEND[[:space:]]' "$1" | grep -vE 'ramroot=(https?|ftp)://'; }
+# stamped_once <file> <id>: every local APPEND ends in the id, exactly once
+stamped_once() {
+    local line n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [[ "$line" == *" thinfloe.stick=$2" ]] || return 1
+        [[ "${line#*thinfloe.stick=}" == "$2" ]] || return 1
+    done < <(local_appends "$1")
+    [[ $n -eq 6 ]]
+}
+# rest_unchanged <file>: everything but the local APPEND lines is as shipped
+rest_unchanged() {
+    diff <(grep -vE '^[[:space:]]*APPEND[[:space:]]+ramroot=tl' "$CFG") \
+         <(grep -vE '^[[:space:]]*APPEND[[:space:]]+ramroot=tl' "$1") >/dev/null
+}
+
+e=$(mkesp fresh); : >"$WORK/log"
+stamp "$e" ""; rc=$?
+if [[ $rc -eq 0 && "$(cat "$e/config/stick-id")" == "$A" ]] \
+   && stamped_once "$e/syslinux.cfg" "$A" && stamped_once "$e/efi/boot/syslinux.cfg" "$A" \
+   && rest_unchanged "$e/syslinux.cfg" && rest_unchanged "$e/efi/boot/syslinux.cfg" \
+   && grep -qF "ramroot=http://192.168.1.100/boot/ramroot.sqsh rd.neednet=1 ip=dhcp console=tty1 quiet splash plymouth.use-simpledrm" "$e/syslinux.cfg" \
+   && ! grep -q 'http.*thinfloe.stick' "$e/syslinux.cfg" \
+   && grep -qF "thinfloe: this stick is now $A" "$WORK/log"; then
+    ok "a fresh stick gets an id in config/stick-id and on its local APPEND lines"
+else
+    bad "fresh stick: rc=$rc id=$(cat "$e/config/stick-id" 2>&1) log=$(cat "$WORK/log")"
+fi
+
+i1=$(stat -c %i "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg" "$e/config/stick-id")
+c1=$(cat "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg" "$e/config/stick-id")
+echo "$B" >"$WORK/uuid"
+stamp "$e" "$A"; rc=$?
+echo "$A" >"$WORK/uuid"
+if [[ $rc -eq 0 && "$i1" == "$(stat -c %i "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg" "$e/config/stick-id")" \
+      && "$c1" == "$(cat "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg" "$e/config/stick-id")" ]]; then
+    ok "stamping again changes nothing, not even an inode"
+else
+    bad "second stamp rewrote a file"
+fi
+
+e=$(mkesp stored); mkdir -p "$e/config"; echo "$B" >"$e/config/stick-id"
+stamp "$e" "$A"
+if stamped_once "$e/syslinux.cfg" "$B" && stamped_once "$e/efi/boot/syslinux.cfg" "$B" \
+   && ! grep -qF "$A" "$e/syslinux.cfg" "$e/efi/boot/syslinux.cfg"; then
+    ok "the stored id wins over the command line's"
+else
+    bad "stored id: $(grep -h APPEND "$e/syslinux.cfg")"
+fi
+
+e=$(mkesp cmdline)
+stamp "$e" "$B"
+if [[ "$(cat "$e/config/stick-id")" == "$B" ]] && stamped_once "$e/syslinux.cfg" "$B"; then
+    ok "with no stored id, the command line's id is kept"
+else
+    bad "command line id: $(cat "$e/config/stick-id" 2>&1)"
+fi
+
+e=$(mkesp invalid); mkdir -p "$e/config"; echo "x" >"$e/config/stick-id"
+stamp "$e" ""
+if [[ "$(cat "$e/config/stick-id")" == "$A" ]] && stamped_once "$e/syslinux.cfg" "$A"; then
+    ok "an invalid stored id is replaced"
+else
+    bad "invalid stored id: $(cat "$e/config/stick-id" 2>&1)"
+fi
+
+e=$(mkesp opts)
+sed -i "s|^\(    APPEND ramroot=tl/ramroot.sqsh console=tty1 quiet splash plymouth.use-simpledrm\)$|\1 foo=bar thinfloe.stick=$B|" "$e/syslinux.cfg"
+stamp "$e" ""
+line=$(grep -m1 'APPEND ramroot=tl/ramroot.sqsh console=tty1 quiet' "$e/syslinux.cfg")
+if [[ "$line" == "    APPEND ramroot=tl/ramroot.sqsh console=tty1 quiet splash plymouth.use-simpledrm foo=bar thinfloe.stick=$A" ]]; then
+    ok "user options survive, an old thinfloe.stick= is replaced"
+else
+    bad "user options: '$line'"
+fi
+
+e=$(mkesp crlf)
+sed -i 's/$/\r/' "$e/syslinux.cfg"
+stamp "$e" ""
+if grep -q "plymouth.use-simpledrm thinfloe.stick=$A"$'\r'"\$" "$e/syslinux.cfg" \
+   && [[ $(grep -c $'\r$' "$e/syslinux.cfg") -eq $(wc -l <"$CFG") ]]; then
+    ok "CRLF line ends stay CRLF"
+else
+    bad "CRLF: $(grep -m1 'APPEND' "$e/syslinux.cfg" | od -c | tail -3)"
+fi
+
+if [[ $(id -u) -ne 0 ]]; then
+    e=$(mkesp ro)
+    chmod 555 "$e" "$e/efi/boot"
+    stamp "$e" ""; rc=$?
+    chmod 755 "$e" "$e/efi/boot"
+    if [[ $rc -eq 0 ]] && cmp -s "$CFG" "$e/syslinux.cfg" && cmp -s "$CFG" "$e/efi/boot/syslinux.cfg" \
+       && [[ -z "$(find "$e" -name '*.tmp')" ]]; then
+        ok "a read-only ESP: exit 0, nothing changed, no .tmp left"
+    else
+        bad "read-only ESP: rc=$rc $(find "$e" -newer "$CFG")"
+    fi
+else
+    ok "# SKIP read-only ESP: running as root"
+fi
+
 exit $fail
