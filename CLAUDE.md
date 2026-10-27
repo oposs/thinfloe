@@ -81,7 +81,7 @@ The boot process involves several interconnected components:
    - **thinfloe-cleanup.sh** - Pre-pivot cleanup
 
 3. **Boot Process**:
-   - **SquashFS Mount**: Mounts compressed read-only rootfs from USB partition or HTTP URL
+   - **SquashFS Mount**: Mounts compressed read-only rootfs from USB partition or HTTP URL (on USB, the ESP of the stick the firmware booted from, chosen by stick id; see [Standing Constraints](#the-esp-is-chosen-by-stick-id-never-by-the-partlabel-link))
    - **ZRAM Setup**: Creates compressed RAM device for writable overlay
    - **OverlayFS**: Combines read-only SquashFS with writable ZRAM layer
    - **machine-id Persistence**: Reads/generates machine-id and stores it in /config/machine-id on EFI partition
@@ -612,7 +612,7 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 ## Standing Constraints
 
-Seventeen rules in this repository look like ordinary configuration but are
+Eighteen rules in this repository look like ordinary configuration but are
 load-bearing. All but the patched-labwc, hook-order, menu-rendering,
 logout-save, migrate-once and add-on-libraries ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
@@ -621,7 +621,9 @@ hook-order one was caught in QEMU: the race it closes is present in every
 image built before it. The menu-rendering and logout-save ones are preventive
 too: they were decided while the menu was designed, and no image has shipped
 without them. The migrate-once and add-on-libraries ones are
-preventive as well: nothing has shipped broken from them.
+preventive as well: nothing has shipped broken from them. The stick-id one fixes a bug every
+image before it shipped with; it was found in QEMU, whose `qemu-test`
+attaches a second stick.
 
 ### No login password ships in the image
 
@@ -1027,6 +1029,52 @@ stick of 4 GB or more; sticks already in the field keep their 2000 MB.
 `test/integration/test-initramfs-home.sh` guard both halves, and `make
 qemu-smoke-upgrade` boots a staged upgrade through OVMF and syslinux and
 requires the rotation and `DEFAULT current` afterwards.
+
+### The ESP is chosen by stick ID, never by the partlabel link
+
+Every ThinFloe stick has a partition named `EFI-SYSTEM`, so with two sticks
+attached `/dev/disk/by-partlabel/EFI-SYSTEM` is one udev link that names
+either one, differently from boot to boot. The initramfs used to mount it:
+the firmware loaded the kernel from one stick, while the squashfs, the home,
+the add-ons and every save went to the other. An add-on installed before a
+restart was gone after it. `make qemu-test` attaches a second copy of the
+image (`vdb`), so two of three restarts there lost the add-on; in the field
+it takes an old and a new stick plugged in together.
+
+Each stick therefore carries an ID: a lowercase UUID in `/config/stick-id`
+on its ESP, and `thinfloe.stick=<id>` at the end of every `APPEND` line of
+both `syslinux.cfg` copies whose `ramroot=` is not a URL. `tf_find_esp`
+(`thinfloe-lib.sh`) lists the `EFI-SYSTEM` partitions from sysfs, reads each
+one's ID read-only, and `tf_choose_esp` picks: the one whose ID the command
+line names (several: the first, logged); else, with one partition, that
+one; else a partition without an ID (several: the first, logged), because
+a stick with an ID always boots with it; else the first, logged. While the
+wanted one is missing it waits up to `TF_ESP_MATCH_WAIT` (10 s) after the
+first stick appeared, for a second stick that enumerates late. The answer
+is cached in `/run/thinfloe-esp-device`, so `finalize-upgrade.sh` and
+`mount-squashfs.sh` mount the same partition. Do not go back to the link.
+`tf_log` sends dracut's `info` to stderr: under systemd `info` writes to
+stdout, and a log line inside `tf_find_esp`'s answer made
+`finalize-upgrade.sh` fail to mount the ESP on every boot of the first
+build of this change (caught by `make qemu-smoke-upgrade`).
+
+The ID is written by `tf_stamp_stick` after the mount (the stored one,
+else the command line's, else a new one; `thinfloe: this stick is now
+<id>`), and by `thinfloe-upgrade` right after `dd` of a fresh install,
+independent of the home-copy question (`stamp_new_stick`). Both make the
+same edit, byte for byte (`stamp_syslinux`). A staged upgrade copies `LABEL
+current` into `LABEL new`, so the ID rides along.
+
+Limits: two attached sticks that both never booted and were not written by
+`thinfloe-upgrade` (a `dd` of the download, `make image`) are still a guess,
+the first by device name; `dd` copies of a used stick share one ID, one
+machine-id and one host name; a 3.x fallback boot (`LABEL previous`) runs
+the 3.x initramfs and still uses the link.
+
+Guards: `test/integration/test-esp-choice.sh` (the rule, the wait, the
+stamp, the shell/Python cross-check, with only the initramfs's tools),
+`test/unit/test_upgrade_image.py` and `make qemu-smoke-two-sticks` (three
+OVMF boots from a fresh stick with a stick that has an ID attached).
 
 ### Add-on runtime libraries are listed by name in the Dockerfile
 

@@ -32,4 +32,5 @@
 
 ### Fixed
 
+- With two ThinFloe sticks plugged in, a boot could take the home directory and the add-ons from the other stick, so an add-on installed before a restart was gone after it, and the home could be saved to the wrong stick. Each stick now gets an ID (`thinfloe.stick=` in its `syslinux.cfg`) when `thinfloe-upgrade` writes it or at its first boot, and the boot uses the stick it started from.
 - Tile icons in the menu no longer look jagged, with broken or dotted lines: each icon is now drawn at the exact size it appears at, on the tiles, in the Settings rows and on the folded-window chips.
