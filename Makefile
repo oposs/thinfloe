@@ -136,7 +136,7 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
 $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
-	$(CONTAINER_RUNTIME) run --rm \
+	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(PWD)/scripts:/scripts:ro \
 		-v $(PWD)/artifacts:/artifacts \
 		-e SQUASHFS_COMP=$(SQUASHFS_COMP) \
@@ -160,7 +160,7 @@ rootfs: $(KERNEL) $(INITRD) $(SQUASHFS)
 
 $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI): .ipxe-container | $(ROOTFS_DIR)
 	@echo "Exporting iPXE boot loaders..."
-	$(CONTAINER_RUNTIME) run --rm \
+	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(PWD)/artifacts/rootfs:/artifacts \
 		$(IPXE_BUILDER)
 
@@ -182,7 +182,7 @@ $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		scripts/make-bootable-image.sh scripts/lib/common.sh \
 		.image-builder-container | $(IMAGE_DIR)
 	@echo "Creating bootable USB image..."
-	$(CONTAINER_RUNTIME) run --rm \
+	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(PWD)/scripts:/scripts:ro \
 		-v $(PWD)/artifacts:/artifacts \
 		-v $(PWD)/configs:/configs:ro \

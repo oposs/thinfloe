@@ -23,7 +23,7 @@ fail=0
 RUNTIME_TIMEOUT=180
 CONTAINER_NAME="thinfloe-runtime-test-$$"
 
-out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$CONTAINER_NAME" \
+out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=2 \
     -e WLR_RENDERER=pixman \
@@ -87,7 +87,7 @@ fi
 # unverified until tested on real hardware with a real keyboard attached.
 GRAB_CONTAINER_NAME="thinfloe-runtime-test-grab-$$"
 
-grab_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$GRAB_CONTAINER_NAME" \
+grab_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$GRAB_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=2 \
     -e WLR_RENDERER=pixman \
@@ -137,7 +137,7 @@ fi
 # proved '1' produces.
 DUP_CONTAINER_NAME="thinfloe-runtime-test-dup-$$"
 
-dup_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$DUP_CONTAINER_NAME" \
+dup_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$DUP_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=2 \
     -e WLR_RENDERER=pixman \
@@ -176,7 +176,7 @@ fi
 # own, and an exit 0 here would be a logout nobody asked for.
 MENU_CONTAINER_NAME="thinfloe-runtime-test-menu-$$"
 
-menu_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$MENU_CONTAINER_NAME" \
+menu_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$MENU_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=1 \
     -e WLR_RENDERER=pixman \
@@ -212,7 +212,7 @@ fi
 # also logs "thinfloe-menu: icon <name> for <file>: <why>". The count is of
 # the tiles the grid draws: no add-on is installed here (there is no status
 # file), so every shipped add-on tile, one with X-TF-Source-* keys, is hidden.
-expected_tiles=$(podman run --rm "$IMAGE" sh -c \
+expected_tiles=$(podman run --rm --log-driver=none "$IMAGE" sh -c \
     'n=0; for f in /etc/thinfloe/menu/*.desktop; do grep -q "^X-TF-Source-" "$f" || n=$((n+1)); done; echo $n')
 icons_line=$(echo "$menu_out" | grep -o 'thinfloe-menu: [0-9]* of [0-9]* tile icons drawn' | tail -1)
 icons_drawn=$(echo "$icons_line" | cut -d' ' -f2)
@@ -232,7 +232,7 @@ else
 fi
 
 # Geo must be known to fontconfig in the built image (title bar font).
-geo_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm "$IMAGE" fc-list 2>&1)
+geo_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none "$IMAGE" fc-list 2>&1)
 if echo "$geo_out" | grep -q 'Geo'; then
     echo "ok   - fc-list lists Geo"
 else
@@ -260,7 +260,7 @@ echo LIST2; thinfloe-menu --windows
 sleep 1
 wait'
 
-fold_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --name "$FOLD_CONTAINER_NAME" \
+fold_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$FOLD_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=1 \
     -e WLR_RENDERER=pixman \

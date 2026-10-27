@@ -54,7 +54,7 @@ check_addon() {
         bad "$label: no package at $deb"
         return
     fi
-    out=$(podman run --rm --network=none -v "$deb:/in/addon.deb:ro,Z" "$IMAGE" /bin/bash -c '
+    out=$(podman run --rm --log-driver=none --network=none -v "$deb:/in/addon.deb:ro,Z" "$IMAGE" /bin/bash -c '
         set -u
         dpkg -i /in/addon.deb >/dev/null 2>&1 || { echo "dpkg -i failed"; dpkg -i /in/addon.deb 2>&1 | tail -5; exit 3; }
         # thinfloe-addon runs the add-on'"'"'s hook after dpkg.

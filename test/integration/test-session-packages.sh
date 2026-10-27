@@ -797,7 +797,7 @@ fi
 # installed, which it never is in the image: test-addon-deps.sh checks
 # ThinLinc's thinlinc_128.png after installing the client.
 IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
-if check_out=$(podman run --rm --network=none "$IMAGE" /usr/bin/thinfloe-menu --check 2>&1); then
+if check_out=$(podman run --rm --log-driver=none --network=none "$IMAGE" /usr/bin/thinfloe-menu --check 2>&1); then
     echo "ok   - every shipped tile is usable and its icon renders"
 else
     echo "FAIL - thinfloe-menu --check in $IMAGE:"
