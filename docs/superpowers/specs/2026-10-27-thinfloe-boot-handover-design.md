@@ -194,8 +194,10 @@ If it fails, stop and bring the frames to the owner; the alternative designs
   appears only once Plymouth has quit. That happens on every path (next
   point), at the latest by the fallback.
 - **Every path the session takes ends Plymouth.** `10-thinfloe-session.sh`
-  runs a guarded `plymouth quit` (no retain) after every `tf_run_labwc`
-  return, whenever Plymouth still answers `--ping`. This covers labwc or the
+  runs a guarded `plymouth quit` (no retain) after the last `tf_run_labwc`
+  return (the first one, unless it failed and the retry follows; the retry
+  is preceded by `reactivate`, which needs Plymouth alive), whenever
+  Plymouth still answers `--ping`. This covers labwc or the
   menu dying before `thinfloe-session` sent its `quit --retain-splash`, and a
   session restart after a failed menu. It runs before `session-verdict`, the
   failure window and the failure text.
