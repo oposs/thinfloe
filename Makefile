@@ -40,6 +40,9 @@ EFI_PARTITION_SIZE ?= 3000
 # QEMU settings
 QEMU_MEMORY ?= 2G
 QEMU_EXTRA_ARGS ?=
+# Screen size of the qemu-test window, e.g. QEMU_XRES=2560 QEMU_YRES=1440.
+QEMU_XRES ?= 1920
+QEMU_YRES ?= 1080
 
 .PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks test-unit test test-runtime help
 
@@ -256,7 +259,7 @@ qemu-test: $(QCOW2_BOOT_IMAGE) $(QCOW2_TARGET_IMAGE) $(QCOW2_EMPTY_IMAGE)
 		-bios /usr/share/ovmf/OVMF.fd \
 		-boot c \
 		-display gtk \
-		-device virtio-vga,xres=1920,yres=1080 \
+		-device virtio-vga,xres=$(QEMU_XRES),yres=$(QEMU_YRES) \
 		-net nic,model=virtio \
 		-net user \
 		-enable-kvm \
