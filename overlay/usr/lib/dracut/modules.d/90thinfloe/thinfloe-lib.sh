@@ -11,9 +11,12 @@ type info >/dev/null 2>&1 || . /lib/dracut-lib.sh
 type dinfo >/dev/null 2>&1 || dinfo() { info "$@"; }
 
 # Also echo to /dev/console for serial output
-# Use >&2 to avoid polluting stdout (which is used for return values)
+# Use >&2 to avoid polluting stdout (which is used for return values).
+# That includes info: under systemd, dracut's info() echoes to stdout, and a
+# log line in tf_find_esp's answer once made finalize-upgrade.sh fail to
+# mount the ESP on every boot.
 tf_log() {
-    info "$@"
+    info "$@" >&2
     echo "$@" > /dev/console 2>/dev/null || true
     echo "$@" >&2
 }
@@ -1068,8 +1071,10 @@ tf_stamp_stick() {
     _tss_tab=$(printf '\t')
     _tss_cr=$(printf '\r')
     _tss_ws="[ $_tss_tab]"
-    # sed address: an APPEND line whose ramroot= is not a URL.
-    _tss_local="/^$_tss_ws*APPEND$_tss_ws/{/${_tss_ws}ramroot=(https?|ftp):\\/\\//b"
+    # sed address: an APPEND line whose ramroot= is not a URL (no
+    # <scheme>://; an alternation here reads as a command call to
+    # test-initramfs-commands.sh's extractor).
+    _tss_local="/^$_tss_ws*APPEND$_tss_ws/{/${_tss_ws}ramroot=[a-z]+:\\/\\//b"
 
     for _tss_cfg in "$_tss_efi/syslinux.cfg" "$_tss_efi/efi/boot/syslinux.cfg"; do
         [ -f "$_tss_cfg" ] || continue

@@ -282,6 +282,35 @@ else
     bad "second call without partition: rc=$rc sleeps=$(sleeps)"
 fi
 
+# --- the answer on stdout carries no log line ----------------------------
+#
+# Under systemd, dracut's info() echoes to stdout, and tf_log calls it. The
+# hooks take tf_find_esp's answer with $(...), so a log line on stdout became
+# part of the device name and finalize-upgrade.sh failed to mount the ESP on
+# every boot. Run the library's own tf_log with such an info() in a fresh
+# shell (the one above is stubbed).
+
+real_log_find() {
+    WANT="$1" PATH="$STUBS:$BIN" "$BASH" -c '
+        info() { echo "$*"; }
+        getarg() { echo "$WANT"; }
+        _TF_LIB_LOADED=""
+        . "$1"
+        ids="$2/ids"
+        tf_read_stick_id() { cat "$ids/$1" 2>/dev/null || true; }
+        tf_find_esp
+    ' _ "$LIB" "$WORK" 2>/dev/null
+}
+fresh
+mkblock vda1 EFI-SYSTEM; mkblock vdb1 EFI-SYSTEM
+echo "$A" >"$WORK/ids/vda1"; echo "$A" >"$WORK/ids/vdb1"
+got=$(real_log_find "$A")
+if [[ "$got" == /dev/vda1 ]]; then
+    ok "tf_find_esp prints only the device, with dracut's info() on stdout"
+else
+    bad "tf_find_esp stdout with dracut's info(): '$got'"
+fi
+
 # --- tf_stamp_stick -----------------------------------------------------
 #
 # A fake ESP with both syslinux.cfg copies from configs/syslinux.cfg. The

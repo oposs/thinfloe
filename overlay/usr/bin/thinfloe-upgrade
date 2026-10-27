@@ -594,7 +594,7 @@ def set_boot_default(efi_mount: str, label: str) -> None:
 
 # An APPEND line of syslinux.cfg, and one whose ramroot= is a URL (netboot).
 _APPEND_RE = re.compile(r"^[ \t]*APPEND[ \t]")
-_REMOTE_RAMROOT_RE = re.compile(r"[ \t]ramroot=(https?|ftp)://")
+_REMOTE_RAMROOT_RE = re.compile(r"[ \t]ramroot=[a-z]+://")
 _STICK_WORD_RE = re.compile(r"[ \t]+thinfloe\.stick=[^ \t\r]*")
 _LINE_END_RE = re.compile(r"[ \t]*(\r?)$")
 
