@@ -23,15 +23,85 @@ readonly TF_STORAGE="$TF_BASE/storage"
 readonly TF_LAYERS="$TF_BASE/layers"
 readonly TF_STATE="$TF_BASE/state"
 
-readonly TF_EFI_DEV="/dev/disk/by-partlabel/EFI-SYSTEM"
 # Set once a wait has already exhausted its budget in this boot, so a later
 # hook fails fast instead of repeating the whole timeout.
-readonly TF_EFI_ABSENT_MARKER="/run/thinfloe-efi-absent"
+readonly TF_EFI_ABSENT_MARKER="${TF_EFI_ABSENT_MARKER:-/run/thinfloe-efi-absent}"
 
-# tf_wait_for_efi [timeout_seconds]
+# tf_esp_candidates
 #
-# Wait for the boot medium's EFI-SYSTEM partition to appear. Returns 0 as soon
-# as it exists, 1 if the budget expires.
+# Print the kernel names (vda1, sdb1) of all partitions named EFI-SYSTEM,
+# sorted, one per line. Every ThinFloe stick carries that name, so with two
+# sticks attached there are two, and /dev/disk/by-partlabel/EFI-SYSTEM is a
+# single udev link that points at either one, differently from boot to
+# boot. That link is therefore never used to choose.
+tf_esp_candidates() {
+    for _tec_dir in "${TF_SYS_BLOCK:-/sys/class/block}"/*; do
+        [ -r "$_tec_dir/uevent" ] || continue
+        while read -r _tec_line; do
+            if [ "$_tec_line" = "PARTNAME=EFI-SYSTEM" ]; then
+                echo "${_tec_dir##*/}"
+                break
+            fi
+        done <"$_tec_dir/uevent"
+    done
+}
+
+# tf_read_stick_id <dev>
+#
+# Print the stick id in config/stick-id on /dev/<dev>, or nothing when the
+# partition has none or it is not valid. Mounts read-only and unmounts again.
+tf_read_stick_id() {
+    _trsi_mnt=/run/thinfloe-probe
+    mkdir -p "$_trsi_mnt" 2>/dev/null || return 0
+    mount -t vfat -o ro "/dev/$1" "$_trsi_mnt" 2>/dev/null || return 0
+    _trsi_id=""
+    [ -r "$_trsi_mnt/config/stick-id" ] && \
+        read -r _trsi_id <"$_trsi_mnt/config/stick-id"
+    umount "$_trsi_mnt" 2>/dev/null || true
+    tf_valid_stick_id "$_trsi_id" && echo "$_trsi_id"
+    return 0
+}
+
+# _tf_esp_pairs <known>
+#
+# Print "<dev>=<id>" for every current candidate, reading the id only for a
+# device not already listed in <known> (the previous output), so a poll
+# does not mount every stick again each second.
+_tf_esp_pairs() {
+    for _tep_dev in $(tf_esp_candidates); do
+        _tep_pair=""
+        for _tep_known in $1; do
+            [ "${_tep_known%%=*}" = "$_tep_dev" ] && _tep_pair="$_tep_known"
+        done
+        [ -n "$_tep_pair" ] || _tep_pair="$_tep_dev=$(tf_read_stick_id "$_tep_dev")"
+        echo "$_tep_pair"
+    done
+}
+
+# _tf_esp_settled <want-id> <pairs...>
+#
+# Exit 0 when waiting longer cannot improve the choice: a partition carries
+# the wanted id, or none is wanted and one partition has no id.
+_tf_esp_settled() {
+    _tes_want="$1"
+    shift
+    for _tes_pair in "$@"; do
+        if [ -n "$_tes_want" ]; then
+            [ "${_tes_pair#*=}" = "$_tes_want" ] && return 0
+        else
+            [ -z "${_tes_pair#*=}" ] && return 0
+        fi
+    done
+    return 1
+}
+
+# tf_find_esp
+#
+# Print /dev/<dev> of the ESP of the stick this machine booted from: the
+# EFI-SYSTEM partition whose config/stick-id the kernel command line names
+# (thinfloe.stick=), chosen by tf_choose_esp. Exit 1 when no EFI-SYSTEM
+# partition appears within TF_DEVICE_TIMEOUT. The answer is cached in
+# TF_ESP_CACHE, so finalize-upgrade.sh and mount-squashfs.sh get the same.
 #
 # This polls rather than checking once. `udevadm settle` only drains events
 # that are ALREADY queued: if the USB host controller has not yet enumerated
@@ -43,28 +113,60 @@ readonly TF_EFI_ABSENT_MARKER="/run/thinfloe-efi-absent"
 #
 # The bootloader having loaded the kernel from this same partition proves
 # nothing about the kernel's view: UEFI firmware used its own USB stack, and
-# the kernel re-enumerates the bus from scratch.
-tf_wait_for_efi() {
-    _dwfe_timeout="${1:-${TF_DEVICE_TIMEOUT:-60}}"
-    _dwfe_waited=0
+# the kernel re-enumerates the bus from scratch. For the same reason a second
+# stick can appear later than the first, so after the first one appears this
+# waits up to TF_ESP_MATCH_WAIT more while the wanted one is missing.
+tf_find_esp() {
+    _tfe_cache="${TF_ESP_CACHE:-/run/thinfloe-esp-device}"
+    _tfe_timeout="${TF_DEVICE_TIMEOUT:-60}"
+    _tfe_match_wait="${TF_ESP_MATCH_WAIT:-10}"
 
-    [ -b "$TF_EFI_DEV" ] && return 0
+    if [ -s "$_tfe_cache" ]; then
+        read -r _tfe_dev <"$_tfe_cache"
+        echo "$_tfe_dev"
+        return 0
+    fi
     [ -e "$TF_EFI_ABSENT_MARKER" ] && return 1
 
-    while [ ! -b "$TF_EFI_DEV" ]; do
-        if [ "$_dwfe_waited" -ge "$_dwfe_timeout" ]; then
+    _tfe_waited=0
+    while [ -z "$(tf_esp_candidates)" ]; do
+        if [ "$_tfe_waited" -ge "$_tfe_timeout" ]; then
             : > "$TF_EFI_ABSENT_MARKER" 2>/dev/null || true
             return 1
         fi
-        if [ $((_dwfe_waited % 5)) -eq 0 ]; then
-            tf_log "Waiting for EFI-SYSTEM to appear (${_dwfe_waited}/${_dwfe_timeout}s)"
+        if [ $((_tfe_waited % 5)) -eq 0 ]; then
+            tf_log "Waiting for EFI-SYSTEM to appear (${_tfe_waited}/${_tfe_timeout}s)"
         fi
         udevadm settle --timeout=5 >/dev/null 2>&1 || true
         sleep 1
-        _dwfe_waited=$((_dwfe_waited + 1))
+        _tfe_waited=$((_tfe_waited + 1))
+    done
+    [ "$_tfe_waited" -gt 0 ] && tf_log "EFI-SYSTEM appeared after ${_tfe_waited}s"
+
+    _tfe_want="$(getarg thinfloe.stick=)"
+    tf_valid_stick_id "$_tfe_want" || _tfe_want=""
+
+    _tfe_pairs="$(_tf_esp_pairs "")"
+    _tfe_waited=0
+    # shellcheck disable=SC2086
+    while ! _tf_esp_settled "$_tfe_want" $_tfe_pairs \
+          && [ "$_tfe_waited" -lt "$_tfe_match_wait" ]; do
+        udevadm settle --timeout=5 >/dev/null 2>&1 || true
+        sleep 1
+        _tfe_waited=$((_tfe_waited + 1))
+        _tfe_pairs="$(_tf_esp_pairs "$_tfe_pairs")"
     done
 
-    [ "$_dwfe_waited" -gt 0 ] && tf_log "EFI-SYSTEM appeared after ${_dwfe_waited}s"
+    # shellcheck disable=SC2086
+    _tfe_dev="$(tf_choose_esp "$_tfe_want" $_tfe_pairs)" || return 1
+    _tfe_id="none"
+    for _tfe_pair in $_tfe_pairs; do
+        [ "${_tfe_pair%%=*}" = "$_tfe_dev" ] && [ -n "${_tfe_pair#*=}" ] && \
+            _tfe_id="${_tfe_pair#*=}"
+    done
+    tf_log "thinfloe: boot stick /dev/$_tfe_dev (stick id $_tfe_id)"
+    echo "/dev/$_tfe_dev" >"$_tfe_cache" 2>/dev/null || true
+    echo "/dev/$_tfe_dev"
     return 0
 }
 

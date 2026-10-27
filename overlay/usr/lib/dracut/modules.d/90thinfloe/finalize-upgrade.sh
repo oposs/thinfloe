@@ -33,15 +33,14 @@ fi
 # Wait for the boot medium. This hook runs BEFORE mount-squashfs, so it is
 # usually the first thing in the boot to look for the device - and it used to
 # check once after `udevadm settle`, which returns immediately when the USB
-# controller has not enumerated the stick yet. See tf_wait_for_efi().
+# controller has not enumerated the stick yet. See tf_find_esp().
 #
 # Getting this wrong here is quieter and nastier than in mount-squashfs: a
 # pending tl.new upgrade would simply not be finalized, mount-squashfs would
 # then find the device a moment later and boot the OLD tl/, and the machine
 # would come up looking perfectly healthy with the upgrade silently skipped -
 # possibly applying on some later boot instead. Upgrades must not be a race.
-EFI_DEV="$TF_EFI_DEV"
-if ! tf_wait_for_efi; then
+if ! EFI_DEV=$(tf_find_esp); then
     # Still non-fatal: mount-squashfs runs next and will report authoritatively
     # if the device never appears. But say plainly that a pending upgrade is
     # being skipped, rather than implying there was simply nothing to do.

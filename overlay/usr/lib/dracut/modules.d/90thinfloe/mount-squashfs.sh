@@ -70,12 +70,12 @@ else
     # USB boot
     tf_log "USB boot: Loading from $ramroot"
 
-    efi_dev="$TF_EFI_DEV"
     efi_mount="$TF_STORAGE/efi"
 
-    # See tf_wait_for_efi() in thinfloe-lib.sh for why a single check raced on
-    # real hardware but never in QEMU.
-    if ! tf_wait_for_efi; then
+    # See tf_find_esp() in thinfloe-lib.sh for why a single check raced on
+    # real hardware but never in QEMU, and why the partlabel link is not
+    # used: with two sticks attached it names either one.
+    if ! efi_dev=$(tf_find_esp); then
         # Give the operator evidence rather than just "not found" - with no
         # rd.shell, dracut answers a die() with a blank screen.
         tf_dump_block_devices
