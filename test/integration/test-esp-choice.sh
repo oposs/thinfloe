@@ -405,4 +405,41 @@ else
     ok "# SKIP read-only ESP: running as root"
 fi
 
+# --- the shell and Python stamps agree ----------------------------------
+#
+# thinfloe-upgrade stamps a freshly written stick with stamp_syslinux; the
+# initramfs stamps one at its first boot with tf_stamp_stick. A stick must
+# look the same whichever did it, so the same id must give the same bytes,
+# on the shipped file and on a CRLF copy.
+
+UPGRADE="$REPO/overlay/usr/bin/thinfloe-upgrade"
+py_stamp() {
+    python3 -I - "$UPGRADE" "$1" "$2" "$3" <<'PY'
+import importlib.machinery, importlib.util, sys
+script, src, stick_id, dest = sys.argv[1:]
+loader = importlib.machinery.SourceFileLoader("upgrade_image", script)
+spec = importlib.util.spec_from_loader("upgrade_image", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+with open(src, newline="") as f:
+    text = f.read()
+with open(dest, "w", newline="") as f:
+    f.write(mod.stamp_syslinux(text, stick_id))
+PY
+}
+
+for variant in lf crlf; do
+    e=$(mkesp "cross-$variant")
+    [[ $variant == crlf ]] && sed -i 's/$/\r/' "$e/syslinux.cfg"
+    cp "$e/syslinux.cfg" "$WORK/cross-src"
+    mkdir -p "$e/config"; echo "$B" >"$e/config/stick-id"
+    stamp "$e" ""
+    if py_stamp "$WORK/cross-src" "$B" "$WORK/cross-py" \
+       && cmp -s "$e/syslinux.cfg" "$WORK/cross-py"; then
+        ok "the shell and Python stamps agree ($variant)"
+    else
+        bad "shell and Python stamps differ ($variant): $(diff "$e/syslinux.cfg" "$WORK/cross-py" 2>&1 | head -5)"
+    fi
+done
+
 exit $fail

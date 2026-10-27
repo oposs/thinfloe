@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -591,6 +592,111 @@ def set_boot_default(efi_mount: str, label: str) -> None:
         os.replace(tmp, path)
 
 
+# An APPEND line of syslinux.cfg, and one whose ramroot= is a URL (netboot).
+_APPEND_RE = re.compile(r"^[ \t]*APPEND[ \t]")
+_REMOTE_RAMROOT_RE = re.compile(r"[ \t]ramroot=(https?|ftp)://")
+_STICK_WORD_RE = re.compile(r"[ \t]+thinfloe\.stick=[^ \t\r]*")
+_LINE_END_RE = re.compile(r"[ \t]*(\r?)$")
+
+
+def stamp_syslinux(text: str, stick_id: str) -> str:
+    """syslinux.cfg text with thinfloe.stick=<id> on every local APPEND line.
+
+    The same edit tf_stamp_stick makes in the initramfs, byte for byte
+    (test-esp-choice.sh compares them): on an APPEND line whose ramroot= is
+    not a URL, any old thinfloe.stick= word goes and the new one is appended,
+    before a trailing CR if the file has CRLF line ends. The initramfs mounts
+    the ESP whose config/stick-id the command line names, so a second stick
+    attached cannot take the home, the add-ons or the saves.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if _APPEND_RE.match(line) and not _REMOTE_RAMROOT_RE.search(line):
+            line = _STICK_WORD_RE.sub("", line)
+            lines[i] = _LINE_END_RE.sub(
+                lambda m: f" thinfloe.stick={stick_id}{m.group(1)}", line, count=1)
+    return "\n".join(lines)
+
+
+def _write_replace(path: str, text: str) -> None:
+    """Write text to path through path.tmp, fsync and rename."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def stamp_new_stick(device: str) -> bool:
+    """Give a freshly written drive a new stick id.
+
+    Writes config/stick-id on its ESP and thinfloe.stick=<id> into both
+    syslinux.cfg copies (stamp_syslinux). Without it the new stick and the
+    one it was made from carry no id, or, when an old stick was overwritten,
+    its old one. Never raises: a stick that is not stamped here gets its id
+    at its first boot, so this returns False with a warning instead.
+    """
+    try:
+        efi_partition, waited = wait_for_efi_partition(device)
+    except KeyboardInterrupt:
+        log("WARNING: interrupted - the new stick gets its id at its first boot")
+        return False
+    if efi_partition is None:
+        log(f"WARNING: no {EFI_PARTLABEL} partition found on {device} after "
+            f"{waited}s - the new stick gets its id at its first boot")
+        return False
+
+    stick_id = str(uuid.uuid4())
+    try:
+        tmp_mount = tempfile.mkdtemp(prefix="thinfloe-stamp-")
+    except OSError as e:
+        log(f"WARNING: could not create a temporary mount point: {e} - "
+            f"the new stick gets its id at its first boot")
+        return False
+    _register_cleanup("dir", tmp_mount)
+    ok = False
+    mounted = False
+    try:
+        run_cmd(["mount", efi_partition, tmp_mount], capture=True)
+        mounted = True
+        _register_cleanup("mount", tmp_mount)
+        os.makedirs(os.path.join(tmp_mount, "config"), exist_ok=True)
+        _write_replace(os.path.join(tmp_mount, "config", "stick-id"), stick_id + "\n")
+        for rel in SYSLINUX_CFGS:
+            path = os.path.join(tmp_mount, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, newline="") as f:
+                text = f.read()
+            _write_replace(path, stamp_syslinux(text, stick_id))
+        ok = True
+    except (subprocess.CalledProcessError, OSError) as e:
+        detail = _failure_detail(e) if isinstance(e, subprocess.CalledProcessError) else str(e)
+        log(f"WARNING: could not give the new stick its id: {detail} - "
+            f"it gets one at its first boot")
+    except KeyboardInterrupt:
+        log("WARNING: interrupted - the new stick gets its id at its first boot")
+    finally:
+        if mounted:
+            try:
+                run_cmd(["umount", tmp_mount], capture=True)
+                _unregister_cleanup("mount", tmp_mount)
+            except subprocess.CalledProcessError as e:
+                log(f"WARNING: could not unmount {tmp_mount}: {e}")
+                ok = False
+        # rmdir, never rmtree: an unmount that failed leaves the stick here.
+        try:
+            os.rmdir(tmp_mount)
+        except OSError:
+            pass
+        _unregister_cleanup("dir", tmp_mount)
+
+    if ok:
+        log(f"The new stick is {stick_id}")
+    return ok
+
+
 def free_bytes(path: str) -> int:
     """Bytes an unprivileged writer can still put on the filesystem at path."""
     st = os.statvfs(path)
@@ -834,6 +940,21 @@ def home_restore_failed() -> bool:
         return False
 
 
+def wait_for_efi_partition(device: str) -> Tuple[Optional[str], int]:
+    """The EFI-SYSTEM partition of a drive just written, and the seconds waited.
+
+    udev may not have re-read the partition table yet, so this looks again
+    every second for EFI_RETRY_SECONDS. None when it never appears.
+    """
+    waited = 0
+    efi_partition = find_efi_partition(device)
+    while efi_partition is None and waited < EFI_RETRY_SECONDS:
+        time.sleep(1)
+        waited += 1
+        efi_partition = find_efi_partition(device)
+    return efi_partition, waited
+
+
 def copy_home_to_drive(device: str) -> bool:
     """Write this machine's home directory onto a freshly installed drive.
 
@@ -863,13 +984,8 @@ def copy_home_to_drive(device: str) -> bool:
             "default one - home not copied")
         return False
 
-    waited = 0
     try:
-        efi_partition = find_efi_partition(device)
-        while efi_partition is None and waited < EFI_RETRY_SECONDS:
-            time.sleep(1)
-            waited += 1
-            efi_partition = find_efi_partition(device)
+        efi_partition, waited = wait_for_efi_partition(device)
     except KeyboardInterrupt:
         log("WARNING: home copy interrupted - home not copied")
         return False
@@ -986,6 +1102,11 @@ def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
     # Sync and reload partition table
     run_cmd(["sync"])
     run_cmd(["partprobe", drive.device], check=False, capture=True)
+
+    # Its own id, so a boot with this stick and another one attached finds
+    # this stick's ESP. Not tied to the home question: a stick made for
+    # somebody else needs its id just as much.
+    stamp_new_stick(drive.device)
 
     # Offer to carry this machine's configuration across; otherwise the new
     # stick boots with the shipped default home. Nothing is copied without an
