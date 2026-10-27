@@ -32,10 +32,12 @@ IPXE_PXE := $(ROOTFS_DIR)/ipxe.pxe
 IPXE_KPXE := $(ROOTFS_DIR)/undionly.kpxe
 IPXE_EFI := $(ROOTFS_DIR)/ipxe.efi
 
-# Configuration
-SQUASHFS_COMP ?= zstd
-SQUASHFS_COMP_LEVEL ?= 19
-EFI_PARTITION_SIZE ?= 3000
+# Configuration. These shape the shipped image, so a variable of the same
+# name in the environment must not change them (`:=`, not `?=`); a
+# `make SQUASHFS_COMP_LEVEL=…` on the command line still does.
+SQUASHFS_COMP := zstd
+SQUASHFS_COMP_LEVEL := 19
+EFI_PARTITION_SIZE := 3000
 
 # QEMU settings
 QEMU_MEMORY ?= 2G
