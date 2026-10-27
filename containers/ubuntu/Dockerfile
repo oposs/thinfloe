@@ -235,10 +235,11 @@ RUN passwd -d root && passwd -l root
 # existing hash with `!` and leaves it recoverable.
 #
 # tfuser must be uid and gid 1001: field home archives carry 1001 and the
-# restore keeps numeric owners. adduser takes the lowest free id, and the
-# base image's unused `ubuntu` account holds 1000, so it is removed only
-# after tfuser exists.
-RUN adduser --disabled-password --gecos "ThinUser" tfuser && \
+# restore keeps numeric owners. Both ids are given explicitly, so the build
+# fails if either is taken instead of quietly picking another. The base
+# image's unused `ubuntu` account (1000) is removed.
+RUN addgroup --gid 1001 tfuser && \
+    adduser --disabled-password --gecos "ThinUser" --uid 1001 --ingroup tfuser tfuser && \
     adduser tfuser sudo && \
     echo "tfuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     adduser tfuser audio && \
@@ -378,10 +379,16 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 # networkd also pulls in kernel-network-modules, so every NIC driver is in the
 # initrd, not only the handful 90thinfloe lists; resolved makes a ramroot URL
 # with a host name resolve.
+#
+# The WiFi modules in --omit-drivers came in through kernel-modules' generic
+# SDIO rules (MediaTek mt7921s, Marvell libertas_sdio, with mac80211 and
+# cfg80211). Nothing in the initrd can use them: it has no wpa_supplicant,
+# and netboot runs over a cable. test-initramfs-commands.sh fails on any
+# module under drivers/net/wireless/, net/wireless/ or net/mac80211/.
 RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     dracut --force --no-hostonly --add "thinfloe plymouth systemd-networkd systemd-resolved" \
     --omit "drm dash crypt dmraid multipath iscsi nfs nbd fcoe fcoe-uefi biosdevname dmsquash-live dmsquash-live-ntfs" \
-    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu i915 vmwgfx qxl virtio-gpu bochs" \
+    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu i915 vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio" \
     --compress "zstd -3 -T4" \
     --kver $KERNEL_VERSION
 

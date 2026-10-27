@@ -246,11 +246,16 @@ fi
 # Nothing in the initrd uses WiFi: it has no wpa_supplicant, and netboot runs
 # over a cable. `instmods iwlwifi` once pulled in 82 MB of Intel WiFi firmware,
 # a sixth of the download. The running system loads the drivers and firmware
-# from the squashfs after switch-root.
-if grep -qE '(^|/)iwlwifi\.ko' "$WORK/initrd.list"; then
-    bad "the initrd carries iwlwifi.ko; WiFi drivers belong in the squashfs only"
+# from the squashfs after switch-root. dracut installs firmware only for the
+# modules it installs, so with no WiFi module there is no WiFi firmware.
+# kernel-modules' SDIO rules brought mt7921s and libertas_sdio with mac80211
+# and cfg80211 until they went into --omit-drivers.
+wifi_mods=$(grep -E '/kernel/(drivers/net/wireless|net/wireless|net/mac80211)/.*\.ko' \
+    "$WORK/initrd.list" | sed 's#.*/##' | tr '\n' ' ')
+if [[ -n "$wifi_mods" ]]; then
+    bad "the initrd carries WiFi modules ($wifi_mods); they belong in the squashfs only"
 else
-    ok "no iwlwifi driver in the initrd"
+    ok "no WiFi module in the initrd"
 fi
 if grep -q 'usr/lib/firmware/intel/iwlwifi/' "$WORK/initrd.list"; then
     bad "the initrd carries Intel WiFi firmware (82 MB that nothing in the initrd uses)"
