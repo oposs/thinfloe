@@ -1034,7 +1034,8 @@ tf_resize_fat() {
     done
     wait "$_trf_pid"
     _trf_rc=$?
-    while read -r _trf_line; do
+    # Its report runs to 40 lines; only a failure needs it in the log.
+    [ "$_trf_rc" = 0 ] || while read -r _trf_line; do
         tf_log "fat32expander: $_trf_line"
     done </tmp/thinfloe-fat32expander.log
     return $_trf_rc

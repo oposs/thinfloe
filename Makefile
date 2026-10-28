@@ -46,7 +46,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-grow test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -67,6 +67,7 @@ help:
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
 	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  qemu-smoke-two-sticks - Three headless boots with a second stick attached"
+	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test              - Run integration guard tests against rootfs"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -417,6 +418,20 @@ qemu-smoke-two-sticks: $(USB_IMAGE)
 	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
 		scripts/run-qemu-two-sticks-smoke.sh $(USB_IMAGE) $(QEMU_TWO_STICKS_PREFIX) \
 		$(QEMU_TWO_STICKS_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		"$(QEMU_SMOKE_APPEND)"
+
+# Two headless boots through OVMF of the image extended to 8 GiB. Requires
+# the first boot to grow the ESP to 6 GiB with its files intact and the
+# hybrid MBR kept, and the second to leave it alone. See
+# scripts/run-qemu-grow-smoke.sh.
+QEMU_GROW_LOG := $(IMAGE_DIR)/qemu-grow-smoke.log
+QEMU_GROW_PREFIX := $(IMAGE_DIR)/$(PROJECT_NAME)-grow
+
+qemu-smoke-grow: $(USB_IMAGE)
+	@echo "Running headless ESP grow smoke test..."
+	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-grow-smoke.sh $(USB_IMAGE) $(QEMU_GROW_PREFIX) \
+		$(QEMU_GROW_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
 		"$(QEMU_SMOKE_APPEND)"
 
 # Host-side tests. No image, no container, no network: the fast feedback

@@ -634,7 +634,7 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 ## Standing Constraints
 
-Nineteen rules in this repository look like ordinary configuration but are
+Twenty rules in this repository look like ordinary configuration but are
 load-bearing. All but the patched-labwc, hook-order, menu-rendering,
 logout-save, migrate-once and add-on-libraries ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
@@ -648,6 +648,7 @@ image before it shipped with; it was found in QEMU, whose `qemu-test`
 attaches a second stick.
 The tty1 one is preventive too: the Plymouth crash it avoids was found in
 QEMU before any image kept the boot picture up.
+The ESP-grow one is preventive: it was decided before the grow first ran.
 
 ### No login password ships in the image
 
@@ -1052,7 +1053,9 @@ it removes anything it checks that free space plus `tl.old/` and `tl.new/`
 holds the release plus 10 %, and stops with "Nothing was changed" if not.
 New images get a 3000 MB ESP (`EFI_PARTITION_SIZE`): two releases, two home
 archives during a save, and room to grow. A fresh install therefore needs a
-stick of 4 GB or more; sticks already in the field keep their 2000 MB.
+stick of 4 GB or more. The first boot grows the ESP to the end of the stick,
+at most 6 GiB, older sticks' 2000 MB included; see
+[The ESP grows once](#the-esp-grows-once-in-the-initramfs-and-keeps-the-hybrid-mbr).
 
 `test/unit/test_upgrade_image.py` (via `make test-unit`) and
 `test/integration/test-initramfs-home.sh` guard both halves, and `make
@@ -1107,6 +1110,64 @@ Guards: `test/integration/test-esp-choice.sh` (the rule, the wait, the
 stamp, the shell/Python cross-check, with only the initramfs's tools),
 `test/unit/test_upgrade_image.py` and `make qemu-smoke-two-sticks` (three
 OVMF boots from a fresh stick with a stick that has an ID attached).
+
+### The ESP grows once, in the initramfs, and keeps the hybrid MBR
+
+`90thinfloe/grow-esp.sh` (pre-mount 20, before `finalize-upgrade.sh` at 25)
+grows partition 1 of the boot stick to the end of the stick, at most
+`TF_ESP_CAP_SECTORS` (6 GiB), and then the FAT32 inside it with
+`fat32expander` (a pinned `.deb` in `containers/ubuntu/Dockerfile`). Code:
+`tf_grow_esp` and its helpers in `thinfloe-lib.sh`. It runs on USB boots
+only, before any hook mounts the ESP, and only for partition 1 with no
+partition behind it on a disk of 512-byte sectors. The partition grows only
+when it gains 256 MiB or more; the FAT32 is resized whenever it is 1 MiB or
+more smaller than its partition (mkfs.fat leaves 51 sectors unused) or its
+boot sector lacks `55 aa`. Neither failure stops the boot.
+
+- **sgdisk, never sfdisk.** `make-bootable-image.sh` writes a hybrid MBR
+  (`sgdisk --hybrid=1`). sfdisk keeps the GPT entry but writes a protective
+  MBR. Every stick in the field has the hybrid entry (since 7e33c00, which
+  gives no reason for it), so firmware that boots from it must keep doing so.
+  `_tf_grow_partition` deletes and recreates entry 1 with the same start,
+  type, unique GUID, attributes and name, moves the backup GPT to the end
+  (`-e`), and passes `-h 1` again when the MBR had an entry other than
+  `ee`.
+- **No `exit` in `grow-esp.sh`.** dracut sources every hook of a stage
+  into one shell (`source_hook`), so an `exit` ends the stage. The first
+  build ended the hook with `exit 0`: `finalize-upgrade.sh` (pre-mount 25)
+  never ran and a staged upgrade never rotated. `make qemu-smoke-upgrade`
+  caught it.
+- **The cap.** The initramfs runs `fsck.fat` on the ESP at every boot,
+  about 3 s for 15 GB; 6 GiB keeps that short. The stick has the rest of
+  its space unused.
+- **Progress.** `fat32expander` 0.1.0 prints none. `tf_resize_fat` takes the
+  byte count from its dry run (`Planned data shift for N clusters (B
+  bytes)`) and divides the sectors written to the disk since the start
+  (`/proc/diskstats` field 10) by it, capped at 99: "Enlarging the boot
+  stick, once: NN % - do not switch off" on the step line, every 10 % in
+  the log. Its own report goes to the log only when it fails.
+- **A power loss.** `fat32expander` clears the `55 aa` signature while it
+  moves data, so a cut-off resize leaves a FAT32 nothing mounts, and the
+  next boot runs it again. Whether it then finishes from its checkpoint
+  has not been tested. A partition grown without its FAT32 (power lost
+  between the two) is grown at the next boot.
+
+Seen in QEMU (2026-10-28): from 3000 MB to 6144 MiB on an 8 GiB stick,
+585 MiB moved in about 24 s; `fsck.fat -n` clean, every file intact, the
+second boot does nothing. **Not verified on hardware**: the time on a real
+stick, and that real firmware still boots it.
+
+Limits: with two sticks, the stick id of one whose resize was cut off cannot
+be read (its ESP does not mount), so the ESP choice may take the wrong
+stick for that boot.
+
+Guards: `test/integration/test-esp-grow.sh` (size rule, resize test,
+progress, log; via `make test`), `test/integration/test-initramfs-commands.sh`
+(`sgdisk`, `partx`, `fat32expander` in the initrd), `make qemu-smoke` (its
+4G disk grows on every run) and `make qemu-smoke-grow` (two OVMF boots of an
+8 GiB stick: 12582912 sectors at the old start, hybrid MBR kept, FAT32 the
+size of its partition, `fsck.fat -n` clean, files unchanged, no resize at
+the second boot).
 
 ### Add-on runtime libraries are listed by name in the Dockerfile
 

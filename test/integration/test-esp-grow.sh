@@ -83,6 +83,10 @@ for i in 1 2 3 4 5 6; do
     sleep 1
     echo "   8       0 sda 1 0 0 0 1 0 \$(( i * 4096 )) 0 0 0 0" >"$WORK/diskstats"
 done
+if [[ -n "\${FAKE_RC:-}" ]]; then
+    echo "Error: device vanished"
+    exit "\$FAKE_RC"
+fi
 echo "The filesystem has been resized successfully."
 exit 0
 EOF
@@ -115,9 +119,27 @@ if awk 'length($0) > 64 + 11 { exit 1 }' "$WORK/steps"; then
 else
     bad "a step text is longer than 64 characters"
 fi
-grep -q 'fat32expander: The filesystem has been resized successfully.' "$WORK/log" \
-    && ok "fat32expander's output goes to the log" \
-    || bad "fat32expander's output is not in the log"
+grep -q 'fat32expander:' "$WORK/log" \
+    && bad "a resize that worked puts fat32expander's report in the log" \
+    || ok "a resize that worked keeps fat32expander's report out of the log"
+
+echo "   8       0 sda 1 0 0 0 1 0 0 0 0 0 0" >"$WORK/diskstats"
+FAKE_RC=3 PATH="$WORK/bin:$PATH" TF_DISKSTATS="$WORK/diskstats" tf_resize_fat /dev/sda1 sda
+rc=$?
+[[ $rc -eq 3 ]] && ok "a failed resize returns fat32expander's status" || bad "a failed resize returned $rc"
+grep -q 'fat32expander: Error: device vanished' "$WORK/log" \
+    && ok "a failed resize puts fat32expander's report in the log" \
+    || bad "a failed resize leaves fat32expander's report out of the log"
+
+# --- the hook ----------------------------------------------------------------
+# dracut sources every pre-mount hook into one shell, so an exit in grow-esp.sh
+# (pre-mount 20) skipped finalize-upgrade.sh (25) and no upgrade rotated.
+if grep -v '^[[:space:]]*#' "${LIB%/*}/grow-esp.sh" \
+        | grep -qE '(^|[;&|[:space:]])exit([[:space:]]|$)'; then
+    bad "grow-esp.sh calls exit, which ends every later pre-mount hook"
+else
+    ok "grow-esp.sh has no exit, so the later pre-mount hooks run"
+fi
 
 if [[ $fail -ne 0 ]]; then
     echo ""
