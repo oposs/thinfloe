@@ -78,6 +78,15 @@ else
     expect_calls "hostile text arrives as one argument, cut to 64" $'--ping\n'"$want"
 fi
 
+# The cut counts characters, not bytes: 70 "€" (3 bytes each) give 64 "€",
+# never a broken last character. Control characters are removed first.
+euro=$(printf '€%.0s' $(seq 1 70))
+run status "$euro"
+expect_calls "multi-byte text is cut at 64 characters" \
+    $'--ping\nupdate|--status=tf:'"$(printf '€%.0s' $(seq 1 64))"
+run status $'Install\033ing\nThin\tLinc\177'
+expect_calls "control characters are removed" $'--ping\nupdate|--status=tf:InstallingThinLinc'
+
 touch "$work/ping.fail"
 for verb in status deactivate reactivate quit quit-retain; do
     run "$verb" "Some text"

@@ -1,9 +1,11 @@
-#!/bin/sh
+#!/bin/bash
 # Talk to the boot screen from the running system.
 #
 # Usage: plymouth-step status TEXT | deactivate | reactivate | quit | quit-retain
 #
-# status       show TEXT (cut to 64 characters) on the step line
+# status       show TEXT on the step line: control characters removed,
+#              then cut to 64 characters (not bytes, so a UTF-8 character
+#              is never split; bash in the C.UTF-8 locale counts them)
 # deactivate   let the session take the display, Plymouth keeps running
 # reactivate   give the display back to Plymouth (the session failed)
 # quit         end Plymouth
@@ -26,7 +28,9 @@ ply --ping || exit 0
 
 case "$1" in
     status)
-        text=$(printf '%.64s' "$2")
+        LC_ALL=C.UTF-8
+        text=${2//[[:cntrl:]]/}
+        text=${text:0:64}
         ply update "--status=tf:$text"
         ;;
     deactivate) ply deactivate ;;

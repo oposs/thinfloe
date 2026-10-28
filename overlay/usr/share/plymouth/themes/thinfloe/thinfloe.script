@@ -151,8 +151,11 @@ step.bottom = Math.Int(screen.h * 0.94
 
 fun show_step(text)
 {
-    if (text.Length() > 64)
-        text = text.SubString(0, 64);
+    # Length() and SubString() count bytes. plymouth-step already cut the
+    # text to 64 characters, at most 256 bytes; this only bounds a text
+    # sent some other way, which may then end in a broken character.
+    if (text.Length() > 256)
+        text = text.SubString(0, 256);
     step.image = Image.Text(text, 0.541, 0.592, 0.651, 1, "Geo " + step.size);
     step.sprite.SetImage(step.image);
     step.sprite.SetPosition(
