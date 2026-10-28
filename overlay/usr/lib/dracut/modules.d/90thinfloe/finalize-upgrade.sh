@@ -1,6 +1,6 @@
 #!/bin/bash
 # finalize-upgrade.sh - Finalize pending upgrade by rotating tl.new -> tl -> tl.old
-# Runs in initramfs after auto-resize, before mount-squashfs (priority 25)
+# Runs in initramfs after grow-esp.sh (20), before mount-squashfs (priority 25)
 #
 # thinfloe-upgrade writes tl.new/ and sets syslinux.cfg to DEFAULT new, so the
 # next boot loads its kernel from tl.new/ with ramroot=tl.new/ramroot.sqsh.

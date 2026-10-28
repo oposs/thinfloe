@@ -13,6 +13,7 @@ depends() {
 
 install() {
     inst_hook cmdline 30 "$moddir/parse-thinfloe.sh"
+    inst_hook pre-mount 20 "$moddir/grow-esp.sh"          # Grow the ESP, before anything mounts it
     inst_hook pre-mount 25 "$moddir/finalize-upgrade.sh"  # Finalize pending tl.new upgrade
     inst_hook mount 30 "$moddir/mount-squashfs.sh"   # Mount hooks run in mount phase
     inst_hook mount 40 "$moddir/setup-overlay.sh"    # After squashfs is mounted
@@ -62,6 +63,9 @@ install() {
     # temporary mount point. Neither is in dracut's base set.
     inst_multiple sync rmdir
     inst_multiple udevadm awk grep sed lsblk
+    # grow-esp.sh: sgdisk rewrites the GPT entry (and the hybrid MBR),
+    # partx tells the kernel, fat32expander grows the FAT32.
+    inst_multiple sgdisk partx fat32expander
 
     # Kernel modules (only what we need)
     instmods squashfs overlay zram loop

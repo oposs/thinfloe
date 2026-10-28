@@ -951,6 +951,186 @@ setup_loop_device() {
     echo "$loop_dev"
 }
 
+# --- Growing the ESP --------------------------------------------------------
+#
+# Images ship a 3000 MB ESP (EFI_PARTITION_SIZE) and older sticks 2000 MB, on
+# sticks of 4 GB and more. grow-esp.sh grows partition 1 to at most
+# TF_ESP_CAP_SECTORS and the FAT32 inside it with fat32expander, before any
+# hook mounts the ESP. The cap keeps fsck.fat short: it checks the ESP on
+# every boot, 3 s for a 15 GB one.
+
+# 6 GiB in 512-byte sectors.
+TF_ESP_CAP_SECTORS="${TF_ESP_CAP_SECTORS:-12582912}"
+# Grow only when it gains 256 MiB or more.
+TF_ESP_MIN_GAIN="${TF_ESP_MIN_GAIN:-524288}"
+
+# tf_esp_grow_size <part-start> <part-size> <disk-size>
+#
+# All in 512-byte sectors. Prints the size partition 1 should grow to, or
+# nothing when it should stay. The partition may end 34 sectors before the
+# end of the disk at the latest (the backup GPT), its size is a whole MiB,
+# never above the cap, and never smaller than now.
+tf_esp_grow_size() {
+    _tegs_max=$(( $3 - 34 - $1 ))
+    [ "$_tegs_max" -gt "$TF_ESP_CAP_SECTORS" ] && _tegs_max=$TF_ESP_CAP_SECTORS
+    _tegs_max=$(( _tegs_max / 2048 * 2048 ))
+    [ $(( _tegs_max - $2 )) -ge "$TF_ESP_MIN_GAIN" ] && echo "$_tegs_max"
+    return 0
+}
+
+# tf_fat_needs_resize <device> <part-size>
+#
+# Exit 0 when the FAT32 on <device> has to be grown: it is 1 MiB or more
+# smaller than its partition of <part-size> 512-byte sectors, or its boot
+# sector has no 55 aa signature, which fat32expander removes while a resize
+# runs (a power loss in the middle leaves it so). mkfs.fat leaves a few
+# sectors unused, hence the 1 MiB.
+tf_fat_needs_resize() {
+    _tfnr_sig=$(od -An -tx1 -j510 -N2 "$1" 2>/dev/null | tr -d ' \n')
+    [ "$_tfnr_sig" = "55aa" ] || return 0
+    _tfnr_bps=$(od -An -tu2 -j11 -N2 "$1" 2>/dev/null | tr -d ' \n')
+    _tfnr_tot=$(od -An -tu4 -j32 -N4 "$1" 2>/dev/null | tr -d ' \n')
+    [ -n "$_tfnr_bps" ] && [ -n "$_tfnr_tot" ] || return 1
+    _tfnr_fs=$(( _tfnr_tot * _tfnr_bps / 512 ))
+    [ $(( $2 - _tfnr_fs )) -ge 2048 ]
+}
+
+# _tf_disk_written <disk>
+#
+# Sectors written to <disk> since boot, from /proc/diskstats.
+_tf_disk_written() {
+    awk -v d="$1" '$3 == d { print $10; exit }' "${TF_DISKSTATS:-/proc/diskstats}"
+}
+
+# tf_resize_fat <part-device> <disk>
+#
+# Run fat32expander on the ESP and show how far it is on the boot screen.
+# fat32expander reports no progress, so the share is the sectors written to
+# the disk since it started, over the bytes its dry run says it will move.
+# Returns fat32expander's exit status.
+tf_resize_fat() {
+    _trf_bytes=$(fat32expander resize --dry-run "$1" 2>/dev/null |
+        sed -n 's/.*Planned data shift for [0-9]* clusters\{0,1\} (\([0-9]*\) bytes).*/\1/p')
+    _trf_bytes="${_trf_bytes:-0}"
+    tf_status "Enlarging the boot stick, once - do not switch off"
+    tf_log "thinfloe: enlarging $1, moving $(( _trf_bytes / 1048576 )) MiB"
+    _trf_base=$(_tf_disk_written "$2")
+    fat32expander resize "$1" >/tmp/thinfloe-fat32expander.log 2>&1 &
+    _trf_pid=$!
+    _trf_last=-1
+    while kill -0 "$_trf_pid" 2>/dev/null; do
+        sleep 1
+        [ "$_trf_bytes" -gt 0 ] || continue
+        _trf_now=$(_tf_disk_written "$2")
+        _trf_pct=$(( (${_trf_now:-0} - ${_trf_base:-0}) * 512 * 100 / _trf_bytes ))
+        [ "$_trf_pct" -gt 99 ] && _trf_pct=99
+        [ "$_trf_pct" -lt 0 ] && _trf_pct=0
+        if [ "$_trf_pct" -ne "$_trf_last" ]; then
+            tf_status "Enlarging the boot stick, once: $_trf_pct % - do not switch off"
+            [ $(( _trf_pct / 10 )) -ne $(( _trf_last / 10 )) ] && \
+                tf_log "thinfloe: enlarging the boot stick, $_trf_pct %"
+            _trf_last=$_trf_pct
+        fi
+    done
+    wait "$_trf_pid"
+    _trf_rc=$?
+    while read -r _trf_line; do
+        tf_log "fat32expander: $_trf_line"
+    done </tmp/thinfloe-fat32expander.log
+    return $_trf_rc
+}
+
+# tf_grow_esp <part-device>
+#
+# Grow the ESP of the boot stick: the partition first, when the stick has
+# room for 256 MiB more below the cap, then the FAT32 inside it whenever it
+# is smaller than its partition or a resize was cut short. A power loss
+# between the two leaves a grown partition with the old FAT32, which the
+# next boot grows. Only partition 1 of a disk with no partition behind it,
+# with 512-byte sectors. Never fails the boot by itself: a FAT32 that could
+# not be grown keeps its size, and one that a failed resize left unmountable
+# fails the mount that follows, with this log above it.
+tf_grow_esp() {
+    _tge_part="${1#/dev/}"
+    _tge_sys="${TF_SYS_BLOCK:-/sys/class/block}"
+    [ -r "$_tge_sys/$_tge_part/partition" ] || return 0
+    read -r _tge_nr <"$_tge_sys/$_tge_part/partition"
+    _tge_disk=$(readlink -f "$_tge_sys/$_tge_part/..")
+    _tge_disk="${_tge_disk##*/}"
+    read -r _tge_start <"$_tge_sys/$_tge_part/start"
+    read -r _tge_size <"$_tge_sys/$_tge_part/size"
+    read -r _tge_disk_size <"$_tge_sys/$_tge_disk/size"
+    read -r _tge_lbs <"$_tge_sys/$_tge_disk/queue/logical_block_size" 2>/dev/null
+
+    if [ "$_tge_nr" = 1 ] && [ "${_tge_lbs:-512}" = 512 ]; then
+        _tge_last=1
+        for _tge_other in "$_tge_sys/$_tge_disk/$_tge_disk"*; do
+            [ -r "$_tge_other/start" ] || continue
+            [ "${_tge_other##*/}" = "$_tge_part" ] && continue
+            read -r _tge_ostart <"$_tge_other/start"
+            [ "$_tge_ostart" -gt "$_tge_start" ] && _tge_last=0
+        done
+        _tge_new=""
+        [ "$_tge_last" = 1 ] && \
+            _tge_new=$(tf_esp_grow_size "$_tge_start" "$_tge_size" "$_tge_disk_size")
+        if [ -n "$_tge_new" ]; then
+            tf_status "Enlarging the boot stick, once - do not switch off"
+            if _tf_grow_partition "/dev/$_tge_disk" "$_tge_start" "$_tge_new" "$_tge_part"; then
+                tf_log "thinfloe: boot stick partition grown from $(( _tge_size / 2048 )) MiB to $(( _tge_new / 2048 )) MiB"
+                _tge_size=$_tge_new
+            else
+                tf_log "thinfloe: could not grow the boot stick partition, keeping $(( _tge_size / 2048 )) MiB"
+            fi
+        fi
+    fi
+
+    tf_fat_needs_resize "/dev/$_tge_part" "$_tge_size" || return 0
+    if tf_resize_fat "/dev/$_tge_part" "$_tge_disk"; then
+        tf_log "thinfloe: boot stick enlarged to $(( _tge_size / 2048 )) MiB"
+    else
+        tf_log "thinfloe: the boot stick could not be enlarged (fat32expander exit $_trf_rc)"
+    fi
+    return 0
+}
+
+# _tf_grow_partition <disk> <start> <new-size> <part-name>
+#
+# Rewrite GPT entry 1 with the same start, type, unique GUID and attributes
+# and the new size, after moving the backup GPT to the end of the disk. When
+# the MBR is hybrid (an entry other than the 0xee protective one), as
+# make-bootable-image.sh writes it, it is made hybrid again for the new size.
+# sfdisk would keep the entry but write a protective MBR.
+_tf_grow_partition() {
+    sgdisk -i 1 "$1" >/tmp/thinfloe-sgdisk-info 2>/dev/null || return 1
+    _tgp_type=$(sed -n 's/^Partition GUID code: \([0-9A-Fa-f-]*\).*/\1/p' /tmp/thinfloe-sgdisk-info)
+    _tgp_guid=$(sed -n 's/^Partition unique GUID: \([0-9A-Fa-f-]*\).*/\1/p' /tmp/thinfloe-sgdisk-info)
+    _tgp_attr=$(sed -n 's/^Attribute flags: \([0-9A-Fa-f]*\).*/\1/p' /tmp/thinfloe-sgdisk-info)
+    _tgp_name=$(sed -n "s/^Partition name: '\(.*\)'\$/\1/p" /tmp/thinfloe-sgdisk-info)
+    [ -n "$_tgp_type" ] && [ -n "$_tgp_guid" ] && [ -n "$_tgp_attr" ] || return 1
+
+    _tgp_args="-e -d 1 -n 1:$2:$(( $2 + $3 - 1 )) -t 1:$_tgp_type -u 1:$_tgp_guid"
+    _tgp_bit=0
+    while [ "$_tgp_bit" -lt 64 ]; do
+        [ $(( (0x$_tgp_attr >> _tgp_bit) & 1 )) = 1 ] && _tgp_args="$_tgp_args -A 1:set:$_tgp_bit"
+        _tgp_bit=$(( _tgp_bit + 1 ))
+    done
+    _tgp_hybrid=""
+    for _tgp_off in 450 466 482 498; do
+        _tgp_t=$(od -An -tx1 -j"$_tgp_off" -N1 "$1" 2>/dev/null | tr -d ' \n')
+        case "$_tgp_t" in 00|ee|'') ;; *) _tgp_hybrid="-h 1" ;; esac
+    done
+
+    # shellcheck disable=SC2086
+    sgdisk $_tgp_args -c "1:$_tgp_name" $_tgp_hybrid "$1" >/tmp/thinfloe-sgdisk.log 2>&1 || {
+        while read -r _tgp_line; do tf_log "sgdisk: $_tgp_line"; done </tmp/thinfloe-sgdisk.log
+        return 1
+    }
+    partx -u -n 1 "$1" >/dev/null 2>&1 || blockdev --rereadpt "$1" >/dev/null 2>&1 || true
+    udevadm settle --timeout=10 >/dev/null 2>&1 || true
+    read -r _tgp_now <"${TF_SYS_BLOCK:-/sys/class/block}/$4/size" 2>/dev/null
+    [ "${_tgp_now:-0}" = "$3" ]
+}
+
 fi  # end of _TF_LIB_LOADED guard
 
 # tf_write_hostname <newroot> <machine_id> <state_dir>

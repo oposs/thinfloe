@@ -440,6 +440,7 @@ test: test-unit rootfs
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-initramfs-home.sh
 	@test/integration/test-esp-choice.sh
+	@test/integration/test-esp-grow.sh
 	@test/integration/test-initramfs-commands.sh
 	@test/integration/test-terminal.sh
 	@test/integration/test-boot-smoke-check.sh
