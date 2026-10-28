@@ -1,0 +1,8 @@
+[Unit]
+Description=End the boot screen 5 minutes after boot if no session did
+
+[Timer]
+OnBootSec=300
+
+[Install]
+WantedBy=timers.target

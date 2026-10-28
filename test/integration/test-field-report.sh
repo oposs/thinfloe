@@ -22,7 +22,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 WAITKMS="overlay/usr/libexec/thinfloe/wait-kms"
 UNIT="overlay/etc/systemd/system/thinfloe-wait-kms.service"
-AUTOLOGIN="overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+AUTOLOGIN="overlay/etc/systemd/system/getty@tty1.service"
 
 if [[ -x "$WAITKMS" ]]; then
     ok "wait-kms exists and is executable"
@@ -58,9 +58,9 @@ else
 fi
 
 if grep -q 'thinfloe-wait-kms' "$AUTOLOGIN" 2>/dev/null; then
-    ok "the autologin drop-in pulls in thinfloe-wait-kms"
+    ok "the tty1 unit pulls in thinfloe-wait-kms"
 else
-    bad "the autologin drop-in does not reference thinfloe-wait-kms"
+    bad "the tty1 unit does not reference thinfloe-wait-kms"
 fi
 
 # The reason for the whole constraints section in CLAUDE.md: this repo has

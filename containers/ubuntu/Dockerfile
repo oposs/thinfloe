@@ -341,6 +341,12 @@ RUN if [ -e /usr/lib/systemd/system/seatd.service ]; then \
 # service no longer declares Before=systemd-hwdb-update.service at all - but
 # masking it here still avoids the pointless regeneration now that nothing
 # stops the unit from actually running.
+#
+# plymouth-quit.service is masked so the boot picture stays up until the
+# menu draws: the session ends Plymouth itself (see getty@tty1.service in
+# the overlay), and thinfloe-plymouth-fallback.timer ends it after 300 s
+# when no session did. Both lines come after the "|| true" above, so a
+# failure stops the build.
 RUN rm -f /etc/ssh/ssh_host_*_key* && \
     systemctl disable ssh.socket || true && \
     systemctl mask ssh.socket || true && \
@@ -356,7 +362,9 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
     systemctl enable thinfloe-addon-check.timer && \
     systemctl enable thinfloe-addon-boot-check.timer && \
     systemctl enable thinfloe-dhcp-timezone.path thinfloe-dhcp-timezone.service && \
-    systemctl mask systemd-hwdb-update.service || true
+    systemctl mask systemd-hwdb-update.service || true && \
+    systemctl enable thinfloe-plymouth-fallback.timer && \
+    systemctl mask plymouth-quit.service
 
 # Build initramfs with dracut
 # Keep it generic but omit unnecessary modules.

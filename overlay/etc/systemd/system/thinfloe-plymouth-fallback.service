@@ -1,0 +1,10 @@
+# End Plymouth when no session did. The session ends it as soon as labwc
+# is up (thinfloe-session), and multi-user.target waits for that; if tty1
+# never logs in, this keeps the boot from waiting forever.
+# Deliberately no Before= (see CLAUDE.md, Standing Constraints).
+[Unit]
+Description=End the boot screen if no session did
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/thinfloe/plymouth-step quit

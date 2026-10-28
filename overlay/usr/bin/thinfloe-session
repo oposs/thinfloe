@@ -124,6 +124,13 @@ tf_hold() {
 # segfault 139, a failed exec 126 or 127; reading those as logout would make
 # a crash silent, and saving on them would archive the home once per
 # respawn.
+# labwc is up and its screen covers the boot picture: end Plymouth now, so
+# the boot can finish (multi-user.target waits for Plymouth to quit), and
+# leave its last picture rather than a text console behind. The helper
+# needs root; it does nothing when Plymouth is gone (every later session).
+sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
+    >/dev/null 2>&1 || true
+
 "$TF_MENU"
 menu_rc=$?
 echo "$menu_rc" >"$TF_SESSION_STATUS" 2>/dev/null || true

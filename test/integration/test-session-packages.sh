@@ -71,7 +71,11 @@ present "labwc rc.xml"     'etc/thinfloe/labwc/rc\.xml$'
 present "labwc title-bar theme" 'etc/thinfloe/labwc/themerc-override$'
 present "Geo font"         'usr/share/fonts/truetype/thinfloe/Geo-Oblique\.ttf$'
 present "Geo licence"      'usr/share/thinfloe/fonts/Geo-OFL\.txt$'
-present "tty1 autologin"   'getty@tty1\.service\.d/autologin\.conf$'
+present "tty1 autologin unit" 'etc/systemd/system/getty@tty1\.service$'
+# The drop-in ordered tty1 after plymouth-quit-wait; the whole unit replaces it.
+absent  "old tty1 drop-in"  'getty@tty1\.service\.d/autologin\.conf$'
+present "boot screen helper" 'usr/libexec/thinfloe/plymouth-step$'
+present "boot screen fallback timer enabled" 'etc/systemd/system/timers\.target\.wants/thinfloe-plymouth-fallback\.timer$'
 present "ssh host key helper" 'usr/bin/thinfloe-ssh-hostkeys$'
 present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
 absent  "old regenerate unit" 'regenerate_ssh_host_keys\.service$'
@@ -430,13 +434,69 @@ else
     echo "FAIL - could not extract passwd, sudoers and home/tluser"
     fail=1
 fi
+# The boot picture stays up until the menu draws (2026-10-27). tty1 runs
+# login -f directly: agetty quits Plymouth when it answers --ping and, at
+# 4K, crashed plymouthd (3 of 3 boots). The session hands the screen over
+# itself, so nothing may order tty1 after plymouth-quit-wait, and
+# plymouth-quit.service is masked so the end of the boot does not quit it.
+GTY="$DPKG_TMP/gty/etc/systemd/system"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/gty" "$SQSH" \
-        etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null 2>&1 &&
-   grep -q -- '--autologin tfuser ' \
-        "$DPKG_TMP/gty/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
-    echo "ok   - getty autologin is tfuser"
+        etc/systemd/system/getty@tty1.service \
+        etc/systemd/system/plymouth-quit.service \
+        etc/systemd/system/thinfloe-plymouth-fallback.service \
+        etc/systemd/system/thinfloe-plymouth-fallback.timer >/dev/null 2>&1 &&
+   [[ -f "$GTY/getty@tty1.service" ]]; then
+    tty1_has() {
+        if grep -qxF -- "$2" "$GTY/getty@tty1.service"; then
+            echo "ok   - getty@tty1: $1"
+        else
+            echo "FAIL - getty@tty1: $1 (no line '$2')"
+            fail=1
+        fi
+    }
+    tty1_has "autologin is tfuser, through login -f" 'ExecStart=-/usr/bin/login -f tfuser'
+    tty1_has "after wait-kms" 'After=thinfloe-wait-kms.service'
+    tty1_has "pulls in wait-kms" 'Wants=thinfloe-wait-kms.service'
+    tty1_has "no reset of the VT" 'TTYReset=no'
+    tty1_has "no hangup of the VT" 'TTYVHangup=no'
+    tty1_has "no clearing of the VT" 'TTYVTDisallocate=no'
+    tty1_has "never hits the start limit" 'StartLimitIntervalSec=0'
+    tty1_has "restarts after 5 s" 'RestartSec=5'
+    if grep -qE '^(After|Requires|Wants)=.*plymouth-quit' "$GTY/getty@tty1.service"; then
+        echo "FAIL - getty@tty1 waits for Plymouth to quit"
+        fail=1
+    else
+        echo "ok   - getty@tty1 does not wait for Plymouth to quit"
+    fi
+    if grep -q '^ExecStart=.*agetty' "$GTY/getty@tty1.service"; then
+        echo "FAIL - getty@tty1 runs agetty, which quits and can crash Plymouth"
+        fail=1
+    else
+        echo "ok   - getty@tty1 runs no agetty"
+    fi
+    if [[ "$(readlink "$GTY/plymouth-quit.service")" == /dev/null ]]; then
+        echo "ok   - plymouth-quit.service is masked"
+    else
+        echo "FAIL - plymouth-quit.service is not masked"
+        fail=1
+    fi
+    if grep -qx 'OnBootSec=300' "$GTY/thinfloe-plymouth-fallback.timer" 2>/dev/null &&
+       grep -qx 'ExecStart=/usr/libexec/thinfloe/plymouth-step quit' \
+            "$GTY/thinfloe-plymouth-fallback.service" 2>/dev/null; then
+        echo "ok   - the fallback ends Plymouth 300 s after boot"
+    else
+        echo "FAIL - the fallback timer or service is missing or wrong"
+        fail=1
+    fi
+    if grep -q '^Before=' "$GTY/thinfloe-plymouth-fallback.timer" \
+            "$GTY/thinfloe-plymouth-fallback.service" 2>/dev/null; then
+        echo "FAIL - a fallback unit declares Before= (ordering cycle risk)"
+        fail=1
+    else
+        echo "ok   - the fallback units declare no Before="
+    fi
 else
-    echo "FAIL - getty autologin is not tfuser"
+    echo "FAIL - cannot extract getty@tty1.service from $SQSH"
     fail=1
 fi
 
@@ -686,21 +746,7 @@ else
     fail=1
 fi
 
-# 7. The autologin drop-in must order getty after wait-kms so the race
-# window cannot open.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/autologin" "$SQSH" \
-        etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null 2>&1 &&
-   [[ -f "$DPKG_TMP/autologin/etc/systemd/system/getty@tty1.service.d/autologin.conf" ]]; then
-    if grep -q 'thinfloe-wait-kms' "$DPKG_TMP/autologin/etc/systemd/system/getty@tty1.service.d/autologin.conf"; then
-        echo "ok   - autologin drop-in pulls in wait-kms"
-    else
-        echo "FAIL - autologin drop-in does not reference thinfloe-wait-kms"
-        fail=1
-    fi
-else
-    echo "FAIL - cannot extract getty@tty1 autologin drop-in from $SQSH"
-    fail=1
-fi
+# 7. getty@tty1 is ordered after wait-kms: checked with the unit above.
 
 # 8. thinfloe-upgrade: the save before finishing and the home copy onto a fresh
 # drive. A stale image would keep the old 60 s save whose bare except hid a

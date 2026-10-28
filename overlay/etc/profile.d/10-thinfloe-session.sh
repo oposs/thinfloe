@@ -134,6 +134,20 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
         labwc -C "$LABWC_CONFIG_DIR" -S /usr/bin/thinfloe-session \
             >>"$TF_SESSION_LOG" 2>&1
     }
+    # The boot picture stays on screen until the menu draws (2026-10-27).
+    # Plymouth is still running: tty1 runs login -f without agetty, which
+    # would quit it, and plymouth-quit.service is masked. Plymouth holds DRM
+    # master, so it lets go of the display (deactivate) before labwc starts,
+    # and thinfloe-session ends it once labwc is up. The quit after labwc
+    # returns covers a labwc that never ran the session; on a later login
+    # Plymouth is gone and every call is a no-op. The helper needs root;
+    # sudo -n because a prompt here would hang the boot.
+    TF_PLYMOUTH_STEP="${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}"
+    tf_boot_screen() {
+        sudo -n "$TF_PLYMOUTH_STEP" "$@" >/dev/null 2>&1 || true
+    }
+    tf_boot_screen status "Starting the session"
+    tf_boot_screen deactivate
     tf_run_labwc
     TF_SESSION_RC=$?
 
@@ -154,13 +168,20 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     if [ "$TF_SESSION_RC" -ne 0 ] && [ -z "${TF_SESSION_RETRIED:-}" ]; then
         echo "thinfloe: the compositor did not start (status $TF_SESSION_RC)."
         echo "thinfloe: waiting for a graphics driver and trying once more..."
+        # The boot picture covers the wait. Plymouth must still be running
+        # here, so no quit before the retry: it would leave nothing to show.
+        tf_boot_screen reactivate
+        tf_boot_screen status "Waiting for the graphics driver"
         # Overridable so the tests do not wait on a host that has the file.
         "${TF_WAIT_KMS:-/usr/libexec/thinfloe/wait-kms}" || true
         TF_SESSION_RETRIED=1
         export TF_SESSION_RETRIED
+        tf_boot_screen deactivate
         tf_run_labwc
         TF_SESSION_RC=$?
     fi
+    # Before the failure screen, which is text on tty1 and must be seen.
+    tf_boot_screen quit
 
     if [ "$TF_SESSION_RC" -eq 0 ]; then
         # labwc came up and went away again. Whether the session inside it
@@ -188,7 +209,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     #
     # Consequence worth knowing: because this holds the shell, getty does not
     # restart on failure at all, so the StartLimitIntervalSec/RestartSec
-    # settings in the getty@tty1 drop-in are belt-and-braces rather than the
+    # settings in getty@tty1.service are belt-and-braces rather than the
     # thing preventing a dead tty1. They still matter if this block is ever
     # changed to exit.
     echo ""

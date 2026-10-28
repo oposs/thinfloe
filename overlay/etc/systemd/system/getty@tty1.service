@@ -1,0 +1,71 @@
+# Autologin tfuser on the first VT. This replaces nodm, which was an X11-only
+# display manager. The resulting login creates a real logind session on seat0,
+# which is what labwc needs for DRM/input access (so no seatd is required) and
+# what provides XDG_RUNTIME_DIR for the PipeWire user services.
+#
+# A whole unit, not a drop-in: it is systemd 259.9's getty@.service
+# (259.9-0ubuntu0.1) with the changes below, because a drop-in cannot remove
+# the template's After=plymouth-quit-wait.service.
+#
+# The boot picture stays on screen until the menu draws (2026-10-27).
+# - No After=plymouth-quit-wait.service: the session hands the display over
+#   itself (/etc/profile.d/10-thinfloe-session.sh and thinfloe-session), so
+#   tty1 starts while Plymouth still runs.
+# - login -f instead of agetty --autologin. agetty (util-linux 2.41) quits
+#   Plymouth when plymouth --ping answers and then waits up to 30 s for the
+#   terminal; at 4K that crashed plymouthd in 3 of 3 QEMU boots and delayed
+#   the login to 61 s. There is nobody to greet on tty1, so agetty's issue
+#   and prompt are not missed.
+# - Type=simple, TTYReset=no, TTYVHangup=no, TTYVTDisallocate=no: no wait for
+#   the boot to go idle, and nothing that clears or resets the VT under the
+#   boot picture.
+# - TERM=linux: agetty used to set it.
+[Unit]
+Description=Getty on %I
+Documentation=man:agetty(8) man:systemd-getty-generator(8)
+After=systemd-user-sessions.service getty-pre.target
+After=rc-local.service
+# Do not start the session until a real KMS driver is bound. i915 is
+# omitted from the initrd, so it loads from udev coldplug after switch-root,
+# and labwc could start in the gap where simpledrm's card0 has been removed
+# and i915's does not exist yet - "Found 0 GPUs", a failure shell, and no
+# retry. Measured 273ms of exposure on a NUC7i3BNK.
+After=thinfloe-wait-kms.service
+Wants=thinfloe-wait-kms.service
+Before=getty.target
+IgnoreOnIsolate=yes
+Conflicts=rescue.service
+Before=rescue.service
+ConditionPathExists=/dev/tty0
+# Never let tty1 hit systemd's start limit. The session legitimately restarts
+# on every logout, and a fast-failing session (labwc unable to open DRM, or a
+# missing tlclient) would otherwise exhaust the default 5-starts-in-10s budget
+# and leave the machine on a black screen that looks like dead hardware.
+# Retrying forever with a delay is what nodm's NODM_MIN_SESSION_TIME did.
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=-/usr/bin/login -f tfuser
+Type=simple
+Environment=TERM=linux
+Restart=always
+RestartSec=5
+UtmpIdentifier=%I
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/%I
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+ImportCredential=tty.virtual.%I.agetty.*:agetty.
+ImportCredential=tty.virtual.%I.login.*:login.
+ImportCredential=agetty.*
+ImportCredential=login.*
+ImportCredential=shell.*
+UnsetEnvironment=LANG LANGUAGE LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION
+
+[Install]
+WantedBy=getty.target
