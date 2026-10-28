@@ -42,7 +42,26 @@
 - [ ] **Step 3:** Record in the plan's "Spike result" section below: pass/fail with frame names, what systemd sends (unit id like `systemd-networkd.service`, or the description), and whether `sudo -n plymouth --ping` from the session succeeded (session log).
 - [ ] **Step 4:** If it fails: stop, show the owner the frames. Do not continue to Task 1. If it passes: remove the spike worktree and branch (ask the owner first).
 
-**Spike result:** _(fill in)_
+**Spike result (2026-10-28):** PASS after one change. Frames in
+`/scratch/oetiker/claude-tmp/thinfloe-tests/spike/`.
+
+- With agetty on tty1, 4K failed 3 of 3 boots: agetty sends Plymouth
+  `MAGIC_QUIT` when `--ping` answers (util-linux 2.41 `agetty.c:1237`,
+  `termio_init`), right after its own vhangup of tty1; plymouthd crashed
+  (SEGV in its event loop, backtrace via `plymouth.debug=stream:/dev/ttyS0`)
+  and agetty then polled the termios lock for up to 30 s (login at 61 s).
+  1280x800 escaped the race.
+- With `ExecStart=-/usr/bin/login -f tfuser` (no agetty), `TTYReset=no`,
+  `TTYVHangup=no`, `TTYVTDisallocate=no`, `Type=simple`: no crash; login
+  0.2 s after the unit starts; 1280x800 splash 6.0-16.0 s, one black frame,
+  menu 17.0 s (27 s with agetty); 4K splash, about 1 s of labwc's black
+  screen with the pointer, menu.
+- labwc does not keep the retained picture: it draws its own black screen
+  until the menu maps (0.5 s at 1280x800, 1 s at 4K in QEMU). No text
+  console in any frame.
+- systemd sends the unit id (`getty@tty1.service`), so the table keys on ids.
+- `sudo -n plymouth --ping`, `update`, `deactivate`, `quit --retain-splash`
+  reach the initramfs-started daemon from the session.
 
 ### Task 1: Step line in the theme
 
