@@ -14,6 +14,7 @@
 
 ### Changed
 
+- The boot screen shows what the machine is doing on a line above the host name, for example "Restoring the home directory", "Installing ThinLinc" or "Starting the session", and stays up until the menu appears.
 - The boot screen, the menu, Settings, the dialogs and the window title bars share one new look: the ThinFloe logo on a near-black background with ice-blue accents and the Geo typeface, a header with the clock, and the host name at the foot of the boot screen once it is known. Window title bars use the same colours and font.
 - The Terminal and Back up home tile icons have square frames, like the tiles.
 - The taskbar at the bottom of the screen is gone. A folded window now shows in a strip at the bottom of the menu and comes back with one click.
@@ -33,6 +34,7 @@
 
 ### Fixed
 
+- The text console with the Ubuntu welcome text no longer shows up between the boot screen and the menu.
 - The ThinFloe logo on the boot screen is sharp on every screen size: on a 4K screen it was enlarged from a small picture and its edges were soft, and on small screens they were slightly soft too. On some screen sizes the logo is now a little smaller than before.
 - The progress line on the boot screen no longer stops at about 15 % when the menu appears: it now follows the time since the boot screen appeared, reaching about 85 % after 10 seconds.
 - With two ThinFloe sticks plugged in, a boot could take the home directory and the add-ons from the other stick, so an add-on installed before a restart was gone after it, and the home could be saved to the wrong stick. Each stick now gets an ID (`thinfloe.stick=` in its `syslinux.cfg`) when `thinfloe-upgrade` writes it or at its first boot, and the boot uses the stick it started from.

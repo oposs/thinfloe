@@ -160,6 +160,17 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   on 4K and doubling the whole screen; the same test guards both. The host name reaches it through
   `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when
   `/etc/thinfloe/version` exists; nothing writes it yet.
+  Above the host name a step line says what the machine does, in English.
+  It arrives through `plymouth update --status`: a text that starts with
+  `tf:` is shown as it is, anything else is a systemd unit id, which a table
+  in `thinfloe.script` (`unit_step`) translates; an id not in the table
+  leaves the line as it was. The initramfs sends its steps with `tf_status`
+  (`thinfloe-lib.sh`; "Finding the boot stick", "Loading the system",
+  "Restoring the home directory"), the running system with
+  `/usr/libexec/thinfloe/plymouth-step` (`status`, cut to 64 characters),
+  and `thinfloe-addon boot` names each add-on ("Installing ThinLinc").
+  The picture stays until the session draws, see
+  [the tty1 constraint](#tty1-does-not-wait-for-plymouth-the-session-ends-it).
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
@@ -254,7 +265,8 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   **Time zone.** Order: `TZ=` in `~/.thinfloe-environment` (exported by `10-thinfloe-session.sh` with `set -a`, so it reaches labwc, `thinfloe-session` and the menu), else the DHCP zone, else UTC. An invalid `TZ=` gives UTC, not the DHCP zone, as glibc does. The drop-in `overlay/etc/systemd/network/10-netplan-eth.network.d/50-timezone.conf` makes networkd ask for option 101 on the `eth` profile of `/etc/netplan/ethernet.yaml`; profiles from `~/wifi.yaml` have user-chosen ids and get none. networkd would set the zone itself through `timedated`, which needs polkit, and the image has none, so `thinfloe-dhcp-timezone.path` watches `/run/systemd/netif/leases/` and `thinfloe-dhcp-timezone.service` runs `/usr/libexec/thinfloe/dhcp-timezone` as root. That script takes the lease's `TIMEZONE=` only if it is 1 to 64 characters of letters, digits and `/ _ + -`, has no `..`, no leading `/` or `-`, and names a TZif file whose `realpath` lies inside `/usr/share/zoneinfo`; then it runs `timedatectl set-timezone -- <zone>` and logs `thinfloe: time zone <zone> from DHCP`. Anything else logs `thinfloe: ignored DHCP time zone '<value cut to 64, printable>': <why>` and changes nothing. The service is also enabled for `multi-user.target` and ordered after the path unit, so it runs once at boot for a lease that is already there (the path unit sees only later changes) and the armed path unit catches the rest; `StartLimitIntervalSec=0` keeps a burst of lease writes from tripping the start limit. The units carry no `Before=` on a sysinit unit. **Netboot:** the initramfs's networkd runs dracut's default network file (`/run/systemd/network/zzzz-dracut-default.network`, no `ip=`), so `90thinfloe/module-setup.sh` installs a drop-in `zzzz-dracut-default.network.d/50-timezone.conf` (`UseTimezone=yes`) in the initrd; the lease it writes then carries `TIMEZONE=`, it survives the switch-root in `/run/systemd/netif/leases/`, and the boot-time run of the service applies it. (An `ip=` on the command line would use a generated file the drop-in does not cover.) Guards: `test/integration/test-dhcp-timezone.sh` (hostile values, stub `timedatectl`), the menu test `a_zone_change_reaches_the_clock_without_a_restart`, `make qemu-smoke-timezone` and `make qemu-smoke-timezone-netboot` (the same netbooted over HTTP from the namespace; dnsmasq on a tap in `podman unshare unshare --net` sends option 101 to a booted guest; a bare `unshare -rn` forbids the `setgroups` call dnsmasq makes at start-up).
 
   Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not** — see [Standing Constraints](#standing-constraints).
-- Autologin: `overlay/etc/systemd/system/getty@tty1.service.d/autologin.conf`
+- Autologin: `overlay/etc/systemd/system/getty@tty1.service`, a whole unit
+  running `login -f tfuser` (see [Standing Constraints](#tty1-does-not-wait-for-plymouth-the-session-ends-it))
 - User defaults: `overlay/home/tfuser/`
 
 After modifying overlay files, rebuild with `make image`.
@@ -622,7 +634,7 @@ The EFI partition `/config/` directory can also store other persistent configura
 
 ## Standing Constraints
 
-Eighteen rules in this repository look like ordinary configuration but are
+Nineteen rules in this repository look like ordinary configuration but are
 load-bearing. All but the patched-labwc, hook-order, menu-rendering,
 logout-save, migrate-once and add-on-libraries ones have each caused a real shipped-image bug. The
 patched-labwc one is preventive - nothing has shipped broken from it yet, but
@@ -634,6 +646,8 @@ without them. The migrate-once and add-on-libraries ones are
 preventive as well: nothing has shipped broken from them. The stick-id one fixes a bug every
 image before it shipped with; it was found in QEMU, whose `qemu-test`
 attaches a second stick.
+The tty1 one is preventive too: the Plymouth crash it avoids was found in
+QEMU before any image kept the boot picture up.
 
 ### No login password ships in the image
 
@@ -1189,6 +1203,49 @@ only the initramfs's tools), `test/integration/test-session-packages.sh`
 (the marker in the image), `test/integration/test-cmdline.sh`, the tile
 tests in `src/thinfloe-menu/src/tiles.rs`, `test/unit/test_upgrade_image.py`
 (`make test-unit`) and `make qemu-smoke-upgrade`.
+
+### tty1 does not wait for Plymouth; the session ends it
+
+The boot picture stays on screen until the menu draws, with no text console
+in between (2026-10-27). Four pieces hold this up:
+
+- `overlay/etc/systemd/system/getty@tty1.service` is a whole unit, a copy
+  of systemd 259.9's `getty@.service` without
+  `After=plymouth-quit-wait.service`. A drop-in cannot remove that line.
+- It runs `login -f tfuser`, never `agetty`. agetty (util-linux 2.41,
+  `termio_init`) quits Plymouth when `plymouth --ping` answers and then
+  waits up to 30 s for the terminal. At 4K in QEMU this crashed plymouthd
+  (SEGV, 3 of 3 boots) and delayed the login to 61 s. `TTYReset=no`,
+  `TTYVHangup=no` and `TTYVTDisallocate=no` keep systemd from clearing the
+  VT under the picture.
+- The session hands the display over: `10-thinfloe-session.sh` sends
+  "Starting the session" and `deactivate` before labwc, `reactivate` and
+  "Waiting for the graphics driver" around the retry, and `quit` once labwc
+  returns, before the failure screen. `thinfloe-session` runs `quit-retain`
+  before the menu. All through `sudo -n plymouth-step`, which does nothing
+  when Plymouth is gone, so later logins are unaffected.
+- `plymouth-quit.service` is masked, and `thinfloe-plymouth-fallback.timer`
+  ends Plymouth 300 s after boot when no session did. While Plymouth runs,
+  `multi-user.target` waits for `plymouth-quit-wait.service`, so the boot
+  counts as finished when the session ends Plymouth.
+
+labwc does not keep the picture: it shows its own black screen until the
+menu maps, about 0.5 s at 1280x800 and 1 to 2 s at 4K in QEMU. Accepted
+(owner, 2026-10-28).
+
+Seen in QEMU (2026-10-28) at 1280x800 and 4K: picture, black, menu, with
+no text console after the first picture. The failure path (labwc does not
+start, the picture comes back with "Waiting for the graphics driver", then
+the failure text) cannot be produced there: with `bochs` blocked, labwc
+runs on `simpledrm`, which is built into the kernel, and without it there
+is no framebuffer at all. Its order is proven by the lifecycle test only.
+**Not verified on hardware.**
+
+Guards: `test/integration/test-session-packages.sh` (the unit, the mask, the
+timer), `test/integration/test-session-lifecycle.sh` (the order of the
+calls, also when labwc fails and when Plymouth is gone),
+`test/integration/test-plymouth-step.sh` (the helper) and
+`test/unit/test_addon.py` (the add-on steps).
 
 ## Known Limitations
 
