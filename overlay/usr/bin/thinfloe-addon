@@ -751,6 +751,8 @@ DPKG = os.environ.get("TF_ADDON_DPKG", "dpkg")
 HOOKS_DIR = os.environ.get("TF_ADDON_HOOKS", "/usr/libexec/thinfloe/addon-hooks")
 SHIPPED_TILES = os.environ.get("TF_ADDON_TILES", "/etc/thinfloe/menu")
 STATE_DIR = os.environ.get("TF_ADDON_STATE", "/run/thinfloe/state")  # the initramfs's records
+# Puts a step on the boot screen; does nothing when Plymouth is gone.
+PLYMOUTH_STEP = os.environ.get("TF_PLYMOUTH_STEP", "/usr/libexec/thinfloe/plymouth-step")
 # Netboot has no ESP: the same layout in RAM, rebuilt each boot.
 CACHE_DIR = "/run/thinfloe/addons-cache"
 
@@ -1993,6 +1995,16 @@ def _boot_next(run: Run, a: Addon, d: str, nxt: Stored) -> None:
     set_result(a.id, None, "%s; %s installed" % (failed, old))
 
 
+def boot_step(text: str) -> None:
+    """Show text on the boot screen's step line. Every failure is ignored:
+    the boot screen must never hold up an install."""
+    if not os.access(PLYMOUTH_STEP, os.X_OK):
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run([PLYMOUTH_STEP, "status", text], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+
+
 def cmd_boot(run: Run) -> None:
     """Seed the ticks, then, on USB, install each ticked add-on from the
     ESP: next.* when there is one (it becomes current.* once installed),
@@ -2018,6 +2030,7 @@ def cmd_boot(run: Run) -> None:
                 run.failed = True
                 break
             a = todo.pop(0)
+            boot_step("Installing %s" % a.name)
             d = _addon_dir(a.id)
             nxt = stored(d, "next")
             if nxt is not None:

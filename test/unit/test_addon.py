@@ -627,6 +627,7 @@ class AddonEnv(ServerTest):
             "LOCK_PATH": str(self.lock), "ROOT_DIR": str(self.root),
             "HOME_DIR": str(self.home), "DPKG": str(dpkg),
             "SHIPPED_TILES": str(self.tiles),
+            "PLYMOUTH_STEP": str(tmp / "no-plymouth-step"),
             "esp_mounted": lambda: True,
             "tfuser_ids": lambda: (os.getuid(), os.getgid()),
             "_secure": lambda url: True,
@@ -1729,6 +1730,34 @@ class TestBoot(AddonEnv):
         self.tick()
         self.assertEqual(self.run_cmd("boot"), 0)
         self.assertEqual(self.dpkg_calls(), [])
+
+    def step_recorder(self, status: int = 0) -> Path:
+        """A plymouth-step that logs its arguments, one call per line."""
+        rec = self.bin / "plymouth-step"
+        rec.write_text('#!/bin/sh\necho "$*" >> "$0.log"\nexit %d\n' % status)
+        rec.chmod(0o755)
+        p = mock.patch.object(ad, "PLYMOUTH_STEP", str(rec))
+        p.start()
+        self.addCleanup(p.stop)
+        return Path(str(rec) + ".log")
+
+    def test_boot_sends_a_step_per_addon(self):
+        steps = self.step_recorder()
+        for name, label in (("10-thinlinc", "ThinLinc"), ("20-oxulnk", "OxuLnk")):
+            (self.tiles / (name + ".desktop")).write_text(
+                "[Desktop Entry]\nName=%s\nExec=%s\nX-TF-Source-URL=%s/%s.deb\n"
+                % (label, name, self.srv.base, name))
+        self.tick("10-thinlinc", "20-oxulnk")
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(steps.read_text().splitlines(),
+                         ["status Installing ThinLinc", "status Installing OxuLnk"])
+
+    def test_boot_step_failure_is_ignored(self):
+        self.stored_demo()
+        steps = self.step_recorder(status=1)
+        self.assertEqual(self.run_cmd("boot"), 0, self.log_lines())
+        self.assertEqual(steps.read_text().splitlines(), ["status Installing Demo"])
+        self.assertEqual(self.dpkg_calls(), [DPKG_I + str(self.addon_dir() / "current.deb")])
 
     def test_seed_from_home_renamed(self):
         self.client_tiles()

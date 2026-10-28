@@ -453,6 +453,7 @@ test: test-unit rootfs
 	@test/integration/test-usb-image-deps.sh
 	@test/integration/test-container-inputs.sh
 	@test/integration/test-format-bytes.sh
+	@test/integration/test-plymouth-step.sh
 	@test/integration/test-make-clean.sh
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
 

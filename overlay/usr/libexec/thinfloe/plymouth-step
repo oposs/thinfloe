@@ -1,0 +1,37 @@
+#!/bin/sh
+# Talk to the boot screen from the running system.
+#
+# Usage: plymouth-step status TEXT | deactivate | reactivate | quit | quit-retain
+#
+# status       show TEXT (cut to 64 characters) on the step line
+# deactivate   let the session take the display, Plymouth keeps running
+# reactivate   give the display back to Plymouth (the session failed)
+# quit         end Plymouth
+# quit-retain  end Plymouth and leave its last picture on the screen
+#
+# Does nothing when Plymouth is not running. Output of plymouth is
+# discarded and the exit status is always 0: a boot screen that is gone
+# must never stop the boot or the session. Each plymouth call gets 5 s,
+# so a wedged plymouthd cannot hang the caller.
+#
+# TF_PLYMOUTH overrides the plymouth binary (tests).
+
+PLYMOUTH=${TF_PLYMOUTH:-/usr/bin/plymouth}
+
+ply() {
+    timeout 5 "$PLYMOUTH" "$@" >/dev/null 2>&1
+}
+
+ply --ping || exit 0
+
+case "$1" in
+    status)
+        text=$(printf '%.64s' "$2")
+        ply update "--status=tf:$text"
+        ;;
+    deactivate) ply deactivate ;;
+    reactivate) ply reactivate ;;
+    quit) ply quit ;;
+    quit-retain) ply quit --retain-splash ;;
+esac
+exit 0
