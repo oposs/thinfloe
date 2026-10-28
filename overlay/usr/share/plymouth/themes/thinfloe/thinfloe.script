@@ -11,6 +11,11 @@
 # Until then the foot line is empty. The version is not shown (nothing writes
 # /etc/thinfloe/version yet).
 #
+# Above the host name a step line says what the machine is doing. It arrives
+# through "plymouth update --status": ThinFloe's own steps as "tf:<text>",
+# shown as they are, and systemd's as the id of each unit it starts, which a
+# table translates; an id not in the table leaves the line as it was.
+#
 # Geo comes from the initrd's /usr/share/fonts (90thinfloe/module-setup.sh);
 # the label plugin, label-pango, finds it through fontconfig.
 
@@ -111,9 +116,9 @@ fun boot_progress(duration, progress)
 }
 Plymouth.SetBootProgressFunction(boot_progress);
 
-# Host name at the foot, #8a97a6 as in the mockup.
+# Host name at the foot, #8a97a6 as in the mockup, 16 px at 1080p.
 foot.sprite = Sprite();
-foot.size = Math.Int(13 * k);
+foot.size = Math.Int(16 * k);
 if (foot.size < 9)
     foot.size = 9;
 
@@ -134,3 +139,60 @@ fun hide_message(text)
 
 Plymouth.SetDisplayMessageFunction(show_message);
 Plymouth.SetHideMessageFunction(hide_message);
+
+# Step line, 20 px at 1080p, centred just above the host name.
+step.sprite = Sprite();
+step.size = Math.Int(20 * k);
+if (step.size < 11)
+    step.size = 11;
+step.bottom = Math.Int(screen.h * 0.94
+    - Image.Text("Ag", 0, 0, 0, 1, "Geo " + foot.size).GetHeight()
+    - 8 * k);
+
+fun show_step(text)
+{
+    if (text.Length() > 64)
+        text = text.SubString(0, 64);
+    step.image = Image.Text(text, 0.541, 0.592, 0.651, 1, "Geo " + step.size);
+    step.sprite.SetImage(step.image);
+    step.sprite.SetPosition(
+        Math.Int((screen.w - step.image.GetWidth()) / 2),
+        step.bottom - step.image.GetHeight(),
+        10);
+}
+
+# systemd unit id -> step text. Keep it short; ids not listed change nothing.
+fun unit_step(id)
+{
+    if (id == "systemd-udevd.service")
+        return "Detecting hardware";
+    if (id == "systemd-networkd.service")
+        return "Starting the network";
+    if (id == "systemd-resolved.service")
+        return "Starting name lookup";
+    if (id == "chrony.service")
+        return "Setting the clock";
+    if (id.SubString(0, 14) == "wpa_supplicant" || id.SubString(0, 12) == "netplan-wpa-")
+        return "Connecting to WiFi";
+    if (id == "wg-quick@wg0.service")
+        return "Starting WireGuard";
+    if (id == "ssh.service" || id == "thinfloe-ssh-hostkeys.service")
+        return "Starting SSH";
+    if (id == "thinfloe-wait-kms.service")
+        return "Waiting for the graphics driver";
+    if (id == "thinfloe-addons.service")
+        return "Installing add-ons";
+    return "";
+}
+
+fun update_status(status)
+{
+    if (status.SubString(0, 3) == "tf:")
+        text = status.SubString(3, status.Length());
+    else
+        text = unit_step(status);
+    if (text != "")
+        show_step(text);
+}
+
+Plymouth.SetUpdateStatusFunction(update_status);

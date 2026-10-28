@@ -185,6 +185,17 @@ if [[ -n "$pscript" ]] && ! grep -q 'logo\.image\.Scale' "$pscript" &&
 else
     bad "the boot screen scales the logo, which blurs it"
 fi
+# The step line: ThinFloe's own steps arrive as "tf:<text>", systemd's as unit
+# ids that a table translates. It sits above the host name, 20 px at 1080p;
+# the host name is 16 px (owner, 2026-10-28).
+if [[ -n "$pscript" ]] && grep -q 'Plymouth.SetUpdateStatusFunction(' "$pscript" &&
+   grep -q '"tf:"' "$pscript" && grep -q '"systemd-networkd.service"' "$pscript" &&
+   grep -q 'step.size = Math.Int(20 \* k)' "$pscript" &&
+   grep -q 'foot.size = Math.Int(16 \* k)' "$pscript"; then
+    ok "the boot screen shows a step line"
+else
+    bad "the boot screen has no step line"
+fi
 if [[ -n "$pconf" ]] && grep -qx 'DeviceScale=1' "$pconf"; then
     ok "plymouthd.conf in the initrd says DeviceScale=1"
 else
