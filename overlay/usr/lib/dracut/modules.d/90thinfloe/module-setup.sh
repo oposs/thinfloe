@@ -77,4 +77,11 @@ install() {
 
 installkernel() {
     instmods squashfs overlay zram loop ext4 vfat
+    # Intel graphics, with the firmware its modinfo names (about 12 MB).
+    # Plymouth starts on simpledrm; when i915 bound only after switch-root,
+    # Plymouth did not follow it to the new card and the screen stayed dark
+    # until the menu drew. Bound here, it takes over before the squashfs
+    # loads. dracut's drm module stays omitted, so no other GPU driver
+    # comes along.
+    instmods i915
 }

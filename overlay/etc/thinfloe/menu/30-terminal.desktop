@@ -2,5 +2,5 @@
 Type=Application
 Name=Terminal
 Icon=square-terminal
-Exec=foot
+Exec=thinfloe-terminal
 X-TF-Multiple=true

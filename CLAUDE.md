@@ -1246,9 +1246,17 @@ no text console. The picture ends earlier there, though: Plymouth draws on
 `simpledrm`, and when `i915` binds after switch-root (8.7 s after the
 kernel started) Plymouth does not move to the new device, so the screen
 stays dark until the menu draws, about 10 s with the two monitor resyncs
-(i915 at 8.7 s, labwc at 10.2 s). Accepted (owner, 2026-10-28). Putting
-`i915` into the initrd would keep the picture; it was left out on purpose
-(see [The session waits for the GPU](#the-session-waits-for-the-gpu-before-it-starts)).
+(i915 at 8.7 s, labwc at 10.2 s). On a Broadwell Brix (i3-5010U, 2014
+firmware) the picture never showed: Plymouth ran on `simpledrm` for 15 s
+and no monitor displayed the firmware framebuffer. So `i915` and the
+firmware its modinfo names are in the initrd since 2026-10-28
+(`installkernel()` in `90thinfloe/module-setup.sh`, not in
+`--omit-drivers`; the initrd grew from 92.3 MB to 98.2 MB), to bind
+before the squashfs loads. `test-initramfs-commands.sh` fails without
+the module or its firmware. **Not verified on hardware**: that Plymouth
+then draws on i915 on both machines. `plymouth.use-simpledrm` stays on
+the command line, because amdgpu, nouveau and radeon are still left out
+and their machines would otherwise show no picture.
 
 Guards: `test/integration/test-session-packages.sh` (the unit, the mask, the
 timer), `test/integration/test-session-lifecycle.sh` (the order of the
@@ -1390,8 +1398,9 @@ session log has all of it.
 ### The session waits for the GPU before it starts
 
 `thinfloe-wait-kms.service` waits up to 20 s for a real KMS driver before the
-tty1 autologin: i915 is omitted from the initrd and binds only after
-switch-root, and simpledrm's `card0` alone does not count. `10-thinfloe-session.sh`
+tty1 autologin: amdgpu, nouveau and radeon are omitted from the initrd and
+bind only after switch-root, and simpledrm's `card0` alone does not count.
+i915 is in the initrd, so on Intel graphics the wait ends at once. `10-thinfloe-session.sh`
 retries labwc once after another wait-kms, so a machine with no GPU waits about
 40 s before the failure screen.
 
@@ -1405,7 +1414,17 @@ tiles) already escalate.
 
 ### Reaching a terminal
 
-The Terminal tile of the menu starts `foot` inside the session. With zero
+The Terminal tile of the menu starts `thinfloe-terminal`, which runs `foot`
+with Smalti 7x14 (`fonts-smalti`, a pinned release `.deb` in
+`containers/ubuntu/Dockerfile`) at 14 px, or at 28 px with double padding
+when the shorter side of a screen's mode is 1800 px or more: the session
+runs every output at scale 1, and Smalti is sharp only at whole multiples
+of 14 px. The rest of the look (menu colours, padding, a window of 100x30
+characters) is `overlay/etc/xdg/foot/foot.ini`. foot has no scroll bar;
+`indicator-position=relative` shows a box on the right edge while the view
+is scrolled back. `test/integration/test-terminal.sh` guards the size rule
+and the config. The failure windows of `thinfloe-session` start `foot`
+directly and get the 14 px look. With zero
 labwc keybindings ([Standing Constraints](#standing-constraints)) there is no
 other in-session path, so when the session is down, reach a terminal from a VT
 (Ctrl+Alt+F2, say) or over SSH instead. **SSH needs a password

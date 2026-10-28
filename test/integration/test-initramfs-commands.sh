@@ -274,6 +274,27 @@ else
     ok "no Intel WiFi firmware in the initrd"
 fi
 
+# --- i915 in the initrd ---------------------------------------------------
+#
+# Plymouth draws on simpledrm until a real driver binds. With i915 loaded only
+# after switch-root, Plymouth did not follow it to the new card and the screen
+# stayed dark until the menu drew: about 10 s on an Alder Lake-P, and the
+# whole boot on a Broadwell Brix. i915 in the initrd binds before the hooks
+# load the squashfs. Its firmware must come along: a probe that cannot load
+# the GuC or DMC does not retry after switch-root.
+if grep -qE '/kernel/drivers/gpu/drm/i915/i915\.ko' "$WORK/initrd.list"; then
+    ok "i915 is in the initrd"
+else
+    bad "no i915.ko in the initrd - Intel machines lose the boot picture when i915 binds after switch-root"
+fi
+for fw in adlp_dmc adlp_guc_70 kbl_dmc_ver1_04; do
+    if grep -qE "usr/lib/firmware/i915/${fw}\.bin(\.zst)?$" "$WORK/initrd.list"; then
+        ok "i915 firmware $fw is in the initrd"
+    else
+        bad "i915 firmware $fw is missing from the initrd - i915 loads without it and does not retry"
+    fi
+done
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - initramfs commands"

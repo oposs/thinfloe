@@ -1,0 +1,25 @@
+#!/bin/sh
+# Start foot with Smalti at 14 px, or at 28 px with double padding when a
+# screen is HiDPI.
+#
+# Smalti is sharp only at whole multiples of its 14 px cell, and the session
+# runs every output at scale 1, so foot cannot tell a 4K screen from a 1080p
+# one by itself. A screen counts as HiDPI when the shorter side of its current
+# mode is 1800 px or more. With several screens the largest decides.
+# /etc/xdg/foot/foot.ini holds the rest of the look.
+
+px=14
+pad=12
+short=$(wlr-randr 2>/dev/null | awk '
+    /current\)$/ {
+        split($1, m, "x")
+        s = (m[1] + 0 < m[2] + 0) ? m[1] + 0 : m[2] + 0
+        if (s > max) max = s
+    }
+    END { print max + 0 }')
+if [ "${short:-0}" -ge 1800 ]; then
+    px=28
+    pad=24
+fi
+exec foot --override="main.font=Smalti 7x14:pixelsize=$px" \
+    --override="main.pad=${pad}x${pad}" "$@"

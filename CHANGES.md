@@ -14,6 +14,8 @@
 
 ### Changed
 
+- The Terminal tile opens a terminal in the menu's colours, with the Smalti pixel font, a margin around the text and room for 100 columns; on a 4K screen the font and margin are twice as large. While you scroll back, a box on the right edge shows where you are.
+- On Intel graphics the boot picture is meant to stay on screen until the menu appears, instead of going dark for about 10 seconds or not showing at all on some older machines.
 - The boot screen shows what the machine is doing on a line above the host name, for example "Restoring the home directory", "Installing ThinLinc" or "Starting the session", and stays up until the menu appears.
 - The boot screen, the menu, Settings, the dialogs and the window title bars share one new look: the ThinFloe logo on a near-black background with ice-blue accents and the Geo typeface, a header with the clock, and the host name at the foot of the boot screen once it is known. Window title bars use the same colours and font.
 - The Terminal and Back up home tile icons have square frames, like the tiles.

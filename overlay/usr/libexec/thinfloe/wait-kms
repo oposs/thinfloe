@@ -2,12 +2,14 @@
 # Wait until a DRM card is driven by something other than simpledrm, and until
 # udev has finished with it, so logind can hand it to labwc.
 #
-# Why this exists: i915 is in dracut's --omit-drivers (containers/ubuntu/
-# Dockerfile), so it loads only from udev coldplug after switch-root. Until
-# then /dev/dri/card0 is simpledrm. When i915 binds it REMOVES simpledrm's
-# card0 and registers its own, and in the gap there is no usable card0 at all.
+# Why this exists: a GPU driver that is not in the initrd (amdgpu, nouveau,
+# radeon; i915 was one until 2026-10-28) loads only from udev coldplug after
+# switch-root. Until then /dev/dri/card0 is simpledrm. When the driver binds
+# it REMOVES simpledrm's card0 and registers its own, and in the gap there is
+# no usable card0 at all. With i915 in the initrd this returns at once on
+# Intel graphics.
 #
-# Measured on a NUC7i3BNK: the tfuser session started at 11.099s and i915's
+# Measured on a NUC7i3BNK, before i915 was in the initrd: the tfuser session started at 11.099s and i915's
 # card0 appeared at 11.372s. labwc failed with "Found 0 GPUs", and because
 # 10-thinfloe-session.sh holds a failure shell rather than exiting, the session
 # was never retried and the whole boot was lost.

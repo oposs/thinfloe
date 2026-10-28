@@ -201,6 +201,16 @@ COPY --from=labwc-build /out/ /tmp/labwc-deb/
 RUN apt-get install -yq --no-install-recommends --no-install-suggests /tmp/labwc-deb/labwc_*.deb && \
     rm -rf /tmp/labwc-deb
 
+# Smalti, the pixel font of the foot terminal (/etc/xdg/foot/foot.ini). It is
+# not in the Ubuntu archive; the release .deb is pinned by version and hash.
+ARG SMALTI_VERSION=0.4.0
+ARG SMALTI_SHA256=242ccd28a77974e779ea60d42018b9eb49a3ba9bb042c0321808b872b4dc02d4
+RUN curl -fsSL -o /tmp/fonts-smalti.deb \
+        "https://github.com/oetiker/smalti/releases/download/v${SMALTI_VERSION}/fonts-smalti_${SMALTI_VERSION}-1_all.deb" && \
+    echo "${SMALTI_SHA256}  /tmp/fonts-smalti.deb" | sha256sum -c - && \
+    apt-get install -yq --no-install-recommends /tmp/fonts-smalti.deb && \
+    rm -f /tmp/fonts-smalti.deb
+
 # thinfloe-menu and its icons, from the menu-build stage above. The tiles
 # themselves are plain files in overlay/etc/thinfloe/menu.
 COPY --from=menu-build /out/ /
@@ -393,10 +403,13 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 # cfg80211). Nothing in the initrd can use them: it has no wpa_supplicant,
 # and netboot runs over a cable. test-initramfs-commands.sh fails on any
 # module under drivers/net/wireless/, net/wireless/ or net/mac80211/.
+#
+# i915 is not in --omit-drivers: 90thinfloe installs it with its firmware, so
+# Intel graphics binds in the initrd and Plymouth keeps the boot picture.
 RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     dracut --force --no-hostonly --add "thinfloe plymouth systemd-networkd systemd-resolved" \
     --omit "drm dash crypt dmraid multipath iscsi nfs nbd fcoe fcoe-uefi biosdevname dmsquash-live dmsquash-live-ntfs" \
-    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu i915 vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio" \
+    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio" \
     --compress "zstd -3 -T4" \
     --kver $KERNEL_VERSION
 
