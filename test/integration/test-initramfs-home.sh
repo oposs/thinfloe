@@ -561,6 +561,42 @@ fi
 # --- tf_write_hostname: boot MAC ---
 
 mkstate() { mkdir -p "$WORK/$1/etc" "$WORK/$1/state"; echo "$WORK/$1"; }
+# --- tf_status: the step line on the boot screen ---
+#
+# Boot steps reach the theme as "plymouth update --status=tf:<text>", only
+# when the daemon answers, and never fail the hook.
+
+: >"$PLY_LOG"
+PATH="$WORK/plybin:$PATH" tf_status "Restoring the home directory"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$PLY_LOG")" == $'--ping\nupdate --status=tf:Restoring the home directory' ]]; then
+    ok "tf_status sends the step to the boot screen when the daemon answers"
+else
+    bad "tf_status: rc=$rc log=$(cat "$PLY_LOG")"
+fi
+
+: >"$PLY_LOG"
+PLY_PING_RC=1 PATH="$WORK/plybin:$PATH" tf_status "Loading the system"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$PLY_LOG")" == "--ping" ]]; then
+    ok "tf_status with no daemon: no update, returns 0"
+else
+    bad "tf_status, daemon down: rc=$rc log=$(cat "$PLY_LOG")"
+fi
+
+: >"$PLY_LOG"
+PLY_RC=1 PATH="$WORK/plybin:$PATH" tf_status "Loading the system" >"$WORK/tfs-out" 2>&1; rc=$?
+if [[ $rc -eq 0 && ! -s "$WORK/tfs-out" ]]; then
+    ok "a failing plymouth update does not fail tf_status and prints nothing"
+else
+    bad "tf_status, failing update: rc=$rc out=$(cat "$WORK/tfs-out")"
+fi
+
+PATH="$WORK/noply" tf_status "Loading the system"; rc=$?
+if [[ $rc -eq 0 ]]; then
+    ok "tf_status with no plymouth binary returns 0"
+else
+    bad "tf_status, no plymouth: rc=$rc"
+fi
+
 MID=0123456789abcdef0123456789abcdef
 
 nr=$(mkstate mac-ok); echo "52:54:00:AB:CD:EF" >"$nr/state/boot-mac"
@@ -647,6 +683,7 @@ echo "52:54:00:ab:cd:ef" >"$WORK/sb-addr"
     tf_write_hostname "$nr2" "$MID" "$nr2/state"
     tf_record_boot_mac "$WORK/sb-addr" "$WORK/sb-state"
     install_local_network "$WORK/sb-net"
+    tf_status "Loading the system"
 ) 2>"$WORK/sb-stderr"
 if [[ "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" \
    && "$(cat "$nr2/etc/hostname")" == "thinfloe-012345" \
@@ -1239,6 +1276,17 @@ for tool in sync rmdir; do
         bad "module-setup.sh does not install $tool, which finalize-upgrade needs"
     fi
 done
+
+# restore_home names its step on the boot screen.
+d="$WORK/rh-step"; mkdefault "$d"; mkdir -p "$d/src"; echo hi >"$d/src/f"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+: >"$PLY_LOG"
+( PATH="$WORK/plybin:$PATH"; restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" )
+if grep -qx 'update --status=tf:Restoring the home directory' "$PLY_LOG"; then
+    ok "restore_home shows 'Restoring the home directory' on the boot screen"
+else
+    bad "restore_home sent no step: log=$(cat "$PLY_LOG")"
+fi
 
 if [[ $fail -ne 0 ]]; then
     echo ""

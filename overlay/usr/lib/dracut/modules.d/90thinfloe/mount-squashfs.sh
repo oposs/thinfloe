@@ -14,6 +14,7 @@ ramroot=$(cat /tmp/thinfloe-ramroot 2>/dev/null)
 [ -z "$ramroot" ] && die "No ramroot parameter"
 
 tf_log "thinfloe: Acquiring squashfs: $ramroot"
+tf_status "Loading the system"
 
 sqsh_path=""
 

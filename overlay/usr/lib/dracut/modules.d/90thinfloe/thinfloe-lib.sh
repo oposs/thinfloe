@@ -21,6 +21,18 @@ tf_log() {
     echo "$@" >&2
 }
 
+# tf_status <text>
+#
+# Show a boot step on the step line of the boot screen ("tf:" tells the theme
+# it is ThinFloe's own text, not a systemd unit id). Only when the plymouth
+# daemon answers; never prints, never fails the hook.
+tf_status() {
+    if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+        plymouth update --status="tf:$1" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 readonly TF_BASE="/run/thinfloe"
 readonly TF_STORAGE="$TF_BASE/storage"
 readonly TF_LAYERS="$TF_BASE/layers"
@@ -137,6 +149,7 @@ tf_find_esp() {
 
     _tfe_waited=0
     while [ -z "$(tf_esp_candidates)" ]; do
+        [ "$_tfe_waited" -eq 0 ] && tf_status "Finding the boot stick"
         if [ "$_tfe_waited" -ge "$_tfe_timeout" ]; then
             : > "$TF_EFI_ABSENT_MARKER" 2>/dev/null || true
             return 1
@@ -703,6 +716,7 @@ restore_home() {
 
     _rh_home="$_rh_newroot/home/tfuser"
     _TF_LINK_WARNED=""
+    tf_status "Restoring the home directory"
 
     if is_remote_url "$_rh_ramroot"; then
         _rh_mac=$(cat "$_rh_state/boot-mac" 2>/dev/null | tr -d '\012')
