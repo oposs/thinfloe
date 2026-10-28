@@ -1238,8 +1238,17 @@ no text console after the first picture. The failure path (labwc does not
 start, the picture comes back with "Waiting for the graphics driver", then
 the failure text) cannot be produced there: with `bochs` blocked, labwc
 runs on `simpledrm`, which is built into the kernel, and without it there
-is no framebuffer at all. Its order is proven by the lifecycle test only.
-**Not verified on hardware.**
+is no framebuffer at all. Its order is proven by the lifecycle test only;
+the failure path is **not verified on hardware.**
+
+**Confirmed on hardware (2026-10-28, Intel Alder Lake-P/Raptor Lake-U):**
+no text console. The picture ends earlier there, though: Plymouth draws on
+`simpledrm`, and when `i915` binds after switch-root (8.7 s after the
+kernel started) Plymouth does not move to the new device, so the screen
+stays dark until the menu draws, about 10 s with the two monitor resyncs
+(i915 at 8.7 s, labwc at 10.2 s). Accepted (owner, 2026-10-28). Putting
+`i915` into the initrd would keep the picture; it was left out on purpose
+(see [The session waits for the GPU](#the-session-waits-for-the-gpu-before-it-starts)).
 
 Guards: `test/integration/test-session-packages.sh` (the unit, the mask, the
 timer), `test/integration/test-session-lifecycle.sh` (the order of the
