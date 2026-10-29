@@ -100,7 +100,7 @@ EOF
 chmod 755 "$WORK/bin/"*
 echo "   8       0 sda 1 0 0 0 1 0 0 0 0 0 0" >"$WORK/diskstats"
 
-PATH="$WORK/bin:$PATH" TF_DISKSTATS="$WORK/diskstats" tf_resize_fat /dev/sda1 sda
+PATH="$WORK/bin:$PATH" TF_DISKSTATS="$WORK/diskstats" TF_FAT_LOG="$WORK/fat32expander.log" tf_resize_fat /dev/sda1 sda
 rc=$?
 [[ $rc -eq 0 ]] && ok "tf_resize_fat returns fat32expander's status" || bad "tf_resize_fat returned $rc"
 if grep -qx -- '--status=tf:Enlarging the boot stick, once - do not switch off' "$WORK/steps"; then
@@ -124,7 +124,7 @@ grep -q 'fat32expander:' "$WORK/log" \
     || ok "a resize that worked keeps fat32expander's report out of the log"
 
 echo "   8       0 sda 1 0 0 0 1 0 0 0 0 0 0" >"$WORK/diskstats"
-FAKE_RC=3 PATH="$WORK/bin:$PATH" TF_DISKSTATS="$WORK/diskstats" tf_resize_fat /dev/sda1 sda
+FAKE_RC=3 PATH="$WORK/bin:$PATH" TF_DISKSTATS="$WORK/diskstats" TF_FAT_LOG="$WORK/fat32expander.log" tf_resize_fat /dev/sda1 sda
 rc=$?
 [[ $rc -eq 3 ]] && ok "a failed resize returns fat32expander's status" || bad "a failed resize returned $rc"
 grep -q 'fat32expander: Error: device vanished' "$WORK/log" \
@@ -132,14 +132,18 @@ grep -q 'fat32expander: Error: device vanished' "$WORK/log" \
     || bad "a failed resize leaves fat32expander's report out of the log"
 
 # --- the hook ----------------------------------------------------------------
-# dracut sources every pre-mount hook into one shell, so an exit in grow-esp.sh
-# (pre-mount 20) skipped finalize-upgrade.sh (25) and no upgrade rotated.
-if grep -v '^[[:space:]]*#' "${LIB%/*}/grow-esp.sh" \
-        | grep -qE '(^|[;&|[:space:]])exit([[:space:]]|$)'; then
-    bad "grow-esp.sh calls exit, which ends every later pre-mount hook"
-else
-    ok "grow-esp.sh has no exit, so the later pre-mount hooks run"
-fi
+# dracut sources every hook of a stage into one shell, so an exit in grow-esp.sh
+# (pre-mount 20) skipped finalize-upgrade.sh (25) and no upgrade rotated, and
+# the one in finalize-upgrade.sh skipped dracut's 99-mount-virtiofs.sh.
+for hook in $(sed -n 's/^[[:space:]]*inst_hook [a-z-]* [0-9]* "$moddir\/\([^"]*\)".*/\1/p' \
+        "${LIB%/*}/module-setup.sh"); do
+    if grep -v '^[[:space:]]*#' "${LIB%/*}/$hook" \
+            | grep -qE '(^|[;&|[:space:]])exit([[:space:]]|$)'; then
+        bad "$hook calls exit, which ends every later hook of its stage"
+    else
+        ok "$hook has no exit, so the later hooks of its stage run"
+    fi
+done
 
 if [[ $fail -ne 0 ]]; then
     echo ""

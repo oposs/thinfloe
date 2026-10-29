@@ -125,6 +125,32 @@ else
     bad "simpledrm case: exit $rc after ${elapsed}s, stderr: $(cat "$WORK/err2")"
 fi
 
+# --show-step repeats the step text while it waits, so a unit started later
+# ("Starting SSH") does not stay on the boot screen; without the flag (the
+# session's retry) and with a driver bound at once it sends nothing.
+cat >"$WORK/stubs/step" <<'STUB'
+#!/bin/bash
+echo "$*" >>"$TF_TEST_STEP_LOG"
+STUB
+chmod +x "$WORK/stubs/step"
+for case in "--show-step sys2 yes" "- sys2 no" "--show-step sys no"; do
+    set -- $case
+    flag=$1; [[ $flag == - ]] && flag=
+    : >"$WORK/step.log"
+    TF_TEST_UDEV_LOG="$WORK/udev-step.log" TF_TEST_STEP_LOG="$WORK/step.log" \
+    TF_DRM_GLOB="$WORK/$2/card[0-9]*" TF_KMS_TIMEOUT=2 \
+    TF_PLYMOUTH_STEP="$WORK/stubs/step" PATH="$WORK/stubs:$PATH" \
+        "$WAITKMS" $flag >/dev/null 2>&1
+    sleep 0.3   # the step call runs in the background
+    n=$(grep -c '^status Waiting for the graphics driver$' "$WORK/step.log")
+    if [[ $3 == yes && $n -ge 1 ]] || [[ $3 == no && $n -eq 0 ]]; then
+        ok "wait-kms ${flag:-without flag} on $2: $n step call(s)"
+    else
+        bad "wait-kms ${flag:-without flag} on $2: $n step call(s), want $3: $(cat "$WORK/step.log")"
+    fi
+done
+set --
+
 # When udevadm times out (slow /dev node creation), wait-kms must still exit 0,
 # never failing the boot.
 mkdir -p "$WORK/sys3/card0/device"

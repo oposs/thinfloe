@@ -37,6 +37,9 @@
 
 ### Fixed
 
+- On machines whose graphics driver loads late (AMD, NVIDIA), the boot screen showed "Starting SSH" for up to 20 seconds while the machine waited for the driver; it now shows "Waiting for the graphics driver".
+- Each `thinfloe:` line of the early boot appeared two or three times in a row on the console and twice in the system log; it now appears once.
+- The boot log no longer shows `cannot create /sys/block/zram1/max_comp_streams: Permission denied`.
 - The text console with the Ubuntu welcome text no longer shows up between the boot screen and the menu.
 - The ThinFloe logo on the boot screen is sharp on every screen size: on a 4K screen it was enlarged from a small picture and its edges were soft, and on small screens they were slightly soft too. On some screen sizes the logo is now a little smaller than before.
 - The progress line on the boot screen no longer stops at about 15 % when the menu appears: it now follows the time since the boot screen appeared, reaching about 85 % after 10 seconds.

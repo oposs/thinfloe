@@ -22,10 +22,20 @@
 # serial-console machine, genuinely simpledrm-only hardware - must still reach
 # a login, so the timeout path exits 0.
 
+# --show-step (thinfloe-wait-kms.service) repeats "Waiting for the graphics
+# driver" on the boot screen once a second while it waits. systemd names a
+# unit to Plymouth only when it starts, so ssh.service, started a moment
+# later, left "Starting SSH" on the screen for the whole wait. In the
+# background, so a wedged plymouthd cannot stretch the wait. The session's
+# retry runs this without the flag and shows the text itself.
+#
 # Overridable so test/integration/test-field-report.sh can drive this against
 # a fake /sys without root or real hardware.
 TF_DRM_GLOB="${TF_DRM_GLOB:-/sys/class/drm/card[0-9]*}"
 TF_KMS_TIMEOUT="${TF_KMS_TIMEOUT:-20}"
+TF_PLYMOUTH_STEP="${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}"
+_wk_show=
+[ "$1" = --show-step ] && _wk_show=1
 
 # 0.2s per poll, so the loop count is five times the timeout in seconds.
 _wk_max=$(( TF_KMS_TIMEOUT * 5 ))
@@ -51,6 +61,9 @@ while [ "$_wk_i" -lt "$_wk_max" ]; do
     done
     sleep 0.2
     _wk_i=$(( _wk_i + 1 ))
+    if [ -n "$_wk_show" ] && [ $(( _wk_i % 5 )) -eq 0 ]; then
+        "$TF_PLYMOUTH_STEP" status "Waiting for the graphics driver" &
+    fi
 done
 
 echo "wait-kms: no KMS driver after ${TF_KMS_TIMEOUT}s, continuing with what there is" >&2

@@ -366,24 +366,27 @@ RUN if [ -e /usr/lib/systemd/system/seatd.service ]; then \
 # plymouth-quit.service is masked so the boot picture stays up until the
 # menu draws: the session ends Plymouth itself (see getty@tty1.service in
 # the overlay), and thinfloe-plymouth-fallback.timer ends it after 300 s
-# when no session did. Both lines come after the "|| true" above, so a
-# failure stops the build.
+# when no session did.
+#
+# No "|| true" in this chain: "a || true && b && c || true && d" groups from
+# the left, so a failing b silently skipped c as well and the build went on.
+# Every unit named here exists, so any failure stops the build.
 RUN rm -f /etc/ssh/ssh_host_*_key* && \
-    systemctl disable ssh.socket || true && \
-    systemctl mask ssh.socket || true && \
-    systemctl mask sshd-keygen.service || true && \
-    systemctl enable thinfloe-ssh-hostkeys.service || true && \
-    systemctl enable thinfloe-password.service || true && \
-    systemctl enable ssh.service || true && \
-    systemctl enable un-dockerize.service || true && \
+    systemctl disable ssh.socket && \
+    systemctl mask ssh.socket && \
+    systemctl mask sshd-keygen.service && \
+    systemctl enable thinfloe-ssh-hostkeys.service && \
+    systemctl enable thinfloe-password.service && \
+    systemctl enable ssh.service && \
+    systemctl enable un-dockerize.service && \
     systemctl enable systemd-networkd && \
     systemctl enable systemd-resolved && \
-    systemctl enable thinfloe-wait-kms.service || true && \
+    systemctl enable thinfloe-wait-kms.service && \
     systemctl enable thinfloe-addons.service && \
     systemctl enable thinfloe-addon-check.timer && \
     systemctl enable thinfloe-addon-boot-check.timer && \
     systemctl enable thinfloe-dhcp-timezone.path thinfloe-dhcp-timezone.service && \
-    systemctl mask systemd-hwdb-update.service || true && \
+    systemctl mask systemd-hwdb-update.service && \
     systemctl enable thinfloe-plymouth-fallback.timer && \
     systemctl mask plymouth-quit.service
 

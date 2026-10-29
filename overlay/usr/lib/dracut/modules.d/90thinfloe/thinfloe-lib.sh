@@ -10,14 +10,13 @@ type info >/dev/null 2>&1 || . /lib/dracut-lib.sh
 # Use info instead of dinfo for compatibility
 type dinfo >/dev/null 2>&1 || dinfo() { info "$@"; }
 
-# Also echo to /dev/console for serial output
-# Use >&2 to avoid polluting stdout (which is used for return values).
-# That includes info: under systemd, dracut's info() echoes to stdout, and a
-# log line in tf_find_esp's answer once made finalize-upgrade.sh fail to
-# mount the ESP on every boot.
+# stderr only, never stdout, which carries the return values: a log line in
+# tf_find_esp's answer once made finalize-upgrade.sh fail to mount the ESP on
+# every boot. Every hook runs in a dracut-*.service with
+# StandardError=journal+console, so one write reaches the journal and the
+# console. Under systemd dracut's info() is a bare echo; calling it as well,
+# or writing to /dev/console, printed each line two or three times.
 tf_log() {
-    info "$@" >&2
-    echo "$@" > /dev/console 2>/dev/null || true
     echo "$@" >&2
 }
 
@@ -867,8 +866,7 @@ create_zram_overlay() {
     local zram_dev="zram${zram_id}"
     local zram_path="/dev/$zram_dev"
 
-    echo zstd > /sys/block/$zram_dev/comp_algorithm 2>/dev/null || true
-    echo 4 > /sys/block/$zram_dev/max_comp_streams 2>/dev/null || true
+    echo zstd 2>/dev/null > /sys/block/$zram_dev/comp_algorithm || true
     echo "$size" > /sys/block/$zram_dev/disksize || die "Failed to set ZRAM size"
 
     mkfs.ext4 -q -O ^has_journal,^metadata_csum,^ext_attr -m 0 -b 4096 "$zram_path" || \
@@ -1015,7 +1013,8 @@ tf_resize_fat() {
     tf_status "Enlarging the boot stick, once - do not switch off"
     tf_log "thinfloe: enlarging $1, moving $(( _trf_bytes / 1048576 )) MiB"
     _trf_base=$(_tf_disk_written "$2")
-    fat32expander resize "$1" >/tmp/thinfloe-fat32expander.log 2>&1 &
+    _trf_log="${TF_FAT_LOG:-/tmp/thinfloe-fat32expander.log}"
+    fat32expander resize "$1" >"$_trf_log" 2>&1 &
     _trf_pid=$!
     _trf_last=-1
     while kill -0 "$_trf_pid" 2>/dev/null; do
@@ -1037,7 +1036,7 @@ tf_resize_fat() {
     # Its report runs to 40 lines; only a failure needs it in the log.
     [ "$_trf_rc" = 0 ] || while read -r _trf_line; do
         tf_log "fat32expander: $_trf_line"
-    done </tmp/thinfloe-fat32expander.log
+    done <"$_trf_log"
     return $_trf_rc
 }
 

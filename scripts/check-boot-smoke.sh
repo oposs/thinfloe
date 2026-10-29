@@ -97,6 +97,7 @@ unwant "GPU not wedged"              'declaring it wedged'
 unwant "no dracut emergency shell"   'Entering emergency mode|dracut: FATAL'
 unwant "no kernel panic"             'Kernel panic'
 unwant "no systemd ordering cycle"   'Found ordering cycle'
+unwant "no failed sysfs write in a hook" 'dracut-[a-z-]+\[[0-9]+\]: .*cannot create /sys/'
 
 # The ThinFloe pre-mount and mount hooks need what the cmdline hook sets up
 # (root=thinfloe, /tmp/thinfloe-ramroot). Without the 90thinfloe drop-ins ordering them
@@ -118,6 +119,19 @@ for unit in dracut-pre-mount dracut-mount; do
         fail=1
     fi
 done
+
+# tf_log once wrote each initramfs line twice to stderr (dracut's info() is a
+# bare echo under systemd), so every "thinfloe:" line showed up twice in a
+# row in the journal and on the console.
+twice=$(strip_terminal_codes "$LOG" |
+    sed -nE 's/^\[ *[0-9.]+\] (dracut-[a-z-]+)\[[0-9]+\]: (thinfloe: .*)/\1 \2/p' |
+    uniq -d | head -1)
+if [[ -z "$twice" ]]; then
+    echo "ok   - initramfs log lines appear once"
+else
+    echo "FAIL - initramfs log line twice in a row: $twice"
+    fail=1
+fi
 
 if [[ $fail -ne 0 ]]; then
     echo ""

@@ -20,7 +20,7 @@ Before=getty@tty1.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/libexec/thinfloe/wait-kms
+ExecStart=/usr/libexec/thinfloe/wait-kms --show-step
 # The script's own timeout is 20s. This is the backstop for a script that
 # somehow cannot reach it; it must not be shorter, or it cuts the wait short.
 TimeoutStartSec=60

@@ -1261,7 +1261,7 @@ if grep -v '^[[:space:]]*#' "$FU" | grep -qE '(cat|<)[[:space:]]*/tmp/thinfloe-r
 else
     ok "finalize-upgrade.sh does not read the cmdline hook's /tmp/thinfloe-ramroot"
 fi
-if grep -qE '^tf_finalize_upgrade "\$efi_mount" "\$ramroot" /tmp/thinfloe-ramroot$' "$FU"; then
+if grep -qE '^[[:space:]]*tf_finalize_upgrade "\$efi_mount" "\$ramroot" /tmp/thinfloe-ramroot$' "$FU"; then
     ok "finalize-upgrade.sh passes the boot's ramroot= and the mount hook's file"
 else
     bad "finalize-upgrade.sh does not call tf_finalize_upgrade with ramroot= and /tmp/thinfloe-ramroot"

@@ -1086,7 +1086,7 @@ ID) it waits up to `TF_ESP_MATCH_WAIT` (10 s) after the
 first stick appeared, for a second stick that enumerates late. The answer
 is cached in `/run/thinfloe-esp-device`, so `finalize-upgrade.sh` and
 `mount-squashfs.sh` mount the same partition. Do not go back to the link.
-`tf_log` sends dracut's `info` to stderr: under systemd `info` writes to
+`tf_log` writes to stderr only: under systemd dracut's `info` writes to
 stdout, and a log line inside `tf_find_esp`'s answer made
 `finalize-upgrade.sh` fail to mount the ESP on every boot of the first
 build of this change (caught by `make qemu-smoke-upgrade`).
@@ -1132,11 +1132,13 @@ boot sector lacks `55 aa`. Neither failure stops the boot.
   type, unique GUID, attributes and name, moves the backup GPT to the end
   (`-e`), and passes `-h 1` again when the MBR had an entry other than
   `ee`.
-- **No `exit` in `grow-esp.sh`.** dracut sources every hook of a stage
-  into one shell (`source_hook`), so an `exit` ends the stage. The first
-  build ended the hook with `exit 0`: `finalize-upgrade.sh` (pre-mount 25)
-  never ran and a staged upgrade never rotated. `make qemu-smoke-upgrade`
-  caught it.
+- **No `exit` in any 90thinfloe hook.** dracut sources every hook of a
+  stage into one shell (`source_hook`), so an `exit` ends the stage. The
+  first build ended `grow-esp.sh` with `exit 0`: `finalize-upgrade.sh`
+  (pre-mount 25) never ran and a staged upgrade never rotated (`make
+  qemu-smoke-upgrade` caught it). `finalize-upgrade.sh` itself exited and
+  skipped dracut's `99-mount-virtiofs.sh`; its body is now a function that
+  returns. `test-esp-grow.sh` checks every hook `module-setup.sh` installs.
 - **The cap.** The initramfs runs `fsck.fat` on the ESP at every boot,
   about 3 s for 15 GB; 6 GiB keeps that short. The stick has the rest of
   its space unused.
