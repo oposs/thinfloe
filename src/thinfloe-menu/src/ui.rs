@@ -2193,6 +2193,27 @@ mod tests {
         }
     }
 
+    /// The drawn face of the button whose label is `label`: the rect around
+    /// it filled in the button's colour (the primary one for Update now, the
+    /// secondary one for Install now).
+    fn button_face(shapes: &[egui::epaint::ClippedShape], label: Rect, update: bool) -> Rect {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let p = Theme::current(&ctx).palette;
+        let fill = if update { p.primary } else { p.secondary };
+        shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill == fill && r.rect.contains_rect(label) => Some(r.rect),
+                _ => None,
+            })
+            .expect("button face")
+    }
+
+    fn label_is_update(inside: &[&(String, Rect)]) -> bool {
+        inside.iter().any(|(t, _)| t == "Update now")
+    }
+
     #[test]
     fn a_row_lays_out_name_source_then_status_line_and_button_right() {
         let shapes = settings_shapes(&open_settings(), 1920.0, 1080.0);
@@ -2210,17 +2231,12 @@ mod tests {
             assert!(status.top() >= name.bottom() - 0.5, "{name:?} {status:?}");
             if let Some(b) = find(&|t| t == "Install now" || t == "Update now") {
                 buttons += 1;
-                // The label sits inside the button's own padding: the button
-                // is the smallest drawn rect around it.
-                let face = shapes
-                    .iter()
-                    .filter_map(|c| match &c.shape {
-                        egui::Shape::Rect(r) if r.rect.contains_rect(b) && r.rect.width() < row.width() => Some(r.rect),
-                        _ => None,
-                    })
-                    .min_by(|x, y| x.area().total_cmp(&y.area()))
-                    .expect("button face");
-                assert!((face.right() - (row.right() - 16.0)).abs() < 2.0, "{face:?} {row:?}");
+                let face = button_face(&shapes, b, label_is_update(&inside));
+                assert!(face.contains_rect(b), "{b:?} not inside {face:?}");
+                assert!(
+                    (face.right() - (row.right() - ROW_RIGHT as f32)).abs() < 2.0,
+                    "{face:?} {row:?}"
+                );
                 assert!((b.center().y - row.center().y).abs() < 2.0, "{b:?} {row:?}");
             }
         }
@@ -2247,7 +2263,41 @@ mod tests {
             .expect("source not drawn");
         assert!(text.ends_with('…') && text.len() < long.len(), "{text} {src:?}");
         let row = row_rects(&shapes).into_iter().find(|r| r.contains_rect(*src)).unwrap();
-        assert!(src.right() > row.right() - 16.0 - 8.0, "{src:?} {row:?}");
+        assert!(src.right() > row.right() - ROW_RIGHT as f32 - 8.0, "{src:?} {row:?}");
+    }
+
+    #[test]
+    fn a_long_status_does_not_push_the_button_off() {
+        let mut menu = open_settings();
+        let st = crate::addons::AddonStatus {
+            id: "30-remmina".into(),
+            ticked: true,
+            state: crate::addons::AddonState::InstallFailed,
+            installed: None,
+            pending: None,
+            auto: true,
+            message: Some("y".repeat(300)),
+        };
+        menu.set_addons(vec![st]);
+        menu.retry = None;
+        let shapes = settings_shapes(&menu, 1920.0, 1080.0);
+        let texts = text_rects(&shapes);
+        let (text, status) = texts
+            .iter()
+            .find(|(t, _)| t.starts_with("not installed · install failed: yyy"))
+            .expect("status");
+        assert!(text.ends_with('…'), "{text}");
+        let row = row_rects(&shapes)
+            .into_iter()
+            .find(|r| r.contains_rect(*status))
+            .unwrap();
+        let (_, label) = texts
+            .iter()
+            .find(|(t, r)| t == "Install now" && row.contains_rect(*r))
+            .expect("button");
+        let face = button_face(&shapes, *label, false);
+        assert!(row.contains_rect(face), "{face:?} {row:?}");
+        assert!(status.right() <= face.left(), "{status:?} {face:?}");
     }
 
     #[test]
