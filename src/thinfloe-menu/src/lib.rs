@@ -12,6 +12,7 @@ pub mod icons;
 pub mod jobs;
 pub mod log;
 pub mod menu;
+pub mod outputs;
 pub mod raster;
 pub mod settings;
 #[cfg(test)]
