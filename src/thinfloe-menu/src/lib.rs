@@ -5,6 +5,7 @@ pub mod app;
 pub mod bounded;
 pub mod brand;
 pub mod damage;
+pub mod density;
 pub mod desktop;
 pub mod header;
 pub mod icons;
