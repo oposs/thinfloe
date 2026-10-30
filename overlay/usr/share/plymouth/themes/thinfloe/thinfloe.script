@@ -3,8 +3,7 @@
 # glow rising from the bottom, the host name small in Geo at the foot.
 #
 # The PNGs are made for a 1920 px wide screen (brand/*.svg, rendered in the
-# plymouth-art stage of containers/ubuntu/Dockerfile); k scales the glow and
-# the bar, and picks one of the rendered logo widths.
+# plymouth-art stage of containers/ubuntu/Dockerfile).
 #
 # The host name arrives with "plymouth display-message", which
 # tf_write_hostname (90thinfloe/thinfloe-lib.sh) calls once the name is known.
@@ -23,14 +22,21 @@
 Window.SetBackgroundTopColor(0.0196, 0.0275, 0.0392);
 Window.SetBackgroundBottomColor(0.0196, 0.0275, 0.0392);
 
-screen.w = Window.GetWidth();
-screen.h = Window.GetHeight();
-k = screen.w / 1920.0;
-if (screen.h / 1080.0 < k)
-    k = screen.h / 1080.0;
+# Plymouth draws every screen from one canvas, as large as the widest and the
+# tallest screen; a smaller screen shows its centre. Window.GetWidth() is that
+# canvas. The layout is for the canvas, so the largest screen is drawn in full
+# and a smaller one shows the middle of it (owner, 2026-10-30).
+#
+# The canvas changes when a driver replaces the firmware screen: i915 binds
+# after switch-root and brings its own heads. The layout made for the firmware
+# screen then filled only the top-left quarter of a 4K monitor, so every
+# hotplug lays everything out again (layout()).
+screen.w = 0;
+screen.h = 0;
+k = 1.0;
 
 glow.image = Image("glow.png");
-glow.sprite = Sprite(glow.image.Scale(screen.w, screen.h));
+glow.sprite = Sprite();
 glow.sprite.SetPosition(0, 0, -10);
 
 # The logo is drawn unscaled: Image.Scale interpolates, and a 640 px logo drawn
@@ -43,36 +49,24 @@ logo.widths[3] = 640;
 logo.widths[4] = 853;
 logo.widths[5] = 960;
 logo.widths[6] = 1280;
-logo.pick = logo.widths[0];
-i = 0;
-while (i < 7)
-{
-    if (logo.widths[i] <= Math.Int(640 * k + 0.5))
-        logo.pick = logo.widths[i];
-    i = i + 1;
-}
-logo.image = Image("logo-" + logo.pick + ".png");
-logo.w = logo.image.GetWidth();
-logo.h = logo.image.GetHeight();
-logo.sprite = Sprite(logo.image);
-logo.x = Math.Int((screen.w - logo.w) / 2);
-logo.y = Math.Int(screen.h * 0.46 - logo.h / 2);
-logo.sprite.SetPosition(logo.x, logo.y, 10);
+logo.pick = 0;
+logo.sprite = Sprite();
 
-# Progress line: 28 % of the width, 6 px at 1080p, 40 px under the logo.
-bar.w = Math.Int(screen.w * 0.28);
-bar.h = Math.Int(12 * k / 2);
-if (bar.h < 2)
-    bar.h = 2;
-bar.x = Math.Int((screen.w - bar.w) / 2);
-bar.y = logo.y + logo.h + Math.Int(40 * k);
 bar.track.image = Image("bar-track.png");
 bar.fill.image = Image("bar-fill.png");
-bar.track.sprite = Sprite(bar.track.image.Scale(bar.w, bar.h));
-bar.track.sprite.SetPosition(bar.x, bar.y, 10);
+bar.track.sprite = Sprite();
 bar.fill.sprite = Sprite();
-bar.fill.sprite.SetPosition(bar.x, bar.y, 11);
+bar.w = 1;
+bar.h = 2;
 bar.progress = 0.0;
+
+fun draw_bar()
+{
+    w = Math.Int(bar.w * bar.progress);
+    if (w < 1)
+        w = 1;
+    bar.fill.sprite.SetImage(bar.fill.image.Scale(w, bar.h));
+}
 
 fun set_progress(p)
 {
@@ -81,12 +75,8 @@ fun set_progress(p)
     if (p > 1.0)
         p = 1.0;
     bar.progress = p;
-    w = Math.Int(bar.w * p);
-    if (w < 1)
-        w = 1;
-    bar.fill.sprite.SetImage(bar.fill.image.Scale(w, bar.h));
+    draw_bar();
 }
-set_progress(0.02);
 
 # Plymouth's own progress divides the elapsed time by the length of earlier
 # boots, kept in /var/lib/plymouth/boot-duration. A machine running from RAM
@@ -116,14 +106,15 @@ fun boot_progress(duration, progress)
 }
 Plymouth.SetBootProgressFunction(boot_progress);
 
-# Host name at the foot, #8a97a6 as in the mockup, 16 px at 1080p.
+# Host name at the foot, #8a97a6 as in the mockup, 16 px at 1080p. The text is
+# kept so that layout() can draw it again at the new size.
 foot.sprite = Sprite();
-foot.size = Math.Int(16 * k);
-if (foot.size < 9)
-    foot.size = 9;
+foot.size = 9;
+foot.text = "";
 
 fun show_message(text)
 {
+    foot.text = text;
     foot.image = Image.Text(text, 0.541, 0.592, 0.651, 1, "Geo " + foot.size);
     foot.sprite.SetImage(foot.image);
     foot.sprite.SetPosition(
@@ -134,6 +125,7 @@ fun show_message(text)
 
 fun hide_message(text)
 {
+    foot.text = "";
     foot.sprite.SetImage(Image.Text(" ", 0, 0, 0, 0, "Geo " + foot.size));
 }
 
@@ -142,12 +134,9 @@ Plymouth.SetHideMessageFunction(hide_message);
 
 # Step line, 20 px at 1080p, centred just above the host name.
 step.sprite = Sprite();
-step.size = Math.Int(20 * k);
-if (step.size < 11)
-    step.size = 11;
-step.bottom = Math.Int(screen.h * 0.94
-    - Image.Text("Ag", 0, 0, 0, 1, "Geo " + foot.size).GetHeight()
-    - 8 * k);
+step.size = 11;
+step.bottom = 0;
+step.text = "";
 
 fun show_step(text)
 {
@@ -156,6 +145,7 @@ fun show_step(text)
     # sent some other way, which may then end in a broken character.
     if (text.Length() > 256)
         text = text.SubString(0, 256);
+    step.text = text;
     step.image = Image.Text(text, 0.541, 0.592, 0.651, 1, "Geo " + step.size);
     step.sprite.SetImage(step.image);
     step.sprite.SetPosition(
@@ -163,6 +153,78 @@ fun show_step(text)
         step.bottom - step.image.GetHeight(),
         10);
 }
+
+# The PNGs are made for a 1920 px wide screen; k scales the glow, the bar and
+# the text, and picks the logo width.
+fun layout()
+{
+    if (Window.GetWidth() < 1 || Window.GetHeight() < 1)
+        return;
+    screen.w = Window.GetWidth();
+    screen.h = Window.GetHeight();
+    k = screen.w / 1920.0;
+    if (screen.h / 1080.0 < k)
+        k = screen.h / 1080.0;
+
+    glow.sprite.SetImage(glow.image.Scale(screen.w, screen.h));
+
+    pick = logo.widths[0];
+    n = 0;
+    while (n < 7)
+    {
+        if (logo.widths[n] <= Math.Int(640 * k + 0.5))
+            pick = logo.widths[n];
+        n = n + 1;
+    }
+    if (pick != logo.pick)
+    {
+        logo.pick = pick;
+        logo.image = Image("logo-" + logo.pick + ".png");
+        logo.w = logo.image.GetWidth();
+        logo.h = logo.image.GetHeight();
+        logo.sprite.SetImage(logo.image);
+    }
+    logo.x = Math.Int((screen.w - logo.w) / 2);
+    logo.y = Math.Int(screen.h * 0.46 - logo.h / 2);
+    logo.sprite.SetPosition(logo.x, logo.y, 10);
+
+    # Progress line: 28 % of the width, 6 px at 1080p, 40 px under the logo.
+    bar.w = Math.Int(screen.w * 0.28);
+    bar.h = Math.Int(12 * k / 2);
+    if (bar.h < 2)
+        bar.h = 2;
+    bar.x = Math.Int((screen.w - bar.w) / 2);
+    bar.y = logo.y + logo.h + Math.Int(40 * k);
+    bar.track.sprite.SetImage(bar.track.image.Scale(bar.w, bar.h));
+    bar.track.sprite.SetPosition(bar.x, bar.y, 10);
+    bar.fill.sprite.SetPosition(bar.x, bar.y, 11);
+    draw_bar();
+
+    foot.size = Math.Int(16 * k);
+    if (foot.size < 9)
+        foot.size = 9;
+    if (foot.text != "")
+        show_message(foot.text);
+
+    step.size = Math.Int(20 * k);
+    if (step.size < 11)
+        step.size = 11;
+    step.bottom = Math.Int(screen.h * 0.94
+        - Image.Text("Ag", 0, 0, 0, 1, "Geo " + foot.size).GetHeight()
+        - 8 * k);
+    if (step.text != "")
+        show_step(step.text);
+}
+
+fun display_hotplug()
+{
+    if (Window.GetWidth() != screen.w || Window.GetHeight() != screen.h)
+        layout();
+}
+
+layout();
+set_progress(0.02);
+Plymouth.SetDisplayHotplugFunction(display_hotplug);
 
 # systemd unit id -> step text. Keep it short; ids not listed change nothing.
 fun unit_step(id)

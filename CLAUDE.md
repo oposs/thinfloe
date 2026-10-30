@@ -155,7 +155,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   the `plymouth-art` stage renders it at seven widths (320 to 1280 px,
   `logo-<w>.png`) and the script draws the widest one that fits `640 * k`,
   unscaled. Scaling interpolates, and the 640 px logo drawn 1280 px wide on
-  4K had edges blurred over 3 px. `DeviceScale=1` in
+  4K had edges blurred over 3 px. Plymouth draws all screens from one
+  canvas as wide and tall as the largest; a smaller screen shows its centre.
+  `layout()` in `thinfloe.script` places everything for that canvas, so the
+  largest screen is drawn in full (owner, 2026-10-30), and runs again from
+  `Plymouth.SetDisplayHotplugFunction`. Laid out once, the picture made for
+  the firmware screen filled the top-left quarter of a 4K monitor after
+  i915 bound (seen on the Broadwell box, reproduced in QEMU with
+  `virtio-gpu`, which is also left out of the initrd). `DeviceScale=1` in
   `overlay/etc/plymouth/plymouthd.conf` keeps Plymouth from guessing scale 2
   on 4K and doubling the whole screen; the same test guards both. The host name reaches it through
   `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when

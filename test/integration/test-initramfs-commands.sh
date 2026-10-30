@@ -196,6 +196,17 @@ if [[ -n "$pscript" ]] && grep -q 'Plymouth.SetUpdateStatusFunction(' "$pscript"
 else
     bad "the boot screen has no step line"
 fi
+# i915 binds after switch-root and replaces the firmware screen. A layout made
+# once, for the firmware screen, then filled the top-left quarter of a 4K
+# monitor; every hotplug lays the screen out again for the new canvas.
+if [[ -n "$pscript" ]] &&
+   grep -q '^Plymouth.SetDisplayHotplugFunction(display_hotplug);' "$pscript" &&
+   grep -q '^ \+layout();' "$pscript" &&
+   ! grep -q '^[a-z.]* *= *Window.Get\(Width\|Height\)' "$pscript"; then
+    ok "the boot screen lays itself out again when the screens change"
+else
+    bad "the boot screen is laid out once, for the firmware screen: after i915 binds it fills the top-left quarter"
+fi
 if [[ -n "$pconf" ]] && grep -qx 'DeviceScale=1' "$pconf"; then
     ok "plymouthd.conf in the initrd says DeviceScale=1"
 else

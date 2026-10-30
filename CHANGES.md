@@ -44,6 +44,7 @@
 
 ### Fixed
 
+- When the graphics driver took over the screen during boot, the boot picture shrank into the top-left corner of a large monitor. It now fills the largest monitor again. A smaller second monitor shows the middle of the picture.
 - On machines whose graphics driver loads late (AMD, NVIDIA), the boot screen showed "Starting SSH" for up to 20 seconds while the machine waited for the driver; it now shows "Waiting for the graphics driver".
 - Each `thinfloe:` line of the early boot appeared two or three times in a row on the console and twice in the system log; it now appears once.
 - The boot log no longer shows `cannot create /sys/block/zram1/max_comp_streams: Permission denied`.
