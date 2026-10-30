@@ -110,6 +110,32 @@ else
     [[ -n "$hp" ]] && kill "$hp" 2>/dev/null
 fi
 
+# No usable scale file path (TF_SCALE_FILE and XDG_RUNTIME_DIR unset or
+# empty, as the menu reads them): the session removes nothing.
+printf '#!/bin/sh\necho "$*" >>"%s/rm.args"\nexec /bin/rm "$@"\n' "$WORK" >"$WORK/bin/rm"
+chmod 755 "$WORK/bin/rm"
+printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/menu"
+chmod 755 "$WORK/bin/menu"
+for empty in unset empty; do
+    rm -f "$WORK/rm.args"
+    if [[ $empty == unset ]]; then
+        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
+            TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+            TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1
+    else
+        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
+            XDG_RUNTIME_DIR= TF_SCALE_FILE= \
+            TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+            TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1
+    fi
+    if ! grep -q thinfloe-scale "$WORK/rm.args" 2>/dev/null; then
+        ok "session: no scale file path ($empty), nothing removed"
+    else
+        bad "session: removed '$(cat "$WORK/rm.args")' with no scale file path ($empty)"
+    fi
+done
+rm -f "$WORK/bin/rm"
+
 run_session 'exit 0'
 rc=$?
 [[ $rc -eq 0 ]] && ok "logout: session exits 0" || bad "logout: session exited $rc"

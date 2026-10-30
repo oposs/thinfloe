@@ -40,7 +40,8 @@
 # scale that rounds to 1. Any failure logs
 # "thinfloe: title bar scale not applied: <why>" to stderr, puts the symlinks
 # back (and, when labwc failed, reconfigures once more); the helper then keeps
-# running and tries again at the next change of the file. The menu must write
+# running and tries the same value up to 3 more times, 5 s apart
+# (TF_SCALE_RETRY), then waits for the next change of the file. The menu must write
 # the scale file atomically (temp file, rename): the helper reads it as soon
 # as it exists. The title bars keep size 10 while nothing is applied.
 
@@ -184,14 +185,42 @@ handle() {
     fi
 }
 
+# A failed apply is tried again for the same value: up to 3 more attempts,
+# TF_SCALE_RETRY seconds apart (default 5), counted in polls. After that the
+# helper waits for the file to change. Each attempt reconfigures labwc, so
+# the retries are never one per poll.
+retry_s=${TF_SCALE_RETRY:-5}
+retry_polls=$(awk -v r="$retry_s" -v p="$poll" 'BEGIN { n = int(r / p + 0.5); print (n < 1 ? 1 : n) }' 2>/dev/null)
+retry_polls=${retry_polls:-5}
+retries_left=0
+wait_polls=0
+
+# handle, then arm the retry when it failed.
+attempt() {
+    if handle "$1"; then
+        retries_left=0
+    else
+        wait_polls=0
+    fi
+}
+
 last=$scale
-handle "$scale"
+retries_left=3
+attempt "$scale"
 [ -n "$once" ] && exit 0
 
 while :; do
     sleep "$poll"
     scale=$(read_scale)
-    [ -n "$scale" ] && [ "$scale" != "$last" ] || continue
-    last=$scale
-    handle "$scale"
+    if [ -n "$scale" ] && [ "$scale" != "$last" ]; then
+        last=$scale
+        retries_left=3
+        attempt "$scale"
+    elif [ "$retries_left" -gt 0 ] && [ "$scale" = "$last" ]; then
+        wait_polls=$((wait_polls + 1))
+        if [ "$wait_polls" -ge "$retry_polls" ]; then
+            retries_left=$((retries_left - 1))
+            attempt "$scale"
+        fi
+    fi
 done

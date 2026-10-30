@@ -16,6 +16,9 @@
 
 - The menu's tiles keep their shape and look the same size on every screen. A 4K screen that reports its size no longer gets stretched tiles (one that reports none or an implausible size still gets double size), and a small, dense laptop screen shrinks the menu to fit.
 - Each row in Settings shows one status line, with its button at the right edge. Long text in a row is cut with "…" and the button stays visible.
+- A long add-on name in Settings is cut with "…", so the source address, the status line and the button stay visible.
+- The menu and the window title bars now follow a change of screen resolution on a monitor even when the menu window keeps its size.
+- When the title bars cannot be scaled, the system tries the same scale again up to three times, five seconds apart, before it waits for a change.
 - The menu header reads "by oetiker.ai" under the name and sits further from the screen edges.
 - The Terminal tile's font and margin, and the window title bars, follow the same screen density as the menu.
 - The first boot of a stick larger than its image enlarges the boot partition to the end of the stick, at most 6 GiB, so there is room for later upgrades, add-ons and the saved home. The boot screen shows "Enlarging the boot stick, once: NN % - do not switch off" while it works. Sticks already in use with 2000 MB are enlarged the same way.

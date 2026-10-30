@@ -134,7 +134,13 @@ sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
 # The title bars follow the menu's scale: drop a scale file left by an earlier
 # session (the helper would apply it before the menu has measured), then let
 # the helper wait for the menu's new one.
-rm -f "${TF_SCALE_FILE:-${XDG_RUNTIME_DIR:-/tmp}/thinfloe-scale}"
+# Same path rule as the menu and the helpers: an empty variable is unset, and
+# with neither set there is no file to remove.
+scale_file=${TF_SCALE_FILE:-}
+if [ -z "$scale_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    scale_file=$XDG_RUNTIME_DIR/thinfloe-scale
+fi
+[ -n "$scale_file" ] && rm -f "$scale_file"
 "${TF_LABWC_SCALE:-/usr/libexec/thinfloe/labwc-scale}" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
 HELPER_PIDS="$HELPER_PIDS $!"
 

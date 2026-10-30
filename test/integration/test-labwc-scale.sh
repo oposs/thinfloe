@@ -22,7 +22,12 @@ fi
 
 mkdir -p "${TMPDIR:-/scratch/oetiker/claude-tmp/thinfloe-tests}"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+hpid=
+cleanup() {
+    [[ -n $hpid ]] && kill "$hpid" 2>/dev/null
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 fail=0
 ok() { echo "ok   - $1"; }
@@ -31,7 +36,8 @@ bad() { echo "FAIL - $1"; fail=1; }
 cat >"$WORK/labwc" <<'STUB'
 #!/bin/sh
 echo "$*" >>"$STUB_LOG"
-[ -z "${STUB_FAIL:-}" ]
+n=$(wc -l <"$STUB_LOG")
+[ -z "${STUB_FAIL:-}" ] && [ "$n" -gt "${STUB_FAIL_FIRST:-0}" ]
 STUB
 chmod +x "$WORK/labwc"
 
@@ -172,5 +178,42 @@ echo 3 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
 waitfor "follow: back to 3 gives size 30" fonts_are 30
 kill -0 "$hpid" 2>/dev/null && ok "follow: helper still running" || bad "follow: helper exited"
 kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null
+hpid=
+
+# --- a failed apply is tried again, a bounded number of times ------------
+# follow ENV...: start the helper with the poll at 0.1 s and the retry at 0.3 s.
+follow() {
+    env TF_SCALE_POLL=0.1 TF_SCALE_RETRY=0.3 TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="$D" \
+        TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$@" "$HELPER" --wait 2 2>"$WORK/err" &
+    hpid=$!
+}
+stop() { kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null; hpid=; }
+
+# labwc fails the first attempt (two calls: the reconfigure and the one after
+# the restore) and then works: the same scale is applied by the retry.
+setup; echo 2 >"$WORK/scale"
+follow STUB_FAIL_FIRST=2
+waitfor "retry: the scale is applied after a failed first attempt" fonts_are 20
+calls_are 3 && ok "retry: three labwc calls in all" || bad "retry: calls $(calls)"
+sleep 0.8
+calls_are 3 && ok "retry: no more attempts once it worked" || bad "retry: calls $(calls) after success"
+[[ $(grep -c 'title bar scale not applied' "$WORK/err") -eq 1 ]] \
+    && ok "retry: the failed attempt was logged once" || bad "retry: stderr: $(cat "$WORK/err")"
+stop
+
+# labwc never works: the first attempt and three retries, two calls each,
+# then the helper waits for a change.
+setup; echo 2 >"$WORK/scale"
+follow STUB_FAIL=1
+waitfor "retry: four attempts, two calls each" calls_are 8
+sleep 1.2
+calls_are 8 && ok "retry: it gives up after three retries" || bad "retry: calls $(calls) after giving up"
+untouched && ok "retry: symlinks restored" || bad "retry: symlinks not restored"
+[[ $(grep -c 'title bar scale not applied' "$WORK/err") -eq 4 ]] \
+    && ok "retry: each attempt logged" || bad "retry: stderr: $(cat "$WORK/err")"
+echo 3 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
+calls_ge() { [[ $(calls) -ge $1 ]]; }
+waitfor "retry: a changed file is tried at once" calls_ge 10
+stop
 
 exit $fail
