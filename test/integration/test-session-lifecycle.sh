@@ -73,6 +73,43 @@ else
     bad "session: boot screen calls were '$(cat "$WORK/steps" 2>/dev/null)'"
 fi
 
+# The title bar scale helper starts before the menu, after a stale scale file
+# of an earlier session is gone, and ends with the session.
+cat >"$WORK/bin/scale-helper" <<STUB
+#!/bin/sh
+if [ -e "$WORK/stale-scale" ]; then s=stale; else s=gone; fi
+echo "started \$s" >"$WORK/helper.out"
+echo \$\$ >"$WORK/helper.pid"
+exec sleep 30
+STUB
+chmod 755 "$WORK/bin/scale-helper"
+rm -f "$WORK/helper.out" "$WORK/helper.pid"
+echo 2 >"$WORK/stale-scale"
+printf '#!/bin/sh\nsleep 0.5\nexit 0\n' >"$WORK/bin/menu"
+chmod 755 "$WORK/bin/menu"
+env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+    TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+    TF_SCALE_FILE="$WORK/stale-scale" TF_LABWC_SCALE="$WORK/bin/scale-helper" \
+    sh "$SESSION" >/dev/null 2>&1
+if [[ ! -e "$WORK/stale-scale" ]]; then
+    ok "session: a stale scale file is removed"
+else
+    bad "session: stale scale file still there"
+fi
+if [[ "$(head -n1 "$WORK/helper.out" 2>/dev/null)" == "started gone" ]]; then
+    ok "session: the scale helper started after the stale file was removed"
+else
+    bad "session: scale helper output '$(cat "$WORK/helper.out" 2>/dev/null)'"
+fi
+hp=$(cat "$WORK/helper.pid" 2>/dev/null)
+sleep 0.3
+if [[ -n "$hp" ]] && ! kill -0 "$hp" 2>/dev/null; then
+    ok "session: the scale helper ends with the session"
+else
+    bad "session: scale helper $hp still running"
+    [[ -n "$hp" ]] && kill "$hp" 2>/dev/null
+fi
+
 run_session 'exit 0'
 rc=$?
 [[ $rc -eq 0 ]] && ok "logout: session exits 0" || bad "logout: session exited $rc"

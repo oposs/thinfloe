@@ -27,7 +27,9 @@
 # Nothing to do, and exit 0: no usable scale file in time, no composed dir
 # (the session fell back to /etc/thinfloe/labwc), or a scale that rounds to 1.
 # Any failure logs "thinfloe: title bar scale not applied: <why>" to stderr,
-# puts the symlinks back and exits 0. The title bars then keep size 10.
+# puts the symlinks back (and, when labwc failed, reconfigures once more) and
+# exits 0. The menu must write the scale file atomically (temp file, rename):
+# the helper reads it as soon as it exists. The title bars then keep size 10.
 
 wait_s=15
 if [ "${1:-}" = "--wait" ] && [ -n "${2:-}" ]; then
@@ -78,6 +80,7 @@ restore() {
 fail() {
     echo "thinfloe: title bar scale not applied: $1" >&2
     restore
+    [ -n "${reload_after_restore:-}" ] && "$labwc" --reconfigure >/dev/null 2>&1
     exit 0
 }
 
@@ -126,5 +129,9 @@ tmp_rc=
 mv -f "$tmp_theme" "$dir/themerc-override" || fail "cannot replace themerc-override"
 tmp_theme=
 
-"$labwc" --reconfigure >/dev/null 2>&1 || fail "labwc --reconfigure failed"
+if ! "$labwc" --reconfigure >/dev/null 2>&1; then
+    # labwc may have applied the copies in part: load the restored files too.
+    reload_after_restore=1
+    fail "labwc --reconfigure failed"
+fi
 exit 0

@@ -119,6 +119,8 @@ setup; echo 2 >"$WORK/scale"; STUB_FAIL=1 run --wait 2
     && ok "failing labwc: symlinks restored, exit 0" || bad "failing labwc: not restored (rc $rc)"
 grep -q 'thinfloe: title bar scale not applied' "$WORK/err" \
     && ok "failing labwc: reason on stderr" || bad "failing labwc: stderr: $(cat "$WORK/err")"
+[[ $(calls) -eq 2 ]] \
+    && ok "failing labwc: reconfigured again after the restore" || bad "failing labwc: labwc calls: $(calls)"
 [[ $(readlink "$D/rc.xml") == "$SYSDIR/rc.xml" ]] \
     && ok "failing labwc: symlink target restored" || bad "failing labwc: wrong target"
 
