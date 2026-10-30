@@ -2427,7 +2427,15 @@ mod tests {
             let mut input = input.clone();
             input.time = Some(frame as f64 * 0.1);
             let mut out = ctx.run_ui(input, |ui| {
-                show(ui, menu, &icons, &Chrome::default(), Instant::now());
+                let chrome = Chrome {
+                    header: crate::header::Header {
+                        host: "thinfloe-a1b2c3".into(),
+                        version: None,
+                    },
+                    clock: "Thu 30 Oct 14:05".into(),
+                    logo: None,
+                };
+                show(ui, menu, &icons, &chrome, Instant::now());
             });
             textures.apply_set(&out.textures_delta);
             out.textures_delta.clear();
@@ -2456,14 +2464,45 @@ mod tests {
         shot(&menu, "dialog.ppm", (1280, 720), 1.0);
     }
 
+    /// The shipped tiles, with the add-ons as installed (their source keys
+    /// dropped so the tiles are drawn).
+    fn shipped_grid() -> Grid {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "desktop"))
+            .collect();
+        names.sort();
+        let files: Vec<_> = names
+            .iter()
+            .map(|p| {
+                let text: String = std::fs::read_to_string(p)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !l.starts_with("X-TF-Source"))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                crate::tiles::SourceFile {
+                    name: p.file_name().unwrap().to_string_lossy().into(),
+                    entry: crate::desktop::parse(&text),
+                }
+            })
+            .collect();
+        Grid {
+            tiles: crate::tiles::merge(&files, &[]),
+            banner: vec![],
+        }
+    }
+
     #[test]
     #[ignore]
     fn shot_desktop_and_settings_at_densities() {
-        let menu = Menu::new(addon_grid(), false);
+        let menu = Menu::new(shipped_grid(), false);
         shot(&menu, "desktop-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "desktop-4k-fallback.ppm", (3840, 2160), 2.0);
         shot(&menu, "desktop-21in-4k.ppm", (3840, 2160), 2.25);
-        let mut folded = Menu::new(addon_grid(), false);
+        let mut folded = Menu::new(shipped_grid(), false);
         folded.folded = vec![
             crate::windows::Folded {
                 id: 1,
