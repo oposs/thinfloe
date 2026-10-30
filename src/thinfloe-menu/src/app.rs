@@ -234,6 +234,20 @@ fn pick_scale<'a>(
     (density::menu_scale(output, fallback_px, width), output)
 }
 
+/// True when the monitor named `name` has a size other than the mode stored
+/// for that output. A rotated monitor swaps width and height, so the sides
+/// are compared as a sorted pair.
+fn mode_changed(outputs: &[OutputInfo], name: Option<&str>, monitor_px: Option<(u32, u32)>) -> bool {
+    let (Some(name), Some(px)) = (name, monitor_px) else {
+        return false;
+    };
+    let Some(o) = outputs.iter().find(|o| o.name.as_deref() == Some(name)) else {
+        return false;
+    };
+    let sorted = |p: (u32, u32)| (p.0.min(p.1), p.0.max(p.1));
+    sorted(o.mode_px) != sorted(px)
+}
+
 impl App {
     /// Computes the menu's scale again. When it changed, or with `force`,
     /// the zoom factor, the icons, the logo and the scale file follow.
@@ -241,11 +255,12 @@ impl App {
         let Some(live) = self.live.as_mut() else { return };
         let monitor = live.window.current_monitor();
         let name = monitor.as_ref().and_then(|m| m.name());
+        let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
         // The first look at a monitor needs no second read of the outputs.
-        if live.monitor.is_some() && name != live.monitor {
+        // A mode change on the same output (wlr-randr --mode, kanshi) needs one too.
+        if (live.monitor.is_some() && name != live.monitor) || mode_changed(&live.outputs, name.as_deref(), px) {
             live.outputs = read_outputs(self.cfg.debug);
         }
-        let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
         let (s, chosen) = pick_scale(&live.outputs, name.as_deref(), px, live.window.inner_size().width);
         let chosen = chosen.cloned();
         live.monitor = name;
@@ -776,6 +791,19 @@ mod tests {
         assert_eq!(o.unwrap().name.as_deref(), Some("eDP-1"));
         let (s, _) = pick_scale(&outs, Some("DP-1"), Some((1920, 1080)), 1920);
         assert_eq!(s, 1.0);
+    }
+
+    #[test]
+    fn a_mode_change_on_the_same_output_is_noticed() {
+        let outs = [out("DP-1", (1920, 1080), (527, 296))];
+        assert!(!mode_changed(&outs, Some("DP-1"), Some((1920, 1080))));
+        assert!(mode_changed(&outs, Some("DP-1"), Some((1280, 720))));
+        // rotated: same mode, sides swapped
+        assert!(!mode_changed(&outs, Some("DP-1"), Some((1080, 1920))));
+        // nothing to compare
+        assert!(!mode_changed(&outs, Some("HDMI-A-1"), Some((1280, 720))));
+        assert!(!mode_changed(&outs, None, Some((1280, 720))));
+        assert!(!mode_changed(&outs, Some("DP-1"), None));
     }
 
     #[test]

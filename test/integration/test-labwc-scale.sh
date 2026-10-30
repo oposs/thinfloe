@@ -11,7 +11,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-HELPER="$ROOT/overlay/usr/libexec/thinfloe/labwc-scale"
+HELPER="${HELPER:-$ROOT/overlay/usr/libexec/thinfloe/labwc-scale}"
 COMPOSE="$ROOT/overlay/usr/bin/thinfloe-compose-labwc-config"
 SYSDIR="$ROOT/overlay/etc/thinfloe/labwc"
 
@@ -44,10 +44,10 @@ setup() {
     "$COMPOSE" "$SYSDIR" "$WORK/home-env" "$WORK/run/thinfloe-labwc"
 }
 
-# run [--wait N]: run the helper; stderr in $WORK/err, status in $rc.
+# run [--wait N]: run the helper once (--once); stderr in $WORK/err, status in $rc.
 run() {
     TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="${DIR:-$WORK/run/thinfloe-labwc}" \
-        TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$HELPER" "$@" 2>"$WORK/err"
+        TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$HELPER" --once "$@" 2>"$WORK/err"
     rc=$?
 }
 
@@ -130,5 +130,47 @@ setup
 run --wait 5; wait
 [[ $(grep -c '<font place=.*size="30"' "$D/rc.xml") -eq 2 ]] \
     && ok "late scale file is picked up" || bad "late scale file ignored"
+
+# --- later changes are followed -------------------------------------------
+# waitfor DESC CMD...: poll up to 10 s for CMD to succeed.
+waitfor() {
+    local desc=$1 n=0
+    shift
+    until "$@"; do
+        n=$((n + 1))
+        if [[ $n -gt 100 ]]; then bad "$desc"; return 1; fi
+        sleep 0.1
+    done
+    ok "$desc"
+}
+fonts_are() { [[ $(grep -c "<font place=.*size=\"$1\"" "$D/rc.xml" 2>/dev/null) -eq 2 ]]; }
+calls_are() { [[ $(calls) -eq $1 ]]; }
+
+setup; echo 2 >"$WORK/scale"
+TF_SCALE_POLL=0.1 TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="$D" TF_LABWC="$WORK/labwc" \
+    STUB_LOG="$WORK/calls" "$HELPER" --wait 2 2>"$WORK/err" &
+hpid=$!
+waitfor "follow: first scale 2 applied" fonts_are 20
+calls_are 1 && ok "follow: one reconfigure" || bad "follow: calls $(calls)"
+
+echo 1.5 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
+waitfor "follow: 2 -> 1.5 gives size 15" fonts_are 15
+waitfor "follow: second reconfigure" calls_are 2
+[[ $(grep -c '^window.button.width: 39$' "$D/themerc-override") -eq 1 ]] \
+    && ok "follow: theme rebuilt from the system file" || bad "follow: theme: $(grep button.width "$D/themerc-override")"
+
+sleep 0.6
+calls_are 2 && ok "follow: unchanged file, no extra reconfigure" || bad "follow: calls $(calls)"
+
+echo 1 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
+waitfor "follow: change to 1 restores the links" untouched
+waitfor "follow: reconfigure after the restore" calls_are 3
+[[ $(readlink "$D/rc.xml") == "$SYSDIR/rc.xml" ]] \
+    && ok "follow: link target is the system file" || bad "follow: wrong target"
+
+echo 3 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
+waitfor "follow: back to 3 gives size 30" fonts_are 30
+kill -0 "$hpid" 2>/dev/null && ok "follow: helper still running" || bad "follow: helper exited"
+kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null
 
 exit $fail

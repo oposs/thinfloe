@@ -220,8 +220,12 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `thinfloe-session` removes a stale one before the menu starts.
   `/usr/libexec/thinfloe/labwc-scale` waits for that file and scales the labwc
   title bars (font `round(10 * s)`, titlebar padding and button keys), then runs
-  `labwc --reconfigure`; when anything fails it logs `thinfloe: title bar scale
-  not applied: <why>` and the bars keep size 10. labwc's outputs stay at scale
+  `labwc --reconfigure`. It keeps running for the session and reads the file
+  once a second: the menu rewrites it after the real window width is known, a
+  move to another monitor and a scale change, and each change is applied again
+  from the system files (a change to 1 restores the symlinks). When anything
+  fails it logs `thinfloe: title bar scale not applied: <why>`, the bars keep
+  size 10 and the next change tries again. labwc's outputs stay at scale
   1. `thinfloe-terminal` reads the file too (see
   [Reaching a terminal](#reaching-a-terminal)). Guards: the unit tests in
   `density.rs` and `ui.rs`, `test/integration/test-labwc-scale.sh`,

@@ -211,4 +211,41 @@ mod tests {
     fn an_unwritable_scale_file_is_an_error_not_a_panic() {
         assert!(write_scale_file(Path::new("/nonexistent-dir/thinfloe-scale"), 1.0).is_err());
     }
+    #[test]
+    fn the_fallback_edge_is_1800_px_on_the_shorter_side() {
+        assert_eq!(fallback_scale((3200, 1799)), 1.0);
+        assert_eq!(fallback_scale((3200, 1800)), 2.0);
+        assert_eq!(fallback_scale((1800, 3200)), 2.0);
+    }
+    #[test]
+    fn a_width_under_200_mm_falls_back() {
+        // 199 mm is refused, 200 mm is used: 1920 px / 7.87 in = 244 ppi, 2.75 by density
+        assert_eq!(s((1920, 1080), (199, 112)), 1.0);
+        assert_eq!(s((1920, 1080), (200, 113)), 2.75);
+    }
+    #[test]
+    fn the_aspect_may_differ_by_ten_percent() {
+        // 8K is 1.7778; 10 % wider is 1.9556, so 500 mm needs a height of 255.7 mm or more
+        assert_eq!(s((7680, 4320), (500, 255)), 2.0); // 10.3 % wider: falls back
+        assert_eq!(s((7680, 4320), (500, 256)), 4.25); // 9.9 % wider: used
+        // 10 % narrower is 1.6: 500 mm allows a height up to 312.5 mm
+        assert_eq!(s((7680, 4320), (500, 312)), 4.25);
+        assert_eq!(s((7680, 4320), (500, 313)), 2.0);
+    }
+    #[test]
+    fn the_density_range_is_50_to_800_ppi() {
+        // 3840 px over 1950 mm is 50.02 ppi (used, the floor of 1); over 1951 mm
+        // it is 49.99 and the fallback 2 applies
+        assert_eq!(s((3840, 2160), (1950, 1097)), 1.0);
+        assert_eq!(s((3840, 2160), (1951, 1097)), 2.0);
+        // 7680 px over 244 mm is 799.5 ppi (used); over 243 mm it is 802.8
+        assert_eq!(s((7680, 4320), (244, 137)), 8.75);
+        assert_eq!(s((7680, 4320), (243, 137)), 2.0);
+    }
+    #[test]
+    fn a_tie_at_an_eighth_rounds_up() {
+        // 1955 px over 254 mm is 195.5 ppi, 2.125 * 92: the step 2.125 is a tie
+        // between 2.0 and 2.25 and rounds up (f32::round, away from zero)
+        assert_eq!(s((1955, 1100), (254, 143)), 2.25);
+    }
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Make labwc's title bars follow the scale thinfloe-menu chose.
 #
-# Usage: labwc-scale [--wait SECONDS]     (default 15)
+# Usage: labwc-scale [--wait SECONDS] [--once]     (--wait default 15)
 #
 # labwc runs every output at scale 1, so its title bars stay small on a HiDPI
 # screen. thinfloe-menu writes its scale to $XDG_RUNTIME_DIR/thinfloe-scale
@@ -24,17 +24,35 @@
 #                      window.button.height              default 26
 #                      window.button.spacing             default 0, kept as is
 #
-# Nothing to do, and exit 0: no usable scale file in time, no composed dir
-# (the session fell back to /etc/thinfloe/labwc), or a scale that rounds to 1.
-# Any failure logs "thinfloe: title bar scale not applied: <why>" to stderr,
-# puts the symlinks back (and, when labwc failed, reconfigures once more) and
-# exits 0. The menu must write the scale file atomically (temp file, rename):
-# the helper reads it as soon as it exists. The title bars then keep size 10.
+# The menu rewrites the file when the real window width is known, when the
+# window moves to another monitor and when the scale changes. The helper
+# therefore keeps running for the whole session (thinfloe-session stops it at
+# the end) and reads the file once a second (TF_SCALE_POLL overrides). Each
+# change is applied again, always from the system files the symlinks pointed
+# at, never from the copies of the last run; a change to a scale that rounds
+# to 1 puts the symlinks back. labwc is reconfigured after each change. An
+# unchanged file, or one that holds no valid scale, causes nothing.
+#
+# With --once the helper handles the first scale and exits (for tests).
+#
+# Exit 0, nothing done: no usable scale file within --wait seconds, or no
+# composed dir (the session fell back to /etc/thinfloe/labwc), or a first
+# scale that rounds to 1. Any failure logs
+# "thinfloe: title bar scale not applied: <why>" to stderr, puts the symlinks
+# back (and, when labwc failed, reconfigures once more); the helper then keeps
+# running and tries again at the next change of the file. The menu must write
+# the scale file atomically (temp file, rename): the helper reads it as soon
+# as it exists. The title bars keep size 10 while nothing is applied.
 
 wait_s=15
-if [ "${1:-}" = "--wait" ] && [ -n "${2:-}" ]; then
-    wait_s=$2
-fi
+once=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --wait) [ -n "${2:-}" ] && wait_s=$2; shift ;;
+        --once) once=1 ;;
+    esac
+    shift
+done
 
 scale_file=${TF_SCALE_FILE:-}
 if [ -z "$scale_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
@@ -45,12 +63,17 @@ if [ -z "$dir" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     dir=$XDG_RUNTIME_DIR/thinfloe-labwc
 fi
 labwc=${TF_LABWC:-labwc}
+poll=${TF_SCALE_POLL:-1}
 
 # The scale from the file, or nothing.
 read_scale() {
     [ -n "$scale_file" ] && [ -r "$scale_file" ] || return 0
     awk 'NR == 1 && NF == 1 && $1 ~ /^[0-9]+(\.[0-9]+)?$/ &&
              $1 + 0 >= 0.5 && $1 + 0 <= 8 { print $1 + 0 }' "$scale_file" 2>/dev/null
+}
+
+is_one() {
+    [ "$(awk -v s="$1" 'BEGIN { print (int(s * 10 + 0.5) == 10) ? 1 : 0 }')" = 1 ]
 }
 
 scale=
@@ -65,73 +88,110 @@ while :; do
 done
 
 [ -d "$dir" ] || exit 0
-[ "$(awk -v s="$scale" 'BEGIN { print (int(s * 10 + 0.5) == 10) ? 1 : 0 }')" = 1 ] && exit 0
+
+# The system files, taken from the links before the first replacement.
+[ -L "$dir/rc.xml" ] && [ -L "$dir/themerc-override" ] || {
+    echo "thinfloe: title bar scale not applied: config files are not the expected links" >&2
+    exit 0
+}
+rc_link=$(readlink "$dir/rc.xml")
+theme_link=$(readlink "$dir/themerc-override")
 
 tmp_rc=
 tmp_theme=
-rc_link=
-theme_link=
+replaced=
 restore() {
     [ -n "$tmp_rc" ] && rm -f "$tmp_rc"
     [ -n "$tmp_theme" ] && rm -f "$tmp_theme"
-    [ -n "$rc_link" ] && ln -sfn "$rc_link" "$dir/rc.xml"
-    [ -n "$theme_link" ] && ln -sfn "$theme_link" "$dir/themerc-override"
+    tmp_rc=
+    tmp_theme=
+    ln -sfn "$rc_link" "$dir/rc.xml"
+    ln -sfn "$theme_link" "$dir/themerc-override"
+    replaced=
 }
 fail() {
     echo "thinfloe: title bar scale not applied: $1" >&2
     restore
     [ -n "${reload_after_restore:-}" ] && "$labwc" --reconfigure >/dev/null 2>&1
-    exit 0
+    reload_after_restore=
+    return 1
 }
 
-[ -L "$dir/rc.xml" ] && [ -L "$dir/themerc-override" ] || fail "config files are not the expected links"
-rc_link=$(readlink "$dir/rc.xml")
-theme_link=$(readlink "$dir/themerc-override")
-[ -r "$dir/rc.xml" ] && [ -r "$dir/themerc-override" ] || fail "cannot read the system config"
+# Scaled copies of the system files for $1, then labwc reconfigures.
+apply() {
+    scale=$1
+    reload_after_restore=
+    [ -r "$rc_link" ] && [ -r "$theme_link" ] || { fail "cannot read the system config"; return; }
 
-tmp_rc=$(mktemp "$dir/.rc.xml.XXXXXX") || fail "cannot write in $dir"
-tmp_theme=$(mktemp "$dir/.themerc-override.XXXXXX") || fail "cannot write in $dir"
+    tmp_rc=$(mktemp "$dir/.rc.xml.XXXXXX") || { fail "cannot write in $dir"; return; }
+    tmp_theme=$(mktemp "$dir/.themerc-override.XXXXXX") || { fail "cannot write in $dir"; return; }
 
-awk -v s="$scale" '
-    /<font place=/ && /size="10"/ {
-        sub(/size="10"/, "size=\"" int(10 * s + 0.5) "\"")
-    }
-    { print }' "$dir/rc.xml" >"$tmp_rc" || fail "cannot scale rc.xml"
-
-awk -v s="$scale" '
-    BEGIN {
-        base["padding.height"] = 0
-        base["window.titlebar.padding.width"] = 0
-        base["window.titlebar.padding.height"] = 0
-        base["window.button.width"] = 26
-        base["window.button.height"] = 26
-        base["window.button.spacing"] = 0
-    }
-    {
-        key = $1
-        sub(/:$/, "", key)
-        if (key in base && $1 ~ /:$/ && $2 ~ /^[0-9]+$/ && NF == 2) {
-            print $1 " " int($2 * s + 0.5)
-            seen[key] = 1
-        } else {
-            print
+    awk -v s="$scale" '
+        /<font place=/ && /size="10"/ {
+            sub(/size="10"/, "size=\"" int(10 * s + 0.5) "\"")
         }
-    }
-    END {
-        for (k in base)
-            if (!(k in seen) && base[k] > 0)
-                print k ": " int(base[k] * s + 0.5)
-    }' "$dir/themerc-override" >"$tmp_theme" || fail "cannot scale themerc-override"
+        { print }' "$rc_link" >"$tmp_rc" || { fail "cannot scale rc.xml"; return; }
 
-chmod 644 "$tmp_rc" "$tmp_theme" 2>/dev/null
-mv -f "$tmp_rc" "$dir/rc.xml" || fail "cannot replace rc.xml"
-tmp_rc=
-mv -f "$tmp_theme" "$dir/themerc-override" || fail "cannot replace themerc-override"
-tmp_theme=
+    awk -v s="$scale" '
+        BEGIN {
+            base["padding.height"] = 0
+            base["window.titlebar.padding.width"] = 0
+            base["window.titlebar.padding.height"] = 0
+            base["window.button.width"] = 26
+            base["window.button.height"] = 26
+            base["window.button.spacing"] = 0
+        }
+        {
+            key = $1
+            sub(/:$/, "", key)
+            if (key in base && $1 ~ /:$/ && $2 ~ /^[0-9]+$/ && NF == 2) {
+                print $1 " " int($2 * s + 0.5)
+                seen[key] = 1
+            } else {
+                print
+            }
+        }
+        END {
+            for (k in base)
+                if (!(k in seen) && base[k] > 0)
+                    print k ": " int(base[k] * s + 0.5)
+        }' "$theme_link" >"$tmp_theme" || { fail "cannot scale themerc-override"; return; }
 
-if ! "$labwc" --reconfigure >/dev/null 2>&1; then
-    # labwc may have applied the copies in part: load the restored files too.
-    reload_after_restore=1
-    fail "labwc --reconfigure failed"
-fi
-exit 0
+    chmod 644 "$tmp_rc" "$tmp_theme" 2>/dev/null
+    mv -f "$tmp_rc" "$dir/rc.xml" || { fail "cannot replace rc.xml"; return; }
+    tmp_rc=
+    mv -f "$tmp_theme" "$dir/themerc-override" || { fail "cannot replace themerc-override"; return; }
+    tmp_theme=
+    replaced=1
+
+    if ! "$labwc" --reconfigure >/dev/null 2>&1; then
+        # labwc may have applied the copies in part: load the restored files too.
+        reload_after_restore=1
+        fail "labwc --reconfigure failed"
+        return
+    fi
+}
+
+# Handle one scale: the copies, or the links back when it rounds to 1.
+handle() {
+    if is_one "$1"; then
+        if [ -n "$replaced" ]; then
+            restore
+            "$labwc" --reconfigure >/dev/null 2>&1
+        fi
+    else
+        apply "$1"
+    fi
+}
+
+last=$scale
+handle "$scale"
+[ -n "$once" ] && exit 0
+
+while :; do
+    sleep "$poll"
+    scale=$(read_scale)
+    [ -n "$scale" ] && [ "$scale" != "$last" ] || continue
+    last=$scale
+    handle "$scale"
+done
