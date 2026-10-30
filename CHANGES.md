@@ -14,8 +14,12 @@
 
 ### Changed
 
+- The menu's tiles keep their shape and look the same size on every screen. A 4K screen no longer gets stretched tiles, and a small, dense laptop screen shrinks the menu to fit.
+- Each row in Settings shows one status line, with its button at the right edge.
+- The menu header reads "by oetiker.ai" under the name and sits further from the screen edges.
+- The Terminal tile's font and margin, and the window title bars, follow the same screen density as the menu.
 - The first boot of a stick larger than its image enlarges the boot partition to the end of the stick, at most 6 GiB, so there is room for later upgrades, add-ons and the saved home. The boot screen shows "Enlarging the boot stick, once: NN % - do not switch off" while it works. Sticks already in use with 2000 MB are enlarged the same way.
-- The Terminal tile opens a terminal in the menu's colours, with the Smalti pixel font, a margin around the text and room for 100 columns; on a 4K screen the font and margin are twice as large. While you scroll back, a box on the right edge shows where you are.
+- The Terminal tile opens a terminal in the menu's colours, with the Smalti pixel font, a margin around the text and room for 100 columns; the font and margin grow with the screen's pixel density. While you scroll back, a box on the right edge shows where you are.
 - On Intel graphics the boot picture is meant to stay on screen until the menu appears, instead of going dark for about 10 seconds or not showing at all on some older machines.
 - The boot screen shows what the machine is doing on a line above the host name, for example "Restoring the home directory", "Installing ThinLinc" or "Starting the session", and stays up until the menu appears.
 - The boot screen, the menu, Settings, the dialogs and the window title bars share one new look: the ThinFloe logo on a near-black background with ice-blue accents and the Geo typeface, a header with the clock, and the host name at the foot of the boot screen once it is known. Window title bars use the same colours and font.

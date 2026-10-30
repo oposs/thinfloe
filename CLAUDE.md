@@ -203,6 +203,20 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `feTurbulence` ran for over a minute). Limits and guards are in
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
+- Menu density: `thinfloe-menu` picks a scale `s` from the monitor's pixels per
+  millimetre (`src/thinfloe-menu/src/density.rs`, from the output size in mm),
+  falling back to the mode's pixel height when the EDID size is missing or
+  implausible, and applies it as egui zoom (`apply_scale` in `app.rs`). The tile
+  group stays 4 x 220 x 76 points, so a tile looks the same size on every
+  screen, and a small dense screen shrinks the menu to fit. It writes `s` to
+  `$XDG_RUNTIME_DIR/thinfloe-scale`. `/usr/libexec/thinfloe/labwc-scale` reads
+  that file and scales the labwc title bars (font `round(10 * s)`, padding and
+  button keys), reloading labwc; `thinfloe-terminal` reads it too (see
+  [Reaching a terminal](#reaching-a-terminal)). Guards: the unit tests in
+  `density.rs` and `ui.rs`, `test/integration/test-labwc-scale.sh`,
+  `test/integration/test-terminal.sh`. The ignored test
+  `shot_desktop_and_settings_at_densities` writes PPM pictures at 1080p, 4K
+  and a 21 inch 4K.
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
@@ -1363,6 +1377,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
   its host-name line), the title bars, the strip and chip clicks with a real
   mouse, the DHCP time zone from a real DHCP server (on netboot as well; only
   QEMU with dnsmasq has run it).
+- Not verified on hardware (menu density): the scale chosen from real EDIDs
+  (including monitors that report no or a wrong size), and the scaled title
+  bars after labwc's reload.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.
@@ -1479,10 +1496,11 @@ tiles) already escalate.
 
 The Terminal tile of the menu starts `thinfloe-terminal`, which runs `foot`
 with Smalti 7x14 (`fonts-smalti`, a pinned release `.deb` in
-`containers/ubuntu/Dockerfile`) at 14 px, or at 28 px with double padding
-when the shorter side of a screen's mode is 1800 px or more: the session
-runs every output at scale 1, and Smalti is sharp only at whole multiples
-of 14 px. The rest of the look (menu colours, padding, a window of 100x30
+`containers/ubuntu/Dockerfile`) at `14 * round(s)` px with `12 * round(s)`
+padding, where `s` is the menu's scale read from
+`$XDG_RUNTIME_DIR/thinfloe-scale` (1 when the file is missing or unreadable):
+the session runs every output at scale 1, and Smalti is sharp only at whole
+multiples of 14 px, so a fractional `s` rounds. The rest of the look (menu colours, padding, a window of 100x30
 characters) is `overlay/etc/xdg/foot/foot.ini`. foot has no scroll bar;
 `indicator-position=relative` shows a box on the right edge while the view
 is scrolled back. `test/integration/test-terminal.sh` guards the size rule

@@ -2409,19 +2409,20 @@ mod tests {
     /// Writes PPM files of the Settings screen and a dialog through the real
     /// rasteriser, for looking at. Run by hand:
     /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
-    fn shot(menu: &Menu, name: &str) {
+    fn shot(menu: &Menu, name: &str, px: (u32, u32), s: f32) {
         let Some(dir) = std::env::var_os("TF_SHOT_DIR") else {
             return;
         };
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
+        ctx.set_zoom_factor(s);
         let input = egui::RawInput {
-            screen_rect: Some(screen(1280.0, 720.0)),
+            screen_rect: Some(screen(px.0 as f32 / s, px.1 as f32 / s)),
             ..Default::default()
         };
         let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let mut textures = crate::raster::Textures::default();
-        let mut canvas = crate::raster::Canvas::new(1280, 720, crate::brand::BG);
+        let mut canvas = crate::raster::Canvas::new(px.0 as usize, px.1 as usize, crate::brand::BG);
         for frame in 0..12 {
             let mut input = input.clone();
             input.time = Some(frame as f64 * 0.1);
@@ -2430,11 +2431,11 @@ mod tests {
             });
             textures.apply_set(&out.textures_delta);
             out.textures_delta.clear();
-            let prims = ctx.tessellate(out.shapes, 1.0);
+            let prims = ctx.tessellate(out.shapes, s);
             canvas.restore_background(canvas.bounds());
-            canvas.draw(&prims, &textures, 1.0, canvas.bounds());
+            canvas.draw(&prims, &textures, s, canvas.bounds());
         }
-        let mut ppm = b"P6\n1280 720\n255\n".to_vec();
+        let mut ppm = format!("P6\n{} {}\n255\n", px.0, px.1).into_bytes();
         for px in &canvas.pixels {
             ppm.extend([(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
         }
@@ -2447,11 +2448,39 @@ mod tests {
         let (mut menu, _) = four_addons();
         let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
         menu.activate(settings, Instant::now());
-        shot(&menu, "settings.ppm");
+        shot(&menu, "settings.ppm", (1280, 720), 1.0);
         let mut menu = Menu::new(addon_grid(), false);
         menu.logout = Some(Logout::Failed {
             message: "The home directory could not be saved: boot server unreachable.".into(),
         });
-        shot(&menu, "dialog.ppm");
+        shot(&menu, "dialog.ppm", (1280, 720), 1.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn shot_desktop_and_settings_at_densities() {
+        let menu = Menu::new(addon_grid(), false);
+        shot(&menu, "desktop-1080.ppm", (1920, 1080), 1.0);
+        shot(&menu, "desktop-4k-fallback.ppm", (3840, 2160), 2.0);
+        shot(&menu, "desktop-21in-4k.ppm", (3840, 2160), 2.25);
+        let mut folded = Menu::new(addon_grid(), false);
+        folded.folded = vec![
+            crate::windows::Folded {
+                id: 1,
+                title: "Terminal".into(),
+                app_id: "foot".into(),
+            },
+            crate::windows::Folded {
+                id: 2,
+                title: "ThinLinc Client".into(),
+                app_id: "tlclient".into(),
+            },
+        ];
+        shot(&folded, "desktop-1080-folded.ppm", (1920, 1080), 1.0);
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        shot(&menu, "settings-1080.ppm", (1920, 1080), 1.0);
+        shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
     }
 }
