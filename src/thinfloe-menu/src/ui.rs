@@ -833,11 +833,19 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 10.0;
-                                ui.label(
-                                    egui::RichText::new(&row.name)
-                                        .font(brand::geo(20.0))
-                                        .color(t.palette.foreground),
-                                );
+                                // At most half the width, cut with "…", so the source stays visible.
+                                let name_w = ui.available_width() * 0.5;
+                                ui.scope(|ui| {
+                                    ui.set_max_width(name_w);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&row.name)
+                                                .font(brand::geo(20.0))
+                                                .color(t.palette.foreground),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
                                 if let Some(source) = &row.source {
                                     let job =
                                         LayoutJob::simple_singleline(source.clone(), FontId::monospace(11.0), MUTED);
@@ -2264,6 +2272,27 @@ mod tests {
         assert!(text.ends_with('…') && text.len() < long.len(), "{text} {src:?}");
         let row = row_rects(&shapes).into_iter().find(|r| r.contains_rect(*src)).unwrap();
         assert!(src.right() > row.right() - ROW_RIGHT as f32 - 8.0, "{src:?} {row:?}");
+    }
+
+    #[test]
+    fn a_long_name_leaves_room_for_source_and_button() {
+        let mut menu = open_settings();
+        let i = menu.tiles.iter().position(|t| t.name == "ThinLinc").unwrap();
+        menu.tiles[i].name = "N".repeat(300);
+        menu.tiles[i].source = Some("https://example.org/client".into());
+        let shapes = settings_shapes(&menu, 1920.0, 1080.0);
+        let texts = text_rects(&shapes);
+        let (name, name_r) = texts.iter().find(|(t, _)| t.starts_with("NN")).expect("name");
+        let (_, src) = texts
+            .iter()
+            .find(|(t, _)| t.starts_with("https://example"))
+            .expect("source");
+        let (_, button) = texts.iter().find(|(t, _)| t == "Update now").expect("button");
+        assert!(name.ends_with('…'), "{name}");
+        assert!(name_r.right() <= src.left(), "{name_r:?} {src:?}");
+        assert!(src.right() <= button.left(), "{src:?} {button:?}");
+        let row = row_rects(&shapes).into_iter().find(|r| r.contains_rect(*src)).unwrap();
+        assert!(row.contains_rect(*button) && row.contains_rect(*name_r), "{row:?}");
     }
 
     #[test]

@@ -248,6 +248,12 @@ fn mode_changed(outputs: &[OutputInfo], name: Option<&str>, monitor_px: Option<(
     sorted(o.mode_px) != sorted(px)
 }
 
+/// True when the window is on another monitor than `known`, or the monitor
+/// `name` shows a mode other than the stored one. Compares known values only.
+fn monitor_moved(outputs: &[OutputInfo], known: Option<&str>, name: Option<&str>, px: Option<(u32, u32)>) -> bool {
+    name != known || mode_changed(outputs, name, px)
+}
+
 impl App {
     /// Computes the menu's scale again. When it changed, or with `force`,
     /// the zoom factor, the icons, the logo and the scale file follow.
@@ -391,10 +397,13 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         // The window moved to another monitor: lay out again for it.
-        let moved = self
-            .live
-            .as_ref()
-            .is_some_and(|l| l.window.current_monitor().and_then(|m| m.name()) != l.monitor);
+        // Also a mode change on the same output, which need not resize the window.
+        let moved = self.live.as_ref().is_some_and(|l| {
+            let monitor = l.window.current_monitor();
+            let name = monitor.as_ref().and_then(|m| m.name());
+            let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
+            monitor_moved(&l.outputs, l.monitor.as_deref(), name.as_deref(), px)
+        });
         if moved {
             self.apply_scale(false);
         }
@@ -804,6 +813,14 @@ mod tests {
         assert!(!mode_changed(&outs, Some("HDMI-A-1"), Some((1280, 720))));
         assert!(!mode_changed(&outs, None, Some((1280, 720))));
         assert!(!mode_changed(&outs, Some("DP-1"), None));
+    }
+
+    #[test]
+    fn the_redraw_check_sees_a_mode_change_and_a_move() {
+        let outs = [out("DP-1", (1920, 1080), (527, 296))];
+        assert!(!monitor_moved(&outs, Some("DP-1"), Some("DP-1"), Some((1920, 1080))));
+        assert!(monitor_moved(&outs, Some("DP-1"), Some("DP-1"), Some((1280, 720))));
+        assert!(monitor_moved(&outs, Some("DP-1"), Some("HDMI-A-1"), Some((1920, 1080))));
     }
 
     #[test]

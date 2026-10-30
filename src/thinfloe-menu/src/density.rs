@@ -90,11 +90,16 @@ pub fn write_scale_file(path: &Path, s: f32) -> io::Result<()> {
 }
 
 /// Where the scale is kept: `TF_SCALE_FILE`, else `$XDG_RUNTIME_DIR/thinfloe-scale`.
+/// An empty variable counts as unset, as in the session scripts.
 pub fn scale_file_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("TF_SCALE_FILE") {
+    scale_file_from(std::env::var_os("TF_SCALE_FILE"), std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+fn scale_file_from(file: Option<std::ffi::OsString>, runtime_dir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(p) = file.filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let dir = runtime_dir.filter(|d| !d.is_empty())?;
     Some(PathBuf::from(dir).join("thinfloe-scale"))
 }
 
@@ -104,6 +109,22 @@ mod tests {
 
     fn s(px: (u32, u32), mm: (u32, u32)) -> f32 {
         density_scale(px, mm)
+    }
+
+    #[test]
+    fn empty_variables_count_as_unset() {
+        let o = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(scale_file_from(o("/a/f"), o("/run")), Some(PathBuf::from("/a/f")));
+        assert_eq!(
+            scale_file_from(o(""), o("/run")),
+            Some(PathBuf::from("/run/thinfloe-scale"))
+        );
+        assert_eq!(
+            scale_file_from(None, o("/run")),
+            Some(PathBuf::from("/run/thinfloe-scale"))
+        );
+        assert_eq!(scale_file_from(o(""), o("")), None);
+        assert_eq!(scale_file_from(None, None), None);
     }
 
     #[test]
