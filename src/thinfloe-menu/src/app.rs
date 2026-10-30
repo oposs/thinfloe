@@ -6,6 +6,7 @@
 
 use crate::addons::{self, AddonLog};
 use crate::damage::Tracker;
+use crate::density::{self, OutputInfo};
 use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
@@ -75,6 +76,13 @@ struct Live {
     chrome: ui::Chrome,
     /// The scale the last frame was laid out and damaged at.
     ppp: f32,
+    /// The menu's own scale `s`: 1 point is `s` pixels, before the
+    /// compositor's scale factor.
+    scale: f32,
+    /// Name of the monitor `scale` was computed for.
+    monitor: Option<String>,
+    /// The outputs the compositor reported at the last read.
+    outputs: Vec<OutputInfo>,
     /// Whether a frame reached the screen.
     presented: bool,
 }
@@ -186,7 +194,70 @@ fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wak
     });
 }
 
+/// The scale for a window, and the output it was taken from: the output
+/// the window is on, else the fallback for the monitor's size, else the
+/// largest mode, else 1920x1080. A window without a size yet counts as
+/// as wide as the output's mode.
+fn pick_scale<'a>(
+    outputs: &'a [OutputInfo],
+    monitor_name: Option<&str>,
+    monitor_px: Option<(u32, u32)>,
+    window_w_px: u32,
+) -> (f32, Option<&'a OutputInfo>) {
+    let output = density::choose_output(outputs, monitor_name, monitor_px);
+    let fallback_px = monitor_px
+        .or_else(|| outputs.iter().map(|o| o.mode_px).max_by_key(|m| m.0 as u64 * m.1 as u64))
+        .unwrap_or((1920, 1080));
+    let width = if window_w_px > 0 {
+        window_w_px
+    } else {
+        output.map_or(fallback_px.0, |o| o.mode_px.0)
+    };
+    (density::menu_scale(output, fallback_px, width), output)
+}
+
 impl App {
+    /// Computes the menu's scale again. When it changed, or with `force`,
+    /// the zoom factor, the icons, the logo and the scale file follow.
+    fn apply_scale(&mut self, force: bool) {
+        let Some(live) = self.live.as_mut() else { return };
+        let monitor = live.window.current_monitor();
+        let name = monitor.as_ref().and_then(|m| m.name());
+        let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
+        let (s, chosen) = pick_scale(&live.outputs, name.as_deref(), px, live.window.inner_size().width);
+        let chosen = chosen.cloned();
+        live.monitor = name;
+        if !force && (s - live.scale).abs() < f32::EPSILON {
+            return;
+        }
+        live.scale = s;
+        self.ctx.set_zoom_factor(s);
+        let ppp = s * live.window.scale_factor() as f32;
+        live.icons = ui::load_icons(&self.ctx, &self.cfg.menu.tiles, &self.cfg.icon_roots, ppp);
+        let logo_px = (ui::LOGO_H * ppp).round() as u32;
+        live.chrome.logo = Some(self.ctx.load_texture(
+            "thinfloe-logo",
+            crate::brand::logo(logo_px),
+            egui::TextureOptions::LINEAR,
+        ));
+        if let Some(path) = density::scale_file_path()
+            && let Err(e) = density::write_scale_file(&path, s)
+        {
+            eprintln!("thinfloe-menu: cannot write the scale file: {e}");
+        }
+        if self.cfg.debug {
+            let (n, m, mm) = match &chosen {
+                Some(o) => (o.name.as_deref().unwrap_or("?").to_string(), o.mode_px, o.phys_mm),
+                None => ("?".to_string(), (0, 0), (0, 0)),
+            };
+            eprintln!(
+                "thinfloe-menu: scale {s} on {n} ({}x{} px, {}x{} mm)",
+                m.0, m.1, mm.0, mm.1
+            );
+        }
+        live.window.request_redraw();
+    }
+
     /// Read the add-on files again. A program or icon that appeared
     /// (the install runs while the menu does) is picked up here, the icon in
     /// a renderer process like every other.
@@ -203,7 +274,7 @@ impl App {
                             &self.ctx,
                             &self.cfg.menu.tiles[i],
                             &self.cfg.icon_roots,
-                            live.window.scale_factor() as f32,
+                            live.scale * live.window.scale_factor() as f32,
                         )
                     } else {
                         None
@@ -282,6 +353,16 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        // The window moved to another monitor: lay out again for it.
+        let moved = self.live.as_ref().is_some_and(|l| {
+            l.window.current_monitor().and_then(|m| m.name()) != l.monitor
+        });
+        if moved {
+            if let Some(live) = self.live.as_mut() {
+                live.outputs = read_outputs(self.cfg.debug);
+            }
+            self.apply_scale(false);
+        }
         let Some(live) = self.live.as_mut() else { return };
         crate::brand::apply(&self.ctx);
         let input = live.egui.take_egui_input(&live.window);
@@ -379,6 +460,19 @@ impl App {
     }
 }
 
+/// The outputs the compositor reports; none when it cannot be asked.
+fn read_outputs(debug: bool) -> Vec<OutputInfo> {
+    match crate::outputs::read() {
+        Ok(o) => o,
+        Err(e) => {
+            if debug {
+                eprintln!("thinfloe-menu: no output sizes: {e}");
+            }
+            Vec::new()
+        }
+    }
+}
+
 fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, canvas: &Canvas) -> Result<(), String> {
     let mut buf = surface.buffer_mut().map_err(|e| e.to_string())?;
     if buf.len() != canvas.pixels.len() {
@@ -454,28 +548,10 @@ impl ApplicationHandler<Wake> for App {
             None,
             None,
         );
-        // Hidden add-on tiles too: the Settings screen shows their icon when
-        // it renders.
-        let icons = ui::load_icons(
-            &self.ctx,
-            &self.cfg.menu.tiles,
-            &self.cfg.icon_roots,
-            window.scale_factor() as f32,
-        );
-        if self.cfg.debug {
-            let shown = self.cfg.menu.visible_tiles();
-            let drawn = shown.iter().filter(|&&i| icons[i].is_some()).count();
-            eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
-        }
-        let logo_px = (ui::LOGO_H * window.scale_factor() as f32).round() as u32;
         let chrome = ui::Chrome {
             header: self.cfg.header.clone(),
             clock: String::new(),
-            logo: Some(self.ctx.load_texture(
-                "thinfloe-logo",
-                crate::brand::logo(logo_px),
-                egui::TextureOptions::LINEAR,
-            )),
+            logo: None,
         };
         let bg = crate::brand::theme().palette.background;
         self.live = Some(Live {
@@ -485,11 +561,26 @@ impl ApplicationHandler<Wake> for App {
             canvas: Canvas::new(1, 1, bg),
             textures: Textures::default(),
             tracker: Tracker::default(),
-            icons,
+            icons: Vec::new(),
             chrome,
             ppp: 0.0,
+            scale: 1.0,
+            monitor: None,
+            outputs: read_outputs(self.cfg.debug),
             presented: false,
         });
+        // Icons and logo are drawn at the scale, so it comes first. Forced,
+        // so the scale file exists even at 1.
+        self.apply_scale(true);
+        if self.cfg.debug
+            && let Some(live) = self.live.as_ref()
+        {
+            // Hidden add-on tiles too: the Settings screen shows their icon
+            // when it renders.
+            let shown = self.cfg.menu.visible_tiles();
+            let drawn = shown.iter().filter(|&&i| live.icons[i].is_some()).count();
+            eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
+        }
         window.request_redraw();
     }
 
@@ -529,7 +620,9 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(live) = self.live.as_mut() else { return };
+        if self.live.is_none() {
+            return;
+        }
         match &event {
             WindowEvent::RedrawRequested => {
                 self.redraw(event_loop);
@@ -539,7 +632,9 @@ impl ApplicationHandler<Wake> for App {
                 if self.cfg.debug {
                     eprintln!("thinfloe-menu: configure {}x{}", size.width, size.height);
                 }
-                if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+                if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                    && let Some(live) = self.live.as_mut()
+                {
                     if let Err(e) = live.surface.resize(w, h) {
                         eprintln!("thinfloe-menu: resize failed: {e}");
                     }
@@ -548,6 +643,8 @@ impl ApplicationHandler<Wake> for App {
                     self.frozen = false;
                     live.tracker.reset();
                 }
+                // The fit to the window width depends on the width.
+                self.apply_scale(false);
             }
             // labwc draws no close button and has no keybindings, so this
             // only comes from a client asking. Ending here would be exit 0,
@@ -560,6 +657,7 @@ impl ApplicationHandler<Wake> for App {
         if self.cfg.menu.refuses_input() && is_input(&event) {
             return;
         }
+        let Some(live) = self.live.as_mut() else { return };
         let resp = live.egui.on_window_event(&live.window, &event);
         if resp.repaint {
             live.window.request_redraw();
@@ -589,6 +687,51 @@ fn is_input(e: &WindowEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_zoom_factor_is_the_pixels_per_point() {
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(2.25);
+        let pass = |w: f32| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 2160.0))),
+                ..Default::default()
+            };
+            let mut seen = 0.0;
+            let mut out = ctx.run_ui(input, |ui| seen = ui.max_rect().width());
+            out.textures_delta.clear();
+            (out.pixels_per_point, seen)
+        };
+        // The scale is the pixels per point in the pass that follows the
+        // call. The screen rect of that first pass is egui's own guess (the
+        // old rect scaled), so the next pass, which egui-winit feeds with
+        // the right rect, is the first that lays out at the scale; the
+        // zoom's repaint request makes that pass follow at once.
+        assert_eq!(pass(3840.0).0, 2.25);
+        let (ppp, width) = pass(3840.0 / 2.25);
+        assert_eq!(ppp, 2.25);
+        assert!((width - 3840.0 / 2.25).abs() < 0.5, "{width}");
+    }
+
+    fn out(name: &str, px: (u32, u32), mm: (u32, u32)) -> OutputInfo {
+        OutputInfo { name: Some(name.into()), mode_px: px, phys_mm: mm }
+    }
+
+    #[test]
+    fn the_scale_follows_the_output_of_the_monitor() {
+        let outs = [out("DP-1", (1920, 1080), (527, 296)), out("eDP-1", (3840, 2160), (344, 193))];
+        let (s, o) = pick_scale(&outs, Some("eDP-1"), Some((3840, 2160)), 3840);
+        assert!(s > 2.0, "{s}");
+        assert_eq!(o.unwrap().name.as_deref(), Some("eDP-1"));
+        let (s, _) = pick_scale(&outs, Some("DP-1"), Some((1920, 1080)), 1920);
+        assert_eq!(s, 1.0);
+    }
+
+    #[test]
+    fn without_outputs_the_monitor_size_decides() {
+        assert_eq!(pick_scale(&[], None, Some((3840, 2160)), 0).0, 2.0);
+        assert_eq!(pick_scale(&[], None, None, 0).0, 1.0);
+    }
 
     #[test]
     fn a_reached_deadline_needs_a_frame() {
