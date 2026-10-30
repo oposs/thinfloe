@@ -225,7 +225,8 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   move to another monitor and a scale change, and each change is applied again
   from the system files (a change to 1 restores the symlinks). When anything
   fails it logs `thinfloe: title bar scale not applied: <why>`, the bars keep
-  size 10 and the next change tries again. labwc's outputs stay at scale
+  size 10, the same value is tried up to 3 more times, 5 s apart
+  (`TF_SCALE_RETRY`), and then the helper waits for a change. labwc's outputs stay at scale
   1. `thinfloe-terminal` reads the file too (see
   [Reaching a terminal](#reaching-a-terminal)). Guards: the unit tests in
   `density.rs` and `ui.rs`, `test/integration/test-labwc-scale.sh`,
