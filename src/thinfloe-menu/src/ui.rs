@@ -3,6 +3,7 @@
 //! file only paints it and reports clicks.
 
 use crate::brand::{self, GOOD, ICE, MUTED, TILE, TILE_ACTIVE, TILE_HOVER, TIME};
+use crate::density::GROUP_W;
 use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
@@ -25,11 +26,6 @@ pub const COLUMNS: usize = 4;
 pub const GAP: f32 = 16.0;
 /// Space between two tiles.
 pub const TILE_GAP: f32 = 3.0;
-/// The tile group takes this share of the screen width...
-pub const GROUP_SHARE: f32 = 0.58;
-/// ...but never less than this, so a name and a comment fit on a small
-/// screen.
-pub const GROUP_MIN: f32 = 4.0 * 220.0 + 3.0 * TILE_GAP;
 /// A band is this tall, down to `TILE_H_MIN` when the screen is short.
 pub const TILE_H: f32 = 76.0;
 pub const TILE_H_MIN: f32 = 64.0;
@@ -261,17 +257,18 @@ pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
         );
         (Some(strip), strip.top() - STRIP_GAP)
     };
+    // The strip takes its room from the log only, down to the log's minimum.
+    let log_min = LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
+    let log_top = (screen.bottom() - GAP - log_h).min(log_bottom - log_min);
     let log = Rect::from_min_max(
-        pos2(screen.left() + GAP, log_bottom - log_h),
+        pos2(screen.left() + GAP, log_top),
         pos2(screen.right() - GAP, log_bottom),
     );
     let header = Rect::from_min_size(screen.min, vec2(screen.width(), HEADER_H));
     let area = Rect::from_min_max(pos2(screen.left(), header.bottom()), pos2(screen.right(), log.top()));
     let cols = COLUMNS.min(tiles.max(1));
     let rows = tiles.max(1).div_ceil(COLUMNS);
-    let group = (GROUP_SHARE * screen.width())
-        .max(GROUP_MIN)
-        .min(screen.width() - 2.0 * GAP);
+    let group = GROUP_W.min(screen.width() - 2.0 * GAP);
     let tile_w = (group - (COLUMNS as f32 - 1.0) * TILE_GAP) / COLUMNS as f32;
     let fit_h = (area.height() - 2.0 * GAP - (rows as f32 - 1.0) * TILE_GAP) / rows as f32;
     let tile = vec2(tile_w, fit_h.clamp(TILE_H_MIN, TILE_H));
@@ -687,7 +684,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     let mut event = None;
     // The panel is as wide as the tile group of the desktop, centred.
     let inner = area.shrink(GAP);
-    let width = (GROUP_SHARE * area.width()).max(GROUP_MIN).min(inner.width());
+    let width = GROUP_W.min(inner.width());
     let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
     s_ui.horizontal(|ui| {
@@ -1187,15 +1184,43 @@ mod tests {
     }
 
     #[test]
-    fn eight_tiles_on_full_hd_are_two_rows_of_bands_at_58_percent() {
-        let l = layout(screen(1920.0, 1080.0), 8, 0);
-        assert!((l.grid.width() - 0.58 * 1920.0).abs() < 1.0, "{:?}", l.grid);
-        assert!((l.grid.center().x - 960.0).abs() < 1.0);
-        assert!(l.tile.x > l.tile.y * 2.5, "bands, not squares: {:?}", l.tile);
-        assert!(l.tile.y >= 64.0);
-        assert!(l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top());
-        assert!(l.log.height() >= 0.3 * 1080.0 - 2.0 * GAP, "{:?}", l.log);
-        assert!(l.log.bottom() <= 1080.0 && l.log.left() >= 0.0 && l.log.right() <= 1920.0);
+    fn tiles_are_220_by_76_on_every_screen() {
+        use crate::density::GROUP_W;
+        for (w, h) in [(1920.0, 1080.0), (3840.0, 2160.0), (1280.0, 720.0), (1707.0, 960.0)] {
+            let l = layout(screen(w, h), 8, 0);
+            assert_eq!(l.tile, vec2(220.0, 76.0), "{w}x{h}: {:?}", l.tile);
+            assert!((l.grid.width() - GROUP_W).abs() < 0.5, "{w}x{h}: {:?}", l.grid);
+            assert!((l.grid.center().x - w / 2.0).abs() < 1.0, "{w}x{h}: {:?}", l.grid);
+            assert!(l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top());
+            assert!(l.log.bottom() <= h && l.log.left() >= 0.0 && l.log.right() <= w);
+        }
+    }
+
+    #[test]
+    fn the_group_never_exceeds_the_screen() {
+        let l = layout(screen(900.0, 600.0), 8, 0);
+        assert!(l.grid.left() >= 0.0 && l.grid.right() <= 900.0, "{:?}", l.grid);
+    }
+
+    #[test]
+    fn folding_a_window_takes_only_from_the_log() {
+        let open = layout(screen(1920.0, 1080.0), 8, 0);
+        let folded = layout(screen(1920.0, 1080.0), 8, 1);
+        assert_eq!(open.area, folded.area);
+        assert_eq!(open.log.top(), folded.log.top());
+        assert_eq!(folded.log.bottom(), folded.strip.unwrap().top() - STRIP_GAP);
+    }
+
+    #[test]
+    fn the_log_keeps_its_minimum_and_the_area_gives_the_rest() {
+        let open = layout(screen(1024.0, 600.0), 8, 0);
+        let folded = layout(screen(1024.0, 600.0), 8, 1);
+        assert!(
+            folded.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD,
+            "{:?}",
+            folded.log
+        );
+        assert!(folded.area.bottom() < open.area.bottom());
     }
 
     #[test]
