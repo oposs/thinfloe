@@ -33,7 +33,7 @@ constants in `ui.rs` stay in points; with the zoom they become pixels.
 - Machine: at most 4 cores (`cargo test -j4`, `CARGO_BUILD_JOBS=4`), podman, `TMPDIR=/scratch/oetiker/claude-tmp/thinfloe-tests`, image builds under `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make VERSION=handover …`, no QEMU during a build.
 - Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
-**Note, deviation from the spec (owner to confirm):** the spec says a TV that
+**Note, deviation from the spec (owner approved 2026-10-30):** the spec says a TV that
 reports 160 x 90 mm falls back through the aspect check. It does not: 160 x 90
 has the 16:9 aspect of a 4K mode, and 3840 px / 160 mm is 609 ppi, inside
 50..800, so `s` would be 6.5. The added rule "physical width under 200 mm is
