@@ -120,10 +120,10 @@ pub fn current_zone(localtime: &std::path::Path) -> jiff::tz::TimeZone {
     // zoneinfo tree; the name after "zoneinfo/" is the zone.
     if let Ok(target) = std::fs::read_link(localtime) {
         let target = target.to_string_lossy();
-        if let Some((_, name)) = target.rsplit_once("zoneinfo/") {
-            if let Ok(tz) = jiff::tz::db().get(name) {
-                return tz;
-            }
+        if let Some((_, name)) = target.rsplit_once("zoneinfo/")
+            && let Ok(tz) = jiff::tz::db().get(name)
+        {
+            return tz;
         }
     }
     std::fs::read(localtime)

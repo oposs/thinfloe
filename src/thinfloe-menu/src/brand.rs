@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(img.size[1], 52);
         let w = img.size[0] as f32 / 52.0;
         assert!((1.2..1.8).contains(&w), "aspect {w}");
-        assert!(img.pixels.iter().any(|p| *p == Color32::WHITE));
+        assert!(img.pixels.contains(&Color32::WHITE));
         assert!(
             img.pixels.iter().all(|p| p.r() == p.g() && p.g() == p.b()),
             "white only"
