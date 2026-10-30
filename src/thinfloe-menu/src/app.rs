@@ -81,6 +81,8 @@ struct Live {
     scale: f32,
     /// Name of the monitor `scale` was computed for.
     monitor: Option<String>,
+    /// When the window was made.
+    started: Instant,
     /// The outputs the compositor reported at the last read.
     outputs: Vec<OutputInfo>,
     /// Whether a frame reached the screen.
@@ -234,6 +236,22 @@ fn pick_scale<'a>(
     (density::menu_scale(output, fallback_px, width), output)
 }
 
+/// How often the menu looks again for the monitor its window is on, and for
+/// how long after the start.
+const MONITOR_RECHECK: Duration = Duration::from_millis(100);
+const MONITOR_RECHECK_FOR: Duration = Duration::from_secs(10);
+
+/// When to look again for the window's monitor, if at all. winit reports
+/// the monitor only once the compositor has shown the window there, and
+/// sends no event when it does (`surface_enter` is empty in winit 0.30), so
+/// the first scale is taken before it is known. With one output that is
+/// still the right one; with several, or none, the scale is a guess (the
+/// largest mode's fallback), which would stay until something else redrew
+/// the menu.
+fn monitor_recheck(known: bool, outputs: usize, since_start: Duration) -> Option<Duration> {
+    (!known && outputs != 1 && since_start < MONITOR_RECHECK_FOR).then_some(MONITOR_RECHECK)
+}
+
 /// True when the monitor named `name` has a size other than the mode stored
 /// for that output. A rotated monitor swaps width and height, so the sides
 /// are compared as a sorted pair.
@@ -249,9 +267,20 @@ fn mode_changed(outputs: &[OutputInfo], name: Option<&str>, monitor_px: Option<(
 }
 
 /// True when the window is on another monitor than `known`, or the monitor
-/// `name` shows a mode other than the stored one. Compares known values only.
+/// `name` shows a mode other than the stored one. Compares known values only:
+/// no monitor is no news (see `seen_monitor`).
 fn monitor_moved(outputs: &[OutputInfo], known: Option<&str>, name: Option<&str>, px: Option<(u32, u32)>) -> bool {
-    name != known || mode_changed(outputs, name, px)
+    (name.is_some() && name != known) || mode_changed(outputs, name, px)
+}
+
+/// The monitor to take the scale from: the one winit reports, else the last
+/// known one. winit reports the outputs the window is visible on, and a
+/// window that another one covers whole, such as the menu behind a
+/// fullscreen OxuLnk or ThinLinc window, is visible on none. Taken as a move,
+/// that gave the guess for the largest mode (2 next to a 4K monitor) and the
+/// title bars grew until the menu happened to draw again uncovered.
+fn seen_monitor(name: Option<String>, known: Option<&str>) -> Option<String> {
+    name.or_else(|| known.map(str::to_string))
 }
 
 impl App {
@@ -260,7 +289,7 @@ impl App {
     fn apply_scale(&mut self, force: bool) {
         let Some(live) = self.live.as_mut() else { return };
         let monitor = live.window.current_monitor();
-        let name = monitor.as_ref().and_then(|m| m.name());
+        let name = seen_monitor(monitor.as_ref().and_then(|m| m.name()), live.monitor.as_deref());
         let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
         // The first look at a monitor needs no second read of the outputs.
         // A mode change on the same output (wlr-randr --mode, kanshi) needs one too.
@@ -484,12 +513,17 @@ impl App {
             self.cfg.menu.hold_retry(false);
             live.window.request_redraw();
         }
+        // A wake-up redraws, and the redraw looks for the monitor again.
+        let recheck = monitor_recheck(live.monitor.is_some(), live.outputs.len(), live.started.elapsed());
         match delay {
             Some(d) if d.is_zero() => live.window.request_redraw(),
-            Some(d) if d < std::time::Duration::from_secs(3600) => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d))
+            d => {
+                let egui_wake = d.filter(|d| *d < Duration::from_secs(3600));
+                match egui_wake.into_iter().chain(recheck).min() {
+                    Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                }
             }
-            _ => event_loop.set_control_flow(ControlFlow::Wait),
         }
 
         let effect = match event.clone() {
@@ -623,6 +657,7 @@ impl ApplicationHandler<Wake> for App {
             ppp: 0.0,
             scale: 1.0,
             monitor: None,
+            started: Instant::now(),
             outputs: read_outputs(self.cfg.debug),
             presented: false,
         });
@@ -821,6 +856,37 @@ mod tests {
         assert!(!monitor_moved(&outs, Some("DP-1"), Some("DP-1"), Some((1920, 1080))));
         assert!(monitor_moved(&outs, Some("DP-1"), Some("DP-1"), Some((1280, 720))));
         assert!(monitor_moved(&outs, Some("DP-1"), Some("HDMI-A-1"), Some((1920, 1080))));
+        // The first monitor after the start is a move too.
+        assert!(monitor_moved(&outs, None, Some("DP-1"), Some((1920, 1080))));
+    }
+
+    #[test]
+    fn a_covered_window_keeps_its_monitor() {
+        // A window that another one covers whole is on no output, so winit
+        // reports no monitor. That is not a move: the scale stays.
+        let outs = [out("DP-1", (1920, 1080), (527, 296))];
+        assert!(!monitor_moved(&outs, Some("DP-1"), None, None));
+        assert_eq!(seen_monitor(None, Some("DP-1")).as_deref(), Some("DP-1"));
+        assert_eq!(
+            seen_monitor(Some("HDMI-A-1".into()), Some("DP-1")).as_deref(),
+            Some("HDMI-A-1")
+        );
+        assert_eq!(seen_monitor(None, None), None);
+    }
+
+    #[test]
+    fn an_unknown_monitor_is_looked_up_again_soon() {
+        let soon = Some(MONITOR_RECHECK);
+        let early = Duration::from_millis(50);
+        // Two outputs and no monitor yet: the scale is a guess.
+        assert_eq!(monitor_recheck(false, 2, early), soon);
+        // Without outputs the monitor's own size still changes the guess.
+        assert_eq!(monitor_recheck(false, 0, early), soon);
+        // One output is the one the window is on; a known monitor needs nothing.
+        assert_eq!(monitor_recheck(false, 1, early), None);
+        assert_eq!(monitor_recheck(true, 2, early), None);
+        // A window that never gets a monitor stops the lookups.
+        assert_eq!(monitor_recheck(false, 2, MONITOR_RECHECK_FOR), None);
     }
 
     #[test]

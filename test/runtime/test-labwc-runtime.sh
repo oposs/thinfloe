@@ -316,4 +316,48 @@ else
     fail=1
 fi
 
+# A fullscreen window that covers the menu whole leaves the menu visible on no
+# output, so winit reports no monitor. The menu took that as a move and wrote
+# the guess for the largest mode: 2 next to a 4K monitor, and the title bars
+# grew while OxuLnk ran. Two outputs, the menu on the 1280x720 one (scale 1),
+# the other 3840x2160; a fullscreen foot covers the menu. The scale must stay.
+COVER_CONTAINER_NAME="thinfloe-runtime-test-cover-$$"
+
+COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0
+wlr-randr --output HEADLESS-2 --pos 0,0
+TF_MENU_DEBUG=1 timeout 12 thinfloe-menu >/dev/null 2>&1 &
+sleep 3
+echo "scale-before=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"
+foot --fullscreen sleep 5 &
+sleep 3
+echo "scale-covered=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"
+wait'
+
+cover_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$COVER_CONTAINER_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=2 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e COVER_SCRIPT="$COVER_SCRIPT" \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           printf "%s\n" "$COVER_SCRIPT" >/tmp/cover.sh &&
+           labwc -C /etc/thinfloe/labwc -S "sh /tmp/cover.sh"' 2>&1)
+cover_rc=$?
+
+if [[ $cover_rc -eq 124 || $cover_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during covered-menu test)"
+    echo "$cover_out"
+    podman rm -f "$COVER_CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+
+if echo "$cover_out" | grep -qx 'scale-before=1' && echo "$cover_out" | grep -qx 'scale-covered=1'; then
+    echo "ok   - a fullscreen window over the menu leaves the scale as it was"
+else
+    echo "FAIL - the scale changed while a fullscreen window covered the menu"
+    echo "$cover_out" | grep '^scale-'
+    fail=1
+fi
+
 exit $fail

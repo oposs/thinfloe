@@ -222,6 +222,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   fit rule then takes the largest 0.25 step with `889 * s <= 0.9 * window width`
   (never below 0.5), which shrinks the menu on a small dense screen. The tile
   group stays 4 x 220 x 76 points (`GROUP_W` 889).
+  The output is the one winit names for the menu window. winit names the
+  outputs the window is *visible* on, so a fullscreen window over the whole
+  menu leaves none; that is no move, and the last one counts
+  (`seen_monitor` in `app.rs`). Taken as a move, it gave the guess for the
+  largest mode and the title bars grew while OxuLnk ran (2026-10-30). winit
+  sends no event when the window first appears on an output, so until one
+  is known the menu looks again every 100 ms for 10 s (`monitor_recheck`).
+  `test/runtime/test-labwc-runtime.sh` covers the menu with a fullscreen foot.
   The menu writes `s` atomically (one number and a newline) to
   `$XDG_RUNTIME_DIR/thinfloe-scale` (`TF_SCALE_FILE` overrides), and
   `thinfloe-session` removes a stale one before the menu starts.
