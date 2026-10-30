@@ -203,15 +203,26 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `feTurbulence` ran for over a minute). Limits and guards are in
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
-- Menu density: `thinfloe-menu` picks a scale `s` from the monitor's pixels per
-  millimetre (`src/thinfloe-menu/src/density.rs`, from the output size in mm),
-  falling back to the mode's pixel height when the EDID size is missing or
-  implausible, and applies it as egui zoom (`apply_scale` in `app.rs`). The tile
-  group stays 4 x 220 x 76 points, so a tile looks the same size on every
-  screen, and a small dense screen shrinks the menu to fit. It writes `s` to
-  `$XDG_RUNTIME_DIR/thinfloe-scale`. `/usr/libexec/thinfloe/labwc-scale` reads
-  that file and scales the labwc title bars (font `round(10 * s)`, padding and
-  button keys), reloading labwc; `thinfloe-terminal` reads it too (see
+- Menu density: `thinfloe-menu` picks a scale `s` per output
+  (`src/thinfloe-menu/src/density.rs`) and applies it as egui zoom
+  (`apply_scale` in `app.rs`), so a tile is about the same size on paper on
+  every screen. `s = ppi / 92`, with `ppi` = mode width in px / (physical width
+  in mm / 25.4), never below 1 from density alone, rounded to the nearest 0.25.
+  The reported size is not trusted when a side is 0, when the aspect of mm and
+  px differs by more than 10 %, when `ppi` is outside 50..800, or when the
+  width is under 200 mm (this catches EDIDs that store cm, such as 160 x 90);
+  then `s` is 2 if the shorter side of the mode is 1800 px or more, else 1. The
+  fit rule then takes the largest 0.25 step with `889 * s <= 0.9 * window width`
+  (never below 0.5), which shrinks the menu on a small dense screen. The tile
+  group stays 4 x 220 x 76 points (`GROUP_W` 889).
+  The menu writes `s` atomically (one number and a newline) to
+  `$XDG_RUNTIME_DIR/thinfloe-scale` (`TF_SCALE_FILE` overrides), and
+  `thinfloe-session` removes a stale one before the menu starts.
+  `/usr/libexec/thinfloe/labwc-scale` waits for that file and scales the labwc
+  title bars (font `round(10 * s)`, titlebar padding and button keys), then runs
+  `labwc --reconfigure`; when anything fails it logs `thinfloe: title bar scale
+  not applied: <why>` and the bars keep size 10. labwc's outputs stay at scale
+  1. `thinfloe-terminal` reads the file too (see
   [Reaching a terminal](#reaching-a-terminal)). Guards: the unit tests in
   `density.rs` and `ui.rs`, `test/integration/test-labwc-scale.sh`,
   `test/integration/test-terminal.sh`. The ignored test
@@ -1496,11 +1507,12 @@ tiles) already escalate.
 
 The Terminal tile of the menu starts `thinfloe-terminal`, which runs `foot`
 with Smalti 7x14 (`fonts-smalti`, a pinned release `.deb` in
-`containers/ubuntu/Dockerfile`) at `14 * round(s)` px with `12 * round(s)`
-padding, where `s` is the menu's scale read from
-`$XDG_RUNTIME_DIR/thinfloe-scale` (1 when the file is missing or unreadable):
+`containers/ubuntu/Dockerfile`) at `14 * n` px with `12 * n` padding, where `n` is the menu's scale `s` rounded
+(at least 1), read from the scale file (see Menu density under Customizing the System):
 the session runs every output at scale 1, and Smalti is sharp only at whole
-multiples of 14 px, so a fractional `s` rounds. The rest of the look (menu colours, padding, a window of 100x30
+multiples of 14 px. Without a usable file (one number from 0.5 to 8 on line 1)
+`n` is 2 when the shorter side of the largest current `wlr-randr` mode is 1800 px
+or more, else 1. The rest of the look (menu colours, padding, a window of 100x30
 characters) is `overlay/etc/xdg/foot/foot.ini`. foot has no scroll bar;
 `indicator-position=relative` shows a box on the right edge while the view
 is scrolled back. `test/integration/test-terminal.sh` guards the size rule
