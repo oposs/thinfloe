@@ -194,6 +194,19 @@ fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wak
     });
 }
 
+impl Live {
+    /// Pixels per point the icons and the logo are rendered at.
+    fn icon_ppp(&self) -> f32 {
+        self.scale * self.window.scale_factor() as f32
+    }
+}
+
+/// Whether egui has not yet taken the zoom factor `scale`: the pass that
+/// takes it is laid out at a guessed size and must not be shown.
+fn settling(zoom: f32, scale: f32) -> bool {
+    (zoom - scale).abs() > f32::EPSILON
+}
+
 /// The scale for a window, and the output it was taken from: the output
 /// the window is on, else the fallback for the monitor's size, else the
 /// largest mode, else 1920x1080. A window without a size yet counts as
@@ -223,6 +236,10 @@ impl App {
         let Some(live) = self.live.as_mut() else { return };
         let monitor = live.window.current_monitor();
         let name = monitor.as_ref().and_then(|m| m.name());
+        // The first look at a monitor needs no second read of the outputs.
+        if live.monitor.is_some() && name != live.monitor {
+            live.outputs = read_outputs(self.cfg.debug);
+        }
         let px = monitor.as_ref().map(|m| (m.size().width, m.size().height));
         let (s, chosen) = pick_scale(&live.outputs, name.as_deref(), px, live.window.inner_size().width);
         let chosen = chosen.cloned();
@@ -231,8 +248,8 @@ impl App {
             return;
         }
         live.scale = s;
+        let ppp = live.icon_ppp();
         self.ctx.set_zoom_factor(s);
-        let ppp = s * live.window.scale_factor() as f32;
         live.icons = ui::load_icons(&self.ctx, &self.cfg.menu.tiles, &self.cfg.icon_roots, ppp);
         let logo_px = (ui::LOGO_H * ppp).round() as u32;
         live.chrome.logo = Some(self.ctx.load_texture(
@@ -274,7 +291,7 @@ impl App {
                             &self.ctx,
                             &self.cfg.menu.tiles[i],
                             &self.cfg.icon_roots,
-                            live.scale * live.window.scale_factor() as f32,
+                            live.icon_ppp(),
                         )
                     } else {
                         None
@@ -358,9 +375,6 @@ impl App {
             l.window.current_monitor().and_then(|m| m.name()) != l.monitor
         });
         if moved {
-            if let Some(live) = self.live.as_mut() {
-                live.outputs = read_outputs(self.cfg.debug);
-            }
             self.apply_scale(false);
         }
         let Some(live) = self.live.as_mut() else { return };
@@ -369,6 +383,9 @@ impl App {
         let now = Instant::now();
         let mut event = None;
         live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
+        // egui takes a new zoom factor at the start of the next pass and
+        // lays that pass out with a guessed screen rect.
+        let settling = settling(self.ctx.zoom_factor(), live.scale);
         let out = self.ctx.run_ui(input, |ui| {
             event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
@@ -391,6 +408,13 @@ impl App {
         }
 
         live.textures.apply_set(&out.textures_delta);
+        if settling {
+            // Nothing of this pass reaches the screen; the textures were
+            // taken above, so the font atlas upload is not lost.
+            live.textures.apply_free(&out.textures_delta);
+            live.window.request_redraw();
+            return;
+        }
         let ppp = out.pixels_per_point;
         // Fingerprint bounds are in pixels, so a scale change invalidates
         // every one of them.
@@ -711,6 +735,17 @@ mod tests {
         let (ppp, width) = pass(3840.0 / 2.25);
         assert_eq!(ppp, 2.25);
         assert!((width - 3840.0 / 2.25).abs() < 0.5, "{width}");
+    }
+
+    #[test]
+    fn the_pass_that_takes_the_zoom_is_the_one_skipped() {
+        let ctx = egui::Context::default();
+        assert!(!settling(ctx.zoom_factor(), 1.0));
+        ctx.set_zoom_factor(2.0);
+        // Still the old zoom until a pass has run.
+        assert!(settling(ctx.zoom_factor(), 2.0));
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        assert!(!settling(ctx.zoom_factor(), 2.0));
     }
 
     fn out(name: &str, px: (u32, u32), mm: (u32, u32)) -> OutputInfo {
