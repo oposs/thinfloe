@@ -29,11 +29,13 @@ pub const TILE_GAP: f32 = 3.0;
 /// A band is this tall, down to `TILE_H_MIN` when the screen is short.
 pub const TILE_H: f32 = 76.0;
 pub const TILE_H_MIN: f32 = 64.0;
-/// The header: 16 above the 52 tall logo, 12 below.
-pub const HEADER_H: f32 = 80.0;
+/// The header: 32 above the 52 tall logo, 16 below.
+pub const HEADER_H: f32 = HEADER_PAD_TOP + LOGO_H + 16.0;
 const HEADER_PAD_X: f32 = 32.0;
-const HEADER_PAD_TOP: f32 = 16.0;
+const HEADER_PAD_TOP: f32 = 32.0;
 pub const LOGO_H: f32 = 52.0;
+/// The line under the name.
+pub const BYLINE: &str = "by oetiker.ai";
 const ICON_BOX: f32 = 44.0;
 /// The folded-window strip: its height, the chip height inside it, the gap
 /// to the log and the widest a chip grows.
@@ -318,7 +320,13 @@ fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
         x = logo.right() + 14.0;
     }
     let mid = top + LOGO_H / 2.0;
-    p.text(pos2(x, mid), Align2::LEFT_CENTER, "ThinFloe", brand::geo(34.0), dim(fg));
+    // Name and byline form one block, centred on the logo.
+    let name = p.layout_no_wrap("ThinFloe".into(), brand::geo(34.0), dim(fg));
+    let by = p.layout_no_wrap(BYLINE.into(), brand::geo(14.0), MUTED);
+    let y = mid - (name.size().y + by.size().y) / 2.0;
+    let by_y = y + name.size().y;
+    p.galley(pos2(x, y), name, fg);
+    p.galley(pos2(x, by_y), by, MUTED);
     p.text(
         pos2(rect.right() - HEADER_PAD_X, mid),
         Align2::RIGHT_CENTER,
@@ -1184,6 +1192,67 @@ mod tests {
 
     fn screen(w: f32, h: f32) -> Rect {
         Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))
+    }
+
+    #[test]
+    fn the_header_has_32_points_margin_and_the_byline() {
+        let menu = Menu::new(
+            Grid {
+                tiles: vec![],
+                banner: vec![],
+            },
+            false,
+        );
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1920.0, 1080.0)),
+            ..Default::default()
+        };
+        let mut out = None;
+        for _ in 0..2 {
+            let mut o = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &menu, &[], &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        let shapes = out.unwrap().shapes;
+        let find = |text: &str| {
+            shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text:?} not drawn"))
+        };
+        let word = find("ThinFloe");
+        let by = find(BYLINE);
+        let word_r = word.visual_bounding_rect();
+        let by_r = by.visual_bounding_rect();
+        let header = layout(screen(1920.0, 1080.0), 0, 0).header;
+        assert!((word.pos.x - 32.0).abs() < 0.5, "wordmark at {:?}", word.pos);
+        assert!(
+            (by.pos.x - word.pos.x).abs() < 0.5,
+            "byline left {:?} vs {:?}",
+            by.pos,
+            word.pos
+        );
+        assert!(by_r.top() >= word_r.bottom() - 2.0, "byline {by_r:?} under {word_r:?}");
+        assert!(by_r.bottom() <= header.bottom(), "byline {by_r:?} inside {header:?}");
+        let f = &by.galley.job.sections[0].format;
+        assert_eq!(f.font_id, brand::geo(14.0));
+        assert_eq!(f.color, MUTED);
+        let right = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text().contains(" · ") => Some(t.pos.x + t.galley.size().x),
+                _ => None,
+            })
+            .next()
+            .expect("header text drawn");
+        assert!((right - (1920.0 - 32.0)).abs() < 0.5, "header text ends at {right}");
     }
 
     #[test]
