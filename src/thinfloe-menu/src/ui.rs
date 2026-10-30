@@ -534,7 +534,10 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
     let shown = menu.visible_tiles();
     let l = layout(ui.max_rect(), shown.len(), menu.folded.len());
     show_header(ui, chrome, l.header);
-    let unfold = l.strip.and_then(|r| show_strip(ui, menu, icons, r)).map(UiEvent::Unfold);
+    let unfold = l
+        .strip
+        .and_then(|r| show_strip(ui, menu, icons, r))
+        .map(UiEvent::Unfold);
     if menu.screen == Screen::Settings {
         let event = show_settings(ui, menu, icons, l.area);
         show_log(ui, &menu.log, l.log);
@@ -702,7 +705,10 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                 event = Some(SettingsEvent::Back);
             }
             if ui
-                .add_enabled(!menu.checking(), Button::new("Check now").variant(ButtonVariant::Secondary))
+                .add_enabled(
+                    !menu.checking(),
+                    Button::new("Check now").variant(ButtonVariant::Secondary),
+                )
                 .clicked()
             {
                 event = Some(SettingsEvent::CheckNow);
@@ -735,11 +741,8 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                     });
                 if row.update_ready {
                     let r = framed.response.rect;
-                    ui.painter().rect_filled(
-                        Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)),
-                        0.0,
-                        ICE,
-                    );
+                    ui.painter()
+                        .rect_filled(Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)), 0.0, ICE);
                 }
                 if let Some(e) = framed.inner {
                     event = Some(e);
@@ -1351,7 +1354,10 @@ mod tests {
                     tile("20-oxulnk.desktop", "OxuLnk"),
                     tile("30-remmina.desktop", "Remmina"),
                     tile("40-manual.desktop", "Manual tool"),
-                    f("60-settings.desktop", "[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n"),
+                    f(
+                        "60-settings.desktop",
+                        "[Desktop Entry]\nName=Settings\nX-TF-Action=settings\n",
+                    ),
                 ],
                 &[],
             ),
@@ -2028,7 +2034,12 @@ mod tests {
         let (_, ev) = strip_frame(&ctx, &menu, size, vec![b(pos2(x, from.y), false)]);
         clicked = clicked.or(ev);
         let (after, _) = strip_frame(&ctx, &menu, size, vec![]);
-        assert!(after[0].left() < before[0].left() - 300.0, "{:?} -> {:?}", before[0], after[0]);
+        assert!(
+            after[0].left() < before[0].left() - 300.0,
+            "{:?} -> {:?}",
+            before[0],
+            after[0]
+        );
         assert!(clicked.is_none(), "a drag is not a click: {clicked:?}");
         assert!(strip.height() > 0.0);
     }
@@ -2181,7 +2192,9 @@ mod tests {
     /// rasteriser, for looking at. Run by hand:
     /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
     fn shot(menu: &Menu, name: &str) {
-        let Some(dir) = std::env::var_os("TF_SHOT_DIR") else { return };
+        let Some(dir) = std::env::var_os("TF_SHOT_DIR") else {
+            return;
+        };
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let input = egui::RawInput {

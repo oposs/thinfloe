@@ -112,7 +112,11 @@ impl Tracker {
                 (s.minimized && s.app_id != MENU_APP_ID).then(|| {
                     (
                         e.fold_seq,
-                        Folded { id, title: s.title.clone(), app_id: s.app_id.clone() },
+                        Folded {
+                            id,
+                            title: s.title.clone(),
+                            app_id: s.app_id.clone(),
+                        },
                     )
                 })
             })
@@ -208,9 +212,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, u64> for State {
             handle_v1::Event::AppId { app_id } => Event::AppId(id, app_id),
             handle_v1::Event::State { state } => {
                 // An array of native-endian u32 state values.
-                let minimized = state.chunks_exact(4).any(|c| {
-                    u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == handle_v1::State::Minimized as u32
-                });
+                let minimized = state
+                    .chunks_exact(4)
+                    .any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == handle_v1::State::Minimized as u32);
                 Event::Minimized(id, minimized)
             }
             handle_v1::Event::Done => Event::Done(id),
@@ -243,9 +247,7 @@ impl Windows {
         let (globals, mut queue): (_, EventQueue<State>) =
             wayland_client::globals::registry_queue_init(&conn).map_err(|e| format!("Wayland registry: {e}"))?;
         let qh = queue.handle();
-        let seat: wl_seat::WlSeat = globals
-            .bind(&qh, 1..=1, ())
-            .map_err(|e| format!("no wl_seat: {e}"))?;
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("no wl_seat: {e}"))?;
         let _manager: ZwlrForeignToplevelManagerV1 = globals
             .bind(&qh, 1..=3, ())
             .map_err(|_| "the compositor lacks zwlr_foreign_toplevel_manager_v1".to_string())?;
@@ -259,7 +261,9 @@ impl Windows {
         // The first roundtrip delivers the toplevels, the second their
         // properties; the windows open now are known when this returns.
         for _ in 0..2 {
-            queue.roundtrip(&mut state).map_err(|e| format!("Wayland roundtrip: {e}"))?;
+            queue
+                .roundtrip(&mut state)
+                .map_err(|e| format!("Wayland roundtrip: {e}"))?;
         }
         state.on_change = Box::new(on_change);
         std::thread::spawn(move || {
@@ -275,7 +279,12 @@ impl Windows {
             lock(&state.tracker).stop();
             (state.on_change)();
         });
-        Ok(Windows { conn, seat, tracker, handles })
+        Ok(Windows {
+            conn,
+            seat,
+            tracker,
+            handles,
+        })
     }
 
     pub fn folded(&self) -> Vec<Folded> {
@@ -294,7 +303,9 @@ impl Windows {
         let Some(h) = handles.get(&id) else { return Ok(()) };
         h.unset_minimized();
         h.activate(&self.seat);
-        self.conn.flush().map_err(|e| format!("could not send the request: {e}"))
+        self.conn
+            .flush()
+            .map_err(|e| format!("could not send the request: {e}"))
     }
 }
 
@@ -322,7 +333,11 @@ mod tests {
     #[test]
     fn the_menu_itself_is_never_listed() {
         let mut t = Tracker::default();
-        for e in [Event::AppId(2, "thinfloe-menu".into()), Event::Minimized(2, true), Event::Done(2)] {
+        for e in [
+            Event::AppId(2, "thinfloe-menu".into()),
+            Event::Minimized(2, true),
+            Event::Done(2),
+        ] {
             t.apply(e);
         }
         assert!(t.folded().is_empty());

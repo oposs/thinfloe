@@ -219,7 +219,12 @@ fn pick_scale<'a>(
 ) -> (f32, Option<&'a OutputInfo>) {
     let output = density::choose_output(outputs, monitor_name, monitor_px);
     let fallback_px = monitor_px
-        .or_else(|| outputs.iter().map(|o| o.mode_px).max_by_key(|m| m.0 as u64 * m.1 as u64))
+        .or_else(|| {
+            outputs
+                .iter()
+                .map(|o| o.mode_px)
+                .max_by_key(|m| m.0 as u64 * m.1 as u64)
+        })
         .unwrap_or((1920, 1080));
     let width = if window_w_px > 0 {
         window_w_px
@@ -371,9 +376,10 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         // The window moved to another monitor: lay out again for it.
-        let moved = self.live.as_ref().is_some_and(|l| {
-            l.window.current_monitor().and_then(|m| m.name()) != l.monitor
-        });
+        let moved = self
+            .live
+            .as_ref()
+            .is_some_and(|l| l.window.current_monitor().and_then(|m| m.name()) != l.monitor);
         if moved {
             self.apply_scale(false);
         }
@@ -469,7 +475,10 @@ impl App {
             Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
             Some(ui::UiEvent::Unfold(id)) => {
                 if let Some(Err(e)) = self.windows.as_ref().map(|w| w.restore(id)) {
-                    self.cfg.menu.log.note(crate::log::Kind::Warn, format!("could not unfold the window: {e}"));
+                    self.cfg
+                        .menu
+                        .log
+                        .note(crate::log::Kind::Warn, format!("could not unfold the window: {e}"));
                 }
                 None
             }
@@ -749,12 +758,19 @@ mod tests {
     }
 
     fn out(name: &str, px: (u32, u32), mm: (u32, u32)) -> OutputInfo {
-        OutputInfo { name: Some(name.into()), mode_px: px, phys_mm: mm }
+        OutputInfo {
+            name: Some(name.into()),
+            mode_px: px,
+            phys_mm: mm,
+        }
     }
 
     #[test]
     fn the_scale_follows_the_output_of_the_monitor() {
-        let outs = [out("DP-1", (1920, 1080), (527, 296)), out("eDP-1", (3840, 2160), (344, 193))];
+        let outs = [
+            out("DP-1", (1920, 1080), (527, 296)),
+            out("eDP-1", (3840, 2160), (344, 193)),
+        ];
         let (s, o) = pick_scale(&outs, Some("eDP-1"), Some((3840, 2160)), 3840);
         assert!(s > 2.0, "{s}");
         assert_eq!(o.unwrap().name.as_deref(), Some("eDP-1"));

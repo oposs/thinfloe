@@ -154,7 +154,11 @@ fn unfold(what: Option<&str>) -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    if hits.is_empty() { ExitCode::from(1) } else { ExitCode::SUCCESS }
+    if hits.is_empty() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn main() -> ExitCode {

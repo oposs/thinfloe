@@ -50,7 +50,11 @@ impl Collector {
         self.seen
             .values()
             .filter_map(|s| {
-                Some(OutputInfo { name: s.name.clone(), mode_px: s.mode_px?, phys_mm: s.mm })
+                Some(OutputInfo {
+                    name: s.name.clone(),
+                    mode_px: s.mode_px?,
+                    phys_mm: s.mm,
+                })
             })
             .collect()
     }
@@ -82,13 +86,17 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &QueueHandle<Self>,
     ) {
         let e = match event {
-            wl_output::Event::Geometry { physical_width, physical_height, .. } => {
-                OutEvent::Geometry { mm: (physical_width, physical_height) }
-            }
-            wl_output::Event::Mode { flags, width, height, .. } => OutEvent::Mode {
-                current: flags
-                    .into_result()
-                    .is_ok_and(|f| f.contains(wl_output::Mode::Current)),
+            wl_output::Event::Geometry {
+                physical_width,
+                physical_height,
+                ..
+            } => OutEvent::Geometry {
+                mm: (physical_width, physical_height),
+            },
+            wl_output::Event::Mode {
+                flags, width, height, ..
+            } => OutEvent::Mode {
+                current: flags.into_result().is_ok_and(|f| f.contains(wl_output::Mode::Current)),
                 px: (width, height),
             },
             wl_output::Event::Name { name } => OutEvent::Name(name),
@@ -113,10 +121,14 @@ pub fn read() -> Result<Vec<OutputInfo>, String> {
             bound.push(out);
         }
     }
-    let mut state = State { collector: Collector::default() };
+    let mut state = State {
+        collector: Collector::default(),
+    };
     // The first roundtrip delivers the bound outputs, the second their events.
     for _ in 0..2 {
-        queue.roundtrip(&mut state).map_err(|e| format!("Wayland roundtrip: {e}"))?;
+        queue
+            .roundtrip(&mut state)
+            .map_err(|e| format!("Wayland roundtrip: {e}"))?;
     }
     Ok(state.collector.outputs())
 }
@@ -126,15 +138,31 @@ mod tests {
     use super::*;
 
     fn info(name: Option<&str>, px: (u32, u32), mm: (u32, u32)) -> OutputInfo {
-        OutputInfo { name: name.map(String::from), mode_px: px, phys_mm: mm }
+        OutputInfo {
+            name: name.map(String::from),
+            mode_px: px,
+            phys_mm: mm,
+        }
     }
 
     #[test]
     fn a_current_mode_and_geometry_make_one_output() {
         let mut c = Collector::default();
         c.apply(1, OutEvent::Geometry { mm: (531, 299) });
-        c.apply(1, OutEvent::Mode { current: false, px: (1024, 768) });
-        c.apply(1, OutEvent::Mode { current: true, px: (1920, 1080) });
+        c.apply(
+            1,
+            OutEvent::Mode {
+                current: false,
+                px: (1024, 768),
+            },
+        );
+        c.apply(
+            1,
+            OutEvent::Mode {
+                current: true,
+                px: (1920, 1080),
+            },
+        );
         c.apply(1, OutEvent::Name("DP-1".into()));
         c.apply(1, OutEvent::Done);
         assert_eq!(c.outputs(), vec![info(Some("DP-1"), (1920, 1080), (531, 299))]);
@@ -144,7 +172,13 @@ mod tests {
     fn an_output_without_a_current_mode_is_left_out() {
         let mut c = Collector::default();
         c.apply(1, OutEvent::Geometry { mm: (531, 299) });
-        c.apply(1, OutEvent::Mode { current: false, px: (1024, 768) });
+        c.apply(
+            1,
+            OutEvent::Mode {
+                current: false,
+                px: (1024, 768),
+            },
+        );
         c.apply(1, OutEvent::Done);
         assert!(c.outputs().is_empty());
     }
@@ -153,7 +187,13 @@ mod tests {
     fn negative_mm_count_as_zero() {
         let mut c = Collector::default();
         c.apply(1, OutEvent::Geometry { mm: (-1, -1) });
-        c.apply(1, OutEvent::Mode { current: true, px: (800, 600) });
+        c.apply(
+            1,
+            OutEvent::Mode {
+                current: true,
+                px: (800, 600),
+            },
+        );
         assert_eq!(c.outputs(), vec![info(None, (800, 600), (0, 0))]);
     }
 
@@ -161,7 +201,13 @@ mod tests {
     fn a_version_3_output_has_no_name() {
         let mut c = Collector::default();
         c.apply(7, OutEvent::Geometry { mm: (300, 200) });
-        c.apply(7, OutEvent::Mode { current: true, px: (1280, 800) });
+        c.apply(
+            7,
+            OutEvent::Mode {
+                current: true,
+                px: (1280, 800),
+            },
+        );
         c.apply(7, OutEvent::Done);
         assert_eq!(c.outputs()[0].name, None);
     }
