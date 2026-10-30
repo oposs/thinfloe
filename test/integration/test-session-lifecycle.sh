@@ -61,7 +61,7 @@ run_session() {
     env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" \
         XDG_RUNTIME_DIR="$WORK" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
-        TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+        TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
         sh "$SESSION" >/dev/null 2>&1
 }
 
@@ -148,7 +148,7 @@ idle_args() { # sessionrc-content [extra env assignment]
     printf '#!/bin/sh\nsleep 0.3\nexit 0\n' >"$WORK/bin/menu"
     chmod 755 "$WORK/bin/menu"
     env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
-        TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+        TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
         sh "$SESSION" >/dev/null 2>&1
     cat "$WORK/swayidle.args" 2>/dev/null
 }
@@ -227,7 +227,7 @@ run_profile() { # menu-status [extra env assignments...]
     env -i PATH="$WORK/ps/bin:/usr/bin:/bin" HOME="$WORK/ps/home" \
         XDG_RUNTIME_DIR="$WORK/ps/run" STUB_MENU_RC="$menu_rc" \
         TF_SESSION_VERDICT="$VERDICT" TF_SESSION_FAILURES="$WORK/ps/failures" \
-        TF_PLYMOUTH_STEP="$WORK/ps/step" TF_WAIT_KMS=/bin/true \
+        TF_PLYMOUTH_STEP="$WORK/ps/step" TF_LABWC_SCALE=/bin/true TF_WAIT_KMS=/bin/true \
         PS_STEPS="$WORK/ps/steps" PS_OUT="$WORK/ps/out" "$@" \
         sh "$PROFILE" >"$WORK/ps/out" 2>&1
     ps_rc=$?

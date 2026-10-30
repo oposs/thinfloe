@@ -131,6 +131,13 @@ tf_hold() {
 sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
     >/dev/null 2>&1 || true
 
+# The title bars follow the menu's scale: drop a scale file left by an earlier
+# session (the helper would apply it before the menu has measured), then let
+# the helper wait for the menu's new one.
+rm -f "${TF_SCALE_FILE:-${XDG_RUNTIME_DIR:-/tmp}/thinfloe-scale}"
+"${TF_LABWC_SCALE:-/usr/libexec/thinfloe/labwc-scale}" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
+HELPER_PIDS="$HELPER_PIDS $!"
+
 "$TF_MENU"
 menu_rc=$?
 echo "$menu_rc" >"$TF_SESSION_STATUS" 2>/dev/null || true

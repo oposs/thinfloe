@@ -453,6 +453,7 @@ test: test-unit rootfs
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
 	@test/integration/test-squashfs-format.sh
 	@test/integration/test-labwc-config-merge.sh
+	@test/integration/test-labwc-scale.sh
 	@test/integration/test-initramfs-home.sh
 	@test/integration/test-esp-choice.sh
 	@test/integration/test-esp-grow.sh

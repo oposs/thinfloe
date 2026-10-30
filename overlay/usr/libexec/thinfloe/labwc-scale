@@ -1,0 +1,130 @@
+#!/bin/sh
+# Make labwc's title bars follow the scale thinfloe-menu chose.
+#
+# Usage: labwc-scale [--wait SECONDS]     (default 15)
+#
+# labwc runs every output at scale 1, so its title bars stay small on a HiDPI
+# screen. thinfloe-menu writes its scale to $XDG_RUNTIME_DIR/thinfloe-scale
+# (TF_SCALE_FILE overrides the path): one number from 0.5 to 8, same rule as
+# thinfloe-terminal. This helper waits for that file, then in the composed
+# config dir $XDG_RUNTIME_DIR/thinfloe-labwc (TF_LABWC_DIR) replaces the
+# symlinks rc.xml and themerc-override by scaled copies and runs
+# "labwc --reconfigure" (TF_LABWC overrides the command). /etc/thinfloe/labwc
+# is never edited.
+#
+#   rc.xml           the size="10" of each <font place=...> line becomes
+#                    round(10 * scale), in points (<theme><font size>)
+#   themerc-override these keys become round(value * scale); a key the file
+#                    lacks is appended with labwc 0.9.3's default as value
+#                    (docs/labwc-theme.5.scd):
+#                      padding.height                    4 in the file
+#                      window.titlebar.padding.width     8 in the file
+#                      window.titlebar.padding.height    default 0, kept as is
+#                      window.button.width               default 26
+#                      window.button.height              default 26
+#                      window.button.spacing             default 0, kept as is
+#
+# Nothing to do, and exit 0: no usable scale file in time, no composed dir
+# (the session fell back to /etc/thinfloe/labwc), or a scale that rounds to 1.
+# Any failure logs "thinfloe: title bar scale not applied: <why>" to stderr,
+# puts the symlinks back and exits 0. The title bars then keep size 10.
+
+wait_s=15
+if [ "${1:-}" = "--wait" ] && [ -n "${2:-}" ]; then
+    wait_s=$2
+fi
+
+scale_file=${TF_SCALE_FILE:-}
+if [ -z "$scale_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    scale_file=$XDG_RUNTIME_DIR/thinfloe-scale
+fi
+dir=${TF_LABWC_DIR:-}
+if [ -z "$dir" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    dir=$XDG_RUNTIME_DIR/thinfloe-labwc
+fi
+labwc=${TF_LABWC:-labwc}
+
+# The scale from the file, or nothing.
+read_scale() {
+    [ -n "$scale_file" ] && [ -r "$scale_file" ] || return 0
+    awk 'NR == 1 && NF == 1 && $1 ~ /^[0-9]+(\.[0-9]+)?$/ &&
+             $1 + 0 >= 0.5 && $1 + 0 <= 8 { print $1 + 0 }' "$scale_file" 2>/dev/null
+}
+
+scale=
+tries=$(awk -v w="$wait_s" 'BEGIN { print int(w * 5) }' 2>/dev/null)
+i=0
+while :; do
+    scale=$(read_scale)
+    [ -n "$scale" ] && break
+    [ "$i" -ge "${tries:-0}" ] && exit 0
+    i=$((i + 1))
+    sleep 0.2
+done
+
+[ -d "$dir" ] || exit 0
+[ "$(awk -v s="$scale" 'BEGIN { print (int(s * 10 + 0.5) == 10) ? 1 : 0 }')" = 1 ] && exit 0
+
+tmp_rc=
+tmp_theme=
+rc_link=
+theme_link=
+restore() {
+    [ -n "$tmp_rc" ] && rm -f "$tmp_rc"
+    [ -n "$tmp_theme" ] && rm -f "$tmp_theme"
+    [ -n "$rc_link" ] && ln -sfn "$rc_link" "$dir/rc.xml"
+    [ -n "$theme_link" ] && ln -sfn "$theme_link" "$dir/themerc-override"
+}
+fail() {
+    echo "thinfloe: title bar scale not applied: $1" >&2
+    restore
+    exit 0
+}
+
+[ -L "$dir/rc.xml" ] && [ -L "$dir/themerc-override" ] || fail "config files are not the expected links"
+rc_link=$(readlink "$dir/rc.xml")
+theme_link=$(readlink "$dir/themerc-override")
+[ -r "$dir/rc.xml" ] && [ -r "$dir/themerc-override" ] || fail "cannot read the system config"
+
+tmp_rc=$(mktemp "$dir/.rc.xml.XXXXXX") || fail "cannot write in $dir"
+tmp_theme=$(mktemp "$dir/.themerc-override.XXXXXX") || fail "cannot write in $dir"
+
+awk -v s="$scale" '
+    /<font place=/ && /size="10"/ {
+        sub(/size="10"/, "size=\"" int(10 * s + 0.5) "\"")
+    }
+    { print }' "$dir/rc.xml" >"$tmp_rc" || fail "cannot scale rc.xml"
+
+awk -v s="$scale" '
+    BEGIN {
+        base["padding.height"] = 0
+        base["window.titlebar.padding.width"] = 0
+        base["window.titlebar.padding.height"] = 0
+        base["window.button.width"] = 26
+        base["window.button.height"] = 26
+        base["window.button.spacing"] = 0
+    }
+    {
+        key = $1
+        sub(/:$/, "", key)
+        if (key in base && $1 ~ /:$/ && $2 ~ /^[0-9]+$/ && NF == 2) {
+            print $1 " " int($2 * s + 0.5)
+            seen[key] = 1
+        } else {
+            print
+        }
+    }
+    END {
+        for (k in base)
+            if (!(k in seen) && base[k] > 0)
+                print k ": " int(base[k] * s + 0.5)
+    }' "$dir/themerc-override" >"$tmp_theme" || fail "cannot scale themerc-override"
+
+chmod 644 "$tmp_rc" "$tmp_theme" 2>/dev/null
+mv -f "$tmp_rc" "$dir/rc.xml" || fail "cannot replace rc.xml"
+tmp_rc=
+mv -f "$tmp_theme" "$dir/themerc-override" || fail "cannot replace themerc-override"
+tmp_theme=
+
+"$labwc" --reconfigure >/dev/null 2>&1 || fail "labwc --reconfigure failed"
+exit 0
