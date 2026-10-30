@@ -1,25 +1,39 @@
 #!/bin/sh
-# Start foot with Smalti at 14 px, or at 28 px with double padding when a
-# screen is HiDPI.
+# Start foot with Smalti at a whole multiple of 14 px.
 #
-# Smalti is sharp only at whole multiples of its 14 px cell, and the session
-# runs every output at scale 1, so foot cannot tell a 4K screen from a 1080p
-# one by itself. A screen counts as HiDPI when the shorter side of its current
-# mode is 1800 px or more. With several screens the largest decides.
+# Smalti is sharp only at whole multiples of its 14 px cell, so the factor is
+# an integer. thinfloe-menu writes the scale it chose to
+# $XDG_RUNTIME_DIR/thinfloe-scale (TF_SCALE_FILE overrides the path): one
+# number from 0.5 to 8. The factor is that number rounded, at least 1. Without
+# a usable file the session runs every output at scale 1, so a screen counts
+# as HiDPI when the shorter side of its current mode is 1800 px or more (the
+# largest screen decides): factor 2, else 1. Padding is 12 px per factor.
 # /etc/xdg/foot/foot.ini holds the rest of the look.
 
-px=14
-pad=12
-short=$(wlr-randr 2>/dev/null | awk '
-    /current\)$/ {
-        split($1, m, "x")
-        s = (m[1] + 0 < m[2] + 0) ? m[1] + 0 : m[2] + 0
-        if (s > max) max = s
-    }
-    END { print max + 0 }')
-if [ "${short:-0}" -ge 1800 ]; then
-    px=28
-    pad=24
+scale_file=${TF_SCALE_FILE:-}
+if [ -z "$scale_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    scale_file=$XDG_RUNTIME_DIR/thinfloe-scale
 fi
+n=
+if [ -n "$scale_file" ] && [ -r "$scale_file" ]; then
+    n=$(awk 'NR == 1 && NF == 1 && $1 ~ /^[0-9]+(\.[0-9]+)?$/ &&
+                 $1 + 0 >= 0.5 && $1 + 0 <= 8 {
+                 n = int($1 + 0.5); print (n < 1 ? 1 : n) }' "$scale_file" 2>/dev/null)
+fi
+if [ -z "$n" ]; then
+    short=$(wlr-randr 2>/dev/null | awk '
+        /current\)$/ {
+            split($1, m, "x")
+            s = (m[1] + 0 < m[2] + 0) ? m[1] + 0 : m[2] + 0
+            if (s > max) max = s
+        }
+        END { print max + 0 }')
+    n=1
+    if [ "${short:-0}" -ge 1800 ]; then
+        n=2
+    fi
+fi
+px=$((14 * n))
+pad=$((12 * n))
 exec foot --override="main.font=Smalti 7x14:pixelsize=$px" \
     --override="main.pad=${pad}x${pad}" "$@"

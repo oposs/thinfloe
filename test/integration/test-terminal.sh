@@ -29,7 +29,10 @@ STUB
 chmod 755 "$work/bin/foot"
 
 # $1: the text wlr-randr prints, or "fail" for a wlr-randr that cannot connect.
+# $2: the content of the menu's scale file; without it there is no file.
 run() {
+    rm -f "$work/scale"
+    if [[ $# -ge 2 ]]; then printf '%s' "$2" >"$work/scale"; fi
     if [[ $1 == fail ]]; then
         printf '#!/bin/sh\necho "failed to connect to display" >&2\nexit 1\n' >"$work/bin/wlr-randr"
     else
@@ -37,7 +40,7 @@ run() {
     fi
     chmod 755 "$work/bin/wlr-randr"
     rm -f "$work/foot.args"
-    PATH="$work/bin:$PATH" "$WRAPPER" -e true
+    TF_SCALE_FILE="$work/scale" PATH="$work/bin:$PATH" "$WRAPPER" -e true
 }
 
 output() {  # name, mode, enabled
@@ -70,6 +73,19 @@ run "$(output DP-1 2160x3840 yes)";                             expect "4K rotat
 run "$(output DP-1 2560x1440 yes)";                             expect "1440p" 14
 run "$(output HDMI-A-1 1920x1080 yes; output DP-1 3840x2160 yes)"; expect "1080p and 4K" 28
 run fail;                                                       expect "no wlr-randr answer" 14
+
+# The menu's scale file wins over the wlr-randr rule.
+run "$(output HDMI-A-1 1920x1080 yes)" $'2.25\n';               expect "scale file 2.25" 28
+run "$(output HDMI-A-1 1920x1080 yes)" $'2.5\n';                expect "scale file 2.5" 42
+run "$(output HDMI-A-1 1920x1080 yes)" $'7.25\n';               expect "scale file 7.25" 98
+run "$(output DP-1 3840x2160 yes)" $'1\n';                      expect "scale file 1 on 4K" 14
+run "$(output DP-1 3840x2160 yes)" $'0.5\n';                    expect "scale file 0.5 on 4K" 14
+run "$(output DP-1 3840x2160 yes)";                             expect "no scale file, 4K" 28
+run fail;                                                       expect "no scale file, no wlr-randr" 14
+for bad_content in abc "" 0 100 $'2 3\n'; do
+    run "$(output DP-1 3840x2160 yes)" "$bad_content";          expect "unusable scale file '$bad_content', 4K" 28
+    run "$(output HDMI-A-1 1920x1080 yes)" "$bad_content";      expect "unusable scale file '$bad_content', 1080p" 14
+done
 
 if [[ -x $WRAPPER ]]; then ok "thinfloe-terminal is executable"; else bad "thinfloe-terminal is not executable"; fi
 
