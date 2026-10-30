@@ -681,11 +681,10 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
     clicked
 }
 
-/// The width of the state column of a Settings row.
-const STATE_WIDTH: f32 = 230.0;
-/// Every row's button is this wide, and a row without one keeps the room,
-/// so the buttons and the states of all rows line up.
-const ROW_BUTTON_W: f32 = 120.0;
+/// The left and right padding of a Settings row; the button ends `ROW_RIGHT` from its edge.
+const ROW_LEFT: i8 = 22;
+const ROW_RIGHT: i8 = 16;
+const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
@@ -733,18 +732,20 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                 ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette.muted_foreground));
             }
             ui.spacing_mut().item_spacing.y = TILE_GAP;
+            let row_inner = ui.available_width().min(width) - ROW_MARGIN_X;
             for row in rows {
                 // A TILE band; the ice edge on the left marks a waiting update.
                 let framed = egui::Frame::new()
                     .fill(TILE)
                     .inner_margin(egui::Margin {
-                        left: 22,
-                        right: 16,
+                        left: ROW_LEFT,
+                        right: ROW_RIGHT,
                         top: 12,
                         bottom: 12,
                     })
                     .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                        // Bounded by the panel, not by what a long text asked for before.
+                        ui.set_width(row_inner);
                         settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t)
                     });
                 if row.update_ready {
@@ -795,70 +796,77 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
             }
         }
         // The button first from the right, so the texts get what is left
-        // and a long source is cut instead of pushing it off the row.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = match row.button {
-                Some(RowButton::InstallNow) => Some("Install now"),
-                Some(RowButton::UpdateNow) => Some("Update now"),
-                None => None,
-            };
-            let slot = ui.allocate_ui_with_layout(
-                vec2(ROW_BUTTON_W, ROW_ICON),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(ROW_BUTTON_W);
-                    let b = Button::new(label?).min_width(ROW_BUTTON_W);
+        // and a long source is cut instead of pushing it off the row. A row
+        // without a button gives its text the whole width.
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), ROW_ICON),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let label = match row.button {
+                    Some(RowButton::InstallNow) => Some("Install now"),
+                    Some(RowButton::UpdateNow) => Some("Update now"),
+                    None => None,
+                };
+                if let Some(label) = label {
+                    let b = Button::new(label);
                     let b = if row.button == Some(RowButton::UpdateNow) {
                         b
                     } else {
                         b.variant(ButtonVariant::Secondary)
                     };
-                    Some(ui.add_enabled(!row.busy, b).clicked())
-                },
-            );
-            if slot.inner == Some(true) {
-                event = Some(match row.button {
-                    Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
-                    _ => SettingsEvent::InstallNow(row.id.clone()),
-                });
-            }
-            let one_line = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
-                let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-                job.wrap = TextWrapping::truncate_at_width(ui.available_width());
-                ui.label(job);
-            };
-            // The state is a right-aligned column: green when current, ice
-            // when an update waits.
-            let state = if row.busy {
-                format!("{} · working…", row.state)
-            } else {
-                row.state.clone()
-            };
-            let state_color = if row.update_ready {
-                ICE
-            } else if state.ends_with("up to date") {
-                GOOD
-            } else {
-                t.palette.foreground
-            };
-            ui.allocate_ui_with_layout(
-                vec2(STATE_WIDTH, ROW_ICON),
-                egui::Layout::top_down(egui::Align::Max).with_main_align(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(STATE_WIDTH);
-                    one_line(ui, &state, FontId::proportional(12.0), state_color);
-                    if row.manual {
-                        one_line(ui, settings::MANUAL_NOTE, FontId::proportional(12.0), WARN);
+                    if ui.add_enabled(!row.busy, b).clicked() {
+                        event = Some(match row.button {
+                            Some(RowButton::UpdateNow) => SettingsEvent::UpdateNow(row.id.clone()),
+                            _ => SettingsEvent::InstallNow(row.id.clone()),
+                        });
                     }
-                },
-            );
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                one_line(ui, &row.name, brand::geo(20.0), t.palette.foreground);
-                if let Some(source) = &row.source {
-                    one_line(ui, source, FontId::monospace(11.0), MUTED);
                 }
-            });
-        });
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), ROW_ICON),
+                    egui::Layout::top_down(egui::Align::Min).with_main_align(egui::Align::Center),
+                    |ui| {
+                        ui.set_max_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        // Not `horizontal`: its minimum height would grow the row past its icon.
+                        ui.allocate_ui_with_layout(
+                            vec2(ui.available_width(), 22.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                ui.label(
+                                    egui::RichText::new(&row.name)
+                                        .font(brand::geo(20.0))
+                                        .color(t.palette.foreground),
+                                );
+                                if let Some(source) = &row.source {
+                                    let job =
+                                        LayoutJob::simple_singleline(source.clone(), FontId::monospace(11.0), MUTED);
+                                    // A horizontal layout lets a label extend; cut it instead.
+                                    ui.add(egui::Label::new(job).truncate());
+                                }
+                            },
+                        );
+                        // One line: the items joined by dots, each in its tone.
+                        let font = FontId::proportional(12.0);
+                        let mut job = LayoutJob::default();
+                        for (i, (text, tone)) in settings::status_items(row).into_iter().enumerate() {
+                            if i > 0 {
+                                job.append(" · ", 0.0, egui::TextFormat::simple(font.clone(), MUTED));
+                            }
+                            let color = match tone {
+                                settings::Tone::Plain => t.palette.foreground,
+                                settings::Tone::Good => GOOD,
+                                settings::Tone::Ice => ICE,
+                                settings::Tone::Warn => WARN,
+                            };
+                            job.append(&text, 0.0, egui::TextFormat::simple(font.clone(), color));
+                        }
+                        job.wrap = TextWrapping::truncate_at_width(ui.available_width());
+                        ui.label(job);
+                    },
+                );
+            },
+        );
     });
     event
 }
@@ -1384,8 +1392,7 @@ mod tests {
             "Back",
             "ThinLinc",
             "https://e.example/dl",
-            "not installed · install failed: HTTP 404",
-            "updates only by hand",
+            "not installed · install failed: HTTP 404 · updates only by hand",
             "Install now",
         ] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
@@ -2113,55 +2120,147 @@ mod tests {
         assert!(strip.height() > 0.0);
     }
 
-    #[test]
-    fn settings_buttons_and_states_line_up_and_nothing_is_rounded() {
-        let (mut menu, _) = four_addons();
-        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
-        menu.activate(settings, Instant::now());
+    /// The shapes of the Settings screen of `menu` on a `w` x `h` screen.
+    fn settings_shapes(menu: &Menu, w: f32, h: f32) -> Vec<egui::epaint::ClippedShape> {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let input = egui::RawInput {
-            screen_rect: Some(screen(1280.0, 720.0)),
+            screen_rect: Some(screen(w, h)),
             ..Default::default()
         };
         let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let mut shapes = vec![];
         for _ in 0..2 {
             let mut o = ctx.run_ui(input.clone(), |ui| {
-                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+                show(ui, menu, &icons, &Chrome::default(), Instant::now());
             });
             o.textures_delta.clear();
             shapes = o.shapes;
         }
-        let mut buttons = vec![];
-        let mut states = vec![];
-        for c in &shapes {
-            match &c.shape {
+        shapes
+    }
+
+    /// The Settings menu of `four_addons()`, open.
+    fn open_settings() -> Menu {
+        let (mut menu, _) = four_addons();
+        let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
+        menu.activate(settings, Instant::now());
+        menu
+    }
+
+    fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
                 egui::Shape::Text(t) => {
-                    let r = t.galley.rect.translate(t.pos.to_vec2());
-                    let text = t.galley.text();
-                    if text == "Install now" || text == "Update now" {
-                        buttons.push(r.center().x);
-                    } else if text.contains("up to date") || text.contains("installed") {
-                        states.push(r.right());
-                    }
+                    // What is drawn: a cut-off line ends with the ellipsis glyph.
+                    let drawn: String = t.galley.rows.iter().map(|r| r.text()).collect();
+                    Some((drawn, t.galley.rect.translate(t.pos.to_vec2())))
                 }
-                egui::Shape::Rect(r) => {
-                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect)
-                }
-                _ => {}
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn row_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                // The log below is TILE-filled too; a row is far lower.
+                egui::Shape::Rect(r) if r.fill == TILE && r.rect.height() < 200.0 => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn settings_draws_nothing_rounded() {
+        let shapes = settings_shapes(&open_settings(), 1280.0, 720.0);
+        for c in &shapes {
+            if let egui::Shape::Rect(r) = &c.shape {
+                assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect);
             }
         }
-        assert_eq!(buttons.len(), 3, "{buttons:?}");
-        assert!(
-            buttons.iter().all(|x| (x - buttons[0]).abs() < 0.5),
-            "button labels {buttons:?}"
-        );
-        assert_eq!(states.len(), 4, "{states:?}");
-        assert!(
-            states.iter().all(|x| (x - states[0]).abs() < 0.5),
-            "state columns {states:?}"
-        );
+    }
+
+    #[test]
+    fn the_settings_panel_is_as_wide_as_the_tile_group() {
+        let rows = row_rects(&settings_shapes(&open_settings(), 1920.0, 1080.0));
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        for r in rows {
+            assert!((r.width() - GROUP_W).abs() < 1.0, "{r:?}");
+            assert!((r.center().x - 960.0).abs() < 1.0, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_row_lays_out_name_source_then_status_line_and_button_right() {
+        let shapes = settings_shapes(&open_settings(), 1920.0, 1080.0);
+        let texts = text_rects(&shapes);
+        let rows = row_rects(&shapes);
+        let mut buttons = 0;
+        for row in rows {
+            let inside: Vec<_> = texts.iter().filter(|(_, r)| row.contains_rect(*r)).collect();
+            let find = |f: &dyn Fn(&str) -> bool| inside.iter().find(|(t, _)| f(t)).map(|(_, r)| *r);
+            let name = find(&|t| ["ThinLinc", "OxuLnk", "Remmina", "Manual tool"].contains(&t)).expect("name");
+            let source = find(&|t| t.starts_with("https://")).expect("source");
+            let status = find(&|t| t.contains("installed") || t.contains("up to date")).expect("status");
+            assert!(source.left() > name.right(), "{name:?} {source:?}");
+            assert!((source.center().y - name.center().y).abs() < 2.0, "{name:?} {source:?}");
+            assert!(status.top() >= name.bottom() - 0.5, "{name:?} {status:?}");
+            if let Some(b) = find(&|t| t == "Install now" || t == "Update now") {
+                buttons += 1;
+                // The label sits inside the button's own padding: the button
+                // is the smallest drawn rect around it.
+                let face = shapes
+                    .iter()
+                    .filter_map(|c| match &c.shape {
+                        egui::Shape::Rect(r) if r.rect.contains_rect(b) && r.rect.width() < row.width() => Some(r.rect),
+                        _ => None,
+                    })
+                    .min_by(|x, y| x.area().total_cmp(&y.area()))
+                    .expect("button face");
+                assert!((face.right() - (row.right() - 16.0)).abs() < 2.0, "{face:?} {row:?}");
+                assert!((b.center().y - row.center().y).abs() < 2.0, "{b:?} {row:?}");
+            }
+        }
+        assert_eq!(buttons, 3);
+    }
+
+    /// `four_addons()` with the source of the tile `name` replaced by 300 `x`.
+    fn long_source_shapes(name: &str) -> (Vec<egui::epaint::ClippedShape>, String) {
+        let mut menu = open_settings();
+        let i = menu.tiles.iter().position(|t| t.name == name).unwrap();
+        let long = "x".repeat(300);
+        menu.tiles[i].source = Some(long.clone());
+        (settings_shapes(&menu, 1920.0, 1080.0), long)
+    }
+
+    #[test]
+    fn a_row_without_a_button_reaches_the_right_padding() {
+        // OxuLnk is installed and current: no button.
+        let (shapes, long) = long_source_shapes("OxuLnk");
+        let texts = text_rects(&shapes);
+        let (text, src) = texts
+            .iter()
+            .find(|(t, _)| t.starts_with('x'))
+            .expect("source not drawn");
+        assert!(text.ends_with('…') && text.len() < long.len(), "{text} {src:?}");
+        let row = row_rects(&shapes).into_iter().find(|r| r.contains_rect(*src)).unwrap();
+        assert!(src.right() > row.right() - 16.0 - 8.0, "{src:?} {row:?}");
+    }
+
+    #[test]
+    fn a_long_source_does_not_push_the_button_off() {
+        // ThinLinc has Update now.
+        let (shapes, _) = long_source_shapes("ThinLinc");
+        let texts = text_rects(&shapes);
+        let (text, src) = texts.iter().find(|(t, _)| t.starts_with('x')).expect("source");
+        let (_, button) = texts.iter().find(|(t, _)| t == "Update now").expect("button");
+        assert!(text.ends_with('…'), "{text}");
+        let row = row_rects(&shapes).into_iter().find(|r| r.contains_rect(*src)).unwrap();
+        assert!(row.contains_rect(*button), "{button:?} {row:?}");
+        assert!(src.right() <= button.left(), "{src:?} {button:?}");
     }
 
     #[test]

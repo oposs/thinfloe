@@ -50,6 +50,40 @@ pub struct Row {
     pub unusable: bool,
 }
 
+/// How a status item is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Plain,
+    Good,
+    Ice,
+    Warn,
+}
+
+/// The items of a row's status line, each with its colour.
+pub fn status_items(row: &Row) -> Vec<(String, Tone)> {
+    let mut items: Vec<(String, Tone)> = row
+        .state
+        .split(" · ")
+        .map(|s| {
+            let tone = if s == "up to date" {
+                Tone::Good
+            } else if s.ends_with("ready for next boot") {
+                Tone::Ice
+            } else {
+                Tone::Plain
+            };
+            (s.to_string(), tone)
+        })
+        .collect();
+    if row.busy {
+        items.push(("working…".to_string(), Tone::Plain));
+    }
+    if row.manual {
+        items.push((MANUAL_NOTE.to_string(), Tone::Warn));
+    }
+    items
+}
+
 pub const MANUAL_NOTE: &str = "updates only by hand";
 
 /// Why is in the add-on log: thinfloe-addon names the file and the rule.
@@ -248,6 +282,47 @@ mod tests {
             auto,
             message: Some("HTTP 404".into()),
         }
+    }
+
+    #[test]
+    fn status_items_keep_their_colours() {
+        let mut row = Row {
+            tile: 0,
+            id: "a".into(),
+            name: "A".into(),
+            source: None,
+            ticked: true,
+            state: "1.4.2 installed · 1.5.0 ready for next boot".into(),
+            button: None,
+            manual: false,
+            busy: false,
+            update_ready: true,
+            unusable: false,
+        };
+        let own = |v: Vec<(&str, Tone)>| v.into_iter().map(|(s, t)| (s.to_string(), t)).collect::<Vec<_>>();
+        assert_eq!(
+            status_items(&row),
+            own(vec![
+                ("1.4.2 installed", Tone::Plain),
+                ("1.5.0 ready for next boot", Tone::Ice)
+            ])
+        );
+        row.state = "2.0 · up to date".into();
+        row.manual = true;
+        assert_eq!(
+            status_items(&row),
+            own(vec![
+                ("2.0", Tone::Plain),
+                ("up to date", Tone::Good),
+                ("updates only by hand", Tone::Warn)
+            ])
+        );
+        row.manual = false;
+        row.busy = true;
+        assert_eq!(
+            status_items(&row).last().unwrap(),
+            &("working…".to_string(), Tone::Plain)
+        );
     }
 
     #[test]
