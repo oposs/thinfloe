@@ -1207,19 +1207,23 @@ mod tests {
         let open = layout(screen(1920.0, 1080.0), 8, 0);
         let folded = layout(screen(1920.0, 1080.0), 8, 1);
         assert_eq!(open.area, folded.area);
+        assert_eq!(open.grid, folded.grid);
         assert_eq!(open.log.top(), folded.log.top());
         assert_eq!(folded.log.bottom(), folded.strip.unwrap().top() - STRIP_GAP);
     }
 
     #[test]
     fn the_log_keeps_its_minimum_and_the_area_gives_the_rest() {
+        // 0.3 * 600 = 180 is 16 above the minimum, less than STRIP_H + STRIP_GAP.
+        let min = LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
         let open = layout(screen(1024.0, 600.0), 8, 0);
         let folded = layout(screen(1024.0, 600.0), 8, 1);
-        assert!(
-            folded.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD,
-            "{:?}",
-            folded.log
-        );
+        assert!(open.log.height() - min < STRIP_H + STRIP_GAP, "{:?}", open.log);
+        assert!(open.log.height() > min, "{:?}", open.log);
+        assert!((folded.log.height() - min).abs() < 0.5, "{:?}", folded.log);
+        let strip = folded.strip.unwrap();
+        assert!((folded.log.bottom() - (strip.top() - STRIP_GAP)).abs() < 0.5);
+        assert_eq!(folded.area.bottom(), folded.log.top());
         assert!(folded.area.bottom() < open.area.bottom());
     }
 
