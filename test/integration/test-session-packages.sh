@@ -851,6 +851,25 @@ else
     fail=1
 fi
 
+# Audio devices start at full level, so the remote client sets the loudness.
+# WirePlumber's own default for outputs is 0.064 (about -24 dB). Ask the
+# image's WirePlumber, so a drop-in it does not parse fails here too.
+present "WirePlumber volume drop-in" 'etc/wireplumber/wireplumber\.conf\.d/50-thinfloe-volume\.conf$'
+# shellcheck disable=SC2016
+WP_PROBE='export XDG_RUNTIME_DIR=/tmp/rt; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+pipewire >/dev/null 2>&1 & sleep 1
+wireplumber >/dev/null 2>&1 & sleep 3
+for k in sink source; do
+    printf "%s " "$k"; wpctl settings "device.routes.default-$k-volume" | sed -n "s/^Value: //p"
+done'
+wp_out=$(timeout 60 podman run --rm --log-driver=none --network=none "$IMAGE" sh -c "$WP_PROBE" 2>/dev/null)
+if [[ "$wp_out" == $'sink 1.0\nsource 1.0' ]]; then
+    echo "ok   - WirePlumber starts outputs and inputs at full volume"
+else
+    echo "FAIL - WirePlumber default device volumes are not 1.0: ${wp_out:-no answer}"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

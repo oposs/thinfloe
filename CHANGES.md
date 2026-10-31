@@ -44,6 +44,7 @@
 
 ### Fixed
 
+- Sound from ThinLinc and OxuLnk played quietly, because the speakers and headphones started at 40 % on every boot and the machine has no volume control. Outputs and microphones now start at 100 %, so the remote desktop sets the loudness. A volume set by hand with `wpctl` or `pactl` is kept.
 - With two monitors, window title bars grew while a fullscreen program such as OxuLnk or ThinLinc covered the menu, and shrank back only when the menu happened to redraw, for example when a window was moved. The title bars and the menu now keep their size.
 - When the graphics driver took over the screen during boot, the boot picture shrank into the top-left corner of a large monitor. It now fills the largest monitor again. A smaller second monitor shows the middle of the picture.
 - On machines whose graphics driver loads late (AMD, NVIDIA), the boot screen showed "Starting SSH" for up to 20 seconds while the machine waited for the driver; it now shows "Waiting for the graphics driver".

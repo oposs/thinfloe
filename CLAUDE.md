@@ -248,6 +248,16 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `test/integration/test-terminal.sh`. The ignored test
   `shot_desktop_and_settings_at_densities` writes PPM pictures at 1080p, 4K
   and a 21 inch 4K.
+- Audio volume: `overlay/etc/wireplumber/wireplumber.conf.d/50-thinfloe-volume.conf`
+  sets `device.routes.default-sink-volume` and `-source-volume` to 1.0, so
+  the remote client (ThinLinc through `tlclient-pulseaudio`, OxuLnk through
+  `pipewire-alsa`) sets the loudness. WirePlumber 0.5.13's own output
+  default is 0.064 (40 % cubic, about -24 dB), and the image has no volume
+  control at the machine. The default is applied with `save = false`
+  (`apply-routes.lua`) and never stored; a volume set with `wpctl`/`pactl`
+  is stored in `~/.local/state/wireplumber/default-routes`, travels with the
+  home archive and wins. `test-session-packages.sh` asks the image's
+  WirePlumber for both values. **Not verified on hardware.**
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
