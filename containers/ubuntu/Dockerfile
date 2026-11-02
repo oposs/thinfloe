@@ -214,8 +214,8 @@ RUN curl -fsSL -o /tmp/fonts-smalti.deb \
 # fat32expander grows the ESP in the initramfs (90thinfloe/grow-esp.sh). A
 # static binary, not in the Ubuntu archive; the release .deb is pinned by
 # version and hash. It must be here before dracut runs below.
-ARG FAT32EXPANDER_VERSION=0.1.0
-ARG FAT32EXPANDER_SHA256=ac699743566ebec15822617b296acde4b8f6d517bd4d3ce78e22126923b90fe7
+ARG FAT32EXPANDER_VERSION=0.1.2
+ARG FAT32EXPANDER_SHA256=dd82898e247f7e1855fd81a2772505223b59ed570d0e51fe19c66cd9a60cc6c8
 RUN curl -fsSL -o /tmp/fat32expander.deb \
         "https://github.com/oetiker/fat32expander/releases/download/v${FAT32EXPANDER_VERSION}/fat32expander_${FAT32EXPANDER_VERSION}-1_amd64.deb" && \
     echo "${FAT32EXPANDER_SHA256}  /tmp/fat32expander.deb" | sha256sum -c - && \
