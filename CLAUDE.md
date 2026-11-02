@@ -1197,6 +1197,13 @@ boot sector lacks `55 aa`. Neither failure stops the boot.
 - **The cap.** The initramfs runs `fsck.fat` on the ESP at every boot,
   about 3 s for 15 GB; 6 GiB keeps that short. The stick has the rest of
   its space unused.
+- **Cluster size.** `make-bootable-image.sh` formats the ESP with 4 KiB
+  clusters (`-S 512 -s 8`). UEFI needs the 512-byte *sector* size to match
+  the stick; it sets no cluster size, and 3000 MB at 4 KiB is about 768000
+  clusters, far above the 65525 that FAT32 needs. Earlier images used
+  `-s 1`: eight times the clusters, a FAT eight times larger, and a resize
+  that moves 1.5 million clusters instead of 190000. Sticks made from them
+  keep 512-byte clusters. **Not verified on hardware** yet with 4 KiB.
 - **Progress.** `fat32expander` 0.1.0 prints none. `tf_resize_fat` takes the
   byte count from its dry run (`Planned data shift for N clusters (B
   bytes)`) and divides the sectors written to the disk since the start

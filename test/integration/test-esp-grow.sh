@@ -51,7 +51,7 @@ size_case "the image itself (3002 MiB)"                2048 6144000 6150144  ""
 # --- does the FAT32 need fat32expander? -------------------------------------
 img="$WORK/fs.img"
 truncate -s 3000M "$img"
-mkfs.fat -I -S 512 -s 1 -n EFI-SYSTEM "$img" >/dev/null
+mkfs.fat -I -S 512 -s 8 -n EFI-SYSTEM "$img" >/dev/null
 if ! tf_fat_needs_resize "$img" 6144000; then
     ok "a fresh mkfs.fat filling its partition needs no resize"
 else
