@@ -1204,7 +1204,7 @@ boot sector lacks `55 aa`. Neither failure stops the boot.
   `-s 1`: eight times the clusters, a FAT eight times larger, and a resize
   that moves 1.5 million clusters instead of 190000. Sticks made from them
   keep 512-byte clusters. **Not verified on hardware** yet with 4 KiB.
-- **Progress.** `fat32expander` 0.1.0 prints none. `tf_resize_fat` takes the
+- **Progress.** `fat32expander` 0.1.2 prints none. `tf_resize_fat` takes the
   byte count from its dry run (`Planned data shift for N clusters (B
   bytes)`) and divides the sectors written to the disk since the start
   (`/proc/diskstats` field 10) by it, capped at 99: "Enlarging the boot
