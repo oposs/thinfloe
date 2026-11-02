@@ -22,6 +22,7 @@
 - The menu header reads "by oetiker.ai" under the name and sits further from the screen edges.
 - The Terminal tile's font and margin, and the window title bars, follow the same screen density as the menu.
 - The first boot of a stick larger than its image enlarges the boot partition to the end of the stick, at most 6 GiB, so there is room for later upgrades, add-ons and the saved home. The boot screen shows "Enlarging the boot stick, once: NN % - do not switch off" while it works. Sticks already in use with 2000 MB are enlarged the same way.
+- New images format the boot partition with 4 KiB clusters instead of 512-byte ones, so "Enlarging the boot stick, once" at the first boot and the check of the boot partition at every boot have an eighth of the clusters to handle. Sticks already in use keep their clusters.
 - The Terminal tile opens a terminal in the menu's colours, with the Smalti pixel font, a margin around the text and room for 100 columns; the font and margin grow with the screen's pixel density. While you scroll back, a box on the right edge shows where you are.
 - On Intel graphics the boot picture is meant to stay on screen until the menu appears, instead of going dark for about 10 seconds or not showing at all on some older machines.
 - The boot screen shows what the machine is doing on a line above the host name, for example "Restoring the home directory", "Installing ThinLinc" or "Starting the session", and stays up until the menu appears.

@@ -42,7 +42,7 @@ sgdisk --new=1::+$((EFI_PARTITION_SIZE))M \
        --hybrid=1 "$IMG" > /dev/null
 
 log_step "Formatting FAT32 filesystem..."
-mkfs.fat -v -I -S 512 -s 1 --offset 2048 -n EFI-SYSTEM "$IMG" $((EFI_PARTITION_SIZE*1024)) > /dev/null
+mkfs.fat -v -I -S 512 -s 8 --offset 2048 -n EFI-SYSTEM "$IMG" $((EFI_PARTITION_SIZE*1024)) > /dev/null
 
 log_step "Installing SYSLINUX bootloader..."
 MD="mmd -i ${IMG}@@1M"
