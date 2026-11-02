@@ -1,0 +1,84 @@
+# THROWAWAY: measures whether a standard GitHub runner can build the image
+# and run the full gates. Lives on branch spike/gh-runner only.
+name: spike-runner
+on:
+  push:
+    branches: [spike/gh-runner]
+  workflow_dispatch:
+
+jobs:
+  full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      VERSION: spike
+      TMPDIR: /mnt/work/tmp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner facts
+        run: |
+          nproc; free -g; df -h / /mnt; ls -l /dev/kvm || true
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          podman --version; cat /sys/fs/cgroup/cgroup.controllers
+          cat /sys/fs/cgroup/user.slice/cgroup.subtree_control 2>/dev/null || true
+
+      - name: Free disk, use /mnt
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null || true
+          sudo mkdir -p /mnt/work/tmp /mnt/work/containers /mnt/work/artifacts
+          sudo chown -R runner:runner /mnt/work
+          mkdir -p ~/.config/containers
+          printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/work/containers"\n' > ~/.config/containers/storage.conf
+          rm artifacts && ln -s /mnt/work/artifacts artifacts
+          df -h / /mnt
+
+      - name: Host tools, KVM, user namespaces
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-x86 qemu-utils ovmf squashfs-tools zstd mtools gdisk dosfstools dnsmasq-base dracut-core expect file python3
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ls -l /dev/kvm
+
+      - name: make image
+        run: |
+          start=$(date +%s)
+          make VERSION=$VERSION image 2>&1 | tee /mnt/work/build.log | tail -40
+          echo "image: $(( $(date +%s) - start )) s"; df -h / /mnt
+          ls -l artifacts/rootfs artifacts/images
+
+      - name: make test
+        continue-on-error: true
+        run: |
+          start=$(date +%s)
+          make VERSION=$VERSION test 2>&1 | tee /mnt/work/test.log | grep -E '^(FAIL|PASSED|FAILED)' ; s=${PIPESTATUS[0]}
+          echo "test: exit $s, $(( $(date +%s) - start )) s, ok=$(grep -c '^ok' /mnt/work/test.log)"; exit $s
+
+      - name: make test-runtime
+        continue-on-error: true
+        run: |
+          start=$(date +%s)
+          make VERSION=$VERSION test-runtime 2>&1 | tee /mnt/work/runtime.log | tail -20; s=${PIPESTATUS[0]}
+          echo "runtime: exit $s, $(( $(date +%s) - start )) s"; exit $s
+
+      - name: QEMU smoke tests
+        continue-on-error: true
+        run: |
+          rc=0
+          for t in qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-grow; do
+            start=$(date +%s)
+            if make VERSION=$VERSION $t >/mnt/work/$t.log 2>&1; then r=PASS; else r=FAIL; rc=1; fi
+            echo "$t: $r $(( $(date +%s) - start )) s"
+            [ $r = FAIL ] && tail -25 /mnt/work/$t.log
+          done
+          df -h / /mnt; exit $rc
+
+      - name: Keep logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-logs
+          path: /mnt/work/*.log
