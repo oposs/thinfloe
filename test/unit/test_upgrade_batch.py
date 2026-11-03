@@ -9,6 +9,7 @@ import errno
 import io
 import json
 import os
+import signal
 import subprocess
 import threading
 import tempfile
@@ -1024,6 +1025,164 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
         p.result(False, "a")
         p.result(False, "b")
         self.assertEqual(out.getvalue(), "@result failed a\n")
+
+
+class TestBatchUpgrade(unittest.TestCase):
+    CFG = "DEFAULT current\nLABEL current\n  KERNEL /tl/vmlinuz\n  APPEND ramroot=tl/ramroot.sqsh\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.esp = root / "esp"
+        self.srv = root / "srv"
+        (self.esp / "tl").mkdir(parents=True)
+        (self.esp / "efi" / "boot").mkdir(parents=True)
+        self.srv.mkdir()
+        for f in ui.FIRMWARE_FILES:
+            (self.esp / "tl" / f).write_text("old " + f)
+            (self.srv / f).write_text("new " + f * 100)
+        for c in self.cfgs():
+            c.write_text(self.CFG)
+        self.before = [c.read_bytes() for c in self.cfgs()]
+        self.url = "file://" + str(self.srv)
+        self.save = mock.Mock(return_value=0)
+        for m in (
+            mock.patch.object(ui, "BOOT_EFI_MOUNT", str(self.esp)),
+            mock.patch.object(ui.os.path, "ismount", return_value=True),
+            mock.patch.object(ui, "save_home_before_finish", self.save),
+        ):
+            m.start()
+            self.addCleanup(m.stop)
+        self.drive = ui.DriveInfo("/dev/sdz", "16G", "Test", "", True,
+                                  "/dev/sdz1", 1024, True, False, False)
+
+    def cfgs(self):
+        return [self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg"]
+
+    def checksums(self, bad=None):
+        for f in ui.FIRMWARE_FILES:
+            digest = hashlib.sha256((self.srv / f).read_bytes()).hexdigest()
+            if f == bad:
+                digest = "0" * 64
+            (self.srv / (f + ".sha256")).write_text(f"{digest}  {f}\n")
+
+    def run_upgrade(self):
+        import types
+        args = types.SimpleNamespace(source=self.url)
+        out = io.StringIO()
+        prog = ui.Progress(out, True, 0)
+        old = signal.signal(signal.SIGTERM, ui._cancel_on_signal)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    rc = ui.batch_upgrade(self.drive, args, prog)
+                except ui.Cancelled:
+                    prog.result(False, "cancelled")
+                    rc = 130
+        finally:
+            signal.signal(signal.SIGTERM, old)
+        return rc, out.getvalue()
+
+    def assertStickUntouched(self):
+        self.assertEqual([c.read_bytes() for c in self.cfgs()], self.before)
+        self.assertFalse((self.esp / "tl.new").exists())
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
+
+    def test_success_steps_in_order(self):
+        self.checksums()
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([l.split()[1] for l in out.splitlines() if l.startswith("@step")],
+                         ["save", "download", "check", "switch"])
+        self.assertEqual([l.split()[1] for l in out.splitlines() if l.startswith("@done")],
+                         ["save", "download", "check", "switch"])
+        self.assertTrue(out.rstrip().endswith("@result ok"))
+        total = sum((self.srv / f).stat().st_size for f in ui.FIRMWARE_FILES)
+        self.assertIn(f"@progress {total} {total}", out)
+        for c in self.cfgs():
+            self.assertIn("DEFAULT new", c.read_text())
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl.new" / f).read_bytes(), (self.srv / f).read_bytes())
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
+
+    def test_missing_checksum_is_logged_not_fatal(self):
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("checksum not checked: ramroot.sqsh.sha256 not found", out)
+
+    def test_failed_save_stops_before_download(self):
+        self.save.return_value = 5
+        with mock.patch.object(ui, "download_firmware") as dl:
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1)
+        dl.assert_not_called()
+        self.assertIn("@result failed the home directory could not be saved", out)
+        self.assertNotIn("@step download", out)
+        self.assertStickUntouched()
+
+    def test_download_failure_leaves_stick(self):
+        (self.srv / "ramroot.sqsh").unlink()
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed downloading ramroot.sqsh failed", out)
+        self.assertNotIn("@step switch", out)
+        self.assertStickUntouched()
+
+    def test_checksum_mismatch_leaves_stick(self):
+        self.checksums(bad="ramroot.sqsh")
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed the download of ramroot.sqsh was damaged", out)
+        self.assertNotIn("@step switch", out)
+        self.assertStickUntouched()
+
+    def test_too_little_space_leaves_stick(self):
+        with mock.patch.object(ui, "free_bytes", return_value=0):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Not enough space", out)
+        self.assertStickUntouched()
+
+    def test_sigterm_during_upgrade_keeps_stick_bootable(self):
+        # The last file never arrives: curl blocks opening a fifo with no writer.
+        (self.srv / "ramroot.sqsh").unlink()
+        os.mkfifo(self.srv / "ramroot.sqsh")
+        timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGTERM))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        with mock.patch.object(ui, "_content_length", return_value=None):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 130, out)
+        self.assertIn("@result failed cancelled", out)
+        self.assertStickUntouched()
+
+    def test_a_failed_copy_removes_the_partial_tl_new(self):
+        run = ui.run_cmd
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed the new release could not be installed", out)
+        self.assertStickUntouched()
+
+    def test_the_switch_ignores_sigterm_and_restores_the_handler(self):
+        real = ui.set_boot_default
+        seen = []
+        def term_then_set(*a):
+            os.kill(os.getpid(), signal.SIGTERM)  # ignored during the switch
+            seen.append(signal.getsignal(signal.SIGTERM))
+            return real(*a)
+        with mock.patch.object(ui, "set_boot_default", side_effect=term_then_set):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, [signal.SIG_IGN])
+        for c in self.cfgs():
+            self.assertIn("DEFAULT new", c.read_text())
 
 
 class TestEnsureRootBatch(unittest.TestCase):

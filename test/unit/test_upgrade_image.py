@@ -1228,6 +1228,7 @@ class TestAbUpgradeBootDefault(unittest.TestCase):
             (fw / f).write_text("new")
         patches = [
             mock.patch.object(ui, "download_firmware", return_value=str(fw)),
+            mock.patch.object(ui, "expected_download_sha256", return_value=None),
             mock.patch.object(ui, "BOOT_EFI_MOUNT", str(self.esp)),
             mock.patch.object(ui.os.path, "ismount", return_value=True),
         ]

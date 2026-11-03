@@ -8,6 +8,7 @@ Supports A/B updates for existing ThinFloe drives, or fresh install for new driv
 
 import argparse
 import atexit
+import contextlib
 import errno
 import fcntl
 import fnmatch
@@ -588,29 +589,92 @@ def select_source() -> Optional[str]:
 
 # ============ Firmware Download ============
 
-def download_file(url: str, dest: str) -> bool:
-    """Download a file with progress"""
-    print(f"  Downloading {os.path.basename(url)}...")
-    result = subprocess.run(
-        ["curl", "-L", "--progress-bar", "-o", dest, url],
-        check=False
-    )
-    return result.returncode == 0
+def _content_length(url: str) -> Optional[int]:
+    """Content-Length of the final response for url, None when unknown."""
+    try:
+        r = subprocess.run(["curl", "-sSfIL", "--max-time", "60", url],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=90)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    # Headers of every hop, separated by blank lines; the last block is final.
+    blocks = [b for b in re.split(r"\r?\n\r?\n", r.stdout.decode("latin-1")) if b.strip()]
+    if not blocks:
+        return None
+    for line in blocks[-1].splitlines():
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "content-length":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
 
 
-def download_firmware(base_url: str, work_dir: str) -> str:
-    """Download firmware files from URL, returns path to firmware directory"""
+def download_file(url: str, dest: str, on_bytes=None) -> None:
+    """Download url into dest; raises WriteFailed with curl's last line.
+
+    Read through a pipe so the caller sees every block (progress, and a
+    cancel arrives between reads). A stalled connection ends after 60 s.
+    """
+    name = os.path.basename(url)
+    err = tempfile.TemporaryFile()
+    try:
+        curl = subprocess.Popen(
+            ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60", url],
+            stdout=subprocess.PIPE, stderr=err)
+    except OSError as e:
+        err.close()
+        raise WriteFailed(f"could not start curl: {e}")
+    try:
+        with open(dest, "wb") as out:
+            while True:
+                block = curl.stdout.read(WRITE_BLOCK)
+                if not block:
+                    break
+                out.write(block)
+                if on_bytes is not None:
+                    on_bytes(len(block))
+            out.flush()
+            os.fsync(out.fileno())
+        if curl.wait() != 0:
+            raise WriteFailed(f"downloading {name} failed{_last_line(err)}")
+    except OSError as e:
+        raise WriteFailed(f"could not store {name}: {e}")
+    finally:
+        if curl.poll() is None:
+            curl.kill()
+        curl.wait()
+        curl.stdout.close()
+        err.close()
+
+
+def download_firmware(base_url: str, work_dir: str, progress: Progress) -> str:
+    """Download the firmware files; returns the directory holding them.
+
+    One progress bar covers all files; its total is the sum of their
+    Content-Length, unknown if any is missing. Raises WriteFailed.
+    """
     log(f"Downloading firmware from {base_url}...")
-
     firmware_dir = os.path.join(work_dir, "firmware")
     os.makedirs(firmware_dir, exist_ok=True)
 
-    for filename in FIRMWARE_FILES:
-        url = f"{base_url}/{filename}"
-        dest = os.path.join(firmware_dir, filename)
-        if not download_file(url, dest):
-            die(f"Failed to download {filename}")
+    sizes = [_content_length(f"{base_url}/{n}") for n in FIRMWARE_FILES]
+    total = None if any(x is None for x in sizes) else sum(sizes)
+    done = [0]
 
+    def on_bytes(n: int) -> None:
+        done[0] += n
+        progress.progress(done[0], total)
+
+    progress.progress(0, total)
+    for filename in FIRMWARE_FILES:
+        download_file(f"{base_url}/{filename}",
+                      os.path.join(firmware_dir, filename), on_bytes)
+    if total is not None:
+        progress.progress(total, total)
     log("Firmware downloaded successfully")
     return firmware_dir
 
@@ -1099,104 +1163,176 @@ def addon_copy_bytes(efi_mount: str) -> int:
     return total
 
 
-def do_ab_upgrade(drive: DriveInfo, base_url: str) -> None:
-    """Perform A/B upgrade on existing ThinFloe drive"""
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(WRITE_BLOCK), b""):
+            h.update(block)
+    return h.hexdigest()
 
-    if drive.is_boot:
-        # Boot drive - use already mounted partition
-        efi_mount = BOOT_EFI_MOUNT
-        if not os.path.ismount(efi_mount):
-            die(f"Boot EFI partition not mounted at {efi_mount}")
-        owned_mount = False
-    else:
-        # Non-boot drive - mount it
-        efi_mount = tempfile.mkdtemp(prefix="thinfloe-upgrade-")
-        _register_cleanup("dir", efi_mount)
 
-        result = run_cmd(["mount", drive.efi_partition, efi_mount], check=False, capture=True)
-        if result.returncode != 0:
-            die(f"Failed to mount EFI partition: {result.stderr}")
-        _register_cleanup("mount", efi_mount)
-        owned_mount = True
+@contextlib.contextmanager
+def _uninterruptible():
+    """Ignore SIGTERM, SIGINT and SIGHUP: the switch is never cut halfway."""
+    old = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            old[sig] = signal.signal(sig, signal.SIG_IGN)
+    except ValueError:  # not the main thread
+        pass
+    try:
+        yield
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
-    # Download firmware
-    work_dir = tempfile.mkdtemp(prefix="thinfloe-fw-")
-    _register_cleanup("dir", work_dir)
 
-    firmware_dir = download_firmware(base_url, work_dir)
-
-    # Paths
+def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None:
+    """Replace the stick's release; DEFAULT new is the last write (boot stick)."""
     tl_path = os.path.join(efi_mount, "tl")
     tl_old_path = os.path.join(efi_mount, "tl.old")
     tl_new_path = os.path.join(efi_mount, "tl.new")
-
-    # Both paths remove tl.old and tl.new before they write, so their space
-    # counts as free. Checked before anything is removed: a stick that cannot
-    # take the release keeps its fallback.
-    need = int(sum(os.path.getsize(os.path.join(firmware_dir, f))
-                   for f in FIRMWARE_FILES) * UPGRADE_SPACE_MARGIN)
-    # Room for one next.* beside every installed add-on's current.*, so the
-    # daily check can still fetch an update after the upgrade.
-    need += addon_copy_bytes(efi_mount)
-    have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
-    if have < need:
-        die(f"Not enough space on {drive.device}: the new release needs "
-            f"{need // (1024 * 1024)} MB, {have // (1024 * 1024)} MB can be made "
-            f"free. Nothing was changed.")
-
-    if drive.is_boot:
-        # Additive upgrade - write to tl.new/, finalized on next boot.
-        #
-        # tl.old goes first. The rotation on the next boot removes it anyway,
-        # and with it in place the stick needed room for three releases: at
-        # 775 MB each that does not fit a 2000 MB partition. While tl.new is
-        # staged the fallback is tl/, the "current" entry.
-        log("Installing firmware to tl.new/ (will activate on reboot)...")
-
-        if os.path.exists(tl_old_path):
-            run_cmd(["rm", "-rf", tl_old_path])
-
-        if os.path.exists(tl_new_path):
-            run_cmd(["rm", "-rf", tl_new_path])
-
-        run_cmd(["mkdir", "-p", tl_new_path])
-        for filename in FIRMWARE_FILES:
-            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
-        # Only after tl.new is complete: DEFAULT new with a partial tl.new
-        # would not boot.
+    try:
+        if drive.is_boot:
+            # Additive upgrade - write to tl.new/, finalized on next boot.
+            #
+            # tl.old goes first. The rotation on the next boot removes it
+            # anyway, and with it in place the stick needed room for three
+            # releases: at 775 MB each that does not fit a 2000 MB partition.
+            # While tl.new is staged the fallback is tl/, the "current" entry.
+            log("Installing firmware to tl.new/ (will activate on reboot)...")
+            if os.path.exists(tl_old_path):
+                run_cmd(["rm", "-rf", tl_old_path])
+            if os.path.exists(tl_new_path):
+                run_cmd(["rm", "-rf", tl_new_path])
+            run_cmd(["mkdir", "-p", tl_new_path])
+            for filename in FIRMWARE_FILES:
+                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
+            # Only after tl.new is complete: DEFAULT new with a partial tl.new
+            # would not boot.
+            run_cmd(["sync"])
+            set_boot_default(efi_mount, "new")
+        else:
+            # Direct A/B rotation
+            log("Rotating firmware (tl -> tl.old, installing new tl)...")
+            if os.path.exists(tl_old_path):
+                run_cmd(["rm", "-rf", tl_old_path])
+            if os.path.exists(tl_path):
+                run_cmd(["mv", tl_path, tl_old_path])
+            if os.path.exists(tl_new_path):
+                run_cmd(["rm", "-rf", tl_new_path])
+            run_cmd(["mkdir", "-p", tl_path])
+            for filename in FIRMWARE_FILES:
+                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_path])
+            # A DEFAULT new left from an unfinished upgrade would point at the
+            # tl.new just removed.
+            set_boot_default(efi_mount, "current")
         run_cmd(["sync"])
-        set_boot_default(efi_mount, "new")
-    else:
-        # Direct A/B rotation
-        log("Rotating firmware (tl -> tl.old, installing new tl)...")
+    except (subprocess.CalledProcessError, OSError) as e:
+        if drive.is_boot:
+            # A partial tl.new is never referenced (DEFAULT is still old).
+            shutil.rmtree(tl_new_path, ignore_errors=True)
+        raise WriteFailed(f"the new release could not be installed: {e}")
 
-        if os.path.exists(tl_old_path):
-            run_cmd(["rm", "-rf", tl_old_path])
 
-        if os.path.exists(tl_path):
-            run_cmd(["mv", tl_path, tl_old_path])
+def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
+                save: bool) -> None:
+    """The A/B upgrade; raises WriteFailed. Nothing on the stick changes
+    until every file is downloaded and checked and the space is known."""
+    owned_mount = False
+    efi_mount = ""
+    work_dir = ""
+    try:
+        if drive.is_boot:
+            # Boot drive - use already mounted partition
+            efi_mount = BOOT_EFI_MOUNT
+            if not os.path.ismount(efi_mount):
+                raise WriteFailed(f"Boot EFI partition not mounted at {efi_mount}")
+        else:
+            # Non-boot drive - mount it
+            efi_mount = tempfile.mkdtemp(prefix="thinfloe-upgrade-")
+            _register_cleanup("dir", efi_mount)
+            result = run_cmd(["mount", drive.efi_partition, efi_mount],
+                             check=False, capture=True)
+            if result.returncode != 0:
+                raise WriteFailed(f"Failed to mount EFI partition: {result.stderr}")
+            _register_cleanup("mount", efi_mount)
+            owned_mount = True
 
-        if os.path.exists(tl_new_path):
-            run_cmd(["rm", "-rf", tl_new_path])
+        if drive.is_boot and save:
+            # Before anything is fetched: a failed save fails the job while
+            # the stick is still untouched.
+            progress.step("save", "Saving the home directory")
+            rc = save_home_before_finish()
+            if rc != 0:
+                why = SAVE_HOME_MESSAGES.get(rc) or "thinfloe-save-home could not be run"
+                raise WriteFailed(f"the home directory could not be saved: {why}")
+            progress.done("save")
 
-        run_cmd(["mkdir", "-p", tl_path])
+        work_dir = tempfile.mkdtemp(prefix="thinfloe-fw-")
+        _register_cleanup("dir", work_dir)
+
+        progress.step("download", "Downloading the new release")
+        firmware_dir = download_firmware(base_url, work_dir, progress)
+        progress.done("download")
+
+        progress.step("check", "Checking the files")
         for filename in FIRMWARE_FILES:
-            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_path])
-        # A DEFAULT new left from an unfinished upgrade would point at the
-        # tl.new just removed.
-        set_boot_default(efi_mount, "current")
+            expected = expected_download_sha256(base_url, filename)
+            if expected is None:
+                log(f"checksum not checked: {filename}.sha256 not found")
+            elif expected != _file_sha256(os.path.join(firmware_dir, filename)):
+                raise WriteFailed(
+                    f"the download of {filename} was damaged; try again")
+        progress.done("check")
 
-    run_cmd(["sync"])
+        tl_old_path = os.path.join(efi_mount, "tl.old")
+        tl_new_path = os.path.join(efi_mount, "tl.new")
+        # Both paths remove tl.old and tl.new before they write, so their
+        # space counts as free. Checked before anything is removed: a stick
+        # that cannot take the release keeps its fallback.
+        need = int(sum(os.path.getsize(os.path.join(firmware_dir, f))
+                       for f in FIRMWARE_FILES) * UPGRADE_SPACE_MARGIN)
+        # Room for one next.* beside every installed add-on's current.*, so
+        # the daily check can still fetch an update after the upgrade.
+        need += addon_copy_bytes(efi_mount)
+        have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
+        if have < need:
+            raise WriteFailed(
+                f"Not enough space on {drive.device}: the new release needs "
+                f"{need // (1024 * 1024)} MB, {have // (1024 * 1024)} MB can be "
+                f"made free. Nothing was changed.")
 
-    # Cleanup
-    if owned_mount:
-        run_cmd(["umount", efi_mount])
-        _unregister_cleanup("mount", efi_mount)
-        shutil.rmtree(efi_mount, ignore_errors=True)
-        _unregister_cleanup("dir", efi_mount)
+        progress.step("switch", "Switching to the new release")
+        with _uninterruptible():
+            _switch_release(drive, efi_mount, firmware_dir)
+        progress.done("switch")
+    finally:
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            _unregister_cleanup("dir", work_dir)
+        if owned_mount:
+            run_cmd(["umount", efi_mount], check=False)
+            _unregister_cleanup("mount", efi_mount)
+            shutil.rmtree(efi_mount, ignore_errors=True)
+            _unregister_cleanup("dir", efi_mount)
 
-    shutil.rmtree(work_dir, ignore_errors=True)
-    _unregister_cleanup("dir", work_dir)
+
+def do_ab_upgrade(drive: DriveInfo, base_url: str,
+                  progress: Progress = None, save: bool = False) -> None:
+    """Perform A/B upgrade on existing ThinFloe drive.
+
+    Batch (progress.batch) raises WriteFailed and saves the home first
+    (save=True); interactive mode dies with the reason and main() saves
+    afterwards, a failed save then only warns.
+    """
+    progress = progress or PROGRESS
+    try:
+        _ab_upgrade(drive, base_url, progress, save)
+    except WriteFailed as e:
+        if progress.batch:
+            raise
+        die(e.reason)
 
     if drive.is_boot:
         log("Upgrade staged! Reboot to activate new firmware.")
@@ -1855,8 +1991,18 @@ def batch_fresh(drive: DriveInfo, args, progress: Progress) -> int:
 
 
 def batch_upgrade(drive: DriveInfo, args, progress: Progress) -> int:
-    progress.result(False, "not implemented yet")
-    return 1
+    """Exit 0 ok, 1 failed (reason reported), 130 cancelled.
+
+    A cancel (Cancelled propagates to batch_main) or a failure before the
+    switch leaves the stick as bootable as it was.
+    """
+    try:
+        do_ab_upgrade(drive, args.source, progress, save=True)
+    except WriteFailed as e:
+        progress.result(False, e.reason)
+        return 1
+    progress.result(True, "")
+    return 0
 
 
 class UsageError(Exception):
