@@ -70,6 +70,8 @@ class FakeReceiver:
         self.pending = self._answer(bytes(data))
 
     def read(self, timeout):
+        if getattr(self, "queue", None):
+            return self.queue.pop(0)
         self.reads += 1
         if self.vanish_after is not None and self.reads > self.vanish_after:
             raise OSError(19, "No such device")
@@ -226,6 +228,38 @@ class ReceiverTests(unittest.TestCase):
         t.read = noisy_read
         self.assertEqual(self.readings(t)[0], [R("A", 40, "discharging", 1000)])
 
+    def test_stale_reply_is_not_taken_for_the_next_request(self):
+        # A getFeature reply that arrives after its request timed out sits in
+        # the buffer; the next getFeature on the slot must not take it.
+        class Late(FakeReceiver):
+            armed = False
+
+            def _feature(self, d, feat, func, params):
+                if feat == 3 and func == 1:   # the DeviceName chunk request
+                    self.armed = True
+                return super()._feature(d, feat, func, params)
+
+            def read(self, timeout):
+                rep = super().read(timeout)
+                if rep is not None and self.armed:   # its reply went out; a late one follows
+                    self.armed = False
+                    self.queue = [bytes([0x11, 1, 0x00, 0x0A, 3, 0, 0]).ljust(20, b"\0")]
+                return rep
+        t = Late({1: dev("A", ub=(40, 4, 0))}, self.clock)
+        self.assertEqual(self.readings(t)[0], [R("A", 40, "discharging", 1000)])
+
+    def test_short_reply_makes_the_device_unreachable(self):
+        class Short(FakeReceiver):
+            def _answer(self, msg):
+                ans = super()._answer(msg)
+                if msg[0] == 0x11 and msg[2] == 9 and msg[3] >> 4 == 1:   # 0x1004 get_status
+                    return ans[0], ans[1][:5]
+                return ans
+        t = Short({1: dev("A", ub=(40, 4, 0))}, self.clock)
+        got, unreachable = mod.read_receiver(t, now=1000)
+        self.assertEqual(got, [])
+        self.assertEqual(unreachable, [(1, "A")])
+
 
 class MergeAndNameTests(unittest.TestCase):
     def test_unreachable_device_keeps_last_reading(self):
@@ -255,6 +289,12 @@ class MergeAndNameTests(unittest.TestCase):
         self.assertEqual(mod.sanitise("a\tb\nc\x1b" + "x" * 300), ("a?b?c?" + "x" * 300)[:64])
         self.assertEqual(mod.sanitise(""), "unknown device")
         self.assertEqual(mod.sanitise("MX MCHNCL\0\0"), "MX MCHNCL")
+
+    def test_unicode_line_breaks_and_bidi_are_sanitised(self):
+        self.assertEqual(mod.sanitise("a\x85b c d‮e"), "a?b?c?d?e")
+
+    def test_parse_splits_on_newline_only(self):
+        self.assertEqual(mod.parse_lines("a b\t90\tfull\t7\n"), [R("a b", 90, "full", 7)])
 
     def test_format_and_parse_round_trip(self):
         rs = [R("b", None, "not reachable", 5), R("a", 90, "full", 7)]
@@ -362,6 +402,22 @@ class MainTests(unittest.TestCase):
             self.assertEqual(self.run_main(r), 0)
         self.assertIn("MX Anywhere 3S for Business\t90\tnot reachable\t1000\n", self.battery())
 
+    def test_power_supply_device_gone_is_not_reachable(self):
+        r = FakeReceiver({}, self.clock)
+        self.run_main(r)
+        (self.sysfs / "class" / "power_supply" / "hidpp_battery_0" / "uevent").unlink()
+        with mock.patch.object(mod.time, "time", lambda: 2000):
+            self.assertEqual(self.run_main(r), 0)
+        self.assertEqual(self.battery(), "BT Mouse\t100\tnot reachable\t1000\n")
+
+    def test_unexpected_error_on_a_node_still_writes_the_file(self):
+        class Broken(FakeReceiver):
+            def write(self, data):
+                raise ValueError("garbage")
+        with mock.patch("sys.stderr"):
+            self.assertEqual(self.run_main(Broken({}, self.clock)), 0)
+        self.assertEqual(self.battery(), "BT Mouse\t100\tfull\t1000\n")
+
     def test_node_vanishing_mid_run_is_skipped(self):
         r = FakeReceiver({1: dev("A", ub=(40, 4, 0))}, self.clock, vanish_after=1)
         with mock.patch("sys.stderr"):
@@ -377,7 +433,7 @@ class MainTests(unittest.TestCase):
             self.assertEqual(self.run_main(r), 1)
         self.assertEqual(self.battery(), before)
         self.assertEqual(sorted(os.listdir(self.out)), ["battery"])
-        self.assertEqual(sorted(os.listdir(self.state)), ["names"])
+        self.assertEqual(sorted(os.listdir(self.state)), ["names", "power-supply"])
 
 
 if __name__ == "__main__":

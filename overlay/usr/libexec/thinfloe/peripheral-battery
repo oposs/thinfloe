@@ -29,6 +29,7 @@ import os
 import select
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -56,7 +57,10 @@ def log(what: str, why: str) -> None:
 
 def sanitise(name: str) -> str:
     name = name.replace("\0", "")
-    name = "".join("?" if ord(c) < 32 or ord(c) == 127 else c for c in name)
+    # Control and format characters (bidi overrides) and Unicode line or
+    # paragraph separators: a name must stay one line for every reader.
+    name = "".join("?" if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c
+                   for c in name)
     name = name.strip()[:MAX_NAME]
     return name or "unknown device"
 
@@ -87,6 +91,11 @@ def _exchange(t, msg: bytes, match, deadline: float) -> Optional[bytes]:
     """Send msg, return the data of the first reply match() accepts, None on
     an error reply or when the request timeout or the deadline passes.
     match(rep) returns data, False for an error reply, None for unrelated."""
+    # A reply that came after its request timed out would match the next
+    # request of the same kind (same slot, feature and SWID): drop it.
+    for _ in range(32):
+        if t.read(0) is None:
+            break
     t.write(msg)
     stop = min(monotonic() + REQUEST_TIMEOUT, deadline)
     while True:
@@ -183,7 +192,7 @@ def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str
     idx = _feature_index(t, slot, 0x1004, deadline)
     if idx:
         r = _feature_call(t, slot, idx, 1, b"", deadline)
-        if not r:
+        if not r or len(r) < 3:
             return None
         soc, level, charging = r[0], r[1], r[2]
         if charging == 0:
@@ -194,7 +203,7 @@ def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str
     idx = _feature_index(t, slot, 0x1000, deadline)
     if idx:
         r = _feature_call(t, slot, idx, 0, b"", deadline)
-        if not r:
+        if not r or len(r) < 3:
             return None
         return (r[0] if r[0] <= 100 else None), BS_STATUS.get(r[2], "unknown")
     idx = _feature_index(t, slot, 0x1001, deadline)
@@ -283,7 +292,7 @@ def format_lines(readings: List[Reading]) -> str:
 
 def parse_lines(text: str) -> List[Reading]:
     out = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         f = line.split("\t")
         if len(f) != 4 or not f[3].isdigit() or not (f[1] == "-" or f[1].isdigit()):
             continue
@@ -354,7 +363,14 @@ def main() -> int:
         previous = []
 
     new = read_power_supply(sysfs, now)
-    unreachable_names = []
+    # A power_supply device that was seen this boot and is gone now (a
+    # Bluetooth mouse switched off) keeps its last reading as not reachable.
+    try:
+        ps_seen = set((state / "power-supply").read_text().split("\n")) - {""}
+    except OSError:
+        ps_seen = set()
+    ps_now = {r.name for r in new}
+    unreachable_names = sorted(ps_seen - ps_now)
     for node, phys in find_hidpp_nodes(sysfs, dev):
         t = None
         try:
@@ -362,6 +378,9 @@ def main() -> int:
             got, unreachable = read_receiver(t, now, deadline)
         except OSError as e:
             log(str(node), e.strerror or str(e))
+            continue
+        except Exception as e:  # noqa: BLE001 - device data is untrusted
+            log(str(node), f"{type(e).__name__}: {e}")
             continue
         finally:
             if t is not None and hasattr(t, "close"):
@@ -381,6 +400,11 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 - anything here means no file
         log(str(outdir / "battery"), str(e))
         return 1
+    try:
+        _write_atomic(state, state / "power-supply",
+                      "".join(f"{n}\n" for n in sorted(ps_seen | ps_now)), 0o600)
+    except OSError as e:
+        log(str(state / "power-supply"), e.strerror or str(e))
     try:
         _write_atomic(state, state / "names",
                       "".join(f"{p}\t{s}\t{r}\t{n}\n" for (p, s), (r, n) in sorted(cache.items())),
