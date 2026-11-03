@@ -22,7 +22,7 @@ its follow-ups `...-tile-lines.md` and `...-on-connect.md`.
 - Work in `/scratch/moetiker/claud.worktrees/thinfloe-peripheral-battery` (branch `peripheral-battery`).
 - `git add` files by name only. Never `git add -A`, `git add .` or `git commit -a`: the `artifacts` symlink is modified locally and must never be committed.
 - No ssh, no pushes. Temporary files under `/scratch/moetiker/tmp`.
-- Code, comments, commit messages in English; no reference to Claude or Anthropic anywhere.
+- Code, comments, commit messages in English.
 - Battery file: `/run/thinfloe/peripherals/battery`, line `name<TAB>percent<TAB>state<TAB>read_epoch`, `percent` 0..100 or `-`, `state` one of `discharging`, `charging`, `full`, `low`, `critical`, `unknown`, `not reachable`.
 - Directories stay: `/run/thinfloe/peripherals` 0755 root, `battery` 0644; `/run/thinfloe/peripherals-state` 0700 root.
 - Timer stays `OnBootSec=30s`, `OnUnitActiveSec=5min`, no `RandomizedDelaySec`.
