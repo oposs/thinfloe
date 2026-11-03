@@ -255,6 +255,52 @@ class TestStreamImage(unittest.TestCase):
             ui.stream_image("file://" + self.dir.name + "/nope.zst", self.dev,
                             None, self.progress)
         self.assertIn("download", cm.exception.reason)
+        self.assertIn("curl: (37)", cm.exception.reason)
+
+    def test_curl_has_a_stall_limit(self):
+        argv = []
+        real_popen = subprocess.Popen
+
+        def spy(a, *args, **kw):
+            argv.append(a)
+            return real_popen(a, *args, **kw)
+
+        with mock.patch.object(ui.subprocess, "Popen", spy):
+            ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        curl = argv[0]
+        i = curl.index("--speed-limit")
+        self.assertEqual(curl[i:i + 4], ["--speed-limit", "1", "--speed-time", "60"])
+
+    def test_closed_progress_is_not_a_stick_error(self):
+        self.progress.progress = mock.Mock(side_effect=BrokenPipeError())
+        with self.assertRaises(BrokenPipeError):
+            ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+
+    def test_truncated_image_fails(self):
+        cut = Path(self.dir.name) / "cut.zst"
+        cut.write_bytes(self.zst_bytes[:len(self.zst_bytes) // 2])
+        with self.assertRaises(ui.WriteFailed) as cm:
+            ui.stream_image("file://" + str(cut), self.dev, None, self.progress)
+        self.assertIn("unpacked", cm.exception.reason)
+
+    def test_interrupt_propagates_and_cleans_up(self):
+        procs = []
+        real_popen = subprocess.Popen
+
+        def spy(*a, **k):
+            p = real_popen(*a, **k)
+            procs.append(p)
+            return p
+
+        before = threading.active_count()
+        self.progress.progress = mock.Mock(side_effect=KeyboardInterrupt())
+        with mock.patch.object(ui.subprocess, "Popen", spy):
+            with self.assertRaises(KeyboardInterrupt):
+                ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        self.assertEqual(len(procs), 2)
+        for p in procs:
+            self.assertIsNotNone(p.returncode)
+        self.assertEqual(threading.active_count(), before)
 
     def test_write_error_raises_and_leaves_no_child(self):
         real = os.write
@@ -274,6 +320,7 @@ class TestStreamImage(unittest.TestCase):
             procs.append(p)
             return p
 
+        before = threading.active_count()
         with mock.patch.object(ui.os, "write", flaky), \
                 mock.patch.object(ui.subprocess, "Popen", spy):
             with self.assertRaises(ui.WriteFailed) as cm:
@@ -282,7 +329,7 @@ class TestStreamImage(unittest.TestCase):
         self.assertEqual(len(procs), 2)
         for p in procs:
             self.assertIsNotNone(p.returncode)
-        self.assertEqual(threading.active_count(), 1)
+        self.assertEqual(threading.active_count(), before)
 
 
 if __name__ == "__main__":

@@ -714,6 +714,16 @@ def _feed(src, dst, digest, state) -> None:
             state["broken"] = True
 
 
+def _last_line(f) -> str:
+    """': <last line>' of a child's stderr file, '' when it said nothing."""
+    try:
+        f.seek(0)
+        lines = f.read().decode("utf-8", "replace").strip().splitlines()
+    except (OSError, ValueError):
+        return ""
+    return ": " + lines[-1][:200] if lines else ""
+
+
 def stream_image(url: str, device: str, total: Optional[int],
                  progress: Progress) -> WriteResult:
     """curl -> zstd -dc -> device, hashing both streams on the way.
@@ -726,6 +736,9 @@ def stream_image(url: str, device: str, total: Optional[int],
     """
     curl = zstd = thread = None
     fd = None
+    # Files, not pipes: a full stderr pipe would block the child.
+    curl_err = tempfile.TemporaryFile()
+    zstd_err = tempfile.TemporaryFile()
     image_hash = hashlib.sha256()
     download_hash = hashlib.sha256()
     state = {"broken": False}
@@ -733,9 +746,12 @@ def stream_image(url: str, device: str, total: Optional[int],
     ok = False
     try:
         try:
-            curl = subprocess.Popen(["curl", "-fsSL", url], stdout=subprocess.PIPE)
+            # A silent network must end the download, not hang the writer.
+            curl = subprocess.Popen(
+                ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60", url],
+                stdout=subprocess.PIPE, stderr=curl_err)
             zstd = subprocess.Popen(["zstd", "-dc"], stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE)
+                                    stdout=subprocess.PIPE, stderr=zstd_err)
         except OSError as e:
             raise WriteFailed(f"could not start the download: {e}")
         thread = threading.Thread(
@@ -753,6 +769,7 @@ def stream_image(url: str, device: str, total: Optional[int],
                 break
             image_hash.update(block)
             view = memoryview(block)
+            synced = False
             try:
                 while view:
                     n = os.write(fd, view)
@@ -762,9 +779,11 @@ def stream_image(url: str, device: str, total: Optional[int],
                 if since_sync >= SYNC_EVERY:
                     os.fdatasync(fd)
                     since_sync = 0
-                    progress.progress(written, total)
+                    synced = True
             except OSError as e:
                 raise WriteFailed(f"writing {device} failed: {e.strerror or e}")
+            if synced:  # outside the try: a closed stdout is not a stick error
+                progress.progress(written, total)
         try:
             os.fdatasync(fd)
         except OSError as e:
@@ -776,10 +795,12 @@ def stream_image(url: str, device: str, total: Optional[int],
         zstd.wait()
         curl.wait()
         if not state["broken"] and curl.returncode != 0:
-            raise WriteFailed(f"the download failed (curl exit {curl.returncode})")
-        if zstd.returncode != 0:
+            raise WriteFailed(f"the download failed (curl exit {curl.returncode})"
+                              + _last_line(curl_err))
+        if zstd.returncode != 0 or state["broken"]:
             raise WriteFailed(
-                f"the downloaded image could not be unpacked (zstd exit {zstd.returncode})")
+                f"the downloaded image could not be unpacked (zstd exit {zstd.returncode})"
+                + _last_line(zstd_err))
         ok = True
         return WriteResult(written, image_hash.hexdigest(), download_hash.hexdigest())
     finally:
@@ -801,6 +822,8 @@ def stream_image(url: str, device: str, total: Optional[int],
             proc.wait()
         if fd is not None:
             os.close(fd)
+        curl_err.close()
+        zstd_err.close()
 
 
 def download_and_write_image(base_url: str, device: str) -> None:
