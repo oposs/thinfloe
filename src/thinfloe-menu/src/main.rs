@@ -66,6 +66,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
+    menu.battery_on = settings::battery_switch_path().exists();
     (menu, paths, IconRoots::system())
 }
 
@@ -189,6 +190,7 @@ fn main() -> ExitCode {
         addon_status: addon_status_path(),
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
+        battery_switch: settings::battery_switch_path(),
         program_path: program_path(),
         header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
     }) {

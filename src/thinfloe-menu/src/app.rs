@@ -58,6 +58,8 @@ pub struct Config {
     pub addon_status: PathBuf,
     pub addon_log: PathBuf,
     pub addon_last_check: PathBuf,
+    /// The file whose existence is the battery switch.
+    pub battery_switch: PathBuf,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
     /// Host name and version for the header.
@@ -333,6 +335,10 @@ impl App {
     /// Read the add-on files again. A program or icon that appeared
     /// (the install runs while the menu does) is picked up here, the icon in
     /// a renderer process like every other.
+    fn refresh_battery(&mut self) {
+        self.cfg.menu.battery_on = self.cfg.battery_switch.exists();
+    }
+
     fn refresh_addons(&mut self) {
         let changed = self.cfg.menu.set_addons(addons::read_status(&self.cfg.addon_status));
         self.cfg.menu.last_check = addons::read_last_check(&self.cfg.addon_last_check);
@@ -544,6 +550,10 @@ impl App {
             }
             None => self.cfg.menu.tick(now),
         };
+        // Opening Settings: the switch file may have changed since the start.
+        if matches!(event, Some(ui::UiEvent::Tile(_))) && self.cfg.menu.screen == crate::menu::Screen::Settings {
+            self.refresh_battery();
+        }
         if effect.is_some() || event.is_some() {
             self.apply(effect, event_loop);
             if let Some(live) = self.live.as_ref() {
@@ -698,10 +708,14 @@ impl ApplicationHandler<Wake> for App {
                 // The status changed with the job; the watcher would see it
                 // only a second later.
                 let addon = matches!(result, JobResult::Addon { .. });
+                let battery = matches!(result, JobResult::Battery { .. });
                 let effect = self.cfg.menu.finished(result, Instant::now());
                 self.apply(effect, event_loop);
                 if addon {
                     self.refresh_addons();
+                }
+                if battery {
+                    self.refresh_battery();
                 }
             }
             Wake::Addons => self.refresh_addons(),
