@@ -2,6 +2,7 @@
 
 pub mod addons;
 pub mod app;
+pub mod battery;
 pub mod bounded;
 pub mod brand;
 pub mod damage;
