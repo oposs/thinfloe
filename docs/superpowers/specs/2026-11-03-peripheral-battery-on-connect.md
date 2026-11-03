@@ -64,3 +64,27 @@ register-0x00 wireless flag. Put the table into the plan and the fake receiver.
   multi-user.target, has no `Before=`.
 - CLAUDE.md "Peripheral battery": the connect-triggered read, the 5-minute
   hold-off, the measured notification bytes.
+
+## Measured (10.46.102.86, 2026-11-03, HID++ node /dev/hidraw0 this boot)
+
+- Receiver register `0x00` (HID++ 1.0 notification flags) reads
+  `10 ff 81 00 00 00 00`: no notifications enabled. Switching the mouse off and
+  on produced **no** `0x41` connection notification and nothing at all on
+  switch-off.
+- On switch-on the **device itself** sent two HID++ 2.0 events, unrequested,
+  ~5 s after it was switched on:
+  - `11 01 04 00 01 01 01 …` — slot 1, feature index 4 = WIRELESS DEVICE STATUS
+    (`0x1D4B`), function/event 0: status `01` = reconnection.
+  - `11 01 09 00 64 08 00 …` — slot 1, feature index 9 = UNIFIED BATTERY
+    (`0x1004`), event 0: state of charge `0x64` = 100 %, level `08` = full,
+    charging status `00` = discharging.
+- So the watcher does **not** need to enable anything on the receiver: it
+  listens for a `0x1D4B` event (or a `0x1004` event) from slot `n`. The feature
+  indices differ per device (mouse: 0x1D4B at 4, 0x1004 at 9; keyboard per
+  Solaar's listing: 0x1D4B at 4, 0x1004 at 7) — resolve them with the root
+  feature's getFeature when a device is first read and cache them with the slot.
+- Simplest correct use: on either event for slot `n`, apply the hold-off and run
+  one reading. Taking the percent straight from the `0x1004` event is allowed
+  (same decoding as the reader's get_status) but optional.
+- Not measured: the keyboard's events (expected the same, unverified), and what
+  arrives when a device goes out of range without being switched off.
