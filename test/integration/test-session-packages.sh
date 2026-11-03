@@ -871,14 +871,21 @@ else
 fi
 
 # Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
-# which the menu's battery tile reads (no ThinLinc). The service is started
-# by the timer only, and neither unit may order itself before anything
+# which the menu's battery tile reads (no ThinLinc). The service also runs
+# once at boot (multi-user.target, in parallel with the menu), the timer
+# repeats it every 5 min, and neither unit may order itself before anything
 # (see CLAUDE.md, the hook-order constraint).
 present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
 if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-peripheral-battery\.timer$' "$LIST"; then
     echo "ok   - thinfloe-peripheral-battery.timer is enabled"
 else
     echo "FAIL - thinfloe-peripheral-battery.timer is not enabled; the battery file would never be written"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-peripheral-battery\.service$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.service is enabled in multi-user.target"
+else
+    echo "FAIL - thinfloe-peripheral-battery.service is not enabled; the tile would be empty until the first timer firing"
     fail=1
 fi
 PB="$DPKG_TMP/pb"
@@ -896,19 +903,19 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - /usr/libexec/thinfloe/peripheral-battery is missing or not executable"
         fail=1
     fi
-    if grep -qx 'OnBootSec=30s' "$PBU/thinfloe-peripheral-battery.timer" &&
+    if ! grep -q '^OnBootSec' "$PBU/thinfloe-peripheral-battery.timer" &&
        grep -qx 'OnUnitActiveSec=5min' "$PBU/thinfloe-peripheral-battery.timer" &&
        ! grep -q '^RandomizedDelaySec' "$PBU/thinfloe-peripheral-battery.timer"; then
-        echo "ok   - the battery timer runs 30 s after boot and every 5 min"
+        echo "ok   - the battery timer repeats every 5 min and has no OnBootSec"
     else
-        echo "FAIL - the battery timer is not OnBootSec=30s / OnUnitActiveSec=5min without a random delay"
+        echo "FAIL - the battery timer has an OnBootSec, lacks OnUnitActiveSec=5min or has a random delay"
         fail=1
     fi
     if grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null &&
-       ! grep -q '^\[Install\]' "$PBU/thinfloe-peripheral-battery.service"; then
-        echo "ok   - the battery service runs the helper and is started by the timer only"
+       grep -qx 'WantedBy=multi-user.target' "$PBU/thinfloe-peripheral-battery.service"; then
+        echo "ok   - the battery service runs the helper and is wanted by multi-user.target"
     else
-        echo "FAIL - the battery service is missing, runs something else, or has an [Install] section"
+        echo "FAIL - the battery service is missing, runs something else, or lacks WantedBy=multi-user.target"
         fail=1
     fi
     if grep -qx 'TimeoutStartSec=60' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
@@ -921,7 +928,7 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - the battery service has a ConditionPathExists (there is no switch any more)"
         fail=1
     else
-        echo "ok   - the battery service runs on every timer firing"
+        echo "ok   - the battery service runs on every start"
     fi
     TILE="$PB/etc/thinfloe/menu/70-battery.desktop"
     if grep -qx 'X-TF-Action=battery' "$TILE" 2>/dev/null &&

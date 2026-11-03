@@ -1,10 +1,10 @@
 [Unit]
 Description=Refresh the battery file of keyboards and mice every 5 minutes
 
-# No RandomizedDelaySec: the file is local to this machine, and a delay
-# would only leave it empty longer after boot.
+# No OnBootSec: the boot run is the service's own start
+# (WantedBy=multi-user.target), and OnUnitActiveSec counts from that
+# activation. No RandomizedDelaySec: the file is local to this machine.
 [Timer]
-OnBootSec=30s
 OnUnitActiveSec=5min
 
 [Install]

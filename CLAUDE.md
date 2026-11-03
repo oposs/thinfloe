@@ -260,9 +260,15 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   WirePlumber for both values. **Not verified on hardware.**
 - Peripheral battery: a menu tile shows the batteries of keyboards and mice
   (owner, 2026-11-03). The reader `/usr/libexec/thinfloe/peripheral-battery`
-  (root; `thinfloe-peripheral-battery.timer`, 30 s after boot and every
-  5 min) writes `/run/thinfloe/peripherals/battery`, one line per device,
-  sorted: `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind` (`percent`
+  (root; `thinfloe-peripheral-battery.service`, once at boot and then every
+  5 min from `thinfloe-peripheral-battery.timer`, which has no `OnBootSec`:
+  `OnUnitActiveSec` counts from the boot run) writes `/run/thinfloe/peripherals/battery`, one line per device,
+  sorted. The boot run is `WantedBy=multi-user.target`, in parallel with the
+  menu and with no `Before=` (not on `getty@tty1` either: a slow device must
+  never delay the login). Measured 2026-11-03: the menu appeared about 16 s
+  after the kernel started, while the old `OnBootSec=30s` timer first read at
+  about 43 s, leaving the tile empty for about 27 s. One reading takes 0.2 to
+  1 s (run budget up to 15 s). Line format: `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind` (`percent`
   `-` when unknown; `state` `discharging`, `charging`, `full`, `low`,
   `critical`, `unknown` or `not reachable`; `kind` `keyboard`, `mouse`,
   `numpad`, `presenter`, `trackball`, `touchpad` or `unknown`; the menu

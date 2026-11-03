@@ -1,8 +1,11 @@
 [Unit]
 Description=Read the battery charge of keyboards and mice
-# Started by thinfloe-peripheral-battery.timer only, so no [Install]. No
-# Before= on anything: see CLAUDE.md, "A multi-user.target unit must never
-# declare Before= on a sysinit.target unit".
+# Runs once at boot (multi-user.target, in parallel with the menu, so the
+# tile has values when it appears) and then from
+# thinfloe-peripheral-battery.timer every 5 minutes. No Before= on anything,
+# getty@tty1 included: a slow device must never delay the login. See
+# CLAUDE.md, "A multi-user.target unit must never declare Before= on a
+# sysinit.target unit".
 
 [Service]
 Type=oneshot
@@ -10,3 +13,6 @@ Type=oneshot
 TimeoutStartSec=60
 StandardOutput=journal
 ExecStart=/usr/libexec/thinfloe/peripheral-battery
+
+[Install]
+WantedBy=multi-user.target
