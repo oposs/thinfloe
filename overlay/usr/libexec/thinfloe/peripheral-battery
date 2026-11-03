@@ -5,11 +5,12 @@ peripheral-battery - write the battery charge of keyboards and mice
 Writes $TF_BATTERY_DIR/battery (default /run/thinfloe/peripherals/battery),
 one line per device, sorted by name:
 
-    name<TAB>percent<TAB>state<TAB>read_epoch
+    name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind
 
 percent is 0..100 or "-"; state is discharging, charging, full, low,
-critical, unknown or "not reachable". A device that does not answer keeps
-its last reading and the time it was taken. The temporary file, the name
+critical, unknown or "not reachable"; kind is keyboard, mouse, numpad,
+presenter, trackball, touchpad or unknown. A device that does not answer
+keeps its last reading, the time it was taken and its kind. The temporary file, the name
 cache and the lock live in $TF_BATTERY_STATE (default
 /run/thinfloe/peripherals-state).
 
@@ -55,6 +56,18 @@ class Reading(NamedTuple):
     percent: Optional[int]
     state: str
     read_epoch: int
+    kind: str = "unknown"
+
+
+# The low nibble of the first byte of the receiver's pairing info (register
+# b5/50+n), as Solaar numbers it for Bolt. 1 and 2 measured on 2026-11-03.
+RECEIVER_KINDS = {1: "keyboard", 2: "mouse", 3: "numpad", 4: "presenter",
+                  8: "trackball", 9: "touchpad"}
+KINDS = set(RECEIVER_KINDS.values()) | {"unknown"}
+
+
+def kind_of(byte: int) -> str:
+    return RECEIVER_KINDS.get(byte & 0x0F, "unknown")
 
 
 def log(what: str, why: str) -> None:
@@ -220,28 +233,31 @@ def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str
 
 
 def read_receiver(t, now: int, deadline: Optional[float] = None
-                  ) -> Tuple[List[Tuple[int, str, Reading]], List[Tuple[int, str]]]:
+                  ) -> Tuple[List[Tuple[int, str, Reading]], List[Tuple[int, str, str]]]:
     """Read every paired slot of one receiver. Returns (slot, receiver_name,
-    reading) for devices that answered and (slot, receiver_name) for paired
-    slots that did not. Pairing comes from the receiver's register b5/50+n,
-    never from the ping: an empty slot answers the ping with an error too."""
+    reading) for devices that answered and (slot, receiver_name, kind) for
+    paired slots that did not. Pairing and kind come from the receiver's
+    register b5/50+n, never from the ping: an empty slot answers the ping
+    with an error too."""
     if deadline is None:
         deadline = monotonic() + RUN_BUDGET
     paired = []
     for slot in range(1, 7):
-        if _receiver_register(t, 0x50 + slot, 0, deadline) is not None:
-            paired.append((slot, _receiver_name(t, slot, deadline)))
+        info = _receiver_register(t, 0x50 + slot, 0, deadline)
+        if info is not None:
+            kind = kind_of(info[0]) if info else "unknown"
+            paired.append((slot, _receiver_name(t, slot, deadline), kind))
     got, unreachable = [], []
-    for slot, rname in paired:
+    for slot, rname, kind in paired:
         if monotonic() >= deadline or _feature_call(t, slot, 0x00, 1, b"\0\0\x5a", deadline) is None:
-            unreachable.append((slot, rname))
+            unreachable.append((slot, rname, kind))
             continue
         name = _device_name(t, slot, deadline) or rname
         bat = _battery(t, slot, deadline)
         if bat is None:
-            unreachable.append((slot, rname))
+            unreachable.append((slot, rname, kind))
             continue
-        got.append((slot, rname, Reading(name, bat[0], bat[1], now)))
+        got.append((slot, rname, Reading(name, bat[0], bat[1], now, kind)))
     return got, unreachable
 
 
@@ -267,6 +283,16 @@ def find_hidpp_nodes(sysfs: Path, dev: Path) -> List[Tuple[Path, str]]:
 
 # --- power_supply -----------------------------------------------------------
 
+def kind_from_name(name: str) -> str:
+    """power_supply has no kind; a name that says it is the only hint."""
+    low = name.lower()
+    if "keyboard" in low:
+        return "keyboard"
+    if "mouse" in low:
+        return "mouse"
+    return "unknown"
+
+
 PS_STATUS = {"discharging": "discharging", "not charging": "discharging",
              "charging": "charging", "full": "full"}
 
@@ -285,50 +311,60 @@ def read_power_supply(sysfs: Path, now: int) -> List[Reading]:
         cap = kv.get("POWER_SUPPLY_CAPACITY", "")
         percent = int(cap) if cap.isdigit() and int(cap) <= 100 else None
         state = PS_STATUS.get(kv.get("POWER_SUPPLY_STATUS", "").lower(), "unknown")
-        out.append(Reading(sanitise(name), percent, state, now))
+        name = sanitise(name)
+        out.append(Reading(name, percent, state, now, kind_from_name(name)))
     return out
 
 
 # --- file -------------------------------------------------------------------
 
 def format_lines(readings: List[Reading]) -> str:
-    return "".join(f"{r.name}\t{'-' if r.percent is None else r.percent}\t{r.state}\t{r.read_epoch}\n"
+    return "".join(f"{r.name}\t{'-' if r.percent is None else r.percent}\t{r.state}\t{r.read_epoch}"
+                   f"\t{r.kind}\n"
                    for r in sorted(readings))
 
 
 def parse_lines(text: str) -> List[Reading]:
+    """Five fields, or four from a file written before the kind existed."""
     out = []
     for line in text.split("\n"):
         f = line.split("\t")
-        if len(f) != 4 or not f[3].isdigit() or not (f[1] == "-" or f[1].isdigit()):
+        if len(f) not in (4, 5) or not f[3].isdigit() or not (f[1] == "-" or f[1].isdigit()):
             continue
-        out.append(Reading(f[0], None if f[1] == "-" else int(f[1]), f[2], int(f[3])))
+        kind = f[4] if len(f) == 5 and f[4] in KINDS else "unknown"
+        out.append(Reading(f[0], None if f[1] == "-" else int(f[1]), f[2], int(f[3]), kind))
     return sorted(out)
 
 
-def merge(new: List[Reading], previous: List[Reading], unreachable_names: List[str],
+def merge(new: List[Reading], previous: List[Reading], unreachable: List[Tuple[str, str]],
           now: int) -> List[Reading]:
-    """New readings win; an unreachable device keeps its previous percent and
-    time, or gets "-" when it was never read. Anything else is dropped."""
+    """New readings win; an unreachable device (name, kind) keeps its
+    previous percent and time, or gets "-" when it was never read, and the
+    previous kind when its own is unknown. Anything else is dropped."""
     result = {r.name: r for r in new}
     prev = {r.name: r for r in previous}
-    for name in unreachable_names:
+    for name, kind in unreachable:
         if name in result:
             continue
         p = prev.get(name)
-        result[name] = (p._replace(state="not reachable") if p
-                        else Reading(name, None, "not reachable", now))
+        if kind == "unknown" and p:
+            kind = p.kind
+        result[name] = (p._replace(state="not reachable", kind=kind) if p
+                        else Reading(name, None, "not reachable", now, kind))
     return sorted(result.values())
 
 
-NameCache = Dict[Tuple[str, int], Tuple[str, str]]
+NameCache = Dict[Tuple[str, int], Tuple[str, str, str]]
 
 
-def resolve_name(cache: NameCache, phys: str, slot: int, receiver_name: str) -> str:
+def resolve_name(cache: NameCache, phys: str, slot: int, receiver_name: str,
+                 kind: str = "unknown") -> Tuple[str, str]:
+    """(full name, kind) of a paired slot that did not answer: the cached
+    ones while the slot holds the same device, the pairing kind first."""
     entry = cache.get((phys, slot))
     if entry and entry[0] == receiver_name:
-        return entry[1]
-    return receiver_name
+        return entry[1], kind if kind != "unknown" else entry[2]
+    return receiver_name, kind
 
 
 def load_names(path: Path) -> NameCache:
@@ -336,8 +372,9 @@ def load_names(path: Path) -> NameCache:
     try:
         for line in path.read_text().splitlines():
             f = line.split("\t")
-            if len(f) == 4 and f[1].isdigit():
-                cache[(f[0], int(f[1]))] = (f[2], f[3])
+            if len(f) in (4, 5) and f[1].isdigit():
+                kind = f[4] if len(f) == 5 and f[4] in KINDS else "unknown"
+                cache[(f[0], int(f[1]))] = (f[2], f[3], kind)
     except OSError:
         pass
     return cache
@@ -405,12 +442,12 @@ def _read_locked(sysfs: Path, dev: Path, outdir: Path, state: Path) -> int:
     except OSError:
         ps_seen = set()
     ps_now = {r.name for r in new}
-    unreachable_names = sorted(ps_seen - ps_now)
+    unreachable = [(name, "unknown") for name in sorted(ps_seen - ps_now)]
     for node, phys in find_hidpp_nodes(sysfs, dev):
         t = None
         try:
             t = open_transport(node)
-            got, unreachable = read_receiver(t, now, deadline)
+            got, gone = read_receiver(t, now, deadline)
         except OSError as e:
             log(str(node), e.strerror or str(e))
             continue
@@ -424,14 +461,14 @@ def _read_locked(sysfs: Path, dev: Path, outdir: Path, state: Path) -> int:
                 except OSError:
                     pass
         for slot, rname, reading in got:
-            cache[(phys, slot)] = (rname, reading.name)
+            cache[(phys, slot)] = (rname, reading.name, reading.kind)
             new.append(reading)
-        for slot, rname in unreachable:
-            unreachable_names.append(resolve_name(cache, phys, slot, rname))
+        for slot, rname, kind in gone:
+            unreachable.append(resolve_name(cache, phys, slot, rname, kind))
 
     try:
         _write_atomic(state, outdir / "battery",
-                      format_lines(merge(new, previous, unreachable_names, now)), 0o644)
+                      format_lines(merge(new, previous, unreachable, now)), 0o644)
     except Exception as e:  # noqa: BLE001 - anything here means no file
         log(str(outdir / "battery"), str(e))
         return 1
@@ -442,7 +479,7 @@ def _read_locked(sysfs: Path, dev: Path, outdir: Path, state: Path) -> int:
         log(str(state / "power-supply"), e.strerror or str(e))
     try:
         _write_atomic(state, state / "names",
-                      "".join(f"{p}\t{s}\t{r}\t{n}\n" for (p, s), (r, n) in sorted(cache.items())),
+                      "".join(f"{p}\t{s}\t{r}\t{n}\t{k}\n" for (p, s), (r, n, k) in sorted(cache.items())),
                       0o600)
     except OSError as e:
         log(str(state / "names"), e.strerror or str(e))
