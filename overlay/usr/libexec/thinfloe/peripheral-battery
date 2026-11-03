@@ -374,6 +374,8 @@ def _write_atomic(state: Path, target: Path, text: str, mode: int) -> None:
 
 
 def read_batteries() -> int:
+    if not switch_on():
+        return 0
     sysfs = Path(os.environ.get("TF_SYSFS", "/sys"))
     dev = Path(os.environ.get("TF_DEV", "/dev"))
     outdir = Path(os.environ.get("TF_BATTERY_DIR", "/run/thinfloe/peripherals"))
@@ -537,7 +539,7 @@ def thinlinc_config(on: bool) -> None:
         raise OSError(f"{etc} is not a directory")
     conf = etc / MANDATORY
     try:
-        lines = conf.read_text().splitlines()
+        lines = conf.read_text(errors="surrogateescape").splitlines()
         exists = True
     except FileNotFoundError:
         lines, exists = [], False
@@ -548,7 +550,7 @@ def thinlinc_config(on: bool) -> None:
         lines.extend(EXPORT_LINES)
     tmp = etc / f".{MANDATORY}.{os.getpid()}"
     try:
-        tmp.write_text("".join(l + "\n" for l in lines))
+        tmp.write_text("".join(l + "\n" for l in lines), errors="surrogateescape")
         os.chmod(tmp, 0o644)
         os.replace(tmp, conf)
     finally:
@@ -566,6 +568,9 @@ def _step(failed: List[bool], what: str, fn) -> None:
         failed[0] = True
     except OSError as e:
         log(what, e.strerror or str(e))
+        failed[0] = True
+    except Exception as e:  # a step must never keep the next one from running
+        log(what, f"{type(e).__name__}: {e}")
         failed[0] = True
 
 

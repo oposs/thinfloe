@@ -273,7 +273,9 @@ pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl F
 pub fn battery(cmd: &[String], on: bool, feed: &Arc<Feed>) -> JobResult {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&cmd[0]);
-    c.args(&cmd[1..]).arg(if on { "enable" } else { "disable" }).process_group(0);
+    c.args(&cmd[1..])
+        .arg(if on { "enable" } else { "disable" })
+        .process_group(0);
     let status = run_logged(c, BATTERY_SOURCE, feed, false, |_| {})
         .map(|st| st.code())
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]));
@@ -607,7 +609,11 @@ mod tests {
                 status: Ok(Some(0))
             }
         );
-        let mut got: Vec<_> = feed.drain().into_iter().map(|l| (l.source.clone(), l.plain())).collect();
+        let mut got: Vec<_> = feed
+            .drain()
+            .into_iter()
+            .map(|l| (l.source.clone(), l.plain()))
+            .collect();
         got.sort();
         assert_eq!(
             got,

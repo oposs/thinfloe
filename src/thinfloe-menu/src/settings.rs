@@ -125,6 +125,27 @@ pub fn battery_switch_path_from(over: Option<std::ffi::OsString>, home: Option<s
     home.join(".config/thinfloe/peripheral-battery")
 }
 
+/// Is the battery switch on? The same rule as the helper's `switch_on()`:
+/// a regular file that is reached without a symlink in the last two
+/// directories (`.config`, `thinfloe`) nor as the file itself. The helper
+/// runs as root in a home that tfuser owns and refuses to follow links.
+pub fn battery_switch_on(path: &Path) -> bool {
+    let is_link = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+    };
+    let file = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_file())
+        .unwrap_or(false);
+    file && !path
+        .ancestors()
+        .skip(1)
+        .take(2)
+        .filter(|p| !p.as_os_str().is_empty())
+        .any(is_link)
+}
+
 pub const MANUAL_NOTE: &str = "updates only by hand";
 
 /// Why is in the add-on log: thinfloe-addon names the file and the rule.
@@ -468,6 +489,27 @@ mod tests {
         let row = battery_row(&m);
         assert!(row.busy);
         assert_eq!(status_items(&row).last().unwrap().0, "working…");
+    }
+
+    #[test]
+    fn the_battery_switch_is_a_regular_file_reached_without_symlinks() {
+        use std::os::unix::fs::symlink;
+        let d = TestDir::new("settings", "switch");
+        let real = d.join("real/thinfloe");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("peripheral-battery"), "on\n").unwrap();
+        assert!(battery_switch_on(&real.join("peripheral-battery")));
+        assert!(!battery_switch_on(&real.join("missing")));
+        // ~/.config is a link
+        symlink(d.join("real"), d.join("cfg")).unwrap();
+        assert!(!battery_switch_on(&d.join("cfg/thinfloe/peripheral-battery")));
+        // ~/.config/thinfloe is a link
+        std::fs::create_dir_all(d.join("c2")).unwrap();
+        symlink(&real, d.join("c2/thinfloe")).unwrap();
+        assert!(!battery_switch_on(&d.join("c2/thinfloe/peripheral-battery")));
+        // the file itself is a link
+        symlink(real.join("peripheral-battery"), real.join("link")).unwrap();
+        assert!(!battery_switch_on(&real.join("link")));
     }
 
     #[test]

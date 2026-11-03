@@ -66,7 +66,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
-    menu.battery_on = settings::battery_switch_path().exists();
+    menu.battery_on = settings::battery_switch_on(&settings::battery_switch_path());
     (menu, paths, IconRoots::system())
 }
 

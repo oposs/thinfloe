@@ -270,7 +270,10 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   change reaches ThinLinc when the client starts again. The helper's
   subcommands are `enable`, `disable`, `status` (`on` or `off`) and
   `thinlinc-config` (makes the mandatory config match the state), which the
-  hook calls; with no argument it does one reading run.
+  hook calls; with no argument it does one reading run, which does nothing
+  (writes no file) unless the switch is on. A symlink anywhere in the path
+  of the state file (`~/.config`, `~/.config/thinfloe` or the file itself)
+  counts as off, for the helper and for the menu alike.
   `/usr/libexec/thinfloe/peripheral-battery` (root,
   `thinfloe-peripheral-battery.timer`, 30 s after boot and every 5 min)
   writes `/run/thinfloe/peripherals/battery`, one line per device, sorted:

@@ -12,6 +12,7 @@ use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu};
 use crate::raster::{Background, Canvas, Textures};
+use crate::settings;
 use crate::ui;
 use egui::ViewportId;
 use std::ffi::OsString;
@@ -332,13 +333,14 @@ impl App {
         live.window.request_redraw();
     }
 
+    /// Read the battery switch again.
+    fn refresh_battery(&mut self) {
+        self.cfg.menu.battery_on = settings::battery_switch_on(&self.cfg.battery_switch);
+    }
+
     /// Read the add-on files again. A program or icon that appeared
     /// (the install runs while the menu does) is picked up here, the icon in
     /// a renderer process like every other.
-    fn refresh_battery(&mut self) {
-        self.cfg.menu.battery_on = self.cfg.battery_switch.exists();
-    }
-
     fn refresh_addons(&mut self) {
         let changed = self.cfg.menu.set_addons(addons::read_status(&self.cfg.addon_status));
         self.cfg.menu.last_check = addons::read_last_check(&self.cfg.addon_last_check);

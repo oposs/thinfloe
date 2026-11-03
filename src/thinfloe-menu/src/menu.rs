@@ -15,7 +15,8 @@
 //! and Power off take the same steps and exit 10 and 11. A running add-on
 //! job is listed in the dialog too; it is waited for, never stopped.
 //! A battery job is neither waited for nor stopped: it is no add-on job, it
-//! only writes a state file and a drop-in, and the shutdown ends it anyway.
+//! writes the switch file and the ThinLinc mandatory config and runs
+//! systemctl, and the shutdown ends it anyway.
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
