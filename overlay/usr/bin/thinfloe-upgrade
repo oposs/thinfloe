@@ -6,6 +6,7 @@ Installs or upgrades ThinFloe firmware on USB drives.
 Supports A/B updates for existing ThinFloe drives, or fresh install for new drives.
 """
 
+import argparse
 import atexit
 import fcntl
 import fnmatch
@@ -254,11 +255,19 @@ def log(message: str) -> None:
     print(f"==> {message}")
 
 
-def ensure_root() -> None:
-    """Re-execute with sudo if not running as root"""
+def ensure_root(batch: bool = False) -> None:
+    """Re-execute with sudo if not running as root.
+
+    Batch mode must never prompt and keeps stdout for machine-readable
+    output: the notice goes to stderr and sudo gets -n.
+    """
     if os.geteuid() != 0:
-        print("Requesting root privileges...")
-        os.execvp("sudo", ["sudo"] + sys.argv)
+        if batch:
+            print("Requesting root privileges...", file=sys.stderr)
+            os.execvp("sudo", ["sudo", "-n"] + sys.argv)
+        else:
+            print("Requesting root privileges...")
+            os.execvp("sudo", ["sudo"] + sys.argv)
 
 
 def run_cmd(
@@ -476,7 +485,8 @@ def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
         device = node.get("path") or f"/dev/{devname}"
         is_boot = boot_dev is not None and device == boot_dev
         transport = node.get("tran") or ""
-        removable = bool(node.get("rm"))
+        # Old util-linux prints rm as "0"/"1"; bool("0") would be True.
+        removable = node.get("rm") in (True, "1", 1)
         if not (include_internal or removable or transport == "usb" or is_boot):
             continue
 
@@ -1679,8 +1689,94 @@ def print_outcome_lines(home_copied: Optional[bool], home_saved: bool) -> None:
         print("  Home directory NOT saved - see the warning above.")
 
 
+# ============ Batch interface ============
+
+def batch_fresh(drive: DriveInfo, args, progress: Progress) -> int:
+    progress.result(False, "not implemented yet")
+    return 1
+
+
+def batch_upgrade(drive: DriveInfo, args, progress: Progress) -> int:
+    progress.result(False, "not implemented yet")
+    return 1
+
+
+def _batch_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="thinfloe-upgrade")
+    sub = parser.add_subparsers(dest="command", required=True)
+    d = sub.add_parser("drives", help="list drives as JSON")
+    d.add_argument("--all", action="store_true", help="include internal drives")
+    d.add_argument("--source", default=DEFAULT_URL)
+    w = sub.add_parser("write", help="write or upgrade a stick without questions")
+    w.add_argument("--device", required=True)
+    w.add_argument("--mode", required=True, choices=("fresh", "upgrade"))
+    w.add_argument("--expect-id", required=True)
+    w.add_argument("--source", default=DEFAULT_URL)
+    w.add_argument("--copy-home", action="store_true")
+    w.add_argument("--verify", action="store_true")
+    w.add_argument("--allow-internal", action="store_true")
+    return parser
+
+
+def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
+    """Why this write must not start, or None. Nothing is opened before."""
+    if drive is None:
+        return f"{args.device} is not a drive this tool may write"
+    if drive_identity(drive) != args.expect_id:
+        return f"{args.device} does not match the drive that was chosen"
+    if args.mode == "fresh":
+        if drive.is_boot:
+            return f"{args.device} is the boot drive and cannot be overwritten"
+        if drive.mounted:
+            return f"{args.device} is mounted and cannot be overwritten"
+        size = image_size(f"{args.source}/thinfloe-usb.img.zst")
+        if size is not None and drive.size_bytes < size:
+            return f"{args.device} is too small for the image"
+    else:
+        if not drive.is_thinfloe:
+            return f"{args.device} is not a ThinFloe drive and cannot be upgraded"
+        if drive.mounted and not drive.is_boot:
+            return f"{args.device} is mounted and cannot be upgraded"
+    if args.copy_home:
+        if args.mode != "fresh":
+            return "copying the home directory only works with a fresh install"
+        if home_restore_failed():
+            return "the home directory of this boot was not restored, so it is not copied"
+    return None
+
+
+def batch_main(argv: List[str]) -> int:
+    """The question-free commands `drives` and `write`."""
+    global PROGRESS
+    try:
+        args = _batch_parser().parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+    args.source = getattr(args, "source", DEFAULT_URL).rstrip("/")
+    PROGRESS = Progress(sys.stdout, batch=True)
+    ensure_root(batch=True)
+
+    if args.command == "drives":
+        drives = enumerate_drives(include_internal=args.all)
+        size = image_size(f"{args.source}/thinfloe-usb.img.zst")
+        print(drives_json(drives, size))
+        return 0
+
+    drives = enumerate_drives(include_internal=args.allow_internal)
+    drive = next((d for d in drives if d.device == args.device), None)
+    reason = _write_refusal(args, drive)
+    if reason is not None:
+        PROGRESS.result(False, reason)
+        return 2
+    if args.mode == "fresh":
+        return batch_fresh(drive, args, PROGRESS)
+    return batch_upgrade(drive, args, PROGRESS)
+
+
 def main() -> int:
     """Main entry point"""
+    if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write"):
+        return batch_main(sys.argv[1:])
     try:
         ensure_root()
 

@@ -4,6 +4,7 @@
 import importlib.machinery
 import importlib.util
 import hashlib
+import contextlib
 import errno
 import io
 import json
@@ -443,6 +444,213 @@ class TestExpectedDownloadSha(unittest.TestCase):
                      self.HEX + "  thinfloe-usb.img.zst extra\n"):
             self.put(text)
             self.assertIsNone(self.get(), text)
+
+
+class TestRemovableFlag(unittest.TestCase):
+    def test_string_zero_is_not_removable(self):
+        # Old util-linux prints rm as "0"/"1"; bool("0") would list internal disks.
+        old = json.dumps({"blockdevices": [
+            {"name": "sdc", "path": "/dev/sdc", "size": 1000, "model": None,
+             "serial": None, "wwn": None, "tran": "sata", "rm": "0",
+             "type": "disk", "mountpoints": [None]},
+            {"name": "sdd", "path": "/dev/sdd", "size": 1000, "model": None,
+             "serial": None, "wwn": None, "tran": None, "rm": "1",
+             "type": "disk", "mountpoints": [None]},
+        ]})
+
+        def cmd(c):
+            return old if c[0] == "lsblk" and "-J" in c else ""
+        with mock.patch.object(ui, "get_cmd_output", side_effect=cmd), \
+             mock.patch.object(ui, "detect_boot_device", return_value=None), \
+             mock.patch.object(ui, "find_efi_partition", return_value=None), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="-"):
+            self.assertEqual([d.device for d in ui.enumerate_drives()], ["/dev/sdd"])
+
+
+IMG = 3148873728
+
+
+class TestBatchRefusals(unittest.TestCase):
+    def setUp(self):
+        self.stream = mock.patch.object(
+            ui, "stream_image", side_effect=AssertionError("stream_image called"))
+        self.stream.start()
+        self.addCleanup(self.stream.stop)
+        for name in ("ensure_root",):
+            m = mock.patch.object(ui, name)
+            m.start()
+            self.addCleanup(m.stop)
+        self.drives = mock.patch.object(
+            ui, "enumerate_drives", side_effect=self._enum)
+        self.drives.start()
+        self.addCleanup(self.drives.stop)
+        self.size = mock.patch.object(ui, "image_size", return_value=IMG)
+        self.size.start()
+        self.addCleanup(self.size.stop)
+        self.restore = mock.patch.object(ui, "home_restore_failed", return_value=False)
+        self.restore.start()
+        self.addCleanup(self.restore.stop)
+        self.fresh = mock.patch.object(ui, "batch_fresh", return_value=0)
+        self.upgrade = mock.patch.object(ui, "batch_upgrade", return_value=0)
+        self.m_fresh = self.fresh.start()
+        self.m_upgrade = self.upgrade.start()
+        self.addCleanup(self.fresh.stop)
+        self.addCleanup(self.upgrade.stop)
+        self.saved_progress = ui.PROGRESS
+        self.addCleanup(setattr, ui, "PROGRESS", self.saved_progress)
+
+    def _enum(self, include_internal=False):
+        out = [self.mk("/dev/sdb", mounted=False, thinfloe=True),
+               self.mk("/dev/sdc", mounted=True, thinfloe=True),
+               self.mk("/dev/sdd", mounted=False, thinfloe=False),
+               self.mk("/dev/sde", size=2 * 10**9),
+               self.mk("/dev/vda", boot=True, thinfloe=True)]
+        if include_internal:
+            out.append(self.mk("/dev/nvme0n1", size=500 * 10**9))
+        return out
+
+    @staticmethod
+    def mk(device, size=16 * 10**9, mounted=False, thinfloe=False, boot=False):
+        return ui.DriveInfo(
+            device=device, size="?", model="M", label="", is_thinfloe=thinfloe,
+            efi_partition=None, part_size_mb=0, is_boot=boot, has_tl_old=False,
+            has_tl_new=False, size_bytes=size, serial="S" + device[-1],
+            transport="usb", removable=True, mounted=mounted, fingerprint="ab" * 8)
+
+    def ident(self, device):
+        return ui.drive_identity(
+            [d for d in self._enum(True) if d.device == device][0])
+
+    def run_write(self, device, mode="fresh", expect=None, *extra):
+        if expect is None:
+            expect = self.ident(device)
+        argv = ["write", "--device", device, "--mode", mode,
+                "--expect-id", expect, *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ui.batch_main(argv)
+        return rc, out.getvalue()
+
+    def assertRefused(self, rc, out, *words):
+        self.assertEqual(rc, 2)
+        lines = [l for l in out.splitlines() if l.startswith("@result")]
+        self.assertEqual(len(lines), 1, out)
+        self.assertTrue(lines[0].startswith("@result failed "), out)
+        for w in words:
+            self.assertIn(w, lines[0])
+        self.m_fresh.assert_not_called()
+        self.m_upgrade.assert_not_called()
+
+    def test_expect_id_mismatch_refuses(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", "WRONG:1:2")
+        self.assertRefused(rc, out, "does not match", "/dev/sdb")
+
+    def test_unlisted_device_refuses(self):
+        rc, out = self.run_write("/dev/sdz", "fresh", "x")
+        self.assertRefused(rc, out, "/dev/sdz")
+
+    def test_internal_disk_needs_allow_internal(self):
+        rc, out = self.run_write("/dev/nvme0n1", "fresh", "S1:500000000000:" + "ab" * 8)
+        self.assertRefused(rc, out)
+        rc, out = self.run_write("/dev/nvme0n1", "fresh", None, "--allow-internal")
+        self.assertEqual(rc, 0)
+        self.m_fresh.assert_called_once()
+
+    def test_fresh_on_boot_drive_refuses(self):
+        rc, out = self.run_write("/dev/vda", "fresh")
+        self.assertRefused(rc, out, "/dev/vda", "boot")
+
+    def test_fresh_on_mounted_drive_refuses(self):
+        rc, out = self.run_write("/dev/sdc", "fresh")
+        self.assertRefused(rc, out, "/dev/sdc", "mounted")
+
+    def test_fresh_when_image_does_not_fit_refuses(self):
+        rc, out = self.run_write("/dev/sde", "fresh")
+        self.assertRefused(rc, out, "/dev/sde")
+
+    def test_fresh_with_unknown_size_goes_on(self):
+        self.size.stop()
+        self.addCleanup(self.size.start)
+        with mock.patch.object(ui, "image_size", return_value=None):
+            rc, out = self.run_write("/dev/sde", "fresh")
+        self.assertEqual(rc, 0)
+        self.m_fresh.assert_called_once()
+
+    def test_fresh_size_check_uses_source_url(self):
+        self.run_write("/dev/sdb", "fresh", None, "--source", "https://h/p/")
+        ui.image_size.assert_called_with("https://h/p/thinfloe-usb.img.zst")
+
+    def test_upgrade_on_non_thinfloe_refuses(self):
+        rc, out = self.run_write("/dev/sdd", "upgrade")
+        self.assertRefused(rc, out, "/dev/sdd", "ThinFloe")
+
+    def test_upgrade_on_mounted_non_boot_drive_refuses(self):
+        rc, out = self.run_write("/dev/sdc", "upgrade")
+        self.assertRefused(rc, out, "/dev/sdc", "mounted")
+
+    def test_upgrade_on_boot_drive_goes_on(self):
+        rc, out = self.run_write("/dev/vda", "upgrade")
+        self.assertEqual(rc, 0)
+        self.m_upgrade.assert_called_once()
+
+    def test_copy_home_with_upgrade_refuses(self):
+        rc, out = self.run_write("/dev/sdb", "upgrade", None, "--copy-home")
+        self.assertRefused(rc, out, "home")
+
+    def test_copy_home_after_failed_restore_refuses(self):
+        with mock.patch.object(ui, "home_restore_failed", return_value=True):
+            rc, out = self.run_write("/dev/sdb", "fresh", None, "--copy-home")
+        self.assertRefused(rc, out, "home")
+
+    def test_accepted_fresh_calls_batch_fresh(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", None, "--verify")
+        self.assertEqual(rc, 0)
+        drive, args, progress = self.m_fresh.call_args.args
+        self.assertEqual(drive.device, "/dev/sdb")
+        self.assertTrue(args.verify)
+        self.assertEqual(args.source, ui.DEFAULT_URL)
+        self.assertTrue(ui.PROGRESS.batch)
+        self.assertIs(progress, ui.PROGRESS)
+
+    def test_unknown_mode_is_argparse_error(self):
+        rc, out = self.run_write("/dev/sdb", "bogus", "x")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+
+    def test_drives_default_omits_internal(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ui.batch_main(["drives"])
+        self.assertEqual(rc, 0)
+        devs = [r["device"] for r in json.loads(out.getvalue())]
+        self.assertNotIn("/dev/nvme0n1", devs)
+        self.assertIn("/dev/sdb", devs)
+
+    def test_drives_all_includes_internal(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ui.batch_main(["drives", "--all"])
+        self.assertIn("/dev/nvme0n1", [r["device"] for r in json.loads(out.getvalue())])
+
+    def test_drives_fits_null_when_size_unknown(self):
+        out = io.StringIO()
+        with mock.patch.object(ui, "image_size", return_value=None), \
+             contextlib.redirect_stdout(out):
+            ui.batch_main(["drives"])
+        self.assertTrue(all(r["fits"] is None for r in json.loads(out.getvalue())))
+
+
+class TestEnsureRootBatch(unittest.TestCase):
+    def test_batch_uses_stderr_and_sudo_n(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ui.os, "geteuid", return_value=1000), \
+             mock.patch.object(ui.os, "execvp") as ex, \
+             mock.patch.object(ui.sys, "argv", ["thinfloe-upgrade", "drives"]), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ui.ensure_root(batch=True)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("Requesting root privileges", err.getvalue())
+        ex.assert_called_once_with("sudo", ["sudo", "-n", "thinfloe-upgrade", "drives"])
 
 
 if __name__ == "__main__":
