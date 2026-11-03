@@ -349,9 +349,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   (`RESCAN`); a node that fails a read is closed and found again then. A
   bad report or a failed reading is logged and the watcher goes on. While
   another run holds the lock, a lookup waits for it (up to 30 s) and the
-  watcher reads nothing meanwhile; the kernel keeps the reports queued.
-  **Not measured:** the keyboard's events (expected the same), and what
-  arrives when a device goes out of range without being switched off.
+  watcher reads nothing meanwhile; the kernel queues up to 64 reports per
+  open file, and a connect event lost beyond that waits for the timer.
+  **Confirmed on hardware (2026-11-03, 10.46.102.86):** after a restart the
+  menu appeared at 16.9 s, the boot read at 12.2 s got the mouse, and the
+  keyboard's first key press at 22.6 s logged `thinfloe: battery: connected:
+  ... slot 2, reading` and put its value on the tile without a click; no
+  ordering cycle. **Not measured:** what arrives when a device goes out of
+  range without being switched off.
   Guards: `test/unit/test_peripheral_battery.py` (a fake receiver that
   answers as the Bolt receiver did on 2026-11-03; the watcher with the
   measured events, fake nodes and an injected clock), `test-session-packages.sh`
