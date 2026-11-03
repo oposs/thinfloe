@@ -350,7 +350,10 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   bad report or a failed reading is logged and the watcher goes on. While
   another run holds the lock, a lookup waits for it (up to 30 s) and the
   watcher reads nothing meanwhile; the kernel queues up to 64 reports per
-  open file, and a connect event lost beyond that waits for the timer.
+  open file. Two things can let that queue overflow: a lookup waiting for
+  the lock, and a reading the watcher runs itself (its own listener fills
+  with the reader's replies). A connect event lost beyond 64 waits for the
+  timer.
   **Confirmed on hardware (2026-11-03, 10.46.102.86):** after a restart the
   menu appeared at 16.9 s, the boot read at 12.2 s got the mouse, and the
   keyboard's first key press at 22.6 s logged `thinfloe: battery: connected:

@@ -235,13 +235,16 @@ def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str
             state = "critical" if level & 1 else "low" if level & 2 else "discharging"
         else:
             state = UB_CHARGING.get(charging, "unknown")
-        return (soc if soc <= 100 else None), state
+        # soc 0 is "not reported": a device without state of charge sends
+        # only the level bitmap.
+        return (soc if 0 < soc <= 100 else None), state
     idx = _feature_index(t, slot, 0x1000, deadline)
     if idx:
         r = _feature_call(t, slot, idx, 0, b"", deadline)
         if not r or len(r) < 3:
             return None
-        return (r[0] if r[0] <= 100 else None), BS_STATUS.get(r[2], "unknown")
+        # level 0 is "unknown".
+        return (r[0] if 0 < r[0] <= 100 else None), BS_STATUS.get(r[2], "unknown")
     idx = _feature_index(t, slot, 0x1001, deadline)
     if idx:
         r = _feature_call(t, slot, idx, 0, b"", deadline)

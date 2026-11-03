@@ -176,6 +176,17 @@ class ReceiverTests(unittest.TestCase):
             R("MX Mechanical", 100, "full", 1000)])
         self.assertEqual(unreachable, [])
 
+    def test_unified_battery_without_state_of_charge_has_no_percent(self):
+        t = FakeReceiver({1: dev("Mouse", ub=(0, 4, 0)), 2: dev("Pad", ub=(0, 1, 0))}, self.clock)
+        got, _ = self.readings(t)
+        self.assertEqual(got, [R("Mouse", None, "discharging", 1000),
+                               R("Pad", None, "critical", 1000)])
+
+    def test_battery_status_level_zero_is_unknown(self):
+        t = FakeReceiver({1: dev("Mouse", bs=(0, 0, 0))}, self.clock)
+        got, _ = self.readings(t)
+        self.assertEqual(got, [R("Mouse", None, "discharging", 1000)])
+
     def test_kind_comes_from_the_pairing_info(self):
         # The bytes the Bolt receiver gave on 2026-11-03: 0x42 mouse, 0x01 keyboard.
         t = FakeReceiver({1: dev("MX Anywhere 3S for Business", "MX Anywhere3SB", ub=(90, 8, 0), kind=0x42),
