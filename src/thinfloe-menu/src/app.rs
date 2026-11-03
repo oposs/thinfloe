@@ -385,6 +385,7 @@ impl App {
             save_home: self.cfg.paths.save_home.clone(),
             state_dir: self.cfg.paths.state_dir.clone(),
             addon_cmd: self.cfg.paths.addon_cmd.clone(),
+            battery_cmd: self.cfg.paths.battery_cmd.clone(),
         };
         std::thread::spawn(move || {
             let result = match job {
@@ -395,6 +396,7 @@ impl App {
                         let _ = started.send_event(Wake::Job(JobResult::Started { id, pgid }));
                     })
                 }
+                Job::Battery { on } => jobs::battery(&paths.battery_cmd, on, &feed),
                 Job::Addon { args } => {
                     let started = proxy.clone();
                     let a = args.clone();

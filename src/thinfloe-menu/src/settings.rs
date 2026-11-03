@@ -20,6 +20,8 @@ pub enum SettingsEvent {
     InstallNow(String),
     UpdateNow(String),
     CheckNow,
+    /// The tick box of the keyboard and mouse battery: `true` switches it on.
+    Battery(bool),
     Back,
 }
 

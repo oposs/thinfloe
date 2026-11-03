@@ -105,6 +105,11 @@ pub enum JobResult {
         args: Vec<String>,
         status: Result<Option<i32>, String>,
     },
+    /// The battery switch ended; `on` is the direction it was started for.
+    Battery {
+        on: bool,
+        status: Result<Option<i32>, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +144,17 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// The add-on tool and what runs it as root; the job's arguments follow.
     pub addon_cmd: Vec<String>,
+    /// The battery helper and what runs it as root; `enable` or `disable` follows.
+    pub battery_cmd: Vec<String>,
+}
+
+/// The log source of the battery job's output.
+pub const BATTERY_SOURCE: &str = "battery";
+
+pub fn default_battery_cmd() -> Vec<String> {
+    ["sudo", "-n", "/usr/libexec/thinfloe/peripheral-battery"]
+        .map(String::from)
+        .to_vec()
 }
 
 /// thinfloe-addon runs as root. tfuser has sudo without a password; `-n`
@@ -251,6 +267,19 @@ pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl F
     }
 }
 
+/// Run the peripheral battery helper with `enable` or `disable`. Both
+/// streams go to the log under `battery`. No group id is reported: the
+/// end-of-session dialogs neither wait for this job nor stop it.
+pub fn battery(cmd: &[String], on: bool, feed: &Arc<Feed>) -> JobResult {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..]).arg(if on { "enable" } else { "disable" }).process_group(0);
+    let status = run_logged(c, BATTERY_SOURCE, feed, false, |_| {})
+        .map(|st| st.code())
+        .map_err(|e| format!("{} could not be started: {e}", cmd[0]));
+    JobResult::Battery { on, status }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,18 +342,21 @@ mod tests {
             save_home: "/bin/true".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            battery_cmd: default_battery_cmd(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
             save_home: "/bin/false".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            battery_cmd: default_battery_cmd(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
             save_home: d.join("nope"),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            battery_cmd: default_battery_cmd(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -548,6 +580,7 @@ mod tests {
             save_home: "/bin/sh".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            battery_cmd: default_battery_cmd(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -555,10 +588,40 @@ mod tests {
             save_home: "/bin/ls".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            battery_cmd: default_battery_cmd(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
         assert!(!got.is_empty(), "ls wrote nothing to the feed");
         assert!(got.iter().all(|l| l.source.as_deref() == Some("save-home")));
+    }
+
+    #[test]
+    fn battery_logs_both_streams_as_battery_and_passes_the_verb() {
+        let feed = Arc::new(Feed::default());
+        let cmd = sh("echo \"out $0\"; echo err >&2; exit 0");
+        assert_eq!(
+            battery(&cmd, true, &feed),
+            JobResult::Battery {
+                on: true,
+                status: Ok(Some(0))
+            }
+        );
+        let mut got: Vec<_> = feed.drain().into_iter().map(|l| (l.source.clone(), l.plain())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (Some("battery".to_string()), "err".to_string()),
+                (Some("battery".to_string()), "out enable".to_string())
+            ]
+        );
+        battery(&cmd, false, &feed);
+        let got: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
+        assert!(got.contains(&"out disable".to_string()), "{got:?}");
+        assert_eq!(
+            default_battery_cmd(),
+            ["sudo", "-n", "/usr/libexec/thinfloe/peripheral-battery"]
+        );
     }
 }

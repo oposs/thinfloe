@@ -52,6 +52,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         save_home: env_path("TF_SAVE_HOME", "/usr/bin/thinfloe-save-home"),
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
         addon_cmd: jobs::default_addon_cmd(),
+        battery_cmd: jobs::default_battery_cmd(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
