@@ -258,6 +258,51 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   is stored in `~/.local/state/wireplumber/default-routes`, travels with the
   home archive and wins. `test-session-packages.sh` asks the image's
   WirePlumber for both values. **Not verified on hardware.**
+- Peripheral battery: `/usr/libexec/thinfloe/peripheral-battery` (root,
+  `thinfloe-peripheral-battery.timer`, 30 s after boot and every 5 min)
+  writes `/run/thinfloe/peripherals/battery`, one line per device, sorted:
+  `name<TAB>percent<TAB>state<TAB>read_epoch` (`percent` `-` when unknown;
+  `state` `discharging`, `charging`, `full`, `low`, `critical`, `unknown`
+  or `not reachable`). A Logi Bolt receiver (`046d:c548`) is left to
+  `hid-generic` (mainline `hid-logitech-dj` does not support Bolt), so the
+  kernel has no battery for its devices: the helper asks them over HID++ on
+  the receiver's hidraw node. Every `power_supply` entry with scope Device
+  is added. Pairing comes from the receiver's register `b5`/`50+n`, never
+  from the ping, since an empty slot answers the ping with an error too
+  (code `0x09`; a switched-off device `0x04`, both after about 50 ms; an
+  idle keyboard took 850 ms to answer, hence the 2 s request timeout). A
+  device that does not answer keeps its last reading as `not reachable`;
+  one off since boot gets the receiver's short pairing name (`MX MCHNCL`)
+  and `-`. Full names are cached in `/run/thinfloe/peripherals-state/`,
+  next to the temporary file: the exported directory holds only `battery`.
+  The ThinLinc add-on hook (`addon-hooks/10-thinlinc`) writes
+  `NFS_SERVER_ENABLED=1` and `NFS_EXPORTS=/run/thinfloe/peripherals,ro`
+  into `/opt/thinlinc/etc/tlclient_mandatory.conf`, so the session sees the
+  file as `~/thindrives/peripherals/battery`. The ThinLinc server mounts it
+  with `tl-mount-localdrives` from `xstartup.d/40-tl-mount-localdrives`,
+  i.e. only when a session starts: on a reconnect to a running session
+  nothing mounts it unless the server also runs it from
+  `sessionreconnect.d/` (empty on thinlinc-aarweg-01); running
+  `/opt/thinlinc/bin/tl-mount-localdrives` in the session does it by hand.
+  That is server configuration, not ThinFloe's. Mandatory, because every saved home's
+  `~/.thinlinc/tlclient.conf` says `NFS_SERVER_ENABLED=0`; the cost is that
+  a user cannot export other local drives (no machine did, owner
+  2026-11-03). A failure there is logged (`thinfloe: battery export not
+  configured`) and never fails the ThinLinc install. Exposure: every
+  ThinLinc session now runs the client's NFS server, tunnelled to the
+  ThinLinc server, exporting this one read-only directory. Solaar was
+  tried and rejected: 44 packages, 39 MB, GTK 3. Guards:
+  `test/unit/test_peripheral_battery.py` (a fake receiver that answers as
+  the Bolt receiver did on 2026-11-03), `test/integration/test-thinlinc-hook.sh`,
+  `test-session-packages.sh` (units, timer, directories).
+  **Confirmed on hardware (2026-11-03, 10.46.102.86, helper, units and hook
+  copied into the running system):** both devices read in 0.5 s, the client
+  exports the directory (`unfsd: /run/thinfloe/peripherals`), and after
+  `tl-mount-localdrives` the session on thinlinc-aarweg-01 reads the file.
+  **Not verified on hardware:** a boot of the built image (ordering cycles;
+  `make qemu-smoke` was not run either), that the export is read-only from
+  the server, and the `not reachable` line written by the timer for a
+  switched-off device (the reply it relies on was measured).
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
