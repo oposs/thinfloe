@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""
+peripheral-battery - write the battery charge of keyboards and mice
+
+Writes $TF_BATTERY_DIR/battery (default /run/thinfloe/peripherals/battery),
+one line per device, sorted by name:
+
+    name<TAB>percent<TAB>state<TAB>read_epoch
+
+percent is 0..100 or "-"; state is discharging, charging, full, low,
+critical, unknown or "not reachable". A device that does not answer keeps
+its last reading and the time it was taken. The ThinLinc client exports the
+directory read-only to the session (addon-hooks/10-thinlinc), so the file
+is the only one ever placed there; the temporary file and the name cache
+live in $TF_BATTERY_STATE (default /run/thinfloe/peripherals-state).
+
+Two sources:
+- Logitech receivers the kernel does not drive (the Logi Bolt receiver
+  046d:c548 is left to hid-generic), asked over HID++ on their hidraw node.
+  Needs root.
+- /sys/class/power_supply entries with scope Device (Bluetooth devices,
+  receivers the kernel drives).
+
+Run by thinfloe-peripheral-battery.timer. Every per-device failure is
+logged and skipped; exit 1 only when the file could not be written.
+"""
+
+import os
+import select
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+REQUEST_TIMEOUT = 2.0   # an idle keyboard answered after 850 ms
+RUN_BUDGET = 15.0
+SWID = 0x0A
+MAX_NAME = 64
+
+monotonic = time.monotonic
+
+# Drivers that already give the kernel the battery (power_supply).
+KERNEL_DRIVERS = {"logitech-djreceiver", "logitech-djdevice", "logitech-hidpp-device"}
+
+
+class Reading(NamedTuple):
+    name: str
+    percent: Optional[int]
+    state: str
+    read_epoch: int
+
+
+def log(what: str, why: str) -> None:
+    print(f"thinfloe: battery: {what}: {why}", file=sys.stderr)
+
+
+def sanitise(name: str) -> str:
+    name = name.replace("\0", "")
+    name = "".join("?" if ord(c) < 32 or ord(c) == 127 else c for c in name)
+    name = name.strip()[:MAX_NAME]
+    return name or "unknown device"
+
+
+# --- HID++ over hidraw ------------------------------------------------------
+
+class HidrawTransport:
+    def __init__(self, node: Path):
+        self.fd = os.open(str(node), os.O_RDWR)
+
+    def write(self, data: bytes) -> None:
+        os.write(self.fd, data)
+
+    def read(self, timeout: float) -> Optional[bytes]:
+        if not select.select([self.fd], [], [], max(timeout, 0))[0]:
+            return None
+        return os.read(self.fd, 64)
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def open_transport(node: Path):
+    return HidrawTransport(node)
+
+
+def _exchange(t, msg: bytes, match, deadline: float) -> Optional[bytes]:
+    """Send msg, return the data of the first reply match() accepts, None on
+    an error reply or when the request timeout or the deadline passes.
+    match(rep) returns data, False for an error reply, None for unrelated."""
+    t.write(msg)
+    stop = min(monotonic() + REQUEST_TIMEOUT, deadline)
+    while True:
+        left = stop - monotonic()
+        if left <= 0:
+            return None
+        rep = t.read(left)
+        if rep is None:
+            return None
+        got = match(rep)
+        if got is False:
+            return None
+        if got is not None:
+            return got
+
+
+def _feature_call(t, slot: int, feat: int, func: int, params: bytes, deadline: float) -> Optional[bytes]:
+    fsw = (func << 4) | SWID
+    msg = bytes([0x11, slot, feat, fsw]) + params
+
+    def match(rep):
+        if len(rep) < 5 or rep[1] != slot:
+            return None
+        if rep[2] == feat and rep[3] == fsw:
+            return rep[4:]
+        if rep[2] == 0xFF and rep[3] == feat and rep[4] == fsw:
+            return False
+        if rep[0] == 0x10 and rep[2] == 0x8F and rep[3] == feat and rep[4] == fsw:
+            return False
+        return None
+    return _exchange(t, msg.ljust(20, b"\0"), match, deadline)
+
+
+def _receiver_register(t, sub: int, param: int, deadline: float) -> Optional[bytes]:
+    msg = bytes([0x10, 0xFF, 0x83, 0xB5, sub, param, 0x00])
+
+    def match(rep):
+        if len(rep) < 5 or rep[1] != 0xFF:
+            return None
+        if rep[2] == 0x83 and rep[3] == 0xB5 and rep[4] == sub:
+            return rep[5:]
+        if rep[2] == 0x8F and rep[3] == 0x83 and rep[4] == 0xB5:
+            return False
+        return None
+    return _exchange(t, msg, match, deadline)
+
+
+def _receiver_name(t, slot: int, deadline: float) -> str:
+    first = _receiver_register(t, 0x60 + slot, 1, deadline)
+    if not first or len(first) < 2:
+        return f"device {slot}"
+    length = first[1]
+    name = bytes(first[2:])
+    chunk = 2
+    while len(name) < length and chunk <= 4:
+        more = _receiver_register(t, 0x60 + slot, chunk, deadline)
+        if not more or len(more) < 2:
+            break
+        name += bytes(more[1:])
+        chunk += 1
+    return sanitise(name[:length].decode("utf-8", "replace"))
+
+
+def _feature_index(t, slot: int, fid: int, deadline: float) -> Optional[int]:
+    r = _feature_call(t, slot, 0x00, 0, bytes([fid >> 8, fid & 0xFF]), deadline)
+    return r[0] if r and r[0] else None
+
+
+def _device_name(t, slot: int, deadline: float) -> Optional[str]:
+    idx = _feature_index(t, slot, 0x0005, deadline)
+    if not idx:
+        return None
+    r = _feature_call(t, slot, idx, 0, b"", deadline)
+    if not r:
+        return None
+    length = r[0]
+    name = b""
+    for _ in range(8):
+        if len(name) >= length:
+            break
+        part = _feature_call(t, slot, idx, 1, bytes([len(name)]), deadline)
+        if not part:
+            break
+        name += bytes(part[: length - len(name)])
+    return sanitise(name.decode("utf-8", "replace")) if name else None
+
+
+UB_CHARGING = {1: "charging", 2: "charging", 3: "full"}
+BS_STATUS = {0: "discharging", 1: "charging", 2: "charging", 3: "full"}
+
+
+def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str]]:
+    """(percent, state), or None when the device stopped answering."""
+    idx = _feature_index(t, slot, 0x1004, deadline)
+    if idx:
+        r = _feature_call(t, slot, idx, 1, b"", deadline)
+        if not r:
+            return None
+        soc, level, charging = r[0], r[1], r[2]
+        if charging == 0:
+            state = "critical" if level & 1 else "low" if level & 2 else "discharging"
+        else:
+            state = UB_CHARGING.get(charging, "unknown")
+        return (soc if soc <= 100 else None), state
+    idx = _feature_index(t, slot, 0x1000, deadline)
+    if idx:
+        r = _feature_call(t, slot, idx, 0, b"", deadline)
+        if not r:
+            return None
+        return (r[0] if r[0] <= 100 else None), BS_STATUS.get(r[2], "unknown")
+    idx = _feature_index(t, slot, 0x1001, deadline)
+    if idx:
+        r = _feature_call(t, slot, idx, 0, b"", deadline)
+        return None if not r else (None, "unknown")
+    return None, "unknown"
+
+
+def read_receiver(t, now: int, deadline: Optional[float] = None
+                  ) -> Tuple[List[Tuple[int, str, Reading]], List[Tuple[int, str]]]:
+    """Read every paired slot of one receiver. Returns (slot, receiver_name,
+    reading) for devices that answered and (slot, receiver_name) for paired
+    slots that did not. Pairing comes from the receiver's register b5/50+n,
+    never from the ping: an empty slot answers the ping with an error too."""
+    if deadline is None:
+        deadline = monotonic() + RUN_BUDGET
+    paired = []
+    for slot in range(1, 7):
+        if _receiver_register(t, 0x50 + slot, 0, deadline) is not None:
+            paired.append((slot, _receiver_name(t, slot, deadline)))
+    got, unreachable = [], []
+    for slot, rname in paired:
+        if monotonic() >= deadline or _feature_call(t, slot, 0x00, 1, b"\0\0\x5a", deadline) is None:
+            unreachable.append((slot, rname))
+            continue
+        name = _device_name(t, slot, deadline) or rname
+        bat = _battery(t, slot, deadline)
+        if bat is None:
+            unreachable.append((slot, rname))
+            continue
+        got.append((slot, rname, Reading(name, bat[0], bat[1], now)))
+    return got, unreachable
+
+
+def find_hidpp_nodes(sysfs: Path, dev: Path) -> List[Tuple[Path, str]]:
+    """(device node, HID_PHYS) of every Logitech HID++ interface whose
+    driver does not give the kernel the battery already."""
+    nodes = []
+    for d in sorted((sysfs / "class" / "hidraw").glob("hidraw*")):
+        try:
+            uevent = dict(line.split("=", 1) for line in
+                          (d / "device" / "uevent").read_text().splitlines() if "=" in line)
+            desc = (d / "device" / "report_descriptor").read_bytes()
+            driver = os.path.basename(os.readlink(d / "device" / "driver"))
+        except OSError:
+            continue
+        parts = uevent.get("HID_ID", "").upper().split(":")
+        if len(parts) != 3 or parts[1] != "0000046D" or driver in KERNEL_DRIVERS:
+            continue
+        if b"\x06\x00\xff" in desc and b"\x85\x11" in desc:
+            nodes.append((dev / d.name, uevent.get("HID_PHYS", d.name)))
+    return nodes
+
+
+# --- power_supply -----------------------------------------------------------
+
+PS_STATUS = {"discharging": "discharging", "not charging": "discharging",
+             "charging": "charging", "full": "full"}
+
+
+def read_power_supply(sysfs: Path, now: int) -> List[Reading]:
+    out = []
+    for d in sorted((sysfs / "class" / "power_supply").glob("*")):
+        try:
+            kv = dict(line.split("=", 1) for line in
+                      (d / "uevent").read_text().splitlines() if "=" in line)
+        except OSError:
+            continue
+        if kv.get("POWER_SUPPLY_SCOPE") != "Device":
+            continue
+        name = kv.get("POWER_SUPPLY_MODEL_NAME") or kv.get("POWER_SUPPLY_NAME") or d.name
+        cap = kv.get("POWER_SUPPLY_CAPACITY", "")
+        percent = int(cap) if cap.isdigit() and int(cap) <= 100 else None
+        state = PS_STATUS.get(kv.get("POWER_SUPPLY_STATUS", "").lower(), "unknown")
+        out.append(Reading(sanitise(name), percent, state, now))
+    return out
+
+
+# --- file -------------------------------------------------------------------
+
+def format_lines(readings: List[Reading]) -> str:
+    return "".join(f"{r.name}\t{'-' if r.percent is None else r.percent}\t{r.state}\t{r.read_epoch}\n"
+                   for r in sorted(readings))
+
+
+def parse_lines(text: str) -> List[Reading]:
+    out = []
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) != 4 or not f[3].isdigit() or not (f[1] == "-" or f[1].isdigit()):
+            continue
+        out.append(Reading(f[0], None if f[1] == "-" else int(f[1]), f[2], int(f[3])))
+    return sorted(out)
+
+
+def merge(new: List[Reading], previous: List[Reading], unreachable_names: List[str],
+          now: int) -> List[Reading]:
+    """New readings win; an unreachable device keeps its previous percent and
+    time, or gets "-" when it was never read. Anything else is dropped."""
+    result = {r.name: r for r in new}
+    prev = {r.name: r for r in previous}
+    for name in unreachable_names:
+        if name in result:
+            continue
+        p = prev.get(name)
+        result[name] = (p._replace(state="not reachable") if p
+                        else Reading(name, None, "not reachable", now))
+    return sorted(result.values())
+
+
+NameCache = Dict[Tuple[str, int], Tuple[str, str]]
+
+
+def resolve_name(cache: NameCache, phys: str, slot: int, receiver_name: str) -> str:
+    entry = cache.get((phys, slot))
+    if entry and entry[0] == receiver_name:
+        return entry[1]
+    return receiver_name
+
+
+def load_names(path: Path) -> NameCache:
+    cache = {}
+    try:
+        for line in path.read_text().splitlines():
+            f = line.split("\t")
+            if len(f) == 4 and f[1].isdigit():
+                cache[(f[0], int(f[1]))] = (f[2], f[3])
+    except OSError:
+        pass
+    return cache
+
+
+def _write_atomic(state: Path, target: Path, text: str, mode: int) -> None:
+    tmp = state / f".{target.name}.new"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def main() -> int:
+    sysfs = Path(os.environ.get("TF_SYSFS", "/sys"))
+    dev = Path(os.environ.get("TF_DEV", "/dev"))
+    outdir = Path(os.environ.get("TF_BATTERY_DIR", "/run/thinfloe/peripherals"))
+    state = Path(os.environ.get("TF_BATTERY_STATE", "/run/thinfloe/peripherals-state"))
+    now = int(time.time())
+    deadline = monotonic() + RUN_BUDGET
+    cache = load_names(state / "names")
+    try:
+        previous = parse_lines((outdir / "battery").read_text())
+    except OSError:
+        previous = []
+
+    new = read_power_supply(sysfs, now)
+    unreachable_names = []
+    for node, phys in find_hidpp_nodes(sysfs, dev):
+        t = None
+        try:
+            t = open_transport(node)
+            got, unreachable = read_receiver(t, now, deadline)
+        except OSError as e:
+            log(str(node), e.strerror or str(e))
+            continue
+        finally:
+            if t is not None and hasattr(t, "close"):
+                try:
+                    t.close()
+                except OSError:
+                    pass
+        for slot, rname, reading in got:
+            cache[(phys, slot)] = (rname, reading.name)
+            new.append(reading)
+        for slot, rname in unreachable:
+            unreachable_names.append(resolve_name(cache, phys, slot, rname))
+
+    try:
+        _write_atomic(state, outdir / "battery",
+                      format_lines(merge(new, previous, unreachable_names, now)), 0o644)
+    except Exception as e:  # noqa: BLE001 - anything here means no file
+        log(str(outdir / "battery"), str(e))
+        return 1
+    try:
+        _write_atomic(state, state / "names",
+                      "".join(f"{p}\t{s}\t{r}\t{n}\n" for (p, s), (r, n) in sorted(cache.items())),
+                      0o600)
+    except OSError as e:
+        log(str(state / "names"), e.strerror or str(e))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
