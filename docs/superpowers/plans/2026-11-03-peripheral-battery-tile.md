@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-03-peripheral-battery-tile.md` (replaces `2026-11-03-peripheral-battery-switch.md`; the branch implements the latter, from commit 51604d6 onward).
 
+**Note (after execution):** this plan records how the branch moved from an
+earlier design (a ThinLinc local-drive export with a Settings switch) to the
+tile. The specs and plans of that design were removed from the repository
+later, and so were the test seams and the test of the `10-thinlinc` hook
+(Task 2): the hook is main's again. The current design is the tile spec and
+its follow-ups `...-tile-lines.md` and `...-on-connect.md`.
+
 ## Global Constraints
 
 - Work in `/scratch/moetiker/claud.worktrees/thinfloe-peripheral-battery` (branch `peripheral-battery`).
