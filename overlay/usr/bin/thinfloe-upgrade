@@ -8,6 +8,7 @@ Supports A/B updates for existing ThinFloe drives, or fresh install for new driv
 
 import argparse
 import atexit
+import errno
 import fcntl
 import fnmatch
 import glob
@@ -17,6 +18,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -912,20 +914,6 @@ def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
     return fields[0].lower()
 
 
-def download_and_write_image(base_url: str, device: str) -> None:
-    """Download the compressed image and write it to the device"""
-    image_url = f"{base_url}/thinfloe-usb.img.zst"
-
-    log(f"Downloading and writing image to {device}...")
-    print(f"  Source: {image_url}")
-    try:
-        stream_image(image_url, device, image_size(image_url), PROGRESS)
-    except WriteFailed as e:
-        die(f"Failed to write image: {e.reason}")
-
-    log("Image written successfully")
-
-
 # ============ Upgrade Operations ============
 
 def _new_label_block(lines: List[str]) -> List[str]:
@@ -1457,6 +1445,149 @@ def copy_home_to_drive(device: str) -> bool:
     return ok
 
 
+class Cancelled(Exception):
+    """The batch caller asked to stop (SIGTERM)."""
+
+
+WIPE_BYTES = 1024 * 1024
+
+
+def wipe_partition_tables(device: str) -> bool:
+    """Zero the first and the last MiB so a cut-off write cannot boot.
+
+    The first MiB holds the MBR, the GPT and syslinux's boot code, the last
+    one the backup GPT. Never raises; False (logged) when it could not.
+    SIGTERM is ignored meanwhile: a second one must not leave the stick
+    half-cleared.
+    """
+    try:
+        old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    except ValueError:  # not the main thread
+        old = None
+    try:
+        fd = os.open(device, os.O_WRONLY)
+        try:
+            size = os.lseek(fd, 0, os.SEEK_END)
+            zeros = bytes(WIPE_BYTES)
+            if size < 2 * WIPE_BYTES:
+                spans = [(0, size)]
+            else:
+                spans = [(0, WIPE_BYTES), (size - WIPE_BYTES, WIPE_BYTES)]
+            for start, length in spans:
+                os.lseek(fd, start, os.SEEK_SET)
+                left = length
+                while left > 0:
+                    n = os.write(fd, zeros[:left])
+                    if n <= 0:
+                        raise OSError(errno.EIO, "short write")
+                    left -= n
+            os.fdatasync(fd)
+        finally:
+            os.close(fd)
+        run_cmd(["partprobe", device], check=False, capture=True)
+        return True
+    except BaseException as e:
+        if not isinstance(e, Exception):
+            raise
+        log(f"could not clear the partition tables of {device}: {e}")
+        return False
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGTERM, old)
+
+
+@dataclass
+class FreshOutcome:
+    ok: bool
+    reason: str = ""
+    written: bool = False  # the stick passed write, checksum and verify
+    cancelled: bool = False
+    home_copied: Optional[bool] = None  # None: not asked for
+    home_saved: bool = False
+
+
+def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
+                  verify: bool, progress: Progress, save: bool = True,
+                  stamp_required: bool = True) -> FreshOutcome:
+    """Write the image to a drive and finish the stick.
+
+    Used by both modes. A failure during write, checksum or verify leaves
+    a stick that may half-boot, so it is wiped. Once verify passed the
+    stick is good and later failures only fail the report.
+    """
+    device = drive.device
+    image_name = "thinfloe-usb.img.zst"
+    image_url = f"{base_url}/{image_name}"
+    outcome = FreshOutcome(ok=False)
+    stick_good = False
+    try:
+        try:
+            progress.step("write", "Downloading and writing")
+            result = stream_image(image_url, device, image_size(image_url), progress)
+            expected = expected_download_sha256(base_url, image_name)
+            if expected is None:
+                log(f"checksum not checked: {image_name}.sha256 not found")
+            elif expected != result.download_sha256:
+                raise WriteFailed("the download was damaged; write the stick again")
+            progress.done("write")
+            if verify:
+                progress.step("verify", "Checking the stick")
+                if not verify_device(device, result.written, result.image_sha256,
+                                     progress):
+                    raise WriteFailed("the stick did not read back what was written")
+                progress.done("verify")
+            stick_good = True
+            outcome.written = True
+        except (WriteFailed, Cancelled) as e:
+            wipe_partition_tables(device)
+            if isinstance(e, Cancelled):
+                outcome.cancelled = True
+                outcome.reason = "cancelled"
+            else:
+                outcome.reason = e.reason
+            return outcome
+
+        run_cmd(["sync"])
+        run_cmd(["partprobe", device], check=False, capture=True)
+
+        # Its own id, so a boot with this stick and another one attached
+        # finds this stick's ESP.
+        progress.step("stamp", "Marking the stick")
+        stamped = stamp_new_stick(device)
+        if not stamped and stamp_required:
+            outcome.reason = "the stick id could not be written to the stick"
+            return outcome
+        progress.done("stamp")
+
+        problems = []
+        if copy_home:
+            progress.step("home", "Copying the home directory")
+            outcome.home_copied = copy_home_to_drive(device)
+            if outcome.home_copied:
+                progress.done("home")
+            else:
+                problems.append("the home directory could not be copied to the stick")
+        if save:
+            progress.step("save", "Saving this machine's home")
+            outcome.home_saved = save_home_before_finish() == 0
+            if outcome.home_saved:
+                progress.done("save")
+            else:
+                problems.append("this machine's home could not be saved")
+        if problems:
+            outcome.reason = "the stick is written, but " + "; ".join(problems)
+            return outcome
+        outcome.ok = True
+        return outcome
+    except Cancelled:
+        # After verify passed: the stick is good, nothing to wipe.
+        outcome.cancelled = True
+        outcome.reason = "cancelled"
+        if not stick_good:
+            wipe_partition_tables(device)
+        return outcome
+
+
 def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
     """Write fresh image to drive.
 
@@ -1476,35 +1607,30 @@ def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
     if not confirm("  Continue?"):
         die("Aborted")
 
-    download_and_write_image(base_url, drive.device)
-
-    # Sync and reload partition table
-    run_cmd(["sync"])
-    run_cmd(["partprobe", drive.device], check=False, capture=True)
-
-    # Its own id, so a boot with this stick and another one attached finds
-    # this stick's ESP. Not tied to the home question: a stick made for
-    # somebody else needs its id just as much.
-    stamp_new_stick(drive.device)
-
     # Offer to carry this machine's configuration across; otherwise the new
     # stick boots with the shipped default home. Nothing is copied without an
     # explicit "y": confirm() re-asks on an empty answer and treats EOF or
     # Ctrl-C as no (the person may be building a stick for somebody else).
     # Asked only here - the A/B upgrade path writes to a drive that already
-    # carries its own home.
+    # carries its own home. Asked before the write now, so the write and
+    # what follows it run without a pause.
     print()
     print("  This machine's home directory holds its WiFi credentials,")
     print("  ThinLinc settings and customisations. Copying it onto the new")
     print("  drive means it boots configured. The SSH host keys and wg0.conf")
     print("  are not copied, so the new machine keeps its own identity.")
     print()
-    home_copied: Optional[bool] = None
-    if confirm("  Copy this machine's home directory to the new drive?"):
-        home_copied = copy_home_to_drive(drive.device)
+    copy_home = confirm("  Copy this machine's home directory to the new drive?")
+
+    # main() saves the home afterwards; a stamp that fails only warns, the
+    # stick then gets its id at its first boot.
+    outcome = fresh_install(drive, base_url, copy_home, False, PROGRESS,
+                            save=False, stamp_required=False)
+    if not outcome.written:
+        die(f"Failed to write image: {outcome.reason}")
 
     log("Fresh install complete!")
-    return home_copied
+    return outcome.home_copied
 
 
 # ============ Drive Display ============
@@ -1692,8 +1818,14 @@ def print_outcome_lines(home_copied: Optional[bool], home_saved: bool) -> None:
 # ============ Batch interface ============
 
 def batch_fresh(drive: DriveInfo, args, progress: Progress) -> int:
-    progress.result(False, "not implemented yet")
-    return 1
+    """Exit 0 ok, 1 failed (reason reported), 130 cancelled."""
+    outcome = fresh_install(drive, args.source, args.copy_home, args.verify,
+                            progress)
+    if outcome.ok:
+        progress.result(True, "")
+        return 0
+    progress.result(False, outcome.reason)
+    return 130 if outcome.cancelled else 1
 
 
 def batch_upgrade(drive: DriveInfo, args, progress: Progress) -> int:
@@ -1701,13 +1833,26 @@ def batch_upgrade(drive: DriveInfo, args, progress: Progress) -> int:
     return 1
 
 
+class UsageError(Exception):
+    pass
+
+
+class _BatchArgumentParser(argparse.ArgumentParser):
+    """Reports a usage error as an exception, so main can print @result."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        raise UsageError(message)
+
+
 def _batch_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="thinfloe-upgrade")
+    parser = _BatchArgumentParser(prog="thinfloe-upgrade", allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
-    d = sub.add_parser("drives", help="list drives as JSON")
+    d = sub.add_parser("drives", help="list drives as JSON", allow_abbrev=False)
     d.add_argument("--all", action="store_true", help="include internal drives")
     d.add_argument("--source", default=DEFAULT_URL)
-    w = sub.add_parser("write", help="write or upgrade a stick without questions")
+    w = sub.add_parser("write", help="write or upgrade a stick without questions",
+                       allow_abbrev=False)
     w.add_argument("--device", required=True)
     w.add_argument("--mode", required=True, choices=("fresh", "upgrade"))
     w.add_argument("--expect-id", required=True)
@@ -1745,15 +1890,39 @@ def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
     return None
 
 
+def _cancel_on_sigterm(signum, frame):
+    raise Cancelled()
+
+
 def batch_main(argv: List[str]) -> int:
     """The question-free commands `drives` and `write`."""
     global PROGRESS
+    PROGRESS = Progress(sys.stdout, batch=True)
     try:
         args = _batch_parser().parse_args(argv)
-    except SystemExit as e:
+    except UsageError as e:
+        PROGRESS.result(False, f"usage: {e}")
+        return 2
+    except SystemExit as e:  # --help
         return e.code if isinstance(e.code, int) else 2
     args.source = getattr(args, "source", DEFAULT_URL).rstrip("/")
-    PROGRESS = Progress(sys.stdout, batch=True)
+
+    old_handler = signal.signal(signal.SIGTERM, _cancel_on_sigterm)
+    try:
+        return _batch_run(args)
+    except Cancelled:
+        PROGRESS.result(False, "cancelled")
+        return 130
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        PROGRESS.result(False, f"{type(e).__name__}: {e}")
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, old_handler)
+
+
+def _batch_run(args) -> int:
     ensure_root(batch=True)
 
     if args.command == "drives":

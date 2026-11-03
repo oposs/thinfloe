@@ -745,7 +745,24 @@ def _drive(is_boot=False):
 
 
 class TestHomeCopyQuestion(unittest.TestCase):
-    """The question is asked on a fresh install only, after the write."""
+    """The question is asked on a fresh install only, before the write."""
+
+    def _patches(self, events, copy_result=True):
+        def write(url, device, total, progress):
+            events.append("write")
+            return ui.WriteResult(1, "0" * 64, "1" * 64)
+
+        return [
+            mock.patch.object(ui, "check_drive_fits"),
+            mock.patch.object(ui, "image_size", return_value=None),
+            mock.patch.object(ui, "stream_image", side_effect=write),
+            mock.patch.object(ui, "expected_download_sha256", return_value=None),
+            mock.patch.object(ui, "run_cmd"),
+            mock.patch.object(ui, "stamp_new_stick", return_value=True),
+            mock.patch.object(
+                ui, "copy_home_to_drive",
+                side_effect=lambda d: events.append("copy") or copy_result),
+        ]
 
     def _fresh_install(self, answers):
         """Run do_fresh_install with scripted input() answers."""
@@ -754,26 +771,22 @@ class TestHomeCopyQuestion(unittest.TestCase):
 
         def fake_input(prompt=""):
             prompts.append(prompt)
+            events.append("ask")
             a = answers.pop(0)
             if isinstance(a, BaseException):
                 raise a
             return a
 
-        with mock.patch("builtins.input", side_effect=fake_input), \
-             mock.patch.object(ui, "download_and_write_image",
-                               side_effect=lambda *a: events.append("write")), \
-             mock.patch.object(ui, "run_cmd"), \
-             mock.patch.object(ui, "stamp_new_stick", return_value=True), \
-             mock.patch.object(
-                 ui, "copy_home_to_drive",
-                 side_effect=lambda d: events.append("copy") or True) as copy, \
-             contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("builtins.input", side_effect=fake_input))
+            mocks = [stack.enter_context(p) for p in self._patches(events)]
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             result = ui.do_fresh_install(_drive(), "http://x")
-        return result, copy, events, prompts
+        return result, mocks[-1], events, prompts
 
     def test_yes_copies_after_the_image_is_written(self):
         result, copy, events, prompts = self._fresh_install(["y", "y"])
-        self.assertEqual(events, ["write", "copy"])
+        self.assertEqual(events, ["ask", "ask", "write", "copy"])
         copy.assert_called_once_with("/dev/sdb")
         self.assertTrue(result)
         self.assertIn("Copy this machine's home", prompts[1])
@@ -781,7 +794,7 @@ class TestHomeCopyQuestion(unittest.TestCase):
     def test_no_skips_the_copy(self):
         result, copy, events, prompts = self._fresh_install(["y", "n"])
         copy.assert_not_called()
-        self.assertEqual(events, ["write"])
+        self.assertEqual(events, ["ask", "ask", "write"])
         self.assertIsNone(result)
         self.assertEqual(len(prompts), 2, "the question was never asked")
 
@@ -790,14 +803,42 @@ class TestHomeCopyQuestion(unittest.TestCase):
         copy.assert_not_called()
         self.assertIsNone(result)
 
+    def test_declining_to_continue_writes_nothing(self):
+        events = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("builtins.input", side_effect=["n"]))
+            for p in self._patches(events):
+                stack.enter_context(p)
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            with self.assertRaises(SystemExit):
+                ui.do_fresh_install(_drive(), "http://x")
+        self.assertEqual(events, [])
+
     def test_a_failed_copy_is_returned_not_hidden(self):
-        with mock.patch("builtins.input", side_effect=["y", "y"]), \
-             mock.patch.object(ui, "download_and_write_image"), \
-             mock.patch.object(ui, "run_cmd"), \
-             mock.patch.object(ui, "stamp_new_stick", return_value=True), \
-             mock.patch.object(ui, "copy_home_to_drive", return_value=False), \
-             contextlib.redirect_stdout(io.StringIO()):
+        events = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("builtins.input", side_effect=["y", "y"]))
+            for p in self._patches(events, copy_result=False):
+                stack.enter_context(p)
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             self.assertIs(ui.do_fresh_install(_drive(), "http://x"), False)
+
+    def test_a_write_failure_dies_and_wipes(self):
+        events = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("builtins.input", side_effect=["y", "n"]))
+            for p in self._patches(events):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch.object(
+                ui, "stream_image", side_effect=ui.WriteFailed("boom")))
+            wipe = stack.enter_context(
+                mock.patch.object(ui, "wipe_partition_tables", return_value=True))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            with self.assertRaises(SystemExit):
+                ui.do_fresh_install(_drive(), "http://x")
+        wipe.assert_called_once_with("/dev/sdb")
 
     def test_the_ab_upgrade_never_asks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1149,8 +1190,12 @@ class TestStickId(unittest.TestCase):
             events = []
             with mock.patch.object(ui, "check_drive_fits"), \
                  mock.patch.object(ui, "confirm", side_effect=[True, False]), \
-                 mock.patch.object(ui, "download_and_write_image",
-                                   side_effect=lambda *a: events.append("write")), \
+                 mock.patch.object(ui, "image_size", return_value=None), \
+                 mock.patch.object(ui, "expected_download_sha256", return_value=None), \
+                 mock.patch.object(
+                     ui, "stream_image",
+                     side_effect=lambda *a: events.append("write")
+                     or ui.WriteResult(1, "0" * 64, "1" * 64)), \
                  mock.patch.object(ui, "run_cmd",
                                    side_effect=lambda cmd, **kw: events.append(cmd[0])), \
                  mock.patch.object(ui, "stamp_new_stick",
@@ -1380,7 +1425,7 @@ class TestFreshInstallDriveSize(unittest.TestCase):
         with mock.patch.object(ui, "image_size", return_value=image), \
              mock.patch.object(ui, "drive_size_bytes", return_value=drive_bytes), \
              mock.patch.object(ui, "confirm", return_value=False) as confirm, \
-             mock.patch.object(ui, "download_and_write_image") as write, \
+             mock.patch.object(ui, "stream_image") as write, \
              mock.patch.object(ui.subprocess, "Popen") as popen, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:

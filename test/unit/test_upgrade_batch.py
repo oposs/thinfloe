@@ -615,7 +615,40 @@ class TestBatchRefusals(unittest.TestCase):
     def test_unknown_mode_is_argparse_error(self):
         rc, out = self.run_write("/dev/sdb", "bogus", "x")
         self.assertEqual(rc, 2)
-        self.assertEqual(out, "")
+        self.assertTrue(out.startswith("@result failed "), out)
+        self.assertEqual(out.count("\n"), 1)
+
+    def test_abbreviated_option_is_refused(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", None, "--ver")
+        self.assertEqual(rc, 2)
+        self.assertTrue(out.startswith("@result failed "), out)
+        self.m_fresh.assert_not_called()
+
+    def test_unexpected_exception_becomes_a_result(self):
+        self.m_fresh.side_effect = RuntimeError("boom\nsecond line")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ui.batch_main(["write", "--device", "/dev/sdb", "--mode",
+                                "fresh", "--expect-id", self.ident("/dev/sdb")])
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed RuntimeError: boom second line\n", out.getvalue())
+        self.assertIn("Traceback", err.getvalue())
+
+    def test_cancelled_gives_130(self):
+        self.m_fresh.side_effect = ui.Cancelled()
+        rc, out = self.run_write("/dev/sdb", "fresh")
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
+
+    def test_sigterm_handler_is_installed_and_restored(self):
+        import signal
+        old = signal.getsignal(signal.SIGTERM)
+        seen = []
+        self.m_fresh.side_effect = lambda *a: seen.append(
+            signal.getsignal(signal.SIGTERM)) or 0
+        self.run_write("/dev/sdb", "fresh")
+        self.assertTrue(callable(seen[0]) and seen[0] is not old)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), old)
 
     def test_drives_default_omits_internal(self):
         out = io.StringIO()
@@ -638,6 +671,245 @@ class TestBatchRefusals(unittest.TestCase):
              contextlib.redirect_stdout(out):
             ui.batch_main(["drives"])
         self.assertTrue(all(r["fits"] is None for r in json.loads(out.getvalue())))
+
+
+class TestWipe(unittest.TestCase):
+    def test_zeroes_first_and_last_mib_only(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "dev")
+            Path(p).write_bytes(b"\xff" * (8 * MIB))
+            self.assertTrue(ui.wipe_partition_tables(p))
+            data = Path(p).read_bytes()
+        self.assertEqual(len(data), 8 * MIB)
+        self.assertEqual(data[:MIB], b"\0" * MIB)
+        self.assertEqual(data[-MIB:], b"\0" * MIB)
+        self.assertEqual(data[MIB:-MIB], b"\xff" * (6 * MIB))
+
+    def test_small_device_is_zeroed_whole(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "dev")
+            Path(p).write_bytes(b"\xff" * (MIB + 100))
+            self.assertTrue(ui.wipe_partition_tables(p))
+            self.assertEqual(Path(p).read_bytes(), b"\0" * (MIB + 100))
+
+    def test_missing_device_returns_false_and_logs(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(ui.wipe_partition_tables("/nonexistent/dev"))
+        self.assertIn("could not clear", out.getvalue())
+
+    def test_sigterm_during_wipe_is_ignored(self):
+        import signal
+        old = signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(ui.Cancelled()))
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        real = os.fdatasync
+
+        def sync_and_term(fd):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return real(fd)
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "dev")
+            Path(p).write_bytes(b"\xff" * (4 * MIB))
+            with mock.patch.object(ui.os, "fdatasync", side_effect=sync_and_term):
+                self.assertTrue(ui.wipe_partition_tables(p))
+            self.assertEqual(Path(p).read_bytes()[:MIB], b"\0" * MIB)
+        self.assertTrue(callable(signal.getsignal(signal.SIGTERM)))
+
+
+class TestFreshInstall(unittest.TestCase):
+    SHA = "ab" * 32
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dev = os.path.join(self.tmp.name, "dev")
+        Path(self.dev).write_bytes(b"\xff" * (128 * MIB))
+        self.calls = []
+        self.drive = ui.DriveInfo(
+            device=self.dev, size="?", model="M", label="", is_thinfloe=False,
+            efi_partition=None, part_size_mb=0, is_boot=False, has_tl_old=False,
+            has_tl_new=False, size_bytes=128 * MIB, serial="S", transport="usb",
+            removable=True, mounted=False, fingerprint="ab" * 8)
+        self.patches = {}
+        for name, kw in (
+            ("stream_image", dict(side_effect=self._stream)),
+            ("verify_device", dict(return_value=True)),
+            ("expected_download_sha256", dict(return_value="cd" * 32)),
+            ("image_size", dict(return_value=MIB)),
+            ("run_cmd", dict()),
+            ("stamp_new_stick", dict(return_value=True)),
+            ("copy_home_to_drive", dict(return_value=True)),
+            ("save_home_before_finish", dict(return_value=0)),
+        ):
+            m = mock.patch.object(ui, name, **kw)
+            self.patches[name] = m.start()
+            self.addCleanup(m.stop)
+
+    def _stream(self, url, device, total, progress):
+        Path(device).write_bytes(b"\xee" * (128 * MIB))
+        return ui.WriteResult(written=MIB, image_sha256=self.SHA,
+                              download_sha256="cd" * 32)
+
+    def run_fresh(self, copy_home=False, verify=False):
+        import types
+        args = types.SimpleNamespace(source="http://x", copy_home=copy_home,
+                                     verify=verify, device=self.dev)
+        out, err = io.StringIO(), io.StringIO()
+        prog = ui.Progress(out, True, 0)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ui.batch_fresh(self.drive, args, prog)
+        return rc, out.getvalue()
+
+    def lines(self, out, kind):
+        return [l for l in out.splitlines() if l.startswith(kind)]
+
+    def assertWiped(self):
+        data = Path(self.dev).read_bytes()
+        self.assertEqual(data[:MIB], b"\0" * MIB)
+        self.assertEqual(data[-MIB:], b"\0" * MIB)
+
+    def assertNotWiped(self):
+        data = Path(self.dev).read_bytes()
+        self.assertEqual(data[:MIB], b"\xee" * MIB)
+
+    def test_success_steps_in_order(self):
+        rc, out = self.run_fresh(copy_home=True, verify=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(
+            [l.split()[1] for l in self.lines(out, "@step")],
+            ["write", "verify", "stamp", "home", "save"])
+        self.assertEqual(
+            [l.split()[1] for l in self.lines(out, "@done")],
+            ["write", "verify", "stamp", "home", "save"])
+        self.assertIn("@step write Downloading and writing", out)
+        self.assertEqual(self.lines(out, "@result"), ["@result ok"])
+        self.patches["stamp_new_stick"].assert_called_once_with(self.dev)
+        self.patches["copy_home_to_drive"].assert_called_once_with(self.dev)
+        self.patches["verify_device"].assert_called_once()
+        self.assertEqual(self.patches["verify_device"].call_args.args[1:3],
+                         (MIB, self.SHA))
+        self.assertNotWiped()
+
+    def test_verify_runs_before_stamp(self):
+        order = []
+        self.patches["verify_device"].side_effect = lambda *a: order.append("v") or True
+        self.patches["stamp_new_stick"].side_effect = lambda *a: order.append("s") or True
+        self.run_fresh(verify=True)
+        self.assertEqual(order, ["v", "s"])
+
+    def test_without_options_no_verify_no_home_step(self):
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 0)
+        self.assertEqual([l.split()[1] for l in self.lines(out, "@step")],
+                         ["write", "stamp", "save"])
+        self.patches["verify_device"].assert_not_called()
+        self.patches["copy_home_to_drive"].assert_not_called()
+
+    def test_write_error_fails_and_wipes(self):
+        self.patches["stream_image"].side_effect = ui.WriteFailed(
+            "the stick stopped answering")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed the stick stopped answering", out)
+        self.assertWiped()
+        self.patches["stamp_new_stick"].assert_not_called()
+
+    def test_wipe_failure_still_fails_and_is_logged(self):
+        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        with mock.patch.object(ui, "wipe_partition_tables", return_value=False) as w:
+            rc, out = self.run_fresh()
+        w.assert_called_once_with(self.dev)
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed x", out)
+
+    def test_wipe_failure_is_logged_for_real(self):
+        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        Path(self.dev).unlink()
+        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertIn("could not clear", out)
+
+    def test_curl_failure_fresh_wipes(self):
+        self.patches["stream_image"].side_effect = ui.WriteFailed(
+            "the download failed: 404")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertWiped()
+
+    def test_verify_false_wipes(self):
+        self.patches["verify_device"].return_value = False
+        rc, out = self.run_fresh(verify=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed the stick did not read back what was written", out)
+        self.assertWiped()
+        self.patches["stamp_new_stick"].assert_not_called()
+
+    def test_checksum_mismatch_wipes(self):
+        self.patches["expected_download_sha256"].return_value = "00" * 32
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed the download was damaged; write the stick again", out)
+        self.assertWiped()
+        self.patches["stamp_new_stick"].assert_not_called()
+
+    def test_missing_checksum_is_logged_and_goes_on(self):
+        self.patches["expected_download_sha256"].return_value = None
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 0)
+        self.assertIn("checksum not checked: thinfloe-usb.img.zst.sha256 not found", out)
+        self.assertNotWiped()
+
+    def test_sigterm_during_write_wipes_and_gives_130(self):
+        import signal
+
+        def term(url, device, total, progress):
+            Path(device).write_bytes(b"\xee" * (128 * MIB))
+            os.kill(os.getpid(), signal.SIGTERM)
+        self.patches["stream_image"].side_effect = term
+        old = signal.getsignal(signal.SIGTERM)
+
+        def handler(*a):
+            raise ui.Cancelled()
+        signal.signal(signal.SIGTERM, handler)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
+        self.assertWiped()
+
+    def test_stamp_failure_fails_job_but_keeps_stick(self):
+        self.patches["stamp_new_stick"].return_value = False
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed", out)
+        self.assertIn("id", self.lines(out, "@result")[0])
+        self.assertNotWiped()
+        self.patches["save_home_before_finish"].assert_not_called()
+
+    def test_home_copy_failure_reported_stick_kept(self):
+        self.patches["copy_home_to_drive"].return_value = False
+        rc, out = self.run_fresh(copy_home=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed", out)
+        self.assertIn("home", self.lines(out, "@result")[0])
+        self.assertNotWiped()
+        self.assertNotIn("@done home", out)
+
+    def test_save_failure_reported_stick_kept(self):
+        self.patches["save_home_before_finish"].return_value = 3
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertIn("@result failed", out)
+        self.assertNotIn("@done save", out)
+        self.assertNotWiped()
+
+    def test_cancel_after_verify_does_not_wipe(self):
+        self.patches["stamp_new_stick"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
+        self.assertNotWiped()
 
 
 class TestEnsureRootBatch(unittest.TestCase):
