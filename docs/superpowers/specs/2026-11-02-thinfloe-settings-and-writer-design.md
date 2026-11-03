@@ -266,10 +266,15 @@ Save-On-Exit tiles use, so the change survives a power cut.
   by the menu.
 - `TF_IDLE_TIMEOUT` in `~/.thinfloe-sessionrc` still wins. When it is set
   there, the select is disabled with *set in ~/.thinfloe-sessionrc*.
-- It takes effect at once: the menu starts `swayidle` itself and restarts
-  it on a change; `thinfloe-session` no longer starts it (my call). The
+- It takes effect at once. `swayidle` stays in `thinfloe-session`
+  (*owner*, 2026-11-03), so blanking does not depend on the menu. The
+  session reads `~/.config/thinfloe/screen` when `TF_IDLE_TIMEOUT` is not
+  set after `.thinfloe-sessionrc`, and restarts `swayidle` with the new
+  value on `SIGUSR1`, which the menu sends after it wrote the file (my
+  call). The session tells the menu its PID and whether the sessionrc
+  set the value through the environment (`TF_SESSION_PID`,
+  `TF_IDLE_TIMEOUT_RC`), so the menu never parses a shell file. The
   `wlopm` command and the rule *never `wlr-randr --off`* stay.
-  `test-session-packages.sh` follows the move.
 
 ## Part C: Network
 
@@ -338,21 +343,37 @@ Save-On-Exit tiles use, so the change survives a power cut.
   monitors, so a laptop alone and the laptop at its dock each keep their
   own choice. Without a choice, or when the chosen monitor is not
   connected, labwc places the menu as today.
-  - How (my call): the menu is a maximized toplevel, and labwc picks its
-    output when the window maps. `thinfloe-compose-labwc-config` already
-    composes the config directory labwc reads; it gains a generated
-    `rc.xml` whose `thinfloe-menu` window rule adds
-    `<action name="MoveToOutput" output="NAME"/>` before the existing
-    `ToggleAlwaysOnBottom`, then maximizes. On a change the menu
-    rewrites it, runs `labwc --reconfigure`, and unmaps and maps its
-    window so the rule runs again. The zero-keybindings rule and its
-    test cover the generated `rc.xml` too.
-  - Builder: confirm the image's labwc 0.9.3 accepts `MoveToOutput` with
-    an `output` attribute in a window rule, and that an unmap and map of
-    a winit window runs the rule again. If either fails, say so before
-    choosing another way (a layer-shell surface on the chosen output
-    would change how the menu stays behind other windows, and is the
-    owner's decision).
+  - It moves at once (*owner*, 2026-11-03: "could the menu restart
+    itself?"). The menu process cannot restart: it is the body of the
+    session, and when it exits the session ends with every program in
+    it. So the menu **replaces its window** instead, in the same process
+    (my call): it drops its winit window and creates a new one. Running
+    programs, add-on and write jobs, and the log are untouched, because
+    they belong to the process, not to the window. (winit 0.30.13 cannot
+    hide and show a window on Wayland, `set_visible` is empty, so the
+    first idea, unmap and map, does not work.)
+  - labwc picks a window's output when it maps, through the
+    `thinfloe-menu` window rule. The rule gains
+    `<action name="MoveToOutput" output="NAME"/>` before
+    `ToggleAlwaysOnBottom`. **`labwc-scale` is the only program that
+    writes the composed `rc.xml`** (my call): it already builds a copy of
+    the system `rc.xml` for the title bar scale and requires the links
+    otherwise (`labwc-scale:94`), so a second writer would break it. The
+    menu writes the wanted output name to
+    `$XDG_RUNTIME_DIR/thinfloe-menu-output`; `labwc-scale`, which already
+    reads the scale file once a second, reads that file too, builds
+    `rc.xml` from the system file plus scale plus output, runs `labwc
+    --reconfigure`, and writes the applied output name to
+    `$XDG_RUNTIME_DIR/thinfloe-menu-output.applied`. The menu replaces its
+    window when the applied name matches, or after 3 s with a line in
+    the log. With scale 1 and no output chosen, the links come back, as
+    today.
+  - The zero-keybindings rule and its test cover the generated `rc.xml`.
+  - Builder, first task of Part D: confirm in `test-labwc-runtime.sh` that
+    labwc 0.9.3 accepts `MoveToOutput` with `output` in a window rule and
+    that a newly created winit window lands on that output. If not, stop
+    and ask the owner (a layer-shell surface would change how the menu
+    stays behind other windows).
   - The density scale follows on its own: the menu already rereads its
     scale when it lands on another output.
 - **Safety:** after Apply, a dialog *Keep this arrangement?* counts down 15
@@ -411,12 +432,8 @@ to guess. The answers, all my calls unless marked:
    complete at the next boot too. When a home moves to a machine whose
    WiFi device has another name, the Network tab shows *WiFi adapter
    changed* and rewrites the file on Apply.
-4. **swayidle stays with the menu.** When the menu crashes,
-   `thinfloe-session` starts it again at once, so blanking stops only for
-   that moment; on the failure screen, no blanking is fine.
-   `thinfloe-session` passes the value from `.thinfloe-sessionrc` to the
-   menu in the environment (`TF_IDLE_TIMEOUT_RC`), so the menu never parses
-   a shell file.
+4. **swayidle** stays in the session; replaced by the owner's answer after
+   the pushback review, see Part B.
 5. **`thinfloe-upgrade`.** The write path is a rewrite (a hashing writer
    replaces the `dd` pipe), and `test/unit/test_upgrade_image.py` may be
    reshaped; every behaviour it guards today (space check, identity
@@ -427,11 +444,13 @@ to guess. The answers, all my calls unless marked:
 6. **Waiting for shadcn-egui 0.8.** The root-tool work of Parts A and C
    (`thinfloe-upgrade` batch mode, `thinfloe-network`) and the kanshi text
    generation of Part D touch no UI and may start before Part 0. All menu
-   screens wait for Part 0.
+   screens wait for Part 0. **All parts, 0 and A to D, must be finished
+   before 4.0.0 is released** (*owner*, 2026-11-03), so a late
+   shadcn-egui 0.8 delays the release rather than being worked around.
 7. **Menu monitor check first.** The first task of Part D checks
-   `MoveToOutput` and the unmap and map in `test-labwc-runtime.sh`. If it
-   fails, *Show the menu here* leaves Part D's first plan, the rest of
-   Part D goes ahead, and the owner decides the alternative.
+   `MoveToOutput` and a new window in `test-labwc-runtime.sh` (see Part
+   D). If it fails, the owner decides the alternative before Part D goes
+   on.
 8. **kanshi is the only one that sets monitors.** The menu reads monitors
    through `zwlr_output_manager_v1` but never applies a configuration
    itself. Apply and the 15-second revert both rewrite
@@ -445,6 +464,60 @@ to guess. The answers, all my calls unless marked:
     same list as add-on jobs; whether `jobs.rs` gets a general *root job*
     type or not is the builder's call. *Restart anyway* during a fresh
     install warns and is allowed, as written above.
+
+## Settled after the pushback review (2026-11-03)
+
+A second review (`paad:pushback`) checked the design against the code.
+Its findings and the answers, all my calls unless marked:
+
+1. **Only USB drives by default** (*owner*). `enumerate_drives()` takes
+   every `sd*`, `nvme*` and `vd*` disk (`thinfloe-upgrade:336`), so an
+   internal disk could be erased with one click. The Target list shows
+   only removable or USB drives (sysfs `removable`, or `lsblk` `TRAN` =
+   `usb`). Other disks appear only under *Advanced: Show all drives*, and
+   erasing one needs its model and size typed back. A drive with a
+   mounted partition is never offered, except the boot stick for
+   *Upgrade*. On netboot no drive is the boot drive; the same rules hold.
+2. **The right stick, not a stick like it.** `drives` returns each
+   drive's serial (or WWN) and a fingerprint of its partition table;
+   `write` takes them as `--expect-id` and refuses on a mismatch. Two
+   sticks of one model, replugged in another order, are then never
+   confused.
+3. **Menu monitor:** moves at once by replacing the menu's window; see
+   Part D (*owner* asked for a restart; the reason it is a window, not a
+   process, is there).
+4. **One writer of `rc.xml`:** `labwc-scale`; see Part D.
+5. **Two checks, both real.** The download is hashed as compressed bytes
+   (curl stream) and compared with the release checksum file (Part 5);
+   the write is hashed as uncompressed bytes and compared with an
+   uncached read-back of the stick (`O_DIRECT`, or `BLKFLSBUF` before the
+   read). This is integrity, not authenticity: checksum and image come
+   from the same host. Signing is not part of this design.
+6. **swayidle stays in the session** (*owner*); see Part B.
+7. **All parts gate 4.0.0** (*owner*); see Settled after the builder
+   check, 6.
+8. **Revert survives a menu crash.** Before Apply the menu keeps the old
+   kanshi config as `config.prev` and writes an *unconfirmed* marker
+   (`$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed`). A confirmed layout
+   removes both. When `thinfloe-session` starts and finds the marker, it
+   puts `config.prev` back before kanshi starts. **Netboot:** the
+   *Fixed address* choice for the wired network is not offered on a
+   netbooted machine, because a wrong value cuts it off from the server
+   that holds its system and its home.
+9. **Hand-written `~/wifi.yaml`.** The first version shows the networks
+   of a hand-written file read-only (names only) and offers no takeover.
+   *Let the menu manage it* applies only to files that the menu can read
+   completely: `wifis` with access points that have no keys other than
+   `password` and `hidden`. Any other file keeps the read-only view.
+10. **A cut-off write leaves no bootable half.** On Cancel, SIGTERM or a
+    failure during a fresh install, the tool overwrites the first and last
+    MiB of the stick (both GPT copies) before it exits, so neither the
+    firmware nor the ESP choice can boot a half-written image with a
+    valid stick id. `make qemu-smoke-write` covers a cancel too.
+11. **Minor:** the Advanced source address follows Part 5
+    (`DEFAULT_URL` in `thinfloe-upgrade` is still the 3.x server); a
+    comments-only `~/wifi.yaml` is replaced by the menu but must also
+    pass `netplan generate` as it is, because the initramfs installs it.
 
 ## Left to the builder
 
