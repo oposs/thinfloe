@@ -91,7 +91,7 @@ class Progress:
     """
 
     def __init__(self, out, batch: bool, min_interval: float = 0.5):
-        self.out = out
+        self._out = out  # None: the current sys.stdout at each write
         self.batch = batch
         self.min_interval = min_interval
         self._last = None  # monotonic time of the last printed progress
@@ -101,6 +101,10 @@ class Progress:
     @staticmethod
     def _one_line(text: str) -> str:
         return " ".join(str(text).split("\n")).replace("\r", " ")
+
+    @property
+    def out(self):
+        return self._out if self._out is not None else sys.stdout
 
     def _emit(self, text: str) -> None:
         self.out.write(text)
@@ -158,7 +162,7 @@ class Progress:
 
 
 # Interactive by default; batch mode replaces it.
-PROGRESS = Progress(sys.stdout, batch=False)
+PROGRESS = Progress(None, batch=False)
 
 # ============ Data Classes ============
 
@@ -1001,6 +1005,22 @@ def _new_label_block(lines: List[str]) -> List[str]:
     return block
 
 
+def set_boot_default_one(efi_mount: str, rel: str, label: str) -> None:
+    """set_boot_default for one config copy (rel is one of SYSLINUX_CFGS)."""
+    path = os.path.join(efi_mount, rel)
+    with open(path) as f:
+        lines = f.read().splitlines()
+    lines = [f"DEFAULT {label}" if l.startswith("DEFAULT ") else l for l in lines]
+    if not any(l.strip() == "LABEL new" for l in lines):
+        lines += _new_label_block(lines)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def set_boot_default(efi_mount: str, label: str) -> None:
     """Make syslinux boot <label> by default, in both config copies.
 
@@ -1011,23 +1031,10 @@ def set_boot_default(efi_mount: str, label: str) -> None:
     original, so a power cut leaves the old or the new file.
     """
     for rel in SYSLINUX_CFGS:
-        path = os.path.join(efi_mount, rel)
-        if not os.path.isfile(path):
-            continue
-        with open(path) as f:
-            lines = f.read().splitlines()
-        lines = [f"DEFAULT {label}" if l.startswith("DEFAULT ") else l for l in lines]
-        if not any(l.strip() == "LABEL new" for l in lines):
-            lines += _new_label_block(lines)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write("\n".join(lines) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        if os.path.isfile(os.path.join(efi_mount, rel)):
+            set_boot_default_one(efi_mount, rel, label)
 
 
-# An APPEND line of syslinux.cfg, and one whose ramroot= is a URL (netboot).
 _APPEND_RE = re.compile(r"^[ \t]*APPEND[ \t]", re.I)
 _REMOTE_RAMROOT_RE = re.compile(r"[ \t]ramroot=[a-z]+://")
 _STICK_WORD_RE = re.compile(r"[ \t]+thinfloe\.stick=[^ \t\r]*")
@@ -1187,50 +1194,81 @@ def _uninterruptible():
             signal.signal(sig, handler)
 
 
+def _restore_default_current(efi_mount: str) -> bool:
+    """Put DEFAULT current back in both copies; True when both are confirmed."""
+    ok = True
+    for rel in SYSLINUX_CFGS:
+        path = os.path.join(efi_mount, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            set_boot_default_one(efi_mount, rel, "current")
+            with open(path) as f:
+                if "DEFAULT current" not in f.read().splitlines():
+                    raise OSError("DEFAULT current not found after restore")
+        except OSError as e:
+            log(f"WARNING: could not restore DEFAULT current in {rel}: {e}")
+            try:
+                with open(path) as f:
+                    ok = ok and "DEFAULT current" in f.read().splitlines()
+            except OSError:
+                ok = False
+    return ok
+
+
 def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None:
-    """Replace the stick's release; DEFAULT new is the last write (boot stick)."""
+    """Replace the stick's release; the boot label is the last write.
+
+    Whatever fails, tl/ stays whole and DEFAULT keeps pointing at something
+    that boots.
+    """
     tl_path = os.path.join(efi_mount, "tl")
     tl_old_path = os.path.join(efi_mount, "tl.old")
     tl_new_path = os.path.join(efi_mount, "tl.new")
+    default_attempted = False
+    renamed_tl = False
     try:
+        # tl.old goes first: with it in place the stick needed room for three
+        # releases (775 MB each does not fit 2000 MB). The release is staged
+        # in tl.new/ on both paths; tl/ is the fallback meanwhile.
         if drive.is_boot:
-            # Additive upgrade - write to tl.new/, finalized on next boot.
-            #
-            # tl.old goes first. The rotation on the next boot removes it
-            # anyway, and with it in place the stick needed room for three
-            # releases: at 775 MB each that does not fit a 2000 MB partition.
-            # While tl.new is staged the fallback is tl/, the "current" entry.
             log("Installing firmware to tl.new/ (will activate on reboot)...")
-            if os.path.exists(tl_old_path):
-                run_cmd(["rm", "-rf", tl_old_path])
-            if os.path.exists(tl_new_path):
-                run_cmd(["rm", "-rf", tl_new_path])
-            run_cmd(["mkdir", "-p", tl_new_path])
-            for filename in FIRMWARE_FILES:
-                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
-            # Only after tl.new is complete: DEFAULT new with a partial tl.new
-            # would not boot.
-            run_cmd(["sync"])
+        else:
+            log("Rotating firmware (tl -> tl.old, installing new tl)...")
+        if os.path.exists(tl_old_path):
+            run_cmd(["rm", "-rf", tl_old_path])
+        if os.path.exists(tl_new_path):
+            run_cmd(["rm", "-rf", tl_new_path])
+        run_cmd(["mkdir", "-p", tl_new_path])
+        for filename in FIRMWARE_FILES:
+            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
+        # Only after tl.new is complete.
+        run_cmd(["sync"])
+        if drive.is_boot:
+            default_attempted = True
             set_boot_default(efi_mount, "new")
         else:
-            # Direct A/B rotation
-            log("Rotating firmware (tl -> tl.old, installing new tl)...")
-            if os.path.exists(tl_old_path):
-                run_cmd(["rm", "-rf", tl_old_path])
             if os.path.exists(tl_path):
-                run_cmd(["mv", tl_path, tl_old_path])
-            if os.path.exists(tl_new_path):
-                run_cmd(["rm", "-rf", tl_new_path])
-            run_cmd(["mkdir", "-p", tl_path])
-            for filename in FIRMWARE_FILES:
-                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_path])
-            # A DEFAULT new left from an unfinished upgrade would point at the
-            # tl.new just removed.
+                os.rename(tl_path, tl_old_path)
+                renamed_tl = True
+            os.rename(tl_new_path, tl_path)
+            # A DEFAULT new left from an unfinished upgrade would point at
+            # the tl.new just renamed.
+            default_attempted = True
             set_boot_default(efi_mount, "current")
         run_cmd(["sync"])
     except (subprocess.CalledProcessError, OSError) as e:
-        if drive.is_boot:
-            # A partial tl.new is never referenced (DEFAULT is still old).
+        keep_new = False
+        if default_attempted and drive.is_boot:
+            # A copy may already say DEFAULT new: only remove tl.new/ when
+            # both copies are confirmed back on current.
+            keep_new = not _restore_default_current(efi_mount)
+        if renamed_tl and not os.path.isdir(tl_path):
+            try:
+                os.rename(tl_old_path, tl_path)
+            except OSError as e2:
+                log(f"WARNING: could not put tl.old back as tl: {e2}")
+        if not keep_new:
             shutil.rmtree(tl_new_path, ignore_errors=True)
         raise WriteFailed(f"the new release could not be installed: {e}")
 
@@ -1312,10 +1350,18 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
             shutil.rmtree(work_dir, ignore_errors=True)
             _unregister_cleanup("dir", work_dir)
         if owned_mount:
-            run_cmd(["umount", efi_mount], check=False)
-            _unregister_cleanup("mount", efi_mount)
-            shutil.rmtree(efi_mount, ignore_errors=True)
-            _unregister_cleanup("dir", efi_mount)
+            run_cmd(["umount", efi_mount], check=False, capture=True)
+            if _is_or_holds_mount(efi_mount):
+                # Busy or the stick is gone: the directory IS the stick.
+                # Leave it and the cleanup entries (atexit tries again).
+                log(f"WARNING: {efi_mount} is still mounted - left untouched")
+            else:
+                _unregister_cleanup("mount", efi_mount)
+                try:
+                    os.rmdir(efi_mount)  # never rmtree a former mount point
+                except OSError:
+                    pass
+                _unregister_cleanup("dir", efi_mount)
 
 
 def do_ab_upgrade(drive: DriveInfo, base_url: str,
@@ -1994,7 +2040,8 @@ def batch_upgrade(drive: DriveInfo, args, progress: Progress) -> int:
     """Exit 0 ok, 1 failed (reason reported), 130 cancelled.
 
     A cancel (Cancelled propagates to batch_main) or a failure before the
-    switch leaves the stick as bootable as it was.
+    switch leaves the stick as bootable as it was. A cancel that arrives
+    during the switch is too late: the upgrade completes and reports ok.
     """
     try:
         do_ab_upgrade(drive, args.source, progress, save=True)

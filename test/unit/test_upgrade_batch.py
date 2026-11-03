@@ -1170,6 +1170,45 @@ class TestBatchUpgrade(unittest.TestCase):
         self.assertIn("@result failed the new release could not be installed", out)
         self.assertStickUntouched()
 
+    def test_second_cfg_write_failing_restores_current_and_removes_tl_new(self):
+        real = ui.set_boot_default_one
+        def flaky(mount, rel, label):
+            if label == "new" and rel != "syslinux.cfg":
+                raise OSError(errno.ENOSPC, "No space left")
+            return real(mount, rel, label)
+        with mock.patch.object(ui, "set_boot_default_one", side_effect=flaky):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        # A LABEL new entry may have been added; what boots is DEFAULT.
+        for c in self.cfgs():
+            self.assertIn("DEFAULT current", c.read_text().splitlines())
+        self.assertFalse((self.esp / "tl.new").exists())
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
+
+    def test_failed_restore_keeps_tl_new(self):
+        # Both copies say new, the final sync fails, and the restore cannot
+        # write: tl.new/ must stay for the DEFAULT new that is on the stick.
+        real = ui.set_boot_default_one
+        run = ui.run_cmd
+        state = {"set": False}
+        def one(mount, rel, label):
+            if label == "current":
+                raise OSError(errno.EIO, "I/O error")
+            state["set"] = True
+            return real(mount, rel, label)
+        def fake_run(cmd, *a, **kw):
+            if cmd[0] == "sync" and state["set"]:
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with mock.patch.object(ui, "set_boot_default_one", side_effect=one), \
+             mock.patch.object(ui, "run_cmd", side_effect=fake_run):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertTrue((self.esp / "tl.new" / "ramroot.sqsh").is_file())
+        for c in self.cfgs():
+            self.assertIn("DEFAULT new", c.read_text())
+
     def test_the_switch_ignores_sigterm_and_restores_the_handler(self):
         real = ui.set_boot_default
         seen = []
@@ -1183,6 +1222,82 @@ class TestBatchUpgrade(unittest.TestCase):
         self.assertEqual(seen, [signal.SIG_IGN])
         for c in self.cfgs():
             self.assertIn("DEFAULT new", c.read_text())
+
+
+class TestNonBootRotation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.esp = root / "esp"
+        (self.esp / "tl").mkdir(parents=True)
+        self.fw = root / "fw"
+        self.fw.mkdir()
+        for f in ui.FIRMWARE_FILES:
+            (self.esp / "tl" / f).write_text("old")
+            (self.fw / f).write_text("new")
+        (self.esp / "syslinux.cfg").write_text("DEFAULT current\nLABEL current\n  APPEND ramroot=tl/r\n")
+        self.drive = ui.DriveInfo("/dev/sdz", "16G", "Test", "", True,
+                                  "/dev/sdz1", 1024, False, False, False)
+
+    def switch(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            ui._switch_release(self.drive, str(self.esp), str(self.fw))
+
+    def test_copy_failure_leaves_tl(self):
+        run = ui.run_cmd
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             self.assertRaises(ui.WriteFailed):
+            self.switch()
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old")
+        self.assertFalse((self.esp / "tl.new").exists())
+        self.assertFalse((self.esp / "tl.old").exists())
+
+    def test_second_rename_failure_restores_tl(self):
+        real = os.rename
+        def fake(a, b):
+            if a.endswith("tl.new"):
+                raise OSError(errno.EIO, "I/O error")
+            return real(a, b)
+        with mock.patch.object(ui.os, "rename", side_effect=fake), \
+             self.assertRaises(ui.WriteFailed):
+            self.switch()
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old")
+        self.assertFalse((self.esp / "tl.old").exists())
+
+    def test_success_rotates(self):
+        self.switch()
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "new")
+            self.assertEqual((self.esp / "tl.old" / f).read_text(), "old")
+        self.assertFalse((self.esp / "tl.new").exists())
+
+    def test_failed_umount_deletes_nothing(self):
+        (self.esp / "home.tar.gz").write_text("home")
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "umount":
+                return subprocess.CompletedProcess(cmd, 32, "", "busy")
+            if cmd[0] == "mount":
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.run(cmd, check=kw.get("check", True))
+        work = Path(self.tmp.name) / "work"
+        work.mkdir()
+        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             mock.patch.object(ui.tempfile, "mkdtemp", side_effect=[str(self.esp), str(work)]), \
+             mock.patch.object(ui, "_is_or_holds_mount", return_value=True), \
+             mock.patch.object(ui, "download_firmware", return_value=str(self.fw)), \
+             mock.patch.object(ui, "expected_download_sha256", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ui._ab_upgrade(self.drive, "x", ui.Progress(io.StringIO(), True), False)
+        self.assertTrue((self.esp / "home.tar.gz").is_file())
+        self.assertTrue((self.esp / "tl").is_dir())
+        ui._cleanup_items.clear()
 
 
 class TestEnsureRootBatch(unittest.TestCase):
