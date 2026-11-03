@@ -912,6 +912,120 @@ class TestFreshInstall(unittest.TestCase):
         self.assertNotWiped()
 
 
+class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
+    """R8/R9: a cancel survives helpers, a second signal, and interactive use."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, ui, "PROGRESS", ui.PROGRESS)
+        # Interactive runs print through the module's PROGRESS.
+        ui.PROGRESS = ui.Progress(io.StringIO(), False)
+
+    def arm_sigterm(self):
+        import signal
+        self.old = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, self.old)
+
+    def test_cancelled_is_not_an_exception(self):
+        self.assertFalse(issubclass(ui.Cancelled, Exception))
+
+    def test_sigterm_during_enumeration_helper_gives_130_without_writing(self):
+        import signal
+        self.arm_sigterm()
+
+        def term_in_subprocess(*a, **kw):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return b""
+        out = io.StringIO()
+        self.patches["run_cmd"].side_effect = term_in_subprocess
+        with mock.patch.object(ui, "ensure_root"), \
+             mock.patch.object(ui, "image_size", return_value=MIB), \
+             contextlib.redirect_stdout(out):
+            rc = ui.batch_main(["write", "--device", "/dev/sdb", "--mode",
+                                "fresh", "--expect-id", "x"])
+        self.assertEqual(rc, 130, out.getvalue())
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(out.getvalue().count("@result"), 1)
+
+    def test_second_sigterm_still_wipes(self):
+        import signal
+        self.arm_sigterm()
+        signal.signal(signal.SIGTERM, ui._cancel_on_signal)
+        real_wipe = ui.wipe_partition_tables
+
+        def twice(url, device, total, progress):
+            Path(device).write_bytes(b"\xee" * (128 * MIB))
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        def wipe_after_second(device):
+            os.kill(os.getpid(), signal.SIGTERM)  # relayed second signal
+            return real_wipe(device)
+        self.patches["stream_image"].side_effect = twice
+        with mock.patch.object(ui, "wipe_partition_tables",
+                               side_effect=wipe_after_second):
+            rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertWiped()
+
+    def test_second_sigterm_before_wipe_is_ignored_by_handler(self):
+        import signal
+        self.arm_sigterm()
+        signal.signal(signal.SIGTERM, ui._cancel_on_signal)
+        with self.assertRaises(ui.Cancelled):
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(100):
+                pass
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+    def test_wipe_ignores_sigint_and_sighup_and_restores(self):
+        import signal
+        marks = {}
+        real = os.fdatasync
+
+        def sync(fd):
+            marks.update({s: signal.getsignal(s) for s in
+                          (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)})
+            return real(fd)
+        before = {s: signal.getsignal(s) for s in marks or
+                  (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+        with mock.patch.object(ui.os, "fdatasync", side_effect=sync):
+            ui.wipe_partition_tables(self.dev)
+        self.assertEqual(set(marks.values()), {signal.SIG_IGN})
+        for s, h in before.items():
+            self.assertEqual(signal.getsignal(s), h)
+
+    def test_interactive_keyboard_interrupt_wipes(self):
+        self.patches["stream_image"].side_effect = KeyboardInterrupt()
+        with mock.patch.object(ui, "check_drive_fits"), \
+             mock.patch.object(ui, "confirm", side_effect=[True, False]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                ui.do_fresh_install(self.drive, "http://x")
+        self.assertWiped()
+
+    def test_interactive_sighup_wipes(self):
+        import signal
+        self.patches["stream_image"].side_effect = (
+            lambda *a: os.kill(os.getpid(), signal.SIGHUP))
+        old = signal.getsignal(signal.SIGHUP)
+        self.addCleanup(signal.signal, signal.SIGHUP, old)
+        with mock.patch.object(ui, "check_drive_fits"), \
+             mock.patch.object(ui, "confirm", side_effect=[True, False]), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                ui.do_fresh_install(self.drive, "http://x")
+        self.assertWiped()
+        self.assertEqual(signal.getsignal(signal.SIGHUP), old)
+
+    def test_only_one_result_line(self):
+        out = io.StringIO()
+        p = ui.Progress(out, True, 0)
+        p.result(False, "a")
+        p.result(False, "b")
+        self.assertEqual(out.getvalue(), "@result failed a\n")
+
+
 class TestEnsureRootBatch(unittest.TestCase):
     def test_batch_uses_stderr_and_sudo_n(self):
         out, err = io.StringIO(), io.StringIO()

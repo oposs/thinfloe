@@ -95,6 +95,7 @@ class Progress:
         self.min_interval = min_interval
         self._last = None  # monotonic time of the last printed progress
         self._open = False  # an interactive progress line lacks its newline
+        self._resulted = False  # batch: only one @result line per run
 
     @staticmethod
     def _one_line(text: str) -> str:
@@ -144,6 +145,9 @@ class Progress:
 
     def result(self, ok: bool, reason: str) -> None:
         if self.batch:
+            if self._resulted:
+                return
+            self._resulted = True
             word = "ok" if ok else "failed"
             reason = self._one_line(reason)
             self._emit("@result %s%s\n" % (word, " " + reason if reason else ""))
@@ -1445,8 +1449,18 @@ def copy_home_to_drive(device: str) -> bool:
     return ok
 
 
-class Cancelled(Exception):
-    """The batch caller asked to stop (SIGTERM)."""
+def _cancel_on_signal(signum, frame):
+    """One-shot: a second signal while the cancel is handled is ignored."""
+    signal.signal(signum, signal.SIG_IGN)
+    raise Cancelled()
+
+
+class Cancelled(BaseException):
+    """The caller asked to stop (SIGTERM, SIGHUP).
+
+    A BaseException so that no `except Exception` in a helper (get_cmd_output,
+    detect_boot_device, ...) can turn a cancel into an ordinary failure.
+    """
 
 
 WIPE_BYTES = 1024 * 1024
@@ -1457,13 +1471,15 @@ def wipe_partition_tables(device: str) -> bool:
 
     The first MiB holds the MBR, the GPT and syslinux's boot code, the last
     one the backup GPT. Never raises; False (logged) when it could not.
-    SIGTERM is ignored meanwhile: a second one must not leave the stick
-    half-cleared.
+    SIGTERM, SIGHUP and SIGINT are ignored meanwhile: a second signal must
+    not leave the stick half-cleared.
     """
-    try:
-        old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    except ValueError:  # not the main thread
-        old = None
+    saved = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            saved[sig] = signal.signal(sig, signal.SIG_IGN)
+        except ValueError:  # not the main thread
+            pass
     try:
         fd = os.open(device, os.O_WRONLY)
         try:
@@ -1486,14 +1502,12 @@ def wipe_partition_tables(device: str) -> bool:
             os.close(fd)
         run_cmd(["partprobe", device], check=False, capture=True)
         return True
-    except BaseException as e:
-        if not isinstance(e, Exception):
-            raise
+    except Exception as e:
         log(f"could not clear the partition tables of {device}: {e}")
         return False
     finally:
-        if old is not None:
-            signal.signal(signal.SIGTERM, old)
+        for sig, old in saved.items():
+            signal.signal(sig, old)
 
 
 @dataclass
@@ -1536,16 +1550,19 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
                                      progress):
                     raise WriteFailed("the stick did not read back what was written")
                 progress.done("verify")
-            stick_good = True
-            outcome.written = True
-        except (WriteFailed, Cancelled) as e:
+        except (WriteFailed, Cancelled, KeyboardInterrupt) as e:
             wipe_partition_tables(device)
+            if isinstance(e, KeyboardInterrupt):
+                raise
             if isinstance(e, Cancelled):
                 outcome.cancelled = True
                 outcome.reason = "cancelled"
             else:
                 outcome.reason = e.reason
             return outcome
+        # Only now: a late signal must not wipe a verified stick.
+        stick_good = True
+        outcome.written = True
 
         run_cmd(["sync"])
         run_cmd(["partprobe", device], check=False, capture=True)
@@ -1624,8 +1641,17 @@ def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
 
     # main() saves the home afterwards; a stamp that fails only warns, the
     # stick then gets its id at its first boot.
-    outcome = fresh_install(drive, base_url, copy_home, False, PROGRESS,
-                            save=False, stamp_required=False)
+    # A dropped SSH session (SIGHUP) must wipe a half-written stick too.
+    try:
+        old_hup = signal.signal(signal.SIGHUP, _cancel_on_signal)
+    except ValueError:
+        old_hup = None
+    try:
+        outcome = fresh_install(drive, base_url, copy_home, False, PROGRESS,
+                                save=False, stamp_required=False)
+    finally:
+        if old_hup is not None:
+            signal.signal(signal.SIGHUP, old_hup)
     if not outcome.written:
         die(f"Failed to write image: {outcome.reason}")
 
@@ -1890,10 +1916,6 @@ def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
     return None
 
 
-def _cancel_on_sigterm(signum, frame):
-    raise Cancelled()
-
-
 def batch_main(argv: List[str]) -> int:
     """The question-free commands `drives` and `write`."""
     global PROGRESS
@@ -1907,7 +1929,7 @@ def batch_main(argv: List[str]) -> int:
         return e.code if isinstance(e.code, int) else 2
     args.source = getattr(args, "source", DEFAULT_URL).rstrip("/")
 
-    old_handler = signal.signal(signal.SIGTERM, _cancel_on_sigterm)
+    old_handler = signal.signal(signal.SIGTERM, _cancel_on_signal)
     try:
         return _batch_run(args)
     except Cancelled:
