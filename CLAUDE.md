@@ -262,9 +262,11 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   (owner, 2026-11-03). The reader `/usr/libexec/thinfloe/peripheral-battery`
   (root; `thinfloe-peripheral-battery.timer`, 30 s after boot and every
   5 min) writes `/run/thinfloe/peripherals/battery`, one line per device,
-  sorted: `name<TAB>percent<TAB>state<TAB>read_epoch` (`percent` `-` when
-  unknown; `state` `discharging`, `charging`, `full`, `low`, `critical`,
-  `unknown` or `not reachable`). A run holds
+  sorted: `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind` (`percent`
+  `-` when unknown; `state` `discharging`, `charging`, `full`, `low`,
+  `critical`, `unknown` or `not reachable`; `kind` `keyboard`, `mouse`,
+  `numpad`, `presenter`, `trackball`, `touchpad` or `unknown`; the menu
+  still reads a 4-field line, kind unknown). A run holds
   `/run/thinfloe/peripherals-state/lock`, so a click and the timer take
   turns. Any argument is exit 2. A Logi Bolt receiver (`046d:c548`) is left
   to `hid-generic` (mainline `hid-logitech-dj` does not support Bolt), so the
@@ -273,26 +275,40 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   is added. Pairing comes from the receiver's register `b5`/`50+n`, never
   from the ping, since an empty slot answers the ping with an error too
   (code `0x09`; a switched-off device `0x04`, both after about 50 ms; an
-  idle keyboard took 850 ms to answer, hence the 2 s request timeout). A
-  device that does not answer keeps its last reading as `not reachable`;
+  idle keyboard took 850 ms to answer, hence the 2 s request timeout). The
+  same register gives the kind: the low nibble of the first byte after the
+  sub-address, `1` keyboard, `2` mouse (measured: MX Mechanical `01`, MX
+  Anywhere 3S `42`), `3` numpad, `4` presenter, `8` trackball, `9`
+  touchpad (Solaar's numbers, unmeasured). A `power_supply` entry has no
+  kind; a name containing Keyboard or Mouse is taken as one. A device that
+  does not answer keeps its last reading and its kind as `not reachable`;
   one off since boot gets the receiver's short pairing name (`MX MCHNCL`)
-  and `-`. Full names are cached in `/run/thinfloe/peripherals-state/`,
-  next to the temporary file. Solaar was tried and rejected: 44 packages,
+  and `-`. Full names and kinds are cached in
+  `/run/thinfloe/peripherals-state/`, next to the temporary file. Solaar was tried and rejected: 44 packages,
   39 MB, GTK 3.
   The tile is `70-battery.desktop` (`X-TF-Action=battery`, honoured only in
   shipped files). A user file of that name may reword Name, Comment and
-  Icon, but while a device is listed the drawn name and comment come from
-  the battery file. The tile shows when the file lists a device. Its name
-  is the lowest reachable percent, or `–` (an en dash, U+2013) when none is. Its
-  comment has one entry per device (name cut to 14 characters, an en dash
-  for not reachable, `+` while charging; the menu font has no glyph for
-  U+26A1) on at most two lines. Only the tile's name turns the warn colour,
-  at state `low` or `critical` or at 15 % or less; the device entries stay
-  muted. The menu reads the file at start, on every change (the 1 s add-on
-  watcher) and after a click. A click runs the reader through `sudo -n` in its own
-  process group (output under `battery`) and then logs `<name>: <percent>
-  %, <state>, read HH:MM` per device. Limitation: the menu, and so the tile,
-  is hidden while a fullscreen window (the ThinLinc client) covers it.
+  Icon, but while a device is listed the battery lines are drawn in place
+  of name and comment (no title). The tile shows when the file lists a
+  device. It has one line per device (owner, 2026-11-03): the kind
+  (`Keyboard`, `Mouse`, `Numpad`, `Presenter`, `Trackball`, `Touchpad`;
+  `Keyboard 1`, `Keyboard 2` in file order when two share one; the name,
+  cut to fit, when the kind is unknown), the percent right-aligned (`95 %`,
+  or `–`, an en dash, when not reachable or unknown) and `+` while charging
+  (the menu font has no glyph for U+26A1). Known kinds come first. A
+  reachable device below 10 % or at state `critical` is drawn red
+  (`brand::RED`) and its log line is a warning; a not reachable one is
+  muted. Four lines fit the 76 pt tile, three the 64 pt minimum; more turn
+  page every 4 s (`battery::PAGE_EVERY`, counted from the last reading, no
+  page indicator), and the menu asks no frame for a page while a window
+  covers it. From a click until the read job ends the tile shows
+  `Refreshing…` in place of the lines and takes no click. The menu reads
+  the file at start, on every change (the 1 s add-on watcher) and after a
+  click. A click runs the reader through `sudo -n` in its own process group
+  (output under `battery`) and then logs `<label> (<name>): <percent> %,
+  <state>, read HH:MM` per device (`<name>: …` when the label is the
+  name). Limitation: the menu, and so the tile, is hidden while a
+  fullscreen window (the ThinLinc client) covers it.
   The service has `TimeoutStartSec=60`; the helper waits up to 30 s for
   its lock (`LOCK_NB`, retried), then logs `thinfloe: battery: lock busy`
   and exits 1, so a hung run cannot hold a click's job for ever.
@@ -303,9 +319,11 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   **Confirmed on hardware (2026-11-03, 10.46.102.86, Logi Bolt, reader and
   units copied into the running system):** both devices read in 0.5 s.
   **Not verified on hardware:** a boot of the built image (ordering cycles;
-  `make qemu-smoke` was not run, the host has no KVM), the tile and the
-  click, and the `not reachable` line written by the timer for a
-  switched-off device (the reply it relies on was measured).
+  `make qemu-smoke` was not run, the host has no KVM), the tile with its
+  kind lines, red line, pages and `Refreshing…`, the click, the kind written
+  by the built reader (the bytes it relies on were measured), and the `not
+  reachable` line written by the timer for a switched-off device (the reply
+  it relies on was measured).
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
