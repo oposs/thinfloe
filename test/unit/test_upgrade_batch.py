@@ -4,8 +4,12 @@
 import importlib.machinery
 import importlib.util
 import hashlib
+import errno
 import io
 import json
+import os
+import subprocess
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -189,6 +193,96 @@ class TestDriveList(unittest.TestCase):
             "device", "model", "size_bytes", "serial", "transport", "removable",
             "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
             "efi_partition", "id", "fits"})
+
+class TestStreamImage(unittest.TestCase):
+    SIZE = 70 * MIB
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        cls.raw = os.urandom(cls.SIZE)
+        (base / "raw.img").write_bytes(cls.raw)
+        subprocess.run(["zstd", "-q", "-1", str(base / "raw.img"), "-o", str(base / "i.zst")],
+                       check=True)
+        cls.zst = base / "i.zst"
+        cls.url = "file://" + str(cls.zst)
+        cls.zst_bytes = cls.zst.read_bytes()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.dev = str(Path(self.dir.name) / "dev")
+        Path(self.dev).write_bytes(b"")
+        self.out = io.StringIO()
+        self.progress = ui.Progress(self.out, True, 0)
+
+    def lines(self):
+        return [l for l in self.out.getvalue().splitlines() if l.startswith("@progress")]
+
+    def test_writes_and_hashes(self):
+        r = ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        self.assertEqual(Path(self.dev).read_bytes(), self.raw)
+        self.assertEqual(r.written, self.SIZE)
+        self.assertEqual(r.image_sha256, hashlib.sha256(self.raw).hexdigest())
+        self.assertEqual(r.download_sha256, hashlib.sha256(self.zst_bytes).hexdigest())
+
+    def test_syncs_in_step(self):
+        real = os.fdatasync
+        calls = []
+        with mock.patch.object(ui.os, "fdatasync", lambda fd: (calls.append(fd), real(fd))[1]):
+            ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        self.assertGreaterEqual(len(calls), 3)
+
+    def test_progress_monotonic_and_final(self):
+        ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        done = [int(l.split()[1]) for l in self.lines()]
+        self.assertEqual(done, sorted(done))
+        self.assertEqual(self.lines()[-1], "@progress 73400320 73400320")
+
+    def test_unknown_total_reports_dash(self):
+        ui.stream_image(self.url, self.dev, None, self.progress)
+        self.assertTrue(self.lines())
+        for l in self.lines():
+            self.assertTrue(l.endswith(" -"), l)
+
+    def test_missing_file_is_download_failure(self):
+        with self.assertRaises(ui.WriteFailed) as cm:
+            ui.stream_image("file://" + self.dir.name + "/nope.zst", self.dev,
+                            None, self.progress)
+        self.assertIn("download", cm.exception.reason)
+
+    def test_write_error_raises_and_leaves_no_child(self):
+        real = os.write
+        n = [0]
+
+        def flaky(fd, data):
+            n[0] += 1
+            if n[0] > 2:
+                raise OSError(errno.EIO, "Input/output error")
+            return real(fd, data)
+
+        procs = []
+        real_popen = subprocess.Popen
+
+        def spy(*a, **k):
+            p = real_popen(*a, **k)
+            procs.append(p)
+            return p
+
+        with mock.patch.object(ui.os, "write", flaky), \
+                mock.patch.object(ui.subprocess, "Popen", spy):
+            with self.assertRaises(ui.WriteFailed) as cm:
+                ui.stream_image(self.url, self.dev, self.SIZE, self.progress)
+        self.assertIn(self.dev, cm.exception.reason)
+        self.assertEqual(len(procs), 2)
+        for p in procs:
+            self.assertIsNotNone(p.returncode)
+        self.assertEqual(threading.active_count(), 1)
 
 
 if __name__ == "__main__":

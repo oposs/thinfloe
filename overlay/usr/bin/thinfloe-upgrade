@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -672,28 +673,146 @@ def check_drive_fits(base_url: str, device: str) -> None:
             f"({needed / 1e9:.1f} GB). Nothing was written.")
 
 
+# Flush to the stick this often, so the progress follows what the stick has
+# really taken and not what the page cache accepted.
+SYNC_EVERY = 32 * 1024 * 1024
+WRITE_BLOCK = 1024 * 1024
+
+
+class WriteFailed(Exception):
+    """Writing the image failed; .reason is one plain sentence for users."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass
+class WriteResult:
+    written: int
+    image_sha256: str  # of the uncompressed image, as written
+    download_sha256: str  # of the compressed bytes, as downloaded
+
+
+def _feed(src, dst, digest, state) -> None:
+    """Thread body: hash curl's output and pass it on to zstd."""
+    try:
+        while True:
+            block = src.read(WRITE_BLOCK)
+            if not block:
+                break
+            digest.update(block)
+            dst.write(block)
+    except (BrokenPipeError, ValueError):
+        state["broken"] = True  # zstd quit early; main reports why
+    except OSError:
+        state["broken"] = True
+    finally:
+        try:
+            dst.close()
+        except OSError:
+            state["broken"] = True
+
+
+def stream_image(url: str, device: str, total: Optional[int],
+                 progress: Progress) -> WriteResult:
+    """curl -> zstd -dc -> device, hashing both streams on the way.
+
+    The device is opened without O_TRUNC so a block device and a regular
+    file (tests) behave alike. Every SYNC_EVERY bytes it is flushed and
+    progress reported, so the number is what the stick has accepted.
+    Any exception, KeyboardInterrupt included, kills both children and
+    joins the thread before it propagates.
+    """
+    curl = zstd = thread = None
+    fd = None
+    image_hash = hashlib.sha256()
+    download_hash = hashlib.sha256()
+    state = {"broken": False}
+    written = 0
+    ok = False
+    try:
+        try:
+            curl = subprocess.Popen(["curl", "-fsSL", url], stdout=subprocess.PIPE)
+            zstd = subprocess.Popen(["zstd", "-dc"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE)
+        except OSError as e:
+            raise WriteFailed(f"could not start the download: {e}")
+        thread = threading.Thread(
+            target=_feed, args=(curl.stdout, zstd.stdin, download_hash, state),
+            daemon=True)
+        thread.start()
+        try:
+            fd = os.open(device, os.O_WRONLY)
+        except OSError as e:
+            raise WriteFailed(f"opening {device} failed: {e.strerror or e}")
+        since_sync = 0
+        while True:
+            block = zstd.stdout.read(WRITE_BLOCK)
+            if not block:
+                break
+            image_hash.update(block)
+            view = memoryview(block)
+            try:
+                while view:
+                    n = os.write(fd, view)
+                    view = view[n:]
+                written += len(block)
+                since_sync += len(block)
+                if since_sync >= SYNC_EVERY:
+                    os.fdatasync(fd)
+                    since_sync = 0
+                    progress.progress(written, total)
+            except OSError as e:
+                raise WriteFailed(f"writing {device} failed: {e.strerror or e}")
+        try:
+            os.fdatasync(fd)
+        except OSError as e:
+            raise WriteFailed(f"writing {device} failed: {e.strerror or e}")
+        progress.progress(written, total)
+        thread.join()
+        if state["broken"]:
+            curl.kill()  # nobody reads it any more
+        zstd.wait()
+        curl.wait()
+        if not state["broken"] and curl.returncode != 0:
+            raise WriteFailed(f"the download failed (curl exit {curl.returncode})")
+        if zstd.returncode != 0:
+            raise WriteFailed(
+                f"the downloaded image could not be unpacked (zstd exit {zstd.returncode})")
+        ok = True
+        return WriteResult(written, image_hash.hexdigest(), download_hash.hexdigest())
+    finally:
+        if not ok:
+            for proc in (curl, zstd):
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+        if thread is not None:
+            thread.join()
+        for proc in (curl, zstd):
+            if proc is None:
+                continue
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            proc.wait()
+        if fd is not None:
+            os.close(fd)
+
+
 def download_and_write_image(base_url: str, device: str) -> None:
-    """Download compressed image and write directly to device"""
+    """Download the compressed image and write it to the device"""
     image_url = f"{base_url}/thinfloe-usb.img.zst"
 
     log(f"Downloading and writing image to {device}...")
     print(f"  Source: {image_url}")
-
-    # curl | zstd -d | dd
-    curl_cmd = ["curl", "-L", "--progress-bar", image_url]
-    zstd_cmd = ["zstd", "-d"]
-    dd_cmd = ["dd", f"of={device}", "bs=1M", "conv=fsync"]
-
-    curl_proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE)
-    zstd_proc = subprocess.Popen(zstd_cmd, stdin=curl_proc.stdout, stdout=subprocess.PIPE)
-    dd_proc = subprocess.Popen(dd_cmd, stdin=zstd_proc.stdout)
-
-    curl_proc.stdout.close()
-    zstd_proc.stdout.close()
-    dd_proc.communicate()
-
-    if dd_proc.returncode != 0:
-        die("Failed to write image")
+    try:
+        stream_image(image_url, device, image_size(image_url), PROGRESS)
+    except WriteFailed as e:
+        die(f"Failed to write image: {e.reason}")
 
     log("Image written successfully")
 
