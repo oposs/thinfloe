@@ -371,8 +371,9 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   1 s; the file carries the kind written by the built reader; the tile shows
   `Keyboard` and `Mouse` lines (owner: "funktioniert"); a click reads and
   logs one line per device; a device that had not reconnected after a
-  restart showed as `not reachable`; and the watcher read the keyboard on
-  its first key press without a click (see above).
+  restart showed as `not reachable`; the watcher read the keyboard on its
+  first key press without a click (see above); and the timer went on after
+  the boot run (reads at 12 s, 343 s and 674 s after boot).
   **Not verified on hardware:** the red line (no device was below 10 %),
   pages (only two devices), and how `Refreshing…` looks.
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
