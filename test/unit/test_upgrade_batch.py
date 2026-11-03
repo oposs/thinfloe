@@ -332,5 +332,118 @@ class TestStreamImage(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
 
 
+class TestVerify(unittest.TestCase):
+    SIZE = 70 * MIB
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.raw = os.urandom(cls.SIZE)
+        cls.path = os.path.join(cls._tmp.name, "dev.img")
+        Path(cls.path).write_bytes(cls.raw)
+        cls.sha = hashlib.sha256(cls.raw).hexdigest()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def progress(self):
+        out = io.StringIO()
+        return ui.Progress(out, True, 0), out
+
+    def test_matching_content_verifies(self):
+        p, out = self.progress()
+        self.assertTrue(ui.verify_device(self.path, self.SIZE, self.sha, p))
+        self.assertIn("@progress %d %d" % (self.SIZE, self.SIZE), out.getvalue())
+
+    def test_flipped_byte_fails(self):
+        bad = os.path.join(self._tmp.name, "bad.img")
+        data = bytearray(self.raw)
+        data[40 * MIB] ^= 1
+        Path(bad).write_bytes(bytes(data))
+        p, _ = self.progress()
+        self.assertFalse(ui.verify_device(bad, self.SIZE, self.sha, p))
+
+    def test_short_device_fails(self):
+        short = os.path.join(self._tmp.name, "short.img")
+        Path(short).write_bytes(self.raw[:10 * MIB])
+        p, _ = self.progress()
+        with mock.patch.object(ui, "log"):
+            self.assertFalse(ui.verify_device(short, self.SIZE, self.sha, p))
+
+    def test_unreadable_device_fails_and_is_logged(self):
+        p, _ = self.progress()
+        with mock.patch.object(ui, "log") as lg:
+            self.assertFalse(ui.verify_device(
+                os.path.join(self._tmp.name, "missing"), 10, self.sha, p))
+        self.assertIn("missing", lg.call_args[0][0])
+
+    def test_drop_cache_on_regular_file_skips_ioctl(self):
+        fd = os.open(self.path, os.O_RDONLY)
+        try:
+            with mock.patch("fcntl.ioctl") as ioc, \
+                 mock.patch("os.posix_fadvise") as adv:
+                ui.drop_cache(fd)
+        finally:
+            os.close(fd)
+        ioc.assert_not_called()
+        adv.assert_called_once_with(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+
+    def test_drop_cache_on_block_device_flushes(self):
+        fake = mock.Mock(st_mode=0o060000)
+        with mock.patch("os.fstat", return_value=fake), \
+             mock.patch("fcntl.ioctl") as ioc, mock.patch("os.posix_fadvise"):
+            ui.drop_cache(7)
+        ioc.assert_called_once_with(7, 0x1261)
+
+    def test_drop_cache_failures_are_ignored(self):
+        fake = mock.Mock(st_mode=0o060000)
+        with mock.patch("os.fstat", return_value=fake), \
+             mock.patch("fcntl.ioctl", side_effect=OSError(1, "no")), \
+             mock.patch("os.posix_fadvise", side_effect=OSError(1, "no")), \
+             mock.patch.object(ui, "log") as lg:
+            ui.drop_cache(7)
+        self.assertEqual(lg.call_count, 2)
+
+
+class TestExpectedDownloadSha(unittest.TestCase):
+    HEX = "ab" * 32
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.base = "file://" + self._tmp.name
+
+    def put(self, text, name="thinfloe-usb.img.zst"):
+        (self.dir / (name + ".sha256")).write_text(text)
+
+    def get(self, name="thinfloe-usb.img.zst"):
+        return ui.expected_download_sha256(self.base, name)
+
+    def test_two_space_format(self):
+        self.put(self.HEX + "  thinfloe-usb.img.zst\n")
+        self.assertEqual(self.get(), self.HEX)
+
+    def test_binary_marker_and_uppercase(self):
+        self.put(self.HEX.upper() + " *thinfloe-usb.img.zst\n")
+        self.assertEqual(self.get(), self.HEX)
+
+    def test_other_file_name(self):
+        self.put(self.HEX + "  other.zst\n")
+        self.assertIsNone(self.get())
+
+    def test_missing_file(self):
+        self.assertIsNone(self.get())
+
+    def test_malformed(self):
+        for text in ("", "zz" * 32 + "  thinfloe-usb.img.zst\n",
+                     "ab" * 31 + "  thinfloe-usb.img.zst\n",
+                     self.HEX + "\n",
+                     self.HEX + "  thinfloe-usb.img.zst extra\n"):
+            self.put(text)
+            self.assertIsNone(self.get(), text)
+
+
 if __name__ == "__main__":
     unittest.main()

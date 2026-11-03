@@ -7,6 +7,7 @@ Supports A/B updates for existing ThinFloe drives, or fresh install for new driv
 """
 
 import atexit
+import fcntl
 import fnmatch
 import glob
 import hashlib
@@ -824,6 +825,81 @@ def stream_image(url: str, device: str, total: Optional[int],
             os.close(fd)
         curl_err.close()
         zstd_err.close()
+
+
+BLKFLSBUF = 0x1261  # <linux/fs.h>: flush the buffer cache of a block device
+VERIFY_BLOCK = 1024 * 1024
+SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def drop_cache(fd: int) -> None:
+    """Make the next read of fd come from the device, not from RAM.
+
+    Without this a verify would read back what the kernel still holds from
+    the write and could not notice a stick that stored it wrongly.
+    Failures are logged and ignored: the read still happens.
+    """
+    try:
+        if stat.S_ISBLK(os.fstat(fd).st_mode):
+            fcntl.ioctl(fd, BLKFLSBUF)
+    except OSError as e:
+        log(f"Could not flush the device cache: {e}")
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError as e:
+        log(f"Could not drop cached pages: {e}")
+
+
+def verify_device(device: str, length: int, expected_sha256: str,
+                  progress: Progress) -> bool:
+    """Read length bytes back from the device and compare their SHA-256."""
+    try:
+        fd = os.open(device, os.O_RDONLY)
+    except OSError as e:
+        log(f"Cannot read {device} back: {e}")
+        return False
+    try:
+        drop_cache(fd)
+        digest = hashlib.sha256()
+        done = 0
+        while done < length:
+            block = os.read(fd, min(VERIFY_BLOCK, length - done))
+            if not block:
+                log(f"{device} ended after {done} of {length} bytes")
+                return False
+            digest.update(block)
+            done += len(block)
+            progress.progress(done, length)
+        return digest.hexdigest() == expected_sha256.lower()
+    except OSError as e:
+        log(f"Cannot read {device} back: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
+def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
+    """The published SHA-256 of <base_url>/<name>, or None.
+
+    Reads <name>.sha256 in sha256sum format. None when the file is missing
+    or malformed. The single place to change if the checksums move into one
+    file.
+    """
+    try:
+        r = subprocess.run(
+            ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60",
+             f"{base_url}/{name}.sha256"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    fields = r.stdout.decode("utf-8", "replace").split()
+    if len(fields) != 2 or not SHA256_RE.fullmatch(fields[0]):
+        return None
+    if fields[1].lstrip("*") != name:
+        return None
+    return fields[0].lower()
 
 
 def download_and_write_image(base_url: str, device: str) -> None:
