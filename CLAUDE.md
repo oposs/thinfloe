@@ -362,15 +362,16 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   measured events, fake nodes and an injected clock), `test-session-packages.sh`
   (units, timer, watch service, tile, icon, directories), `battery.rs` and
   the menu and ui tests in `src/thinfloe-menu`.
-  **Confirmed on hardware (2026-11-03, 10.46.102.86, Logi Bolt, reader and
-  units copied into the running system):** both devices read in 0.5 s.
-  **Not verified on hardware:** a boot of the built image (ordering cycles;
-  `make qemu-smoke` was not run, the host has no KVM), the tile with its
-  kind lines, red line, pages and `Refreshing…`, the click, the kind written
-  by the built reader (the bytes it relies on were measured), and the `not
-  reachable` line written by the timer for a switched-off device (the reply
-  it relies on was measured), and the watcher: a reading when a device
-  connects (the events it relies on were measured on the mouse only).
+  **Confirmed on hardware (2026-11-03, 10.46.102.86, Logi Bolt):** the built
+  images booted from the stick (three boots: tile, kind lines with the boot
+  read, the watcher) with no ordering cycle; both devices read in 0.5 to
+  1 s; the file carries the kind written by the built reader; the tile shows
+  `Keyboard` and `Mouse` lines (owner: "funktioniert"); a click reads and
+  logs one line per device; a device that had not reconnected after a
+  restart showed as `not reachable`; and the watcher read the keyboard on
+  its first key press without a click (see above).
+  **Not verified on hardware:** the red line (no device was below 10 %),
+  pages (only two devices), and how `Refreshing…` looks.
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
