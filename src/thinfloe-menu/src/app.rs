@@ -343,7 +343,9 @@ impl App {
 
     /// Read the battery file again.
     fn refresh_battery(&mut self) {
-        self.cfg.menu.set_battery(battery::read(&self.cfg.battery_file));
+        self.cfg
+            .menu
+            .set_battery(battery::read(&self.cfg.battery_file), Instant::now());
     }
 
     /// Read the add-on files again. A program or icon that appeared
@@ -461,6 +463,7 @@ impl App {
         let now = Instant::now();
         let mut event = None;
         live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
+        live.chrome.covered = !self.shown.load(Ordering::Relaxed);
         // egui takes a new zoom factor at the start of the next pass and
         // lays that pass out with a guessed screen rect.
         let settling = settling(self.ctx.zoom_factor(), live.scale);
@@ -662,6 +665,7 @@ impl ApplicationHandler<Wake> for App {
             header: self.cfg.header.clone(),
             clock: String::new(),
             logo: None,
+            covered: false,
         };
         let bg = crate::brand::theme().palette.background;
         self.live = Some(Live {
@@ -762,7 +766,14 @@ impl ApplicationHandler<Wake> for App {
             // only comes from a client asking. Ending here would be exit 0,
             // which thinfloe-session reads as logout.
             WindowEvent::CloseRequested => return,
-            WindowEvent::Occluded(hidden) => self.shown.store(!hidden, Ordering::Relaxed),
+            WindowEvent::Occluded(hidden) => {
+                self.shown.store(!hidden, Ordering::Relaxed);
+                // Uncovered: the battery tile's pages turn again, from a
+                // frame that asks for the next one.
+                if !hidden && let Some(live) = self.live.as_ref() {
+                    live.window.request_redraw();
+                }
+            }
             _ => {}
         }
         // While the dialog is up, input is refused rather than handled.

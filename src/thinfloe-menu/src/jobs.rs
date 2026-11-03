@@ -621,7 +621,8 @@ mod tests {
                     name: "Kbd".into(),
                     percent: Some(80),
                     state: "charging".into(),
-                    read_epoch: 1000
+                    read_epoch: 1000,
+                    kind: crate::battery::DeviceKind::Unknown,
                 }]
             }
         );

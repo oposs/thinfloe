@@ -3,16 +3,59 @@
 //! symlinks, malformed lines dropped, names made printable.
 
 use std::path::Path;
+use std::time::Duration;
 
 pub const FILE: &str = "/run/thinfloe/peripherals/battery";
 pub const MAX_BYTES: u64 = 16 * 1024;
 pub const MAX_LINES: usize = 64;
 pub const MAX_NAME: usize = 64;
-pub const SHORT_NAME: usize = 14;
-pub const WARN_PERCENT: u8 = 15;
+/// A reachable device below this percent is drawn red and logged as a warning.
+pub const LOW_BELOW: u8 = 10;
 pub const CHARGING_MARK: &str = "+";
+/// How long the tile shows one page of lines when not all fit.
+pub const PAGE_EVERY: Duration = Duration::from_secs(4);
 
 const NOT_REACHABLE: &str = "not reachable";
+
+/// What a device is, as the reader learned it (the receiver's pairing info).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeviceKind {
+    Keyboard,
+    Mouse,
+    Numpad,
+    Presenter,
+    Trackball,
+    Touchpad,
+    #[default]
+    Unknown,
+}
+
+impl DeviceKind {
+    /// The word of the file's fifth field; anything else is unknown.
+    pub fn parse(word: &str) -> DeviceKind {
+        match word {
+            "keyboard" => DeviceKind::Keyboard,
+            "mouse" => DeviceKind::Mouse,
+            "numpad" => DeviceKind::Numpad,
+            "presenter" => DeviceKind::Presenter,
+            "trackball" => DeviceKind::Trackball,
+            "touchpad" => DeviceKind::Touchpad,
+            _ => DeviceKind::Unknown,
+        }
+    }
+
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            DeviceKind::Keyboard => Some("Keyboard"),
+            DeviceKind::Mouse => Some("Mouse"),
+            DeviceKind::Numpad => Some("Numpad"),
+            DeviceKind::Presenter => Some("Presenter"),
+            DeviceKind::Trackball => Some("Trackball"),
+            DeviceKind::Touchpad => Some("Touchpad"),
+            DeviceKind::Unknown => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
@@ -20,6 +63,7 @@ pub struct Device {
     pub percent: Option<u8>,
     pub state: String,
     pub read_epoch: u64,
+    pub kind: DeviceKind,
 }
 
 impl Device {
@@ -27,9 +71,10 @@ impl Device {
         self.state != NOT_REACHABLE
     }
 
+    /// Below `LOW_BELOW` percent or critical, and reachable: a stale
+    /// percent says nothing about now.
     pub fn low(&self) -> bool {
-        self.reachable()
-            && (self.state == "low" || self.state == "critical" || self.percent.is_some_and(|p| p <= WARN_PERCENT))
+        self.reachable() && (self.state == "critical" || self.percent.is_some_and(|p| p < LOW_BELOW))
     }
 }
 
@@ -67,11 +112,19 @@ pub fn sanitise(name: &str) -> String {
 
 fn parse_line(line: &str) -> Option<Device> {
     let f: Vec<&str> = line.split('\t').collect();
-    if f.len() != 4 {
+    // Four fields come from a reader of before the kind; the kind is unknown.
+    if f.len() != 4 && f.len() != 5 {
         return None;
     }
     // `\r` at the end of the last field is tolerated.
-    let epoch = f[3].strip_suffix('\r').unwrap_or(f[3]);
+    let epoch = if f.len() == 4 {
+        f[3].strip_suffix('\r').unwrap_or(f[3])
+    } else {
+        f[3]
+    };
+    let kind = f.get(4).map_or(DeviceKind::Unknown, |k| {
+        DeviceKind::parse(k.strip_suffix('\r').unwrap_or(k))
+    });
     if epoch.is_empty() || !epoch.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -89,6 +142,7 @@ fn parse_line(line: &str) -> Option<Device> {
         percent,
         state: sanitise(f[2]),
         read_epoch,
+        kind,
     })
 }
 
@@ -103,55 +157,128 @@ pub fn read(path: &Path) -> Vec<Device> {
     }
 }
 
+/// How a tile line is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    /// Reachable and below `LOW_BELOW` percent or critical: red.
+    Low,
+    /// Not reachable: muted.
+    Muted,
+}
+
+/// One device line of the tile: label left, percent right, then the
+/// charging mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileText {
-    pub name: String,
-    pub entries: Vec<String>,
-    pub warn: bool,
+pub struct Line {
+    pub label: String,
+    /// `100 %`, or `–` when the device is not reachable or has no percent.
+    pub percent: String,
+    pub charging: bool,
+    pub tone: Tone,
 }
 
-fn short(name: &str) -> String {
-    if name.chars().count() > SHORT_NAME {
-        let mut s: String = name.chars().take(SHORT_NAME).collect();
-        s.push('…');
-        s
-    } else {
-        name.to_string()
-    }
-}
-
-pub fn tile_text(devices: &[Device]) -> TileText {
-    let lowest = devices.iter().filter(|d| d.reachable()).filter_map(|d| d.percent).min();
-    let entries = devices
+/// The label of each device, in file order: its kind, numbered when two
+/// devices share it (`Keyboard 1`, `Keyboard 2`), or its name when the kind
+/// is unknown.
+pub fn labels(devices: &[Device]) -> Vec<String> {
+    let mut seen = std::collections::HashMap::new();
+    devices
         .iter()
-        .map(|d| {
-            let p = match d.percent {
-                Some(p) if d.reachable() => p.to_string(),
+        .map(|d| match d.kind.label() {
+            None => d.name.clone(),
+            Some(label) => {
+                let total = devices.iter().filter(|o| o.kind == d.kind).count();
+                if total == 1 {
+                    label.to_string()
+                } else {
+                    let n = seen.entry(d.kind).or_insert(0);
+                    *n += 1;
+                    format!("{label} {n}")
+                }
+            }
+        })
+        .collect()
+}
+
+/// One line per device: known kinds first, in the order of `DeviceKind`,
+/// otherwise in file order.
+pub fn tile_lines(devices: &[Device]) -> Vec<Line> {
+    let mut lines: Vec<(DeviceKind, Line)> = devices
+        .iter()
+        .zip(labels(devices))
+        .map(|(d, label)| {
+            let percent = match d.percent {
+                Some(p) if d.reachable() => format!("{p} %"),
                 _ => "–".to_string(),
             };
-            let mut e = format!("{} {}", short(&d.name), p);
-            if d.state == "charging" {
-                e.push(' ');
-                e.push_str(CHARGING_MARK);
-            }
-            e
+            let tone = if !d.reachable() {
+                Tone::Muted
+            } else if d.low() {
+                Tone::Low
+            } else {
+                Tone::Normal
+            };
+            let line = Line {
+                label,
+                percent,
+                charging: d.state == "charging",
+                tone,
+            };
+            (d.kind, line)
         })
         .collect();
-    TileText {
-        name: lowest.map_or_else(|| "–".to_string(), |p| format!("{p} %")),
-        entries,
-        warn: devices.iter().any(Device::low),
+    lines.sort_by_key(|(kind, _)| *kind);
+    lines.into_iter().map(|(_, l)| l).collect()
+}
+
+/// The lines `start..end` the tile shows, and how long until the next page
+/// (`None` when all lines fit and nothing pages).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    pub start: usize,
+    pub end: usize,
+    pub next: Option<Duration>,
+}
+
+/// The page of `lines` lines, `per_page` to a page, shown `elapsed` after
+/// the lines were set. Each page stays `PAGE_EVERY`; after the last comes
+/// the first.
+pub fn page(lines: usize, per_page: usize, elapsed: Duration) -> Page {
+    let per_page = per_page.max(1);
+    let pages = lines.div_ceil(per_page);
+    if pages <= 1 {
+        return Page {
+            start: 0,
+            end: lines,
+            next: None,
+        };
+    }
+    let every = PAGE_EVERY.as_millis();
+    let ms = elapsed.as_millis();
+    let index = ((ms / every) % pages as u128) as usize;
+    let start = index * per_page;
+    Page {
+        start,
+        end: (start + per_page).min(lines),
+        next: Some(Duration::from_millis((every - ms % every) as u64)),
     }
 }
 
-fn phrase(d: &Device, h: i8, m: i8) -> String {
+fn phrase(d: &Device, label: &str, h: i8, m: i8) -> String {
     let p = d.percent.map_or_else(|| "–".to_string(), |p| format!("{p} %"));
-    format!("{}: {}, {}, read {:02}:{:02}", d.name, p, d.state, h, m)
+    let who = if label == d.name {
+        label.to_string()
+    } else {
+        format!("{label} ({})", d.name)
+    };
+    format!("{who}: {p}, {}, read {:02}:{:02}", d.state, h, m)
 }
 
-pub fn log_text(d: &Device) -> String {
+/// The log line of a device, `label` from `labels`.
+pub fn log_text(d: &Device, label: &str) -> String {
     let (h, m, _) = crate::log::local_hms(d.read_epoch as i64);
-    phrase(d, h, m)
+    phrase(d, label, h, m)
 }
 
 /// Says when the file needs reading again: the first `tick` always, then
@@ -182,15 +309,24 @@ mod tests {
             percent: p,
             state: state.into(),
             read_epoch: 1,
+            kind: DeviceKind::Unknown,
+        }
+    }
+
+    fn kdev(name: &str, kind: DeviceKind, p: Option<u8>, state: &str) -> Device {
+        Device {
+            kind,
+            ..dev(name, p, state)
         }
     }
 
     #[test]
     fn parse_takes_good_lines_only() {
-        let text = "MX Mechanical\t100\tcharging\t1000\n\
+        let text = "MX Mechanical\t100\tcharging\t1000\tkeyboard\n\
                     Mouse\t-\tnot reachable\t900\n\
                     a\t5\tfull\n\
-                    a\t5\tfull\t1\textra\n\
+                    a\t5\tfull\t1\tmouse\textra\n\
+                    Odd\t5\tfull\t1\tlaser\n\
                     x\t101\tfull\t1\n\
                     x\t9a\tfull\t1\n\
                     x\t5\tfull\t-1\n\
@@ -203,19 +339,29 @@ mod tests {
                     name: "MX Mechanical".into(),
                     percent: Some(100),
                     state: "charging".into(),
-                    read_epoch: 1000
+                    read_epoch: 1000,
+                    kind: DeviceKind::Keyboard,
                 },
                 Device {
                     name: "Mouse".into(),
                     percent: None,
                     state: "not reachable".into(),
-                    read_epoch: 900
+                    read_epoch: 900,
+                    kind: DeviceKind::Unknown,
+                },
+                Device {
+                    name: "Odd".into(),
+                    percent: Some(5),
+                    state: "full".into(),
+                    read_epoch: 1,
+                    kind: DeviceKind::Unknown,
                 },
                 Device {
                     name: "Pad?".into(),
                     percent: Some(7),
                     state: "discharging".into(),
-                    read_epoch: 5
+                    read_epoch: 5,
+                    kind: DeviceKind::Unknown,
                 },
             ]
         );
@@ -275,52 +421,127 @@ mod tests {
     }
 
     #[test]
-    fn tile_text_names_the_lowest_reachable_percent() {
+    fn every_kind_word_parses_and_has_its_label() {
+        for (word, label) in [
+            ("keyboard", Some("Keyboard")),
+            ("mouse", Some("Mouse")),
+            ("numpad", Some("Numpad")),
+            ("presenter", Some("Presenter")),
+            ("trackball", Some("Trackball")),
+            ("touchpad", Some("Touchpad")),
+            ("unknown", None),
+            ("Keyboard", None),
+            ("", None),
+        ] {
+            assert_eq!(DeviceKind::parse(word).label(), label, "{word:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_names_the_kind_and_says_percent_and_charging() {
         let v = vec![
-            dev("MX Anywhere 3S Mouse", Some(95), "discharging"),
-            dev("MX Mechanical", Some(100), "charging"),
-            dev("Mouse", Some(5), "not reachable"),
+            kdev("MX Anywhere 3S for Business", DeviceKind::Mouse, Some(95), "charging"),
+            kdev("MX Mechanical", DeviceKind::Keyboard, Some(100), "discharging"),
+            dev("Pen", Some(5), "not reachable"),
+            dev("Stylus", None, "unknown"),
         ];
-        let t = tile_text(&v);
-        assert_eq!(t.name, "95 %");
-        assert_eq!(t.entries, vec!["MX Anywhere 3S… 95", "MX Mechanical 100 +", "Mouse –"]);
-        assert!(!t.warn);
-        assert_eq!(tile_text(&[dev("Mouse", Some(5), "not reachable")]).name, "–");
-        assert_eq!(tile_text(&[dev("Mouse", None, "discharging")]).name, "–");
+        let lines = tile_lines(&v);
+        let shown: Vec<(&str, &str, bool, Tone)> = lines
+            .iter()
+            .map(|l| (l.label.as_str(), l.percent.as_str(), l.charging, l.tone))
+            .collect();
+        // Known kinds first, keyboard before mouse; unknown ones by name.
+        assert_eq!(
+            shown,
+            vec![
+                ("Keyboard", "100 %", false, Tone::Normal),
+                ("Mouse", "95 %", true, Tone::Normal),
+                ("Pen", "–", false, Tone::Muted),
+                ("Stylus", "–", false, Tone::Normal),
+            ]
+        );
     }
 
     #[test]
-    fn warn_at_low_critical_or_15_percent() {
-        let w = |p, s| tile_text(&[dev("M", p, s)]).warn;
-        assert!(w(Some(15), "discharging"));
-        assert!(!w(Some(16), "discharging"));
-        assert!(w(Some(50), "low"));
-        assert!(w(Some(50), "critical"));
-        assert!(!w(Some(5), "not reachable"));
+    fn two_devices_of_one_kind_are_numbered_in_file_order() {
+        let v = vec![
+            kdev("B Keys", DeviceKind::Keyboard, Some(50), "discharging"),
+            kdev("M", DeviceKind::Mouse, Some(50), "discharging"),
+            kdev("A Keys", DeviceKind::Keyboard, Some(60), "discharging"),
+            dev("Same", Some(1), "not reachable"),
+            dev("Same", Some(2), "not reachable"),
+        ];
+        assert_eq!(labels(&v), vec!["Keyboard 1", "Mouse", "Keyboard 2", "Same", "Same"]);
+        let order: Vec<String> = tile_lines(&v).into_iter().map(|l| l.label).collect();
+        assert_eq!(order, vec!["Keyboard 1", "Keyboard 2", "Mouse", "Same", "Same"]);
     }
 
     #[test]
-    fn log_text_says_percent_state_and_time() {
-        // The zone is not set here: another test changes TZ, so the clock
-        // part is checked through the pure helper, and the public function
-        // only for its shape.
-        let d = Device {
-            name: "MX Mechanical".into(),
-            percent: Some(100),
-            state: "charging".into(),
-            read_epoch: 3660,
-        };
-        assert_eq!(phrase(&d, 1, 1), "MX Mechanical: 100 %, charging, read 01:01");
+    fn red_below_10_percent_or_at_critical_when_reachable() {
+        let tone = |p, s| tile_lines(&[dev("M", p, s)])[0].tone;
+        assert_eq!(tone(Some(9), "discharging"), Tone::Low);
+        assert_eq!(tone(Some(0), "discharging"), Tone::Low);
+        assert_eq!(tone(Some(10), "discharging"), Tone::Normal);
+        assert_eq!(tone(Some(15), "low"), Tone::Normal);
+        assert_eq!(tone(Some(50), "critical"), Tone::Low);
+        assert_eq!(tone(None, "critical"), Tone::Low);
+        assert_eq!(tone(Some(5), "not reachable"), Tone::Muted);
+        assert!(dev("M", Some(9), "charging").low());
+        assert!(!dev("M", Some(9), "not reachable").low());
+    }
+
+    #[test]
+    fn all_lines_on_one_page_means_no_paging() {
+        for elapsed in [0, 3, 4, 100] {
+            assert_eq!(
+                page(3, 3, Duration::from_secs(elapsed)),
+                Page {
+                    start: 0,
+                    end: 3,
+                    next: None
+                }
+            );
+        }
+        assert_eq!(page(0, 3, Duration::ZERO).next, None);
+    }
+
+    #[test]
+    fn pages_switch_every_page_interval() {
+        let at = |ms| page(5, 2, Duration::from_millis(ms));
+        assert_eq!((at(0).start, at(0).end), (0, 2));
+        assert_eq!(at(0).next, Some(PAGE_EVERY));
+        assert_eq!(at(1500).next, Some(PAGE_EVERY - Duration::from_millis(1500)));
+        assert_eq!((at(3999).start, at(3999).end), (0, 2));
+        assert_eq!((at(4000).start, at(4000).end), (2, 4));
+        assert_eq!((at(8000).start, at(8000).end), (4, 5));
+        // Back to the first page after the last.
+        assert_eq!((at(12_000).start, at(12_000).end), (0, 2));
+        // At least one line a page, however small the tile.
+        assert_eq!(
+            (
+                page(2, 0, Duration::from_secs(4)).start,
+                page(2, 0, Duration::from_secs(4)).end
+            ),
+            (1, 2)
+        );
+    }
+
+    #[test]
+    fn log_text_says_kind_name_percent_state_and_time() {
+        let d = kdev("MX Mechanical", DeviceKind::Keyboard, Some(100), "charging");
+        let d = Device { read_epoch: 3660, ..d };
+        assert_eq!(
+            phrase(&d, "Keyboard", 13, 47),
+            "Keyboard (MX Mechanical): 100 %, charging, read 13:47"
+        );
         let m = Device {
-            name: "Mouse".into(),
-            percent: None,
-            state: "not reachable".into(),
             read_epoch: 3660,
+            ..dev("Mouse", None, "not reachable")
         };
-        assert_eq!(phrase(&m, 1, 1), "Mouse: –, not reachable, read 01:01");
-        let t = log_text(&d);
-        assert!(t.starts_with("MX Mechanical: 100 %, charging, read "), "{t}");
-        assert_eq!(t.len(), "MX Mechanical: 100 %, charging, read 00:00".len());
+        assert_eq!(phrase(&m, "Mouse", 1, 1), "Mouse: –, not reachable, read 01:01");
+        let t = log_text(&d, "Keyboard");
+        assert!(t.starts_with("Keyboard (MX Mechanical): 100 %, charging, read "), "{t}");
+        assert_eq!(t.len(), "Keyboard (MX Mechanical): 100 %, charging, read 00:00".len());
     }
 
     #[test]

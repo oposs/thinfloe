@@ -72,7 +72,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
-    menu.set_battery(battery::read(&battery_file()));
+    menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
     (menu, paths, IconRoots::system())
 }
 

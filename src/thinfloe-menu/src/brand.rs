@@ -19,6 +19,8 @@ pub const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
 /// A warning amber, for reasons drawn on a disabled tile.
 pub const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
 pub const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+/// A battery about to run out.
+pub const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
 
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";

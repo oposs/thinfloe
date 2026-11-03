@@ -174,6 +174,9 @@ pub struct Menu {
     battery_run: bool,
     /// The devices the battery file lists; set by the app and by the job.
     pub battery: Vec<crate::battery::Device>,
+    /// When `battery` was set: the tile's pages count from here, so a new
+    /// reading starts at the first page.
+    pub battery_since: Option<Instant>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -218,6 +221,7 @@ impl Menu {
             addon_runs: Vec::new(),
             battery_run: false,
             battery: Vec::new(),
+            battery_since: None,
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -302,8 +306,9 @@ impl Menu {
     }
 
     /// Take the devices the battery file lists now.
-    pub fn set_battery(&mut self, devices: Vec<crate::battery::Device>) {
+    pub fn set_battery(&mut self, devices: Vec<crate::battery::Device>, now: Instant) {
         self.battery = devices;
+        self.battery_since = Some(now);
     }
 
     fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
@@ -687,11 +692,11 @@ impl Menu {
                     self.log
                         .push(line(Kind::Event, "No keyboard or mouse reports a battery.".into()));
                 }
-                for d in &devices {
+                for (d, label) in devices.iter().zip(crate::battery::labels(&devices)) {
                     let kind = if d.low() { Kind::Warn } else { Kind::Event };
-                    self.log.push(line(kind, crate::battery::log_text(d)));
+                    self.log.push(line(kind, crate::battery::log_text(d, &label)));
                 }
-                self.set_battery(devices);
+                self.set_battery(devices, now);
                 None
             }
             JobResult::Saved(outcome) => {
@@ -1999,6 +2004,7 @@ mod tests {
             percent: Some(percent),
             state: state.into(),
             read_epoch: 1_000_000,
+            kind: crate::battery::DeviceKind::Unknown,
         }
     }
 
@@ -2030,7 +2036,7 @@ mod tests {
         let (mut m, i) = battery_menu();
         assert!(!m.visible(i));
         assert!(!m.can_activate(i));
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         assert!(m.visible(i));
         assert!(m.can_activate(i));
     }
@@ -2038,7 +2044,7 @@ mod tests {
     #[test]
     fn a_click_starts_one_read_job() {
         let (mut m, i) = battery_menu();
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         assert_eq!(m.activate(i, Instant::now()), Some(Effect::Start(Job::Battery)));
         assert!(m.battery_busy());
         assert!(m.active(i));
@@ -2052,22 +2058,46 @@ mod tests {
     #[test]
     fn the_job_end_logs_one_line_per_device() {
         let (mut m, i) = battery_menu();
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         m.activate(i, Instant::now());
-        let devices = vec![dev("Kbd", 100, "charging"), dev("Mouse", 10, "discharging")];
+        let keyboard = crate::battery::Device {
+            kind: crate::battery::DeviceKind::Keyboard,
+            ..dev("MX Mechanical", 100, "charging")
+        };
+        let devices = vec![keyboard, dev("Mouse", 9, "discharging"), dev("Pad", 10, "discharging")];
         assert_eq!(battery_done(&mut m, Ok(Some(0)), devices.clone()), None);
         assert!(!m.battery_busy());
         assert_eq!(m.battery, devices);
         let lines: Vec<_> = m.log.lines().collect();
         let n = lines.len();
-        for (l, (d, kind)) in lines[n - 2..]
-            .iter()
-            .zip([(&devices[0], Kind::Event), (&devices[1], Kind::Warn)])
-        {
+        for (l, (d, label, kind)) in lines[n - 3..].iter().zip([
+            (&devices[0], "Keyboard", Kind::Event),
+            (&devices[1], "Mouse", Kind::Warn),
+            (&devices[2], "Pad", Kind::Event),
+        ]) {
             assert_eq!(l.source.as_deref(), Some("battery"));
-            assert_eq!(l.plain(), crate::battery::log_text(d));
+            assert_eq!(l.plain(), crate::battery::log_text(d, label));
             assert_eq!(l.kind, kind);
         }
+        assert!(lines[n - 3].plain().starts_with("Keyboard (MX Mechanical): 100 %"));
+    }
+
+    #[test]
+    fn a_reading_starts_the_pages_again() {
+        let (mut m, i) = battery_menu();
+        let t0 = Instant::now();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], t0);
+        assert_eq!(m.battery_since, Some(t0));
+        m.activate(i, t0);
+        let t1 = t0 + std::time::Duration::from_secs(7);
+        m.finished(
+            JobResult::Battery {
+                status: Ok(Some(0)),
+                devices: vec![dev("Kbd", 70, "discharging")],
+            },
+            t1,
+        );
+        assert_eq!(m.battery_since, Some(t1));
     }
 
     #[test]
@@ -2077,7 +2107,7 @@ mod tests {
         battery_done(&mut m, Ok(Some(1)), devices.clone());
         let l = log(&m);
         assert_eq!(l[l.len() - 2], warn("peripheral-battery exited with status 1."));
-        assert_eq!(l[l.len() - 1].1, crate::battery::log_text(&devices[0]));
+        assert_eq!(l[l.len() - 1].1, crate::battery::log_text(&devices[0], "Kbd"));
         battery_done(&mut m, Ok(None), devices.clone());
         let l = log(&m);
         assert_eq!(l[l.len() - 2], warn("peripheral-battery was killed by a signal."));
@@ -2089,7 +2119,7 @@ mod tests {
     #[test]
     fn a_job_that_finds_no_device_hides_the_tile_and_says_so() {
         let (mut m, i) = battery_menu();
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         m.activate(i, Instant::now());
         battery_done(&mut m, Ok(Some(0)), Vec::new());
         let last = m.log.last().unwrap();
@@ -2102,7 +2132,7 @@ mod tests {
     #[test]
     fn no_read_job_behind_a_dialog() {
         let (mut m, i) = battery_menu();
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         m.logout = Some(Logout::Confirm);
         assert_eq!(m.activate(i, Instant::now()), None);
     }
@@ -2111,7 +2141,7 @@ mod tests {
     fn the_end_of_session_question_ignores_a_battery_job() {
         let now = Instant::now();
         let (mut m, i) = battery_menu();
-        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.set_battery(vec![dev("Kbd", 80, "discharging")], Instant::now());
         assert_eq!(m.activate(i, now), Some(Effect::Start(Job::Battery)));
         assert_eq!(m.activate(2, now), Some(Effect::Start(Job::Save)));
         let before = m.logout.clone();
