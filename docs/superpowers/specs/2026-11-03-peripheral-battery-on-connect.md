@@ -71,8 +71,8 @@ register-0x00 wireless flag. Put the table into the plan and the fake receiver.
   `10 ff 81 00 00 00 00`: no notifications enabled. Switching the mouse off and
   on produced **no** `0x41` connection notification and nothing at all on
   switch-off.
-- On switch-on the **device itself** sent two HID++ 2.0 events, unrequested,
-  ~5 s after it was switched on:
+- On switch-on the **device itself** sent two HID++ 2.0 events, unrequested
+  (both 19.17 s after the listener started; the exact switch-on time was not recorded):
   - `11 01 04 00 01 01 01 …` — slot 1, feature index 4 = WIRELESS DEVICE STATUS
     (`0x1D4B`), function/event 0: status `01` = reconnection.
   - `11 01 09 00 64 08 00 …` — slot 1, feature index 9 = UNIFIED BATTERY
