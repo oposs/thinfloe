@@ -3,7 +3,10 @@
 
 import importlib.machinery
 import importlib.util
+import hashlib
 import io
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -107,6 +110,85 @@ class TestProgress(unittest.TestCase):
 
     def test_global_default_is_interactive(self):
         self.assertFalse(ui.PROGRESS.batch)
+
+
+LSBLK = json.dumps({"blockdevices": [
+    {"name": "sdb", "path": "/dev/sdb", "size": 16000000000, "model": "Stick ",
+     "serial": "SER1", "wwn": None, "tran": "usb", "rm": True, "type": "disk",
+     "mountpoints": [None],
+     "children": [{"name": "sdb1", "path": "/dev/sdb1", "size": 1, "model": None,
+                   "serial": None, "wwn": None, "tran": None, "rm": True,
+                   "type": "part", "mountpoints": ["/media/x"]}]},
+    {"name": "nvme0n1", "path": "/dev/nvme0n1", "size": 500000000000,
+     "model": "Internal", "serial": None, "wwn": "eui.1", "tran": "nvme",
+     "rm": False, "type": "disk", "mountpoints": [None]},
+    {"name": "vda", "path": "/dev/vda", "size": 8000000000, "model": None,
+     "serial": None, "wwn": None, "tran": None, "rm": False, "type": "disk",
+     "mountpoints": [None]},
+    {"name": "loop0", "path": "/dev/loop0", "size": 1000, "model": None,
+     "serial": None, "wwn": None, "tran": None, "rm": True, "type": "loop",
+     "mountpoints": [None]},
+]})
+
+
+def fake_cmd(cmd):
+    if cmd[0] == "lsblk" and "-J" in cmd:
+        return LSBLK
+    return ""
+
+
+class TestDriveList(unittest.TestCase):
+    def list(self, **kw):
+        with mock.patch.object(ui, "get_cmd_output", side_effect=fake_cmd), \
+             mock.patch.object(ui, "detect_boot_device", return_value="/dev/vda"), \
+             mock.patch.object(ui, "find_efi_partition", return_value=None), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="ab" * 8):
+            return ui.enumerate_drives(**kw)
+
+    def test_default_is_usb_and_boot(self):
+        self.assertEqual([d.device for d in self.list()], ["/dev/sdb", "/dev/vda"])
+
+    def test_include_internal(self):
+        self.assertEqual([d.device for d in self.list(include_internal=True)],
+                         ["/dev/sdb", "/dev/nvme0n1", "/dev/vda"])
+
+    def test_mounted_partition(self):
+        d = {x.device: x for x in self.list(include_internal=True)}
+        self.assertTrue(d["/dev/sdb"].mounted)
+        self.assertFalse(d["/dev/vda"].mounted)
+        self.assertEqual(d["/dev/sdb"].serial, "SER1")
+        self.assertEqual(d["/dev/sdb"].size_bytes, 16000000000)
+        self.assertTrue(d["/dev/vda"].is_boot)
+
+    def test_fingerprint(self):
+        data = bytes(range(256)) * 80  # 20480 bytes, more than 17408
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(data)
+            f.flush()
+            want = hashlib.sha256(data[:17408]).hexdigest()[:16]
+            self.assertEqual(ui.ptable_fingerprint(f.name), want)
+        self.assertEqual(ui.ptable_fingerprint("/nonexistent/dev"), "-")
+
+    def test_identity_differs_by_fingerprint(self):
+        a, b = self.list()[:2]
+        a2 = ui.DriveInfo(**{**a.__dict__, "fingerprint": "00" * 8})
+        self.assertNotEqual(ui.drive_identity(a), ui.drive_identity(a2))
+        self.assertEqual(ui.drive_identity(a), "SER1:16000000000:" + "ab" * 8)
+
+    def test_json(self):
+        drives = self.list()
+        rows = json.loads(ui.drives_json(drives, 3148873728))
+        self.assertEqual(rows[0]["device"], "/dev/sdb")
+        self.assertEqual(rows[0]["id"], ui.drive_identity(drives[0]))
+        self.assertTrue(rows[0]["fits"])
+        self.assertTrue(rows[0]["mounted"])
+        small = ui.DriveInfo(**{**drives[0].__dict__, "size_bytes": 2 * 10**9})
+        self.assertFalse(json.loads(ui.drives_json([small], 3148873728))[0]["fits"])
+        self.assertIsNone(json.loads(ui.drives_json(drives, None))[0]["fits"])
+        self.assertEqual(set(rows[0]), {
+            "device", "model", "size_bytes", "serial", "transport", "removable",
+            "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
+            "efi_partition", "id", "fits"})
 
 
 if __name__ == "__main__":

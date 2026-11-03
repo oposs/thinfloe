@@ -9,6 +9,8 @@ Supports A/B updates for existing ThinFloe drives, or fresh install for new driv
 import atexit
 import fnmatch
 import glob
+import hashlib
+import json
 import os
 import pwd
 import re
@@ -163,6 +165,12 @@ class DriveInfo:
     is_boot: bool            # True if this is the current boot device
     has_tl_old: bool         # True if tl.old/ exists (has fallback)
     has_tl_new: bool         # True if tl.new/ exists (pending upgrade)
+    size_bytes: int = 0      # exact size, for the fit check
+    serial: str = ""         # lsblk SERIAL, else WWN
+    transport: str = ""      # usb, nvme, sata, ...
+    removable: bool = False
+    mounted: bool = False    # the disk or any partition has a mountpoint
+    fingerprint: str = "-"   # hash of the partition table, "-" if unreadable
 
 
 # ============ Global State ============
@@ -420,29 +428,63 @@ def examine_efi_partition(efi_partition: str) -> Tuple[bool, bool, bool]:
     return is_thinfloe, has_tl_old, has_tl_new
 
 
-def enumerate_drives() -> List[DriveInfo]:
-    """Find all suitable block devices"""
+PTABLE_BYTES = 17408  # LBA 0 to 33: MBR, GPT header and entries
+
+
+def ptable_fingerprint(device: str) -> str:
+    """First 16 hex digits of SHA-256 over the partition table area."""
+    try:
+        with open(device, "rb") as f:
+            data = f.read(PTABLE_BYTES)
+    except OSError:
+        return "-"
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def drive_identity(d: DriveInfo) -> str:
+    """Identity that changes when the drive is swapped or repartitioned."""
+    return f"{d.serial or '-'}:{d.size_bytes}:{d.fingerprint}"
+
+
+def _any_mounted(node: dict) -> bool:
+    if any(node.get("mountpoints") or []):
+        return True
+    return any(_any_mounted(c) for c in node.get("children") or [])
+
+
+def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
+    """Find suitable block devices; USB/removable and the boot drive by default."""
     drives = []
     boot_dev = detect_boot_device()
 
-    for block_dir in Path("/sys/block").iterdir():
-        devname = block_dir.name
+    out = get_cmd_output(["lsblk", "-J", "-b", "-o",
+                          "NAME,PATH,SIZE,MODEL,SERIAL,WWN,TRAN,RM,TYPE,MOUNTPOINTS"])
+    try:
+        nodes = json.loads(out)["blockdevices"]
+    except (ValueError, KeyError, TypeError):
+        return []
 
-        # Consider sd*, nvme*, vd* devices
+    for node in nodes:
+        devname = node.get("name") or ""
+        if node.get("type") != "disk":
+            continue
         if not any(devname.startswith(p) for p in ("sd", "nvme", "vd")):
             continue
 
-        # Skip loop devices, ram disks, etc.
-        if devname.startswith(("loop", "ram", "zram")):
+        device = node.get("path") or f"/dev/{devname}"
+        is_boot = boot_dev is not None and device == boot_dev
+        transport = node.get("tran") or ""
+        removable = bool(node.get("rm"))
+        if not (include_internal or removable or transport == "usb" or is_boot):
             continue
 
-        device = f"/dev/{devname}"
-
-        # Get drive info
+        try:
+            size_bytes = int(node.get("size") or 0)
+        except (TypeError, ValueError):
+            size_bytes = 0
         size = get_cmd_output(["lsblk", "-dno", "SIZE", device]) or "?"
-        model = get_cmd_output(["lsblk", "-dno", "MODEL", device]) or "Unknown"
+        model = (node.get("model") or "").strip() or "Unknown"
 
-        # Check for EFI-SYSTEM partition
         efi_part = find_efi_partition(device)
 
         is_thinfloe = False
@@ -452,25 +494,18 @@ def enumerate_drives() -> List[DriveInfo]:
         label = ""
 
         if efi_part:
-            # Get partition size
             part_size_str = get_cmd_output(["lsblk", "-bno", "SIZE", efi_part])
             try:
                 part_size_mb = int(part_size_str) // (1024 * 1024) if part_size_str else 0
             except ValueError:
                 part_size_mb = 0
-
-            # Get filesystem label
             label = get_cmd_output(["blkid", "-s", "LABEL", "-o", "value", efi_part])
-
-            # Examine partition contents
             is_thinfloe, has_tl_old, has_tl_new = examine_efi_partition(efi_part)
-
-        is_boot = boot_dev is not None and device == boot_dev
 
         drives.append(DriveInfo(
             device=device,
             size=size,
-            model=model.strip(),
+            model=model,
             label=label,
             is_thinfloe=is_thinfloe,
             efi_partition=efi_part,
@@ -478,9 +513,38 @@ def enumerate_drives() -> List[DriveInfo]:
             is_boot=is_boot,
             has_tl_old=has_tl_old,
             has_tl_new=has_tl_new,
+            size_bytes=size_bytes,
+            serial=node.get("serial") or node.get("wwn") or "",
+            transport=transport,
+            removable=removable,
+            mounted=_any_mounted(node),
+            fingerprint=ptable_fingerprint(device),
         ))
 
     return drives
+
+
+def drives_json(drives: List[DriveInfo], image_bytes: Optional[int]) -> str:
+    """The drive list for the menu."""
+    rows = []
+    for d in drives:
+        rows.append({
+            "device": d.device,
+            "model": d.model,
+            "size_bytes": d.size_bytes,
+            "serial": d.serial,
+            "transport": d.transport,
+            "removable": d.removable,
+            "mounted": d.mounted,
+            "is_boot": d.is_boot,
+            "is_thinfloe": d.is_thinfloe,
+            "has_tl_old": d.has_tl_old,
+            "has_tl_new": d.has_tl_new,
+            "efi_partition": d.efi_partition,
+            "id": drive_identity(d),
+            "fits": None if image_bytes is None else d.size_bytes >= image_bytes,
+        })
+    return json.dumps(rows)
 
 
 # ============ Source Selection ============
@@ -1251,10 +1315,14 @@ def format_drive_status(d: DriveInfo) -> str:
     return " ".join(tags)
 
 
-def show_drives_with_operations(drives: List[DriveInfo]) -> Optional[Tuple[DriveInfo, str]]:
+SHOW_ALL = "show-all"
+
+
+def show_drives_with_operations(drives: List[DriveInfo], offer_all: bool = False):
     """
     Show all drives with their available operations.
-    Returns (selected_drive, operation) or None if cancelled.
+    Returns (selected_drive, operation), None if cancelled, or SHOW_ALL when
+    offer_all was set and the user asked for the unfiltered list.
     """
     print_header("Available Drives")
     print()
@@ -1292,6 +1360,8 @@ def show_drives_with_operations(drives: List[DriveInfo]) -> Optional[Tuple[Drive
 
         print()
 
+    if offer_all:
+        print("  a) show all drives")
     print(f"  0) Cancel")
     print()
 
@@ -1300,6 +1370,8 @@ def show_drives_with_operations(drives: List[DriveInfo]) -> Optional[Tuple[Drive
             choice = input("Select option: ").strip()
             if not choice:
                 continue
+            if offer_all and choice.lower() == "a":
+                return SHOW_ALL
 
             num = int(choice)
             if num == 0:
@@ -1408,7 +1480,12 @@ def main() -> int:
             die("No suitable drives found")
 
         # Step 3: Show drives and let user select operation
-        result = show_drives_with_operations(drives)
+        result = show_drives_with_operations(drives, offer_all=True)
+        if result == SHOW_ALL:
+            drives = enumerate_drives(include_internal=True)
+            if not drives:
+                die("No suitable drives found")
+            result = show_drives_with_operations(drives)
         if result is None:
             return 0
 
