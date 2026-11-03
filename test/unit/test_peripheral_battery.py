@@ -13,6 +13,7 @@ clock that the receiver advances, so timeouts cost no real time.
 
 import importlib.machinery
 import importlib.util
+import io
 import os
 import stat
 import tempfile
@@ -434,6 +435,141 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.battery(), before)
         self.assertEqual(sorted(os.listdir(self.out)), ["battery"])
         self.assertEqual(sorted(os.listdir(self.state)), ["names", "power-supply"])
+
+
+class SwitchTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        r = self.root
+        (r / "home").mkdir()
+        (r / "tl" / "etc").mkdir(parents=True)
+        self.conf = r / "tl" / "etc" / "tlclient_mandatory.conf"
+        self.conf.write_text("PRINTER_ENABLED=0\n")
+        (r / "peripherals").mkdir()
+        (r / "peripherals" / "battery").write_text("x\t1\tfull\t1\n")
+        (r / "state").mkdir()
+        (r / "state" / "power-supply").write_text("x\n")
+        self.calls = r / "calls"
+        self.stop_saw_file = r / "stop_saw_file"
+        stub = r / "systemctl"
+        stub.write_text(
+            '#!/bin/sh\n'
+            f'echo "$*" >> {self.calls}\n'
+            f'if [ "$1" = stop ]; then [ -e {r}/peripherals/battery ] && echo yes > {self.stop_saw_file}; fi\n'
+            'exit "${STUB_RC:-0}"\n')
+        stub.chmod(0o755)
+        self.sw = r / "home" / ".config" / "thinfloe" / "peripheral-battery"
+        env = {"TF_BATTERY_HOME": str(r / "home"), "TF_THINLINC_DIR": str(r / "tl"),
+               "TF_SYSTEMCTL": str(stub), "TF_BATTERY_DIR": str(r / "peripherals"),
+               "TF_BATTERY_STATE": str(r / "state")}
+        p = mock.patch.dict(os.environ, env)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = mod.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_default_is_off(self):
+        rc, out, _ = self.run_main("status")
+        self.assertEqual((rc, out), (0, "off\n"))
+        self.assertFalse(self.sw.exists())
+
+    def test_enable_writes_switch_config_and_starts_service(self):
+        self.assertEqual(self.run_main("enable")[0], 0)
+        self.assertEqual(self.sw.read_text(), "on\n")
+        self.assertEqual(stat.S_IMODE(self.sw.stat().st_mode), 0o644)
+        self.assertEqual(self.conf.read_text(),
+                         "PRINTER_ENABLED=0\nNFS_SERVER_ENABLED=1\n"
+                         "NFS_EXPORTS=/run/thinfloe/peripherals,ro\n")
+        self.assertEqual(stat.S_IMODE(self.conf.stat().st_mode), 0o644)
+        self.assertEqual(self.calls.read_text(),
+                         "start --no-block thinfloe-peripheral-battery.service\n")
+        self.assertEqual(self.run_main("status")[1], "on\n")
+
+    def test_enable_without_thinlinc_etc_still_switches_on(self):
+        self.conf.unlink()
+        (self.root / "tl" / "etc").rmdir()
+        self.assertEqual(self.run_main("enable")[0], 0)
+        self.assertTrue(self.sw.exists())
+        self.assertFalse((self.root / "tl" / "etc").exists())
+
+    def test_disable_removes_switch_keys_and_battery_file(self):
+        self.run_main("enable")
+        self.assertEqual(self.run_main("disable")[0], 0)
+        self.assertFalse(self.sw.exists())
+        self.assertFalse((self.root / "peripherals" / "battery").exists())
+        self.assertFalse((self.root / "state" / "power-supply").exists())
+        self.assertEqual(self.conf.read_text(), "PRINTER_ENABLED=0\n")
+        self.assertEqual(self.calls.read_text().splitlines()[-1],
+                         "stop thinfloe-peripheral-battery.service")
+
+    def test_disable_stops_the_service_before_removing_the_file(self):
+        self.run_main("enable")
+        self.run_main("disable")
+        self.assertTrue(self.stop_saw_file.exists())
+
+    def test_enable_and_disable_twice_change_nothing(self):
+        def leftovers():
+            return [p for d in (self.root / "tl" / "etc", self.sw.parent) if d.exists()
+                    for p in d.iterdir() if p.name.startswith(".")]
+        self.assertEqual(self.run_main("enable")[0], 0)
+        a, b = self.sw.read_bytes(), self.conf.read_bytes()
+        self.assertEqual(self.run_main("enable")[0], 0)
+        self.assertEqual((self.sw.read_bytes(), self.conf.read_bytes()), (a, b))
+        self.assertEqual(self.run_main("disable")[0], 0)
+        c = self.conf.read_bytes()
+        self.assertEqual(self.run_main("disable")[0], 0)
+        self.assertEqual(self.conf.read_bytes(), c)
+        self.assertFalse(self.sw.exists())
+        self.assertEqual(leftovers(), [])
+
+    def test_thinlinc_config_follows_the_switch(self):
+        self.conf.write_text("NFS_SERVER_ENABLED=0\nNFS_EXPORTS=/media,rw\nX=1\n")
+        self.assertEqual(self.run_main("thinlinc-config")[0], 0)
+        self.assertEqual(self.conf.read_text(), "X=1\n")
+        mod.set_switch(True)
+        self.assertEqual(self.run_main("thinlinc-config")[0], 0)
+        self.assertEqual(self.conf.read_text(),
+                         "X=1\nNFS_SERVER_ENABLED=1\nNFS_EXPORTS=/run/thinfloe/peripherals,ro\n")
+        mod.set_switch(False)
+        self.conf.unlink()
+        self.assertEqual(self.run_main("thinlinc-config")[0], 0)
+        self.assertFalse(self.conf.exists())
+
+    def test_unusable_thinlinc_etc_fails_with_a_reason(self):
+        etc = self.root / "tl" / "etc"
+        self.conf.unlink()
+        etc.rmdir()
+        etc.write_text("not a directory")
+        mod.set_switch(True)
+        rc, _, err = self.run_main("thinlinc-config")
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("thinfloe: battery: "), err)
+
+    def test_systemctl_failure_keeps_the_switch_and_exits_1(self):
+        with mock.patch.dict(os.environ, {"STUB_RC": "3"}):
+            rc, _, err = self.run_main("enable")
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.sw.exists())
+        self.assertIn("thinfloe: battery: ", err)
+
+    def test_symlinked_config_dir_is_not_followed(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "home" / ".config").symlink_to(outside)
+        rc, _, err = self.run_main("enable")
+        self.assertEqual(rc, 1)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertIn("thinfloe: battery: ", err)
+
+    def test_unknown_subcommand_exits_2(self):
+        self.assertEqual(self.run_main("bogus")[0], 2)
+
 
 
 if __name__ == "__main__":

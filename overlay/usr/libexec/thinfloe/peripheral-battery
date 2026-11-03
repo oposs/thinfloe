@@ -23,15 +23,33 @@ Two sources:
 
 Run by thinfloe-peripheral-battery.timer. Every per-device failure is
 logged and skipped; exit 1 only when the file could not be written.
+
+Subcommands (root, called by the menu through sudo):
+
+    (none)           one reading run
+    enable           switch on: write the state file, put the NFS keys into
+                     the ThinLinc mandatory config, start the service
+    disable          switch off: stop the service, remove the state file,
+                     the NFS keys and the battery file
+    thinlinc-config  make the mandatory config follow the state file
+    status           print "on" or "off"
+
+The switch is the file ~/.config/thinfloe/peripheral-battery (content "on",
+mode 0644, owned by tfuser) in tfuser's home, which is taken from the
+password database and never from $HOME. Without it nothing is read, no
+battery file exists and the NFS keys are absent. Exit 0 ok, 1 a failure
+(logged), 2 an unknown subcommand.
 """
 
 import os
+import pwd
 import select
+import subprocess
 import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 REQUEST_TIMEOUT = 2.0   # an idle keyboard answered after 850 ms
 RUN_BUDGET = 15.0
@@ -39,6 +57,12 @@ SWID = 0x0A
 MAX_NAME = 64
 
 monotonic = time.monotonic
+
+SWITCH_DIRS = (".config", "thinfloe")
+SWITCH_FILE = "peripheral-battery"
+SERVICE = "thinfloe-peripheral-battery.service"
+EXPORT_LINES = ("NFS_SERVER_ENABLED=1", "NFS_EXPORTS=/run/thinfloe/peripherals,ro")
+MANDATORY = "tlclient_mandatory.conf"
 
 # Drivers that already give the kernel the battery (power_supply).
 KERNEL_DRIVERS = {"logitech-djreceiver", "logitech-djdevice", "logitech-hidpp-device"}
@@ -349,7 +373,7 @@ def _write_atomic(state: Path, target: Path, text: str, mode: int) -> None:
             tmp.unlink()
 
 
-def main() -> int:
+def read_batteries() -> int:
     sysfs = Path(os.environ.get("TF_SYSFS", "/sys"))
     dev = Path(os.environ.get("TF_DEV", "/dev"))
     outdir = Path(os.environ.get("TF_BATTERY_DIR", "/run/thinfloe/peripherals"))
@@ -414,5 +438,188 @@ def main() -> int:
     return 0
 
 
+# --- switch -----------------------------------------------------------------
+
+def _tfuser():
+    return pwd.getpwnam("tfuser")
+
+
+def _home() -> str:
+    return os.environ.get("TF_BATTERY_HOME") or _tfuser().pw_dir
+
+
+def _switch_dir_fd(create: bool) -> Optional[int]:
+    """An fd of ~/.config/thinfloe, reached without following a symlink: the
+    home is tfuser's and this runs as root. Missing directories are made
+    (owned by tfuser) when create is set, else None is returned."""
+    fd = os.open(_home(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        for part in SWITCH_DIRS:
+            try:
+                nfd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                os.mkdir(part, 0o755, dir_fd=fd)
+                nfd = os.open(part, flags, dir_fd=fd)
+                if os.geteuid() == 0:
+                    u = _tfuser()
+                    os.fchown(nfd, u.pw_uid, u.pw_gid)
+            os.close(fd)
+            fd = nfd
+        result, fd = fd, -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def switch_on() -> bool:
+    try:
+        dfd = _switch_dir_fd(False)
+    except OSError:
+        return False
+    if dfd is None:
+        return False
+    try:
+        os.stat(SWITCH_FILE, dir_fd=dfd, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(dfd)
+
+
+def set_switch(on: bool) -> None:
+    dfd = _switch_dir_fd(on)
+    if dfd is None:
+        return
+    tmp = SWITCH_FILE + ".new"
+    try:
+        if not on:
+            try:
+                os.unlink(SWITCH_FILE, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+            return
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("on\n")
+                f.flush()
+                os.fchmod(f.fileno(), 0o644)
+                if os.geteuid() == 0:
+                    u = _tfuser()
+                    os.fchown(f.fileno(), u.pw_uid, u.pw_gid)
+                os.fsync(f.fileno())
+            os.replace(tmp, SWITCH_FILE, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dfd)
+
+
+def thinlinc_config(on: bool) -> None:
+    etc = Path(os.environ.get("TF_THINLINC_DIR", "/opt/thinlinc")) / "etc"
+    if not os.path.lexists(etc):
+        return
+    if not etc.is_dir():
+        raise OSError(f"{etc} is not a directory")
+    conf = etc / MANDATORY
+    try:
+        lines = conf.read_text().splitlines()
+        exists = True
+    except FileNotFoundError:
+        lines, exists = [], False
+    if not on and not exists:
+        return
+    lines = [l for l in lines if not l.startswith(("NFS_SERVER_ENABLED=", "NFS_EXPORTS="))]
+    if on:
+        lines.extend(EXPORT_LINES)
+    tmp = etc / f".{MANDATORY}.{os.getpid()}"
+    try:
+        tmp.write_text("".join(l + "\n" for l in lines))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, conf)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _step(failed: List[bool], what: str, fn) -> None:
+    try:
+        fn()
+    except subprocess.CalledProcessError as e:
+        log(what, f"exit status {e.returncode}")
+        failed[0] = True
+    except OSError as e:
+        log(what, e.strerror or str(e))
+        failed[0] = True
+
+
+def _systemctl(*args: str) -> None:
+    subprocess.run([os.environ.get("TF_SYSTEMCTL", "systemctl"), *args], check=True)
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def enable() -> int:
+    failed = [False]
+    _step(failed, "switch", lambda: set_switch(True))
+    if failed[0]:
+        return 1
+    _step(failed, "ThinLinc config", lambda: thinlinc_config(True))
+    _step(failed, "start " + SERVICE, lambda: _systemctl("start", "--no-block", SERVICE))
+    return 1 if failed[0] else 0
+
+
+def disable() -> int:
+    failed = [False]
+    outdir = Path(os.environ.get("TF_BATTERY_DIR", "/run/thinfloe/peripherals"))
+    state = Path(os.environ.get("TF_BATTERY_STATE", "/run/thinfloe/peripherals-state"))
+    _step(failed, "switch", lambda: set_switch(False))
+    _step(failed, "stop " + SERVICE, lambda: _systemctl("stop", SERVICE))
+    _step(failed, "ThinLinc config", lambda: thinlinc_config(False))
+    _step(failed, str(outdir / "battery"), lambda: _unlink_quiet(outdir / "battery"))
+    _step(failed, str(state / "power-supply"), lambda: _unlink_quiet(state / "power-supply"))
+    return 1 if failed[0] else 0
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    if not argv:
+        return read_batteries()
+    cmd = argv[0]
+    if cmd == "enable" and len(argv) == 1:
+        return enable()
+    if cmd == "disable" and len(argv) == 1:
+        return disable()
+    if cmd == "thinlinc-config" and len(argv) == 1:
+        failed = [False]
+        _step(failed, "ThinLinc config", lambda: thinlinc_config(switch_on()))
+        return 1 if failed[0] else 0
+    if cmd == "status" and len(argv) == 1:
+        print("on" if switch_on() else "off")
+        return 0
+    print("usage: peripheral-battery [enable|disable|thinlinc-config|status]", file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
