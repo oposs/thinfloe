@@ -274,7 +274,7 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `numpad`, `presenter`, `trackball`, `touchpad` or `unknown`; the menu
   still reads a 4-field line, kind unknown). A run holds
   `/run/thinfloe/peripherals-state/lock`, so a click and the timer take
-  turns. Any argument is exit 2. A Logi Bolt receiver (`046d:c548`) is left
+  turns. Any argument but `watch` is exit 2. A Logi Bolt receiver (`046d:c548`) is left
   to `hid-generic` (mainline `hid-logitech-dj` does not support Bolt), so the
   kernel has no battery for its devices: the reader asks them over HID++ on
   the receiver's hidraw node. Every `power_supply` entry with scope Device
@@ -318,10 +318,45 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   The service has `TimeoutStartSec=60`; the helper waits up to 30 s for
   its lock (`LOCK_NB`, retried), then logs `thinfloe: battery: lock busy`
   and exits 1, so a hung run cannot hold a click's job for ever.
+  **Read on connect.** After a reboot a Bolt device reconnects only when it
+  is used (the mouse on first movement, the keyboard on first key press;
+  owner, 2026-11-03), so the boot run finds it asleep.
+  `thinfloe-peripheral-battery-watch.service` (`Type=simple`,
+  `Restart=on-failure`, `RestartSec=5`, `WantedBy=multi-user.target`, no
+  `Before=`) runs `peripheral-battery watch`, which opens every HID++ node
+  the reader would use read-only and listens. Measured on 10.46.102.86
+  (2026-11-03, mouse switched off and on): the receiver sends no `0x41`
+  connection notification (its register `0x00` reads `00`, notifications
+  off, and the watcher leaves it so); the device itself sends
+  `11 01 04 00 01 01 01` (slot 1, feature index 4 = WIRELESS DEVICE STATUS
+  `0x1D4B`, event 0, status `01` reconnection) and `11 01 09 00 64 08 00`
+  (index 9 = UNIFIED BATTERY `0x1004`, event 0: 100 %, full,
+  discharging). Nothing arrived at switch-off. The watcher takes a long
+  report from slot 1 to 6 with function 0 and software id 0 (a reply has
+  the reader's `0x0a`) as an event, and a `0x1D4B` event with status 1 or
+  any `0x1004` event as a connect. Feature indices differ per device (the
+  keyboard's `0x1004` is at 7), so the first event of a slot is answered
+  by the root feature's getFeature for both features, under the reader's
+  lock, cached per HID_PHYS and slot; it is the only request the watcher
+  sends. A slot that does not answer is asked again after 30 s at the
+  earliest (`LOOKUP_RETRY`). Events within 2 s (`DEBOUNCE`) give one
+  reading, the same code path as the plain run, under the lock, in the
+  watcher's process. **Hold-off** (owner, 2026-11-03): a device whose line
+  in the battery file has a percent, a state other than `not reachable`
+  and a `read_epoch` younger than 300 s (`HOLD_OFF`) is not read on its
+  events; the slot is mapped to that line through the name cache. The
+  timer and a click are not held off. Nodes are looked for every 5 s
+  (`RESCAN`); a node that fails a read is closed and found again then. A
+  bad report or a failed reading is logged and the watcher goes on. While
+  another run holds the lock, a lookup waits for it (up to 30 s) and the
+  watcher reads nothing meanwhile; the kernel keeps the reports queued.
+  **Not measured:** the keyboard's events (expected the same), and what
+  arrives when a device goes out of range without being switched off.
   Guards: `test/unit/test_peripheral_battery.py` (a fake receiver that
-  answers as the Bolt receiver did on 2026-11-03), `test-session-packages.sh`
-  (units, timer, tile, icon, directories), `battery.rs` and the menu and
-  ui tests in `src/thinfloe-menu`.
+  answers as the Bolt receiver did on 2026-11-03; the watcher with the
+  measured events, fake nodes and an injected clock), `test-session-packages.sh`
+  (units, timer, watch service, tile, icon, directories), `battery.rs` and
+  the menu and ui tests in `src/thinfloe-menu`.
   **Confirmed on hardware (2026-11-03, 10.46.102.86, Logi Bolt, reader and
   units copied into the running system):** both devices read in 0.5 s.
   **Not verified on hardware:** a boot of the built image (ordering cycles;
@@ -329,7 +364,8 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   kind lines, red line, pages and `Refreshing…`, the click, the kind written
   by the built reader (the bytes it relies on were measured), and the `not
   reachable` line written by the timer for a switched-off device (the reply
-  it relies on was measured).
+  it relies on was measured), and the watcher: a reading when a device
+  connects (the events it relies on were measured on the mouse only).
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.

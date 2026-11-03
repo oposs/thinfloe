@@ -873,8 +873,9 @@ fi
 # Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
 # which the menu's battery tile reads (no ThinLinc). The service also runs
 # once at boot (multi-user.target, in parallel with the menu), the timer
-# repeats it every 5 min, and neither unit may order itself before anything
-# (see CLAUDE.md, the hook-order constraint).
+# repeats it every 5 min, the watch service reads a device when it connects,
+# and no unit may order itself before anything (see CLAUDE.md, the
+# hook-order constraint).
 present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
 if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-peripheral-battery\.timer$' "$LIST"; then
     echo "ok   - thinfloe-peripheral-battery.timer is enabled"
@@ -888,9 +889,16 @@ else
     echo "FAIL - thinfloe-peripheral-battery.service is not enabled; the tile would be empty until the first timer firing"
     fail=1
 fi
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-peripheral-battery-watch\.service$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery-watch.service is enabled in multi-user.target"
+else
+    echo "FAIL - thinfloe-peripheral-battery-watch.service is not enabled; a device that connects after boot would wait for the timer"
+    fail=1
+fi
 PB="$DPKG_TMP/pb"
 if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         etc/systemd/system/thinfloe-peripheral-battery.service \
+        etc/systemd/system/thinfloe-peripheral-battery-watch.service \
         etc/systemd/system/thinfloe-peripheral-battery.timer \
         usr/lib/tmpfiles.d/thinfloe-peripherals.conf \
         etc/thinfloe/menu/70-battery.desktop \
@@ -938,8 +946,19 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - 70-battery.desktop lacks X-TF-Action=battery or Icon=battery"
         fail=1
     fi
+    PBW="$PBU/thinfloe-peripheral-battery-watch.service"
+    if grep -qx 'Type=simple' "$PBW" 2>/dev/null &&
+       grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery watch' "$PBW" &&
+       grep -qx 'Restart=on-failure' "$PBW" &&
+       grep -qx 'RestartSec=5' "$PBW" &&
+       grep -qx 'WantedBy=multi-user.target' "$PBW"; then
+        echo "ok   - the battery watch service runs the watcher, restarts on failure and is wanted by multi-user.target"
+    else
+        echo "FAIL - the battery watch service is missing, runs something else, does not restart or lacks WantedBy=multi-user.target"
+        fail=1
+    fi
     if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
-            "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+            "$PBU/thinfloe-peripheral-battery.service" "$PBW" 2>/dev/null; then
         echo "FAIL - a battery unit declares Before= (ordering cycle risk)"
         fail=1
     else

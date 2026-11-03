@@ -1,0 +1,18 @@
+[Unit]
+Description=Read a keyboard's or mouse's battery when it connects
+# A Bolt device reconnects only when it is used, so the boot run of
+# thinfloe-peripheral-battery.service finds it asleep. This listens for the
+# events the device sends when it connects and runs the same reading, at
+# most once in 5 minutes per device with a value. No Before= on anything:
+# see CLAUDE.md, "A multi-user.target unit must never declare Before= on a
+# sysinit.target unit".
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/thinfloe/peripheral-battery watch
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
