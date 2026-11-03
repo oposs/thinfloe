@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
+use thinfloe_menu::battery;
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
@@ -40,6 +41,10 @@ fn addon_status_path() -> PathBuf {
     env_path("TF_ADDON_STATUS", addons::STATUS_PATH)
 }
 
+fn battery_file() -> PathBuf {
+    env_path("TF_BATTERY_FILE", battery::FILE)
+}
+
 fn addon_last_check_path() -> PathBuf {
     env_path("TF_ADDON_LAST_CHECK", addons::LAST_CHECK_PATH)
 }
@@ -53,6 +58,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
         addon_cmd: jobs::default_addon_cmd(),
         battery_cmd: jobs::default_battery_cmd(),
+        battery_file: battery_file(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
@@ -66,7 +72,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
-    menu.battery_on = settings::battery_switch_on(&settings::battery_switch_path());
+    menu.set_battery(battery::read(&battery_file()));
     (menu, paths, IconRoots::system())
 }
 
@@ -190,7 +196,7 @@ fn main() -> ExitCode {
         addon_status: addon_status_path(),
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
-        battery_switch: settings::battery_switch_path(),
+        battery_file: battery_file(),
         program_path: program_path(),
         header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
     }) {

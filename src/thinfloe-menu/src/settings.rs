@@ -20,8 +20,6 @@ pub enum SettingsEvent {
     InstallNow(String),
     UpdateNow(String),
     CheckNow,
-    /// The tick box of the keyboard and mouse battery: `true` switches it on.
-    Battery(bool),
     Back,
 }
 
@@ -35,8 +33,7 @@ pub enum RowButton {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     /// The add-on's tile, for its name and icon.
-    /// `None` for the battery row, which has no tile.
-    pub tile: Option<usize>,
+    pub tile: usize,
     pub id: String,
     pub name: String,
     pub source: Option<String>,
@@ -70,7 +67,7 @@ pub fn status_items(row: &Row) -> Vec<(String, Tone)> {
         .map(|s| {
             let tone = if s == "up to date" {
                 Tone::Good
-            } else if s.ends_with("ready for next boot") || s == BATTERY_NOTE {
+            } else if s.ends_with("ready for next boot") {
                 Tone::Ice
             } else {
                 Tone::Plain
@@ -85,65 +82,6 @@ pub fn status_items(row: &Row) -> Vec<(String, Tone)> {
         items.push((MANUAL_NOTE.to_string(), Tone::Warn));
     }
     items
-}
-
-pub const BATTERY_NAME: &str = "Keyboard and mouse battery";
-pub const BATTERY_ON: &str = "on · in ThinLinc as ~/thindrives/peripherals/battery";
-pub const BATTERY_NOTE: &str = "takes effect when ThinLinc starts again";
-
-/// The row of the keyboard and mouse battery switch.
-pub fn battery_row(menu: &Menu) -> Row {
-    let mut state = if menu.battery_on { BATTERY_ON } else { "off" }.to_string();
-    if menu.battery_changed {
-        state = format!("{state} · {BATTERY_NOTE}");
-    }
-    Row {
-        tile: None,
-        id: String::new(),
-        name: BATTERY_NAME.to_string(),
-        source: None,
-        ticked: menu.battery_on,
-        state,
-        button: None,
-        manual: false,
-        busy: menu.battery_busy(),
-        update_ready: false,
-        unusable: false,
-    }
-}
-
-/// Where the battery switch lives: `TF_BATTERY_SWITCH`, else in the home.
-pub fn battery_switch_path() -> PathBuf {
-    battery_switch_path_from(std::env::var_os("TF_BATTERY_SWITCH"), std::env::var_os("HOME"))
-}
-
-pub fn battery_switch_path_from(over: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
-    if let Some(p) = over {
-        return PathBuf::from(p);
-    }
-    let home = home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/home/tfuser"));
-    home.join(".config/thinfloe/peripheral-battery")
-}
-
-/// Is the battery switch on? The same rule as the helper's `switch_on()`:
-/// a regular file that is reached without a symlink in the last two
-/// directories (`.config`, `thinfloe`) nor as the file itself. The helper
-/// runs as root in a home that tfuser owns and refuses to follow links.
-pub fn battery_switch_on(path: &Path) -> bool {
-    let is_link = |p: &Path| {
-        std::fs::symlink_metadata(p)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-    };
-    let file = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_file())
-        .unwrap_or(false);
-    file && !path
-        .ancestors()
-        .skip(1)
-        .take(2)
-        .filter(|p| !p.as_os_str().is_empty())
-        .any(is_link)
 }
 
 pub const MANUAL_NOTE: &str = "updates only by hand";
@@ -197,7 +135,7 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
             let id = crate::menu::addon_id(t).to_string();
             if !menu.addon_usable(i) {
                 return Row {
-                    tile: Some(i),
+                    tile: i,
                     name: t.name.clone(),
                     source: t.source.clone(),
                     ticked: false,
@@ -212,7 +150,7 @@ pub fn rows(menu: &Menu) -> Vec<Row> {
             }
             let status = menu.addons().iter().find(|a| a.id == id);
             Row {
-                tile: Some(i),
+                tile: i,
                 name: t.name.clone(),
                 source: t.source.clone(),
                 ticked: status.is_some_and(|s| s.ticked),
@@ -349,7 +287,7 @@ mod tests {
     #[test]
     fn status_items_keep_their_colours() {
         let mut row = Row {
-            tile: Some(0),
+            tile: 0,
             id: "a".into(),
             name: "A".into(),
             source: None,
@@ -462,68 +400,5 @@ mod tests {
         assert!(last_checked(Some(now as u64), now).starts_with("last checked today "));
         let old = last_checked(Some(86_400 * 3), now);
         assert!(old.starts_with("last checked 1970-01-0"), "{old}");
-    }
-
-    #[test]
-    fn battery_row_says_off_on_and_the_note() {
-        use crate::menu::Screen;
-        use crate::tiles::Grid;
-        let mut m = Menu::new(
-            Grid {
-                tiles: vec![],
-                banner: vec![],
-            },
-            false,
-        );
-        m.screen = Screen::Settings;
-        let row = battery_row(&m);
-        assert_eq!((row.state.as_str(), row.ticked, row.tile), ("off", false, None));
-        m.battery_on = true;
-        assert_eq!(battery_row(&m).state, BATTERY_ON);
-        m.battery_changed = true;
-        assert_eq!(
-            status_items(&battery_row(&m)).last().unwrap(),
-            &(BATTERY_NOTE.to_string(), Tone::Ice)
-        );
-        m.settings(SettingsEvent::Battery(false));
-        let row = battery_row(&m);
-        assert!(row.busy);
-        assert_eq!(status_items(&row).last().unwrap().0, "working…");
-    }
-
-    #[test]
-    fn the_battery_switch_is_a_regular_file_reached_without_symlinks() {
-        use std::os::unix::fs::symlink;
-        let d = TestDir::new("settings", "switch");
-        let real = d.join("real/thinfloe");
-        std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join("peripheral-battery"), "on\n").unwrap();
-        assert!(battery_switch_on(&real.join("peripheral-battery")));
-        assert!(!battery_switch_on(&real.join("missing")));
-        // ~/.config is a link
-        symlink(d.join("real"), d.join("cfg")).unwrap();
-        assert!(!battery_switch_on(&d.join("cfg/thinfloe/peripheral-battery")));
-        // ~/.config/thinfloe is a link
-        std::fs::create_dir_all(d.join("c2")).unwrap();
-        symlink(&real, d.join("c2/thinfloe")).unwrap();
-        assert!(!battery_switch_on(&d.join("c2/thinfloe/peripheral-battery")));
-        // the file itself is a link
-        symlink(real.join("peripheral-battery"), real.join("link")).unwrap();
-        assert!(!battery_switch_on(&real.join("link")));
-    }
-
-    #[test]
-    fn battery_switch_path_prefers_the_override_then_home() {
-        use std::ffi::OsString;
-        let o = |s: &str| Some(OsString::from(s));
-        assert_eq!(battery_switch_path_from(o("/x"), o("/h")), PathBuf::from("/x"));
-        assert_eq!(
-            battery_switch_path_from(None, o("/h")),
-            PathBuf::from("/h/.config/thinfloe/peripheral-battery")
-        );
-        assert_eq!(
-            battery_switch_path_from(None, None),
-            PathBuf::from("/home/tfuser/.config/thinfloe/peripheral-battery")
-        );
     }
 }

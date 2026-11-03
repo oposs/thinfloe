@@ -5,6 +5,7 @@
 //! without a GPU".
 
 use crate::addons::{self, AddonLog};
+use crate::battery;
 use crate::damage::Tracker;
 use crate::density::{self, OutputInfo};
 use crate::icons::IconRoots;
@@ -12,7 +13,6 @@ use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu};
 use crate::raster::{Background, Canvas, Textures};
-use crate::settings;
 use crate::ui;
 use egui::ViewportId;
 use std::ffi::OsString;
@@ -42,6 +42,8 @@ pub enum Wake {
     Output,
     /// The add-on status or log file changed.
     Addons,
+    /// The battery file changed.
+    Battery,
     /// The set of folded windows changed.
     Windows,
 }
@@ -59,8 +61,8 @@ pub struct Config {
     pub addon_status: PathBuf,
     pub addon_log: PathBuf,
     pub addon_last_check: PathBuf,
-    /// The file whose existence is the battery switch.
-    pub battery_switch: PathBuf,
+    /// The file the battery reader writes.
+    pub battery_file: PathBuf,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
     /// Host name and version for the header.
@@ -178,14 +180,17 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
 }
 
-/// A thread that looks at the status and log files once a second and wakes
-/// the loop only when one of them changed: the loop sleeps in between.
+/// A thread that looks at the add-on status and log files and the battery
+/// file once a second and wakes the loop only when one of them changed: the
+/// loop sleeps in between.
 fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
     let (status, log) = (cfg.addon_status.clone(), cfg.addon_log.clone());
+    let battery_file = cfg.battery_file.clone();
     let shown = shown.clone();
     // The first tick reads the files whatever they hold, so a change between
     // the menu's first read of the status and now is not lost.
     let mut watcher = addons::Watcher::default();
+    let mut battery_watcher = battery::Watcher::default();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(ADDON_POLL);
@@ -193,6 +198,9 @@ fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wak
                 continue;
             }
             if watcher.tick(&status, &log) && waker.send_event(Wake::Addons).is_err() {
+                return;
+            }
+            if battery_watcher.tick(&battery_file) && waker.send_event(Wake::Battery).is_err() {
                 return;
             }
         }
@@ -333,9 +341,9 @@ impl App {
         live.window.request_redraw();
     }
 
-    /// Read the battery switch again.
+    /// Read the battery file again.
     fn refresh_battery(&mut self) {
-        self.cfg.menu.battery_on = settings::battery_switch_on(&self.cfg.battery_switch);
+        self.cfg.menu.set_battery(battery::read(&self.cfg.battery_file));
     }
 
     /// Read the add-on files again. A program or icon that appeared
@@ -394,6 +402,7 @@ impl App {
             state_dir: self.cfg.paths.state_dir.clone(),
             addon_cmd: self.cfg.paths.addon_cmd.clone(),
             battery_cmd: self.cfg.paths.battery_cmd.clone(),
+            battery_file: self.cfg.paths.battery_file.clone(),
         };
         std::thread::spawn(move || {
             let result = match job {
@@ -404,7 +413,7 @@ impl App {
                         let _ = started.send_event(Wake::Job(JobResult::Started { id, pgid }));
                     })
                 }
-                Job::Battery { on } => jobs::battery(&paths.battery_cmd, on, &feed),
+                Job::Battery => jobs::battery(&paths.battery_cmd, &paths.battery_file, &feed),
                 Job::Addon { args } => {
                     let started = proxy.clone();
                     let a = args.clone();
@@ -552,10 +561,6 @@ impl App {
             }
             None => self.cfg.menu.tick(now),
         };
-        // Opening Settings: the switch file may have changed since the start.
-        if matches!(event, Some(ui::UiEvent::Tile(_))) && self.cfg.menu.screen == crate::menu::Screen::Settings {
-            self.refresh_battery();
-        }
         if effect.is_some() || event.is_some() {
             self.apply(effect, event_loop);
             if let Some(live) = self.live.as_ref() {
@@ -710,17 +715,14 @@ impl ApplicationHandler<Wake> for App {
                 // The status changed with the job; the watcher would see it
                 // only a second later.
                 let addon = matches!(result, JobResult::Addon { .. });
-                let battery = matches!(result, JobResult::Battery { .. });
                 let effect = self.cfg.menu.finished(result, Instant::now());
                 self.apply(effect, event_loop);
                 if addon {
                     self.refresh_addons();
                 }
-                if battery {
-                    self.refresh_battery();
-                }
             }
             Wake::Addons => self.refresh_addons(),
+            Wake::Battery => self.refresh_battery(),
             Wake::Windows => self.windows_changed(),
             Wake::Output => {}
         }

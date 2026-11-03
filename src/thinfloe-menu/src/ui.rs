@@ -746,9 +746,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                     .show(ui, |ui| {
                         // Bounded by the panel, not by what a long text asked for before.
                         ui.set_width(row_inner);
-                        let icon = row.tile.and_then(|i| icons.get(i)).and_then(Option::as_ref);
-                        let id = row.id.clone();
-                        settings_row(ui, &row, icon, &t, |on| SettingsEvent::Tick { id, on })
+                        settings_row(ui, &row, icons.get(row.tile).and_then(Option::as_ref), &t)
                     });
                 if row.update_ready {
                     let r = framed.response.rect;
@@ -759,42 +757,23 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                     event = Some(e);
                 }
             }
-            let row = settings::battery_row(menu);
-            let framed = egui::Frame::new()
-                .fill(TILE)
-                .inner_margin(egui::Margin {
-                    left: ROW_LEFT,
-                    right: ROW_RIGHT,
-                    top: 12,
-                    bottom: 12,
-                })
-                .show(ui, |ui| {
-                    ui.set_width(row_inner);
-                    settings_row(ui, &row, None, &t, SettingsEvent::Battery)
-                });
-            if let Some(e) = framed.inner {
-                event = Some(e);
-            }
         });
     event
 }
 
 /// One add-on: tick box, icon, name, source, state, and its button.
-fn settings_row(
-    ui: &mut Ui,
-    row: &settings::Row,
-    icon: Option<&Icon>,
-    t: &Theme,
-    tick: impl FnOnce(bool) -> SettingsEvent,
-) -> Option<SettingsEvent> {
+fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme) -> Option<SettingsEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
         let mut ticked = row.ticked;
-        let tick_box = ui.add_enabled_ui(!row.busy && !row.unusable, |ui| {
+        let tick = ui.add_enabled_ui(!row.busy && !row.unusable, |ui| {
             egui_shadcn::components::checkbox::checkbox(ui, &mut ticked)
         });
-        if tick_box.inner.changed() {
-            event = Some(tick(ticked));
+        if tick.inner.changed() {
+            event = Some(SettingsEvent::Tick {
+                id: row.id.clone(),
+                on: ticked,
+            });
         }
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_ICON), Sense::hover());
         match icon {
@@ -1424,37 +1403,6 @@ mod tests {
             "not installed · install failed: HTTP 404 · updates only by hand",
             "Install now",
         ] {
-            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
-        }
-    }
-
-    #[test]
-    fn the_settings_screen_ends_with_the_battery_row() {
-        let mut menu = Menu::new(addon_grid(), false);
-        menu.activate(1, Instant::now());
-        menu.battery_on = true;
-        let texts = texts_of(&menu, &[None, None]);
-        for want in [
-            "Keyboard and mouse battery",
-            "on · in ThinLinc as ~/thindrives/peripherals/battery",
-        ] {
-            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
-        }
-        menu.battery_changed = true;
-        let texts = texts_of(&menu, &[None, None]);
-        let want = "on · in ThinLinc as ~/thindrives/peripherals/battery · takes effect when ThinLinc starts again";
-        assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
-
-        let mut empty = Menu::new(
-            Grid {
-                tiles: vec![],
-                banner: vec![],
-            },
-            false,
-        );
-        empty.screen = crate::menu::Screen::Settings;
-        let texts = texts_of(&empty, &[]);
-        for want in ["No add-ons are defined.", "Keyboard and mouse battery"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
     }
@@ -2246,8 +2194,7 @@ mod tests {
     #[test]
     fn the_settings_panel_is_as_wide_as_the_tile_group() {
         let rows = row_rects(&settings_shapes(&open_settings(), 1920.0, 1080.0));
-        assert_eq!(rows.len(), 5, "{rows:?}");
-        assert!(rows[4].top() > rows[3].top(), "{rows:?}");
+        assert_eq!(rows.len(), 4, "{rows:?}");
         for r in rows {
             assert!((r.width() - GROUP_W).abs() < 1.0, "{r:?}");
             assert!((r.center().x - 960.0).abs() < 1.0, "{r:?}");
@@ -2281,8 +2228,7 @@ mod tests {
         let texts = text_rects(&shapes);
         let rows = row_rects(&shapes);
         let mut buttons = 0;
-        // The last row is the battery switch: no source, no button.
-        for row in &rows[..rows.len() - 1] {
+        for row in rows {
             let inside: Vec<_> = texts.iter().filter(|(_, r)| row.contains_rect(*r)).collect();
             let find = |f: &dyn Fn(&str) -> bool| inside.iter().find(|(t, _)| f(t)).map(|(_, r)| *r);
             let name = find(&|t| ["ThinLinc", "OxuLnk", "Remmina", "Manual tool"].contains(&t)).expect("name");

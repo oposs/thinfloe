@@ -14,9 +14,8 @@
 //! failed and the person at the machine chose to log out anyway. Restart
 //! and Power off take the same steps and exit 10 and 11. A running add-on
 //! job is listed in the dialog too; it is waited for, never stopped.
-//! A battery job is neither waited for nor stopped: it is no add-on job, it
-//! writes the switch file and the ThinLinc mandatory config and runs
-//! systemctl, and the shutdown ends it anyway.
+//! A battery read job is neither waited for nor stopped: it only reads, and
+//! the shutdown ends it anyway.
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
@@ -116,10 +115,8 @@ pub enum Job {
     Addon {
         args: Vec<String>,
     },
-    /// `sudo -n /usr/libexec/thinfloe/peripheral-battery enable|disable`.
-    Battery {
-        on: bool,
-    },
+    /// `sudo -n /usr/libexec/thinfloe/peripheral-battery`, one reading run.
+    Battery,
 }
 
 /// What fills the space above the log.
@@ -172,15 +169,11 @@ pub struct Menu {
     pub retry: Option<Retry>,
     /// Each add-on job that runs.
     addon_runs: Vec<AddonRun>,
-    /// The direction of the running battery job, if any. It is not an
-    /// `AddonRun`: the end-of-session dialogs do not list, wait for or stop
-    /// it (it only writes a state file), and `addon_busy` would match its
-    /// verb against add-on ids.
-    battery_run: Option<bool>,
-    /// The battery display is on (the state file exists); set by the app.
-    pub battery_on: bool,
-    /// A job switched the battery in this menu run.
-    pub battery_changed: bool,
+    /// A battery read job runs. It is not an `AddonRun`: the end-of-session
+    /// dialogs do not list, wait for or stop it.
+    battery_run: bool,
+    /// The devices the battery file lists; set by the app and by the job.
+    pub battery: Vec<crate::battery::Device>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -223,9 +216,8 @@ impl Menu {
             screen: Screen::Grid,
             retry: None,
             addon_runs: Vec::new(),
-            battery_run: None,
-            battery_on: false,
-            battery_changed: false,
+            battery_run: false,
+            battery: Vec::new(),
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -306,7 +298,12 @@ impl Menu {
 
     /// Whether a battery job runs.
     pub fn battery_busy(&self) -> bool {
-        self.battery_run.is_some()
+        self.battery_run
+    }
+
+    /// Take the devices the battery file lists now.
+    pub fn set_battery(&mut self, devices: Vec<crate::battery::Device>) {
+        self.battery = devices;
     }
 
     fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
@@ -323,13 +320,6 @@ impl Menu {
             return None;
         }
         let (verb, id) = match event {
-            SettingsEvent::Battery(on) => {
-                if self.battery_run.is_some() || on == self.battery_on {
-                    return None;
-                }
-                self.battery_run = Some(on);
-                return Some(Effect::Start(Job::Battery { on }));
-            }
             SettingsEvent::Back => {
                 self.screen = Screen::Grid;
                 self.offer_retry();
@@ -411,6 +401,7 @@ impl Menu {
     /// add-on has a copy on this machine, a failed check included.
     pub fn visible(&self, index: usize) -> bool {
         match self.tiles.get(index) {
+            Some(t) if t.action == Action::Battery => !self.battery.is_empty(),
             Some(t) if t.addon => self.addon_of(index).is_some_and(AddonStatus::present),
             Some(_) => true,
             None => false,
@@ -485,6 +476,7 @@ impl Menu {
         match tile.action {
             Action::Run => tile.multiple || self.running(index) == 0,
             Action::SaveHome => !self.save.running,
+            Action::Battery => !self.battery_run,
             Action::Logout | Action::Reboot | Action::Poweroff | Action::Settings => true,
         }
     }
@@ -493,6 +485,7 @@ impl Menu {
     /// the save tile, a save.
     pub fn active(&self, index: usize) -> bool {
         self.running(index) > 0
+            || (self.tiles.get(index).is_some_and(|t| t.action == Action::Battery) && self.battery_run)
             || (self.tiles.get(index).is_some_and(|t| t.action == Action::SaveHome) && self.save.running)
     }
 
@@ -528,6 +521,11 @@ impl Menu {
             Action::Settings => {
                 self.screen = Screen::Settings;
                 None
+            }
+            Action::Battery => {
+                self.battery_run = true;
+                self.log.note(Kind::Event, "Reading the keyboard and mouse batteries.");
+                Some(Effect::Start(Job::Battery))
             }
             Action::Logout | Action::Reboot | Action::Poweroff => {
                 self.ending = tile.action;
@@ -669,25 +667,31 @@ impl Menu {
                 }
                 None
             }
-            JobResult::Battery { on, status } => {
-                self.battery_run = None;
-                let word = if on { "on" } else { "off" };
+            JobResult::Battery { status, devices } => {
+                self.battery_run = false;
                 match status {
-                    Ok(Some(0)) => {
-                        self.battery_changed = true;
-                        self.log
-                            .note(Kind::Event, format!("Keyboard and mouse battery switched {word}."));
-                    }
-                    Ok(Some(n)) => self.log.note(
-                        Kind::Warn,
-                        format!("Switching the keyboard and mouse battery {word} failed (status {n})."),
-                    ),
-                    Ok(None) => self.log.note(
-                        Kind::Warn,
-                        format!("Switching the keyboard and mouse battery {word} failed (killed by a signal)."),
-                    ),
+                    Ok(Some(0)) => {}
+                    Ok(Some(n)) => self
+                        .log
+                        .note(Kind::Warn, format!("peripheral-battery exited with status {n}.")),
+                    Ok(None) => self.log.note(Kind::Warn, "peripheral-battery was killed by a signal."),
                     Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
                 }
+                let line = |kind, text: String| crate::log::Line {
+                    time: crate::log::local_time(),
+                    source: Some(crate::jobs::BATTERY_SOURCE.to_string()),
+                    runs: vec![crate::log::Run::plain(text)],
+                    kind,
+                };
+                if devices.is_empty() {
+                    self.log
+                        .push(line(Kind::Event, "No keyboard or mouse reports a battery.".into()));
+                }
+                for d in &devices {
+                    let kind = if d.low() { Kind::Warn } else { Kind::Event };
+                    self.log.push(line(kind, crate::battery::log_text(d)));
+                }
+                self.set_battery(devices);
                 None
             }
             JobResult::Saved(outcome) => {
@@ -1989,84 +1993,130 @@ mod tests {
         assert_eq!(m.choose(Choice::Stay, now), None);
     }
 
-    fn battery_done(m: &mut Menu, on: bool, status: Result<Option<i32>, String>) -> Option<Effect> {
-        m.finished(JobResult::Battery { on, status }, Instant::now())
+    fn dev(name: &str, percent: u8, state: &str) -> crate::battery::Device {
+        crate::battery::Device {
+            name: name.into(),
+            percent: Some(percent),
+            state: state.into(),
+            read_epoch: 1_000_000,
+        }
+    }
+
+    fn battery_menu() -> (Menu, usize) {
+        let mut g = grid();
+        g.tiles.extend(merge(
+            &[SourceFile {
+                name: "70-battery.desktop".into(),
+                entry: desktop::parse(
+                    "[Desktop Entry]\nType=Application\nName=Battery\nComment=Keyboard and mouse\nIcon=battery\nX-TF-Action=battery\n",
+                ),
+            }],
+            &[],
+        ));
+        let i = g.tiles.len() - 1;
+        (Menu::new(g, false), i)
+    }
+
+    fn battery_done(
+        m: &mut Menu,
+        status: Result<Option<i32>, String>,
+        devices: Vec<crate::battery::Device>,
+    ) -> Option<Effect> {
+        m.finished(JobResult::Battery { status, devices }, Instant::now())
     }
 
     #[test]
-    fn battery_tick_starts_one_job() {
-        let (_d, mut m) = settings_menu("battery-tick");
-        m.battery_on = false;
-        assert_eq!(
-            m.settings(SettingsEvent::Battery(true)),
-            Some(Effect::Start(Job::Battery { on: true }))
-        );
+    fn the_battery_tile_shows_only_with_a_device() {
+        let (mut m, i) = battery_menu();
+        assert!(!m.visible(i));
+        assert!(!m.can_activate(i));
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        assert!(m.visible(i));
+        assert!(m.can_activate(i));
+    }
+
+    #[test]
+    fn a_click_starts_one_read_job() {
+        let (mut m, i) = battery_menu();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        assert_eq!(m.activate(i, Instant::now()), Some(Effect::Start(Job::Battery)));
         assert!(m.battery_busy());
-        assert_eq!(m.settings(SettingsEvent::Battery(true)), None);
-        assert_eq!(m.settings(SettingsEvent::Battery(false)), None);
+        assert!(m.active(i));
+        assert_eq!(
+            log(&m).last().unwrap(),
+            &ev("Reading the keyboard and mouse batteries.")
+        );
+        assert_eq!(m.activate(i, Instant::now()), None);
     }
 
     #[test]
-    fn battery_tick_matching_the_state_does_nothing() {
-        let (_d, mut m) = settings_menu("battery-same");
-        m.battery_on = true;
-        assert_eq!(m.settings(SettingsEvent::Battery(true)), None);
+    fn the_job_end_logs_one_line_per_device() {
+        let (mut m, i) = battery_menu();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.activate(i, Instant::now());
+        let devices = vec![dev("Kbd", 100, "charging"), dev("Mouse", 10, "discharging")];
+        assert_eq!(battery_done(&mut m, Ok(Some(0)), devices.clone()), None);
+        assert!(!m.battery_busy());
+        assert_eq!(m.battery, devices);
+        let lines: Vec<_> = m.log.lines().collect();
+        let n = lines.len();
+        for (l, (d, kind)) in lines[n - 2..]
+            .iter()
+            .zip([(&devices[0], Kind::Event), (&devices[1], Kind::Warn)])
+        {
+            assert_eq!(l.source.as_deref(), Some("battery"));
+            assert_eq!(l.plain(), crate::battery::log_text(d));
+            assert_eq!(l.kind, kind);
+        }
+    }
+
+    #[test]
+    fn a_failed_read_job_warns_and_still_logs_the_devices() {
+        let (mut m, _) = battery_menu();
+        let devices = vec![dev("Kbd", 50, "discharging")];
+        battery_done(&mut m, Ok(Some(1)), devices.clone());
+        let l = log(&m);
+        assert_eq!(l[l.len() - 2], warn("peripheral-battery exited with status 1."));
+        assert_eq!(l[l.len() - 1].1, crate::battery::log_text(&devices[0]));
+        battery_done(&mut m, Ok(None), devices.clone());
+        let l = log(&m);
+        assert_eq!(l[l.len() - 2], warn("peripheral-battery was killed by a signal."));
+        battery_done(&mut m, Err("sudo could not be started: x".into()), devices);
+        let l = log(&m);
+        assert_eq!(l[l.len() - 2], warn("sudo could not be started: x."));
+    }
+
+    #[test]
+    fn a_job_that_finds_no_device_hides_the_tile_and_says_so() {
+        let (mut m, i) = battery_menu();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.activate(i, Instant::now());
+        battery_done(&mut m, Ok(Some(0)), Vec::new());
+        let last = m.log.last().unwrap();
+        assert_eq!(last.plain(), "No keyboard or mouse reports a battery.");
+        assert_eq!(last.source.as_deref(), Some("battery"));
+        assert!(!m.visible(i));
         assert!(!m.battery_busy());
     }
 
     #[test]
-    fn battery_job_end_frees_the_row_and_notes_the_change() {
-        let (_d, mut m) = settings_menu("battery-end");
-        m.settings(SettingsEvent::Battery(true));
-        assert_eq!(battery_done(&mut m, true, Ok(Some(0))), None);
-        assert!(!m.battery_busy());
-        assert!(m.battery_changed);
-        assert_eq!(
-            log(&m).last().unwrap(),
-            &(Kind::Event, "Keyboard and mouse battery switched on.".to_string())
-        );
-    }
-
-    #[test]
-    fn a_failed_battery_job_is_a_warning() {
-        let (_d, mut m) = settings_menu("battery-fail");
-        m.settings(SettingsEvent::Battery(true));
-        battery_done(&mut m, true, Ok(Some(1)));
-        assert_eq!(
-            log(&m).last().unwrap(),
-            &warn("Switching the keyboard and mouse battery on failed (status 1).")
-        );
-        m.settings(SettingsEvent::Battery(true));
-        battery_done(&mut m, true, Ok(None));
-        assert_eq!(
-            log(&m).last().unwrap(),
-            &warn("Switching the keyboard and mouse battery on failed (killed by a signal).")
-        );
-        m.settings(SettingsEvent::Battery(true));
-        battery_done(&mut m, true, Err("sudo could not be started: x".into()));
-        assert_eq!(log(&m).last().unwrap(), &warn("sudo could not be started: x."));
-        assert!(!m.battery_changed);
-        assert!(!m.battery_busy());
+    fn no_read_job_behind_a_dialog() {
+        let (mut m, i) = battery_menu();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        m.logout = Some(Logout::Confirm);
+        assert_eq!(m.activate(i, Instant::now()), None);
     }
 
     #[test]
     fn the_end_of_session_question_ignores_a_battery_job() {
         let now = Instant::now();
-        let mut m = Menu::new(grid(), false);
-        m.screen = Screen::Settings;
-        m.settings(SettingsEvent::Battery(true));
-        m.screen = Screen::Grid;
-        assert_eq!(m.activate(3, now), Some(Effect::Start(Job::Save)));
+        let (mut m, i) = battery_menu();
+        m.set_battery(vec![dev("Kbd", 80, "discharging")]);
+        assert_eq!(m.activate(i, now), Some(Effect::Start(Job::Battery)));
+        assert_eq!(m.activate(2, now), Some(Effect::Start(Job::Save)));
         let before = m.logout.clone();
         assert_ne!(before, Some(Logout::Confirm));
-        battery_done(&mut m, true, Ok(Some(0)));
+        battery_done(&mut m, Ok(Some(0)), vec![dev("Kbd", 80, "discharging")]);
         assert_eq!(m.logout, before);
-    }
-
-    #[test]
-    fn no_battery_job_during_a_logout() {
-        let (_d, mut m) = settings_menu("battery-logout");
-        m.logout = Some(Logout::Confirm);
-        assert_eq!(m.settings(SettingsEvent::Battery(true)), None);
     }
 }

@@ -31,6 +31,8 @@ pub enum Action {
     Poweroff,
     /// The Settings screen, with the add-ons.
     Settings,
+    /// Reads the keyboard and mouse batteries once; the tile shows them.
+    Battery,
 }
 
 impl Action {
@@ -42,6 +44,7 @@ impl Action {
             Some("reboot") => Ok(Action::Reboot),
             Some("poweroff") => Ok(Action::Poweroff),
             Some("settings") => Ok(Action::Settings),
+            Some("battery") => Ok(Action::Battery),
             Some(other) => Err(format!("unknown action '{other}'")),
         }
     }
@@ -55,7 +58,7 @@ impl Action {
             Action::Logout => Some(0),
             Action::Reboot => Some(10),
             Action::Poweroff => Some(11),
-            Action::Run | Action::SaveHome | Action::Settings => None,
+            Action::Run | Action::SaveHome | Action::Settings | Action::Battery => None,
         }
     }
 
@@ -733,6 +736,48 @@ mod tests {
         );
         assert_eq!(tiles[0].action, Action::Settings);
         assert_eq!(tiles[0].name, "Einstellungen");
+    }
+
+    #[test]
+    fn battery_tile_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-battery.desktop")).unwrap();
+        let t = merge(&[src("70-battery.desktop", &text)], &[]).remove(0);
+        assert_eq!(t.action, Action::Battery);
+        assert_eq!(t.icon.as_deref(), Some("battery"));
+        assert!(t.usable() && !t.addon && !t.multiple && !t.save_on_exit);
+        assert_eq!(Action::Battery.exit_code(), None);
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("icons/battery.svg")
+                .is_file(),
+            "the Lucide icon is shipped"
+        );
+    }
+
+    #[test]
+    fn user_file_cannot_use_battery_action() {
+        let tiles = merge(
+            &[],
+            &[src(
+                "61-mine.desktop",
+                "[Desktop Entry]\nName=Mine\nX-TF-Action=battery\n",
+            )],
+        );
+        assert_eq!(
+            tiles[0].problem.as_deref(),
+            Some("61-mine.desktop: a tile of your own may only use the run action, not 'battery'")
+        );
+        let shipped = src(
+            "70-battery.desktop",
+            "[Desktop Entry]\nName=Battery\nIcon=battery\nX-TF-Action=battery\n",
+        );
+        let tiles = merge(
+            &[shipped],
+            &[src("70-battery.desktop", "[Desktop Entry]\nName=Akku\nExec=x\n")],
+        );
+        assert_eq!(tiles[0].action, Action::Battery);
+        assert_eq!(tiles[0].name, "Akku");
     }
 
     #[test]

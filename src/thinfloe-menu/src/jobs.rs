@@ -105,10 +105,10 @@ pub enum JobResult {
         args: Vec<String>,
         status: Result<Option<i32>, String>,
     },
-    /// The battery switch ended; `on` is the direction it was started for.
+    /// The battery read job ended; `devices` is the battery file read after it.
     Battery {
-        on: bool,
         status: Result<Option<i32>, String>,
+        devices: Vec<crate::battery::Device>,
     },
 }
 
@@ -144,8 +144,10 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// The add-on tool and what runs it as root; the job's arguments follow.
     pub addon_cmd: Vec<String>,
-    /// The battery helper and what runs it as root; `enable` or `disable` follows.
+    /// The battery reader and what runs it as root; it takes no argument.
     pub battery_cmd: Vec<String>,
+    /// The file the reader writes and the job reads afterwards.
+    pub battery_file: PathBuf,
 }
 
 /// The log source of the battery job's output.
@@ -267,19 +269,20 @@ pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl F
     }
 }
 
-/// Run the peripheral battery helper with `enable` or `disable`. Both
-/// streams go to the log under `battery`. No group id is reported: the
+/// Run the peripheral battery reader once. Both streams go to the log under
+/// `battery`, then the battery file is read. No group id is reported: the
 /// end-of-session dialogs neither wait for this job nor stop it.
-pub fn battery(cmd: &[String], on: bool, feed: &Arc<Feed>) -> JobResult {
+pub fn battery(cmd: &[String], file: &Path, feed: &Arc<Feed>) -> JobResult {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&cmd[0]);
-    c.args(&cmd[1..])
-        .arg(if on { "enable" } else { "disable" })
-        .process_group(0);
+    c.args(&cmd[1..]).process_group(0);
     let status = run_logged(c, BATTERY_SOURCE, feed, false, |_| {})
         .map(|st| st.code())
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]));
-    JobResult::Battery { on, status }
+    JobResult::Battery {
+        status,
+        devices: crate::battery::read(file),
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +348,7 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             battery_cmd: default_battery_cmd(),
+            battery_file: d.join("battery"),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -352,6 +356,7 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             battery_cmd: default_battery_cmd(),
+            battery_file: d.join("battery"),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -359,6 +364,7 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             battery_cmd: default_battery_cmd(),
+            battery_file: d.join("battery"),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -583,6 +589,7 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             battery_cmd: default_battery_cmd(),
+            battery_file: d.join("battery"),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -591,6 +598,7 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             battery_cmd: default_battery_cmd(),
+            battery_file: d.join("battery"),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -599,14 +607,22 @@ mod tests {
     }
 
     #[test]
-    fn battery_logs_both_streams_as_battery_and_passes_the_verb() {
+    fn battery_logs_both_streams_and_returns_the_file() {
+        let d = dir("battery");
+        let file = d.join("battery");
+        fs::write(&file, "Kbd\t80\tcharging\t1000\n").unwrap();
         let feed = Arc::new(Feed::default());
-        let cmd = sh("echo \"out $0\"; echo err >&2; exit 0");
+        let cmd = sh("echo \"out $#\"; echo err >&2; exit 0");
         assert_eq!(
-            battery(&cmd, true, &feed),
+            battery(&cmd, &file, &feed),
             JobResult::Battery {
-                on: true,
-                status: Ok(Some(0))
+                status: Ok(Some(0)),
+                devices: vec![crate::battery::Device {
+                    name: "Kbd".into(),
+                    percent: Some(80),
+                    state: "charging".into(),
+                    read_epoch: 1000
+                }]
             }
         );
         let mut got: Vec<_> = feed
@@ -619,12 +635,9 @@ mod tests {
             got,
             [
                 (Some("battery".to_string()), "err".to_string()),
-                (Some("battery".to_string()), "out enable".to_string())
+                (Some("battery".to_string()), "out 0".to_string())
             ]
         );
-        battery(&cmd, false, &feed);
-        let got: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
-        assert!(got.contains(&"out disable".to_string()), "{got:?}");
         assert_eq!(
             default_battery_cmd(),
             ["sudo", "-n", "/usr/libexec/thinfloe/peripheral-battery"]
