@@ -10,7 +10,7 @@ pub const MAX_LINES: usize = 64;
 pub const MAX_NAME: usize = 64;
 pub const SHORT_NAME: usize = 14;
 pub const WARN_PERCENT: u8 = 15;
-pub const CHARGING_MARK: &str = "⚡";
+pub const CHARGING_MARK: &str = "+";
 
 const NOT_REACHABLE: &str = "not reachable";
 
@@ -263,7 +263,7 @@ mod tests {
         ];
         let t = tile_text(&v);
         assert_eq!(t.name, "95 %");
-        assert_eq!(t.entries, vec!["MX Anywhere 3S… 95", "MX Mechanical 100 ⚡", "Mouse –"]);
+        assert_eq!(t.entries, vec!["MX Anywhere 3S… 95", "MX Mechanical 100 +", "Mouse –"]);
         assert!(!t.warn);
         assert_eq!(tile_text(&[dev("Mouse", Some(5), "not reachable")]).name, "–");
         assert_eq!(tile_text(&[dev("Mouse", None, "discharging")]).name, "–");

@@ -2,6 +2,7 @@
 //! and the dialogs. Everything that decides something lives in menu.rs; this
 //! file only paints it and reports clicks.
 
+use crate::battery;
 use crate::brand::{self, GOOD, ICE, MUTED, TILE, TILE_ACTIVE, TILE_HOVER, TIME};
 use crate::density::GROUP_W;
 use crate::header::{Header, header_text, until_next_minute};
@@ -570,6 +571,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
                         let (rect, resp) = ui.allocate_exact_size(l.tile, sense);
                         let running = menu.running(index);
+                        let text = (tile.action == Action::Battery).then(|| battery::tile_text(&menu.battery));
                         paint_tile(
                             ui,
                             rect,
@@ -582,6 +584,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                                 active: menu.active(index),
                                 update: menu.pending_update(index),
                             },
+                            text.as_ref(),
                         );
                         if resp.clicked() {
                             clicked = Some(UiEvent::Tile(index));
@@ -1007,7 +1010,34 @@ struct TileState {
     update: bool,
 }
 
-fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: TileState) {
+/// Join `entries` with ` · ` into at most `max_lines` lines, each filled
+/// while `fits` accepts it. What does not fit goes onto the last line.
+fn pack(entries: &[String], fits: impl Fn(&str) -> bool, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for e in entries {
+        match lines.last_mut() {
+            None => lines.push(e.clone()),
+            Some(last) => {
+                let joined = format!("{last} · {e}");
+                if fits(&joined) || lines.len() >= max_lines {
+                    *lines.last_mut().unwrap() = joined;
+                } else {
+                    lines.push(e.clone());
+                }
+            }
+        }
+    }
+    lines
+}
+
+fn paint_tile(
+    ui: &Ui,
+    rect: Rect,
+    tile: &Tile,
+    icon: Option<&Icon>,
+    state: TileState,
+    text: Option<&battery::TileText>,
+) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
@@ -1071,11 +1101,31 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         job.wrap = TextWrapping::truncate_at_width(text_w);
         lines.push(clipped.layout_job(job));
     };
-    line(&tile.name, brand::geo(21.0), fade(t.palette.foreground));
+    let battery_text = text.filter(|_| tile.problem.is_none());
+    match battery_text {
+        // The data names the tile; a reword of Name has no say.
+        Some(b) => line(
+            &b.name,
+            brand::geo(21.0),
+            fade(if b.warn { WARN } else { t.palette.foreground }),
+        ),
+        None => line(&tile.name, brand::geo(21.0), fade(t.palette.foreground)),
+    }
     // One second line: why the tile is grey, else its comment, else the
     // note about its file. `--check` has the long form.
     if let Some(why) = &tile.problem {
         line(why, FontId::proportional(11.0), WARN);
+    } else if let Some(b) = battery_text {
+        let fits = |s: &str| {
+            clipped
+                .layout_no_wrap(s.to_string(), FontId::proportional(11.0), MUTED)
+                .size()
+                .x
+                <= text_w
+        };
+        for l in pack(&b.entries, fits, 2) {
+            line(&l, FontId::proportional(11.0), fade(MUTED));
+        }
     } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
         // Only a reworded file that lost keys; plain "reworded" is no news.
         match &tile.origin {
@@ -1198,6 +1248,136 @@ mod tests {
             assert!(clip.height() <= 260.0, "clipped to the tile, not {clip:?}");
             assert!(clip.contains_rect(t.visual_bounding_rect()), "inside its clip");
         }
+    }
+
+    #[test]
+    fn pack_fills_lines_greedily() {
+        let e: Vec<String> = ["aaaa", "bbbb", "cccc"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pack(&e, |s| s.chars().count() <= 11, 2), vec!["aaaa · bbbb", "cccc"]);
+        assert_eq!(pack(&e, |s| s.chars().count() <= 10, 2), vec!["aaaa", "bbbb · cccc"]);
+        assert_eq!(pack(&e[..1], |_| true, 2), vec!["aaaa"]);
+        assert!(pack(&[], |_| true, 2).is_empty());
+    }
+
+    fn dev(name: &str, percent: u8, state: &str) -> battery::Device {
+        battery::Device {
+            name: name.into(),
+            percent: Some(percent),
+            state: state.into(),
+            read_epoch: 0,
+        }
+    }
+
+    fn battery_shapes(mut menu: Menu, devices: Vec<battery::Device>) -> Vec<egui::epaint::ClippedShape> {
+        menu.battery = devices;
+        let mut icons: Vec<Option<Icon>> = Vec::new();
+        icons.resize_with(menu.tiles.len(), || None);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+        });
+        out.textures_delta.clear();
+        out.shapes
+    }
+
+    fn text_shape(
+        shapes: &[egui::epaint::ClippedShape],
+        pred: impl Fn(&str) -> bool,
+    ) -> Vec<(&Rect, &egui::epaint::TextShape)> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) if pred(t.galley.text()) => Some((&c.clip_rect, t)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_battery_tile_draws_the_data_inside_its_tile() {
+        let long = "W".repeat(200);
+        let shapes = battery_shapes(
+            Menu::new(shipped_grid(), false),
+            vec![
+                dev("Keyboard", 95, "discharging"),
+                dev(&long, 97, "discharging"),
+                dev("Mouse", 99, "charging"),
+            ],
+        );
+        let found = text_shape(&shapes, |t| t.starts_with("Keyboard") || t.starts_with("WWW"));
+        assert!(
+            !found.is_empty() && found.len() <= 2,
+            "{:?}",
+            found.iter().map(|f| f.1.galley.text().to_string()).collect::<Vec<_>>()
+        );
+        let name = text_shape(&shapes, |t| t.ends_with(" %"));
+        assert_eq!(name.len(), 1);
+        for (clip, t) in name.into_iter().chain(found) {
+            assert_eq!(t.galley.rows.len(), 1, "one line");
+            assert!(clip.height() <= 260.0, "clipped to the tile, not {clip:?}");
+            assert!(clip.contains_rect(t.visual_bounding_rect()), "inside its clip");
+        }
+    }
+
+    #[test]
+    fn the_battery_tile_shows_95_percent_and_its_devices() {
+        let shapes = battery_shapes(
+            Menu::new(shipped_grid(), false),
+            vec![dev("Keyboard", 95, "discharging"), dev("Mouse", 99, "discharging")],
+        );
+        assert_eq!(text_shape(&shapes, |t| t == "95 %").len(), 1);
+        let lines = text_shape(&shapes, |t| t.contains("Keyboard 95"));
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn a_low_battery_draws_the_name_in_warn() {
+        let colour = |p: u8| {
+            let shapes = battery_shapes(
+                Menu::new(shipped_grid(), false),
+                vec![dev("Keyboard", p, "discharging")],
+            );
+            let name = text_shape(&shapes, |t| t == format!("{p} %"));
+            assert_eq!(name.len(), 1);
+            name[0].1.galley.job.sections[0].format.color
+        };
+        assert_eq!(colour(10), WARN);
+        let t = Theme::current(&{
+            let c = egui::Context::default();
+            crate::brand::apply(&c);
+            c
+        });
+        assert_eq!(colour(50), t.palette.foreground);
+    }
+
+    #[test]
+    fn battery_data_names_the_tile_over_a_reword() {
+        let mut menu = Menu::new(shipped_grid(), false);
+        for t in menu.tiles.iter_mut().filter(|t| t.action == Action::Battery) {
+            t.name = "Akku".into();
+        }
+        let shapes = battery_shapes(menu, vec![dev("Keyboard", 95, "discharging")]);
+        assert!(text_shape(&shapes, |t| t == "Akku").is_empty());
+        assert_eq!(text_shape(&shapes, |t| t == "95 %").len(), 1);
+    }
+
+    #[test]
+    fn the_charging_mark_has_a_glyph() {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut ok = false;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ok = ui
+                .ctx()
+                .fonts_mut(|f| f.has_glyphs(&FontId::proportional(11.0), battery::CHARGING_MARK));
+        });
+        out.textures_delta.clear();
+        assert!(ok, "no glyph for the charging mark");
     }
 
     #[test]
@@ -2545,6 +2725,9 @@ mod tests {
             },
         ];
         shot(&folded, "desktop-1080-folded.ppm", (1920, 1080), 1.0);
+        let mut bat = Menu::new(shipped_grid(), false);
+        bat.battery = vec![dev("Keyboard", 95, "charging"), dev("Mouse", 12, "discharging")];
+        shot(&bat, "desktop-1080-battery.ppm", (1920, 1080), 1.0);
         let (mut menu, _) = four_addons();
         let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
         menu.activate(settings, Instant::now());
