@@ -81,10 +81,10 @@ present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
 absent  "old regenerate unit" 'regenerate_ssh_host_keys\.service$'
 present "thinfloe-menu"          'usr/bin/thinfloe-menu$'
 present "session verdict"     'usr/libexec/thinfloe/session-verdict$'
-for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 60-settings 80-reboot 81-poweroff; do
+for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 60-settings 70-battery 80-reboot 81-poweroff; do
     present "tile $t" "etc/thinfloe/menu/$t\.desktop$"
 done
-for i in hard-drive-download usb log-out rotate-ccw power settings; do
+for i in hard-drive-download usb log-out rotate-ccw power settings battery; do
     present "Lucide icon $i" "usr/share/thinfloe/icons/$i\.svg$"
 done
 present "Lucide licence"      'usr/share/thinfloe/icons/LICENSE$'
@@ -871,7 +871,7 @@ else
 fi
 
 # Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
-# which the ThinLinc client exports to the session. The service is started
+# which the menu's battery tile reads (no ThinLinc). The service is started
 # by the timer only, and neither unit may order itself before anything
 # (see CLAUDE.md, the hook-order constraint).
 present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
@@ -886,6 +886,7 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         etc/systemd/system/thinfloe-peripheral-battery.service \
         etc/systemd/system/thinfloe-peripheral-battery.timer \
         usr/lib/tmpfiles.d/thinfloe-peripherals.conf \
+        etc/thinfloe/menu/70-battery.desktop \
         usr/libexec/thinfloe/peripheral-battery >/dev/null 2>&1 &&
    [[ -f "$PB/etc/systemd/system/thinfloe-peripheral-battery.timer" ]]; then
     PBU="$PB/etc/systemd/system"
@@ -910,17 +911,19 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - the battery service is missing, runs something else, or has an [Install] section"
         fail=1
     fi
-    if grep -qx 'ConditionPathExists=/home/tfuser/.config/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
-        echo "ok   - the battery service runs only when switched on"
-    else
-        echo "FAIL - the battery service lacks ConditionPathExists on the switch file"
+    if grep -q '^ConditionPathExists=' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "FAIL - the battery service has a ConditionPathExists (there is no switch any more)"
         fail=1
+    else
+        echo "ok   - the battery service runs on every timer firing"
     fi
-    if grep -qE '^squashfs-root/home/tfuser/\.config/thinfloe/peripheral-battery$' "$LIST"; then
-        echo "FAIL - the image ships the battery switch file (default must be off)"
-        fail=1
+    TILE="$PB/etc/thinfloe/menu/70-battery.desktop"
+    if grep -qx 'X-TF-Action=battery' "$TILE" 2>/dev/null &&
+       grep -qx 'Icon=battery' "$TILE" 2>/dev/null; then
+        echo "ok   - the battery tile has X-TF-Action=battery and Icon=battery"
     else
-        echo "ok   - the image ships no battery switch file"
+        echo "FAIL - 70-battery.desktop lacks X-TF-Action=battery or Icon=battery"
+        fail=1
     fi
     if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
             "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
@@ -931,7 +934,7 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
     fi
     if grep -qx 'd /run/thinfloe/peripherals 0755 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf" &&
        grep -qx 'd /run/thinfloe/peripherals-state 0700 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf"; then
-        echo "ok   - the exported directory is 0755, the state directory 0700"
+        echo "ok   - the battery directory is 0755, the state directory 0700"
     else
         echo "FAIL - the battery directories are missing or have the wrong mode"
         fail=1
