@@ -1,40 +1,11 @@
 #!/bin/sh
-# Hook run by thinfloe-addon after it installs or updates the ThinLinc client.
-#
-# 1. The client starts its own PulseAudio 6.0 from
-#    /opt/thinlinc/lib/tlclient/pulseaudio; the package puts that daemon
-#    there, so put the PipeWire shim over it. A failure here fails the hook
-#    and so the install.
-# 2. When the Settings switch for the battery display is on, have
-#    peripheral-battery thinlinc-config export /run/thinfloe/peripherals
-#    (the battery file) read-only to the session, through the client's local
-#    drive redirection. Mandatory, because every saved home carries a
-#    ~/.thinlinc/tlclient.conf with NFS_SERVER_ENABLED=0, which beats the
-#    system file. dpkg -i rewrites the mandatory file, so this runs after
-#    every install. A failure here is only logged: ThinLinc must not vanish
-#    from the machine over a battery display.
-#
-# TF_THINLINC_DIR, TF_SHIM, TF_BATTERY_HELPER and TF_BATTERY_HOME exist for
-# test/integration/test-thinlinc-hook.sh.
+# Hook run by thinfloe-addon after it installs the ThinLinc client. The client starts
+# its own PulseAudio 6.0 from /opt/thinlinc/lib/tlclient/pulseaudio; the
+# package puts that daemon there, so put the PipeWire shim over it.
+# TF_THINLINC_DIR and TF_SHIM exist for test/integration/test-thinlinc-hook.sh.
 set -e
 TL=${TF_THINLINC_DIR:-/opt/thinlinc}
 SHIM=${TF_SHIM:-/usr/libexec/thinfloe/tlclient-pulseaudio}
-HELPER=${TF_BATTERY_HELPER:-/usr/libexec/thinfloe/peripheral-battery}
-
 f=$TL/lib/tlclient/pulseaudio
-if [ -e "$f" ]; then
-    install -m 0755 "$SHIM" "$f"
-fi
-
-export_battery() {
-    "$HELPER" thinlinc-config
-}
-
-# thinfloe-addon keeps a hook's output only when the hook fails, so the
-# message also goes to the journal.
-if ! err=$(export_battery 2>&1); then
-    msg="thinfloe: battery export not configured: ${err:-$HELPER thinlinc-config failed}"
-    echo "$msg"
-    command -v logger >/dev/null 2>&1 && logger -t thinfloe-addon -- "$msg" || true
-fi
-exit 0
+[ -e "$f" ] || exit 0
+install -m 0755 "$SHIM" "$f"
