@@ -61,6 +61,93 @@ BOOT_EFI_MOUNT = "/run/thinfloe/storage/efi"
 # first, the EFI build the second.
 SYSLINUX_CFGS = ("syslinux.cfg", "efi/boot/syslinux.cfg")
 
+# ============ Progress ============
+
+class Progress:
+    """Reports what a long operation is doing.
+
+    Batch mode (the menu reads it) writes one line per message:
+      @step <id> <text>      a phase starts
+      @progress <done> <total|->   bytes so far; "-" when the total is unknown
+      @done <id>             the phase ended
+      @result ok|failed <reason>
+    Newlines in text are replaced by spaces so one message stays one line.
+
+    Interactive mode (SSH) prints "==> <text>" for a step and a carriage
+    return line "  <MiB done> of <MiB total> MiB" for progress, ended by a
+    newline at done == total, at done() or before a failure. A failed result
+    prints "Failed: <reason>"; a successful one and done() print nothing more.
+
+    progress() is rate limited to min_interval seconds, except for the last
+    call (done == total).
+    """
+
+    def __init__(self, out, batch: bool, min_interval: float = 0.5):
+        self.out = out
+        self.batch = batch
+        self.min_interval = min_interval
+        self._last = None  # monotonic time of the last printed progress
+        self._open = False  # an interactive progress line lacks its newline
+
+    @staticmethod
+    def _one_line(text: str) -> str:
+        return " ".join(str(text).split("\n")).replace("\r", " ")
+
+    def _emit(self, text: str) -> None:
+        self.out.write(text)
+        self.out.flush()
+
+    def _close_line(self) -> None:
+        if self._open:
+            self._emit("\n")
+            self._open = False
+
+    def step(self, id: str, text: str) -> None:
+        if self.batch:
+            self._emit("@step %s %s\n" % (id, self._one_line(text)))
+        else:
+            self._close_line()
+            self._emit("==> %s\n" % self._one_line(text))
+
+    def progress(self, done: int, total: Optional[int]) -> None:
+        last = total is not None and done >= total
+        now = time.monotonic()
+        if (not last and self._last is not None
+                and now - self._last < self.min_interval):
+            return
+        self._last = now
+        if self.batch:
+            self._emit("@progress %d %s\n" % (done, "-" if total is None else total))
+            return
+        mib = done // (1024 * 1024)
+        if total is None:
+            line = "\r  %d MiB" % mib
+        else:
+            line = "\r  %d of %d MiB" % (mib, total // (1024 * 1024))
+        self._emit(line)
+        self._open = True
+        if last:
+            self._close_line()
+
+    def done(self, id: str) -> None:
+        if self.batch:
+            self._emit("@done %s\n" % id)
+        else:
+            self._close_line()
+
+    def result(self, ok: bool, reason: str) -> None:
+        if self.batch:
+            word = "ok" if ok else "failed"
+            reason = self._one_line(reason)
+            self._emit("@result %s%s\n" % (word, " " + reason if reason else ""))
+        elif not ok:
+            self._close_line()
+            self._emit("Failed: %s\n" % self._one_line(reason))
+
+
+# Interactive by default; batch mode replaces it.
+PROGRESS = Progress(sys.stdout, batch=False)
+
 # ============ Data Classes ============
 
 @dataclass
