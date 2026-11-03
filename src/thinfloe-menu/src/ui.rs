@@ -1367,17 +1367,26 @@ mod tests {
     }
 
     #[test]
-    fn the_charging_mark_has_a_glyph() {
+    fn the_drawn_battery_characters_have_glyphs() {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
-        let mut ok = false;
+        let mut missing: Vec<String> = Vec::new();
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            ok = ui
-                .ctx()
-                .fonts_mut(|f| f.has_glyphs(&FontId::proportional(11.0), battery::CHARGING_MARK));
+            ui.ctx().fonts_mut(|f| {
+                for (label, font) in [
+                    ("geo 21", brand::geo(21.0)),
+                    ("proportional 11", FontId::proportional(11.0)),
+                ] {
+                    for text in [battery::CHARGING_MARK, "\u{2013}", "\u{2026}", "\u{00B7}"] {
+                        if !f.has_glyphs(&font, text) {
+                            missing.push(format!("{label}: {text:?}"));
+                        }
+                    }
+                }
+            });
         });
         out.textures_delta.clear();
-        assert!(ok, "no glyph for the charging mark");
+        assert!(missing.is_empty(), "no glyph for {missing:?}");
     }
 
     #[test]

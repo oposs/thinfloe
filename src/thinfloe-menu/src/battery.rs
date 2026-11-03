@@ -47,7 +47,13 @@ pub fn sanitise(name: &str) -> String {
                     | '\u{2029}'
                     | '\u{2060}'..='\u{2064}'
                     | '\u{2066}'..='\u{2069}'
-                    | '\u{FEFF}');
+                    | '\u{FEFF}'
+                    | '\u{061C}'
+                    | '\u{00AD}'
+                    | '\u{180E}'
+                    | '\u{206A}'..='\u{206F}'
+                    | '\u{FFF9}'..='\u{FFFB}'
+                    | '\u{E0000}'..='\u{E007F}');
             if bad { '?' } else { c }
         })
         .collect();
@@ -218,6 +224,20 @@ mod tests {
     #[test]
     fn names_are_sanitised_and_cut() {
         assert_eq!(sanitise("A\u{202e}B\u{2028}C\x1b"), "A?B?C?");
+        for c in [
+            '\u{061C}',
+            '\u{00AD}',
+            '\u{180E}',
+            '\u{206A}',
+            '\u{206F}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{E0000}',
+            '\u{E0041}',
+            '\u{E007F}',
+        ] {
+            assert_eq!(sanitise(&format!("A{c}B")), "A?B", "U+{:04X}", c as u32);
+        }
         assert_eq!(sanitise(&"W".repeat(200)).chars().count(), 64);
         assert_eq!(sanitise("  "), "unknown device");
     }
