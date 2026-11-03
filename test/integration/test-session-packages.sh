@@ -870,6 +870,65 @@ else
     fail=1
 fi
 
+# Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
+# which the ThinLinc client exports to the session. The service is started
+# by the timer only, and neither unit may order itself before anything
+# (see CLAUDE.md, the hook-order constraint).
+present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-peripheral-battery\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.timer is enabled"
+else
+    echo "FAIL - thinfloe-peripheral-battery.timer is not enabled; the battery file would never be written"
+    fail=1
+fi
+PB="$DPKG_TMP/pb"
+if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
+        etc/systemd/system/thinfloe-peripheral-battery.service \
+        etc/systemd/system/thinfloe-peripheral-battery.timer \
+        usr/lib/tmpfiles.d/thinfloe-peripherals.conf \
+        usr/libexec/thinfloe/peripheral-battery >/dev/null 2>&1 &&
+   [[ -f "$PB/etc/systemd/system/thinfloe-peripheral-battery.timer" ]]; then
+    PBU="$PB/etc/systemd/system"
+    if [[ -x "$PB/usr/libexec/thinfloe/peripheral-battery" ]]; then
+        echo "ok   - the battery helper is executable"
+    else
+        echo "FAIL - /usr/libexec/thinfloe/peripheral-battery is missing or not executable"
+        fail=1
+    fi
+    if grep -qx 'OnBootSec=30s' "$PBU/thinfloe-peripheral-battery.timer" &&
+       grep -qx 'OnUnitActiveSec=5min' "$PBU/thinfloe-peripheral-battery.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$PBU/thinfloe-peripheral-battery.timer"; then
+        echo "ok   - the battery timer runs 30 s after boot and every 5 min"
+    else
+        echo "FAIL - the battery timer is not OnBootSec=30s / OnUnitActiveSec=5min without a random delay"
+        fail=1
+    fi
+    if grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null &&
+       ! grep -q '^\[Install\]' "$PBU/thinfloe-peripheral-battery.service"; then
+        echo "ok   - the battery service runs the helper and is started by the timer only"
+    else
+        echo "FAIL - the battery service is missing, runs something else, or has an [Install] section"
+        fail=1
+    fi
+    if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
+            "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "FAIL - a battery unit declares Before= (ordering cycle risk)"
+        fail=1
+    else
+        echo "ok   - the battery units declare no Before="
+    fi
+    if grep -qx 'd /run/thinfloe/peripherals 0755 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf" &&
+       grep -qx 'd /run/thinfloe/peripherals-state 0700 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf"; then
+        echo "ok   - the exported directory is 0755, the state directory 0700"
+    else
+        echo "FAIL - the battery directories are missing or have the wrong mode"
+        fail=1
+    fi
+else
+    echo "FAIL - cannot extract the battery units from $SQSH"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

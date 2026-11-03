@@ -1,0 +1,10 @@
+[Unit]
+Description=Read the battery charge of keyboards and mice
+# Started by thinfloe-peripheral-battery.timer only, so no [Install]. No
+# Before= on anything: see CLAUDE.md, "A multi-user.target unit must never
+# declare Before= on a sysinit.target unit".
+
+[Service]
+Type=oneshot
+StandardOutput=journal
+ExecStart=/usr/libexec/thinfloe/peripheral-battery

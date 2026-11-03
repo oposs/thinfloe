@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the battery file of keyboards and mice every 5 minutes
+
+# No RandomizedDelaySec: the file is local to this machine, and a delay
+# would only leave it empty longer after boot.
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
