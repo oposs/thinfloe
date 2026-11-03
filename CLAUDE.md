@@ -258,7 +258,20 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   is stored in `~/.local/state/wireplumber/default-routes`, travels with the
   home archive and wins. `test-session-packages.sh` asks the image's
   WirePlumber for both values. **Not verified on hardware.**
-- Peripheral battery: `/usr/libexec/thinfloe/peripheral-battery` (root,
+- Peripheral battery: off by default (owner, 2026-11-03). The Settings row
+  `Keyboard and mouse battery` runs `sudo -n
+  /usr/libexec/thinfloe/peripheral-battery enable|disable`. The state is the
+  file `~/.config/thinfloe/peripheral-battery` (content `on`), written only
+  by the helper, which resolves the home from `getent passwd tfuser`; it
+  travels with `save-home`. On: `thinfloe-peripheral-battery.service` runs
+  (`ConditionPathExists=` on the state file; the timer stays enabled),
+  the battery file exists and the ThinLinc hook writes the two NFS keys.
+  Off: none of it, and `disable` removes the keys and the battery file. A
+  change reaches ThinLinc when the client starts again. The helper's
+  subcommands are `enable`, `disable`, `status` (`on` or `off`) and
+  `thinlinc-config` (makes the mandatory config match the state), which the
+  hook calls; with no argument it does one reading run.
+  `/usr/libexec/thinfloe/peripheral-battery` (root,
   `thinfloe-peripheral-battery.timer`, 30 s after boot and every 5 min)
   writes `/run/thinfloe/peripherals/battery`, one line per device, sorted:
   `name<TAB>percent<TAB>state<TAB>read_epoch` (`percent` `-` when unknown;
@@ -275,9 +288,9 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   one off since boot gets the receiver's short pairing name (`MX MCHNCL`)
   and `-`. Full names are cached in `/run/thinfloe/peripherals-state/`,
   next to the temporary file: the exported directory holds only `battery`.
-  The ThinLinc add-on hook (`addon-hooks/10-thinlinc`) writes
-  `NFS_SERVER_ENABLED=1` and `NFS_EXPORTS=/run/thinfloe/peripherals,ro`
-  into `/opt/thinlinc/etc/tlclient_mandatory.conf`, so the session sees the
+  When switched on, the ThinLinc add-on hook (`addon-hooks/10-thinlinc`,
+  through `thinlinc-config`) writes `NFS_SERVER_ENABLED=1` and
+  `NFS_EXPORTS=/run/thinfloe/peripherals,ro` into `/opt/thinlinc/etc/tlclient_mandatory.conf`, so the session sees the
   file as `~/thindrives/peripherals/battery`. The ThinLinc server mounts it
   with `tl-mount-localdrives` from `xstartup.d/40-tl-mount-localdrives`,
   i.e. only when a session starts: on a reconnect to a running session
@@ -288,13 +301,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `~/.thinlinc/tlclient.conf` says `NFS_SERVER_ENABLED=0`; the cost is that
   a user cannot export other local drives (no machine did, owner
   2026-11-03). A failure there is logged (`thinfloe: battery export not
-  configured`) and never fails the ThinLinc install. Exposure: every
-  ThinLinc session now runs the client's NFS server, tunnelled to the
+  configured`) and never fails the ThinLinc install. Exposure: when switched on, every
+  ThinLinc session runs the client's NFS server, tunnelled to the
   ThinLinc server, exporting this one read-only directory. Solaar was
   tried and rejected: 44 packages, 39 MB, GTK 3. Guards:
   `test/unit/test_peripheral_battery.py` (a fake receiver that answers as
-  the Bolt receiver did on 2026-11-03), `test/integration/test-thinlinc-hook.sh`,
-  `test-session-packages.sh` (units, timer, directories).
+  the Bolt receiver did on 2026-11-03), `test/integration/test-thinlinc-hook.sh` (export only when switched
+  on), `test-session-packages.sh` (units, timer, `ConditionPathExists=`,
+  directories), and the Settings row tests in `src/thinfloe-menu`.
   **Confirmed on hardware (2026-11-03, 10.46.102.86, helper, units and hook
   copied into the running system):** both devices read in 0.5 s, the client
   exports the directory (`unfsd: /run/thinfloe/peripherals`), and after
@@ -302,7 +316,9 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   **Not verified on hardware:** a boot of the built image (ordering cycles;
   `make qemu-smoke` was not run either), that the export is read-only from
   the server, and the `not reachable` line written by the timer for a
-  switched-off device (the reply it relies on was measured).
+  switched-off device (the reply it relies on was measured), the switch on
+  hardware, and that the timer fires again after `enable` on a boot whose
+  first run the condition skipped.
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
@@ -663,7 +679,11 @@ home; removing it is later work.
   because the stop signals a process group (`kill(-pgid)`), which would
   otherwise be the menu's own. sudo keeps tfuser's real uid, so it receives
   the SIGTERM and relays it to the tool; tfuser cannot signal the root tool
-  itself. A
+  itself. The
+  battery switch job (Settings, `battery`) is neither listed nor waited for
+  at Log out, Restart or Power off: it takes a moment, and a cut-off
+  leaves at most a state file and mandatory config the next
+  `thinlinc-config` corrects. A
   Save-On-Exit program that ends while the question waits only for an
   add-on job starts no save: the logout save follows, or, on Stay, the
   owed save starts then.
