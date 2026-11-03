@@ -384,6 +384,34 @@ class MainTests(unittest.TestCase):
     def battery(self):
         return (self.out / "battery").read_text()
 
+    def test_a_held_lock_ends_in_lock_busy_not_in_a_wait_without_end(self):
+        import fcntl
+        fd = os.open(str(self.state / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with mock.patch.object(mod, "LOCK_WAIT", 0.3), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = self.run_main(FakeReceiver({}, self.clock))
+        self.assertEqual(code, 1)
+        self.assertIn("thinfloe: battery: lock busy", err.getvalue())
+        self.assertFalse((self.out / "battery").exists())
+
+    def test_a_lock_freed_during_the_wait_is_taken(self):
+        import fcntl
+        fd = os.open(str(self.state / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        real_sleep = mod.time.sleep
+
+        def sleep_and_release(t):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            real_sleep(t)
+
+        with mock.patch.object(mod, "LOCK_WAIT", 5.0), \
+                mock.patch.object(mod.time, "sleep", sleep_and_release):
+            code = self.run_main(FakeReceiver({}, self.clock))
+        self.assertEqual(code, 0)
+
     def test_main_writes_file_and_name_cache(self):
         r = FakeReceiver({1: dev("MX Anywhere 3S for Business", "MX Anywhere3SB", ub=(90, 8, 0))}, self.clock)
         self.assertEqual(self.run_main(r), 0)
@@ -458,7 +486,7 @@ class MainTests(unittest.TestCase):
         with mock.patch.object(mod.fcntl, "flock", flock), \
                 mock.patch.object(mod, "open_transport", transport):
             self.assertEqual(mod.main(), 0)
-        self.assertEqual(calls[0], (str(self.state / "lock"), mod.fcntl.LOCK_EX))
+        self.assertEqual(calls[0], (str(self.state / "lock"), mod.fcntl.LOCK_EX | mod.fcntl.LOCK_NB))
         self.assertEqual(calls[1][0], "open")
         self.assertEqual(stat.S_IMODE((self.state / "lock").stat().st_mode), 0o600)
 

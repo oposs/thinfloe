@@ -6,5 +6,7 @@ Description=Read the battery charge of keyboards and mice
 
 [Service]
 Type=oneshot
+# A hung run would hold the helper's lock for ever.
+TimeoutStartSec=60
 StandardOutput=journal
 ExecStart=/usr/libexec/thinfloe/peripheral-battery

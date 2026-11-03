@@ -39,6 +39,8 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 REQUEST_TIMEOUT = 2.0   # an idle keyboard answered after 850 ms
 RUN_BUDGET = 15.0
+LOCK_WAIT = 30.0        # how long a run waits for another one
+LOCK_POLL = 0.1
 SWID = 0x0A
 MAX_NAME = 64
 
@@ -365,12 +367,21 @@ def read_batteries() -> int:
     except OSError as e:
         log(str(lockpath), e.strerror or str(e))
         return 1
-    try:
-        fcntl.flock(lockfd, fcntl.LOCK_EX)
-    except OSError as e:
-        os.close(lockfd)
-        log(str(lockpath), e.strerror or str(e))
-        return 1
+    give_up = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= give_up:
+                os.close(lockfd)
+                print("thinfloe: battery: lock busy", file=sys.stderr)
+                return 1
+            time.sleep(LOCK_POLL)
+        except OSError as e:
+            os.close(lockfd)
+            log(str(lockpath), e.strerror or str(e))
+            return 1
     try:
         return _read_locked(sysfs, dev, outdir, state)
     finally:

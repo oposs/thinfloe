@@ -911,6 +911,12 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - the battery service is missing, runs something else, or has an [Install] section"
         fail=1
     fi
+    if grep -qx 'TimeoutStartSec=60' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "ok   - the battery service ends a hung run after 60 s"
+    else
+        echo "FAIL - the battery service lacks TimeoutStartSec=60 (a hung run would hold the helper's lock for ever)"
+        fail=1
+    fi
     if grep -q '^ConditionPathExists=' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
         echo "FAIL - the battery service has a ConditionPathExists (there is no switch any more)"
         fail=1

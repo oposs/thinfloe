@@ -283,16 +283,19 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   shipped files). A user file of that name may reword Name, Comment and
   Icon, but while a device is listed the drawn name and comment come from
   the battery file. The tile shows when the file lists a device. Its name
-  is the lowest reachable percent, or `-` (an en dash) when none is. Its
+  is the lowest reachable percent, or `–` (an en dash, U+2013) when none is. Its
   comment has one entry per device (name cut to 14 characters, an en dash
   for not reachable, `+` while charging; the menu font has no glyph for
   U+26A1) on at most two lines. Only the tile's name turns the warn colour,
   at state `low` or `critical` or at 15 % or less; the device entries stay
   muted. The menu reads the file at start, on every change (the 1 s add-on
-  watcher) and after a click. A click runs `sudo -n` the reader in its own
+  watcher) and after a click. A click runs the reader through `sudo -n` in its own
   process group (output under `battery`) and then logs `<name>: <percent>
   %, <state>, read HH:MM` per device. Limitation: the menu, and so the tile,
   is hidden while a fullscreen window (the ThinLinc client) covers it.
+  The service has `TimeoutStartSec=60`; the helper waits up to 30 s for
+  its lock (`LOCK_NB`, retried), then logs `thinfloe: battery: lock busy`
+  and exits 1, so a hung run cannot hold a click's job for ever.
   Guards: `test/unit/test_peripheral_battery.py` (a fake receiver that
   answers as the Bolt receiver did on 2026-11-03), `test-session-packages.sh`
   (units, timer, tile, icon, directories), `battery.rs` and the menu and
