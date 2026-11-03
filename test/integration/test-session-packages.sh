@@ -910,6 +910,18 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - the battery service is missing, runs something else, or has an [Install] section"
         fail=1
     fi
+    if grep -qx 'ConditionPathExists=/home/tfuser/.config/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "ok   - the battery service runs only when switched on"
+    else
+        echo "FAIL - the battery service lacks ConditionPathExists on the switch file"
+        fail=1
+    fi
+    if grep -qE '^squashfs-root/home/tfuser/\.config/thinfloe/peripheral-battery$' "$LIST"; then
+        echo "FAIL - the image ships the battery switch file (default must be off)"
+        fail=1
+    else
+        echo "ok   - the image ships no battery switch file"
+    fi
     if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
             "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
         echo "FAIL - a battery unit declares Before= (ordering cycle risk)"

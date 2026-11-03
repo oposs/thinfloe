@@ -1,10 +1,12 @@
 #!/bin/bash
 # Offline tests for overlay/usr/libexec/thinfloe/addon-hooks/10-thinlinc, the
 # hook thinfloe-addon runs after it installs the ThinLinc client. It puts the
-# PipeWire shim over the client's PulseAudio and exports the battery file
+# PipeWire shim over the client's PulseAudio and, when the Settings switch is
+# on, has peripheral-battery thinlinc-config export the battery file
 # (/run/thinfloe/peripherals) read-only to the session through
 # tlclient_mandatory.conf. A temporary directory stands in for /opt/thinlinc
-# (TF_THINLINC_DIR); TF_SHIM points at the shim in the overlay.
+# (TF_THINLINC_DIR) and for the home (TF_BATTERY_HOME); TF_SHIM and
+# TF_BATTERY_HELPER point at the overlay files.
 #
 # Usage: test/integration/test-thinlinc-hook.sh
 
@@ -35,10 +37,15 @@ tree() {
     : > "$d/etc/tlclient_mandatory.conf"
     echo "$d"
 }
-run() {  # run DIR [SHIM]: output in $out, exit status in $rc
-    out=$(TF_THINLINC_DIR="$1" TF_SHIM="${2:-$SHIM}" sh "$HOOK" 2>&1)
+HELPER="$REPO/overlay/usr/libexec/thinfloe/peripheral-battery"
+on()  { mkdir -p "$work/home/.config/thinfloe"; echo on > "$work/home/.config/thinfloe/peripheral-battery"; }
+off() { rm -f "$work/home/.config/thinfloe/peripheral-battery"; }
+run() {  # run DIR [SHIM] [HELPER]: output in $out, exit status in $rc
+    out=$(TF_THINLINC_DIR="$1" TF_SHIM="${2:-$SHIM}" TF_BATTERY_HOME="$work/home" \
+          TF_BATTERY_HELPER="${3:-$HELPER}" sh "$HOOK" 2>&1)
     rc=$?
 }
+on
 
 d=$(tree empty)
 run "$d"
@@ -89,11 +96,30 @@ fi
 d=$(tree noetc)
 rm -r "$d/etc"
 run "$d"
-if [[ $rc -eq 0 && "$(cat "$d/etc/tlclient_mandatory.conf" 2>/dev/null)" == "$EXPECTED" ]]; then
-    ok "a missing etc/ is created"
+if [[ $rc -eq 0 && ! -e "$d/etc" ]]; then
+    ok "ThinLinc without etc/ has nothing to configure"
 else
     bad "missing etc/: rc=$rc, $out"
 fi
+
+d=$(tree off1)
+off
+run "$d"
+if [[ $rc -eq 0 && ! -s "$d/etc/tlclient_mandatory.conf" ]]; then
+    ok "switched off, an empty mandatory file stays empty"
+else
+    bad "switched off, empty file: rc=$rc, $(cat "$d/etc/tlclient_mandatory.conf")"
+fi
+
+d=$(tree off2)
+printf 'PRINTER_ENABLED=0\n%s\n' "$EXPECTED" > "$d/etc/tlclient_mandatory.conf"
+run "$d"
+if [[ $rc -eq 0 && "$(cat "$d/etc/tlclient_mandatory.conf")" == "PRINTER_ENABLED=0" ]]; then
+    ok "switched off, keys an earlier hook wrote are removed, others kept"
+else
+    bad "switched off, old keys: rc=$rc, $(cat "$d/etc/tlclient_mandatory.conf")"
+fi
+on
 
 d=$(tree badetc)
 rm -r "$d/etc"
@@ -104,6 +130,15 @@ if [[ $rc -eq 0 && "$out" == *"thinfloe: battery export not configured: "* ]] &&
     ok "an unusable etc/ is logged, the hook still succeeds and installs the shim"
 else
     bad "unusable etc/: rc=$rc, output: $out"
+fi
+
+d=$(tree nohelper)
+run "$d" "$SHIM" "$work/none"
+if [[ $rc -eq 0 && "$out" == *"thinfloe: battery export not configured: "* ]] &&
+   cmp -s "$d/lib/tlclient/pulseaudio" "$SHIM"; then
+    ok "a missing helper is logged, the hook still succeeds and installs the shim"
+else
+    bad "missing helper: rc=$rc, output: $out"
 fi
 
 d=$(tree noshim)

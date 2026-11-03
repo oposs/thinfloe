@@ -1,5 +1,9 @@
 [Unit]
 Description=Read the battery charge of keyboards and mice
+# The Settings switch: no state file, no reading. Off skips every timer run;
+# "peripheral-battery enable" starts this service, which also gives
+# OnUnitActiveSec a start to count from.
+ConditionPathExists=/home/tfuser/.config/thinfloe/peripheral-battery
 # Started by thinfloe-peripheral-battery.timer only, so no [Install]. No
 # Before= on anything: see CLAUDE.md, "A multi-user.target unit must never
 # declare Before= on a sysinit.target unit".

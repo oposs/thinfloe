@@ -5,18 +5,21 @@
 #    /opt/thinlinc/lib/tlclient/pulseaudio; the package puts that daemon
 #    there, so put the PipeWire shim over it. A failure here fails the hook
 #    and so the install.
-# 2. Export /run/thinfloe/peripherals (the battery file written by
-#    peripheral-battery) read-only to the session, through the client's
-#    local drive redirection. Mandatory, because every saved home carries a
+# 2. When the Settings switch for the battery display is on, have
+#    peripheral-battery thinlinc-config export /run/thinfloe/peripherals
+#    (the battery file) read-only to the session, through the client's local
+#    drive redirection. Mandatory, because every saved home carries a
 #    ~/.thinlinc/tlclient.conf with NFS_SERVER_ENABLED=0, which beats the
 #    system file. dpkg -i rewrites the mandatory file, so this runs after
 #    every install. A failure here is only logged: ThinLinc must not vanish
 #    from the machine over a battery display.
 #
-# TF_THINLINC_DIR and TF_SHIM exist for test/integration/test-thinlinc-hook.sh.
+# TF_THINLINC_DIR, TF_SHIM, TF_BATTERY_HELPER and TF_BATTERY_HOME exist for
+# test/integration/test-thinlinc-hook.sh.
 set -e
 TL=${TF_THINLINC_DIR:-/opt/thinlinc}
 SHIM=${TF_SHIM:-/usr/libexec/thinfloe/tlclient-pulseaudio}
+HELPER=${TF_BATTERY_HELPER:-/usr/libexec/thinfloe/peripheral-battery}
 
 f=$TL/lib/tlclient/pulseaudio
 if [ -e "$f" ]; then
@@ -24,22 +27,13 @@ if [ -e "$f" ]; then
 fi
 
 export_battery() {
-    conf=$TL/etc/tlclient_mandatory.conf
-    mkdir -p "$TL/etc" || return 1
-    tmp=$(mktemp "$TL/etc/.tlclient_mandatory.conf.XXXXXX") || return 1
-    {
-        if [ -f "$conf" ]; then
-            grep -v -e '^NFS_SERVER_ENABLED=' -e '^NFS_EXPORTS=' "$conf" || true
-        fi
-        echo 'NFS_SERVER_ENABLED=1'
-        echo 'NFS_EXPORTS=/run/thinfloe/peripherals,ro'
-    } > "$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$conf" || { rm -f "$tmp"; return 1; }
+    "$HELPER" thinlinc-config
 }
 
 # thinfloe-addon keeps a hook's output only when the hook fails, so the
 # message also goes to the journal.
 if ! err=$(export_battery 2>&1); then
-    msg="thinfloe: battery export not configured: ${err:-could not write $TL/etc/tlclient_mandatory.conf}"
+    msg="thinfloe: battery export not configured: ${err:-$HELPER thinlinc-config failed}"
     echo "$msg"
     command -v logger >/dev/null 2>&1 && logger -t thinfloe-addon -- "$msg" || true
 fi
