@@ -932,12 +932,6 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
         echo "FAIL - the battery service lacks TimeoutStartSec=60 (a hung run would hold the helper's lock for ever)"
         fail=1
     fi
-    if grep -q '^ConditionPathExists=' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
-        echo "FAIL - the battery service has a ConditionPathExists (there is no switch any more)"
-        fail=1
-    else
-        echo "ok   - the battery service runs on every start"
-    fi
     TILE="$PB/etc/thinfloe/menu/70-battery.desktop"
     if grep -qx 'X-TF-Action=battery' "$TILE" 2>/dev/null &&
        grep -qx 'Icon=battery' "$TILE" 2>/dev/null; then

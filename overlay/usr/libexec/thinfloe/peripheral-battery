@@ -21,7 +21,8 @@ Two sources:
 - /sys/class/power_supply entries with scope Device (Bluetooth devices,
   receivers the kernel drives).
 
-Run by thinfloe-peripheral-battery.timer. Every per-device failure is
+Run once at boot by thinfloe-peripheral-battery.service and every 5
+minutes by its timer. Every per-device failure is
 logged and skipped; exit 1 only when the file could not be written.
 
 The menu's battery tile reads the file, and a click runs this helper once

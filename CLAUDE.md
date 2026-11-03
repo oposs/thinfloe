@@ -266,7 +266,7 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   sorted. The boot run is `WantedBy=multi-user.target`, in parallel with the
   menu and with no `Before=` (not on `getty@tty1` either: a slow device must
   never delay the login). Measured 2026-11-03: the menu appeared about 16 s
-  after the kernel started, while the old `OnBootSec=30s` timer first read at
+  after the kernel started, while a timer with `OnBootSec=30s` first read at
   about 43 s, leaving the tile empty for about 27 s. One reading takes 0.2 to
   1 s (run budget up to 15 s). Line format: `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind` (`percent`
   `-` when unknown; `state` `discharging`, `charging`, `full`, `low`,
