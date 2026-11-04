@@ -136,6 +136,10 @@ terminal, a home backup, `thinfloe-upgrade`, Settings, Restart and Power off.
 Restart and Power off save the home directory first; if the save fails, the
 menu asks whether to stay or to go on anyway.
 
+Below the tiles a status area shows the battery of keyboards and mice, network
+traffic and hardware sensors, as far as the machine can report them. It takes
+no click and is hidden while a fullscreen window covers the menu.
+
 ThinLinc and OxuLnk are not in the image. Tick them in Settings: the image
 fetches the program from its source, keeps a copy on the boot stick and
 installs it at every boot, before the session starts. A network-booted

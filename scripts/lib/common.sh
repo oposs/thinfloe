@@ -6,7 +6,6 @@ set -euo pipefail
 # Color codes
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
@@ -20,10 +19,6 @@ log_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $*" >&2
 }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*" >&2
-}
-
 log_error() {
     echo -e "${RED}[ERROR]${NC} $*" >&2
 }
@@ -35,13 +30,6 @@ log_step() {
 die() {
     log_error "$*"
     exit 1
-}
-
-# Verify tool exists
-require_tool() {
-    local tool="$1"
-    command -v "$tool" >/dev/null 2>&1 || \
-        die "Required tool '$tool' not found. Please install it."
 }
 
 # Verify file exists and has minimum size
@@ -62,12 +50,6 @@ verify_file() {
 ensure_dir() {
     local dir="$1"
     [[ -d "$dir" ]] || mkdir -p "$dir"
-}
-
-# Run command with logging
-run() {
-    log_step "Running: $*"
-    "$@" || die "Command failed: $*"
 }
 
 # Format bytes to human readable. MB and GB carry one decimal, rounded:

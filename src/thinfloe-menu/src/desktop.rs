@@ -24,6 +24,12 @@ impl Entry {
 /// Parse a desktop entry. The error names the line, because the grid shows
 /// it on the tile and that is the only place a person at the machine sees it.
 pub fn parse(text: &str) -> Result<Entry, String> {
+    parse_group(text, "[Desktop Entry]")
+}
+
+/// `parse` for a file whose keys sit in the group `header` (`[Status
+/// Element]`, say); the same lines, escapes and errors.
+pub fn parse_group(text: &str, header: &str) -> Result<Entry, String> {
     let mut entry = Entry::default();
     let mut in_main = false;
     let mut seen_main = false;
@@ -37,7 +43,7 @@ pub fn parse(text: &str) -> Result<Entry, String> {
             if !line.ends_with(']') {
                 return Err(format!("line {line_no} is not a group header"));
             }
-            in_main = line == "[Desktop Entry]";
+            in_main = line == header;
             seen_main |= in_main;
             continue;
         }
@@ -45,7 +51,7 @@ pub fn parse(text: &str) -> Result<Entry, String> {
             return Err(format!("line {line_no} is not a desktop entry line"));
         };
         if !seen_main {
-            return Err(format!("line {line_no} comes before [Desktop Entry]"));
+            return Err(format!("line {line_no} comes before {header}"));
         }
         if !in_main {
             continue;
@@ -60,7 +66,7 @@ pub fn parse(text: &str) -> Result<Entry, String> {
         entry.keys.insert(key.to_string(), unescape(value.trim()));
     }
     if !seen_main {
-        return Err("no [Desktop Entry] group".to_string());
+        return Err(format!("no {header} group"));
     }
     Ok(entry)
 }

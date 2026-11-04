@@ -58,11 +58,6 @@ impl Action {
             Action::Run | Action::SaveHome | Action::Settings => None,
         }
     }
-
-    /// Whether this action ends the session.
-    pub fn ends(self) -> bool {
-        self.exit_code().is_some()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +154,19 @@ pub struct SourceDir {
 /// read, and only regular files no larger than `MAX_FILE_BYTES` are opened.
 /// `label` is how the notes name the directory.
 pub fn read_dir_bounded(dir: &Path, cap: usize, label: &str) -> SourceDir {
+    read_entries(dir, cap, label, ".desktop", "tile", desktop::parse)
+}
+
+/// `read_dir_bounded` for files ending in `ext`, each parsed by `parse`;
+/// `what` names one file in the notes ("tile", "status").
+pub fn read_entries(
+    dir: &Path,
+    cap: usize,
+    label: &str,
+    ext: &str,
+    what: &str,
+    parse: fn(&str) -> Result<Entry, String>,
+) -> SourceDir {
     let mut out = SourceDir::default();
     match fs::symlink_metadata(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
@@ -193,20 +201,20 @@ pub fn read_dir_bounded(dir: &Path, cap: usize, label: &str) -> SourceDir {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if name.ends_with(".desktop") && !name.starts_with('.') {
+        if name.ends_with(ext) && !name.starts_with('.') {
             names.push(name);
         }
     }
     names.sort();
     if names.len() > cap {
         out.notes.push(format!(
-            "{label} has {} tile files; only the first {cap} are shown",
+            "{label} has {} {what} files; only the first {cap} are shown",
             names.len()
         ));
         names.truncate(cap);
     }
     for name in names {
-        let entry = read_file_bounded(&dir.join(&name)).and_then(|t| desktop::parse(&t));
+        let entry = read_file_bounded(&dir.join(&name)).and_then(|t| parse(&t));
         out.files.push(SourceFile { name, entry });
     }
     out

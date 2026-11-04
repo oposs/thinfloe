@@ -19,10 +19,18 @@ pub const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
 /// A warning amber, for reasons drawn on a disabled tile.
 pub const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
 pub const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+/// A battery about to run out.
+pub const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
+/// The light grid lines of a status element's graph, a step above `TILE`.
+pub const GRID: Color32 = Color32::from_rgb(0x1c, 0x25, 0x30);
+/// The axes of a status element's graph.
+pub const AXIS: Color32 = Color32::from_rgb(0x3a, 0x46, 0x54);
 
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";
+/// Geo itself, for egui and for the status area's SVG text.
+pub static GEO_TTF: &[u8] = include_bytes!("../assets/Geo-Oblique.ttf");
 
 pub fn geo(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(GEO.into()))
@@ -63,7 +71,7 @@ pub fn apply(ctx: &Context) {
 /// row next to vertical stems spread over two, so the bars of "e", "a" and
 /// "B" looked too thin.
 fn geo_data() -> FontData {
-    let mut data = FontData::from_static(include_bytes!("../assets/Geo-Oblique.ttf"));
+    let mut data = FontData::from_static(GEO_TTF);
     data.tweak.hinting = Some(false);
     data
 }
