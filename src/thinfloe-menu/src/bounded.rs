@@ -36,6 +36,15 @@ pub fn read_bounded(path: &Path, max_bytes: u64, follow_symlinks: bool) -> Resul
     Ok(bytes)
 }
 
+/// A file of the system as text, `None` when it cannot be read or is larger
+/// than `max_bytes`. Symlinks count (sysfs is full of them); bytes that are
+/// not UTF-8 are replaced.
+pub fn read_text(path: &Path, max_bytes: u64) -> Option<String> {
+    read_bounded(path, max_bytes, true)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
 fn too_large(max_bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     if max_bytes < MIB {
@@ -79,6 +88,16 @@ mod tests {
             read_bounded(&d.join("b"), 1024 * 1024, false).unwrap_err(),
             "larger than 1 MiB"
         );
+    }
+
+    #[test]
+    fn text_is_lossy_and_bounded_and_follows_symlinks() {
+        let d = tmpdir("text");
+        fs::write(d.join("a"), b"x\xffy").unwrap();
+        symlink(d.join("a"), d.join("link")).unwrap();
+        assert_eq!(read_text(&d.join("link"), 10).as_deref(), Some("x\u{FFFD}y"));
+        assert_eq!(read_text(&d.join("a"), 2), None);
+        assert_eq!(read_text(&d.join("missing"), 10), None);
     }
 
     #[test]

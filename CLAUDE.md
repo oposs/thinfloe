@@ -293,6 +293,342 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   is stored in `~/.local/state/wireplumber/default-routes`, travels with the
   home archive and wins. `test-session-packages.sh` asks the image's
   WirePlumber for both values. **Not verified on hardware.**
+- Peripheral battery: the menu's status area shows the batteries of
+  keyboards and mice (owner, 2026-11-03). The reader `/usr/libexec/thinfloe/peripheral-battery`
+  (root; `thinfloe-peripheral-battery.service`, once at boot and then every
+  5 min from `thinfloe-peripheral-battery.timer`, which has no `OnBootSec`:
+  `OnUnitActiveSec` counts from the boot run) writes `/run/thinfloe/peripherals/battery`, one line per device,
+  sorted by name; devices of one name stay in a fixed order (slot, or place
+  in `/sys/class/power_supply`), never by value, because the menu numbers them
+  in file order. The boot run is `WantedBy=multi-user.target`, in parallel with the
+  menu and with no `Before=` (not on `getty@tty1` either: a slow device must
+  never delay the login). Measured 2026-11-03: the menu appeared about 16 s
+  after the kernel started, while a timer with `OnBootSec=30s` first read at
+  about 43 s, leaving the display empty for about 27 s. One reading takes 0.2 to
+  1 s (run budget up to 15 s). Line format: `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind` (`percent`
+  `-` when unknown; `state` `discharging`, `charging`, `full`, `low`,
+  `critical`, `unknown` or `not reachable`; `kind` `keyboard`, `mouse`,
+  `numpad`, `presenter`, `trackball`, `touchpad` or `unknown`; the menu
+  still reads a 4-field line, kind unknown). A run holds
+  `/run/thinfloe/peripherals-state/lock`, so the boot run, the timer and
+  the watcher take turns. Any argument but `watch` is exit 2. A Logi Bolt receiver (`046d:c548`) is left
+  to `hid-generic` (mainline `hid-logitech-dj` does not support Bolt), so the
+  kernel has no battery for its devices: the reader asks them over HID++ on
+  the receiver's hidraw node. Every `power_supply` entry with scope Device
+  is added, and a `POWER_SUPPLY_CAPACITY` of 0 is no percent, as on HID++: a
+  driver reports it before it knows. Device names in a uevent file may be any
+  bytes: such a file is decoded with replacement and split on newlines only,
+  so a name cannot end a run and a Unicode line separator in one cannot add a
+  key. A literal newline in a name can: the file has no quoting, so what
+  follows it reads as a key of its own, and the last value of a key counts. Pairing comes from the receiver's register `b5`/`50+n`, never
+  from the ping, since an empty slot answers the ping with an error too
+  (code `0x09`; a switched-off device `0x04`, both after about 50 ms; an
+  idle keyboard took 850 ms to answer, hence the 2 s request timeout). Error
+  `0x08` (unknown device, measured) on the register is an empty slot; any other
+  error, or no reply in time, the run's budget included, says nothing about
+  the slot, which then keeps what the name cache knows of it as `not
+  reachable`, as do the slots of a node that fails during a run. So does a slot
+  whose pairing name does not arrive whole: any error or timeout on one of its
+  chunks. A slot nobody knows is logged and gets no line. A state file that
+  is not text, or holds digits `int()` refuses, counts as absent (logged
+  `corrupt, ignored`), for a run and for the watcher, and the next run writes
+  it anew. The
+  same register gives the kind: the low nibble of the first byte after the
+  sub-address, `1` keyboard, `2` mouse (measured: MX Mechanical `01`, MX
+  Anywhere 3S `42`), `3` numpad, `4` presenter, `8` trackball, `9`
+  touchpad (Solaar's numbers, unmeasured). A `power_supply` entry has no
+  kind; a name containing Keyboard or Mouse is taken as one. A device that
+  does not answer keeps its last reading and its kind as `not reachable`,
+  also one that stops answering partway through its reading (a feature it
+  lacks is told from one it did not answer about);
+  one off since boot gets the receiver's short pairing name (`MX MCHNCL`)
+  and `-`. A device that answers but does not give all of its full name keeps
+  the cached one. Full names and kinds are cached in
+  `/run/thinfloe/peripherals-state/names`, next to the temporary file.
+  Two devices can share a name, so a device's identity is `HID_PHYS/slot`
+  (a `power_supply` entry: its name, `#2` and so on for the next of that name,
+  since its sysfs name changes when it reconnects). Limit: that place is all
+  that tells two `power_supply` devices of one name apart. When the first one
+  goes, the second moves up to its place: the live line is right, but the line
+  shown as `not reachable` keeps the second device's last value, and the numbers
+  of the menu's two lines can swap. HID++ devices have no such limit. `readings` in the same
+  directory is the battery file with the identity in front of each line; the
+  last reading of a device comes from there, and the battery file keeps its
+  format. A new name under an identity is a device paired anew and gets no
+  old value. Solaar was tried and rejected: 44 packages,
+  39 MB, GTK 3.
+  **Status area** (owner, 2026-11-03). Below the tile grid and above the
+  log, a grid of the tiles' cell size and gaps, 4 columns, not drawn at all
+  when no element has anything to show. An element moves up until a shown
+  element above it in its columns, or the top, stops it (`moved_up` in
+  `status/mod.rs`; owner, 2026-11-04), and the area has as many rows as the
+  elements then use (at most 3), so no row stays blank. It takes no click. Code: `src/thinfloe-menu/src/status/`;
+  spec `docs/superpowers/specs/2026-11-03-status-area.md`.
+  - *Space* (owner, 2026-11-04). Tiles and area are centred together between
+    header and log, 32 pt apart, computed from the rows of the configured
+    elements (`Area::planned_rows`: on a short screen their short forms), not
+    from those shown, so the tiles and the area's top do not jump when an element
+    appears or goes; the elements inside it close up (`moved_up`). A menu with no status file has the
+    tiles centred alone. The cells take the tiles' height, which shrinks with the
+    screen (76 down to 64 pt). Where the planned rows do not fit, the grid starts
+    16 pt under the header, the area is pinned 16 pt above the log, always fully
+    visible, and only the tile grid scrolls, in the band above it (`layout()` in
+    `ui.rs`, `Layout.status`, `Layout.tiles`). With 8 tiles and the shipped files
+    everything fits with the full gap at 1280x720, 1366x768, 1440x900, 1080p
+    and 4K at scale 2.
+  - *Elements from files.* One file per element in `/etc/thinfloe/status/`,
+    shipped only, no user files yet (owner, 2026-11-03;
+    `overlay/etc/thinfloe/status/10-battery.conf`: group `[Status
+    Element]`, `Type=battery`, `Cell=0,0` (column,row), `Size=1x1`
+    (default), `Refresh=change` (or 1 to 3600 seconds), `PageEvery=4`, the
+    battery's only).
+    `ShortSize=WxH` is the element's size on a screen under 900 points high
+    (`ui::SHORT_SCREEN_H`), from the same cell and inside the grid, and may be
+    wider than `Size` (the graph goes 2x2 to 3x1); `ShortSize=none` leaves the
+    element off a short screen: no row, no picture, no wake. Two short forms
+    must not overlap, as two `Size` rectangles must not.
+    The file name orders and names the element. An unknown type or key, a
+    rectangle outside the 4 x 3 grid, a bad value or a syntax error refuses
+    the file; on overlap the lower name wins (`status: 20-network.conf
+    refused: overlaps 10-battery.conf`). Refusals are warnings in the
+    menu's log and `--check` output, and fail `--check`, as does a directory
+    the menu cannot use (not a directory, unreadable, too many files; a missing
+    one means no elements and is fine). `--check` also lists each element (`status 10-battery.conf: battery at 0,0 size 1x1`,
+    `status 20-network.conf: network at 1,0 size 2x2 short 3x1`,
+    `status 25-network-info.conf: network-info at 3,0 size 1x2 short none`).
+    Shipped, at 900 points and above (owner, 2026-11-04): row 0 battery 0,0
+    1x1, graph 1,0 2x2, list 3,0 1x2; row 1 temperatures 0,1 1x1; row 2 CPU
+    0,2 1x1, memory 1,2 1x1, system 2,2 1x1, clock 3,2 1x1. Below: battery and the graph at
+    3x1. With no battery device the temperatures and CPU move up a cell; with
+    no network memory and system take the top row; with neither and no sensor
+    the area has one row. `--check` lists the cells of the file.
+  - *Types.* `status::KINDS` lists them (`battery`, `network`, `network-info`,
+    `hardware`); a type is an
+    `Element` (`visible`, `svg`, `next_change`) plus a `Kind` (name,
+    options, build). A new type is a module, a line in `KINDS` and a file.
+    The menu asks for its next frame at the soonest of every shown
+    element's `Refresh` interval and `next_change`, never while a window
+    covers it; `Refresh=change` elements are drawn again when their data
+    source changes. Covered means winit names no monitor for the window any
+    more (`is_covered` in `app.rs`): its Wayland backend never sends
+    `WindowEvent::Occluded`. Uncovering sends no event either, so while
+    covered the loop wakes once a second to look and draws nothing, except a
+    frame that is due (the clock, the save timer, the pause before logout)
+    or one a wake asks for: program output wakes the loop, so a fullscreen
+    client that writes a line a second keeps the 1 s render going behind the
+    cover. The watcher of the add-on and battery files rests while covered
+    and catches up within about 2 s of uncovering.
+    `test/runtime/test-labwc-runtime.sh` covers the menu with a fullscreen
+    foot and requires both log lines (`thinfloe-menu: covered`, `uncovered`,
+    under `TF_MENU_DEBUG`).
+  - *Design.* One module, `status/style.rs`, holds the look of every
+    element; none sets a font size or colour of its own. Titles and labels
+    in Geo, every number, unit, address and interface name in Hack
+    (monospace: widths are counted, `MONO_ADVANCE`; Geo words are measured
+    once with usvg and cached). Sizes follow the cell height, not the menu
+    scale (`Style::for_cell`; 76 pt: title and label 15, value 12, small 10,
+    row and line 16, padding 12/6; 64 pt: 13, 11, 9, 14, 10/5; interpolated
+    between, on half points); an element gets `Room { size, cell }`.
+    Colours from `brand.rs`, graphs add `GRID` and `AXIS`. Arrows are
+    vector marks (`style::draw_arrow`): Hack's are too thin. So is the battery
+    symbol (`style::draw_battery`).
+  - *Rendering.* Each element builds its SVG (names from the system
+    XML-escaped, a character XML does not allow becomes `?`) and
+    the menu renders it in-process with resvg, with Geo and egui's
+    proportional sans (Ubuntu Light) and monospace Hack loaded into resvg's fontdb
+    (`status/render.rs`; resvg's `text` feature, which added fontdb,
+    slotmap, tinyvec, unicode-bidi, unicode-script, unicode-vo, xmlwriter
+    and base64 to `Cargo.lock`). fontdb points at the font bytes in the binary,
+    with no heap copy. usvg's `<image>` resolvers are off: the default ones read
+    any path and decode `data:` of any size (`svg_options` in `icons.rs`). A panic
+    in resvg or usvg is caught (`render::guarded`): that element draws nothing
+    and the menu lives on, with one line `thinfloe-menu: status element <name>:
+    <why>` at most every 5 min per element (`STATUS_LOG_EVERY`), since a graph's
+    picture changes each second. User icons keep their sandboxed child. Each
+    element has its own texture, rendered again only when its SVG text or
+    its size in pixels (points times pixels per point) changes, so it is
+    never stretched. A frame whose only texture uploads are status textures
+    damages only those elements' rectangles (`damage::texture_damage`);
+    any other upload still redraws the whole canvas.
+  - *Battery element.* One line per device, `Keyboard [#### ] 100 %`: a symbol
+    filled to the level in the line's colour (dashed and empty when no percent
+    is shown), between the kind in Geo at the title size (`Keyboard`,
+    `Mouse`, `Numpad`, `Presenter`, `Trackball`, `Touchpad`; the name, clipped
+    where the symbol column starts, when the kind is unknown; `Keyboard 1`,
+    `Keyboard 2` in file order when two share one of these) and the percent in Hack,
+    right-aligned (`95 %`, or `–` when not reachable or unknown), `+` while
+    charging, in a slot of its own so all percents end at one edge. Known kinds first. A reachable device below 10 %, at state
+    `critical`, or at state `low` with no percent (it reports only a level) is
+    red (`brand::RED`), a not reachable one muted. Four lines
+    fit a 76 pt cell, three a 64 pt one; more turn page every
+    `PageEvery` seconds (default 4, `battery::PAGE_EVERY`; counted from the
+    last reading, no page indicator). A label is clipped (`clipPath`) where
+    the symbol column starts: no ellipsis, and no measuring, except for a
+    numbered label: where it would not fit, the number ends at that edge and
+    the name is clipped before it, so two devices of one long name stay apart.
+    The menu reads the battery file at start and on every
+    change (the 1 s add-on watcher) and asks no frame for a page while a
+    window covers it. Limitation: the menu, and so the area, is hidden while
+    a fullscreen window (the ThinLinc client) covers it.
+  - *Network element* (owner, 2026-11-04; `status/network.rs`, data in
+    `src/thinfloe-menu/src/netstat.rs`, `20-network.conf`: `Type=network`,
+    `Cell=1,0`, `Size=2x2`, `ShortSize=3x1`, `Refresh=1`, no options). With
+    it shown the area has two rows. Under 900 points high (1280 x 720,
+    1366 x 768) it has one and the element is the graph alone, edge to edge:
+    grid and curves, with rate labels (none for 0), unit and legend inside
+    the plot, no time labels, so the eight shipped tiles stay uncovered (owner,
+    2026-11-04). The two-row form is a graph of the received (ice blue,
+    filled) and sent (green line) rate of the default-route interface over
+    the last 5 minutes:
+    rate axis with 0 and up to three steps of 1, 2 or 5 times a power of
+    ten at or above the window's peak (`style::rate_ticks`; at least
+    1 kbit/s, labels `500`, `1.5k`, `15M`, the unit `bit/s` above), time
+    axis `-5m` ... `-1m`, `now`, light grid lines, legend `↓ rx ↑ tx`.
+  - *Network list* (owner, 2026-11-04; `status/network_info.rs`,
+    `25-network-info.conf`: `Type=network-info`, `Cell=3,0`, `Size=1x2`,
+    `ShortSize=none`, `Refresh=1`, no options). One fact per row, the label in
+    Geo, the value from one column: `Down`, `Up`, `Peak`, `Total` (since the
+    click on the oldest running Save-On-Exit tile, ThinLinc or OxuLnk, else
+    since the menu start; when the oldest ends the next one's own start counts,
+    for the time and the total), `Since`, `Link` (`eth0 1 Gbit/s`, `wlan0 WiFi
+    -56 dBm`), `IPv4`, `Gateway`, `DNS` (each further server a row without a
+    label), `VPN` (`wg0 up`/`down`, `no VPN`). It draws from the graph's
+    snapshot and is hidden when the graph is. Rows move together down to the
+    value size plus 1 pt, then rows are left out: further DNS servers (the last
+    first), the peak, the since, the total, DNS, the gateway, the link; rates,
+    address and VPN stay. A `Link` row that is too wide for the column leaves
+    out the word `WiFi` (`wlp0s20f3 -61 dBm`); a value still too long is cut
+    at the padding. On rows too tight for the Geo labels the
+    labels are half a point smaller (`style::label_in_row`: 14.5 instead of 15
+    at 76 pt cells with eleven rows, which is a network with two or more DNS servers).
+  - *Clock* (owner, 2026-11-05; `status/clock.rs`, `40-clock.conf`, 3,2 1x1,
+    `ShortSize=none`). `Time 14:05` and `Date Thu 5 Nov 2026` in the machine's
+    zone, looked up on every picture and drawn again when the minute turns. It
+    always shows, so on a tall screen the area is never hidden. It lists English
+    names whatever the locale. It is not on a short screen; the header has the
+    time there.
+  - *Hardware tiles* (owner, 2026-11-04; `status/hardware.rs`, data in
+    `src/thinfloe-menu/src/hardware.rs`). Four files of `Type=hardware`, each
+    with `ShortSize=none` and `Refresh=5`; `Show=` names the tile, one sampler
+    feeds them all, and nothing pages: `30-temperatures.conf` (`Show=temperatures`,
+    0,1 1x1), `31-cpu.conf` (`cpu`, 0,2 1x1: `CPU load`, `CPU clock`),
+    `32-memory.conf` (`memory`, 1,2 1x1: `RAM`, `zram`, `3.1 / 8.0 GiB`) and
+    `33-system.conf` (`system`, 2,2 1x1: fans on one line, `Up 3 d 4 h`, the
+    `Model NUC8i3BEK` (`Maker` when the machine names no model), the value on the right and cut at its end when too long).
+    One cell is 220 points wide: the fans that do not fit beside `Fans` with
+    `rpm` showing are left out, the first ones stay (`lines_in`; about three to five
+    fans, fewer at 76 pt than at 64 pt, because the type is larger). A hole in the bottom
+    row on a machine with no battery device stays: there is no fill rule. A
+    label in Geo, a value in Hack on the right. A value the machine does not
+    provide drops out with no placeholder, and a tile with nothing is not shown.
+    The temperature tile holds 4 lines at 76 pt cells and 3 at 64 pt. Sensors that
+    do not fit drop the least important: the first CPU sensor stays, then hot ones
+    before normal ones, then the order of `sensor_name` (CPU, GPU, Disk, RAM,
+    WiFi, LAN, Chipset, Board, others); those kept stay in that order.
+    A thread of the menu reads /sys and /proc every 5 s, no root and no
+    subprocess, bounded and treated as hostile; it rests while the menu is
+    covered and on a short screen. A hot temperature draws its line in the
+    warning colour, a critical one in the alert colour. Thresholds
+    (`hardware::thresholds`): critical 5 C below `crit`; hot at `max` when that
+    is below critical, else 15 C below `crit`; with `max` alone, critical 15 C
+    above it; with no limit 80 and 95 C. Limits outside 40 to 150 C count as
+    none. A fan at 0 rpm drops out. **Not verified on hardware**: the sensor
+    names and labels are from memory (the development host is a VM with no
+    hwmon); `k10temp`'s `tempN_max`, if it reports 70, would warn at 70 C;
+    reading sensors every 5 s may wake a suspended discrete GPU (unmeasured).
+  - *Network sampler*, for graph and list. A thread samples once a second, also while the menu is covered
+    (so the graph is whole when it shows again), and wakes the event loop only
+    when the element appears or goes (a hidden element asks for no frames of
+    its own); the redraw copies its snapshot. No subprocess: `/proc/net/route`
+    (lowest metric), `getifaddrs`, `statistics/{rx,tx}_bytes`, `speed`
+    (`-1` is none), `/proc/net/wireless` or a `wireless/` directory,
+    `/run/systemd/resolve/resolv.conf` (else `/etc/resolv.conf`), and
+    `wg0`'s `flags` (`IFF_UP`; its operstate is `unknown` while up). 300
+    samples per direction; a rate is the byte delta over the real elapsed
+    time; a counter that goes back or a new interface starts the graph
+    again (no spike), the total keeps counting. Without a default route
+    the first interface with an address is measured (`no default route`);
+    with no address but loopback and link-local, the element is hidden.
+    Every name is XML-escaped. **Not verified on hardware.**
+  The service has `TimeoutStartSec=60`; the helper waits up to 30 s for
+  its lock (`LOCK_NB`, retried), then logs `thinfloe: battery: lock busy`
+  and exits 1, so a hung run cannot block the next one for ever.
+  **Read on connect.** After a reboot a Bolt device reconnects only when it
+  is used (the mouse on first movement, the keyboard on first key press;
+  owner, 2026-11-03), so the boot run finds it asleep.
+  `thinfloe-peripheral-battery-watch.service` (`Type=simple`,
+  `Restart=on-failure`, `RestartSec=5`, no `Before=`) runs `peripheral-battery
+  watch`, which opens every HID++ node the reader would use read-only and
+  listens. It is not enabled: on a machine with no Logitech device it would be
+  14.5 MB of root Python doing nothing. `overlay/etc/udev/rules.d/90-thinfloe-peripheral-battery.rules`
+  starts it through `SYSTEMD_WANTS` on a `hidraw` node whose HID parent is named
+  `*:046D:*` (bus, vendor, product in upper-case hex, the vendor
+  `find_hidpp_nodes` takes from `HID_ID`), at boot through
+  `systemd-udev-trigger`'s replay and for a receiver plugged in later. It also
+  matches Logitech nodes without HID++ or with a kernel driver; the watcher
+  then idles. It stays running once started, and finds a receiver plugged in
+  again by its rescan. **Not verified on a booted system:** only `udevadm verify`
+  and a unit test of the pattern have run this rule. Measured on a test machine
+  (2026-11-03, mouse switched off and on): the receiver sends no `0x41`
+  connection notification (its register `0x00` reads `00`, notifications
+  off, and the watcher leaves it so); the device itself sends
+  `11 01 04 00 01 01 01` (slot 1, feature index 4 = WIRELESS DEVICE STATUS
+  `0x1D4B`, event 0, status `01` reconnection) and `11 01 09 00 64 08 00`
+  (index 9 = UNIFIED BATTERY `0x1004`, event 0: 100 %, full,
+  discharging). Nothing arrived at switch-off. The watcher takes a long
+  report from slot 1 to 6 with function 0 and software id 0 (a reply has
+  the reader's `0x0a`) as an event, and a `0x1D4B` event with status 1 or
+  any `0x1004` event as a connect. Feature indices differ per device (the
+  keyboard's `0x1004` is at 7), so the first event of a slot is answered
+  by the root feature's getFeature for both features, under the reader's
+  lock, cached per HID_PHYS and slot; it is the only request the watcher
+  sends. Only those indices tell a connect from another event, so while a
+  slot has none its reports are held (at most 16) and judged once it answers:
+  the lookup is tried up to 4 times (`LOOKUP_TRIES`), 30 s apart
+  (`LOOKUP_RETRY`), also with no further event, and then the timer reads the
+  device. When a slot's pairing name changes in the reader's name cache
+  (looked at every 5 s) it holds another device and its indices are asked
+  for again; until the reader has run, the old ones count. Events within 2 s (`DEBOUNCE`) give one
+  reading, the same code path as the plain run, under the lock, in the
+  watcher's process. **Hold-off** (owner, 2026-11-03): a device whose line
+  in the battery file has a percent, a state other than `not reachable`
+  and a `read_epoch` younger than 300 s (`HOLD_OFF`) is not read on its
+  events; the slot is mapped to that line through its identity in
+  `readings`. The
+  timer is not held off. Nodes are looked for every 5 s
+  (`RESCAN`); a node that fails a read is closed and found again then. A
+  bad report or a failed reading is logged and the watcher goes on. While
+  another run holds the lock, a lookup waits for it (up to 30 s) and the
+  watcher reads nothing meanwhile; the kernel queues up to 64 reports per
+  open file. Two things can let that queue overflow: a lookup waiting for
+  the lock, and a reading the watcher runs itself (its own listener fills
+  with the reader's replies). A connect event lost beyond 64 waits for the
+  timer.
+  **Confirmed on hardware (2026-11-03):** after a restart the
+  menu appeared at 16.9 s, the boot read at 12.2 s got the mouse, and the
+  keyboard's first key press at 22.6 s logged `thinfloe: battery: connected:
+  ... slot 2, reading` and put its value in the menu; no ordering cycle. **Not measured:** what arrives when a device goes out of
+  range without being switched off.
+  Guards: `test/unit/test_peripheral_battery.py` (a fake receiver that
+  answers as the Bolt receiver did on 2026-11-03; the watcher with the
+  measured events, fake nodes and an injected clock), `test-session-packages.sh`
+  (units, timer, watch service not enabled, the udev rule, the status file, no
+  battery tile file, directories),
+  `battery.rs`, `status/` (layout, files, SVG, rendering with the real
+  fonts) and the menu, ui and damage tests in `src/thinfloe-menu`.
+  **Confirmed on hardware (2026-11-03, Logi Bolt):** the built
+  images booted from the stick (three boots: the menu's battery lines, kind lines with the boot
+  read, the watcher) with no ordering cycle; both devices read in 0.5 to
+  1 s; the file carries the kind written by the built reader; the menu
+  showed `Keyboard` and `Mouse` lines (owner: "funktioniert"); a device that
+  had not reconnected after a restart showed as `not reachable`; the
+  watcher read the keyboard on its first key press (see above); and the
+  timer went on after the boot run (reads at 12 s, 343 s and 674 s after
+  boot).
+  **Not verified on hardware:** the status area as a whole (its place,
+  the SVG rendering and fonts, the damage of a page turn, the hardware tiles
+  and the list), the battery symbol, the red line
+  (no device was below 10 %) and pages (only two devices).
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
 - **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
@@ -1508,6 +1844,7 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 ### Menu limits
 
 - The grid is on one monitor. The span patch covers Xwayland windows only.
+- The status area is not seen while a fullscreen window covers the menu.
 - Clicking a tile is not covered by the headless runtime test, which has no
   input devices. The end-of-session dialogs and their buttons (Stay / Stop
   them and restart, Stay / Restart anyway, and the same for Power off and

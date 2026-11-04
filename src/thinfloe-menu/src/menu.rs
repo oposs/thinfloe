@@ -61,6 +61,9 @@ pub struct Running {
     pub name: String,
     /// Known once the worker reports the start.
     pub pgid: Option<i32>,
+    /// When the tile was clicked: a Save-On-Exit program's start begins
+    /// the network element's session total.
+    pub started: Instant,
 }
 
 /// The background save: one at a time, and one more at most queued.
@@ -214,6 +217,23 @@ pub struct Menu {
     pub retry: Option<Retry>,
     /// Each add-on job that runs.
     addon_runs: Vec<AddonRun>,
+    /// The devices the battery file lists; set by the app on every change.
+    pub battery: Vec<crate::battery::Device>,
+    /// When `battery` was set: the status area's battery pages count from
+    /// here, so a new reading starts at the first page.
+    pub battery_since: Option<Instant>,
+    /// The status area's elements, from their files.
+    pub status: crate::status::Area,
+    /// The network sampler's last copy, set by the app before each frame.
+    pub netstat: Option<crate::netstat::Snapshot>,
+    /// Where the network element's session total counts from.
+    pub netstat_since: crate::netstat::Since,
+    /// The hardware sampler's last copy, set by the app before each frame.
+    pub hardware: Option<crate::hardware::Snapshot>,
+    /// `Snapshot::total` at each running session program's first copy, so
+    /// that when the oldest ends, the next one's total starts where its own
+    /// label says.
+    network_bases: Vec<(JobId, (u64, u64))>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -266,6 +286,13 @@ impl Menu {
             screen: Screen::Grid,
             retry: None,
             addon_runs: Vec::new(),
+            battery: Vec::new(),
+            battery_since: None,
+            status: crate::status::Area::default(),
+            netstat: None,
+            netstat_since: crate::netstat::Since::default(),
+            hardware: None,
+            network_bases: Vec::new(),
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -464,6 +491,80 @@ impl Menu {
                 _ => "Checking the add-ons".to_string(),
             })
             .collect()
+    }
+
+    /// Take the status elements; what was refused opens the log as a
+    /// warning and is printed by `--check`, like the tile banner.
+    pub fn set_status(&mut self, area: crate::status::Area) {
+        for note in &area.notes {
+            self.log.note(Kind::Warn, note.clone());
+            self.banner.push(note.clone());
+        }
+        self.status = area;
+    }
+
+    /// What the status elements draw from.
+    pub fn status_sources(&self) -> crate::status::Sources<'_> {
+        crate::status::Sources {
+            battery: &self.battery,
+            battery_since: self.battery_since,
+            network: self.netstat.as_ref(),
+            network_since: Some(&self.netstat_since),
+            hardware: self.hardware.as_ref(),
+        }
+    }
+
+    /// Take the hardware sampler's copy.
+    pub fn set_hardware(&mut self, snap: crate::hardware::Snapshot) {
+        self.hardware = Some(snap);
+    }
+
+    /// Take the network sampler's copy made at `now` (`wall` on the clock).
+    /// The session total counts from the oldest Save-On-Exit program that
+    /// runs (ThinLinc, OxuLnk), from its first frame after the click; with
+    /// none running, from the menu start.
+    pub fn set_network(&mut self, snap: crate::netstat::Snapshot, now: Instant, wall: std::time::SystemTime) {
+        let session = self
+            .jobs
+            .iter()
+            .filter(|j| self.tiles.get(j.tile).is_some_and(|t| t.save_on_exit))
+            .min_by_key(|j| (j.started, j.id));
+        self.network_bases
+            .retain(|(id, _)| self.jobs.iter().any(|j| j.id == *id));
+        for j in self
+            .jobs
+            .iter()
+            .filter(|j| self.tiles.get(j.tile).is_some_and(|t| t.save_on_exit))
+        {
+            if !self.network_bases.iter().any(|(id, _)| *id == j.id) {
+                self.network_bases.push((j.id, snap.total));
+            }
+        }
+        match session {
+            Some(j) if self.netstat_since.job != Some(j.id) => {
+                let at = wall
+                    .checked_sub(now.saturating_duration_since(j.started))
+                    .unwrap_or(wall);
+                self.netstat_since = crate::netstat::Since {
+                    job: Some(j.id),
+                    label: format!("since {}", crate::header::clock_text(at)),
+                    base: self
+                        .network_bases
+                        .iter()
+                        .find(|(id, _)| *id == j.id)
+                        .map_or(snap.total, |(_, base)| *base),
+                };
+            }
+            Some(_) => {}
+            None => self.netstat_since = crate::netstat::Since::default(),
+        }
+        self.netstat = Some(snap);
+    }
+
+    /// Take the devices the battery file lists now.
+    pub fn set_battery(&mut self, devices: Vec<crate::battery::Device>, now: Instant) {
+        self.battery = devices;
+        self.battery_since = Some(now);
     }
 
     fn start_addon(&mut self, args: Vec<String>) -> Option<Effect> {
@@ -698,6 +799,7 @@ impl Menu {
                     tile: index,
                     name: tile.name.clone(),
                     pgid: None,
+                    started: now,
                 });
                 Some(Effect::Start(Job::Run {
                     id,
@@ -3275,5 +3377,116 @@ mod tests {
         assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
         assert_eq!(m.screen, Screen::Grid);
         assert_eq!(m.retry.as_ref().map(|r| r.id.as_str()), Some("10-thinlinc"));
+    }
+
+    #[test]
+    fn refused_status_files_open_the_log_and_reach_check() {
+        let mut m = Menu::new(grid(), false);
+        let area = crate::status::Area {
+            notes: vec!["Status element S/x.conf refused: no Type.".into()],
+            ..Default::default()
+        };
+        m.set_status(area);
+        assert_eq!(
+            log(&m).last().unwrap(),
+            &warn("Status element S/x.conf refused: no Type.")
+        );
+        assert_eq!(m.banner, ["Status element S/x.conf refused: no Type."]);
+    }
+
+    #[test]
+    fn the_network_total_counts_from_the_running_session_program() {
+        use crate::netstat::{Since, Snapshot};
+        let mut m = Menu::new(grid(), false);
+        // Tile 0 is ThinLinc (Save-On-Exit), tile 1 the Terminal.
+        let sx = 0;
+        let t0 = Instant::now();
+        let wall = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let snap = |rx: u64| Snapshot {
+            total: (rx, rx / 10),
+            ..Snapshot::default()
+        };
+        m.set_network(snap(100), t0, wall);
+        assert_eq!(m.netstat_since, Since::default());
+        assert_eq!(m.status_sources().network.unwrap().total, (100, 10));
+        // A program without Save-On-Exit is no session.
+        let other = started(&mut m, 1, t0);
+        m.set_network(snap(200), t0, wall);
+        assert_eq!(m.netstat_since.label, "since menu start");
+        // The session program starts; the first copy after it is the base,
+        // the label is the click's time on the clock.
+        let id = started(&mut m, sx, t0);
+        let later = t0 + std::time::Duration::from_secs(1);
+        m.set_network(snap(300), later, wall);
+        let since = m.netstat_since.clone();
+        assert_eq!(since.job, Some(id));
+        assert_eq!(since.base, (300, 30));
+        assert_eq!(
+            since.label,
+            format!(
+                "since {}",
+                crate::header::clock_text(wall - std::time::Duration::from_secs(1))
+            )
+        );
+        // Later copies keep the base.
+        m.set_network(snap(900), later + std::time::Duration::from_secs(60), wall);
+        assert_eq!(m.netstat_since, since);
+        assert_eq!(m.status_sources().network_since, Some(&since));
+        // It ends: back to the menu start.
+        ran(&mut m, id, 0, later);
+        ran(&mut m, other, 0, later);
+        m.set_network(snap(1000), later, wall);
+        assert_eq!(m.netstat_since, Since::default());
+    }
+
+    #[test]
+    fn the_network_total_of_two_sessions_counts_from_the_one_that_remains() {
+        use crate::netstat::{Since, Snapshot};
+        use std::time::Duration;
+        let mut m = Menu::new(grid(), false);
+        // Tile 0 runs once; tile 1 is made a second session program.
+        m.tiles[1].save_on_exit = true;
+        let t0 = Instant::now();
+        let wall = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let snap = |rx: u64| Snapshot {
+            total: (rx, rx / 10),
+            ..Snapshot::default()
+        };
+        let first = started(&mut m, 0, t0);
+        m.set_network(snap(100), t0, wall);
+        assert_eq!((m.netstat_since.job, m.netstat_since.base), (Some(first), (100, 10)));
+        // A second session starts: the oldest keeps the total.
+        let t1 = t0 + Duration::from_secs(60);
+        let second = started(&mut m, 1, t1);
+        m.set_network(snap(500), t1, wall);
+        assert_eq!((m.netstat_since.job, m.netstat_since.base), (Some(first), (100, 10)));
+        // The oldest ends: label and base are both the second's.
+        let t2 = t1 + Duration::from_secs(5);
+        ran(&mut m, first, 0, t2);
+        m.set_network(snap(900), t2, wall);
+        assert_eq!(
+            m.netstat_since,
+            Since {
+                job: Some(second),
+                label: format!("since {}", crate::header::clock_text(wall - Duration::from_secs(5))),
+                base: (500, 50),
+            }
+        );
+        // The second ends too: nothing is kept.
+        ran(&mut m, second, 0, t2);
+        m.set_network(snap(1000), t2, wall);
+        assert_eq!(m.netstat_since, Since::default());
+        assert!(m.network_bases.is_empty(), "{:?}", m.network_bases);
+    }
+
+    #[test]
+    fn a_reading_starts_the_battery_pages_again() {
+        let mut m = Menu::new(grid(), false);
+        let t0 = Instant::now();
+        m.set_battery(Vec::new(), t0);
+        assert_eq!(m.battery_since, Some(t0));
+        let t1 = t0 + std::time::Duration::from_secs(7);
+        m.set_battery(Vec::new(), t1);
+        assert_eq!(m.status_sources().battery_since, Some(t1));
     }
 }

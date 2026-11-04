@@ -5,6 +5,7 @@
 //! without a GPU".
 
 use crate::addons::{self, AddonLog};
+use crate::battery;
 use crate::damage::Tracker;
 use crate::density::{self, OutputInfo};
 use crate::icons::IconRoots;
@@ -23,8 +24,8 @@ use std::ffi::OsString;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent};
@@ -46,10 +47,17 @@ pub enum Wake {
     Output,
     /// The add-on status or log file changed.
     Addons,
+    /// The battery file changed.
+    Battery,
     /// The set of folded windows changed.
     Windows,
     /// The release status file of thinfloe-upgrade changed.
     Release,
+    /// The network element appeared or went: a hidden element asks for no
+    /// frames of its own.
+    Network,
+    /// The hardware element appeared or went.
+    Hardware,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -65,6 +73,12 @@ pub struct Config {
     pub addon_status: PathBuf,
     pub addon_log: PathBuf,
     pub addon_last_check: PathBuf,
+    /// The file the battery reader writes.
+    pub battery_file: PathBuf,
+    /// Where the network element's sampler reads /sys, /proc, /run, /etc.
+    pub network_roots: crate::netstat::Roots,
+    /// Where the hardware element's sampler reads /sys and /proc.
+    pub hardware_roots: crate::hardware::Roots,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
     /// Host name and version for the header.
@@ -107,6 +121,9 @@ struct Live {
     outputs: Vec<OutputInfo>,
     /// Whether a frame reached the screen.
     presented: bool,
+    /// When the next frame is due; what a look at a covered menu must not
+    /// skip.
+    frame_due: Option<Instant>,
 }
 
 pub struct App {
@@ -129,6 +146,13 @@ pub struct App {
     windows: Option<crate::windows::Windows>,
     /// The folded list at the last wake, to name what changed.
     folded_seen: Vec<crate::windows::Folded>,
+    /// The network sampler, running only when a network element is set up.
+    network: Option<Arc<Mutex<crate::netstat::Series>>>,
+    /// The hardware sampler, running only when a hardware element is set up.
+    hardware: Option<Arc<Mutex<crate::hardware::Snapshot>>>,
+    /// Whether the hardware sampler reads: not while a window covers the menu
+    /// or on a short screen, where the element is not drawn.
+    hardware_on: Arc<AtomicBool>,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -178,7 +202,30 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     if let Some(w) = windows.as_ref() {
         cfg.menu.folded = w.folded();
     }
+    let has_kind = |names: &[&str]| cfg.menu.status.elements.iter().any(|p| names.contains(&p.kind));
+    let hardware_on = Arc::new(AtomicBool::new(true));
+    let hardware = has_kind(&[crate::status::hardware::KIND.name]).then(|| {
+        let waker = event_loop.create_proxy();
+        crate::hardware::spawn(cfg.hardware_roots.clone(), hardware_on.clone(), move || {
+            let _ = waker.send_event(Wake::Hardware);
+        })
+    });
+    // The graph and the list draw from one sampler.
+    let network = has_kind(&[
+        crate::status::network::KIND.name,
+        crate::status::network_info::KIND.name,
+    ])
+    .then(|| {
+        let waker = event_loop.create_proxy();
+        crate::netstat::spawn(cfg.network_roots.clone(), move || {
+            // The loop is gone only when the menu is exiting.
+            let _ = waker.send_event(Wake::Network);
+        })
+    });
     let mut app = App {
+        network,
+        hardware,
+        hardware_on,
         windows,
         folded_seen: Vec::new(),
         addon_log: AddonLog::new(cfg.addon_log.clone()),
@@ -202,8 +249,10 @@ struct Watch {
     addon_status: PathBuf,
     addon_log: PathBuf,
     upgrade_status: PathBuf,
+    battery_file: PathBuf,
     addons: addons::Watcher,
     release: release::Watcher,
+    battery: battery::Watcher,
 }
 
 impl Watch {
@@ -212,10 +261,12 @@ impl Watch {
             addon_status: cfg.addon_status.clone(),
             addon_log: cfg.addon_log.clone(),
             upgrade_status: cfg.upgrade_status.clone(),
+            battery_file: cfg.battery_file.clone(),
             // The first tick reads the files whatever they hold, so a change
             // between the menu's first read and now is not lost.
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
+            battery: battery::Watcher::default(),
         }
     }
 
@@ -228,13 +279,16 @@ impl Watch {
         if self.release.tick(&self.upgrade_status) {
             wakes.push(Wake::Release);
         }
+        if self.battery.tick(&self.battery_file) {
+            wakes.push(Wake::Battery);
+        }
         wakes
     }
 }
 
-/// A thread that looks at the add-on files and the release status once a
-/// second and wakes the loop only when one of them changed: the loop sleeps
-/// in between.
+/// A thread that looks at the add-on files, the release status and the
+/// battery file once a second and wakes the loop only when one of them
+/// changed: the loop sleeps in between.
 fn watch_files(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
     let shown = shown.clone();
     let mut watch = Watch::new(cfg);
@@ -490,6 +544,41 @@ fn seen_monitor(name: Option<String>, known: Option<&str>) -> Option<String> {
     name.or_else(|| known.map(str::to_string))
 }
 
+/// How often a covered menu looks whether it still is.
+const COVERED_LOOK: Duration = Duration::from_secs(1);
+
+/// Whether a window covers the menu whole: winit names no monitor (see
+/// `seen_monitor`), and one was named before, since a window that was never
+/// shown names none either. winit's Wayland backend never sends
+/// `WindowEvent::Occluded`, and this is the only sign there is.
+fn is_covered(seen: bool, known: bool) -> bool {
+    !seen && known
+}
+
+/// When the loop must wake: for the next frame, and, while covered, to look
+/// again, because uncovering sends no event (`surface_enter` is empty in winit
+/// 0.30). `None`: only an event wakes it.
+fn next_wake(frame_due: Option<Instant>, covered: bool, now: Instant) -> Option<Instant> {
+    frame_due.into_iter().chain(covered.then(|| now + COVERED_LOOK)).min()
+}
+
+/// Whether a reached wake-up draws, with `covered` what the look found. A look
+/// that finds the menu still covered draws nothing unless a frame is due: the
+/// save timer and the pause before logout advance through those frames.
+fn frame_wanted(covered: bool, frame_due: Option<Instant>, now: Instant) -> bool {
+    !covered || frame_due.is_some_and(|due| due <= now)
+}
+
+fn wake_flow(at: Option<Instant>) -> ControlFlow {
+    at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+}
+
+/// Whether the hardware sampler reads: not while a window covers the menu, and
+/// only when a hardware tile has a place on a screen `height` points tall.
+fn hardware_wanted(status: &crate::status::Area, covered: bool, height: f32) -> bool {
+    !covered && status.has_on(crate::status::hardware::KIND.name, ui::short_screen(height))
+}
+
 impl App {
     /// Computes the menu's scale again. When it changed, or with `force`,
     /// the zoom factor, the icons, the logo and the scale file follow.
@@ -535,6 +624,13 @@ impl App {
             );
         }
         live.window.request_redraw();
+    }
+
+    /// Read the battery file again.
+    fn refresh_battery(&mut self) {
+        self.cfg
+            .menu
+            .set_battery(battery::read(&self.cfg.battery_file), Instant::now());
     }
 
     /// Read the add-on files again. A program or icon that appeared
@@ -646,10 +742,28 @@ impl App {
             self.apply_scale(false);
         }
         let Some(live) = self.live.as_mut() else { return };
+        let covered = is_covered(live.window.current_monitor().is_some(), live.monitor.is_some());
+        if self.shown.swap(!covered, Ordering::Relaxed) == covered && self.cfg.debug {
+            eprintln!("thinfloe-menu: {}", if covered { "covered" } else { "uncovered" });
+        }
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
         live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
+        live.chrome.covered = covered;
+        // The sampler's latest copy, taken under its lock for as long as a
+        // copy of 600 numbers takes.
+        if let Some(snap) = self.network.as_ref().and_then(|n| n.lock().ok().map(|s| s.snapshot())) {
+            self.cfg.menu.set_network(snap, now, std::time::SystemTime::now());
+        }
+        if let Some(snap) = self.hardware.as_ref().and_then(|h| h.lock().ok().map(|s| s.clone())) {
+            self.cfg.menu.set_hardware(snap);
+        }
+        let height = live.window.inner_size().height as f32 / self.ctx.pixels_per_point();
+        self.hardware_on.store(
+            hardware_wanted(&self.cfg.menu.status, covered, height),
+            Ordering::Relaxed,
+        );
         // egui takes a new zoom factor at the start of the next pass and
         // lays that pass out with a guessed screen rect.
         let settling = settling(self.ctx.zoom_factor(), live.scale);
@@ -691,11 +805,19 @@ impl App {
             force_full = true;
         }
         let prims = self.ctx.tessellate(out.shapes, ppp);
-        let mut damage = live.tracker.damage(&prims, ppp);
-        if force_full || !out.textures_delta.set.is_empty() {
-            damage = Some(live.canvas.bounds());
-        }
-        if let Some(rect) = damage {
+        let tracked = live.tracker.damage(&prims, ppp);
+        // A status element's new picture damages its own cell only; any
+        // other upload (the font atlas) everything.
+        let set: Vec<egui::TextureId> = out.textures_delta.set.keys().copied().collect();
+        let own = |id| {
+            self.ctx
+                .tex_manager()
+                .read()
+                .meta(id)
+                .is_some_and(|m| m.name.starts_with(ui::STATUS_TEXTURE))
+        };
+        let textures = crate::damage::texture_damage(&set, own, &prims, ppp);
+        if let Some(rect) = crate::damage::frame_damage(force_full, tracked, textures, live.canvas.bounds()) {
             let t0 = Instant::now();
             live.canvas.restore_background(rect);
             live.canvas.draw(&prims, &live.textures, ppp, rect);
@@ -738,10 +860,9 @@ impl App {
                     .into_iter()
                     .chain(network_wake(menu.screen, menu.settings_tab, shown))
                     .min();
-                match egui_wake.into_iter().chain(recheck).chain(poll).min() {
-                    Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d)),
-                    None => event_loop.set_control_flow(ControlFlow::Wait),
-                }
+                let at = Instant::now();
+                live.frame_due = egui_wake.into_iter().chain(recheck).chain(poll).min().map(|d| at + d);
+                event_loop.set_control_flow(wake_flow(next_wake(live.frame_due, covered, at)));
             }
         }
 
@@ -863,6 +984,7 @@ impl ApplicationHandler<Wake> for App {
             header: self.cfg.header.clone(),
             clock: String::new(),
             logo: None,
+            covered: false,
         };
         let bg = crate::brand::theme().palette().background;
         self.live = Some(Live {
@@ -880,6 +1002,7 @@ impl ApplicationHandler<Wake> for App {
             started: Instant::now(),
             outputs: read_outputs(self.cfg.debug),
             presented: false,
+            frame_due: None,
         });
         // Icons and logo are drawn at the scale, so it comes first. Forced,
         // so the scale file exists even at 1.
@@ -896,11 +1019,19 @@ impl ApplicationHandler<Wake> for App {
         window.request_redraw();
     }
 
-    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        if wake_needs_frame(&cause)
-            && let Some(live) = self.live.as_ref()
-        {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if !wake_needs_frame(&cause) {
+            return;
+        }
+        let Some(live) = self.live.as_ref() else { return };
+        let covered = is_covered(live.window.current_monitor().is_some(), live.monitor.is_some());
+        let now = Instant::now();
+        if frame_wanted(covered, live.frame_due, now) {
             live.window.request_redraw();
+        } else {
+            // No frame follows to set the next wake, and a deadline already
+            // past would spin the loop.
+            event_loop.set_control_flow(wake_flow(next_wake(live.frame_due, covered, now)));
         }
     }
 
@@ -924,8 +1055,9 @@ impl ApplicationHandler<Wake> for App {
             }
             Wake::Addons => self.refresh_addons(),
             Wake::Release => self.refresh_release(),
+            Wake::Battery => self.refresh_battery(),
             Wake::Windows => self.windows_changed(),
-            Wake::Output => {}
+            Wake::Output | Wake::Network | Wake::Hardware => {}
         }
         if let Some(live) = self.live.as_ref() {
             live.window.request_redraw();
@@ -963,13 +1095,6 @@ impl ApplicationHandler<Wake> for App {
             // only comes from a client asking. Ending here would be exit 0,
             // which thinfloe-session reads as logout.
             WindowEvent::CloseRequested => return,
-            WindowEvent::Occluded(hidden) => {
-                self.shown.store(!hidden, Ordering::Relaxed);
-                // The drive poll rested while hidden; a frame starts it again.
-                if !hidden && let Some(live) = self.live.as_ref() {
-                    live.window.request_redraw();
-                }
-            }
             _ => {}
         }
         // While the dialog is up, input is refused rather than handled.
@@ -1235,8 +1360,10 @@ esac"#;
             addon_status: d.join("addon-status"),
             addon_log: d.join("addon-log"),
             upgrade_status: release.clone(),
+            battery_file: d.join("battery"),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
+            battery: battery::Watcher::default(),
         };
         let is_release = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Release)).count();
         // The first look reads both, whatever the files hold.
@@ -1265,6 +1392,20 @@ esac"#;
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Network, false), None);
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Packages, true), None);
         assert_eq!(network_wake(Screen::Grid, SettingsTab::Network, true), None);
+    }
+
+    #[test]
+    fn the_hardware_sampler_rests_when_covered_on_a_short_screen_and_without_a_tile() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/status");
+        let shipped = crate::status::config::load(&dir);
+        assert!(hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H));
+        assert!(!hardware_wanted(&shipped, true, ui::SHORT_SCREEN_H), "covered");
+        assert!(
+            !hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H - 0.5),
+            "short screen"
+        );
+        let none = crate::status::Area::default();
+        assert!(!hardware_wanted(&none, false, ui::SHORT_SCREEN_H), "no hardware tile");
     }
 
     #[test]
@@ -1380,6 +1521,43 @@ esac"#;
     fn without_outputs_the_monitor_size_decides() {
         assert_eq!(pick_scale(&[], None, Some((3840, 2160)), 0).0, 2.0);
         assert_eq!(pick_scale(&[], None, None, 0).0, 1.0);
+    }
+
+    #[test]
+    fn no_monitor_is_covered_once_one_was_known() {
+        assert!(is_covered(false, true), "on no output any more");
+        assert!(!is_covered(true, true));
+        assert!(!is_covered(true, false));
+        assert!(!is_covered(false, false), "not shown yet: not covered");
+    }
+
+    #[test]
+    fn a_covered_menu_wakes_to_look_or_for_a_due_frame() {
+        let now = Instant::now();
+        let look = now + COVERED_LOOK;
+        let soon = now + Duration::from_millis(100);
+        let late = now + Duration::from_secs(60);
+        assert_eq!(next_wake(None, false, now), None);
+        assert_eq!(next_wake(Some(late), false, now), Some(late));
+        assert_eq!(next_wake(None, true, now), Some(look));
+        assert_eq!(next_wake(Some(late), true, now), Some(look));
+        assert_eq!(next_wake(Some(soon), true, now), Some(soon));
+    }
+
+    #[test]
+    fn a_covered_menu_draws_only_a_due_frame() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(10);
+        let past = now - Duration::from_millis(1);
+        // The look found it still covered: no frame, unless one is due. The
+        // save timer and the pause before logout advance through those.
+        assert!(!frame_wanted(true, None, now));
+        assert!(!frame_wanted(true, Some(later), now));
+        assert!(frame_wanted(true, Some(past), now));
+        assert!(frame_wanted(true, Some(now), now));
+        // Uncovered, or never covered: a frame.
+        assert!(frame_wanted(false, Some(later), now));
+        assert!(frame_wanted(false, None, now));
     }
 
     #[test]

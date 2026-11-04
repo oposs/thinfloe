@@ -106,9 +106,15 @@ pub fn local_hms(epoch: i64) -> (i8, i8, i8) {
 
 /// The zone `TZ` names, else the one `localtime` is or points to, else UTC.
 pub fn current_zone(localtime: &std::path::Path) -> jiff::tz::TimeZone {
+    zone_for(std::env::var("TZ").ok().as_deref(), localtime)
+}
+
+/// `current_zone` with the value of `TZ` passed in, so a test needs no
+/// change to the process environment.
+pub fn zone_for(tz: Option<&str>, localtime: &std::path::Path) -> jiff::tz::TimeZone {
     use jiff::tz::TimeZone;
-    if let Some(tz) = std::env::var_os("TZ").and_then(|v| v.into_string().ok()) {
-        let name = tz.strip_prefix(':').unwrap_or(&tz);
+    if let Some(tz) = tz {
+        let name = tz.strip_prefix(':').unwrap_or(tz);
         if !name.is_empty() {
             return jiff::tz::db()
                 .get(name)

@@ -2,7 +2,6 @@
 
 PROJECT_NAME := thinfloe
 VERSION := 3.0.0
-BUILD_DATE := $(shell date -u +%Y-%m-%d)
 BUILD_ID := $(shell date -u +%Y%m%d-%H%M%S)
 
 CONTAINER_RUNTIME ?= podman

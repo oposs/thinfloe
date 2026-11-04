@@ -33,6 +33,15 @@ pub const TILE_GAP: f32 = 3.0;
 /// A band is this tall, down to `TILE_H_MIN` when the screen is short.
 pub const TILE_H: f32 = 76.0;
 pub const TILE_H_MIN: f32 = 64.0;
+/// Between the tile grid and the status area below it.
+pub const STATUS_GAP: f32 = 32.0;
+/// A screen under this many points high is short: status elements take
+/// their `ShortSize`.
+pub const SHORT_SCREEN_H: f32 = 900.0;
+
+pub fn short_screen(height: f32) -> bool {
+    height < SHORT_SCREEN_H
+}
 /// The header: 32 above the 52 tall logo, 16 below.
 pub const HEADER_H: f32 = HEADER_PAD_TOP + LOGO_H + 16.0;
 const HEADER_PAD_X: f32 = 32.0;
@@ -245,12 +254,19 @@ pub struct Layout {
     pub header: Rect,
     /// The log, along the bottom.
     pub log: Rect,
-    /// The space between header and log; the grid scrolls inside it.
+    /// The space between header and log.
     pub area: Rect,
-    /// The grid itself, centred in `area`, or from its top when taller.
+    /// The part of `area` the tile grid scrolls in: all of it, or the band
+    /// above the status area.
+    pub tiles: Rect,
+    /// The grid itself: with the status area centred in `area`, or from its
+    /// top when they are taller.
     pub grid: Rect,
-    /// The size of one band.
+    /// The size of one band, and of one cell of the status area.
     pub tile: Vec2,
+    /// The status area below the grid, four cells wide and as many high as
+    /// its shown elements use; `None` when none shows anything.
+    pub status: Option<Rect>,
     /// The row of folded-window chips at the bottom edge; `None` when no
     /// window is folded.
     pub strip: Option<Rect>,
@@ -262,12 +278,26 @@ pub fn small_log(menu: &Menu) -> bool {
     menu.screen == Screen::Upgrade && menu.upgrade.stage == crate::upgrade::Stage::Choose
 }
 
-pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
-    layout_with(screen, tiles, folded, false)
+pub fn layout(screen: Rect, tiles: usize, folded: usize, status_rows: usize, planned_rows: usize) -> Layout {
+    layout_with(screen, tiles, folded, status_rows, planned_rows, false)
 }
 
 /// The layout, with a log of `LOG_CHOOSE_ROWS` rows when `small_log`.
-pub fn layout_with(screen: Rect, tiles: usize, folded: usize, small_log: bool) -> Layout {
+///
+/// `status_rows` is the rows the status area uses now (0 to 3; 0 draws none);
+/// `planned_rows` the rows it has when every element shows
+/// (`status::Area::planned_rows`). The tiles and the top of the area are placed
+/// by the planned rows, so they stay where they are when an element appears or
+/// goes (the elements inside the area close up); with none planned the tiles
+/// are centred alone.
+pub fn layout_with(
+    screen: Rect,
+    tiles: usize,
+    folded: usize,
+    status_rows: usize,
+    planned_rows: usize,
+    small_log: bool,
+) -> Layout {
     let small_h = LOG_CHOOSE_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
     let log_h = if small_log {
         small_h
@@ -300,20 +330,46 @@ pub fn layout_with(screen: Rect, tiles: usize, folded: usize, small_log: bool) -
     let rows = tiles.max(1).div_ceil(COLUMNS);
     let group = GROUP_W.min(screen.width() - 2.0 * GAP);
     let tile_w = (group - (COLUMNS as f32 - 1.0) * TILE_GAP) / COLUMNS as f32;
+    let max_rows = crate::status::ROWS as usize;
+    let (srows, planned) = (status_rows.min(max_rows), planned_rows.min(max_rows));
+    // The cells take the tiles' height (64 to 76 pt).
     let fit_h = (area.height() - 2.0 * GAP - (rows as f32 - 1.0) * TILE_GAP) / rows as f32;
     let tile = vec2(tile_w, fit_h.clamp(TILE_H_MIN, TILE_H));
-    let size = vec2(
-        cols as f32 * tile.x + (cols as f32 - 1.0) * TILE_GAP,
-        rows as f32 * tile.y + (rows as f32 - 1.0) * TILE_GAP,
-    );
-    let left = (screen.center().x - size.x / 2.0).max(area.left() + GAP.min(area.width() / 2.0));
-    let top = area.top() + ((area.height() - size.y) / 2.0).max(GAP);
+    let span = |n: usize, size: f32| n as f32 * size + (n as f32 - 1.0) * TILE_GAP;
+    let size = vec2(span(cols, tile.x), span(rows, tile.y));
+    let status_size = vec2(span(COLUMNS, tile.x), span(srows, tile.y));
+    let planned_h = span(planned, tile.y);
+    let block_h = if planned > 0 {
+        size.y + STATUS_GAP + planned_h
+    } else {
+        size.y
+    };
+    let min_left = area.left() + GAP.min(area.width() / 2.0);
+    let left = (screen.center().x - size.x / 2.0).max(min_left);
+    let top = area.top() + ((area.height() - block_h) / 2.0).max(GAP);
+    let grid = Rect::from_min_size(pos2(left, top), size);
+    // The area stands below the grid; where the planned rows do not fit it is
+    // pinned GAP above the log, and only the tiles scroll, in the band above.
+    let status_top = (grid.bottom() + STATUS_GAP)
+        .min(area.bottom() - GAP - planned_h)
+        .max(area.top());
+    let status = (srows > 0).then(|| {
+        let left = (screen.center().x - status_size.x / 2.0).max(min_left);
+        Rect::from_min_size(pos2(left, status_top), status_size)
+    });
+    let tiles = if planned > 0 {
+        Rect::from_min_max(area.min, pos2(area.right(), status_top))
+    } else {
+        area
+    };
     Layout {
         header,
         log,
         area,
-        grid: Rect::from_min_size(pos2(left, top), size),
+        tiles,
+        grid,
         tile,
+        status,
         strip,
     }
 }
@@ -323,6 +379,9 @@ pub fn layout_with(screen: Rect, tiles: usize, folded: usize, small_log: bool) -
 #[derive(Default)]
 pub struct Chrome {
     pub header: Header,
+    /// A window covers the menu: nothing changes on screen for the eye,
+    /// so no element of the status area asks for a frame.
+    pub covered: bool,
     /// `HH:MM`; the app refreshes it before every frame.
     pub clock: String,
     pub logo: Option<TextureHandle>,
@@ -613,7 +672,16 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         return chose.map(UiEvent::Retry);
     }
     let shown = menu.visible_tiles();
-    let l = layout_with(ui.max_rect(), shown.len(), menu.folded.len(), small_log(menu));
+    let sources = menu.status_sources();
+    let short = short_screen(ui.max_rect().height());
+    let l = layout_with(
+        ui.max_rect(),
+        shown.len(),
+        menu.folded.len(),
+        menu.status.rows(&sources, short),
+        menu.status.planned_rows(short),
+        small_log(menu),
+    );
     show_header(ui, chrome, l.header);
     let unfold = l
         .strip
@@ -630,7 +698,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         return event.map(UiEvent::Upgrade).or(unfold);
     }
     let mut clicked = None;
-    let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
+    let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.tiles));
     egui::ScrollArea::vertical()
         .id_salt("grid")
         .auto_shrink([false, false])
@@ -670,8 +738,132 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             }
             ui.add_space(0.0);
         });
+    // Outside the scroll area: the tiles scroll, the status area stays.
+    if let Some(st) = l.status {
+        let place = StatusPlace {
+            origin: st.min,
+            cell: l.tile,
+            short,
+        };
+        paint_status(ui, &menu.status, &sources, place, now, chrome.covered);
+    }
     show_log(ui, &menu.log, l.log);
     clicked.or(unfold)
+}
+
+/// Where the status elements go: the top-left cell, the cell size, and
+/// whether the screen is short.
+#[derive(Clone, Copy)]
+struct StatusPlace {
+    origin: egui::Pos2,
+    cell: Vec2,
+    short: bool,
+}
+
+/// Draw each shown status element in `place` and ask for a frame when one
+/// changes on its own, unless the menu is covered.
+fn paint_status(
+    ui: &Ui,
+    area: &crate::status::Area,
+    data: &crate::status::Sources,
+    place: StatusPlace,
+    now: Instant,
+    covered: bool,
+) {
+    let ctx = ui.ctx();
+    let ppp = ctx.pixels_per_point();
+    let StatusPlace { origin, cell, short } = place;
+    for (p, cells) in area.shown(data, short) {
+        let r = cells.rect(origin, cell, TILE_GAP);
+        // On whole pixels, so the picture is drawn 1:1.
+        let min = (r.min.to_vec2() * ppp).round() / ppp;
+        let px = [(r.width() * ppp).round() as usize, (r.height() * ppp).round() as usize];
+        let at = Rect::from_min_size(min.to_pos2(), vec2(px[0] as f32, px[1] as f32) / ppp);
+        let svg = p.element.svg(data, cells.room(cell, TILE_GAP), now);
+        if let (Some(tex), _) = status_texture(ctx, &p.name, &svg, px) {
+            ui.painter().image(
+                tex.id(),
+                at,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                // token-ok: white tints nothing: the element is drawn as rendered
+                Color32::WHITE,
+            );
+        }
+    }
+    if !covered && let Some(d) = area.wake(data, cell, TILE_GAP, now, short) {
+        ctx.request_repaint_after(d);
+    }
+}
+
+/// One element's last picture: the SVG text and pixel size it was made
+/// from, and the texture, `None` when that SVG did not render.
+#[derive(Clone)]
+struct StatusTexture {
+    svg: String,
+    px: [usize; 2],
+    tex: Option<TextureHandle>,
+    /// When a failed render of this element was last logged.
+    logged: Option<Instant>,
+}
+
+/// A failed render is logged at most this often per element: a graph's SVG
+/// changes every second, and it would fail every second.
+const STATUS_LOG_EVERY: Duration = Duration::from_secs(300);
+
+/// Whether a failure now is worth a log line, after one logged at `last`.
+fn status_log_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= STATUS_LOG_EVERY)
+}
+
+/// The name of every status element texture starts so; the app damages
+/// only the element's cell when one is uploaded.
+pub const STATUS_TEXTURE: &str = "thinfloe-status ";
+
+fn status_id(name: &str) -> egui::Id {
+    egui::Id::unique(("thinfloe-status", name))
+}
+
+/// The texture of element `name` for `svg` at `px` pixels, and whether it
+/// was rendered now: only when the text or the size differs from the last
+/// one, so a picture is made again only when its content, page, cell size
+/// or scale changed. A failed render, a panic in the renderer included,
+/// draws nothing and is logged at most every `STATUS_LOG_EVERY`.
+fn status_texture(ctx: &egui::Context, name: &str, svg: &str, px: [usize; 2]) -> (Option<TextureHandle>, bool) {
+    let id = status_id(name);
+    let cached = ctx.data(|d| d.get_temp::<StatusTexture>(id));
+    if let Some(c) = &cached
+        && c.svg == svg
+        && c.px == px
+    {
+        return (c.tex.clone(), false);
+    }
+    let mut logged = cached.and_then(|c| c.logged);
+    let tex = match crate::status::render::render(svg, px) {
+        Ok(img) => Some(ctx.load_texture(format!("{STATUS_TEXTURE}{name}"), img, egui::TextureOptions::NEAREST)),
+        Err(e) => {
+            let now = Instant::now();
+            if status_log_due(logged, now) {
+                eprintln!("thinfloe-menu: status element {name}: {e}");
+                logged = Some(now);
+            }
+            None
+        }
+    };
+    let entry = StatusTexture {
+        svg: svg.to_string(),
+        px,
+        tex: tex.clone(),
+        logged,
+    };
+    ctx.data_mut(|d| d.insert_temp(id, entry));
+    (tex, true)
+}
+
+/// The texture element `name` draws now and its size in pixels, for tests.
+#[cfg(test)]
+fn status_cache_key(ctx: &egui::Context, name: &str) -> Option<(egui::TextureId, [usize; 2])> {
+    ctx.data(|d| d.get_temp::<StatusTexture>(status_id(name)))
+        .and_then(|c| c.tex.map(|t| (t.id(), c.px)))
 }
 
 /// The folded windows as chips in one row. A row wider than the strip
@@ -1393,6 +1585,7 @@ mod tests {
     use super::*;
     use crate::brand::rgb::*;
 
+    use crate::battery;
     use crate::tiles::{Action, Grid};
 
     // Before the fix a long Name wrapped down the screen and the painter was
@@ -1450,6 +1643,695 @@ mod tests {
         }
     }
 
+    fn dev(name: &str, percent: u8, state: &str) -> battery::Device {
+        battery::Device {
+            name: name.into(),
+            percent: Some(percent),
+            state: state.into(),
+            read_epoch: 0,
+            kind: battery::DeviceKind::Unknown,
+        }
+    }
+
+    fn kdev(name: &str, kind: battery::DeviceKind, percent: u8, state: &str) -> battery::Device {
+        battery::Device {
+            kind,
+            ..dev(name, percent, state)
+        }
+    }
+
+    /// The shipped status files.
+    fn shipped_status() -> crate::status::Area {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/status");
+        crate::status::config::load(&dir)
+    }
+
+    fn status_menu(devices: Vec<battery::Device>, t0: Instant) -> Menu {
+        let mut m = Menu::new(shipped_grid(), false);
+        // A USB boot, where the Upgrade tile shows too: all shipped tiles.
+        m.set_usb_boot(true);
+        m.set_status(shipped_status());
+        m.set_battery(devices, t0);
+        m
+    }
+
+    /// The shapes of one 1280 x 720 frame, `at` the frame's time, and the
+    /// repaint delay egui was asked for.
+    fn status_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        at: Instant,
+        covered: bool,
+    ) -> (Vec<egui::epaint::ClippedShape>, Duration) {
+        status_frame_at(ctx, menu, at, covered, None)
+    }
+
+    /// One frame of a screen `w` by `h`.
+    fn status_frame_on(
+        ctx: &egui::Context,
+        menu: &Menu,
+        at: Instant,
+        (w, h): (f32, f32),
+    ) -> Vec<egui::epaint::ClippedShape> {
+        status_frame_sized(ctx, menu, at, false, None, screen(w, h)).0
+    }
+
+    /// `status_frame` with egui's clock at `time` seconds, so its own
+    /// animations (a scroll bar fading in) end.
+    fn status_frame_at(
+        ctx: &egui::Context,
+        menu: &Menu,
+        at: Instant,
+        covered: bool,
+        time: Option<f64>,
+    ) -> (Vec<egui::epaint::ClippedShape>, Duration) {
+        status_frame_sized(ctx, menu, at, covered, time, screen(1280.0, 720.0))
+    }
+
+    fn status_frame_sized(
+        ctx: &egui::Context,
+        menu: &Menu,
+        at: Instant,
+        covered: bool,
+        time: Option<f64>,
+        rect: Rect,
+    ) -> (Vec<egui::epaint::ClippedShape>, Duration) {
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            time,
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let chrome = Chrome {
+            covered,
+            ..Chrome::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            show(ui, menu, &icons, &chrome, at);
+        });
+        out.textures_delta.clear();
+        let delay = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        (out.shapes, delay)
+    }
+
+    fn new_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        ctx
+    }
+
+    /// The rectangles of the textured meshes drawn: with no icons and no
+    /// logo, only status elements draw pictures.
+    fn pictures(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => Some(m.calc_bounds()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn five() -> Vec<battery::Device> {
+        ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|n| dev(&format!("Dev {n}"), 50, "discharging"))
+            .collect()
+    }
+
+    #[test]
+    fn the_battery_element_draws_one_picture_in_the_top_left_cell() {
+        let t0 = Instant::now();
+        let menu = status_menu(vec![kdev("K", battery::DeviceKind::Keyboard, 80, "discharging")], t0);
+        let (shapes, _) = status_frame(&new_ctx(), &menu, t0, false);
+        let l = layout(screen(1280.0, 720.0), menu.visible_tiles().len(), 0, 1, 1);
+        let st = l.status.unwrap();
+        let cell = crate::status::Cells::parse("0,0,1,1")
+            .unwrap()
+            .rect(st.min, l.tile, TILE_GAP);
+        let got = pictures(&shapes);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!((got[0].min - cell.min).length() < 1.0, "{:?} vs {cell:?}", got[0]);
+        assert!((got[0].size() - cell.size()).length() < 1.0, "{:?} vs {cell:?}", got[0]);
+        // No tile of its own any more.
+        assert!(menu.tiles.iter().all(|t| t.name != "Battery"));
+    }
+
+    fn tile_name_top(shapes: &[egui::epaint::ClippedShape], name: &str) -> f32 {
+        shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == name => Some(t.pos.y),
+                _ => None,
+            })
+            .expect("tile name drawn")
+    }
+
+    #[test]
+    fn without_a_device_nothing_is_drawn_and_the_tiles_keep_their_place() {
+        let t0 = Instant::now();
+        let with_area = status_menu(Vec::new(), t0);
+        let without = Menu::new(shipped_grid(), false);
+        let (a, _) = status_frame(&new_ctx(), &with_area, t0, false);
+        let (b, _) = status_frame(&new_ctx(), &without, t0, false);
+        assert!(pictures(&a).is_empty());
+        // The files plan a row, so the tiles stand higher than in a menu with
+        // no status file at all, which keeps its tiles centred alone.
+        assert!(
+            tile_name_top(&a, "Terminal") < tile_name_top(&b, "Terminal"),
+            "{} {}",
+            tile_name_top(&a, "Terminal"),
+            tile_name_top(&b, "Terminal")
+        );
+        // With a device the grid stays where it was: no tile jump.
+        let (c, _) = status_frame(&new_ctx(), &status_menu(five(), t0), t0, false);
+        assert_eq!(tile_name_top(&c, "Terminal"), tile_name_top(&a, "Terminal"));
+    }
+
+    #[test]
+    fn a_page_turn_is_asked_for_only_while_the_menu_is_shown() {
+        let t0 = Instant::now();
+        let menu = status_menu(five(), t0);
+        let at = t0 + Duration::from_millis(1500);
+        let (_, delay) = status_frame(&new_ctx(), &menu, at, false);
+        assert!(delay <= Duration::from_millis(2500), "{delay:?}");
+        let (_, covered) = status_frame(&new_ctx(), &menu, at, true);
+        // Only the minute clock asks; it never lands on the page's 2.5 s.
+        assert_ne!(covered, Duration::from_millis(2500));
+        let (_, calm) = status_frame(&new_ctx(), &status_menu(five()[..2].to_vec(), t0), at, false);
+        assert_ne!(calm, Duration::from_millis(2500), "nothing pages: no wake");
+    }
+
+    #[test]
+    fn an_element_is_rendered_again_only_when_its_picture_changes() {
+        let ctx = new_ctx();
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"5\"><rect width=\"10\" height=\"5\" fill=\"#fff\"/></svg>";
+        let other = svg.replace("#fff", "#f00");
+        let mut first = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx();
+            let (tex, rendered) = status_texture(c, "a", svg, [20, 10]);
+            assert!(rendered && tex.is_some());
+            first = tex.map(|t| t.id());
+            assert!(!status_texture(c, "a", svg, [20, 10]).1, "same text, same size: cached");
+            assert_eq!(status_texture(c, "a", svg, [20, 10]).0.map(|t| t.id()), first);
+            assert!(status_texture(c, "b", svg, [20, 10]).1, "each element has its own");
+            assert!(!status_texture(c, "a", svg, [20, 10]).1, "b did not push a out");
+            assert!(status_texture(c, "a", svg, [40, 20]).1, "new scale or cell size");
+            assert!(status_texture(c, "a", &other, [40, 20]).1, "new content or page");
+            let (bad, rendered) = status_texture(c, "a", "<svg", [40, 20]);
+            assert!(rendered && bad.is_none(), "a broken SVG draws nothing");
+            assert!(
+                !status_texture(c, "a", "<svg", [40, 20]).1,
+                "and is not tried every frame"
+            );
+        });
+        out.textures_delta.clear();
+        // Paging a battery element changes its text; the same page does not.
+        let t0 = Instant::now();
+        let menu = status_menu(five(), t0);
+        let ctx = new_ctx();
+        let frame = |at| status_frame(&ctx, &menu, at, false);
+        frame(t0);
+        assert!(!frame(t0 + Duration::from_millis(500)).0.is_empty());
+        let id = |ctx: &egui::Context| status_cache_key(ctx, "10-battery.conf");
+        let before = id(&ctx);
+        frame(t0 + Duration::from_millis(900));
+        assert_eq!(id(&ctx), before, "same page: no new texture");
+        frame(t0 + Duration::from_secs(4));
+        assert_ne!(id(&ctx), before, "next page: a new picture");
+    }
+
+    #[test]
+    fn a_new_scale_or_cell_size_renders_again_and_never_stretches() {
+        let t0 = Instant::now();
+        let menu = status_menu(vec![dev("Dev A", 50, "discharging")], t0);
+        let ctx = new_ctx();
+        let key = |ctx: &egui::Context| status_cache_key(ctx, "10-battery.conf");
+        let run = |ctx: &egui::Context, h: f32| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1280.0, h)),
+                ..Default::default()
+            };
+            let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), t0);
+            });
+            out.textures_delta.clear();
+            pictures(&out.shapes)[0]
+        };
+        run(&ctx, 720.0);
+        let first = key(&ctx);
+        let pic = run(&ctx, 720.0);
+        assert_eq!(key(&ctx), first, "same data, same pixels: cached");
+        // The scale settles after the first frame: egui takes a zoom
+        // factor at the start of the next pass.
+        ctx.set_zoom_factor(2.0);
+        run(&ctx, 720.0);
+        let zoomed = run(&ctx, 720.0);
+        let ppp = ctx.pixels_per_point();
+        assert_eq!(ppp, 2.0);
+        assert_ne!(key(&ctx), first, "twice the pixels: rendered again");
+        assert_eq!(
+            key(&ctx).unwrap().1,
+            [
+                (zoomed.width() * ppp).round() as usize,
+                (zoomed.height() * ppp).round() as usize
+            ],
+            "drawn 1:1"
+        );
+        assert_eq!(first.unwrap().1, [pic.width() as usize, pic.height() as usize]);
+        // A screen too low for 76 pt tiles squeezes the cell: rendered again.
+        ctx.set_zoom_factor(1.0);
+        run(&ctx, 720.0);
+        run(&ctx, 720.0);
+        let tall = key(&ctx);
+        let short = run(&ctx, 400.0);
+        assert!(short.height() < TILE_H, "{short:?}");
+        assert_ne!(key(&ctx), tall, "a lower cell: rendered again");
+    }
+
+    #[test]
+    fn a_page_turn_uploads_only_the_element_and_damages_only_its_cell() {
+        let t0 = Instant::now();
+        let menu = status_menu(five(), t0);
+        let ctx = new_ctx();
+        let input = || egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let frame = |at| {
+            ctx.run_ui(input(), |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), at);
+            })
+        };
+        // Fonts land one frame late; let them settle.
+        for _ in 0..3 {
+            frame(t0).textures_delta.clear();
+        }
+        let mut out = frame(t0 + Duration::from_secs(4));
+        let set: Vec<egui::TextureId> = out.textures_delta.set.keys().copied().collect();
+        out.textures_delta.clear();
+        assert_eq!(set.len(), 1, "one new picture: {set:?}");
+        let own = |id| {
+            ctx.tex_manager()
+                .read()
+                .meta(id)
+                .is_some_and(|m| m.name.starts_with(STATUS_TEXTURE))
+        };
+        let pic = pictures(&out.shapes)[0];
+        let prims = ctx.tessellate(out.shapes, 1.0);
+        let dmg = crate::damage::texture_damage(&set, own, &prims, 1.0).expect("only a status texture");
+        assert_eq!(
+            dmg,
+            crate::raster::IRect::from_points(pic, 1.0),
+            "its cell, not the canvas"
+        );
+    }
+
+    /// A network copy with `n` samples of a curve, on eth0 with an
+    /// address, a gateway, DNS and wg0 up.
+    fn net_snap(n: usize) -> crate::netstat::Snapshot {
+        use crate::netstat::{Info, Link, Vpn};
+        let curve = |k: f64| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f64 / 300.0 * std::f64::consts::TAU;
+                    (k * (1.2 + (t * 3.0).sin() + 0.6 * (t * 11.0).sin())).max(0.0)
+                })
+                .collect()
+        };
+        crate::netstat::Snapshot {
+            rx: curve(4.0e6),
+            tx: curve(6.0e5),
+            total: (1_234_000_000, 98_700_000),
+            info: Info {
+                iface: Some("eth0".into()),
+                default_route: true,
+                link: Link::Wired(Some(1000)),
+                ipv4: Some((std::net::Ipv4Addr::new(192, 168, 1, 23), 24)),
+                gateway: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+                dns: vec!["192.168.1.1".into(), "9.9.9.9".into()],
+                vpn: Vpn::Up,
+                addressed: true,
+            },
+        }
+    }
+
+    fn net_menu(n: usize, t0: Instant) -> Menu {
+        let mut m = status_menu(vec![kdev("K", battery::DeviceKind::Keyboard, 80, "discharging")], t0);
+        m.set_network(net_snap(n), t0, std::time::SystemTime::now());
+        m
+    }
+
+    #[test]
+    fn the_network_graph_spans_two_by_two_cells_and_its_list_stands_right_of_it() {
+        let t0 = Instant::now();
+        let menu = net_menu(120, t0);
+        let full = (1920.0, 1080.0);
+        assert_eq!(
+            menu.status.rows(&menu.status_sources(), false),
+            3,
+            "two rows and the clock's"
+        );
+        let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
+        let l = layout(screen(full.0, full.1), menu.visible_tiles().len(), 0, 3, 3);
+        let st = l.status.unwrap();
+        let want = crate::status::Cells::parse("1,0,2,2")
+            .unwrap()
+            .rect(st.min, l.tile, TILE_GAP);
+        let list = crate::status::Cells::parse("3,0,1,2")
+            .unwrap()
+            .rect(st.min, l.tile, TILE_GAP);
+        let got = pictures(&shapes);
+        assert_eq!(got.len(), 4, "battery, graph, list and clock: {got:?}");
+        assert!((got[1].min - want.min).length() < 1.0, "{:?} vs {want:?}", got[1]);
+        assert!((got[1].size() - want.size()).length() < 1.0, "{:?} vs {want:?}", got[1]);
+        assert!((got[2].min - list.min).length() < 1.0, "{:?} vs {list:?}", got[2]);
+        assert!((got[2].size() - list.size()).length() < 1.0, "{:?} vs {list:?}", got[2]);
+        // With nothing to measure it is gone, the battery stays, the tiles
+        // do not move.
+        let mut gone = net_menu(120, t0);
+        gone.set_network(crate::netstat::Snapshot::default(), t0, std::time::SystemTime::now());
+        let g = status_frame_on(&new_ctx(), &gone, t0, full);
+        assert_eq!(pictures(&g).len(), 2, "the battery and the clock");
+        assert_eq!(gone.status.rows(&gone.status_sources(), false), 1, "back to one row");
+        assert_eq!(tile_name_top(&g, "Terminal"), tile_name_top(&shapes, "Terminal"));
+        // Without a battery device graph and list still take two rows, the
+        // clock under them the third.
+        let mut alone = net_menu(120, t0);
+        alone.set_battery(Vec::new(), t0);
+        assert_eq!(alone.status.rows(&alone.status_sources(), false), 3);
+        let a = status_frame_on(&new_ctx(), &alone, t0, full);
+        assert_eq!(pictures(&a).len(), 3);
+        assert!((pictures(&a)[0].min - want.min).length() < 1.0);
+    }
+
+    #[test]
+    fn a_failing_element_draws_nothing_and_is_logged_once_in_a_while() {
+        let ctx = new_ctx();
+        let logged = |ctx: &egui::Context| {
+            ctx.data(|d| d.get_temp::<StatusTexture>(status_id("bad")))
+                .and_then(|c| c.logged)
+        };
+        // Its text changes each second, and it fails each second.
+        let (tex, _) = status_texture(&ctx, "bad", "<svg 1", [10, 10]);
+        assert!(tex.is_none());
+        let first = logged(&ctx).expect("the first failure is logged");
+        let (tex, _) = status_texture(&ctx, "bad", "<svg 2", [10, 10]);
+        assert!(tex.is_none());
+        assert_eq!(logged(&ctx), Some(first), "the second one is not");
+        // A success between two failures does not start the count again.
+        let good = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
+        let (tex, _) = status_texture(&ctx, "bad", good, [10, 10]);
+        assert!(tex.is_some());
+        status_texture(&ctx, "bad", "<svg 3", [10, 10]);
+        assert_eq!(logged(&ctx), Some(first));
+        // And the time rule itself.
+        assert!(status_log_due(None, first));
+        assert!(!status_log_due(
+            Some(first),
+            first + STATUS_LOG_EVERY - Duration::from_secs(1)
+        ));
+        assert!(status_log_due(Some(first), first + STATUS_LOG_EVERY));
+    }
+
+    /// Whether a picture is drawn on `cells` of the area in layout `l`.
+    fn drawn_on(got: &[Rect], l: &Layout, cells: &str) -> bool {
+        let want = crate::status::Cells::parse(cells)
+            .unwrap()
+            .rect(l.status.unwrap().min, l.tile, TILE_GAP);
+        got.iter()
+            .any(|r| (r.min - want.min).length() < 1.0 && (r.size() - want.size()).length() < 1.0)
+    }
+
+    #[test]
+    fn the_hardware_tiles_stand_where_the_owner_put_them_and_are_gone_on_a_short_screen() {
+        let t0 = Instant::now();
+        let mut menu = net_menu(120, t0);
+        menu.set_hardware(crate::status::hardware::sample());
+        let full = (1920.0, 1080.0);
+        let n = menu.visible_tiles().len();
+        let l = layout(screen(full.0, full.1), n, 0, 3, 3);
+        assert_eq!(menu.status.rows(&menu.status_sources(), false), 3);
+        let all = status_frame_on(&new_ctx(), &menu, t0, full);
+        let got = pictures(&all);
+        assert_eq!(got.len(), 8, "{got:?}");
+        for cells in [
+            "0,0,1,1", "1,0,2,2", "3,0,1,2", "0,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1", "3,2,1,1",
+        ] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        // No battery: its column closes up, the others stay, the tiles do not
+        // move.
+        let mut no_battery = net_menu(120, t0);
+        no_battery.set_battery(Vec::new(), t0);
+        no_battery.set_hardware(crate::status::hardware::sample());
+        let shapes = status_frame_on(&new_ctx(), &no_battery, t0, full);
+        let got = pictures(&shapes);
+        assert_eq!(got.len(), 7, "{got:?}");
+        for cells in [
+            "0,0,1,1", "0,1,1,1", "1,0,2,2", "3,0,1,2", "1,2,1,1", "2,2,1,1", "3,2,1,1",
+        ] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert!(!drawn_on(&got, &l, "0,2,1,1"), "{got:?}");
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // No network: memory and system in the top row, tiles unmoved.
+        let mut no_net = net_menu(120, t0);
+        no_net.set_network(crate::netstat::Snapshot::default(), t0, std::time::SystemTime::now());
+        no_net.set_hardware(crate::status::hardware::sample());
+        let shapes = status_frame_on(&new_ctx(), &no_net, t0, full);
+        let got = pictures(&shapes);
+        for cells in ["0,0,1,1", "0,1,1,1", "0,2,1,1", "1,0,1,1", "2,0,1,1"] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // A VM: one row, in the top row of the same place, tiles unmoved.
+        let mut vm = net_menu(120, t0);
+        vm.set_battery(Vec::new(), t0);
+        vm.set_network(crate::netstat::Snapshot::default(), t0, std::time::SystemTime::now());
+        vm.set_hardware(crate::hardware::Snapshot {
+            temps: vec![],
+            ..crate::status::hardware::sample()
+        });
+        assert_eq!(vm.status.rows(&vm.status_sources(), false), 1, "no blank row");
+        let shapes = status_frame_on(&new_ctx(), &vm, t0, full);
+        let got = pictures(&shapes);
+        assert_eq!(got.len(), 4, "{got:?}");
+        for cells in ["0,0,1,1", "1,0,1,1", "2,0,1,1", "3,0,1,1"] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // Nothing yet from the sampler: the same place again.
+        let shapes = status_frame_on(&new_ctx(), &net_menu(120, t0), t0, full);
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // A short screen: battery and the 3 x 1 graph, nothing else.
+        let small = (1280.0, 720.0);
+        let l = layout(screen(small.0, small.1), n, 0, 1, 1);
+        let got = pictures(&status_frame_on(&new_ctx(), &menu, t0, small));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(menu.status.rows(&menu.status_sources(), true), 1);
+        assert!(drawn_on(&got, &l, "1,0,3,1"), "{got:?}");
+    }
+
+    #[test]
+    fn the_shipped_status_area_covers_no_tile_on_any_screen() {
+        let t0 = Instant::now();
+        let mut menu = net_menu(120, t0);
+        menu.set_hardware(crate::status::hardware::sample());
+        let n = menu.visible_tiles().len();
+        for (w, h, planned) in SHIPPED_SCREENS {
+            let short = short_screen(h);
+            assert_eq!(menu.status.planned_rows(short), planned, "{h}");
+            let l = layout(
+                screen(w, h),
+                n,
+                0,
+                menu.status.rows(&menu.status_sources(), short),
+                planned,
+            );
+            assert!(
+                l.grid.bottom() + STATUS_GAP <= l.status.unwrap().top() + 0.01,
+                "{w}x{h}: {l:?}"
+            );
+            for r in pictures(&status_frame_on(&new_ctx(), &menu, t0, (w, h))) {
+                assert!(r.min.y >= l.status.unwrap().top() - 1.0, "{w}x{h}: {r:?}");
+                assert!(r.max.y <= l.log.top() - GAP + 1.0, "{w}x{h}: {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_screens_give_the_network_one_row_and_cover_no_shipped_tile() {
+        let t0 = Instant::now();
+        assert!(short_screen(SHORT_SCREEN_H - 0.5));
+        assert!(!short_screen(SHORT_SCREEN_H));
+        let menu = net_menu(120, t0);
+        let n = menu.visible_tiles().len();
+        assert_eq!(n, 8, "the shipped tiles");
+        for size in [(1280.0, 720.0), (1366.0, 768.0), (1280.0, 800.0), (1440.0, 899.0)] {
+            assert_eq!(menu.status.rows(&menu.status_sources(), true), 1);
+            let l = layout(screen(size.0, size.1), n, 0, 1, 1);
+            let st = l.status.unwrap();
+            assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01, "{size:?}: no tile covered");
+            let shapes = status_frame_on(&new_ctx(), &menu, t0, size);
+            let got = pictures(&shapes);
+            assert_eq!(got.len(), 2, "{size:?}: {got:?}");
+            let want = crate::status::Cells::parse("1,0,3,1")
+                .unwrap()
+                .rect(st.min, l.tile, TILE_GAP);
+            assert!(
+                (got[1].min - want.min).length() < 1.0,
+                "{size:?}: {:?} vs {want:?}",
+                got[1]
+            );
+            assert!(
+                (got[1].size() - want.size()).length() < 1.0,
+                "{size:?}: {:?} vs {want:?}",
+                got[1]
+            );
+        }
+        // From the threshold up: both rows, and still no tile covered.
+        for size in [(1440.0, 900.0), (1600.0, 1000.0), (1920.0, 1080.0)] {
+            let l = layout(screen(size.0, size.1), n, 0, 2, 3);
+            assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01, "{size:?}: no tile covered");
+            let got = pictures(&status_frame_on(&new_ctx(), &menu, t0, size));
+            assert!(
+                (got[1].height() - (2.0 * l.tile.y + TILE_GAP)).abs() < 1.0,
+                "{size:?}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nine_tiles_at_1280x720_fit_with_the_one_row_area_and_keep_their_place() {
+        let t0 = Instant::now();
+        let nine = || {
+            let mut grid = shipped_grid();
+            let terminal = grid.tiles.iter().find(|t| t.name == "Terminal").unwrap().clone();
+            grid.tiles.push(crate::tiles::Tile {
+                name: "Ninth".into(),
+                ..terminal
+            });
+            let mut m = Menu::new(grid, false);
+            // A USB boot, where the Upgrade tile shows too.
+            m.set_usb_boot(true);
+            m
+        };
+        let mut menu = nine();
+        menu.set_status(shipped_status());
+        menu.set_battery(vec![kdev("K", battery::DeviceKind::Keyboard, 80, "discharging")], t0);
+        menu.set_network(net_snap(120), t0, std::time::SystemTime::now());
+        let n = menu.visible_tiles().len();
+        assert_eq!(n, 9, "{:?}", menu.tiles.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(menu.status.rows(&menu.status_sources(), true), 1);
+        let l = layout(screen(1280.0, 720.0), n, 0, 1, 1);
+        let st = l.status.unwrap();
+        assert!((st.height() - l.tile.y).abs() < 0.01);
+        assert!(st.bottom() <= l.log.top() - GAP + 0.01, "{st:?} above {:?}", l.log);
+        assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01, "nothing to scroll: {l:?}");
+        assert!((st.top() - l.grid.bottom() - STATUS_GAP).abs() < 0.01, "{l:?}");
+        assert_eq!(l.grid, layout(screen(1280.0, 720.0), n, 0, 0, 1).grid, "no tile jump");
+        let (with, _) = status_frame(&new_ctx(), &menu, t0, false);
+        let mut empty = nine();
+        empty.set_status(shipped_status());
+        let (none_shown, _) = status_frame(&new_ctx(), &empty, t0, false);
+        assert_eq!(tile_name_top(&with, "Terminal"), tile_name_top(&none_shown, "Terminal"));
+        // Both pictures inside the area.
+        for r in pictures(&with) {
+            assert!(st.expand(1.0).contains_rect(r), "{r:?} in {st:?}");
+        }
+    }
+
+    #[test]
+    fn the_network_element_asks_for_a_frame_a_second_only_while_shown() {
+        // `show` always asks for the next minute, and that wins in the last
+        // second of one: start past the boundary when it is close.
+        let left = until_next_minute(std::time::SystemTime::now());
+        if left < Duration::from_secs(5) {
+            std::thread::sleep(left);
+        }
+        let t0 = Instant::now();
+        let mut menu = net_menu(10, t0);
+        // No battery device: only the network element asks.
+        menu.set_battery(Vec::new(), t0);
+        // The fonts land in the first frames, which ask for the next at
+        // once; where the tiles scroll, egui fades their scroll bar in over
+        // the first frames.
+        let settled = |covered| {
+            let ctx = new_ctx();
+            let mut delay = Duration::ZERO;
+            for i in 0..8 {
+                delay = status_frame_at(&ctx, &menu, t0, covered, Some(i as f64 * 0.5)).1;
+            }
+            delay
+        };
+        let shown = settled(false);
+        // egui counts from the frame's start, a little before the request.
+        assert!(
+            shown <= Duration::from_secs(1) && shown > Duration::from_millis(900),
+            "{shown:?}"
+        );
+        let covered = settled(true);
+        assert!(covered > Duration::from_secs(1), "{covered:?}");
+    }
+
+    #[test]
+    fn a_new_network_sample_uploads_only_its_picture_and_damages_only_its_cells() {
+        let t0 = Instant::now();
+        let ctx = new_ctx();
+        let input = || egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            ..Default::default()
+        };
+        let frame = |menu: &Menu| {
+            let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+            ctx.run_ui(input(), |ui| {
+                show(ui, menu, &icons, &Chrome::default(), t0);
+            })
+        };
+        let menu = net_menu(100, t0);
+        for _ in 0..3 {
+            frame(&menu).textures_delta.clear();
+        }
+        // One second later: one more sample.
+        let next = net_menu(101, t0);
+        let mut out = frame(&next);
+        let set: Vec<egui::TextureId> = out.textures_delta.set.keys().copied().collect();
+        out.textures_delta.clear();
+        assert_eq!(set.len(), 1, "only the network picture: {set:?}");
+        let own = |id| {
+            ctx.tex_manager()
+                .read()
+                .meta(id)
+                .is_some_and(|m| m.name.starts_with(STATUS_TEXTURE))
+        };
+        let pics = pictures(&out.shapes);
+        let net = pics[1];
+        let prims = ctx.tessellate(out.shapes, 1.0);
+        let dmg = crate::damage::texture_damage(&set, own, &prims, 1.0).expect("only a status texture");
+        assert_eq!(
+            dmg,
+            crate::raster::IRect::from_points(net, 1.0),
+            "its cells, not the canvas"
+        );
+        // The same sample again: nothing rendered, nothing uploaded.
+        let mut out = frame(&next);
+        assert!(out.textures_delta.set.is_empty());
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_end_of_session_dialogs_draw_no_status_area() {
+        let t0 = Instant::now();
+        let mut menu = status_menu(five(), t0);
+        menu.logout = Some(Logout::Failed { message: "x".into() });
+        let (shapes, _) = status_frame(&new_ctx(), &menu, t0, false);
+        assert!(pictures(&shapes).is_empty());
+    }
+
     #[test]
     fn elapsed_is_minutes_and_seconds() {
         assert_eq!(elapsed(Duration::from_secs(0)), "0:00");
@@ -1497,7 +2379,7 @@ mod tests {
         let by = find(BYLINE);
         let word_r = word.visual_bounding_rect();
         let by_r = by.visual_bounding_rect();
-        let header = layout(screen(1920.0, 1080.0), 0, 0).header;
+        let header = layout(screen(1920.0, 1080.0), 0, 0, 0, 0).header;
         assert!((word.pos.x - 32.0).abs() < 0.5, "wordmark at {:?}", word.pos);
         assert!(
             (by.pos.x - word.pos.x).abs() < 0.5,
@@ -1525,7 +2407,7 @@ mod tests {
     fn tiles_are_220_by_76_on_every_screen() {
         use crate::density::GROUP_W;
         for (w, h) in [(1920.0, 1080.0), (3840.0, 2160.0), (1280.0, 720.0), (1707.0, 960.0)] {
-            let l = layout(screen(w, h), 8, 0);
+            let l = layout(screen(w, h), 8, 0, 0, 0);
             assert_eq!(l.tile, vec2(220.0, 76.0), "{w}x{h}: {:?}", l.tile);
             assert!((l.grid.width() - GROUP_W).abs() < 0.5, "{w}x{h}: {:?}", l.grid);
             assert!((l.grid.center().x - w / 2.0).abs() < 1.0, "{w}x{h}: {:?}", l.grid);
@@ -1534,16 +2416,125 @@ mod tests {
         }
     }
 
+    /// The screens the layout is checked on, with the rows of the shipped files
+    /// there: one on a short screen, three on any other.
+    const SHIPPED_SCREENS: [(f32, f32, usize); 5] = [
+        (1280.0, 720.0, 1),
+        (1366.0, 768.0, 1),
+        (1440.0, 900.0, 3),
+        (1920.0, 1080.0, 3),
+        (3840.0, 2160.0, 3),
+    ];
+
+    #[test]
+    fn tiles_and_status_area_are_centred_together_between_header_and_log() {
+        use crate::density::GROUP_W;
+        for (w, h, planned) in SHIPPED_SCREENS {
+            let l = layout(screen(w, h), 8, 0, planned, planned);
+            let st = l.status.expect("rows");
+            assert_eq!(l.tile, vec2(220.0, 76.0), "{w}x{h}");
+            assert!((st.top() - l.grid.bottom() - STATUS_GAP).abs() < 0.01, "{w}x{h}: {l:?}");
+            let above = l.grid.top() - l.area.top();
+            let below = l.area.bottom() - st.bottom();
+            assert!((above - below).abs() < 0.01, "{w}x{h}: {above} above, {below} below");
+            assert!(above >= GAP, "{w}x{h}: {above}");
+            assert!((st.width() - GROUP_W).abs() < 0.5, "four columns: {st:?}");
+            assert!((st.left() - l.grid.left()).abs() < 0.5, "columns line up: {st:?}");
+            let p = planned as f32;
+            assert!((st.height() - (p * l.tile.y + (p - 1.0) * TILE_GAP)).abs() < 0.01);
+            assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01, "{w}x{h}: no tile covered");
+            assert_eq!(l.log, layout(screen(w, h), 8, 0, 0, 0).log, "the log stays as it is");
+        }
+        assert_eq!(
+            layout(screen(1920.0, 1080.0), 8, 0, 9, 9).status.unwrap().height(),
+            layout(screen(1920.0, 1080.0), 8, 0, 3, 3).status.unwrap().height(),
+            "at most 3 rows"
+        );
+    }
+
+    #[test]
+    fn nothing_jumps_when_elements_appear_or_go() {
+        for (w, h, planned) in SHIPPED_SCREENS {
+            let all = layout(screen(w, h), 8, 0, planned, planned);
+            let top = all.status.unwrap().top();
+            for shown in 0..=planned {
+                let l = layout(screen(w, h), 8, 0, shown, planned);
+                assert_eq!(l.grid, all.grid, "{w}x{h}, {shown} shown");
+                assert_eq!(l.tile, all.tile, "{w}x{h}, {shown} shown");
+                assert_eq!(l.tiles, all.tiles, "{w}x{h}, {shown} shown");
+                assert_eq!(l.log, all.log, "{w}x{h}, {shown} shown");
+                match l.status {
+                    None => assert_eq!(shown, 0, "{w}x{h}"),
+                    Some(st) => {
+                        assert_eq!(st.top(), top, "{w}x{h}, {shown} shown");
+                        let n = shown as f32;
+                        assert!((st.height() - (n * l.tile.y + (n - 1.0) * TILE_GAP)).abs() < 0.01);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_menu_with_no_status_file_keeps_its_tiles_centred_alone() {
+        for (w, h, _) in SHIPPED_SCREENS {
+            let l = layout(screen(w, h), 8, 0, 0, 0);
+            assert_eq!(l.status, None);
+            assert_eq!(l.tiles, l.area);
+            let above = l.grid.top() - l.area.top();
+            let below = l.area.bottom() - l.grid.bottom();
+            assert!((above - below).abs() < 0.01, "{w}x{h}: {above} above, {below} below");
+        }
+    }
+
+    #[test]
+    fn where_it_does_not_fit_the_area_is_pinned_above_the_log_and_only_the_tiles_scroll() {
+        // Four rows of tiles over the three rows of a tall screen, or the one
+        // row of a short one, with the tiles at their full height.
+        for (w, h, tiles, planned) in [(1280.0, 720.0, 16, 1), (1920.0, 900.0, 16, 3), (1280.0, 620.0, 12, 1)] {
+            let l = layout(screen(w, h), tiles, 0, planned, planned);
+            let st = l.status.unwrap();
+            assert!(st.bottom() <= l.log.top() - GAP + 0.01, "{h}: {st:?} above {:?}", l.log);
+            assert!(st.top() >= l.area.top(), "{h}: {st:?}");
+            let r = planned as f32;
+            assert!((st.height() - (r * l.tile.y + (r - 1.0) * TILE_GAP)).abs() < 0.01);
+            assert!(l.tile.y >= TILE_H_MIN && l.tile.y <= TILE_H);
+            // The tiles scroll in the band above it, from a GAP under the header.
+            assert!(l.tiles.bottom() <= st.top() + 0.01, "{h}: {:?}", l.tiles);
+            assert_eq!(l.tiles.top(), l.area.top());
+            assert!((l.grid.top() - l.area.top() - GAP).abs() < 0.01, "{h}: {l:?}");
+            assert!(l.grid.bottom() > l.tiles.bottom(), "{h}: {l:?}");
+            // With fewer rows shown the same: no jump.
+            let fewer = layout(screen(w, h), tiles, 0, 1, planned);
+            assert_eq!(fewer.grid, l.grid, "{h}");
+            assert_eq!(fewer.status.unwrap().top(), st.top(), "{h}");
+        }
+        // With room to spare nothing scrolls and both sit together.
+        let l = layout(screen(1920.0, 1080.0), 8, 0, 1, 3);
+        let st = l.status.unwrap();
+        assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01);
+        assert!((st.top() - (l.grid.bottom() + STATUS_GAP)).abs() < 0.01);
+        // A smaller screen shrinks tiles and cells together.
+        let small = layout(screen(1280.0, 480.0), 9, 0, 1, 1);
+        assert!(small.tile.y < TILE_H, "{:?}", small.tile);
+        assert!((small.status.unwrap().height() - small.tile.y).abs() < 0.01);
+        // Narrow screens stay inside.
+        for (w, h, n) in [(1024.0, 560.0, 8), (700.0, 900.0, 3)] {
+            let st = layout(screen(w, h), n, 0, 2, 3).status.unwrap();
+            assert!(st.left() >= 0.0 && st.right() <= w, "{st:?}");
+        }
+    }
+
     #[test]
     fn the_group_never_exceeds_the_screen() {
-        let l = layout(screen(900.0, 600.0), 8, 0);
+        let l = layout(screen(900.0, 600.0), 8, 0, 0, 0);
         assert!(l.grid.left() >= 0.0 && l.grid.right() <= 900.0, "{:?}", l.grid);
     }
 
     #[test]
     fn folding_a_window_takes_only_from_the_log() {
-        let open = layout(screen(1920.0, 1080.0), 8, 0);
-        let folded = layout(screen(1920.0, 1080.0), 8, 1);
+        let open = layout(screen(1920.0, 1080.0), 8, 0, 0, 0);
+        let folded = layout(screen(1920.0, 1080.0), 8, 1, 0, 0);
         assert_eq!(open.area, folded.area);
         assert_eq!(open.grid, folded.grid);
         assert_eq!(open.log.top(), folded.log.top());
@@ -1554,8 +2545,8 @@ mod tests {
     fn the_log_keeps_its_minimum_and_the_area_gives_the_rest() {
         // 0.3 * 600 = 180 is 16 above the minimum, less than STRIP_H + STRIP_GAP.
         let min = LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
-        let open = layout(screen(1024.0, 600.0), 8, 0);
-        let folded = layout(screen(1024.0, 600.0), 8, 1);
+        let open = layout(screen(1024.0, 600.0), 8, 0, 0, 0);
+        let folded = layout(screen(1024.0, 600.0), 8, 1, 0, 0);
         assert!(open.log.height() - min < STRIP_H + STRIP_GAP, "{:?}", open.log);
         assert!(open.log.height() > min, "{:?}", open.log);
         assert!((folded.log.height() - min).abs() < 0.5, "{:?}", folded.log);
@@ -1567,7 +2558,7 @@ mod tests {
 
     #[test]
     fn nine_tiles_fit_between_header_and_log_on_1280_by_720() {
-        let l = layout(screen(1280.0, 720.0), 9, 0);
+        let l = layout(screen(1280.0, 720.0), 9, 0, 0, 0);
         assert!(
             l.grid.top() > l.header.bottom() && l.grid.bottom() < l.log.top(),
             "{l:?}"
@@ -1759,13 +2750,13 @@ mod tests {
 
     #[test]
     fn the_log_keeps_its_minimum_rows_on_a_short_screen() {
-        let l = layout(screen(1280.0, 480.0), 6, 0);
+        let l = layout(screen(1280.0, 480.0), 6, 0, 0, 0);
         assert!(l.log.height() >= LOG_MIN_ROWS as f32 * LOG_ROW, "{:?}", l.log);
     }
 
     #[test]
     fn many_tiles_start_at_the_top_and_overflow_downwards() {
-        let l = layout(screen(1920.0, 1080.0), 38, 0);
+        let l = layout(screen(1920.0, 1080.0), 38, 0, 0, 0);
         assert!(
             l.grid.top() >= l.area.top() && l.grid.height() > l.area.height(),
             "{:?}",
@@ -1893,7 +2884,7 @@ mod tests {
             out = Some(o);
         }
         let out = out.unwrap();
-        let l = layout(screen(1280.0, 720.0), names.len(), 0);
+        let l = layout(screen(1280.0, 720.0), names.len(), 0, 0, 0);
         let tiles: Vec<Rect> = out
             .shapes
             .iter()
@@ -2146,7 +3137,7 @@ mod tests {
             out = Some(o);
         }
         let out = out.unwrap();
-        let l = layout(screen(1280.0, 720.0), 3, 0);
+        let l = layout(screen(1280.0, 720.0), 3, 0, 0, 0);
         // The ice edge: a 5 wide bar at the left of the band, full height.
         let edges: Vec<Rect> = out
             .shapes
@@ -2284,14 +3275,14 @@ mod tests {
 
     #[test]
     fn no_folded_window_means_no_strip_and_the_log_reaches_the_bottom() {
-        let l = layout(screen(1920.0, 1080.0), 8, 0);
+        let l = layout(screen(1920.0, 1080.0), 8, 0, 0, 0);
         assert!(l.strip.is_none());
         assert!(1080.0 - l.log.bottom() <= GAP + 0.5);
     }
 
     #[test]
     fn a_folded_window_puts_the_strip_below_the_log() {
-        let l = layout(screen(1920.0, 1080.0), 8, 2);
+        let l = layout(screen(1920.0, 1080.0), 8, 2, 0, 0);
         let s = l.strip.unwrap();
         assert!(s.top() >= l.log.bottom() && s.bottom() <= 1080.0);
         assert!(s.height() >= CHIP_H);
@@ -2317,7 +3308,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let size = vec2(1280.0, 720.0);
-        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        let strip = layout(screen(1280.0, 720.0), 1, 10, 0, 0).strip.unwrap();
         let over = strip.center();
         strip_frame(&ctx, &menu, size, vec![]);
         let (first, _) = strip_frame(&ctx, &menu, size, vec![]);
@@ -2349,7 +3340,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let size = vec2(1280.0, 720.0);
-        let strip = layout(screen(1280.0, 720.0), 1, 10).strip.unwrap();
+        let strip = layout(screen(1280.0, 720.0), 1, 10, 0, 0).strip.unwrap();
         strip_frame(&ctx, &menu, size, vec![]);
         let (before, _) = strip_frame(&ctx, &menu, size, vec![]);
         let from = before[0].center();
@@ -3916,7 +4907,7 @@ mod tests {
             })
             .next_back()
             .unwrap_or_else(|| panic!("{label:?} not drawn"));
-        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, small_log(menu)).log;
+        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, 0, 0, small_log(menu)).log;
         (rect, clip.contains_rect(rect) && rect.bottom() < log.top())
     }
 
@@ -4060,7 +5051,7 @@ mod tests {
         let shapes = upgrade_shapes(&menu, w, h);
         let label = "Erase Samsung SSD 980, 500 GB, and install the newest ThinFloe";
         let footer = card_of(&shapes, label);
-        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, small_log(&menu)).log;
+        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, 0, 0, small_log(&menu)).log;
         assert!((footer.bottom() - (log.top() - 16.0)).abs() < 1.0, "{footer:?} {log:?}");
         let (rect, ok) = visible_button(&menu, w, h, "Erase Samsung SSD 980 500 GB");
         assert!(ok, "{rect:?}");
@@ -4092,7 +5083,7 @@ mod tests {
     #[test]
     fn the_log_is_small_only_while_choosing() {
         let rows = |m: &Menu| {
-            let l = layout_with(screen(1920.0, 1080.0), m.visible_tiles().len(), 0, small_log(m));
+            let l = layout_with(screen(1920.0, 1080.0), m.visible_tiles().len(), 0, 0, 0, small_log(m));
             ((l.log.height() - 2.0 * LOG_PAD) / LOG_ROW).round() as usize
         };
         let choosing = erase_chosen();
@@ -4186,6 +5177,7 @@ mod tests {
                     },
                     clock: "Thu 30 Oct 14:05".into(),
                     logo: Some(logo.clone()),
+                    covered: false,
                 };
                 show(ui, menu, &icons, &chrome, Instant::now());
             });
@@ -4268,6 +5260,35 @@ mod tests {
             },
         ];
         shot(&folded, "desktop-1080-folded.ppm", (1920, 1080), 1.0);
+        let bat = status_menu(
+            vec![
+                kdev("MX Mechanical", battery::DeviceKind::Keyboard, 100, "discharging"),
+                kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 95, "charging"),
+                dev("Pen", 7, "discharging"),
+            ],
+            Instant::now(),
+        );
+        shot(&bat, "desktop-1080-battery.ppm", (1920, 1080), 1.0);
+        shot(&bat, "desktop-4k-battery.ppm", (3840, 2160), 2.0);
+        let mut net = status_menu(
+            vec![
+                kdev("MX Mechanical", battery::DeviceKind::Keyboard, 100, "discharging"),
+                kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 95, "charging"),
+                dev("Pen", 7, "discharging"),
+            ],
+            Instant::now(),
+        );
+        net.set_network(net_snap(300), Instant::now(), std::time::SystemTime::now());
+        net.set_hardware(crate::status::hardware::sample());
+        shot(&net, "desktop-1080-status.ppm", (1920, 1080), 1.0);
+        shot(&net, "desktop-4k-status.ppm", (3840, 2160), 2.0);
+        shot(&net, "desktop-1366x768-status.ppm", (1366, 768), 1.0);
+        shot(&net, "desktop-1280x720-status.ppm", (1280, 720), 1.0);
+        shot(&net, "desktop-1440x900-status.ppm", (1440, 900), 1.0);
+        let mut no_battery = status_menu(Vec::new(), Instant::now());
+        no_battery.set_network(net_snap(300), Instant::now(), std::time::SystemTime::now());
+        no_battery.set_hardware(crate::status::hardware::sample());
+        shot(&no_battery, "desktop-1080-no-battery.ppm", (1920, 1080), 1.0);
         let (mut menu, _) = four_addons();
         let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
         menu.activate(settings, Instant::now());
@@ -4366,6 +5387,7 @@ mod tests {
             ..Default::default()
         });
         shot(&newer, "desktop-1080-upgrade-marker.ppm", (1920, 1080), 1.0);
+        shot_elements();
     }
 
     #[test]
@@ -4457,5 +5479,92 @@ mod tests {
         dialog.ending = Action::Reboot;
         dialog.logout = Some(Logout::WaitAddons);
         shot(&dialog, "dialog-writing-1080.ppm", (1920, 1080), 1.0);
+    }
+
+    /// One element as its SVG, and as a picture at twice its size.
+    fn shot_element(name: &str, svg: &str, room: crate::status::Room) {
+        let Some(dir) = std::env::var_os("TF_SHOT_DIR") else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        std::fs::write(dir.join(format!("{name}.svg")), svg).unwrap();
+        let px = [room.size.x as usize * 2, room.size.y as usize * 2];
+        let img = crate::status::render::render(svg, px).unwrap();
+        let mut ppm = format!("P6\n{} {}\n255\n", px[0], px[1]).into_bytes();
+        for p in &img.pixels {
+            ppm.extend([p.r(), p.g(), p.b()]);
+        }
+        std::fs::write(dir.join(format!("{name}.ppm")), ppm).unwrap();
+    }
+
+    /// Every status element by itself, with sample data.
+    fn shot_elements() {
+        use crate::netstat::{Info, Link, Since, Vpn};
+        use crate::status::{Cells, battery as b, hardware as h, network as g, network_info as l};
+        let room = |cells: &str, cell_h: f32| Cells::parse(cells).unwrap().room(vec2(220.0, cell_h), TILE_GAP);
+
+        let r = room("0,0,1,1", TILE_H);
+        let lines = battery::lines(&[
+            kdev("MX Mechanical", battery::DeviceKind::Keyboard, 100, "discharging"),
+            kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 60, "charging"),
+            dev("Pen", 7, "discharging"),
+        ]);
+        shot_element("battery", &b::svg(&lines, r), r);
+
+        let sample = h::sample();
+        for (name, show, cells) in [
+            ("temperatures", h::Show::Temperatures, "0,1,1,1"),
+            ("cpu", h::Show::Cpu, "0,2,1,1"),
+            ("memory", h::Show::Memory, "1,2,1,1"),
+            ("system", h::Show::System, "2,2,1,1"),
+        ] {
+            for (size, cell_h) in [("76", TILE_H), ("64", TILE_H_MIN)] {
+                let r = room(cells, cell_h);
+                let per = b::per_page(r.size.y, &r.style());
+                let svg = h::svg(&h::lines_in(&sample, show, per, r), r);
+                shot_element(&format!("hardware-{name}-{size}"), &svg, r);
+            }
+        }
+
+        let crowded = crate::hardware::Snapshot {
+            fans: vec![12000, 1800, 900, 600],
+            maker: Some("Gigabyte Technology".into()),
+            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
+            ..sample.clone()
+        };
+        for (size, cell_h) in [("76", TILE_H), ("64", TILE_H_MIN)] {
+            let r = room("2,2,1,1", cell_h);
+            let per = b::per_page(r.size.y, &r.style());
+            let svg = h::svg(&h::lines_in(&crowded, h::Show::System, per, r), r);
+            shot_element(&format!("hardware-system-crowded-{size}"), &svg, r);
+        }
+
+        let r = room("1,0,2,2", TILE_H);
+        shot_element("network-graph", &g::svg(&net_snap(300), r), r);
+        let r = room("1,0,3,1", TILE_H);
+        shot_element("network-graph-short", &g::svg(&net_snap(300), r), r);
+
+        let since = Since {
+            job: Some(1),
+            label: "since 14:02".into(),
+            base: (1_000_000_000, 600_000),
+        };
+        let r = room("3,0,1,2", TILE_H);
+        shot_element("network-info", &l::svg(&l::sample(), &since, r), r);
+        let mut three = l::sample();
+        three.info.dns = vec!["192.168.1.1".into(), "9.9.9.9".into(), "1.1.1.1".into()];
+        shot_element("network-info-three-dns", &l::svg(&three, &since, r), r);
+        let mut warn = l::sample();
+        warn.info = Info {
+            iface: Some("wlp0s20f3".into()),
+            default_route: false,
+            link: Link::Wifi(Some(-61)),
+            addressed: true,
+            vpn: Vpn::Down,
+            ..Info::default()
+        };
+        shot_element("network-info-warning", &l::svg(&warn, &since, r), r);
+        let r = room("3,0,1,2", TILE_H_MIN);
+        shot_element("network-info-small-cell", &l::svg(&l::sample(), &since, r), r);
     }
 }

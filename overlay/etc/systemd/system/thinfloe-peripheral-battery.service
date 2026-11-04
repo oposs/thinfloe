@@ -1,0 +1,17 @@
+[Unit]
+Description=Read the battery charge of keyboards and mice
+# Runs once at boot (multi-user.target, in parallel with the menu, so the
+# status area has values when it appears) and then from
+# thinfloe-peripheral-battery.timer every 5 minutes. No Before= on anything,
+# getty@tty1 included: a slow device must never delay the login, and a
+# multi-user.target unit must never declare Before= on a sysinit.target unit.
+
+[Service]
+Type=oneshot
+# A hung run would hold the helper's lock for ever.
+TimeoutStartSec=60
+StandardOutput=journal
+ExecStart=/usr/libexec/thinfloe/peripheral-battery
+
+[Install]
+WantedBy=multi-user.target
