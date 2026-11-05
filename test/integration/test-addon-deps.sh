@@ -31,7 +31,7 @@ fetch_thinlinc() {
     pattern=$(sed -n 's/^X-TF-Source-Pattern=//p' "$TILE")
     [[ -n "$page" && -n "$pattern" ]] || return 1
     mkdir -p "$CACHE" || return 1
-    url=$(curl -fsSL --max-time 60 "$page" | python3 -I -c '
+    url=$(curl -fsSL --max-time 60 "$page" | python3 -I -B -c '
 import re, sys
 pat = re.compile(sys.argv[1])
 best = None
@@ -56,7 +56,7 @@ print(best[1] if best else "")
 fetch_oxulnk() {
     mkdir -p "$CACHE" || return 1
     local file="$CACHE/oxulnk-desktop.deb"
-    python3 -I -c '
+    python3 -I -B -c '
 import importlib.machinery, importlib.util, os, sys
 tool, tile, dest = sys.argv[1:4]
 loader = importlib.machinery.SourceFileLoader("thinfloe_addon", tool)

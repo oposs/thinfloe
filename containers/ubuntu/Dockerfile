@@ -271,7 +271,7 @@ RUN addgroup --gid 1001 tfuser && \
 ADD overlay/ /__overlay
 # netplan refuses world-readable config ("Permissions for ... are too open")
 # and git cannot store mode 0600, so set it here.
-RUN tar cf - --exclude="*~" -C /__overlay . | tar xf - && rm -rf /__overlay \
+RUN tar cf - --exclude="*~" --exclude="__pycache__" -C /__overlay . | tar xf - && rm -rf /__overlay \
     && chmod 600 /etc/netplan/*.yaml
 RUN chown -R tfuser:tfuser /home/tfuser
 # The account was called tluser until 4.0; saved files and local notes may

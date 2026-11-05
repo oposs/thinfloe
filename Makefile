@@ -90,8 +90,10 @@ $(ARTIFACT_DIR) $(ROOTFS_DIR) $(IMAGE_DIR):
 # prerequisites too: a deleted file takes its own name off OVERLAY_FILES, so
 # without them make saw nothing changed and the image kept the deleted file
 # (test-container-inputs.sh). Deleting a file changes its directory's mtime.
-OVERLAY_FILES := $(shell find overlay -type f ! -name '*~' 2>/dev/null)
-OVERLAY_DIRS := $(shell find overlay -type d 2>/dev/null)
+# __pycache__ is pruned: bytecode a tool run leaves there is not an input
+# (it changed overlay/usr/bin's mtime and made the image look stale).
+OVERLAY_FILES := $(shell find overlay -name __pycache__ -prune -o -type f ! -name '*~' -print 2>/dev/null)
+OVERLAY_DIRS := $(shell find overlay -name __pycache__ -prune -o -type d -print 2>/dev/null)
 
 # labwc is rebuilt from source inside the ubuntu container, patched with
 # every file here (see containers/ubuntu/Dockerfile's labwc-build stage).

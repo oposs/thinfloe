@@ -92,4 +92,15 @@ else
     bad "deleting a brand file left the image standing"
 fi
 
+# Rewriting bytecode touches the pyc and its __pycache__, not overlay/usr/bin.
+reset
+mkdir -p "$TREE/overlay/usr/bin/__pycache__"
+(cd "$TREE" && find overlay -name __pycache__ -prune -o -exec touch -d '2020-01-01' {} +)
+: >"$TREE/overlay/usr/bin/__pycache__/tool.cpython-312.pyc"
+if [[ $(state) == up-to-date ]]; then
+    ok "bytecode in overlay/__pycache__ does not make the image stale"
+else
+    bad "a __pycache__ under overlay/ makes the image rebuild"
+fi
+
 exit $fail

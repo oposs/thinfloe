@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import tempfile
 import unittest
@@ -22,6 +23,8 @@ SCRIPT = REPO / "overlay" / "usr" / "bin" / "thinfloe-upgrade"
 
 
 def load_upgrade_image():
+    # The tools sit in overlay/, which ships; no bytecode may land there.
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_loader(
         "upgrade_image_batch",
         importlib.machinery.SourceFileLoader("upgrade_image_batch", str(SCRIPT)),
@@ -1488,7 +1491,7 @@ sys.exit(rc)
             (bin_ / "cp").chmod(0o755)
             env = dict(os.environ, PATH=str(bin_) + ":" + os.environ["PATH"])
             proc = subprocess.Popen(
-                ["python3", "-c", runner, str(SCRIPT), str(esp), str(srv)],
+                ["python3", "-B", "-c", runner, str(SCRIPT), str(esp), str(srv)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                 start_new_session=True, text=True)
             self.addCleanup(lambda: proc.poll() is None and proc.kill())

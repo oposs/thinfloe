@@ -29,6 +29,8 @@ SCRIPT = REPO / "overlay" / "usr" / "bin" / "thinfloe-upgrade"
 
 
 def load_upgrade_image():
+    # The tools sit in overlay/, which ships; no bytecode may land there.
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_loader(
         "upgrade_image",
         importlib.machinery.SourceFileLoader("upgrade_image", str(SCRIPT)),

@@ -24,6 +24,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +40,8 @@ SCRIPT = REPO / "overlay" / "usr" / "bin" / "thinfloe-addon"
 
 
 def load_addon():
+    # The tools sit in overlay/, which ships; no bytecode may land there.
+    sys.dont_write_bytecode = True
     loader = importlib.machinery.SourceFileLoader("thinfloe_addon", str(SCRIPT))
     spec = importlib.util.spec_from_loader("thinfloe_addon", loader)
     module = importlib.util.module_from_spec(spec)

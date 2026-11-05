@@ -502,7 +502,7 @@ fi
 
 UPGRADE="$REPO/overlay/usr/bin/thinfloe-upgrade"
 py_stamp() {
-    python3 -I - "$UPGRADE" "$1" "$2" "$3" <<'PY'
+    python3 -I -B - "$UPGRADE" "$1" "$2" "$3" <<'PY'
 import importlib.machinery, importlib.util, sys
 script, src, stick_id, dest = sys.argv[1:]
 loader = importlib.machinery.SourceFileLoader("upgrade_image", script)
