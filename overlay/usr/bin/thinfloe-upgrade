@@ -1863,8 +1863,11 @@ def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
     one the backup GPT. Never raises; False (logged) when it could not.
     SIGTERM, SIGHUP and SIGINT are ignored meanwhile: a second signal must
     not leave the stick half-cleared. fd, when given, is the device the
-    write had open; it is used and left open, so a stick swapped in under
-    the same name is never the one cleared.
+    write had open; the zeros go through it, so a stick swapped in under
+    the same name is never the one cleared. It is closed before partprobe
+    either way: the kernel's re-read of the table needs the drive to itself
+    and fails with EBUSY while an O_EXCL open holds it, leaving stale
+    partition nodes behind.
     """
     saved = {}
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
@@ -1872,9 +1875,8 @@ def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
             saved[sig] = signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
             pass
-    own_fd = fd is None
     try:
-        if own_fd:
+        if fd is None:
             fd = os.open(device, os.O_WRONLY)
         try:
             size = os.lseek(fd, 0, os.SEEK_END)
@@ -1893,8 +1895,7 @@ def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
                     left -= n
             os.fdatasync(fd)
         finally:
-            if own_fd:
-                os.close(fd)
+            os.close(fd)
         run_cmd(["partprobe", device], check=False, capture=True)
         return True
     except Exception as e:
@@ -2019,6 +2020,8 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         except BaseException as e:
             # Anything that ends the write early (a closed stdout, a bug, a
             # signal) leaves a half-written stick: wipe it, then report.
+            # The wipe closes the fd.
+            held[0] = None
             wipe_partition_tables(device, fd)
             if isinstance(e, Cancelled):
                 outcome.cancelled = True
@@ -2071,7 +2074,8 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         # After verify passed: the stick is good, nothing to wipe.
         outcome.cancelled = True
         outcome.reason = "cancelled"
-        if not stick_good:
+        if not stick_good and held[0] is not None:
+            held[0] = None
             wipe_partition_tables(device, fd)
         return outcome
 

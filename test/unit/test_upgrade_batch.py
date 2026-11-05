@@ -1913,5 +1913,55 @@ class TestBatchSignals(TestBatchRefusals):
         self.assertEqual(seen[1][0], "umount")
         self.assertNotIn(("mount", "/run/x/thinfloe-check-1"), ui._cleanup_items)
 
+
+class TestWipeClosesTheWriteFirst(TestFreshInstall):
+    """M1: the kernel re-reads the table only once the O_EXCL open is gone."""
+
+    def setUp(self):
+        super().setUp()
+        self.fds = []
+        real = ui.open_target
+
+        def spy(device):
+            fd = real(device)
+            self.fds.append(fd)
+            return fd
+        m = mock.patch.object(ui, "open_target", side_effect=spy)
+        m.start()
+        self.addCleanup(m.stop)
+        self.probes = []
+
+        def run_cmd(cmd, *a, **kw):
+            if cmd[0] == "partprobe":
+                try:
+                    os.fstat(self.fds[0])
+                    self.probes.append("open")
+                except OSError:
+                    self.probes.append("closed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        self.patches["run_cmd"].side_effect = run_cmd
+
+    def test_failed_write_probes_after_close(self):
+        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1, out)
+        self.assertWiped()
+        self.assertEqual(self.probes, ["closed"])
+
+    def test_cancelled_write_probes_after_close(self):
+        self.patches["stream_image"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130, out)
+        self.assertWiped()
+        self.assertEqual(self.probes, ["closed"])
+
+    def test_wipe_closes_a_given_fd_before_partprobe(self):
+        fd = os.open(self.dev, os.O_RDWR)
+        self.fds.append(fd)
+        self.assertTrue(ui.wipe_partition_tables(self.dev, fd))
+        self.assertEqual(self.probes, ["closed"])
+        self.assertWiped()
+
+
 if __name__ == "__main__":
     unittest.main()
