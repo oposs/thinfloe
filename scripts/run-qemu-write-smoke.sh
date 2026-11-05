@@ -11,7 +11,10 @@
 # scripts/smoke-write-report.sh as systemd.run=: `drives` lists both, a fresh
 # write to B is cancelled with SIGTERM after its first @progress line (exit
 # 130, the first MiB of B all zero), and a fresh write with --verify to A
-# from the boot server below ends with exit 0 and `@result ok`.
+# from the boot server below ends with exit 0 and `@result ok`. The boot
+# disk's row in `drives` must say is_thinfloe, and `write --mode upgrade` of
+# the boot disk from a stand-in release (three 1 MiB files with checksums)
+# must stage it in tl.new/ and set DEFAULT new in both syslinux.cfg copies.
 # Run 2: QEMU boots A alone through OVMF and syslinux; it must pass
 # check-boot-smoke.sh, and the stick id the write stamped on A must differ
 # from the id the boot disk got and survive the boot.
@@ -71,6 +74,13 @@ ip link set lo up || { echo "FAIL: cannot bring up loopback in the namespace" >&
 mkdir "$tmp/srv"
 ln -s "$(realpath "$IMAGE_ZST")" "$tmp/srv/thinfloe-usb.img.zst"
 ln -s "$(realpath "$IMAGE_SHA")" "$tmp/srv/thinfloe-usb.img.zst.sha256"
+# A stand-in release for the upgrade of the boot disk: small, so run 1 stays
+# within its memory and time, and with checksums, so the check step runs.
+mkdir "$tmp/srv/upgrade"
+for f in vmlinuz initrd.img ramroot.sqsh; do
+    head -c 1048576 /dev/urandom >"$tmp/srv/upgrade/$f" || exit 2
+    (cd "$tmp/srv/upgrade" && sha256sum "$f" >"$f.sha256") || exit 2
+done
 cat >"$tmp/server.py" <<'PY'
 import os, re, shutil, sys
 from functools import partial
@@ -220,6 +230,33 @@ if [[ " $(field WRITE-STEPS) " == *" verify "* ]]; then
     ok "the write ran the verify step"
 else
     bad "no verify step in '$(field WRITE-STEPS)'"
+fi
+
+if [[ "$(field BOOT-THINFLOE)" == true ]]; then
+    ok "drives marks the boot disk $(field BOOT-DRIVE) as a ThinFloe drive"
+else
+    bad "the boot disk's row: is_thinfloe '$(field BOOT-THINFLOE)' (row: $(field BOOT-ROW))"
+fi
+if [[ "$(field UPGRADE-RC)" == 0 && "$(field UPGRADE-RESULT)" == '@result ok'* \
+      && " $(field UPGRADE-STEPS) " == *" switch "* ]]; then
+    ok "write --mode upgrade of the boot disk exits 0 with '$(field UPGRADE-RESULT)' (steps: $(field UPGRADE-STEPS))"
+else
+    bad "upgrade of the boot disk: exit '$(field UPGRADE-RC)', result '$(field UPGRADE-RESULT)', steps '$(field UPGRADE-STEPS)'"
+    sed -n '/SMOKE-WRITE-UPGRADE-TAIL-BEGIN/,/SMOKE-WRITE-UPGRADE-TAIL-END/p' "$clean" | sed 's/^/         /'
+fi
+ESP_BOOT=$(esp_of "$BOOT") || exit 2
+staged=1
+for f in vmlinuz initrd.img ramroot.sqsh; do
+    [[ "$(mtype -i "$ESP_BOOT" "::tl.new/$f" 2>/dev/null | sha256sum | cut -d' ' -f1)" \
+       == "$(sha256sum <"$tmp/srv/upgrade/$f" | cut -d' ' -f1)" ]] || staged=0
+done
+for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
+    mtype -i "$ESP_BOOT" "$cfg" 2>/dev/null | tr -d '\r' | grep -qx 'DEFAULT new' || staged=0
+done
+if [[ $staged == 1 ]]; then
+    ok "the boot disk has the stand-in release in tl.new/ and DEFAULT new in both syslinux.cfg"
+else
+    bad "the boot disk after the upgrade: tl.new/ or DEFAULT new missing"
 fi
 
 if grep -qaE 'GET /thinfloe-usb\.img\.zst\.sha256 ' "$HTTP_LOG" \
