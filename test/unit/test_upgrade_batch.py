@@ -966,9 +966,9 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             os.kill(os.getpid(), signal.SIGTERM)
 
-        def wipe_after_second(device, fd=None):
+        def wipe_after_second(*a, **kw):
             os.kill(os.getpid(), signal.SIGTERM)  # relayed second signal
-            return real_wipe(device, fd)
+            return real_wipe(*a, **kw)
         self.patches["stream_image"].side_effect = twice
         with mock.patch.object(ui, "wipe_partition_tables",
                                side_effect=wipe_after_second):
@@ -1975,6 +1975,46 @@ class TestWipeClosesTheWriteFirst(TestFreshInstall):
         self.assertTrue(ui.wipe_partition_tables(self.dev, fd))
         self.assertEqual(self.probes, ["closed"])
         self.assertWiped()
+
+
+class TestCancelBeforeTheWipe(TestWipeClosesTheWriteFirst):
+    """L1: a signal between the failed write and the wipe still wipes."""
+
+    def cancel_first_wipe(self):
+        real = ui.wipe_partition_tables
+        calls = []
+
+        def wipe(*a, **kw):
+            calls.append(a)
+            if len(calls) == 1:
+                # As if SIGTERM arrived before the wipe ignored it.
+                raise ui.Cancelled()
+            return real(*a, **kw)
+        m = mock.patch.object(ui, "wipe_partition_tables", side_effect=wipe)
+        m.start()
+        self.addCleanup(m.stop)
+        return calls
+
+    def assertClosed(self):
+        with self.assertRaises(OSError):
+            os.fstat(self.fds[0])
+
+    def test_cancel_before_wipe_after_failed_write(self):
+        self.cancel_first_wipe()
+        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130, out)
+        self.assertWiped()
+        self.assertClosed()
+
+    def test_cancel_before_wipe_after_cancelled_write(self):
+        self.cancel_first_wipe()
+        self.patches["stream_image"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130, out)
+        self.assertWiped()
+        self.assertClosed()
+        self.assertEqual(self.probes, ["closed"])
 
 
 class TestInteractiveLock(unittest.TestCase):

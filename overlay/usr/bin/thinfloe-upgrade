@@ -1868,7 +1868,8 @@ class Cancelled(BaseException):
 WIPE_BYTES = 1024 * 1024
 
 
-def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
+def wipe_partition_tables(device: str, fd: Optional[int] = None,
+                          holder: Optional[list] = None) -> bool:
     """Zero the first and the last MiB so a cut-off write cannot boot.
 
     The first MiB holds the MBR, the GPT and syslinux's boot code, the last
@@ -1880,14 +1881,20 @@ def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
     either way: the kernel's re-read of the table needs the drive to itself
     and fails with EBUSY while an O_EXCL open holds it, leaving stale
     partition nodes behind.
+
+    holder, when given, is a one-item list holding that fd. It is cleared
+    only once the fd is closed, so a signal that lands before the wipe
+    ignores signals leaves the fd with the holder, whose owner then wipes.
     """
     saved = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        try:
-            saved[sig] = signal.signal(sig, signal.SIG_IGN)
-        except ValueError:  # not the main thread
-            pass
     try:
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            try:
+                saved[sig] = signal.signal(sig, signal.SIG_IGN)
+            except ValueError:  # not the main thread
+                pass
+        if holder is not None:
+            fd = holder[0]
         if fd is None:
             fd = os.open(device, os.O_WRONLY)
         try:
@@ -1907,7 +1914,11 @@ def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
                     left -= n
             os.fdatasync(fd)
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            finally:
+                if holder is not None:
+                    holder[0] = None
         run_cmd(["partprobe", device], check=False, capture=True)
         return True
     except Exception as e:
@@ -2032,9 +2043,9 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         except BaseException as e:
             # Anything that ends the write early (a closed stdout, a bug, a
             # signal) leaves a half-written stick: wipe it, then report.
-            # The wipe closes the fd.
-            held[0] = None
-            wipe_partition_tables(device, fd)
+            # The wipe closes the fd and only then clears held[0]: a signal
+            # before that leaves held[0] set, and the outer handler wipes.
+            wipe_partition_tables(device, holder=held)
             if isinstance(e, Cancelled):
                 outcome.cancelled = True
                 outcome.reason = "cancelled"
@@ -2087,8 +2098,7 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         outcome.cancelled = True
         outcome.reason = "cancelled"
         if not stick_good and held[0] is not None:
-            held[0] = None
-            wipe_partition_tables(device, fd)
+            wipe_partition_tables(device, holder=held)
         return outcome
 
 
