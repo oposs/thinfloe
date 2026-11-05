@@ -1914,6 +1914,20 @@ class TestBatchSignals(TestBatchRefusals):
         self.assertNotIn(("mount", "/run/x/thinfloe-check-1"), ui._cleanup_items)
 
 
+def lock_held(path):
+    """True when another open file holds the flock on path."""
+    import fcntl
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
 class TestWipeClosesTheWriteFirst(TestFreshInstall):
     """M1: the kernel re-reads the table only once the O_EXCL open is gone."""
 
@@ -1961,6 +1975,108 @@ class TestWipeClosesTheWriteFirst(TestFreshInstall):
         self.assertTrue(ui.wipe_partition_tables(self.dev, fd))
         self.assertEqual(self.probes, ["closed"])
         self.assertWiped()
+
+
+class TestInteractiveLock(unittest.TestCase):
+    """M2: an SSH prompt never holds the lock; the write does."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock = os.path.join(self.tmp.name, "upgrade.lock")
+        self.addCleanup(ui._release_lock)
+        self.seen = []
+        self.drive = TestBatchRefusals.mk("/dev/sdb", thinfloe=True)
+        self.later = [self.drive]
+
+        def note(name, value):
+            def f(*a, **kw):
+                self.seen.append((name, lock_held(self.lock)))
+                return value
+            return f
+        for name, kw in (
+            ("LOCK_PATH", dict(new=self.lock)),
+            ("WRITE_LOCK_WAIT", dict(new=0.3)),
+            ("ensure_root", dict()),
+            ("select_source", dict(side_effect=note("source", "http://x"))),
+            ("enumerate_drives", dict(side_effect=self._enum)),
+            ("show_drives_with_operations", dict(side_effect=self._choose)),
+            ("confirm", dict(side_effect=note("confirm", True))),
+            ("check_drive_fits", dict()),
+            ("image_size", dict(return_value=MIB)),
+            ("home_restore_failed", dict(return_value=False)),
+            ("fresh_install", dict(side_effect=note(
+                "write", ui.FreshOutcome(ok=True, written=True)))),
+            ("do_ab_upgrade", dict(side_effect=note("write", None))),
+            ("save_home_before_finish", dict(return_value=0)),
+        ):
+            m = mock.patch.object(ui, name, **kw)
+            m.start()
+            self.addCleanup(m.stop)
+        self.operation = "overwrite"
+
+    def _enum(self, include_internal=False, examine=True):
+        self.seen.append(("scan", lock_held(self.lock)))
+        return list(self.later) if self.scans_done() else [self.drive]
+
+    def scans_done(self):
+        return sum(1 for n, _ in self.seen if n == "scan") > 1
+
+    def _choose(self, drives, offer_all=False):
+        self.seen.append(("choose", lock_held(self.lock)))
+        return (self.drive, self.operation)
+
+    def run_main(self):
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            return ui.main()
+
+    def check(self):
+        prompts = [h for n, h in self.seen if n in ("source", "choose", "confirm")]
+        writes = [h for n, h in self.seen if n == "write"]
+        self.assertTrue(prompts)
+        self.assertEqual(set(prompts), {False}, self.seen)
+        self.assertEqual(writes, [True], self.seen)
+
+    def test_fresh_install_locks_only_for_the_write(self):
+        self.assertEqual(self.run_main(), 0)
+        self.check()
+
+    def test_upgrade_locks_only_for_the_write(self):
+        self.operation = "upgrade"
+        self.assertEqual(self.run_main(), 0)
+        self.check()
+
+    def test_a_drive_changed_during_the_prompts_is_not_written(self):
+        self.later = [ui.DriveInfo(**{**self.drive.__dict__, "fingerprint": "00" * 8})]
+        with self.assertRaises(SystemExit):
+            self.run_main()
+        self.assertNotIn("write", [n for n, _ in self.seen])
+
+    def test_a_drive_mounted_during_the_prompts_is_not_written(self):
+        self.operation = "upgrade"
+        self.later = [ui.DriveInfo(**{**self.drive.__dict__, "mounted": True})]
+        with self.assertRaises(SystemExit):
+            self.run_main()
+        self.assertNotIn("write", [n for n, _ in self.seen])
+
+    def test_a_running_write_stops_the_ssh_write_after_the_prompts(self):
+        import fcntl
+        state = {}
+
+        def confirm(*a, **kw):
+            if "fd" not in state:  # another write starts while we ask
+                fd = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o644)
+                self.addCleanup(os.close, fd)
+                state["fd"] = fd
+                # Non-blocking: a prompt that holds the lock must fail the
+                # test, not hang it.
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        ui.confirm.side_effect = confirm
+        with self.assertRaises(SystemExit):
+            self.run_main()
+        self.assertNotIn("write", [n for n, _ in self.seen])
 
 
 class TestIdWithoutSerial(TestBatchRefusals):

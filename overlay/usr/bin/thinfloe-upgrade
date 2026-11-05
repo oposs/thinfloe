@@ -2092,11 +2092,14 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         return outcome
 
 
-def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
+def do_fresh_install(drive: DriveInfo, base_url: str,
+                     before_write=None) -> Optional[bool]:
     """Write fresh image to drive.
 
     Returns None when the home copy was not asked for or declined, otherwise
     whether it succeeded. The install itself counts as done either way.
+    before_write, when given, runs after the last question and returns the
+    drive to write (main takes the lock there and checks the drive again).
     """
 
     check_drive_fits(base_url, drive.device)
@@ -2125,6 +2128,8 @@ def do_fresh_install(drive: DriveInfo, base_url: str) -> Optional[bool]:
     print("  are not copied, so the new machine keeps its own identity.")
     print()
     copy_home = confirm("  Copy this machine's home directory to the new drive?")
+    if before_write is not None:
+        drive = before_write()
 
     # main() saves the home afterwards; a stamp that fails only warns, the
     # stick then gets its id at its first boot.
@@ -2485,6 +2490,42 @@ def _batch_run(args) -> int:
     return batch_upgrade(drive, args, PROGRESS)
 
 
+def _scan_drives(include_internal: bool = False) -> List[DriveInfo]:
+    """The drive list for the questions, under the lock only for the scan.
+
+    The scan mounts ESPs for a moment, which a running write must not see;
+    the questions afterwards hold no lock, so an SSH session left at a
+    prompt never blocks the menu.
+    """
+    if not _take_lock(WRITE_LOCK_WAIT):
+        die("another thinfloe-upgrade is writing a stick; try again when "
+            "it has finished")
+    try:
+        return enumerate_drives(include_internal=include_internal)
+    finally:
+        _release_lock()
+
+
+def _lock_for_write(drive: DriveInfo, operation: str, base_url: str,
+                    include_internal: bool) -> DriveInfo:
+    """After the last question: take the lock for the write and check the
+    chosen drive again with the batch rules, since the prompts may have
+    waited for long. Dies when it is busy or changed; held until exit."""
+    if not _take_lock(WRITE_LOCK_WAIT):
+        die("another thinfloe-upgrade is writing a stick; nothing was "
+            "written, try again when it has finished")
+    now = next((d for d in enumerate_drives(include_internal=include_internal)
+                if d.device == drive.device), None)
+    args = argparse.Namespace(
+        device=drive.device, expect_id=drive_identity(drive),
+        mode="upgrade" if operation == "upgrade" else "fresh",
+        source=base_url, copy_home=False)
+    reason = _write_refusal(args, now)
+    if reason is not None:
+        die(f"{reason}; nothing was written")
+    return now
+
+
 def main() -> int:
     """Main entry point"""
     if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write"):
@@ -2500,21 +2541,17 @@ def main() -> int:
         # Ensure URL doesn't end with /
         base_url = base_url.rstrip("/")
 
-        # The scan mounts ESPs and the write needs the drive to itself; a
-        # menu job (or a second SSH session) must not run meanwhile.
-        if not _take_lock(WRITE_LOCK_WAIT):
-            die("another thinfloe-upgrade is writing a stick; try again when "
-                "it has finished")
-
         # Step 2: Enumerate drives
-        drives = enumerate_drives()
+        include_internal = False
+        drives = _scan_drives()
         if not drives:
             die("No suitable drives found")
 
         # Step 3: Show drives and let user select operation
         result = show_drives_with_operations(drives, offer_all=True)
         if result == SHOW_ALL:
-            drives = enumerate_drives(include_internal=True)
+            include_internal = True
+            drives = _scan_drives(include_internal=True)
             if not drives:
                 die("No suitable drives found")
             result = show_drives_with_operations(drives)
@@ -2539,12 +2576,16 @@ def main() -> int:
             if not confirm("  Proceed?"):
                 return 0
 
+            drive = _lock_for_write(drive, operation, base_url, include_internal)
             do_ab_upgrade(drive, base_url)
         else:
             # Fresh install (overwrite)
             if drive.is_boot:
                 die("Cannot overwrite the boot drive while running!")
-            home_copied = do_fresh_install(drive, base_url)
+            home_copied = do_fresh_install(
+                drive, base_url,
+                before_write=lambda: _lock_for_write(
+                    drive, operation, base_url, include_internal))
 
         # Save home before a potential reboot. A failure here is reported and
         # does not fail the install, which has already succeeded.

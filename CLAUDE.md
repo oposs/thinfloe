@@ -456,7 +456,12 @@ The system implements home directory persistence across reboots:
   holds `/run/thinfloe/upgrade.lock` for the whole job, opens a fresh
   target with `O_EXCL` (busy: exit 2) and checks the id again through that
   open; `drives` waits at most 2 s for the lock and then mounts no ESP
-  (`examined: false`). An ESP that is mounted already (the boot stick's) is
+  (`examined: false`). A wipe closes that open before `partprobe`, which
+  fails with EBUSY while it is held. The interactive mode takes the lock
+  for each drive scan and then again only after the last question, for the
+  write, and checks the chosen drive with the same refusals as `write`
+  (changed id, mounted, boot drive for a fresh install): an SSH session
+  left at a prompt blocks no menu write. An ESP that is mounted already (the boot stick's) is
   read in place: the kernel refuses a second, read-only mount of it, and
   the boot stick looked like no ThinFloe drive. Every child process runs in
   a session of its own, because the menu signals the tool's whole process

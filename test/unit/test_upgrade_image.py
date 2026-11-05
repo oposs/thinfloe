@@ -883,6 +883,7 @@ class TestClosingSummary(unittest.TestCase):
              mock.patch.object(ui, "confirm", return_value=True), \
              mock.patch.object(ui, "do_fresh_install", return_value=home_copied), \
              mock.patch.object(ui, "do_ab_upgrade"), \
+             mock.patch.object(ui, "_lock_for_write", side_effect=lambda d, *a: d), \
              mock.patch.object(ui, "save_home_before_finish", return_value=save_rc), \
              contextlib.redirect_stdout(out):
             rc = ui.main()
