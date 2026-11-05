@@ -198,10 +198,11 @@ if [[ "$(field CANCEL-SAW-PROGRESS)" == yes && "$(field CANCEL-RC)" == 130 ]]; t
 else
     bad "cancel: progress seen '$(field CANCEL-SAW-PROGRESS)', exit '$(field CANCEL-RC)', result '$(field CANCEL-RESULT)'"
 fi
-if [[ "$(field CANCEL-NONZERO)" == 0 ]]; then
-    ok "the cancelled stick's first MiB is all zero"
+if [[ "$(field CANCEL-BEFORE-NONZERO)" =~ ^[0-9]+$ && "$(field CANCEL-BEFORE-NONZERO)" -gt 0 \
+      && "$(field CANCEL-NONZERO)" == 0 ]]; then
+    ok "the first MiB of the stick held data while it was written ($(field CANCEL-BEFORE-NONZERO) non-zero bytes), and is all zero after the cancel"
 else
-    bad "the first MiB of the cancelled stick holds '$(field CANCEL-NONZERO)' non-zero bytes"
+    bad "first MiB of the cancelled stick: non-zero bytes before the cancel '$(field CANCEL-BEFORE-NONZERO)' (need > 0), after '$(field CANCEL-NONZERO)' (need 0)"
 fi
 
 if [[ "$(field WRITE-RC)" == 0 && "$(field WRITE-RESULT)" == '@result ok'* ]]; then
@@ -214,6 +215,11 @@ if [[ "$(field WRITE-PROGRESS-LINES)" =~ ^[0-9]+$ && "$(field WRITE-PROGRESS-LIN
     ok "the write reported progress ($(field WRITE-PROGRESS-LINES) lines; steps: $(field WRITE-STEPS))"
 else
     bad "the write printed no @progress lines"
+fi
+if [[ " $(field WRITE-STEPS) " == *" verify "* ]]; then
+    ok "the write ran the verify step"
+else
+    bad "no verify step in '$(field WRITE-STEPS)'"
 fi
 
 if grep -qaE 'GET /thinfloe-usb\.img\.zst\.sha256 ' "$HTTP_LOG" \
@@ -236,10 +242,17 @@ fi
 ESP_A=$(esp_of "$DISK_A") || exit 2
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mtype -i "$ESP_A" "$cfg" | tr -d '\r' >"$tmp/cfg" || { bad "cannot read $cfg on the written stick"; continue; }
+    # The tool's own stamp, before this script edits the file.
+    if [[ -n "$A_ID" ]] && grep -qE "^[[:space:]]+APPEND .*thinfloe\.stick=$A_ID( |\$)" "$tmp/cfg"; then
+        ok "the write stamped thinfloe.stick=$A_ID into $cfg"
+    else
+        bad "the write did not stamp thinfloe.stick=$A_ID into $cfg"
+    fi
     awk -v append="$APPEND" -v id="$A_ID" '
         /^LABEL /   { in_current = ($2 == "current") }
         /^[[:space:]]+APPEND / && !/ramroot=[a-z]+:\/\// {
             if (in_current) $0 = "    APPEND ramroot=tl/ramroot.sqsh " append
+            gsub(/ thinfloe\.stick=[^ ]*/, "")
             if (id != "") $0 = $0 " thinfloe.stick=" id
         }
         { print }' "$tmp/cfg" >"$tmp/cfg.new"

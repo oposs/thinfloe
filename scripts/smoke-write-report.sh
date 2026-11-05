@@ -60,13 +60,22 @@ fi
 "$TOOL" write --device "$B_DEV" --mode fresh --expect-id "$B_ID" \
     --source "$SRC" >"$OUT/cancel.out" 2>"$OUT/cancel.err" &
 pid=$!
+# Wait for a @progress line past 4 MiB: the tool emits it after os.write()
+# returned, and a read of the block device goes through the same page cache,
+# so the first MiB is then readable (no O_DIRECT or fdatasync needed).
+progress_done() { grep '^@progress' "$OUT/cancel.out" | tail -1 | cut -d' ' -f2; }
 i=0
-while [ "$i" -lt 300 ] && kill -0 "$pid" 2>/dev/null \
-      && ! grep -q '^@progress' "$OUT/cancel.out"; do
+while [ "$i" -lt 300 ] && kill -0 "$pid" 2>/dev/null; do
+    d=$(progress_done)
+    [ -n "$d" ] && [ "$d" -ge 4194304 ] 2>/dev/null && break
     i=$((i + 1))
     sleep 1
 done
-grep -q '^@progress' "$OUT/cancel.out" && say "SMOKE-WRITE-CANCEL-SAW-PROGRESS: yes"
+d=$(progress_done)
+[ -n "$d" ] && [ "$d" -ge 4194304 ] 2>/dev/null && say "SMOKE-WRITE-CANCEL-SAW-PROGRESS: yes"
+# Non-zero bytes in the first MiB of B while it is being written: proves that
+# the zero check after the cancel sees a wipe, not a stick never written.
+say "SMOKE-WRITE-CANCEL-BEFORE-NONZERO: $(head -c 1048576 "$B_DEV" | tr -d '\0' | wc -c)"
 kill -TERM "$pid" 2>/dev/null
 wait "$pid"
 say "SMOKE-WRITE-CANCEL-RC: $?"
