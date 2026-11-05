@@ -929,6 +929,11 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
         self.addCleanup(setattr, ui, "PROGRESS", ui.PROGRESS)
         # Interactive runs print through the module's PROGRESS.
         ui.PROGRESS = ui.Progress(io.StringIO(), False)
+        # The interactive path checks the open drive against the chosen one.
+        m = mock.patch.object(ui, "fd_identity",
+                              side_effect=lambda fd, dev: ui.drive_identity(self.drive))
+        m.start()
+        self.addCleanup(m.stop)
 
     def arm_sigterm(self):
         import signal
@@ -2015,6 +2020,37 @@ class TestCancelBeforeTheWipe(TestWipeClosesTheWriteFirst):
         self.assertWiped()
         self.assertClosed()
         self.assertEqual(self.probes, ["closed"])
+
+
+class TestInteractiveFreshChecksTheOpenDrive(TestFreshInstall):
+    """L2: over SSH too, the drive behind the O_EXCL open is the chosen one."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, ui, "PROGRESS", ui.PROGRESS)
+        ui.PROGRESS = ui.Progress(io.StringIO(), False)
+
+    def run_interactive(self, before_write=None):
+        with mock.patch.object(ui, "check_drive_fits"), \
+             mock.patch.object(ui, "confirm", side_effect=[True, False]), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            return ui.do_fresh_install(self.drive, "http://x",
+                                       before_write=before_write)
+
+    def test_a_swapped_drive_is_refused_and_not_written(self):
+        with mock.patch.object(ui, "fd_identity", return_value="sn-OTHER:1:00"):
+            with self.assertRaises(SystemExit):
+                self.run_interactive()
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes()[:MIB], b"\xff" * MIB)
+
+    def test_the_identity_of_the_rescanned_drive_is_expected(self):
+        now = ui.DriveInfo(**{**self.drive.__dict__, "fingerprint": "12" * 8})
+        with mock.patch.object(ui, "fd_identity",
+                               return_value=ui.drive_identity(now)):
+            self.run_interactive(before_write=lambda: now)
+        self.patches["stream_image"].assert_called_once()
 
 
 class TestInteractiveLock(unittest.TestCase):

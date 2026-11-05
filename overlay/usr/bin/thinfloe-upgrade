@@ -2149,8 +2149,12 @@ def do_fresh_install(drive: DriveInfo, base_url: str,
     except ValueError:
         old_hup = None
     try:
+        # As in batch mode: the drive behind the exclusive open must be the
+        # one just scanned, so a stick swapped in at the last moment is
+        # refused before anything is written.
         outcome = fresh_install(drive, base_url, copy_home, False, PROGRESS,
-                                save=False, stamp_required=False)
+                                save=False, stamp_required=False,
+                                expect_id=drive_identity(drive))
     finally:
         if old_hup is not None:
             signal.signal(signal.SIGHUP, old_hup)

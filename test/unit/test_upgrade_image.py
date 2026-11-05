@@ -754,6 +754,11 @@ def _open_null(device):
     return os.open(os.devnull, os.O_RDWR)
 
 
+def _same_drive(fd, device):
+    """fd_identity of the open stand-in: the drive _drive() describes."""
+    return ui.drive_identity(_drive())
+
+
 class TestHomeCopyQuestion(unittest.TestCase):
     """The question is asked on a fresh install only, before the write."""
 
@@ -764,6 +769,7 @@ class TestHomeCopyQuestion(unittest.TestCase):
 
         return [
             mock.patch.object(ui, "open_target", side_effect=_open_null),
+            mock.patch.object(ui, "fd_identity", side_effect=_same_drive),
             mock.patch.object(ui, "check_drive_fits"),
             mock.patch.object(ui, "image_size", return_value=None),
             mock.patch.object(ui, "stream_image", side_effect=write),
@@ -1203,6 +1209,7 @@ class TestStickId(unittest.TestCase):
             events = []
             with mock.patch.object(ui, "check_drive_fits"), \
                  mock.patch.object(ui, "open_target", side_effect=_open_null), \
+                 mock.patch.object(ui, "fd_identity", side_effect=_same_drive), \
                  mock.patch.object(ui, "confirm", side_effect=[True, False]), \
                  mock.patch.object(ui, "image_size", return_value=None), \
                  mock.patch.object(ui, "expected_download_sha256", return_value=None), \
