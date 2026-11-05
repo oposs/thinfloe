@@ -55,6 +55,13 @@ make qemu-smoke-addons
 Requires a stored test `.deb`, ticked by the home archive, to be installed
 before `getty@tty1.service` starts, with no network. See [Add-ons](#add-ons).
 
+### Write a stick from a boot server (headless QEMU):
+```bash
+make qemu-smoke-write
+```
+Writes a USB disk with `thinfloe-upgrade write` and boots it. See
+[Persistent Home Directory](#persistent-home-directory).
+
 ### Publish the image for thinfloe-upgrade:
 ```bash
 scripts/publish.sh
@@ -426,6 +433,25 @@ The system implements home directory persistence across reboots:
   the drive is smaller: `dd` onto such a stick failed partway and left it
   unbootable. When the size cannot be learned (no range support, a stream
   compressed from a pipe) it warns and goes on.
+
+- `thinfloe-upgrade drives [--all] [--source URL]` and `write --device DEV
+  --mode fresh|upgrade --expect-id ID [--source URL] [--copy-home] [--verify]
+  [--allow-internal]` are the question-free batch interface the menu calls
+  with `sudo -n`; the interactive mode over SSH uses the same functions.
+  `drives` prints a JSON list (`device`, `model`, `size_bytes`, `serial`,
+  `transport`, `removable`, `mounted`, `is_boot`, `is_thinfloe`, `id`,
+  `fits`, ...) of USB or removable drives only, unless `--all`; `write`
+  refuses a drive that is not in that list (internal ones need
+  `--allow-internal`), whose `id` differs from `--expect-id`, or that is
+  mounted (fresh mode: always; upgrade mode: unless it is the boot stick),
+  with exit 2. Progress goes to stdout as `@step <id> <text>`, `@progress
+  <done> <total or ->`, `@done <id>` and one `@result ok|failed <reason>`;
+  exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
+  that is cancelled or fails wipes the start of the stick, so it does not
+  try to boot half-written; an upgrade that is cancelled or fails leaves the
+  stick as it was. `make qemu-smoke-write` writes two blank USB disks in
+  QEMU from a boot server in a namespace: one write cancelled, one complete
+  with `--verify`, then a boot of the written stick.
 
 This allows WiFi credentials, ThinLinc settings, and user customizations to persist.
 

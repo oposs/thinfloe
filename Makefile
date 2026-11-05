@@ -46,7 +46,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-grow test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -67,6 +67,7 @@ help:
 	@echo "  qemu-smoke-upgrade - Headless first boot of a staged upgrade"
 	@echo "  qemu-smoke-addons - Headless boot of a stick with a ticked add-on"
 	@echo "  qemu-smoke-two-sticks - Three headless boots with a second stick attached"
+	@echo "  qemu-smoke-write  - Headless write of a USB stick from a boot server, then boot it"
 	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test              - Run integration guard tests against rootfs"
@@ -418,6 +419,25 @@ qemu-smoke-two-sticks: $(USB_IMAGE)
 	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
 		scripts/run-qemu-two-sticks-smoke.sh $(USB_IMAGE) $(QEMU_TWO_STICKS_PREFIX) \
 		$(QEMU_TWO_STICKS_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		"$(QEMU_SMOKE_APPEND)"
+
+# One boot with two blank USB disks attached: thinfloe-upgrade drives lists
+# them, a fresh write to one is cancelled (exit 130, stick wiped), a fresh
+# write with --verify to the other from a boot server in a namespace succeeds,
+# and a second boot from the written stick alone must pass. Needs the .zst and
+# its checksum from `make image`. QEMU_WRITE_TIMEOUT is longer than
+# QEMU_SMOKE_TIMEOUT: the guest writes and reads back a whole image. See
+# scripts/run-qemu-write-smoke.sh.
+QEMU_WRITE_LOG := $(IMAGE_DIR)/qemu-write-smoke.log
+QEMU_WRITE_PREFIX := $(IMAGE_DIR)/$(PROJECT_NAME)-write
+QEMU_WRITE_TIMEOUT ?= 1200
+
+qemu-smoke-write: $(USB_IMAGE) $(USB_CHECKSUM) $(KERNEL) $(INITRD)
+	@echo "Running headless write smoke test..."
+	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-write-smoke.sh $(USB_IMAGE) $(USB_IMAGE_COMPRESSED) \
+		$(USB_CHECKSUM) $(KERNEL) $(INITRD) $(QEMU_WRITE_PREFIX) \
+		$(QEMU_WRITE_LOG) $(QEMU_WRITE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
 		"$(QEMU_SMOKE_APPEND)"
 
 # Two headless boots through OVMF of the image extended to 8 GiB. Requires

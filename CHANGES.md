@@ -11,6 +11,7 @@
 - When a ticked add-on could not be installed, the menu asks once per boot "<Name> could not be installed: <reason>" with Retry and Later.
 - Log out, Restart and Power off wait for an add-on install, update, removal or check started from Settings: the dialog names it ("Installing ThinLinc"), and Stay stays available while it finishes. Restart and Power off also offer "Restart anyway" and "Power off anyway", which stop the add-on work and go on after at most 5 seconds. Running programs are stopped as before.
 - The clock in the menu and the time stamps in its log show the time zone set with `TZ=` in `~/.thinfloe-environment`, else the one the DHCP server sends (option 101), else UTC; a zone that arrives after the menu started shows within a minute. The system log says `thinfloe: time zone <zone> from DHCP`, or `thinfloe: ignored DHCP time zone '<value>': <reason>` for a value it refuses. WiFi profiles from `~/wifi.yaml` do not ask the DHCP server for a zone.
+- `thinfloe-upgrade` has a mode without questions for the menu: `thinfloe-upgrade drives` lists the USB drives as JSON (`--all` adds internal ones), and `thinfloe-upgrade write --device ... --mode fresh|upgrade --expect-id ...` writes or upgrades a stick, printing each step and how many bytes are done as `@step`, `@progress` and `@result` lines. `--verify` reads the written stick back, and a write that is cancelled or fails leaves a stick that does not try to boot; the interactive mode over SSH shows the same progress and is otherwise unchanged.
 
 ### Changed
 
