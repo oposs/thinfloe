@@ -39,6 +39,9 @@ def load_upgrade_image():
 
 
 ui = load_upgrade_image()
+# Never the real /run/thinfloe/upgrade.lock.
+_LOCK_DIR = tempfile.TemporaryDirectory()
+ui.LOCK_PATH = os.path.join(_LOCK_DIR.name, "upgrade.lock")
 
 
 class TestSaveHomeBeforeFinish(unittest.TestCase):
@@ -744,15 +747,21 @@ def _drive(is_boot=False):
     )
 
 
+def _open_null(device):
+    """Stands in for the exclusive open of a drive the test cannot open."""
+    return os.open(os.devnull, os.O_RDWR)
+
+
 class TestHomeCopyQuestion(unittest.TestCase):
     """The question is asked on a fresh install only, before the write."""
 
     def _patches(self, events, copy_result=True):
-        def write(url, device, total, progress):
+        def write(url, device, total, progress, fd=None):
             events.append("write")
             return ui.WriteResult(1, "0" * 64, "1" * 64)
 
         return [
+            mock.patch.object(ui, "open_target", side_effect=_open_null),
             mock.patch.object(ui, "check_drive_fits"),
             mock.patch.object(ui, "image_size", return_value=None),
             mock.patch.object(ui, "stream_image", side_effect=write),
@@ -838,7 +847,8 @@ class TestHomeCopyQuestion(unittest.TestCase):
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             with self.assertRaises(SystemExit):
                 ui.do_fresh_install(_drive(), "http://x")
-        wipe.assert_called_once_with("/dev/sdb")
+        wipe.assert_called_once()
+        self.assertEqual(wipe.call_args.args[0], "/dev/sdb")
 
     def test_the_ab_upgrade_never_asks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1189,12 +1199,13 @@ class TestStickId(unittest.TestCase):
         for stamped in (False, True):
             events = []
             with mock.patch.object(ui, "check_drive_fits"), \
+                 mock.patch.object(ui, "open_target", side_effect=_open_null), \
                  mock.patch.object(ui, "confirm", side_effect=[True, False]), \
                  mock.patch.object(ui, "image_size", return_value=None), \
                  mock.patch.object(ui, "expected_download_sha256", return_value=None), \
                  mock.patch.object(
                      ui, "stream_image",
-                     side_effect=lambda *a: events.append("write")
+                     side_effect=lambda *a, **k: events.append("write")
                      or ui.WriteResult(1, "0" * 64, "1" * 64)), \
                  mock.patch.object(ui, "run_cmd",
                                    side_effect=lambda cmd, **kw: events.append(cmd[0])), \

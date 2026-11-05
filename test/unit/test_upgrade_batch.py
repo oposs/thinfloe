@@ -33,6 +33,9 @@ def load_upgrade_image():
 
 ui = load_upgrade_image()
 MIB = 1024 * 1024
+# Never the real /run/thinfloe/upgrade.lock.
+_LOCK_DIR = tempfile.TemporaryDirectory()
+ui.LOCK_PATH = os.path.join(_LOCK_DIR.name, "upgrade.lock")
 
 
 class TestProgress(unittest.TestCase):
@@ -194,7 +197,7 @@ class TestDriveList(unittest.TestCase):
         self.assertEqual(set(rows[0]), {
             "device", "model", "size_bytes", "serial", "transport", "removable",
             "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
-            "efi_partition", "id", "fits"})
+            "efi_partition", "examined", "id", "fits"})
 
 class TestStreamImage(unittest.TestCase):
     SIZE = 70 * MIB
@@ -500,7 +503,7 @@ class TestBatchRefusals(unittest.TestCase):
         self.saved_progress = ui.PROGRESS
         self.addCleanup(setattr, ui, "PROGRESS", self.saved_progress)
 
-    def _enum(self, include_internal=False):
+    def _enum(self, include_internal=False, examine=True):
         out = [self.mk("/dev/sdb", mounted=False, thinfloe=True),
                self.mk("/dev/sdc", mounted=True, thinfloe=True),
                self.mk("/dev/sdd", mounted=False, thinfloe=False),
@@ -746,7 +749,7 @@ class TestFreshInstall(unittest.TestCase):
             self.patches[name] = m.start()
             self.addCleanup(m.stop)
 
-    def _stream(self, url, device, total, progress):
+    def _stream(self, url, device, total, progress, fd=None):
         Path(device).write_bytes(b"\xee" * (128 * MIB))
         return ui.WriteResult(written=MIB, image_sha256=self.SHA,
                               download_sha256="cd" * 32)
@@ -754,7 +757,7 @@ class TestFreshInstall(unittest.TestCase):
     def run_fresh(self, copy_home=False, verify=False):
         import types
         args = types.SimpleNamespace(source="http://x", copy_home=copy_home,
-                                     verify=verify, device=self.dev)
+                                     verify=verify, device=self.dev, expect_id=None)
         out, err = io.StringIO(), io.StringIO()
         prog = ui.Progress(out, True, 0)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -819,15 +822,17 @@ class TestFreshInstall(unittest.TestCase):
         self.patches["stream_image"].side_effect = ui.WriteFailed("x")
         with mock.patch.object(ui, "wipe_partition_tables", return_value=False) as w:
             rc, out = self.run_fresh()
-        w.assert_called_once_with(self.dev)
+        w.assert_called_once()
+        self.assertEqual(w.call_args.args[0], self.dev)
         self.assertEqual(rc, 1)
         self.assertIn("@result failed x", out)
 
     def test_wipe_failure_is_logged_for_real(self):
         self.patches["stream_image"].side_effect = ui.WriteFailed("x")
-        Path(self.dev).unlink()
-        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
-        rc, out = self.run_fresh()
+        # The stick stopped taking writes: the wipe's own flush fails too.
+        with mock.patch.object(ui.os, "fdatasync",
+                               side_effect=OSError(errno.EIO, "Input/output error")):
+            rc, out = self.run_fresh()
         self.assertEqual(rc, 1)
         self.assertIn("could not clear", out)
 
@@ -864,7 +869,7 @@ class TestFreshInstall(unittest.TestCase):
     def test_sigterm_during_write_wipes_and_gives_130(self):
         import signal
 
-        def term(url, device, total, progress):
+        def term(url, device, total, progress, fd=None):
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             os.kill(os.getpid(), signal.SIGTERM)
         self.patches["stream_image"].side_effect = term
@@ -954,13 +959,13 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
         signal.signal(signal.SIGTERM, ui._cancel_on_signal)
         real_wipe = ui.wipe_partition_tables
 
-        def twice(url, device, total, progress):
+        def twice(url, device, total, progress, fd=None):
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             os.kill(os.getpid(), signal.SIGTERM)
 
-        def wipe_after_second(device):
+        def wipe_after_second(device, fd=None):
             os.kill(os.getpid(), signal.SIGTERM)  # relayed second signal
-            return real_wipe(device)
+            return real_wipe(device, fd)
         self.patches["stream_image"].side_effect = twice
         with mock.patch.object(ui, "wipe_partition_tables",
                                side_effect=wipe_after_second):
@@ -1007,7 +1012,7 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
     def test_interactive_sighup_wipes(self):
         import signal
         self.patches["stream_image"].side_effect = (
-            lambda *a: os.kill(os.getpid(), signal.SIGHUP))
+            lambda *a, **k: os.kill(os.getpid(), signal.SIGHUP))
         old = signal.getsignal(signal.SIGHUP)
         self.addCleanup(signal.signal, signal.SIGHUP, old)
         with mock.patch.object(ui, "check_drive_fits"), \
@@ -1312,6 +1317,598 @@ class TestEnsureRootBatch(unittest.TestCase):
         self.assertIn("Requesting root privileges", err.getvalue())
         ex.assert_called_once_with("sudo", ["sudo", "-n", "thinfloe-upgrade", "drives"])
 
+
+# ---------------------------------------------------------------- final fixes
+
+def mk_drive(device, **kw):
+    base = dict(device=device, size="?", model="M", label="", is_thinfloe=False,
+                efi_partition=None, part_size_mb=0, is_boot=False,
+                has_tl_old=False, has_tl_new=False, size_bytes=16 * 10**9,
+                serial="S", transport="usb", removable=True, mounted=False,
+                fingerprint="ab" * 8)
+    base.update(kw)
+    return ui.DriveInfo(**base)
+
+
+def make_thinfloe_esp(root):
+    (Path(root) / "tl").mkdir(parents=True)
+    for f in ("vmlinuz", "ramroot.sqsh"):
+        (Path(root) / "tl" / f).write_text("x")
+    (Path(root) / "tl.old").mkdir()
+
+
+class TestExamineMounted(unittest.TestCase):
+    """F1: an ESP that is mounted already is read where it is, never mounted again."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.mount_calls = []
+
+    def fake_run(self, cmd, *a, **kw):
+        self.mount_calls.append(cmd)
+        # The kernel refuses a second, read-only mount of a rw superblock.
+        return subprocess.CompletedProcess(cmd, 32, "", "already mounted")
+
+    def enum(self, lsblk, boot="/dev/vda", efi=None):
+        def cmd(c):
+            if c[0] == "lsblk" and "-J" in c:
+                return json.dumps({"blockdevices": lsblk})
+            return ""
+        with mock.patch.object(ui, "get_cmd_output", side_effect=cmd), \
+             mock.patch.object(ui, "detect_boot_device", return_value=boot), \
+             mock.patch.object(ui, "find_efi_partition", side_effect=lambda d: efi.get(d)), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="ab" * 8), \
+             mock.patch.object(ui, "run_cmd", side_effect=self.fake_run):
+            return {d.device: d for d in ui.enumerate_drives()}
+
+    @staticmethod
+    def disk(name, mnt, part_mnt, tran="usb"):
+        return {"name": name, "path": "/dev/" + name, "size": 8000000000,
+                "model": None, "serial": None, "wwn": None, "tran": tran,
+                "rm": False, "type": "disk", "mountpoints": [mnt],
+                "children": [{"name": name + "1", "path": "/dev/%s1" % name,
+                              "size": 1, "type": "part", "mountpoints": [part_mnt]}]}
+
+    def test_boot_esp_is_examined_in_place(self):
+        esp = os.path.join(self.tmp.name, "efi")
+        make_thinfloe_esp(esp)
+        with mock.patch.object(ui, "BOOT_EFI_MOUNT", esp), \
+             mock.patch.object(ui.os.path, "ismount", side_effect=lambda p: p == esp):
+            d = self.enum([self.disk("vda", None, esp, tran=None)],
+                          efi={"/dev/vda": "/dev/vda1"})["/dev/vda"]
+        self.assertTrue(d.is_boot)
+        self.assertTrue(d.is_thinfloe)
+        self.assertTrue(d.has_tl_old)
+        self.assertEqual([c for c in self.mount_calls if c[0] == "mount"], [])
+
+    def test_other_mounted_esp_is_examined_at_its_mount_point(self):
+        esp = os.path.join(self.tmp.name, "media")
+        make_thinfloe_esp(esp)
+        d = self.enum([self.disk("sdb", None, esp)], boot=None,
+                      efi={"/dev/sdb": "/dev/sdb1"})["/dev/sdb"]
+        self.assertTrue(d.is_thinfloe)
+        self.assertTrue(d.mounted)
+        self.assertEqual([c for c in self.mount_calls if c[0] == "mount"], [])
+
+    def test_failed_umount_keeps_the_cleanup_entry(self):
+        # F8: atexit must try the umount again.
+        self.addCleanup(ui._cleanup_items.clear)
+
+        def run(cmd, *a, **kw):
+            rc = 0 if cmd[0] == "mount" else 32
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        with mock.patch.object(ui, "run_cmd", side_effect=run):
+            ui.examine_efi_partition("/dev/sdz1")
+        kinds = [t for t, _ in ui._cleanup_items]
+        self.assertIn("mount", kinds)
+
+
+class TestChildIsolation(unittest.TestCase):
+    """F2: the menu signals the tool's process group; children must not get it."""
+
+    def test_every_child_starts_in_its_own_session(self):
+        seen = []
+        real = subprocess.Popen
+
+        def spy(*a, **kw):
+            seen.append((a[0] if a else kw.get("args"), kw.get("start_new_session")))
+            return real(*a, **kw)
+        with tempfile.TemporaryDirectory() as t, \
+             mock.patch.object(ui.subprocess, "Popen", spy), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            src = Path(t) / "f"
+            src.write_bytes(b"x")
+            ui.run_cmd(["true"], check=False)
+            ui.get_cmd_output(["true"])
+            ui.image_size("file://" + str(src))
+            ui._content_length("file://" + str(src))
+            ui.expected_download_sha256("file://" + t, "f")
+            ui.download_file("file://" + str(src), str(Path(t) / "g"))
+            with mock.patch.object(ui.subprocess, "run", wraps=subprocess.run) as r:
+                ui.save_home_before_finish()
+        self.assertTrue(seen)
+        bad = [cmd for cmd, iso in seen if not iso]
+        self.assertEqual(bad, [], "children sharing the tool's process group")
+
+    def test_stream_children_start_in_their_own_session(self):
+        seen = []
+        real = subprocess.Popen
+
+        def spy(*a, **kw):
+            seen.append(kw.get("start_new_session"))
+            return real(*a, **kw)
+        with tempfile.TemporaryDirectory() as t:
+            raw = Path(t) / "raw"
+            raw.write_bytes(b"y" * 4096)
+            subprocess.run(["zstd", "-q", str(raw), "-o", str(raw) + ".zst"], check=True)
+            dev = Path(t) / "dev"
+            dev.write_bytes(b"")
+            with mock.patch.object(ui.subprocess, "Popen", spy):
+                ui.stream_image("file://%s.zst" % raw, str(dev), None,
+                                ui.Progress(io.StringIO(), True, 0))
+        self.assertEqual(seen, [True, True])
+
+    def test_group_sigterm_during_the_switch_still_completes(self):
+        # The real thing: the tool runs in a group of its own, a slow cp is
+        # on PATH, and the whole group gets SIGTERM while cp runs.
+        runner = r"""
+import contextlib, io, os, signal, sys, types
+from unittest import mock
+import importlib.machinery, importlib.util
+spec = importlib.util.spec_from_loader("u", importlib.machinery.SourceFileLoader("u", sys.argv[1]))
+ui = importlib.util.module_from_spec(spec); spec.loader.exec_module(ui)
+esp, srv = sys.argv[2], sys.argv[3]
+ui.BOOT_EFI_MOUNT = esp
+ui.save_home_before_finish = lambda: 0
+d = ui.DriveInfo("/dev/sdz", "16G", "T", "", True, "/dev/sdz1", 1024, True, False, False)
+p = ui.Progress(sys.stdout, True, 0)
+signal.signal(signal.SIGTERM, ui._cancel_on_signal)
+with mock.patch.object(ui.os.path, "ismount", return_value=True), \
+     contextlib.redirect_stderr(io.StringIO()):
+    try:
+        rc = ui.batch_upgrade(d, types.SimpleNamespace(source="file://" + srv), p)
+    except ui.Cancelled:
+        p.result(False, "cancelled"); rc = 130
+sys.exit(rc)
+"""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            esp, srv, bin_ = root / "esp", root / "srv", root / "bin"
+            (esp / "tl").mkdir(parents=True)
+            srv.mkdir()
+            bin_.mkdir()
+            for f in ui.FIRMWARE_FILES:
+                (esp / "tl" / f).write_text("old")
+                (srv / f).write_text("new " + f)
+            (esp / "syslinux.cfg").write_text(
+                "DEFAULT current\nLABEL current\n  APPEND ramroot=tl/ramroot.sqsh\n")
+            (bin_ / "cp").write_text("#!/bin/sh\necho cp-start >&2\nsleep 2\nexec /bin/cp \"$@\"\n")
+            (bin_ / "cp").chmod(0o755)
+            env = dict(os.environ, PATH=str(bin_) + ":" + os.environ["PATH"])
+            proc = subprocess.Popen(
+                ["python3", "-c", runner, str(SCRIPT), str(esp), str(srv)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                start_new_session=True, text=True)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            lines = []
+            for line in proc.stdout:
+                lines.append(line)
+                if line.startswith("@step switch"):
+                    break
+            import time
+            time.sleep(0.7)  # cp is sleeping now
+            os.killpg(proc.pid, signal.SIGTERM)
+            out, err = proc.communicate(timeout=60)
+            lines.append(out)
+            out = "".join(lines)
+            self.assertEqual(proc.returncode, 0, out + err)
+            self.assertIn("@result ok", out)
+            self.assertIn("DEFAULT new", (esp / "syslinux.cfg").read_text())
+            for f in ui.FIRMWARE_FILES:
+                self.assertEqual((esp / "tl.new" / f).read_text(), "new " + f)
+
+
+class TestClosedStdout(TestFreshInstall):
+    """F3: nobody reading stdout is no reason to leave a half-written stick."""
+
+    def test_emit_after_broken_pipe_is_silent(self):
+        class Gone:
+            def write(self, text):
+                raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+            def flush(self):
+                pass
+        p = ui.Progress(Gone(), True, 0)
+        p.step("write", "Writing")
+        p.progress(1, 2)
+        p.result(False, "x")  # nothing raises
+
+    def test_unexpected_error_during_write_wipes_and_propagates(self):
+        def boom(*a, **kw):
+            Path(self.dev).write_bytes(b"\xee" * (128 * MIB))
+            raise RuntimeError("unexpected")
+        self.patches["stream_image"].side_effect = boom
+        with self.assertRaises(RuntimeError):
+            self.run_fresh()
+        self.assertWiped()
+
+    def test_closed_stdout_mid_write_finishes_or_wipes(self):
+        class GoneAfter(io.StringIO):
+            n = 0
+
+            def write(self, text):
+                self.n += 1
+                if self.n > 1:
+                    raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+                return super().write(text)
+
+        def stream(url, device, total, progress, *a, **kw):
+            progress.progress(1, 2)  # stdout is gone by now
+            Path(device).write_bytes(b"\xee" * (128 * MIB))
+            return ui.WriteResult(written=MIB, image_sha256=self.SHA,
+                                  download_sha256="cd" * 32)
+        self.patches["stream_image"].side_effect = stream
+        import types
+        args = types.SimpleNamespace(source="http://x", copy_home=False,
+                                     verify=False, device=self.dev, expect_id=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = ui.batch_fresh(self.drive, args, ui.Progress(GoneAfter(), True, 0))
+        self.assertEqual(rc, 0)
+        self.assertNotWiped()
+
+
+class TestStagedUpgrade(TestBatchUpgrade):
+    """F4: a stick with an upgrade still staged (DEFAULT new, tl.new/)."""
+
+    STAGED = CFG = ("DEFAULT new\nLABEL current\n  KERNEL /tl/vmlinuz\n"
+                    "  APPEND ramroot=tl/ramroot.sqsh\nLABEL new\n"
+                    "  KERNEL /tl.new/vmlinuz\n  APPEND ramroot=tl.new/ramroot.sqsh\n")
+
+    def setUp(self):
+        super().setUp()
+        (self.esp / "tl.new").mkdir()
+        for f in ui.FIRMWARE_FILES:
+            (self.esp / "tl.new" / f).write_text("staged " + f)
+
+    def assertStickUntouched(self):
+        # Inherited tests: a failure before the switch keeps the staged release.
+        self.assertEqual([c.read_bytes() for c in self.cfgs()], self.before)
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
+            self.assertEqual((self.esp / "tl.new" / f).read_text(), "staged " + f)
+
+    def assertBootable(self):
+        for c in self.cfgs():
+            lines = c.read_text().splitlines()
+            if "DEFAULT new" in lines:
+                for f in ui.FIRMWARE_FILES:
+                    self.assertTrue((self.esp / "tl.new" / f).is_file(), f)
+            else:
+                self.assertIn("DEFAULT current", lines)
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
+
+    def test_failed_copy_leaves_a_bootable_stick(self):
+        run = ui.run_cmd
+
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertBootable()
+
+    def test_a_failed_copy_removes_the_partial_tl_new(self):
+        # Staged: the restore puts DEFAULT current back, then the copy fails.
+        run = ui.run_cmd
+
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertFalse((self.esp / "tl.new").exists())
+        for c in self.cfgs():
+            self.assertIn("DEFAULT current", c.read_text().splitlines())
+        self.assertBootable()
+
+    def test_too_little_space_leaves_stick(self):
+        with mock.patch.object(ui, "free_bytes", return_value=0), \
+             mock.patch.object(ui, "tree_bytes", return_value=0):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Not enough space", out)
+        self.assertStickUntouched()
+
+    def test_unconfirmed_restore_removes_nothing(self):
+        real = ui.set_boot_default_one
+
+        def one(mount, rel, label):
+            if label == "current":
+                raise OSError(errno.EIO, "I/O error")
+            return real(mount, rel, label)
+        with mock.patch.object(ui, "set_boot_default_one", side_effect=one):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl.new" / f).read_text(), "staged " + f)
+        self.assertBootable()
+
+    def test_upgrade_replaces_the_staged_release(self):
+        self.checksums()
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl.new" / f).read_bytes(),
+                             (self.srv / f).read_bytes())
+        self.assertBootable()
+
+    def test_non_boot_staged_failed_copy_leaves_a_bootable_stick(self):
+        self.drive = ui.DriveInfo("/dev/sdz", "16G", "Test", "", True,
+                                  "/dev/sdz1", 1024, False, False, False)
+        run = ui.run_cmd
+
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                raise subprocess.CalledProcessError(1, cmd)
+            return run(cmd, *a, **kw)
+        with contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             self.assertRaises(ui.WriteFailed):
+            ui._switch_release(self.drive, str(self.esp), str(self.srv))
+        self.assertBootable()
+
+
+class TestRestoreNonUtf8(unittest.TestCase):
+    """F12: a byte that is not UTF-8 cannot skip the rollback."""
+
+    def test_restore_keeps_foreign_bytes(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = Path(t) / "syslinux.cfg"
+            cfg.write_bytes(b"# caf\xe9\nDEFAULT new\nLABEL current\n  APPEND ramroot=tl/r\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(ui._restore_default_current(t))
+            data = cfg.read_bytes()
+        self.assertIn(b"caf\xe9", data)
+        self.assertIn(b"DEFAULT current\n", data)
+
+
+class TestLock(TestBatchRefusals):
+    """F5: one lock between `write` and the drive scan of `drives`."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock = os.path.join(self.tmp.name, "upgrade.lock")
+        for m in (mock.patch.object(ui, "LOCK_PATH", self.lock),
+                  mock.patch.object(ui, "WRITE_LOCK_WAIT", 0.3),
+                  mock.patch.object(ui, "DRIVES_LOCK_WAIT", 0.3)):
+            m.start()
+            self.addCleanup(m.stop)
+        self.addCleanup(ui._release_lock)
+
+    def hold(self):
+        import fcntl
+        fd = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.addCleanup(os.close, fd)
+
+    def held_by_someone(self):
+        import fcntl
+        fd = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+
+    def test_write_holds_the_lock_for_the_whole_job(self):
+        seen = []
+        self.m_fresh.side_effect = lambda *a: seen.append(self.held_by_someone()) or 0
+        rc, out = self.run_write("/dev/sdb", "fresh")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, [True])
+        self.assertFalse(self.held_by_someone())
+
+    def test_write_while_another_runs_is_refused(self):
+        self.hold()
+        rc, out = self.run_write("/dev/sdb", "fresh")
+        self.assertRefused(rc, out, "another")
+        self.drives.stop()
+        self.drives.start()
+
+    def test_drives_while_a_write_runs_does_not_mount(self):
+        self.drives.stop()
+        self.hold()
+        out = io.StringIO()
+        lsblk = json.dumps({"blockdevices": [TestExamineMounted.disk("sdb", None, None)]})
+        mounts = []
+        with mock.patch.object(ui, "get_cmd_output",
+                               side_effect=lambda c: lsblk if "-J" in c else ""), \
+             mock.patch.object(ui, "detect_boot_device", return_value=None), \
+             mock.patch.object(ui, "find_efi_partition", return_value="/dev/sdb1"), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="ab" * 8), \
+             mock.patch.object(ui, "run_cmd", side_effect=lambda c, *a, **k: mounts.append(c)), \
+             contextlib.redirect_stdout(out):
+            rc = ui.batch_main(["drives"])
+        self.drives.start()
+        self.assertEqual(rc, 0)
+        rows = json.loads(out.getvalue())
+        self.assertEqual(rows[0]["device"], "/dev/sdb")
+        self.assertFalse(rows[0]["examined"])
+        self.assertEqual(mounts, [])
+
+    def test_own_check_mounts_are_not_mounted(self):
+        node = {"mountpoints": [None], "children": [
+            {"mountpoints": ["/tmp/thinfloe-check-abc123"]}]}
+        self.assertFalse(ui._any_mounted(node))
+        node["children"].append({"mountpoints": ["/media/x"]})
+        self.assertTrue(ui._any_mounted(node))
+
+
+class TestExclusiveOpen(TestFreshInstall):
+    """F7: the stick is opened once, exclusively, and checked again after."""
+
+    def setUp(self):
+        super().setUp()
+        self.drive.fingerprint = ui.ptable_fingerprint(self.dev)
+        m = mock.patch.object(ui, "device_serial", return_value="S")
+        m.start()
+        self.addCleanup(m.stop)
+
+    def run_fresh(self, copy_home=False, verify=False, expect=None):
+        import types
+        args = types.SimpleNamespace(
+            source="http://x", copy_home=copy_home, verify=verify, device=self.dev,
+            expect_id=expect or ui.drive_identity(self.drive))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = ui.batch_fresh(self.drive, args, ui.Progress(out, True, 0))
+        return rc, out.getvalue()
+
+    def test_opened_with_o_excl_before_the_size_request(self):
+        order = []
+        real = os.open
+
+        def spy(path, flags, *a):
+            if path == self.dev:
+                order.append(("open", flags))
+            return real(path, flags, *a)
+        self.patches["image_size"].side_effect = lambda *a: order.append(("size",)) or MIB
+        with mock.patch.object(ui.os, "open", spy):
+            rc, out = self.run_fresh()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(order[0][0], "open")
+        self.assertTrue(order[0][1] & os.O_EXCL)
+        self.assertEqual(self.patches["stream_image"].call_args.kwargs.get("fd") is not None, True)
+
+    def test_the_write_starts_at_byte_zero(self):
+        # The identity check seeks to the end for the size; the stream must
+        # not start there (ENOSPC on the first write in the smoke).
+        seen = []
+
+        def stream(url, device, total, progress, fd=None):
+            seen.append(os.lseek(fd, 0, os.SEEK_CUR))
+            return self._stream(url, device, total, progress, fd)
+        self.patches["stream_image"].side_effect = stream
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, [0])
+
+    def test_busy_device_is_refused_and_untouched(self):
+        real = os.open
+
+        def busy(path, flags, *a):
+            if path == self.dev and flags & os.O_EXCL:
+                raise OSError(errno.EBUSY, "Device or resource busy")
+            return real(path, flags, *a)
+        with mock.patch.object(ui.os, "open", busy):
+            rc, out = self.run_fresh()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("in use", out)
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes()[:MIB], b"\xff" * MIB)
+
+    def test_swapped_stick_after_open_is_refused(self):
+        Path(self.dev).write_bytes(b"\x01" * (128 * MIB))  # other table now
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("does not match", out)
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes()[:MIB], b"\x01" * MIB)
+
+
+class TestSourceCheck(TestBatchRefusals):
+    """F9: --source goes to curl; only http(s) is taken, never an option."""
+
+    def test_option_like_source_is_refused(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", None, "--source=-o/etc/x")
+        self.assertRefused(rc, out, "source")
+
+    def test_other_scheme_is_refused(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", None, "--source", "ftp://h/p")
+        self.assertRefused(rc, out, "source")
+
+    def test_https_is_taken(self):
+        rc, out = self.run_write("/dev/sdb", "fresh", None, "--source", "HTTPS://h/p")
+        self.assertEqual(rc, 0, out)
+
+    def test_curl_calls_end_options_before_the_url(self):
+        self.size.stop()  # the real image_size, with its curl
+        self.addCleanup(self.size.start)
+        argvs = []
+        real = subprocess.Popen
+
+        def spy(a, *x, **kw):
+            argvs.append(a)
+            return real(a, *x, **kw)
+        with tempfile.TemporaryDirectory() as t, \
+             mock.patch.object(ui.subprocess, "Popen", spy), \
+             contextlib.redirect_stdout(io.StringIO()):
+            src = Path(t) / "f"
+            src.write_bytes(b"x")
+            url = "file://" + str(src)
+            ui.image_size(url)
+            ui._content_length(url)
+            ui.expected_download_sha256("file://" + t, "f")
+            ui.download_file(url, str(Path(t) / "g"))
+        curls = [a for a in argvs if a[0] == "curl"]
+        self.assertEqual(len(curls), 4)
+        for a in curls:
+            self.assertEqual(a[-2], "--", a)
+
+
+class TestBatchSignals(TestBatchRefusals):
+    """F10: SIGHUP cancels like SIGTERM; no signal cuts the cleanup."""
+
+    def test_sighup_cancels(self):
+        self.m_fresh.side_effect = lambda *a: os.kill(os.getpid(), signal.SIGHUP)
+        old = signal.getsignal(signal.SIGHUP)
+        rc, out = self.run_write("/dev/sdb", "fresh")
+        self.assertEqual(rc, 130, out)
+        self.assertIn("@result failed cancelled", out)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), old)
+
+    def test_one_shot_covers_both_signals(self):
+        old = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+        for s, h in old.items():
+            self.addCleanup(signal.signal, s, h)
+        signal.signal(signal.SIGTERM, ui._cancel_on_signal)
+        signal.signal(signal.SIGHUP, ui._cancel_on_signal)
+        with self.assertRaises(ui.Cancelled):
+            os.kill(os.getpid(), signal.SIGTERM)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+    def test_sigterm_during_cleanup_is_ignored_and_cleanup_finishes(self):
+        self.addCleanup(ui._cleanup_items.clear)
+        seen = []
+
+        def umount(cmd, *a, **kw):
+            seen.append(signal.getsignal(signal.SIGTERM))
+            os.kill(os.getpid(), signal.SIGTERM)
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def job(*a):
+            ui._register_cleanup("mount", "/run/x/thinfloe-check-1")
+            return 0
+        self.m_fresh.side_effect = job
+        with mock.patch.object(ui, "run_cmd", side_effect=umount):
+            rc, out = self.run_write("/dev/sdb", "fresh")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen[0], signal.SIG_IGN)
+        self.assertEqual(seen[1][0], "umount")
+        self.assertNotIn(("mount", "/run/x/thinfloe-check-1"), ui._cleanup_items)
 
 if __name__ == "__main__":
     unittest.main()

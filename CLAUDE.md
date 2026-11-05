@@ -449,9 +449,20 @@ The system implements home directory persistence across reboots:
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
   that is cancelled or fails wipes the start of the stick, so it does not
   try to boot half-written; an upgrade that is cancelled or fails leaves the
-  stick as it was. `make qemu-smoke-write` writes two blank USB disks in
-  QEMU from a boot server in a namespace: one write cancelled, one complete
-  with `--verify`, then a boot of the written stick.
+  stick as it was. The `id` is serial, size and partition table, so two
+  blank sticks of one model without a serial get the same id; pass it as
+  `--expect-id=ID`, since an id without a serial starts with `-`. A write
+  holds `/run/thinfloe/upgrade.lock` for the whole job, opens a fresh
+  target with `O_EXCL` (busy: exit 2) and checks the id again through that
+  open; `drives` waits at most 2 s for the lock and then mounts no ESP
+  (`examined: false`). An ESP that is mounted already (the boot stick's) is
+  read in place: the kernel refuses a second, read-only mount of it, and
+  the boot stick looked like no ThinFloe drive. Every child process runs in
+  a session of its own, because the menu signals the tool's whole process
+  group. `make qemu-smoke-write` writes two blank USB disks in QEMU from a
+  boot server in a namespace: one write cancelled, one complete with
+  `--verify`, then an upgrade of the boot disk from a stand-in release and
+  a boot of the written stick.
 
 This allows WiFi credentials, ThinLinc settings, and user customizations to persist.
 

@@ -4,6 +4,47 @@ thinfloe-upgrade - ThinFloe firmware upgrade utility
 
 Installs or upgrades ThinFloe firmware on USB drives.
 Supports A/B updates for existing ThinFloe drives, or fresh install for new drives.
+
+Without arguments it asks its questions on the terminal (SSH). The batch
+interface asks nothing; the menu runs it with `sudo -n` in a process group
+of its own and cancels it with SIGTERM to that group:
+
+  thinfloe-upgrade drives [--all] [--source URL]
+      One JSON list on stdout, one object per drive (device, model,
+      size_bytes, serial, transport, removable, mounted, is_boot,
+      is_thinfloe, has_tl_old, has_tl_new, efi_partition, examined, id,
+      fits). While a write runs, drives waits at most DRIVES_LOCK_WAIT
+      seconds for it and then lists the drives without mounting any ESP:
+      a row whose ESP was not looked at has examined false, and its
+      is_thinfloe, has_tl_old and has_tl_new say nothing.
+
+  thinfloe-upgrade write --device DEV --mode fresh|upgrade --expect-id=ID
+                   [--source URL] [--copy-home] [--verify] [--allow-internal]
+      Pass the id as --expect-id=ID: an id of a drive without a serial
+      starts with "-", which a separate argument would make an option.
+      --source takes http:// and https:// only.
+      stdout carries @step <id> <text>, @progress <done> <total|->,
+      @done <id> and at most one @result ok|failed [<reason>].
+      Exit 0 done, 1 failed, 2 refused or misuse (nothing was written),
+      130 cancelled.
+
+What the menu must know about `write`:
+  - @result wins over the exit code. A run can end with no @result at all
+    (sudo -n refused, the tool killed): treat that as failed.
+  - @result ok may carry no reason.
+  - Exit 130 after `@done write` or `@done verify` of a fresh install can
+    leave a good stick that was not wiped: the cancel came after the write
+    was checked. Before that point a cancel wipes the stick.
+  - A cancel during the upgrade's `switch` step is ignored: the switch is
+    never cut halfway, and the job ends with @result ok (show "the cancel
+    came too late").
+  - SIGHUP cancels like SIGTERM. Only the first signal counts; the tool's
+    own children run in sessions of their own, so a group signal reaches
+    the tool alone and the tool decides what stops.
+  - Only one write runs at a time (LOCK_PATH); a second one is refused
+    with exit 2.
+  - The identity in --expect-id is serial, size and partition table: two
+    blank sticks of one model without a serial have the same id.
 """
 
 import argparse
@@ -68,6 +109,18 @@ BOOT_EFI_MOUNT = "/run/thinfloe/storage/efi"
 # Both copies of the boot loader config on the ESP: BIOS syslinux reads the
 # first, the EFI build the second.
 SYSLINUX_CFGS = ("syslinux.cfg", "efi/boot/syslinux.cfg")
+# Held by a write for the whole job and by `drives` while it mounts ESPs:
+# a temporary mount of the scan makes the write's mount check or its own
+# rw mount fail. Module constant so tests can point it elsewhere.
+LOCK_PATH = "/run/thinfloe/upgrade.lock"
+# A write waits this long for a `drives` scan; after it, it is another write.
+WRITE_LOCK_WAIT = 10.0
+# The menu asks for drives every 2 s; it must not hang behind a write.
+DRIVES_LOCK_WAIT = 2.0
+# Every child runs in a session of its own: the menu signals the tool's whole
+# process group, and a cp killed in the switch would turn a cancel that
+# came too late into a failed upgrade. The tool decides what stops.
+SPAWN = {"start_new_session": True}
 
 # ============ Progress ============
 
@@ -97,6 +150,7 @@ class Progress:
         self._last = None  # monotonic time of the last printed progress
         self._open = False  # an interactive progress line lacks its newline
         self._resulted = False  # batch: only one @result line per run
+        self._gone = False  # stdout was closed: nobody reads any more
 
     @staticmethod
     def _one_line(text: str) -> str:
@@ -107,8 +161,20 @@ class Progress:
         return self._out if self._out is not None else sys.stdout
 
     def _emit(self, text: str) -> None:
-        self.out.write(text)
-        self.out.flush()
+        """Write one message; a closed stdout ends the output, not the job.
+
+        The menu may crash or the session end while a stick is written. The
+        job then goes on (or fails and wipes) without anyone reading; every
+        later print() goes to /dev/null instead of raising BrokenPipeError.
+        """
+        if self._gone:
+            return
+        try:
+            self.out.write(text)
+            self.out.flush()
+        except (BrokenPipeError, ValueError):  # ValueError: closed file
+            self._gone = True
+            _silence_stdout(self.out)
 
     def _close_line(self) -> None:
         if self._open:
@@ -161,6 +227,20 @@ class Progress:
             self._emit("Failed: %s\n" % self._one_line(reason))
 
 
+def _silence_stdout(out) -> None:
+    """Point a dead stdout at /dev/null, so print() and the exit flush pass."""
+    try:
+        fd = out.fileno()
+    except (AttributeError, OSError, ValueError):
+        return
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, fd)
+        os.close(null)
+    except OSError:
+        pass
+
+
 # Interactive by default; batch mode replaces it.
 PROGRESS = Progress(None, batch=False)
 
@@ -185,6 +265,7 @@ class DriveInfo:
     removable: bool = False
     mounted: bool = False    # the disk or any partition has a mountpoint
     fingerprint: str = "-"   # hash of the partition table, "-" if unreadable
+    examined: bool = True    # False: the ESP was not looked at (a write runs)
 
 
 # ============ Global State ============
@@ -230,11 +311,19 @@ def _is_or_holds_mount(path: str) -> bool:
 
 
 def _do_cleanup() -> None:
-    """Cleanup all registered items (called on exit)"""
+    """Cleanup all registered items (batch end, and on exit).
+
+    What is done is dropped from the list; what failed stays, so the exit
+    handler tries it once more.
+    """
+    global _cleanup_items
+    left = []
     for cleanup_type, path in reversed(_cleanup_items):
+        done = False
         try:
             if cleanup_type == "mount":
-                run_cmd(["umount", path], check=False, capture=True)
+                done = run_cmd(["umount", path], check=False,
+                               capture=True).returncode == 0
             elif cleanup_type == "dir":
                 # Entries run in reverse, so a "mount" on this path has had
                 # its umount attempted already. If that failed (busy), the
@@ -246,8 +335,12 @@ def _do_cleanup() -> None:
                           f"untouched", file=sys.stderr)
                 else:
                     shutil.rmtree(path, ignore_errors=True)
+                    done = True
         except Exception:
             pass
+        if not done:
+            left.append((cleanup_type, path))
+    _cleanup_items = list(reversed(left))
 
 
 atexit.register(_do_cleanup)
@@ -262,8 +355,11 @@ def die(message: str) -> None:
 
 
 def log(message: str) -> None:
-    """Print log message"""
-    print(f"==> {message}")
+    """Print log message; a closed stdout is no reason to stop the job."""
+    try:
+        print(f"==> {message}", flush=True)
+    except (BrokenPipeError, ValueError):
+        _silence_stdout(sys.stdout)
 
 
 def ensure_root(batch: bool = False) -> None:
@@ -287,7 +383,8 @@ def run_cmd(
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command"""
-    return subprocess.run(cmd, check=check, capture_output=capture, text=True)
+    return subprocess.run(cmd, check=check, capture_output=capture, text=True,
+                          **SPAWN)
 
 
 def get_cmd_output(cmd: List[str]) -> str:
@@ -408,11 +505,27 @@ def find_efi_partition(device: str) -> Optional[str]:
     return None
 
 
-def examine_efi_partition(efi_partition: str) -> Tuple[bool, bool, bool]:
+def _examine_tree(root: str) -> Tuple[bool, bool, bool]:
+    """(is_thinfloe, has_tl_old, has_tl_new) of an ESP mounted at root."""
+    tl_path = os.path.join(root, "tl")
+    is_thinfloe = (os.path.isfile(os.path.join(tl_path, "vmlinuz"))
+                   and os.path.isfile(os.path.join(tl_path, "ramroot.sqsh")))
+    return (is_thinfloe, os.path.isdir(os.path.join(root, "tl.old")),
+            os.path.isdir(os.path.join(root, "tl.new")))
+
+
+def examine_efi_partition(efi_partition: str,
+                          mounted_at: Optional[str] = None) -> Tuple[bool, bool, bool]:
     """
     Examine EFI partition to determine if it's a ThinFloe drive.
     Returns: (is_thinfloe, has_tl_old, has_tl_new)
+
+    A partition that is mounted already (the boot ESP, rw) is read where it
+    is: the kernel refuses a second, read-only mount of the same filesystem,
+    which made the boot stick look like no ThinFloe drive.
     """
+    if mounted_at:
+        return _examine_tree(mounted_at)
     tmp_mount = tempfile.mkdtemp(prefix="thinfloe-check-")
     _register_cleanup("dir", tmp_mount)
 
@@ -424,18 +537,11 @@ def examine_efi_partition(efi_partition: str) -> Tuple[bool, bool, bool]:
         result = run_cmd(["mount", "-o", "ro", efi_partition, tmp_mount], check=False, capture=True)
         if result.returncode == 0:
             _register_cleanup("mount", tmp_mount)
-
-            tl_path = os.path.join(tmp_mount, "tl")
-            if os.path.isdir(tl_path):
-                # Check for firmware files
-                has_vmlinuz = os.path.isfile(os.path.join(tl_path, "vmlinuz"))
-                has_ramroot = os.path.isfile(os.path.join(tl_path, "ramroot.sqsh"))
-                is_thinfloe = has_vmlinuz and has_ramroot
-
-            has_tl_old = os.path.isdir(os.path.join(tmp_mount, "tl.old"))
-            has_tl_new = os.path.isdir(os.path.join(tmp_mount, "tl.new"))
-
-            run_cmd(["umount", tmp_mount], check=False, capture=True)
+            is_thinfloe, has_tl_old, has_tl_new = _examine_tree(tmp_mount)
+            umount = run_cmd(["umount", tmp_mount], check=False, capture=True)
+            if umount.returncode != 0:
+                # Keep both entries: the atexit cleanup tries again.
+                return is_thinfloe, has_tl_old, has_tl_new
             _unregister_cleanup("mount", tmp_mount)
     except Exception:
         pass
@@ -468,14 +574,82 @@ def drive_identity(d: DriveInfo) -> str:
     return f"{d.serial or '-'}:{d.size_bytes}:{d.fingerprint}"
 
 
+def _real_mountpoints(node: dict) -> List[str]:
+    """The node's mount points, without this tool's own short check mounts.
+
+    A `drives` scan mounts each ESP for a moment at thinfloe-check-*; seen
+    by a write's scan, that mount would refuse the write as "mounted".
+    """
+    return [m for m in node.get("mountpoints") or []
+            if m and not os.path.basename(m).startswith("thinfloe-check-")]
+
+
 def _any_mounted(node: dict) -> bool:
-    if any(node.get("mountpoints") or []):
+    if _real_mountpoints(node):
         return True
     return any(_any_mounted(c) for c in node.get("children") or [])
 
 
-def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
-    """Find suitable block devices; USB/removable and the boot drive by default."""
+def _mountpoint_of(node: dict, path: str) -> Optional[str]:
+    """Where the partition `path` below node is mounted, None if nowhere."""
+    for child in node.get("children") or []:
+        if child.get("path") == path:
+            points = _real_mountpoints(child)
+            return points[0] if points else None
+        found = _mountpoint_of(child, path)
+        if found:
+            return found
+    return None
+
+
+_LOCK_FD: Optional[int] = None
+
+
+def _take_lock(wait: float) -> bool:
+    """Take LOCK_PATH, waiting at most wait seconds; False when it stays held.
+
+    A lock file that cannot be created (no /run/thinfloe, a test host) is
+    no reason to refuse: the tool then runs without it, as before.
+    """
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        return True
+    try:
+        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+        fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    except OSError as e:
+        print(f"WARNING: no lock {LOCK_PATH}: {e}", file=sys.stderr)
+        return True
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _LOCK_FD = fd
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return False
+            time.sleep(0.1)
+        except BaseException:
+            os.close(fd)
+            raise
+
+
+def _release_lock() -> None:
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        os.close(_LOCK_FD)  # closing drops the flock
+        _LOCK_FD = None
+
+
+def enumerate_drives(include_internal: bool = False,
+                     examine: bool = True) -> List[DriveInfo]:
+    """Find suitable block devices; USB/removable and the boot drive by default.
+
+    examine=False mounts nothing: an ESP that is not mounted already is not
+    looked at, and its row has examined=False.
+    """
     drives = []
     boot_dev = detect_boot_device()
 
@@ -515,6 +689,7 @@ def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
         has_tl_new = False
         part_size_mb = 0
         label = ""
+        examined = True
 
         if efi_part:
             part_size_str = get_cmd_output(["lsblk", "-bno", "SIZE", efi_part])
@@ -523,7 +698,15 @@ def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
             except ValueError:
                 part_size_mb = 0
             label = get_cmd_output(["blkid", "-s", "LABEL", "-o", "value", efi_part])
-            is_thinfloe, has_tl_old, has_tl_new = examine_efi_partition(efi_part)
+            if is_boot and os.path.ismount(BOOT_EFI_MOUNT):
+                mounted_at = BOOT_EFI_MOUNT
+            else:
+                mounted_at = _mountpoint_of(node, efi_part)
+            if mounted_at or examine:
+                is_thinfloe, has_tl_old, has_tl_new = examine_efi_partition(
+                    efi_part, mounted_at)
+            else:
+                examined = False
 
         drives.append(DriveInfo(
             device=device,
@@ -542,6 +725,7 @@ def enumerate_drives(include_internal: bool = False) -> List[DriveInfo]:
             removable=removable,
             mounted=_any_mounted(node),
             fingerprint=ptable_fingerprint(device),
+            examined=examined,
         ))
 
     return drives
@@ -564,6 +748,7 @@ def drives_json(drives: List[DriveInfo], image_bytes: Optional[int]) -> str:
             "has_tl_old": d.has_tl_old,
             "has_tl_new": d.has_tl_new,
             "efi_partition": d.efi_partition,
+            "examined": d.examined,
             "id": drive_identity(d),
             "fits": None if image_bytes is None else d.size_bytes >= image_bytes,
         })
@@ -596,9 +781,9 @@ def select_source() -> Optional[str]:
 def _content_length(url: str) -> Optional[int]:
     """Content-Length of the final response for url, None when unknown."""
     try:
-        r = subprocess.run(["curl", "-sSfIL", "--max-time", "60", url],
+        r = subprocess.run(["curl", "-sSfIL", "--max-time", "60", "--", url],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                           timeout=90)
+                           timeout=90, **SPAWN)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
@@ -627,8 +812,8 @@ def download_file(url: str, dest: str, on_bytes=None) -> None:
     err = tempfile.TemporaryFile()
     try:
         curl = subprocess.Popen(
-            ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60", url],
-            stdout=subprocess.PIPE, stderr=err)
+            ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60", "--", url],
+            stdout=subprocess.PIPE, stderr=err, **SPAWN)
     except OSError as e:
         err.close()
         raise WriteFailed(f"could not start curl: {e}")
@@ -718,8 +903,8 @@ def image_size(image_url: str) -> Optional[int]:
     """
     try:
         result = subprocess.run(
-            ["curl", "-fsSL", "-r", "0-17", "--max-filesize", "4096", image_url],
-            capture_output=True, timeout=30, check=False,
+            ["curl", "-fsSL", "-r", "0-17", "--max-filesize", "4096", "--", image_url],
+            capture_output=True, timeout=30, check=False, **SPAWN,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -810,17 +995,18 @@ def _last_line(f) -> str:
 
 
 def stream_image(url: str, device: str, total: Optional[int],
-                 progress: Progress) -> WriteResult:
+                 progress: Progress, fd: Optional[int] = None) -> WriteResult:
     """curl -> zstd -dc -> device, hashing both streams on the way.
 
-    The device is opened without O_TRUNC so a block device and a regular
-    file (tests) behave alike. Every SYNC_EVERY bytes it is flushed and
+    fd, when given, is the device already open for writing; it stays open.
+    Otherwise the device is opened without O_TRUNC so a block device and a
+    regular file (tests) behave alike. Every SYNC_EVERY bytes it is flushed and
     progress reported, so the number is what the stick has accepted.
     Any exception, KeyboardInterrupt included, kills both children and
     joins the thread before it propagates.
     """
     curl = zstd = thread = None
-    fd = None
+    own_fd = fd is None
     # Files, not pipes: a full stderr pipe would block the child.
     curl_err = tempfile.TemporaryFile()
     zstd_err = tempfile.TemporaryFile()
@@ -833,20 +1019,23 @@ def stream_image(url: str, device: str, total: Optional[int],
         try:
             # A silent network must end the download, not hang the writer.
             curl = subprocess.Popen(
-                ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60", url],
-                stdout=subprocess.PIPE, stderr=curl_err)
+                ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60",
+                 "--", url],
+                stdout=subprocess.PIPE, stderr=curl_err, **SPAWN)
             zstd = subprocess.Popen(["zstd", "-dc"], stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=zstd_err)
+                                    stdout=subprocess.PIPE, stderr=zstd_err,
+                                    **SPAWN)
         except OSError as e:
             raise WriteFailed(f"could not start the download: {e}")
         thread = threading.Thread(
             target=_feed, args=(curl.stdout, zstd.stdin, download_hash, state),
             daemon=True)
         thread.start()
-        try:
-            fd = os.open(device, os.O_WRONLY)
-        except OSError as e:
-            raise WriteFailed(f"opening {device} failed: {e.strerror or e}")
+        if own_fd:
+            try:
+                fd = os.open(device, os.O_WRONLY)
+            except OSError as e:
+                raise WriteFailed(f"opening {device} failed: {e.strerror or e}")
         since_sync = 0
         while True:
             block = zstd.stdout.read(WRITE_BLOCK)
@@ -905,7 +1094,7 @@ def stream_image(url: str, device: str, total: Optional[int],
                     except OSError:
                         pass
             proc.wait()
-        if fd is not None:
+        if own_fd and fd is not None:
             os.close(fd)
         curl_err.close()
         zstd_err.close()
@@ -972,8 +1161,9 @@ def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
     try:
         r = subprocess.run(
             ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60",
-             f"{base_url}/{name}.sha256"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+             "--", f"{base_url}/{name}.sha256"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120,
+            **SPAWN)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
@@ -1008,13 +1198,15 @@ def _new_label_block(lines: List[str]) -> List[str]:
 def set_boot_default_one(efi_mount: str, rel: str, label: str) -> None:
     """set_boot_default for one config copy (rel is one of SYSLINUX_CFGS)."""
     path = os.path.join(efi_mount, rel)
-    with open(path) as f:
+    # surrogateescape, as the stamp: a byte that is not UTF-8 (a comment in
+    # Latin-1) must neither stop the switch nor its rollback.
+    with open(path, errors="surrogateescape") as f:
         lines = f.read().splitlines()
     lines = [f"DEFAULT {label}" if l.startswith("DEFAULT ") else l for l in lines]
     if not any(l.strip() == "LABEL new" for l in lines):
         lines += _new_label_block(lines)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
         f.flush()
         os.fsync(f.fileno())
@@ -1203,13 +1395,13 @@ def _restore_default_current(efi_mount: str) -> bool:
             continue
         try:
             set_boot_default_one(efi_mount, rel, "current")
-            with open(path) as f:
+            with open(path, errors="surrogateescape") as f:
                 if "DEFAULT current" not in f.read().splitlines():
                     raise OSError("DEFAULT current not found after restore")
         except OSError as e:
             log(f"WARNING: could not restore DEFAULT current in {rel}: {e}")
             try:
-                with open(path) as f:
+                with open(path, errors="surrogateescape") as f:
                     ok = ok and "DEFAULT current" in f.read().splitlines()
             except OSError:
                 ok = False
@@ -1227,6 +1419,14 @@ def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None
     tl_new_path = os.path.join(efi_mount, "tl.new")
     default_attempted = False
     renamed_tl = False
+    if os.path.exists(tl_new_path):
+        # An upgrade is still staged: a copy may say DEFAULT new. Removing
+        # tl.new/ under it and then failing (or losing power) would leave a
+        # stick whose default entry is gone, and syslinux stops at its prompt.
+        if not _restore_default_current(efi_mount):
+            raise WriteFailed(
+                "the stick still boots a staged upgrade and its boot entry "
+                "could not be set back; nothing was removed")
     try:
         # tl.old goes first: with it in place the stick needed room for three
         # releases (775 MB each does not fit 2000 MB). The release is staged
@@ -1631,9 +1831,17 @@ def copy_home_to_drive(device: str) -> bool:
     return ok
 
 
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
 def _cancel_on_signal(signum, frame):
-    """One-shot: a second signal while the cancel is handled is ignored."""
-    signal.signal(signum, signal.SIG_IGN)
+    """One-shot: a second signal while the cancel is handled is ignored.
+
+    Both cancel signals: a SIGHUP after the SIGTERM (or the other way round)
+    must not cut the wipe either.
+    """
+    for sig in set(CANCEL_SIGNALS) | {signum}:
+        signal.signal(sig, signal.SIG_IGN)
     raise Cancelled()
 
 
@@ -1648,13 +1856,15 @@ class Cancelled(BaseException):
 WIPE_BYTES = 1024 * 1024
 
 
-def wipe_partition_tables(device: str) -> bool:
+def wipe_partition_tables(device: str, fd: Optional[int] = None) -> bool:
     """Zero the first and the last MiB so a cut-off write cannot boot.
 
     The first MiB holds the MBR, the GPT and syslinux's boot code, the last
     one the backup GPT. Never raises; False (logged) when it could not.
     SIGTERM, SIGHUP and SIGINT are ignored meanwhile: a second signal must
-    not leave the stick half-cleared.
+    not leave the stick half-cleared. fd, when given, is the device the
+    write had open; it is used and left open, so a stick swapped in under
+    the same name is never the one cleared.
     """
     saved = {}
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
@@ -1662,8 +1872,10 @@ def wipe_partition_tables(device: str) -> bool:
             saved[sig] = signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
             pass
+    own_fd = fd is None
     try:
-        fd = os.open(device, os.O_WRONLY)
+        if own_fd:
+            fd = os.open(device, os.O_WRONLY)
         try:
             size = os.lseek(fd, 0, os.SEEK_END)
             zeros = bytes(WIPE_BYTES)
@@ -1681,7 +1893,8 @@ def wipe_partition_tables(device: str) -> bool:
                     left -= n
             os.fdatasync(fd)
         finally:
-            os.close(fd)
+            if own_fd:
+                os.close(fd)
         run_cmd(["partprobe", device], check=False, capture=True)
         return True
     except Exception as e:
@@ -1698,28 +1911,99 @@ class FreshOutcome:
     reason: str = ""
     written: bool = False  # the stick passed write, checksum and verify
     cancelled: bool = False
+    refused: bool = False  # nothing was written: the drive is busy or another
     home_copied: Optional[bool] = None  # None: not asked for
     home_saved: bool = False
 
 
+def device_serial(device: str) -> str:
+    """The serial drive_identity uses: lsblk SERIAL, else WWN."""
+    try:
+        node = json.loads(get_cmd_output(
+            ["lsblk", "-J", "-d", "-o", "SERIAL,WWN", device]))["blockdevices"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return ""
+    return node.get("serial") or node.get("wwn") or ""
+
+
+def open_target(device: str) -> int:
+    """The drive to write, opened exclusively (EBUSY while anything holds it)."""
+    return os.open(device, os.O_RDWR | os.O_EXCL)
+
+
+def fd_identity(fd: int, device: str) -> str:
+    """drive_identity of the drive behind fd, read through fd where it can be.
+
+    Size and partition table come from the open drive itself, so a stick
+    swapped in under the same name after the open does not match.
+    """
+    size = os.lseek(fd, 0, os.SEEK_END)
+    # Back to the start: the write goes through this fd from its position.
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        fingerprint = hashlib.sha256(os.pread(fd, PTABLE_BYTES, 0)).hexdigest()[:16]
+    except OSError:
+        fingerprint = "-"
+    return f"{device_serial(device) or '-'}:{size}:{fingerprint}"
+
+
 def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
                   verify: bool, progress: Progress, save: bool = True,
-                  stamp_required: bool = True) -> FreshOutcome:
+                  stamp_required: bool = True,
+                  expect_id: Optional[str] = None) -> FreshOutcome:
     """Write the image to a drive and finish the stick.
 
     Used by both modes. A failure during write, checksum or verify leaves
     a stick that may half-boot, so it is wiped. Once verify passed the
     stick is good and later failures only fail the report.
+
+    The drive is opened once, with O_EXCL, before anything is fetched: the
+    kernel answers EBUSY while a partition is mounted or the drive is held
+    (LVM, md, LUKS). With expect_id the drive behind that open is checked
+    again, which closes the time between the batch check and the write.
+    O_RDWR, not O_WRONLY, so the check reads the table through the same fd.
+    Busy or not matching: outcome.refused, nothing written.
     """
     device = drive.device
     image_name = "thinfloe-usb.img.zst"
     image_url = f"{base_url}/{image_name}"
     outcome = FreshOutcome(ok=False)
+    try:
+        fd = open_target(device)
+    except OSError as e:
+        outcome.refused = True
+        if e.errno == errno.EBUSY:
+            outcome.reason = (f"{device} is in use (mounted or held by another "
+                              f"program) and cannot be overwritten")
+        else:
+            outcome.reason = f"opening {device} failed: {e.strerror or e}"
+        return outcome
+    held = [fd]  # _fresh_install_open closes it early and clears this
+    try:
+        if expect_id is not None and fd_identity(fd, device) != expect_id:
+            outcome.refused = True
+            outcome.reason = f"{device} does not match the drive that was chosen"
+            return outcome
+        return _fresh_install_open(drive, base_url, copy_home, verify, progress,
+                                   save, stamp_required, held, outcome)
+    finally:
+        if held[0] is not None:
+            os.close(held[0])
+
+
+def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
+                        stamp_required, held, outcome) -> FreshOutcome:
+    """fresh_install with the drive open at held[0]; closed before the stamp."""
+    device = drive.device
+    fd = held[0]
+    image_name = "thinfloe-usb.img.zst"
+    image_url = f"{base_url}/{image_name}"
     stick_good = False
     try:
         try:
             progress.step("write", "Downloading and writing")
-            result = stream_image(image_url, device, image_size(image_url), progress)
+            result = stream_image(image_url, device, image_size(image_url), progress,
+                                  fd=fd)
             expected = expected_download_sha256(base_url, image_name)
             if expected is None:
                 log(f"checksum not checked: {image_name}.sha256 not found")
@@ -1732,19 +2016,24 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
                                      progress):
                     raise WriteFailed("the stick did not read back what was written")
                 progress.done("verify")
-        except (WriteFailed, Cancelled, KeyboardInterrupt) as e:
-            wipe_partition_tables(device)
-            if isinstance(e, KeyboardInterrupt):
-                raise
+        except BaseException as e:
+            # Anything that ends the write early (a closed stdout, a bug, a
+            # signal) leaves a half-written stick: wipe it, then report.
+            wipe_partition_tables(device, fd)
             if isinstance(e, Cancelled):
                 outcome.cancelled = True
                 outcome.reason = "cancelled"
-            else:
+                return outcome
+            if isinstance(e, WriteFailed):
                 outcome.reason = e.reason
-            return outcome
+                return outcome
+            raise
         # Only now: a late signal must not wipe a verified stick.
         stick_good = True
         outcome.written = True
+        # The ESP is mounted next, which an exclusive open of the drive forbids.
+        held[0] = None
+        os.close(fd)
 
         run_cmd(["sync"])
         run_cmd(["partprobe", device], check=False, capture=True)
@@ -1783,7 +2072,7 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
         outcome.cancelled = True
         outcome.reason = "cancelled"
         if not stick_good:
-            wipe_partition_tables(device)
+            wipe_partition_tables(device, fd)
         return outcome
 
 
@@ -1982,6 +2271,7 @@ def save_home_before_finish() -> int:
             ["thinfloe-save-home"],
             capture_output=True,
             timeout=SAVE_HOME_TIMEOUT,
+            **SPAWN,
         )
     except subprocess.TimeoutExpired:
         log(f"WARNING: saving the home directory timed out after "
@@ -2026,13 +2316,15 @@ def print_outcome_lines(home_copied: Optional[bool], home_saved: bool) -> None:
 # ============ Batch interface ============
 
 def batch_fresh(drive: DriveInfo, args, progress: Progress) -> int:
-    """Exit 0 ok, 1 failed (reason reported), 130 cancelled."""
+    """Exit 0 ok, 1 failed, 2 refused (nothing written), 130 cancelled."""
     outcome = fresh_install(drive, args.source, args.copy_home, args.verify,
-                            progress)
+                            progress, expect_id=args.expect_id)
     if outcome.ok:
         progress.result(True, "")
         return 0
     progress.result(False, outcome.reason)
+    if outcome.refused:
+        return 2
     return 130 if outcome.cancelled else 1
 
 
@@ -2121,31 +2413,51 @@ def batch_main(argv: List[str]) -> int:
     except SystemExit as e:  # --help
         return e.code if isinstance(e.code, int) else 2
     args.source = getattr(args, "source", DEFAULT_URL).rstrip("/")
+    # It goes to curl: no option, no other scheme (file://, ftp://, ...).
+    if not re.match(r"https?://[^\s]", args.source, re.I):
+        PROGRESS.result(False, "usage: --source takes an http:// or https:// address")
+        return 2
 
-    old_handler = signal.signal(signal.SIGTERM, _cancel_on_signal)
+    old = {sig: signal.signal(sig, _cancel_on_signal) for sig in CANCEL_SIGNALS}
     try:
-        return _batch_run(args)
-    except Cancelled:
-        PROGRESS.result(False, "cancelled")
-        return 130
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        PROGRESS.result(False, f"{type(e).__name__}: {e}")
-        return 1
+        try:
+            return _batch_run(args)
+        except Cancelled:
+            PROGRESS.result(False, "cancelled")
+            return 130
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            PROGRESS.result(False, f"{type(e).__name__}: {e}")
+            return 1
     finally:
-        signal.signal(signal.SIGTERM, old_handler)
+        # A signal now would cut the cleanup and leave a temporary mount.
+        for sig in CANCEL_SIGNALS:
+            signal.signal(sig, signal.SIG_IGN)
+        _do_cleanup()
+        _release_lock()
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
 
 def _batch_run(args) -> int:
     ensure_root(batch=True)
 
     if args.command == "drives":
-        drives = enumerate_drives(include_internal=args.all)
+        # A write runs: list the drives without mounting any ESP rather than
+        # make the menu wait (it asks again in 2 s).
+        locked = _take_lock(DRIVES_LOCK_WAIT)
+        try:
+            drives = enumerate_drives(include_internal=args.all, examine=locked)
+        finally:
+            _release_lock()
         size = image_size(f"{args.source}/thinfloe-usb.img.zst")
         print(drives_json(drives, size))
         return 0
 
+    if not _take_lock(WRITE_LOCK_WAIT):
+        PROGRESS.result(False, "another write is running; try again when it has finished")
+        return 2
     drives = enumerate_drives(include_internal=args.allow_internal)
     drive = next((d for d in drives if d.device == args.device), None)
     reason = _write_refusal(args, drive)
@@ -2171,6 +2483,12 @@ def main() -> int:
 
         # Ensure URL doesn't end with /
         base_url = base_url.rstrip("/")
+
+        # The scan mounts ESPs and the write needs the drive to itself; a
+        # menu job (or a second SSH session) must not run meanwhile.
+        if not _take_lock(WRITE_LOCK_WAIT):
+            die("another thinfloe-upgrade is writing a stick; try again when "
+                "it has finished")
 
         # Step 2: Enumerate drives
         drives = enumerate_drives()
