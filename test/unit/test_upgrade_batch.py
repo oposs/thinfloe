@@ -2053,6 +2053,43 @@ class TestInteractiveFreshChecksTheOpenDrive(TestFreshInstall):
         self.patches["stream_image"].assert_called_once()
 
 
+class TestMountedDrivesNotOffered(unittest.TestCase):
+    """L3: a mounted drive is offered only as the boot stick, for Upgrade."""
+
+    def setUp(self):
+        self.drives = [
+            mk_drive("/dev/sda", is_boot=True, is_thinfloe=True, mounted=True),
+            mk_drive("/dev/sdb", is_thinfloe=True, mounted=True),
+            mk_drive("/dev/sdc", mounted=True),
+            mk_drive("/dev/sdd"),
+        ]
+
+    def choose(self, *answers):
+        out = io.StringIO()
+        with mock.patch("builtins.input", side_effect=list(answers)), \
+             contextlib.redirect_stdout(out):
+            result = ui.show_drives_with_operations(self.drives)
+        return result, out.getvalue()
+
+    def test_only_the_boot_stick_and_the_unmounted_drive_have_options(self):
+        result, out = self.choose("1")
+        self.assertEqual((result[0].device, result[1]), ("/dev/sda", "upgrade"))
+        result, out = self.choose("2")
+        self.assertEqual((result[0].device, result[1]), ("/dev/sdd", "overwrite"))
+        result, out = self.choose("3", "0")
+        self.assertIsNone(result)
+        self.assertIn("Invalid choice", out)
+
+    def test_the_mounted_drives_say_why(self):
+        _, out = self.choose("0")
+        blocks = out.split("\n\n")
+        for dev in ("/dev/sdb", "/dev/sdc"):
+            block = next(b for b in blocks if dev in b)
+            self.assertIn("(mounted - unmount it to write it)", block)
+            self.assertNotRegex(block, r"\n    \d+\) ")
+        self.assertEqual(out.count("(mounted - unmount it to write it)"), 2)
+
+
 class TestInteractiveLock(unittest.TestCase):
     """M2: an SSH prompt never holds the lock; the write does."""
 

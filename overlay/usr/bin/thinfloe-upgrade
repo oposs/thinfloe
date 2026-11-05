@@ -2230,6 +2230,11 @@ def show_drives_with_operations(drives: List[DriveInfo], offer_all: bool = False
             print(f"    {option_num}) Upgrade firmware (A/B, activates on reboot)")
             options.append((d, "upgrade"))
             option_num += 1
+        elif d.mounted:
+            # Only the boot stick is offered while mounted: writing a drive
+            # mounted elsewhere changes files under that mount.
+            # _lock_for_write still refuses one mounted after this list.
+            print("    (mounted - unmount it to write it)")
         elif d.is_thinfloe:
             # Other ThinFloe drive: upgrade or overwrite
             print(f"    {option_num}) Upgrade firmware (A/B with fallback)")
