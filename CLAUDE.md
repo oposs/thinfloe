@@ -449,9 +449,10 @@ The system implements home directory persistence across reboots:
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
   that is cancelled or fails wipes the start of the stick, so it does not
   try to boot half-written; an upgrade that is cancelled or fails leaves the
-  stick as it was. The `id` is serial, size and partition table, so two
-  blank sticks of one model without a serial get the same id; pass it as
-  `--expect-id=ID`, since an id without a serial starts with `-`. A write
+  stick as it was. The `id` is `sn-<serial>` (`nosn` without a serial),
+  size and partition table, joined by `:`, so two blank sticks of one
+  model without a serial get the same id; it never starts with `-`, so
+  `--expect-id ID` and `--expect-id=ID` both work. A write
   holds `/run/thinfloe/upgrade.lock` for the whole job, opens a fresh
   target with `O_EXCL` (busy: exit 2) and checks the id again through that
   open; `drives` waits at most 2 s for the lock and then mounts no ESP

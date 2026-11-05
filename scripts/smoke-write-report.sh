@@ -75,7 +75,7 @@ if [ -z "$A_DEV" ] || [ -z "$B_DEV" ]; then
 fi
 
 # 1. Cancel a fresh write to B after its first @progress line.
-"$TOOL" write --device "$B_DEV" --mode fresh --expect-id="$B_ID" \
+"$TOOL" write --device "$B_DEV" --mode fresh --expect-id "$B_ID" \
     --source "$SRC" >"$OUT/cancel.out" 2>"$OUT/cancel.err" &
 pid=$!
 # Wait for a @progress line past 4 MiB: the tool emits it after os.write()
@@ -102,7 +102,7 @@ say "SMOKE-WRITE-CANCEL-RESULT: $(grep '^@result' "$OUT/cancel.out" | tail -1)"
 say "SMOKE-WRITE-CANCEL-NONZERO: $(head -c 1048576 "$B_DEV" | tr -d '\0' | wc -c)"
 
 # 2. Write A completely and read it back.
-"$TOOL" write --device "$A_DEV" --mode fresh --expect-id="$A_ID" \
+"$TOOL" write --device "$A_DEV" --mode fresh --expect-id "$A_ID" \
     --source "$SRC" --verify >"$OUT/write.out" 2>"$OUT/write.err"
 say "SMOKE-WRITE-WRITE-RC: $?"
 say "SMOKE-WRITE-WRITE-RESULT: $(grep '^@result' "$OUT/write.out" | tail -1)"
@@ -115,7 +115,7 @@ say "SMOKE-WRITE-WRITE-TAIL-END"
 
 # 3. Upgrade the boot stick from the stand-in release.
 if [ -n "$BOOT_DEV" ]; then
-    "$TOOL" write --device "$BOOT_DEV" --mode upgrade --expect-id="$BOOT_ID" \
+    "$TOOL" write --device "$BOOT_DEV" --mode upgrade --expect-id "$BOOT_ID" \
         --source "$SRC/upgrade" >"$OUT/upgrade.out" 2>"$OUT/upgrade.err"
     say "SMOKE-WRITE-UPGRADE-RC: $?"
     say "SMOKE-WRITE-UPGRADE-RESULT: $(grep '^@result' "$OUT/upgrade.out" | tail -1)"

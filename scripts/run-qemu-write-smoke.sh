@@ -237,6 +237,13 @@ if [[ "$(field BOOT-THINFLOE)" == true ]]; then
 else
     bad "the boot disk's row: is_thinfloe '$(field BOOT-THINFLOE)' (row: $(field BOOT-ROW))"
 fi
+# The boot disk (virtio) has no serial: its id starts with "nosn:" and went
+# to write as a separate argument (--expect-id ID).
+if [[ "$(field BOOT-ROW)" == *'"id": "nosn:'* ]]; then
+    ok "the boot disk's id has the nosn placeholder"
+else
+    bad "the boot disk's id does not start with nosn: (row: $(field BOOT-ROW))"
+fi
 if [[ "$(field UPGRADE-RC)" == 0 && "$(field UPGRADE-RESULT)" == '@result ok'* \
       && " $(field UPGRADE-STEPS) " == *" switch "* ]]; then
     ok "write --mode upgrade of the boot disk exits 0 with '$(field UPGRADE-RESULT)' (steps: $(field UPGRADE-STEPS))"

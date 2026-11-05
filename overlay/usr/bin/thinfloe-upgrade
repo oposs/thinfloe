@@ -18,10 +18,10 @@ of its own and cancels it with SIGTERM to that group:
       a row whose ESP was not looked at has examined false, and its
       is_thinfloe, has_tl_old and has_tl_new say nothing.
 
-  thinfloe-upgrade write --device DEV --mode fresh|upgrade --expect-id=ID
+  thinfloe-upgrade write --device DEV --mode fresh|upgrade --expect-id ID
                    [--source URL] [--copy-home] [--verify] [--allow-internal]
-      Pass the id as --expect-id=ID: an id of a drive without a serial
-      starts with "-", which a separate argument would make an option.
+      --expect-id ID and --expect-id=ID both work: an id never starts
+      with "-".
       --source takes http:// and https:// only.
       stdout carries @step <id> <text>, @progress <done> <total|->,
       @done <id> and at most one @result ok|failed [<reason>].
@@ -43,8 +43,9 @@ What the menu must know about `write`:
     the tool alone and the tool decides what stops.
   - Only one write runs at a time (LOCK_PATH); a second one is refused
     with exit 2.
-  - The identity in --expect-id is serial, size and partition table: two
-    blank sticks of one model without a serial have the same id.
+  - The identity in --expect-id is sn-<serial> (nosn without a serial),
+    size and partition table fingerprint, joined by ":": two blank sticks
+    of one model without a serial have the same id.
 """
 
 import argparse
@@ -569,9 +570,20 @@ def ptable_fingerprint(device: str) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def identity_string(serial: str, size_bytes: int, fingerprint: str) -> str:
+    """sn-<serial> or nosn, then size and partition table fingerprint.
+
+    The prefix keeps an id from starting with "-" (argparse would read it
+    as an option) and keeps a drive without a serial apart from one whose
+    serial is "nosn".
+    """
+    part = f"sn-{serial}" if serial else "nosn"
+    return f"{part}:{size_bytes}:{fingerprint}"
+
+
 def drive_identity(d: DriveInfo) -> str:
     """Identity that changes when the drive is swapped or repartitioned."""
-    return f"{d.serial or '-'}:{d.size_bytes}:{d.fingerprint}"
+    return identity_string(d.serial, d.size_bytes, d.fingerprint)
 
 
 def _real_mountpoints(node: dict) -> List[str]:
@@ -1945,7 +1957,7 @@ def fd_identity(fd: int, device: str) -> str:
         fingerprint = hashlib.sha256(os.pread(fd, PTABLE_BYTES, 0)).hexdigest()[:16]
     except OSError:
         fingerprint = "-"
-    return f"{device_serial(device) or '-'}:{size}:{fingerprint}"
+    return identity_string(device_serial(device), size, fingerprint)
 
 
 def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,

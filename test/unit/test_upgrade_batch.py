@@ -185,7 +185,7 @@ class TestDriveList(unittest.TestCase):
         a, b = self.list()[:2]
         a2 = ui.DriveInfo(**{**a.__dict__, "fingerprint": "00" * 8})
         self.assertNotEqual(ui.drive_identity(a), ui.drive_identity(a2))
-        self.assertEqual(ui.drive_identity(a), "SER1:16000000000:" + "ab" * 8)
+        self.assertEqual(ui.drive_identity(a), "sn-SER1:16000000000:" + "ab" * 8)
 
     def test_json(self):
         drives = self.list()
@@ -1961,6 +1961,58 @@ class TestWipeClosesTheWriteFirst(TestFreshInstall):
         self.assertTrue(ui.wipe_partition_tables(self.dev, fd))
         self.assertEqual(self.probes, ["closed"])
         self.assertWiped()
+
+
+class TestIdWithoutSerial(TestBatchRefusals):
+    """M4: an id never starts with "-", so it passes as its own argument."""
+
+    def mk_noserial(self):
+        return ui.DriveInfo(**{**self.mk("/dev/sdb").__dict__, "serial": ""})
+
+    def test_format(self):
+        d = self.mk_noserial()
+        self.assertEqual(ui.drive_identity(d), "nosn:%d:%s" % (16 * 10**9, "ab" * 8))
+        for serial in ("nosn", "-x", "sn-", ""):
+            ident = ui.drive_identity(ui.DriveInfo(**{**d.__dict__, "serial": serial}))
+            self.assertFalse(ident.startswith("-"), ident)
+            if serial:
+                self.assertNotEqual(ident, ui.drive_identity(d), serial)
+
+    def test_fd_identity_uses_the_same_format(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "dev")
+            Path(p).write_bytes(b"\xff" * (2 * MIB))
+            d = ui.DriveInfo(**{**self.mk_noserial().__dict__,
+                                "size_bytes": 2 * MIB,
+                                "fingerprint": ui.ptable_fingerprint(p)})
+            fd = os.open(p, os.O_RDONLY)
+            try:
+                with mock.patch.object(ui, "device_serial", return_value=""):
+                    self.assertEqual(ui.fd_identity(fd, p), ui.drive_identity(d))
+            finally:
+                os.close(fd)
+
+    def test_id_as_two_arguments(self):
+        self.drives.stop()
+        nos = self.mk_noserial()
+        with mock.patch.object(ui, "enumerate_drives", return_value=[nos]):
+            rc, out = self.run_write("/dev/sdb", "fresh", ui.drive_identity(nos))
+        self.drives.start()
+        self.assertEqual(rc, 0, out)
+        self.m_fresh.assert_called_once()
+
+    def test_id_with_equals_still_works(self):
+        self.drives.stop()
+        nos = self.mk_noserial()
+        argv = ["write", "--device", "/dev/sdb", "--mode", "fresh",
+                "--expect-id=" + ui.drive_identity(nos)]
+        with mock.patch.object(ui, "enumerate_drives", return_value=[nos]), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            rc = ui.batch_main(argv)
+        self.drives.start()
+        self.assertEqual(rc, 0)
+        self.m_fresh.assert_called_once()
 
 
 if __name__ == "__main__":
