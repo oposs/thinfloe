@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
+use thinfloe_menu::battery;
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{settings, tiles, ui, windows};
+use thinfloe_menu::{settings, status, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -38,6 +39,10 @@ fn program_path() -> OsString {
 
 fn addon_status_path() -> PathBuf {
     env_path("TF_ADDON_STATUS", addons::STATUS_PATH)
+}
+
+fn battery_file() -> PathBuf {
+    env_path("TF_BATTERY_FILE", battery::FILE)
 }
 
 fn addon_last_check_path() -> PathBuf {
@@ -65,6 +70,11 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
+    menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
+    menu.set_status(status::config::load(&env_path(
+        "TF_STATUS_DIR",
+        status::config::SHIPPED_DIR,
+    )));
     (menu, paths, IconRoots::system())
 }
 
@@ -112,6 +122,11 @@ fn check() -> ExitCode {
             bad = true;
         }
     }
+    for p in &menu.status.elements {
+        println!("{}", status::config::check_line(p));
+    }
+    // A refused shipped status file is a defect of the image.
+    bad |= menu.status.shipped_refused;
     if bad { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
@@ -188,6 +203,9 @@ fn main() -> ExitCode {
         addon_status: addon_status_path(),
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
+        battery_file: battery_file(),
+        network_roots: thinfloe_menu::network::Roots::system(),
+        hardware_roots: thinfloe_menu::hardware::Roots::system(),
         program_path: program_path(),
         header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
     }) {

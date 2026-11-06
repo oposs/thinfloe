@@ -1,0 +1,6 @@
+# Start the battery watcher when a Logitech hidraw node appears, at boot too
+# (systemd-udev-trigger replays every device). The parent's kernel name is
+# bus:vendor:product.id in upper-case hex, the same vendor find_hidpp_nodes in
+# peripheral-battery takes from HID_ID, on any bus. The watcher itself tells
+# which of these nodes speak HID++; nodes it does not use cost it nothing.
+ACTION!="remove", SUBSYSTEM=="hidraw", SUBSYSTEMS=="hid", KERNELS=="*:046D:*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="thinfloe-peripheral-battery-watch.service"

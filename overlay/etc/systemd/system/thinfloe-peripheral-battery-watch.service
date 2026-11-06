@@ -1,0 +1,18 @@
+[Unit]
+Description=Read a keyboard's or mouse's battery when it connects
+# A Bolt device reconnects only when it is used, so the boot run of
+# thinfloe-peripheral-battery.service finds it asleep. This listens for the
+# events the device sends when it connects and runs the same reading, at
+# most once in 5 minutes per device with a value. Not enabled: the udev rule
+# 90-thinfloe-peripheral-battery.rules starts it when a Logitech hidraw node
+# appears, at boot as well, so a machine without one does not run it. Once
+# started it stays, and finds a receiver plugged in again by itself. No
+# Before= on anything: a unit started after basic.target must never declare
+# Before= on a sysinit.target unit.
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/thinfloe/peripheral-battery watch
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal

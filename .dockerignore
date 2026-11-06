@@ -2,9 +2,6 @@
 *~
 !overlay
 !brand
-!*.patch
 !containers/ubuntu/patches
-!syslinux.cfg
-!vendor
 !src/thinfloe-menu
 src/thinfloe-menu/target

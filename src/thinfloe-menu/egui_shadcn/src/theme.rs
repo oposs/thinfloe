@@ -125,11 +125,6 @@ pub fn family(ctx: &egui::Context, name: &str) -> egui::FontFamily {
     }
 }
 
-// NOTE: The Google Fonts repository only ships Oxanium as a variable font
-// (Oxanium[wght].ttf) — there are no separate static weight files any more.
-// All three weight slots use the same variable font binary; egui will render
-// at one effective weight.  A future improvement would be to use font
-// variation settings once egui gains that support.
 fn install_fonts(ctx: &egui::Context) {
     // Building the font atlas is expensive and `apply` runs every frame, so
     // install the fonts only once per context.

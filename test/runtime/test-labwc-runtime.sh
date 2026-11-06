@@ -321,17 +321,26 @@ fi
 # the guess for the largest mode: 2 next to a 4K monitor, and the title bars
 # grew while OxuLnk ran. Two outputs, the menu on the 1280x720 one (scale 1),
 # the other 3840x2160; a fullscreen foot covers the menu. The scale must stay.
+# The same run proves the signal the menu takes "covered" from, in both
+# directions: it looks for no monitor at the start of a frame and once a second
+# while covered. An element of its own with Refresh=1 gives it a frame a second
+# to notice the cover in, whether or not the container has a network.
 COVER_CONTAINER_NAME="thinfloe-runtime-test-cover-$$"
 
 COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0
 wlr-randr --output HEADLESS-2 --pos 0,0
-TF_MENU_DEBUG=1 timeout 12 thinfloe-menu >/dev/null 2>&1 &
+mkdir -p /tmp/cover-status
+printf "[Status Element]\nType=battery\nCell=0,0\nRefresh=1\n" >/tmp/cover-status/10-tick.conf
+printf "Test\t50\tok\t1\tkeyboard\n" >/tmp/cover-battery
+TF_STATUS_DIR=/tmp/cover-status TF_BATTERY_FILE=/tmp/cover-battery TF_MENU_DEBUG=1 \
+    timeout 12 thinfloe-menu >/dev/null 2>/tmp/cover-menu.log &
 sleep 3
 echo "scale-before=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"
 foot --fullscreen sleep 5 &
 sleep 3
 echo "scale-covered=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"
-wait'
+wait
+grep -xE "thinfloe-menu: (un)?covered" /tmp/cover-menu.log'
 
 cover_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$COVER_CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
@@ -357,6 +366,15 @@ if echo "$cover_out" | grep -qx 'scale-before=1' && echo "$cover_out" | grep -qx
 else
     echo "FAIL - the scale changed while a fullscreen window covered the menu"
     echo "$cover_out" | grep '^scale-'
+    fail=1
+fi
+
+cover_seen=$(echo "$cover_out" | grep -xE 'thinfloe-menu: (un)?covered' | tr '\n' ' ')
+if [[ "$cover_seen" == "thinfloe-menu: covered thinfloe-menu: uncovered " ]]; then
+    echo "ok   - the menu sees a fullscreen window cover it, and its end uncover it"
+else
+    echo "FAIL - covered/uncovered lines were '$cover_seen'"
+    echo "$cover_out"
     fail=1
 fi
 

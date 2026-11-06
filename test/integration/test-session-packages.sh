@@ -88,6 +88,10 @@ for i in hard-drive-download usb log-out rotate-ccw power settings; do
     present "Lucide icon $i" "usr/share/thinfloe/icons/$i\.svg$"
 done
 present "Lucide licence"      'usr/share/thinfloe/icons/LICENSE$'
+# The battery shows in the menu's status area, not as a tile (owner,
+# 2026-11-03): no tile file, no tile icon.
+absent  "battery tile"        'etc/thinfloe/menu/70-battery\.desktop$'
+absent  "battery tile icon"   'usr/share/thinfloe/icons/battery\.svg$'
 present "Oxanium licence"     'usr/share/thinfloe/fonts/Oxanium-OFL\.txt$'
 
 absent  "Xorg server"      'usr/lib/xorg/Xorg$'
@@ -850,6 +854,41 @@ else
     echo "$check_out"
     fail=1
 fi
+# The status area's battery element ships as its own file and --check
+# (which fails on a refused shipped status file) lists it top left.
+present "battery status element" 'etc/thinfloe/status/10-battery\.conf$'
+if grep -qx 'status 10-battery.conf: battery at 0,0 size 1x1' <<<"$check_out"; then
+    echo "ok   - the battery status element is at cell 0,0, 1x1"
+else
+    echo "FAIL - thinfloe-menu --check does not list the battery status element at 0,0 1x1:"
+    echo "$check_out"
+    fail=1
+fi
+# Graph, list and four hardware tiles ship beside it: the graph two cells by two
+# and one row on a short screen, the list and the hardware only on a tall one.
+present "network status element" 'etc/thinfloe/status/20-network\.conf$'
+present "network list status element" 'etc/thinfloe/status/25-network-info\.conf$'
+present "temperatures status element" 'etc/thinfloe/status/30-temperatures\.conf$'
+present "CPU status element" 'etc/thinfloe/status/31-cpu\.conf$'
+present "memory status element" 'etc/thinfloe/status/32-memory\.conf$'
+present "system status element" 'etc/thinfloe/status/33-system\.conf$'
+present "clock status element" 'etc/thinfloe/status/40-clock\.conf$'
+for want in \
+    'status 20-network.conf: network at 1,0 size 2x2 short 3x1' \
+    'status 25-network-info.conf: network-info at 3,0 size 1x2 short none' \
+    'status 30-temperatures.conf: hardware at 0,1 size 1x1 short none' \
+    'status 31-cpu.conf: hardware at 0,2 size 1x1 short none' \
+    'status 32-memory.conf: hardware at 1,2 size 1x1 short none' \
+    'status 33-system.conf: hardware at 2,2 size 1x1 short none' \
+    'status 40-clock.conf: clock at 3,2 size 1x1 short none'; do
+    if grep -qxF "$want" <<<"$check_out"; then
+        echo "ok   - --check lists: $want"
+    else
+        echo "FAIL - thinfloe-menu --check does not list: $want"
+        echo "$check_out"
+        fail=1
+    fi
+done
 
 # Audio devices start at full level, so the remote client sets the loudness.
 # WirePlumber's own default for outputs is 0.064 (about -24 dB). Ask the
@@ -867,6 +906,103 @@ if [[ "$wp_out" == $'sink 1.0\nsource 1.0' ]]; then
     echo "ok   - WirePlumber starts outputs and inputs at full volume"
 else
     echo "FAIL - WirePlumber default device volumes are not 1.0: ${wp_out:-no answer}"
+    fail=1
+fi
+
+# Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
+# which the menu's status area reads (no ThinLinc). The service also runs
+# once at boot (multi-user.target, in parallel with the menu), the timer
+# repeats it every 5 min, the watch service reads a device when it connects,
+# and no unit may order itself before anything (see CLAUDE.md, the
+# hook-order constraint).
+present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-peripheral-battery\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.timer is enabled"
+else
+    echo "FAIL - thinfloe-peripheral-battery.timer is not enabled; the battery file would never be written"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-peripheral-battery\.service$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.service is enabled in multi-user.target"
+else
+    echo "FAIL - thinfloe-peripheral-battery.service is not enabled; the status area would stay empty until the first timer firing"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/[^/]*\.wants/thinfloe-peripheral-battery-watch\.service$' "$LIST"; then
+    echo "FAIL - thinfloe-peripheral-battery-watch.service is enabled; a machine with no Logitech device would run it"
+    fail=1
+else
+    echo "ok   - thinfloe-peripheral-battery-watch.service is not enabled; the udev rule starts it"
+fi
+if grep -qE 'etc/udev/rules\.d/90-thinfloe-peripheral-battery\.rules$' "$LIST"; then
+    echo "ok   - the udev rule that starts the battery watcher is in the image"
+else
+    echo "FAIL - the udev rule is missing; a device that connects after boot would wait for the timer"
+    fail=1
+fi
+PB="$DPKG_TMP/pb"
+if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
+        etc/systemd/system/thinfloe-peripheral-battery.service \
+        etc/systemd/system/thinfloe-peripheral-battery-watch.service \
+        etc/systemd/system/thinfloe-peripheral-battery.timer \
+        usr/lib/tmpfiles.d/thinfloe-peripherals.conf \
+        usr/libexec/thinfloe/peripheral-battery >/dev/null 2>&1 &&
+   [[ -f "$PB/etc/systemd/system/thinfloe-peripheral-battery.timer" ]]; then
+    PBU="$PB/etc/systemd/system"
+    if [[ -x "$PB/usr/libexec/thinfloe/peripheral-battery" ]]; then
+        echo "ok   - the battery helper is executable"
+    else
+        echo "FAIL - /usr/libexec/thinfloe/peripheral-battery is missing or not executable"
+        fail=1
+    fi
+    if ! grep -q '^OnBootSec' "$PBU/thinfloe-peripheral-battery.timer" &&
+       grep -qx 'OnUnitActiveSec=5min' "$PBU/thinfloe-peripheral-battery.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$PBU/thinfloe-peripheral-battery.timer"; then
+        echo "ok   - the battery timer repeats every 5 min and has no OnBootSec"
+    else
+        echo "FAIL - the battery timer has an OnBootSec, lacks OnUnitActiveSec=5min or has a random delay"
+        fail=1
+    fi
+    if grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null &&
+       grep -qx 'WantedBy=multi-user.target' "$PBU/thinfloe-peripheral-battery.service"; then
+        echo "ok   - the battery service runs the helper and is wanted by multi-user.target"
+    else
+        echo "FAIL - the battery service is missing, runs something else, or lacks WantedBy=multi-user.target"
+        fail=1
+    fi
+    if grep -qx 'TimeoutStartSec=60' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "ok   - the battery service ends a hung run after 60 s"
+    else
+        echo "FAIL - the battery service lacks TimeoutStartSec=60 (a hung run would hold the helper's lock for ever)"
+        fail=1
+    fi
+    PBW="$PBU/thinfloe-peripheral-battery-watch.service"
+    if grep -qx 'Type=simple' "$PBW" 2>/dev/null &&
+       grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery watch' "$PBW" &&
+       grep -qx 'Restart=on-failure' "$PBW" &&
+       grep -qx 'RestartSec=5' "$PBW" &&
+       ! grep -q '^WantedBy=' "$PBW"; then
+        echo "ok   - the battery watch service runs the watcher, restarts on failure and has no WantedBy="
+    else
+        echo "FAIL - the battery watch service is missing, runs something else, does not restart or has a WantedBy="
+        fail=1
+    fi
+    if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
+            "$PBU/thinfloe-peripheral-battery.service" "$PBW" 2>/dev/null; then
+        echo "FAIL - a battery unit declares Before= (ordering cycle risk)"
+        fail=1
+    else
+        echo "ok   - the battery units declare no Before="
+    fi
+    if grep -qx 'd /run/thinfloe/peripherals 0755 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf" &&
+       grep -qx 'd /run/thinfloe/peripherals-state 0700 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf"; then
+        echo "ok   - the battery directory is 0755, the state directory 0700"
+    else
+        echo "FAIL - the battery directories are missing or have the wrong mode"
+        fail=1
+    fi
+else
+    echo "FAIL - cannot extract the battery units from $SQSH"
     fail=1
 fi
 
