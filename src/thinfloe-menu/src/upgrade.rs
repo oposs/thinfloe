@@ -135,6 +135,11 @@ pub struct Upgrade {
     listing: bool,
     next_poll: Option<Instant>,
     logged_error: Option<String>,
+    /// The last drive list was answered after the screen last entered
+    /// Choose with the current Show all; only such a list confirms a write.
+    list_fresh: bool,
+    /// The source the running check was sent with.
+    check_source: Option<Option<String>>,
     job: Option<Job>,
     /// The version the finished write installed.
     done_version: Option<String>,
@@ -173,6 +178,8 @@ impl Upgrade {
             listing: false,
             next_poll: None,
             logged_error: None,
+            list_fresh: false,
+            check_source: None,
             job: None,
             done_version: None,
         }
@@ -228,7 +235,11 @@ impl Upgrade {
             }
             UpgradeEvent::ShowAll(on) => {
                 if self.show_all != on {
+                    // The list was made for the other setting: drop it, so a
+                    // drive only Show all offers is not choosable without it.
                     self.show_all = on;
+                    self.drives.clear();
+                    self.list_fresh = false;
                     self.next_poll = Some(now);
                 }
                 None
@@ -278,6 +289,9 @@ impl Upgrade {
             UpgradeEvent::TryAgain => {
                 if matches!(self.stage, Stage::Finished(_)) {
                     self.stage = Stage::Choose;
+                    // The list is from before the write; a stick may have
+                    // been pulled or swapped since.
+                    self.list_fresh = false;
                     self.steps.clear();
                     self.progress = None;
                     self.speed = Speed::new();
@@ -333,6 +347,7 @@ impl Upgrade {
                 }
                 self.drives = list;
                 self.drives_error = None;
+                self.list_fresh = self.stage == Stage::Choose;
                 self.logged_error = None;
                 if self.chosen_drive().is_none() {
                     self.clear_choice();
@@ -346,12 +361,23 @@ impl Upgrade {
     }
 
     /// The answer to a `Check` request; `custom` when it carried a source.
+    /// An answer for an address that is no longer the entered one is
+    /// dropped. An answer for the default address always counts: it is the
+    /// default's release whatever the field says now.
     pub fn released(&mut self, custom: bool, r: Result<Release, String>) {
         self.checking = false;
-        let slot = if custom {
-            self.custom_release.get_or_insert_with(Release::default)
-        } else {
-            &mut self.release
+        let Some(sent) = self.check_source.take() else { return };
+        if custom != sent.is_some() {
+            return;
+        }
+        let slot = match sent {
+            None => &mut self.release,
+            Some(a) => {
+                if self.source() != Ok(Some(a)) {
+                    return;
+                }
+                self.custom_release.get_or_insert_with(Release::default)
+            }
         };
         match r {
             Ok(rel) => *slot = rel,
@@ -549,10 +575,15 @@ impl Upgrade {
                 (s, Tone::Good)
             }
             Outcome::Failed { reason } => (upper_first(reason), Tone::Warn),
-            Outcome::Refused { reason } => (
-                format!("Nothing was written: {}.", reason.trim_end_matches('.')),
-                Tone::Warn,
-            ),
+            Outcome::Refused { reason } => {
+                let reason = reason.trim().trim_end_matches('.');
+                let text = if reason.is_empty() {
+                    "Nothing was written.".to_string()
+                } else {
+                    format!("Nothing was written: {reason}.")
+                };
+                (text, Tone::Warn)
+            }
             Outcome::Cancelled {
                 mode: Mode::Fresh,
                 written: false,
@@ -583,11 +614,12 @@ impl Upgrade {
         }
         let source = self.source().ok()?;
         self.checking = true;
+        self.check_source = Some(source.clone());
         Some(Request::Check { source })
     }
 
     fn confirm(&mut self) -> Option<Request> {
-        if self.stage != Stage::Choose || self.job.is_some() {
+        if self.stage != Stage::Choose || self.job.is_some() || !self.list_fresh {
             return None;
         }
         let d = self.chosen_drive()?.clone();
@@ -615,6 +647,7 @@ impl Upgrade {
             result: None,
         });
         self.stage = Stage::Running;
+        self.list_fresh = false;
         Some(Request::Write { args })
     }
 
@@ -707,11 +740,7 @@ fn source_ok(s: &str) -> bool {
 }
 
 fn name(d: &Drive) -> &str {
-    if d.model.trim().is_empty() {
-        &d.device
-    } else {
-        &d.model
-    }
+    if d.model.trim().is_empty() { &d.device } else { &d.model }
 }
 
 fn upper_first(s: &str) -> String {
@@ -1339,6 +1368,9 @@ mod tests {
         assert_eq!(u.chosen.as_ref().map(|c| c.device.as_str()), Some("/dev/sdc"));
         assert_eq!(u.mode, Some(Mode::Fresh));
         assert!(u.copy_home && !u.verify);
+        // A write is confirmed again only from a list made after this one.
+        let tf = Drive { is_thinfloe: true, ..stick("/dev/sdc", "sn-C:1:1") };
+        u.drives_listed(false, Ok(vec![tf]), t);
         assert_eq!(write_of(ev(&mut u, UpgradeEvent::Confirm, t)), first);
     }
 
@@ -1457,6 +1489,8 @@ mod tests {
             Some("Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe")
         );
         // A failed check keeps its reason.
+        ev(&mut u, UpgradeEvent::Advanced(false), t);
+        assert_eq!(ev(&mut u, UpgradeEvent::CheckNow, t), Some(Request::Check { source: None }));
         u.released(false, Err("no network".into()));
         assert_eq!(u.release.error.as_deref(), Some("no network"));
     }
@@ -1579,16 +1613,18 @@ mod tests {
             u.drives_listed(false, Err("sudo: a password is required".into()), t),
             None
         );
-        assert!(u
-            .drives_listed(false, Err("drive list: not an array".into()), t)
-            .is_some());
+        assert!(
+            u.drives_listed(false, Err("drive list: not an array".into()), t)
+                .is_some()
+        );
         assert_eq!(u.drives_listed(false, Err("drive list: not an array".into()), t), None);
         assert_eq!(u.drives_listed(false, Ok(vec![]), t), None);
         assert_eq!(u.drives_error, None);
         // After a good list the same error is news again.
-        assert!(u
-            .drives_listed(false, Err("drive list: not an array".into()), t)
-            .is_some());
+        assert!(
+            u.drives_listed(false, Err("drive list: not an array".into()), t)
+                .is_some()
+        );
     }
 
     #[test]
@@ -1608,6 +1644,106 @@ mod tests {
         u.drives_listed(false, Ok(vec![]), t2 + Duration::from_secs(10));
         assert_eq!(u.poll(t2 + Duration::from_secs(11)), None);
         assert!(u.poll(t2 + Duration::from_secs(12)).is_some());
+    }
+
+    #[test]
+    fn try_again_waits_for_a_fresh_drive_list() {
+        let (mut u, t) = running_fresh(true);
+        u.message(step("write"), t);
+        u.message(result(false, "the stick was removed"), t);
+        u.ended(Ok(Some(1)));
+        ev(&mut u, UpgradeEvent::TryAgain, t);
+        assert_eq!(u.stage, Stage::Choose);
+        // The list from before the write says nothing about the stick now.
+        assert_eq!(ev(&mut u, UpgradeEvent::Confirm, t), None);
+        assert_eq!(u.poll(t), Some(Request::Drives { all: false }));
+        assert_eq!(ev(&mut u, UpgradeEvent::Confirm, t), None, "the answer is not in yet");
+        u.drives_listed(false, Ok(vec![stick("/dev/sdb", "sn-A:1:1")]), t);
+        assert!(matches!(
+            ev(&mut u, UpgradeEvent::Confirm, t),
+            Some(Request::Write { .. })
+        ));
+    }
+
+    #[test]
+    fn a_check_answer_for_another_address_is_dropped() {
+        let (mut u, t) = ready(vec![stick("/dev/sdb", "sn-A:1:1")]);
+        u.released(false, Ok(release()));
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        ev(&mut u, UpgradeEvent::Advanced(true), t);
+        ev(&mut u, UpgradeEvent::Source("https://a.example/rel".into()), t);
+        assert_eq!(
+            ev(&mut u, UpgradeEvent::CheckNow, t),
+            Some(Request::Check {
+                source: Some("https://a.example/rel".into())
+            })
+        );
+        ev(&mut u, UpgradeEvent::Source("https://b.example/rel".into()), t);
+        u.released(
+            true,
+            Ok(Release {
+                latest: Some("9.9.9".into()),
+                image_bytes: Some(1),
+                ..Release::default()
+            }),
+        );
+        assert!(!u.checking);
+        assert!(u.custom_release.is_none(), "A's answer is not B's release");
+        assert_eq!(
+            u.summary().as_deref(),
+            Some("Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe")
+        );
+        // Advanced turned off while the check runs: the answer is dropped too.
+        ev(&mut u, UpgradeEvent::CheckNow, t);
+        ev(&mut u, UpgradeEvent::Advanced(false), t);
+        u.released(
+            true,
+            Ok(Release {
+                latest: Some("9.9.9".into()),
+                ..Release::default()
+            }),
+        );
+        assert!(u.custom_release.is_none());
+        assert_eq!(u.release.latest.as_deref(), Some("4.1.0"));
+        // A check of the default address still counts after an address is entered.
+        ev(&mut u, UpgradeEvent::CheckNow, t);
+        ev(&mut u, UpgradeEvent::Advanced(true), t);
+        u.released(
+            false,
+            Ok(Release {
+                latest: Some("4.1.1".into()),
+                ..Release::default()
+            }),
+        );
+        assert_eq!(u.release.latest.as_deref(), Some("4.1.1"));
+        assert!(u.custom_release.is_none());
+    }
+
+    #[test]
+    fn show_all_off_drops_the_internal_choice() {
+        let nvme = Drive {
+            transport: Some("nvme".into()),
+            removable: false,
+            ..stick("/dev/nvme0n1", "sn-X:1:1")
+        };
+        let (mut u, t) = ready(vec![]);
+        ev(&mut u, UpgradeEvent::ShowAll(true), t);
+        u.poll(t);
+        u.drives_listed(true, Ok(vec![nvme.clone()]), t);
+        ev(&mut u, UpgradeEvent::Choose("/dev/nvme0n1".into()), t);
+        ev(&mut u, UpgradeEvent::Typed(drives::confirm_text(&nvme)), t);
+        ev(&mut u, UpgradeEvent::ShowAll(false), t);
+        assert!(u.drives.is_empty(), "the Show all list is gone");
+        assert_eq!(u.summary(), None);
+        assert_eq!(ev(&mut u, UpgradeEvent::Confirm, t), None);
+    }
+
+    #[test]
+    fn refused_without_a_reason() {
+        let (mut u, t) = running_fresh(true);
+        u.message(result(false, ""), t);
+        u.ended(Ok(Some(2)));
+        assert_eq!(u.outcome_text(), ("Nothing was written.".to_string(), Tone::Warn));
     }
 
     #[test]
