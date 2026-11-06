@@ -317,9 +317,16 @@ fn upgrade_command(cmd: &[String], args: &[String]) -> Command {
 /// Run `thinfloe-upgrade write` with `args`. Progress lines go to `on_msg`
 /// in order; all other output goes to the log. The tool is never killed
 /// from here: `on_spawn` gets its process group so the caller can send
-/// SIGTERM. Returns only after the stdout pump has delivered every line
-/// (up to `UPGRADE_DRAIN` after the exit), so a `@result` printed just
-/// before the exit is never lost.
+/// SIGTERM.
+///
+/// Returns once the tool exited and its stdout was read to the end, waiting
+/// at most `UPGRADE_DRAIN` for that, so a `@result` printed just before the
+/// exit is not lost. If a background process keeps stdout open past that,
+/// one line says so in the log, and from then on `on_msg` is never called
+/// again (later lines go to the log as plain output).
+///
+/// `on_msg` runs on the pump thread, under a lock that `upgrade_write`
+/// takes before it returns: it must not block or panic.
 pub fn upgrade_write(
     cmd: &[String],
     args: &[String],
@@ -331,50 +338,97 @@ pub fn upgrade_write(
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
     on_spawn(child.id() as i32);
-    let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
-    let mut pumps = 0;
+    let closed = Arc::new(std::sync::Mutex::new(false));
+    let (out_tx, out_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+    let (err_tx, err_rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+    let have_out = child.stdout.is_some();
     if let Some(out) = child.stdout.take() {
-        let (f, t) = (feed.clone(), tx.clone());
+        let (f, c) = (feed.clone(), closed.clone());
         std::thread::spawn(move || {
-            pump_lines(out, UPGRADE_LOG_SOURCE.to_string(), f, t, |line| match upgrade_proto::parse(line) {
-                Some(m) => {
-                    on_msg(m);
-                    true
+            pump_lines(out, UPGRADE_LOG_SOURCE.to_string(), f, out_tx, |line| {
+                let closed = c.lock().unwrap_or_else(|e| e.into_inner());
+                if *closed {
+                    return false;
                 }
-                None => false,
+                match upgrade_proto::parse(line) {
+                    Some(m) => {
+                        on_msg(m);
+                        true
+                    }
+                    None => false,
+                }
             })
         });
-        pumps += 1;
     }
+    let have_err = child.stderr.is_some();
     if let Some(err) = child.stderr.take() {
         let f = feed.clone();
-        std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, tx));
-        pumps += 1;
+        std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, err_tx));
     }
     let status = child
         .wait()
         .map(|s| s.code())
         .map_err(|e| format!("waiting for {}: {e}", cmd[0]));
     let deadline = Instant::now() + UPGRADE_DRAIN;
-    for _ in 0..pumps {
-        if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
-            break;
-        }
+    let out_done = !have_out || out_rx.recv_timeout(UPGRADE_DRAIN).is_ok();
+    if !out_done {
+        // From here on no progress line reaches the caller.
+        *closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        feed.push(Line {
+            time: local_time(),
+            source: Some(UPGRADE_LOG_SOURCE.to_string()),
+            runs: vec![Run::plain(format!(
+                "the writer's output stayed open {} s after it ended; later lines are ignored",
+                UPGRADE_DRAIN.as_secs()
+            ))],
+            kind: Kind::Warn,
+        });
     }
+    if have_err {
+        let _ = err_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(DRAIN_GRACE));
+    }
+    // Lines after this point are logged only.
+    *closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
     status
 }
 
+/// Longest wait for the drive list and for the release check. The check
+/// makes two curl calls of up to 30 s each.
+pub const DRIVES_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+/// After SIGTERM for a timeout, how long to wait for the tool to end.
+/// Then we give up waiting; it may linger, these are not write jobs.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Wait for `child` until `deadline`; `None` when it still runs.
+fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return Some(st),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Run the tool and read at most `cap` bytes of stdout; stderr goes to the
-/// log. More than `cap` is an error and the tool is stopped with SIGTERM.
+/// log. More than `cap` is an error and the tool is stopped with SIGTERM,
+/// as is a tool that does not finish within `timeout`.
 fn upgrade_capture(
     cmd: &[String],
     args: &[String],
     cap: usize,
+    timeout: Duration,
     feed: &Arc<Feed>,
 ) -> Result<(String, Option<i32>), String> {
     let mut child = upgrade_command(cmd, args)
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
+    let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     let mut pumps = 0;
     if let Some(err) = child.stderr.take() {
@@ -382,16 +436,35 @@ fn upgrade_capture(
         std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, tx));
         pumps += 1;
     }
-    let mut out = Vec::new();
+    let (out_tx, out_rx) = mpsc::channel();
     if let Some(pipe) = child.stdout.take() {
-        let _ = pipe.take(cap as u64 + 1).read_to_end(&mut out);
-        // Dropping the pipe here gives a still-writing tool SIGPIPE.
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = pipe.take(cap as u64 + 1).read_to_end(&mut out);
+            // Dropping the pipe here gives a still-writing tool SIGPIPE.
+            let _ = out_tx.send(out);
+        });
+    } else {
+        let _ = out_tx.send(Vec::new());
     }
+    let out = match out_rx.recv_timeout(timeout) {
+        Ok(out) => out,
+        Err(_) => {
+            stop(child.id() as i32, Signal::Term);
+            wait_until(&mut child, Instant::now() + STOP_WAIT);
+            return Err(format!("{} did not answer within {} s", cmd[0], timeout.as_secs_f32().round()));
+        }
+    };
     let too_long = out.len() > cap;
     if too_long {
         stop(child.id() as i32, Signal::Term);
     }
-    let status = child.wait().map_err(|e| format!("waiting for {}: {e}", cmd[0]))?;
+    let left = timeout.saturating_sub(started.elapsed()).max(if too_long { STOP_WAIT } else { Duration::ZERO });
+    let Some(status) = wait_until(&mut child, Instant::now() + left) else {
+        stop(child.id() as i32, Signal::Term);
+        wait_until(&mut child, Instant::now() + STOP_WAIT);
+        return Err(format!("{} did not end within {} s", cmd[0], timeout.as_secs_f32().round()));
+    };
     let deadline = Instant::now() + DRAIN_GRACE;
     for _ in 0..pumps {
         if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
@@ -410,7 +483,7 @@ pub fn upgrade_drives(cmd: &[String], all: bool, feed: &Arc<Feed>) -> Result<Vec
     if all {
         args.push("--all".to_string());
     }
-    let (text, status) = upgrade_capture(cmd, &args, DRIVES_BYTES, feed)?;
+    let (text, status) = upgrade_capture(cmd, &args, DRIVES_BYTES, DRIVES_TIMEOUT, feed)?;
     if status != Some(0) {
         return Err(match status {
             Some(n) => format!("the drive list failed with status {n}"),
@@ -429,7 +502,7 @@ pub fn upgrade_check(cmd: &[String], source: Option<&str>, feed: &Arc<Feed>) -> 
         args.push("--source".to_string());
         args.push(url.to_string());
     }
-    let (text, status) = upgrade_capture(cmd, &args, CHECK_BYTES, feed)?;
+    let (text, status) = upgrade_capture(cmd, &args, CHECK_BYTES, CHECK_TIMEOUT, feed)?;
     match status {
         Some(0) | Some(1) if !text.trim().is_empty() => Ok(release::parse_status(&text)),
         Some(0) | Some(1) => Err("the release check printed nothing".to_string()),
@@ -808,6 +881,7 @@ mod tests {
         let got: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
         assert_eq!(got, ["own"]);
         // SAFETY: getpgrp has no preconditions.
+        assert!(pgid > 1);
         assert_ne!(pgid, unsafe { libc::getpgrp() });
     }
 
@@ -856,5 +930,39 @@ mod tests {
         assert!(upgrade_check(&sh("exit 2"), None, &feed).is_err());
         assert!(upgrade_check(&sh("exit 0"), None, &feed).is_err(), "no lines");
         assert_eq!(default_upgrade_cmd(), ["sudo", "-n", "/usr/bin/thinfloe-upgrade"]);
+    }
+
+    #[test]
+    fn a_late_result_after_the_drain_is_logged_not_delivered() {
+        let feed = Arc::new(Feed::default());
+        let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let t0 = Instant::now();
+        let st = upgrade_write(
+            &sh("echo \"@step write W\"; (sleep 7; echo \"@result ok\") & exit 0"),
+            &[],
+            &feed,
+            |_| {},
+            move |m| g.lock().unwrap().push(m),
+        );
+        let took = t0.elapsed();
+        assert_eq!(st, Ok(Some(0)));
+        assert!(took >= UPGRADE_DRAIN && took < Duration::from_secs(7), "{took:?}");
+        assert_eq!(got.lock().unwrap().len(), 1);
+        let lines: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
+        assert!(lines.iter().any(|l| l.contains("stayed open")), "{lines:?}");
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(got.lock().unwrap().len(), 1, "no on_msg after return");
+        let lines: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
+        assert!(lines.contains(&"@result ok".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn a_tool_that_does_not_answer_is_stopped_at_the_deadline() {
+        let feed = Arc::new(Feed::default());
+        let t0 = Instant::now();
+        let r = upgrade_capture(&sh("sleep 5"), &[], 100, Duration::from_millis(300), &feed);
+        assert!(r.unwrap_err().contains("did not answer"));
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     }
 }
