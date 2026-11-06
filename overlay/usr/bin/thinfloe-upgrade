@@ -132,6 +132,12 @@ SYSLINUX_CFGS = ("syslinux.cfg", "efi/boot/syslinux.cfg")
 # a temporary mount of the scan makes the write's mount check or its own
 # rw mount fail. Module constant so tests can point it elsewhere.
 LOCK_PATH = "/run/thinfloe/upgrade.lock"
+# Every write to the boot stick's ESP takes this lock (thinfloe-addon, the
+# USB save in thinfloe-save-home). Held here only while tl.old/ goes and the
+# release is switched, never during the download. Taken inside LOCK_PATH, which
+# is not part of the add-on lock order, so no cycle.
+ESP_LOCK = os.environ.get("TF_ESP_LOCK", "/run/thinfloe/esp.lock")
+ESP_LOCK_WAIT = 30.0
 # A write waits this long for a `drives` scan; after it, it is another write.
 WRITE_LOCK_WAIT = 10.0
 # The menu asks for drives every 2 s; it must not hang behind a write.
@@ -1438,6 +1444,40 @@ def _restore_default_current(efi_mount: str) -> bool:
     return ok
 
 
+@contextlib.contextmanager
+def esp_lock(timeout: float = None):
+    """Holds ESP_LOCK; WriteFailed if another writer keeps it for `timeout` s.
+
+    A lock file that does not exist (tmpfiles did not run) is skipped with a
+    log line, as thinfloe-save-home does."""
+    if timeout is None:
+        timeout = ESP_LOCK_WAIT
+    try:
+        fd = os.open(ESP_LOCK, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError as e:
+        log(f"cannot open {ESP_LOCK} ({e.strerror}) - going on without it")
+        yield
+        return
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+            if time.monotonic() >= deadline:
+                raise WriteFailed(
+                    "the boot stick is busy (a home save or an add-on "
+                    "install is running); try again in a minute. "
+                    "Nothing was changed.")
+            time.sleep(0.2)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None:
     """Replace the stick's release; the boot label is the last write.
 
@@ -1572,7 +1612,11 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
                 f"made free. Nothing was changed.")
 
         progress.step("switch", "Switching to the new release")
-        with _uninterruptible():
+        # Only the boot stick's ESP is the one saves and add-ons write.
+        with contextlib.ExitStack() as stack:
+            if drive.is_boot:
+                stack.enter_context(esp_lock())
+            stack.enter_context(_uninterruptible())
             _switch_release(drive, efi_mount, firmware_dir)
         progress.done("switch")
     finally:

@@ -595,6 +595,13 @@ home; removing it is later work.
   `/run/thinfloe/addons/`, `esp.lock` is not. Never take an earlier one
   while a later one is held. `thinfloe-save-home` takes
   only `esp.lock` (`flock -w 30`), so a save never waits for dpkg.
+  `thinfloe-upgrade` takes `esp.lock` (`esp_lock()`, 30 s, then `the boot
+  stick is busy` and nothing changed) only around the `switch` step of an
+  upgrade of the boot stick, which includes removing `tl.old/`; never around
+  the download and never for another stick. It holds `/run/thinfloe/upgrade.lock`
+  for the whole write and takes `esp.lock` inside it; `upgrade.lock` is not
+  in the add-on order, so there is no cycle. A missing lock file is skipped
+  with a log line, as `thinfloe-save-home` does.
 - **Status file** `/run/thinfloe/addons/status`, rewritten atomically, one
   line per known add-on, tab-separated: `id ticked state installed_version
   pending_version auto message`. `ticked` and `auto` are `0`/`1`; `state` is

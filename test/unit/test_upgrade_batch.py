@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -1235,6 +1236,87 @@ class TestBatchUpgrade(unittest.TestCase):
         self.assertEqual(seen, [signal.SIG_IGN])
         for c in self.cfgs():
             self.assertIn("DEFAULT new", c.read_text())
+
+
+class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
+    """The boot stick's switch step takes /run/thinfloe/esp.lock."""
+
+    def setUp(self):
+        super().setUp()
+        self.lock = Path(self.tmp.name) / "esp.lock"
+        self.lock.write_text("")
+        m = mock.patch.object(ui, "ESP_LOCK", str(self.lock))
+        m.start()
+        self.addCleanup(m.stop)
+
+    def hold(self):
+        import fcntl
+        fd = os.open(str(self.lock), os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    def test_switch_waits_for_the_esp_lock(self):
+        self.checksums()
+        fd = self.hold()
+        released = []
+        def release():
+            released.append(time.monotonic())
+            os.close(fd)
+        threading.Timer(1.0, release).start()
+        started = []
+        real = ui._switch_release
+        def spy(*a, **kw):
+            started.append(time.monotonic())
+            return real(*a, **kw)
+        with mock.patch.object(ui, "_switch_release", side_effect=spy):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(started), 1)
+        self.assertGreaterEqual(started[0], released[0])
+
+    def test_esp_lock_timeout_fails_before_the_switch(self):
+        self.checksums()
+        fd = self.hold()
+        self.addCleanup(os.close, fd)
+        clock = [0.0]
+        def sleep(s):
+            clock[0] += max(s, 1.0)
+        with mock.patch.object(ui.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(ui.time, "sleep", side_effect=sleep), \
+             mock.patch.object(ui, "_switch_release") as sw:
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 1, out)
+        sw.assert_not_called()
+        self.assertIn("@result failed the boot stick is busy", out)
+        self.assertEqual([c.read_bytes() for c in self.cfgs()], self.before)
+        self.assertFalse((self.esp / "tl.new").exists())
+
+    def test_download_does_not_hold_the_esp_lock(self):
+        import fcntl
+        self.checksums()
+        held = []
+        real = ui.download_firmware
+        def spy(*a, **kw):
+            fd = os.open(str(self.lock), os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+            finally:
+                os.close(fd)
+            return real(*a, **kw)
+        with mock.patch.object(ui, "download_firmware", side_effect=spy):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(held, [False])
+
+    def test_missing_lock_file_goes_on_without_it(self):
+        self.checksums()
+        self.lock.unlink()
+        rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("without it", out)
 
 
 class TestNonBootRotation(unittest.TestCase):
