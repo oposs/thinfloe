@@ -4,23 +4,105 @@ use std::sync::Arc;
 
 use egui::{Color32, ColorImage, Context, FontData, FontDefinitions, FontFamily, FontId};
 use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::usvg;
 use shadcn_egui::style::Radius;
 use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
-use resvg::usvg;
+
+// The palette. UI code reads these through the theme: the six that are
+// shadcn roles as `Theme::palette()` (ICE primary and ring, BG background,
+// TILE card, TILE_HOVER accent, LINE border, MUTED muted_foreground), the
+// other four as the app colours in `role`.
 
 /// Ice blue, the accent.
-pub const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
-pub const BG: Color32 = Color32::from_rgb(0x05, 0x07, 0x0a);
-pub const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
-pub const TILE_ACTIVE: Color32 = Color32::from_rgb(0x10, 0x1b, 0x26);
-pub const TILE_HOVER: Color32 = Color32::from_rgb(0x13, 0x1c, 0x26);
-pub const LINE: Color32 = Color32::from_rgb(0x15, 0x1b, 0x22);
-pub const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
+const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
+const BG: Color32 = Color32::from_rgb(0x05, 0x07, 0x0a);
+const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
+const TILE_ACTIVE: Color32 = Color32::from_rgb(0x10, 0x1b, 0x26);
+const TILE_HOVER: Color32 = Color32::from_rgb(0x13, 0x1c, 0x26);
+const LINE: Color32 = Color32::from_rgb(0x15, 0x1b, 0x22);
+const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
 /// The grey of timestamps.
-pub const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
+const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
 /// A warning amber, for reasons drawn on a disabled tile.
-pub const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
-pub const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
+const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+
+/// The palette's values, for tests that look for a colour in drawn shapes.
+#[cfg(test)]
+pub(crate) mod rgb {
+    use egui::Color32;
+    pub(crate) const BG: Color32 = super::BG;
+    pub(crate) const GOOD: Color32 = super::GOOD;
+    pub(crate) const ICE: Color32 = super::ICE;
+    pub(crate) const MUTED: Color32 = super::MUTED;
+    pub(crate) const TILE: Color32 = super::TILE;
+    pub(crate) const TILE_HOVER: Color32 = super::TILE_HOVER;
+    pub(crate) const TIME: Color32 = super::TIME;
+    pub(crate) const WARN: Color32 = super::WARN;
+}
+
+/// The app colours: what the shadcn palette has no role for.
+pub mod role {
+    use shadcn_egui::style::Role;
+    /// A tile while its program runs.
+    pub const TILE_ACTIVE: Role = Role::custom("tf-tile-active");
+    /// Timestamps in the log.
+    pub const TIME: Role = Role::custom("tf-time");
+    /// Warnings: a grey tile's reason, a failed save.
+    pub const WARN: Role = Role::custom("tf-warn");
+    /// Good news: installed, saved.
+    pub const GOOD: Role = Role::custom("tf-good");
+}
+
+/// The 16 basic terminal colours, picked to read on the dark log
+/// background: black and blue are lightened, which a terminal's defaults
+/// would leave nearly invisible here.
+pub const ANSI_16: [Color32; 16] = [
+    Color32::from_rgb(0x6e, 0x6e, 0x6e),
+    Color32::from_rgb(0xe0, 0x6c, 0x75),
+    Color32::from_rgb(0x98, 0xc3, 0x79),
+    Color32::from_rgb(0xe5, 0xc0, 0x7b),
+    Color32::from_rgb(0x61, 0xaf, 0xef),
+    Color32::from_rgb(0xc6, 0x78, 0xdd),
+    Color32::from_rgb(0x56, 0xb6, 0xc2),
+    Color32::from_rgb(0xd0, 0xd0, 0xd0),
+    Color32::from_rgb(0x8a, 0x8a, 0x8a),
+    Color32::from_rgb(0xff, 0x7b, 0x86),
+    Color32::from_rgb(0xb5, 0xe8, 0x90),
+    Color32::from_rgb(0xff, 0xd7, 0x87),
+    Color32::from_rgb(0x82, 0xc4, 0xff),
+    Color32::from_rgb(0xe0, 0x9c, 0xf5),
+    Color32::from_rgb(0x7f, 0xd8, 0xe3),
+    Color32::from_rgb(0xff, 0xff, 0xff),
+];
+
+// Text sizes in points, one per place they are used.
+/// "ThinFloe" in the header.
+pub const NAME_PT: f32 = 34.0;
+/// The byline under the name.
+pub const BYLINE_PT: f32 = 14.0;
+/// Host name and clock, top right.
+pub const HEADER_PT: f32 = 16.0;
+/// The running timer of the save dialog.
+pub const TIMER_PT: f32 = 28.0;
+/// The Settings screen's title.
+pub const SETTINGS_TITLE_PT: f32 = 28.0;
+/// An add-on's name in a Settings row.
+pub const ROW_NAME_PT: f32 = 20.0;
+/// The source address under an add-on's name.
+pub const ROW_SOURCE_PT: f32 = 11.0;
+/// The status line of a Settings row.
+pub const ROW_STATUS_PT: f32 = 12.0;
+/// A tile's name.
+pub const TILE_NAME_PT: f32 = 21.0;
+/// A tile's second line: its reason or comment.
+pub const TILE_NOTE_PT: f32 = 11.0;
+/// The "×2" of a tile whose program runs more than once.
+pub const RUNNING_PT: f32 = 15.0;
+/// The small marks on a tile ("update", "user").
+pub const MARK_PT: f32 = 11.0;
+/// A dialog's title.
+pub const DIALOG_TITLE_PT: f32 = 24.0;
 
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
@@ -61,7 +143,12 @@ pub fn theme() -> shadcn_egui::Theme {
     let mut style = Style::vega();
     // vega's tick box is `rounded-[4px]`, not a step of the theme radius.
     style.checkbox.radius.set(Radius::Px(0.0));
-    shadcn_egui::Theme::new(style, p, p, 0.0).fonts(&UBUNTU_LIGHT, None)
+    shadcn_egui::Theme::new(style, p, p, 0.0)
+        .fonts(&UBUNTU_LIGHT, None)
+        .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
+        .color(role::TIME, TIME, TIME)
+        .color(role::WARN, WARN, WARN)
+        .color(role::GOOD, GOOD, GOOD)
 }
 
 /// Apply the theme and install the fonts. Once per context: the context
@@ -123,6 +210,76 @@ pub fn logo(height_px: u32) -> ColorImage {
 mod tests {
     use super::*;
 
+    /// A colour or size written into UI code instead of taken from the
+    /// theme or a named constant (the build-ui skill's grep, plus `geo(`).
+    fn style_literal(line: &str) -> bool {
+        const PLAIN: [&str; 5] = [
+            "Color32::from_",
+            "Color32::WHITE",
+            "Color32::BLACK",
+            "from_black_alpha",
+            "from_white_alpha",
+        ];
+        if PLAIN.iter().any(|p| line.contains(p)) {
+            return true;
+        }
+        let digit_after = |at: usize| line[at..].starts_with(|c: char| c.is_ascii_digit());
+        let call_with_digit = |pat: &str| line.match_indices(pat).any(|(i, _)| digit_after(i + pat.len()));
+        if call_with_digit(".size(") || call_with_digit("geo(") {
+            return true;
+        }
+        // FontId::<word>(<digit>
+        line.match_indices("FontId::").any(|(i, p)| {
+            let rest = &line[i + p.len()..];
+            let word = rest
+                .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+                .unwrap_or(rest.len());
+            word > 0 && rest[word..].starts_with('(') && digit_after(i + p.len() + word + 1)
+        })
+    }
+
+    #[test]
+    fn ui_code_has_no_style_literals() {
+        // Positive control: the matcher sees what it must.
+        for bad in [
+            "Color32::from_rgb(1,2,3)",
+            "Color32::WHITE",
+            "from_black_alpha(9)",
+            "FontId::proportional(11.0)",
+            ".size(28.0)",
+            "brand::geo(34.0)",
+            "geo(21.0)",
+        ] {
+            assert!(style_literal(bad), "{bad}");
+        }
+        for good in [
+            "brand::geo(NAME_PT)",
+            "FontId::proportional(LOG_PT)",
+            ".size(t.metrics.icon)",
+        ] {
+            assert!(!style_literal(good), "{good}");
+        }
+        for (name, src) in [
+            ("ui.rs", include_str!("ui.rs")),
+            ("app.rs", include_str!("app.rs")),
+            ("header.rs", include_str!("header.rs")),
+            ("desktop.rs", include_str!("desktop.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+        ] {
+            let code = src.split("#[cfg(test)]").next().unwrap();
+            let mut prev = "";
+            let mut hits = Vec::new();
+            for (n, line) in code.lines().enumerate() {
+                let ok = prev.trim_start().starts_with("// token-ok:");
+                if !ok && style_literal(line) {
+                    hits.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                }
+                prev = line;
+            }
+            assert!(hits.is_empty(), "style literals:\n{}", hits.join("\n"));
+        }
+    }
+
     #[test]
     fn the_palette_is_the_spec_palette() {
         assert_eq!(ICE, Color32::from_rgb(0x7c, 0xc4, 0xff));
@@ -136,6 +293,8 @@ mod tests {
             assert_eq!((p.accent, p.border, p.muted_foreground), (TILE_HOVER, LINE, MUTED));
         }
         assert_eq!(t.radius, 0.0);
+        let app = [role::TILE_ACTIVE, role::TIME, role::WARN, role::GOOD].map(|r| t.role(r));
+        assert_eq!(app, [TILE_ACTIVE, TIME, WARN, GOOD]);
     }
 
     /// Runs `n` empty passes: fonts land one pass after `apply`.
@@ -155,7 +314,10 @@ mod tests {
             let geo = &d.families[&FontFamily::Name(GEO.into())];
             assert_eq!(geo[0], "Geo-Oblique");
             // No theme face (Inter's fallback or a body face) sits in Geo's list.
-            assert!(!geo.iter().any(|n| n.starts_with("shadcn-") || n.contains("oxanium")), "{geo:?}");
+            assert!(
+                !geo.iter().any(|n| n.starts_with("shadcn-") || n.contains("oxanium")),
+                "{geo:?}"
+            );
             let first = |fam: &FontFamily| (*d.font_data[&d.families[fam][0]].font).as_ref().to_vec();
             let ubuntu = epaint_default_fonts::UBUNTU_LIGHT;
             assert!(first(&FontFamily::Proportional) == ubuntu, "body is Ubuntu Light");

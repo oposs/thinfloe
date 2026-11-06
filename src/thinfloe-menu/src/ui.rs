@@ -2,7 +2,7 @@
 //! and the dialogs. Everything that decides something lives in menu.rs; this
 //! file only paints it and reports clicks.
 
-use crate::brand::{self, GOOD, ICE, MUTED, TILE, TILE_ACTIVE, TILE_HOVER, TIME};
+use crate::brand::{self, role};
 use crate::density::GROUP_W;
 use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
@@ -54,7 +54,6 @@ pub const LOG_MIN_ROWS: usize = 8;
 pub const LOG_ROW: f32 = 18.0;
 const LOG_PAD: f32 = 10.0;
 const LOG_FONT: f32 = 13.0;
-pub use crate::brand::WARN;
 
 /// The side of an icon drawn `points` tall, in whole pixels.
 fn icon_px(points: f32, ppp: f32) -> usize {
@@ -130,6 +129,7 @@ pub fn shrink(img: &ColorImage, side: usize) -> ColorImage {
                 }
             }
             let ch = |k: usize| (acc[k] / total).round().min(255.0) as u8;
+            // token-ok: raw pixels of a scaled icon
             pixels.push(Color32::from_rgba_premultiplied(ch(0), ch(1), ch(2), ch(3)));
         }
     }
@@ -302,8 +302,9 @@ pub struct Chrome {
 
 /// Logo, name, host, version and clock along the top of `rect`.
 fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
+    let t = Theme::current(ui.ctx());
     let p = ui.painter();
-    let fg = brand::theme().palette().foreground;
+    let fg = t.palette().foreground;
     // The mark and the name sit back at 60 %.
     let dim = |c: Color32| c.gamma_multiply(0.6);
     let top = rect.top() + HEADER_PAD_TOP;
@@ -315,24 +316,29 @@ fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
             tex.id(),
             logo,
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            // token-ok: white tints nothing: the logo texture is drawn as it is
             dim(Color32::WHITE),
         );
         x = logo.right() + 14.0;
     }
     let mid = top + LOGO_H / 2.0;
     // Name and byline form one block, centred on the logo.
-    let name = p.layout_no_wrap("ThinFloe".into(), brand::geo(34.0), dim(fg));
-    let by = p.layout_no_wrap(BYLINE.into(), brand::geo(14.0), MUTED);
+    let name = p.layout_no_wrap("ThinFloe".into(), brand::geo(brand::NAME_PT), dim(fg));
+    let by = p.layout_no_wrap(
+        BYLINE.into(),
+        brand::geo(brand::BYLINE_PT),
+        t.palette().muted_foreground,
+    );
     let y = mid - (name.size().y + by.size().y) / 2.0;
     let by_y = y + name.size().y;
     p.galley(pos2(x, y), name, fg);
-    p.galley(pos2(x, by_y), by, MUTED);
+    p.galley(pos2(x, by_y), by, t.palette().muted_foreground);
     p.text(
         pos2(rect.right() - HEADER_PAD_X, mid),
         Align2::RIGHT_CENTER,
         header_text(&chrome.header, &chrome.clock),
-        brand::geo(16.0),
-        MUTED,
+        brand::geo(brand::HEADER_PT),
+        t.palette().muted_foreground,
     );
 }
 
@@ -474,7 +480,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             dialog(ui, &format!("Saving your home directory before {verbing}"), |ui, t| {
                 ui.label(
                     egui::RichText::new(elapsed(now.duration_since(*since)))
-                        .size(28.0)
+                        .size(brand::TIMER_PT)
                         .monospace()
                         .color(t.palette().ring),
                 );
@@ -496,7 +502,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::Failed { message }) => {
             let mut chose = None;
             dialog(ui, "Your home directory was not saved", |ui, t| {
-                ui.label(egui::RichText::new(message).color(WARN));
+                ui.label(egui::RichText::new(message).color(t.role(role::WARN)));
                 ui.label(
                     egui::RichText::new(format!("If you {verb} now, the changes since the last save are lost."))
                         .color(t.palette().muted_foreground),
@@ -525,7 +531,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             None => format!("{} could not be installed.", r.name),
         };
         dialog(ui, "Add-on not installed", |ui, t| {
-            ui.label(egui::RichText::new(text).color(WARN));
+            ui.label(egui::RichText::new(text).color(t.role(role::WARN)));
             ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette().muted_foreground));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -632,9 +638,13 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                         ui.scroll_with_delta(vec2(resp.drag_delta().x, 0.0));
                     }
                     let p = ui.painter();
-                    let fill = if resp.hovered() { TILE_HOVER } else { TILE };
+                    let fill = if resp.hovered() {
+                        t.palette().accent
+                    } else {
+                        t.palette().card
+                    };
                     p.rect_filled(rect, 0.0, fill);
-                    p.rect_stroke(rect, 0.0, Stroke::new(1.0, brand::LINE), StrokeKind::Inside);
+                    p.rect_stroke(rect, 0.0, Stroke::new(1.0, t.palette().border), StrokeKind::Inside);
                     if resp.has_focus() {
                         p.rect_stroke(
                             rect.expand(2.0),
@@ -652,6 +662,7 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                         .and_then(|i| icons.get(i))
                         .and_then(|i| i.as_ref());
                     match tex {
+                        // token-ok: white tints nothing: the icon is drawn as rendered
                         Some(icon) => draw_icon(p, &icon.chip, icon_rect.min, Color32::WHITE),
                         None => {
                             p.rect_filled(icon_rect, t.radius_sm(), t.palette().muted);
@@ -700,7 +711,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     s_ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Add-ons")
-                .font(brand::geo(28.0))
+                .font(brand::geo(brand::SETTINGS_TITLE_PT))
                 .color(t.palette().foreground),
         );
         ui.add_space(12.0);
@@ -736,7 +747,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
             for row in rows {
                 // A TILE band; the ice edge on the left marks a waiting update.
                 let framed = egui::Frame::new()
-                    .fill(TILE)
+                    .fill(t.palette().card)
                     .inner_margin(egui::Margin {
                         left: ROW_LEFT,
                         right: ROW_RIGHT,
@@ -750,8 +761,11 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                     });
                 if row.update_ready {
                     let r = framed.response.rect;
-                    ui.painter()
-                        .rect_filled(Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)), 0.0, ICE);
+                    ui.painter().rect_filled(
+                        Rect::from_min_max(r.min, pos2(r.min.x + 5.0, r.max.y)),
+                        0.0,
+                        t.palette().primary,
+                    );
                 }
                 if let Some(e) = framed.inner {
                     event = Some(e);
@@ -777,9 +791,10 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
         }
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_ICON), Sense::hover());
         match icon {
+            // token-ok: white tints nothing: the icon is drawn as rendered
             Some(icon) => draw_icon(ui.painter(), &icon.row, rect.min, Color32::WHITE),
             None => {
-                ui.painter().rect_filled(rect, 0.0, TILE_HOVER);
+                ui.painter().rect_filled(rect, 0.0, t.palette().accent);
                 let letter: String = row
                     .name
                     .chars()
@@ -840,32 +855,39 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&row.name)
-                                                .font(brand::geo(20.0))
+                                                .font(brand::geo(brand::ROW_NAME_PT))
                                                 .color(t.palette().foreground),
                                         )
                                         .truncate(),
                                     );
                                 });
                                 if let Some(source) = &row.source {
-                                    let job =
-                                        LayoutJob::simple_singleline(source.clone(), FontId::monospace(11.0), MUTED);
+                                    let job = LayoutJob::simple_singleline(
+                                        source.clone(),
+                                        FontId::monospace(brand::ROW_SOURCE_PT),
+                                        t.palette().muted_foreground,
+                                    );
                                     // A horizontal layout lets a label extend; cut it instead.
                                     ui.add(egui::Label::new(job).truncate());
                                 }
                             },
                         );
                         // One line: the items joined by dots, each in its tone.
-                        let font = FontId::proportional(12.0);
+                        let font = FontId::proportional(brand::ROW_STATUS_PT);
                         let mut job = LayoutJob::default();
                         for (i, (text, tone)) in settings::status_items(row).into_iter().enumerate() {
                             if i > 0 {
-                                job.append(" · ", 0.0, egui::TextFormat::simple(font.clone(), MUTED));
+                                job.append(
+                                    " · ",
+                                    0.0,
+                                    egui::TextFormat::simple(font.clone(), t.palette().muted_foreground),
+                                );
                             }
                             let color = match tone {
                                 settings::Tone::Plain => t.palette().foreground,
-                                settings::Tone::Good => GOOD,
-                                settings::Tone::Ice => ICE,
-                                settings::Tone::Warn => WARN,
+                                settings::Tone::Good => t.role(role::GOOD),
+                                settings::Tone::Ice => t.palette().primary,
+                                settings::Tone::Warn => t.role(role::WARN),
                             };
                             job.append(&text, 0.0, egui::TextFormat::simple(font.clone(), color));
                         }
@@ -912,35 +934,14 @@ fn show_log(ui: &mut Ui, log: &Log, rect: Rect) {
         });
 }
 
-/// The 16 basic terminal colours, picked to read on the dark log
-/// background: black and blue are lightened, which a terminal's defaults
-/// would leave nearly invisible here.
-const ANSI16: [Color32; 16] = [
-    Color32::from_rgb(0x6e, 0x6e, 0x6e),
-    Color32::from_rgb(0xe0, 0x6c, 0x75),
-    Color32::from_rgb(0x98, 0xc3, 0x79),
-    Color32::from_rgb(0xe5, 0xc0, 0x7b),
-    Color32::from_rgb(0x61, 0xaf, 0xef),
-    Color32::from_rgb(0xc6, 0x78, 0xdd),
-    Color32::from_rgb(0x56, 0xb6, 0xc2),
-    Color32::from_rgb(0xd0, 0xd0, 0xd0),
-    Color32::from_rgb(0x8a, 0x8a, 0x8a),
-    Color32::from_rgb(0xff, 0x7b, 0x86),
-    Color32::from_rgb(0xb5, 0xe8, 0x90),
-    Color32::from_rgb(0xff, 0xd7, 0x87),
-    Color32::from_rgb(0x82, 0xc4, 0xff),
-    Color32::from_rgb(0xe0, 0x9c, 0xf5),
-    Color32::from_rgb(0x7f, 0xd8, 0xe3),
-    Color32::from_rgb(0xff, 0xff, 0xff),
-];
-
 pub fn ansi_color(a: Ansi) -> Color32 {
     match a {
-        Ansi::Basic(n) => ANSI16[(n & 15) as usize],
-        Ansi::Indexed(n @ 0..=15) => ANSI16[n as usize],
+        Ansi::Basic(n) => brand::ANSI_16[(n & 15) as usize],
+        Ansi::Indexed(n @ 0..=15) => brand::ANSI_16[n as usize],
         Ansi::Indexed(n @ 16..=231) => {
             let level = [0u8, 95, 135, 175, 215, 255];
             let i = n - 16;
+            // token-ok: xterm's 256-colour cube, a program's own colour
             Color32::from_rgb(
                 level[(i / 36) as usize],
                 level[(i / 6 % 6) as usize],
@@ -949,8 +950,10 @@ pub fn ansi_color(a: Ansi) -> Color32 {
         }
         Ansi::Indexed(n) => {
             let g = 8 + 10 * (n - 232);
+            // token-ok: xterm's grey ramp, a program's own colour
             Color32::from_rgb(g, g, g)
         }
+        // token-ok: a program's own RGB colour
         Ansi::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
     }
 }
@@ -972,15 +975,15 @@ fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     let text_color = match line.kind {
         Kind::Event => t.palette().foreground,
         Kind::Output => t.palette().muted_foreground,
-        Kind::Warn => WARN,
-        Kind::Good => GOOD,
+        Kind::Warn => t.role(role::WARN),
+        Kind::Good => t.role(role::GOOD),
     };
     let mut job = LayoutJob::default();
-    job.append(&line.time, 0.0, TextFormat::simple(font.clone(), TIME));
+    job.append(&line.time, 0.0, TextFormat::simple(font.clone(), t.role(role::TIME)));
     let mut lead = 16.0;
     if let Some(source) = &line.source {
-        job.append(source, 16.0, TextFormat::simple(font.clone(), ICE));
-        job.append(" | ", 0.0, TextFormat::simple(font.clone(), TIME));
+        job.append(source, 16.0, TextFormat::simple(font.clone(), t.palette().primary));
+        job.append(" | ", 0.0, TextFormat::simple(font.clone(), t.role(role::TIME)));
         lead = 0.0;
     }
     for run in &line.runs {
@@ -1014,15 +1017,19 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
     // A tile that cannot be used fades; its reason stays at full strength.
     let fade = |c: Color32| if usable { c } else { c.gamma_multiply(0.35) };
     let fill = if state.hovered {
-        TILE_HOVER
+        t.palette().accent
     } else if state.active {
-        TILE_ACTIVE
+        t.role(role::TILE_ACTIVE)
     } else {
-        TILE
+        t.palette().card
     };
     p.rect_filled(rect, 0.0, fade(fill));
     if state.active {
-        p.rect_filled(Rect::from_min_size(rect.min, vec2(EDGE_W, rect.height())), 0.0, ICE);
+        p.rect_filled(
+            Rect::from_min_size(rect.min, vec2(EDGE_W, rect.height())),
+            0.0,
+            t.palette().primary,
+        );
     }
     if state.focused {
         p.rect_stroke(
@@ -1041,6 +1048,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         Vec2::splat(ICON_BOX),
     );
     match icon {
+        // token-ok: white tints nothing: the icon is drawn as rendered, only faded
         Some(icon) => draw_icon(p, &icon.tile, icon_rect.min, fade(Color32::WHITE)),
         None => {
             p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette().muted));
@@ -1071,11 +1079,15 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         job.wrap = TextWrapping::truncate_at_width(text_w);
         lines.push(clipped.layout_job(job));
     };
-    line(&tile.name, brand::geo(21.0), fade(t.palette().foreground));
+    line(
+        &tile.name,
+        brand::geo(brand::TILE_NAME_PT),
+        fade(t.palette().foreground),
+    );
     // One second line: why the tile is grey, else its comment, else the
     // note about its file. `--check` has the long form.
     if let Some(why) = &tile.problem {
-        line(why, FontId::proportional(11.0), WARN);
+        line(why, FontId::proportional(brand::TILE_NOTE_PT), t.role(role::WARN));
     } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
         // Only a reworded file that lost keys; plain "reworded" is no news.
         match &tile.origin {
@@ -1083,12 +1095,17 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
             _ => None,
         }
     }) {
-        line(&c, FontId::proportional(11.0), fade(MUTED));
+        line(
+            &c,
+            FontId::proportional(brand::TILE_NOTE_PT),
+            fade(t.palette().muted_foreground),
+        );
     }
     let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
     let block_h = heights.iter().sum::<f32>() + 2.0 * (lines.len() as f32 - 1.0);
     let mut y = snap(rect.center().y - block_h / 2.0);
     for (galley, h) in lines.into_iter().zip(heights) {
+        // token-ok: fallback colour only: every section of these galleys has its own
         clipped.galley(pos2(text_x, y), galley, Color32::WHITE);
         y += h + 2.0;
     }
@@ -1097,8 +1114,8 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
             rect.right_top() + vec2(-9.0, 7.0),
             Align2::RIGHT_TOP,
             format!("×{}", state.running),
-            brand::geo(15.0),
-            ICE,
+            brand::geo(brand::RUNNING_PT),
+            t.palette().primary,
         );
     }
     // Small marks along the bottom right.
@@ -1108,16 +1125,16 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
             pos2(right, rect.bottom() - 6.0),
             Align2::RIGHT_BOTTOM,
             text,
-            FontId::proportional(11.0),
+            FontId::proportional(brand::MARK_PT),
             color,
         );
         right = r.left() - 8.0;
     };
     if state.update {
-        mark("update", ICE);
+        mark("update", t.palette().primary);
     }
     if tile.origin == Origin::User {
-        mark("user", MUTED);
+        mark("user", t.palette().muted_foreground);
     }
 }
 
@@ -1128,12 +1145,12 @@ fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(TILE)
-                .stroke(Stroke::new(1.0, brand::LINE))
+                .fill(t.palette().card)
+                .stroke(Stroke::new(1.0, t.palette().border))
                 .inner_margin(24.0)
                 .show(ui, |ui| {
                     ui.set_width(460.0);
-                    ui.label(egui::RichText::new(title).font(brand::geo(24.0)));
+                    ui.label(egui::RichText::new(title).font(brand::geo(brand::DIALOG_TITLE_PT)));
                     body(ui, &t);
                 });
         });
@@ -1142,6 +1159,7 @@ fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brand::rgb::*;
 
     use crate::tiles::{Action, Grid};
 
@@ -2452,7 +2470,7 @@ mod tests {
         };
         let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let mut textures = crate::raster::Textures::default();
-        let mut canvas = crate::raster::Canvas::new(px.0 as usize, px.1 as usize, crate::brand::BG);
+        let mut canvas = crate::raster::Canvas::new(px.0 as usize, px.1 as usize, crate::brand::rgb::BG);
         for frame in 0..12 {
             let mut input = input.clone();
             input.time = Some(frame as f64 * 0.1);
