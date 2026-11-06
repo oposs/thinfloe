@@ -487,9 +487,10 @@ The system implements home directory persistence across reboots:
   failed. Without `--source` it also writes the lines, plus `installed=` from
   `/etc/thinfloe/version`, atomically to `/run/thinfloe/upgrade/status`.
   `test/unit/upgrade-write-args.tsv` lists the `write` calls the menu may make.
-- `thinfloe-upgrade-check.timer` runs `thinfloe-upgrade check` 5 min after
-  boot and then once a day (`OnUnitActiveSec=1d`, `RandomizedDelaySec=1h`),
-  so the Upgrade tile sees a fresh `/run/thinfloe/upgrade/status`. The
+- `thinfloe-upgrade-boot-check.timer` runs `thinfloe-upgrade check` 5 min
+  after boot without random delay, and `thinfloe-upgrade-check.timer` runs it
+  once a day (`OnUnitActiveSec=1d`, `RandomizedDelaySec=1h`), so the Upgrade
+  tile sees a fresh `/run/thinfloe/upgrade/status`. The
   service is skipped on netboot (`ConditionPathIsMountPoint` on the ESP) and
   retried after an hour when a check fails (`Restart=on-failure`,
   `RestartSec=1h`). The unit list is `overlay/etc/systemd/system/`, and

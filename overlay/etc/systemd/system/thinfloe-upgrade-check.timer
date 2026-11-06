@@ -1,12 +1,11 @@
 [Unit]
-Description=Check the ThinFloe release server for a newer image
+Description=Check the ThinFloe release server once a day
 
-# The first check comes 5 min after boot, then once a day. The status
-# lives in /run, so a machine that runs for less than a day would otherwise
-# never write it. systemd applies RandomizedDelaySec to every firing, so the
-# boot check can also come up to an hour later than 5 min.
+# The check after boot is thinfloe-upgrade-boot-check.timer. systemd applies
+# RandomizedDelaySec to every time a timer fires, so an OnBootSec= here would
+# delay that first check by up to an hour. OnUnitActiveSec counts from the
+# last run of thinfloe-upgrade-check.service, which the boot timer starts first.
 [Timer]
-OnBootSec=5min
 OnUnitActiveSec=1d
 RandomizedDelaySec=1h
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the ThinFloe release server five minutes after boot
+
+# Without a random delay, so the first check comes five minutes after boot.
+# The daily check is thinfloe-upgrade-check.timer. The status lives in /run,
+# so a machine that runs for less than a day would otherwise never write it.
+[Timer]
+OnBootSec=5min
+Unit=thinfloe-upgrade-check.service
+
+[Install]
+WantedBy=timers.target

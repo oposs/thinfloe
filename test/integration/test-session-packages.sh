@@ -656,6 +656,13 @@ fi
 # netboot case, and it must not declare Before= (see CLAUDE.md).
 present "upgrade check timer"        'etc/systemd/system/thinfloe-upgrade-check\.timer$'
 present "upgrade check service"      'etc/systemd/system/thinfloe-upgrade-check\.service$'
+present "upgrade boot check timer"   'etc/systemd/system/thinfloe-upgrade-boot-check\.timer$'
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-upgrade-boot-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-upgrade-boot-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-upgrade-boot-check.timer is not enabled; the first release check after boot would never run"
+    fail=1
+fi
 if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-upgrade-check\.timer$' "$LIST"; then
     echo "ok   - thinfloe-upgrade-check.timer is enabled"
 else
@@ -665,8 +672,9 @@ fi
 UPGRADECHECK="$DPKG_TMP/upgradecheck/etc/systemd/system"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/upgradecheck" "$SQSH" \
         etc/systemd/system/thinfloe-upgrade-check.service \
-        etc/systemd/system/thinfloe-upgrade-check.timer >/dev/null 2>&1 &&
-   [[ -f "$UPGRADECHECK/thinfloe-upgrade-check.service" && -f "$UPGRADECHECK/thinfloe-upgrade-check.timer" ]]; then
+        etc/systemd/system/thinfloe-upgrade-check.timer \
+        etc/systemd/system/thinfloe-upgrade-boot-check.timer >/dev/null 2>&1 &&
+   [[ -f "$UPGRADECHECK/thinfloe-upgrade-check.service" && -f "$UPGRADECHECK/thinfloe-upgrade-check.timer" && -f "$UPGRADECHECK/thinfloe-upgrade-boot-check.timer" ]]; then
     if grep -qxF 'ConditionPathIsMountPoint=/run/thinfloe/storage/efi' "$UPGRADECHECK/thinfloe-upgrade-check.service"; then
         echo "ok   - thinfloe-upgrade-check.service runs only where the ESP is mounted"
     else
@@ -680,12 +688,15 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/upgradecheck" "$SQSH" \
         echo "FAIL - thinfloe-upgrade-check.service declares $before (ordering cycle risk)"
         fail=1
     fi
-    if grep -qxF 'OnBootSec=5min' "$UPGRADECHECK/thinfloe-upgrade-check.timer" &&
+    if grep -qxF 'OnBootSec=5min' "$UPGRADECHECK/thinfloe-upgrade-boot-check.timer" &&
+       grep -qxF 'Unit=thinfloe-upgrade-check.service' "$UPGRADECHECK/thinfloe-upgrade-boot-check.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$UPGRADECHECK/thinfloe-upgrade-boot-check.timer" &&
+       ! grep -q '^OnBootSec' "$UPGRADECHECK/thinfloe-upgrade-check.timer" &&
        grep -qxF 'OnUnitActiveSec=1d' "$UPGRADECHECK/thinfloe-upgrade-check.timer" &&
        grep -qxF 'RandomizedDelaySec=1h' "$UPGRADECHECK/thinfloe-upgrade-check.timer"; then
-        echo "ok   - thinfloe-upgrade-check.timer runs 5 min after boot, then daily"
+        echo "ok   - the release check runs 5 min after boot without random delay, then daily"
     else
-        echo "FAIL - thinfloe-upgrade-check.timer schedule is not OnBootSec=5min, OnUnitActiveSec=1d, RandomizedDelaySec=1h"
+        echo "FAIL - the release check timers do not split the boot check from the daily check"
         fail=1
     fi
 else
