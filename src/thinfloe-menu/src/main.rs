@@ -6,7 +6,7 @@
 //! failed.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config};
@@ -14,7 +14,7 @@ use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{settings, tiles, ui, windows};
+use thinfloe_menu::{release, settings, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -38,6 +38,22 @@ fn program_path() -> OsString {
 
 fn addon_status_path() -> PathBuf {
     env_path("TF_ADDON_STATUS", addons::STATUS_PATH)
+}
+
+fn upgrade_status_path() -> PathBuf {
+    env_path("TF_UPGRADE_STATUS", release::STATUS_PATH)
+}
+
+/// Whether `esp` is a mount point, as Python's `os.path.ismount` decides
+/// for a directory: it lies on another device than its parent. The
+/// initramfs mounts the boot stick's ESP there on a USB boot only.
+/// A symlink is no mount point, as there.
+fn usb_boot(esp: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(dir), Ok(parent)) = (std::fs::symlink_metadata(esp), std::fs::metadata(esp.join(".."))) else {
+        return false;
+    };
+    dir.is_dir() && dir.dev() != parent.dev()
 }
 
 fn addon_last_check_path() -> PathBuf {
@@ -66,6 +82,10 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // tile, program and icon from the start.
     menu.set_addons(addons::read_status(&addon_status_path()));
     menu.refresh_programs(&path);
+    // The Upgrade tile is drawn on a USB boot only; a netbooted machine has
+    // no stick of its own to upgrade.
+    menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
+    menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     (menu, paths, IconRoots::system())
 }
 
@@ -176,11 +196,13 @@ fn main() -> ExitCode {
     if args.get(1).is_some_and(|a| a == "--unfold") {
         return unfold(args.get(2).and_then(|a| a.to_str()));
     }
-    let (menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
+    let (mut menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();
     if debug {
         eprintln!("thinfloe-menu: {} tiles", menu.tiles.len());
     }
+    let header = header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version"));
+    menu.set_installed(header.version.clone());
     match app::run(Config {
         menu,
         paths,
@@ -190,7 +212,8 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         program_path: program_path(),
-        header: header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version")),
+        header,
+        upgrade_status: upgrade_status_path(),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {
@@ -201,8 +224,21 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[path = "testdir.rs"]
+mod testdir;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TestDir;
+
+    #[test]
+    fn usb_boot_is_a_mount_point_test() {
+        assert!(usb_boot(Path::new("/proc")));
+        let d = TestDir::new("main", "usb-boot");
+        assert!(!usb_boot(&d));
+        assert!(!usb_boot(&d.join("missing")));
+    }
 
     fn tile(addon: bool, problem: Option<&str>) -> tiles::Tile {
         let mut t = tiles::merge(

@@ -10,9 +10,11 @@ use crate::density::{self, OutputInfo};
 use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
-use crate::menu::{Effect, Job, Menu};
+use crate::menu::{Effect, Job, Menu, Screen};
 use crate::raster::{Background, Canvas, Textures};
+use crate::release;
 use crate::ui;
+use crate::upgrade::{self, Stage};
 use egui::ViewportId;
 use std::ffi::OsString;
 use std::num::NonZeroU32;
@@ -43,6 +45,8 @@ pub enum Wake {
     Addons,
     /// The set of folded windows changed.
     Windows,
+    /// The release status file of thinfloe-upgrade changed.
+    Release,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -62,6 +66,8 @@ pub struct Config {
     pub program_path: OsString,
     /// Host name and version for the header.
     pub header: crate::header::Header,
+    /// The release status file `thinfloe-upgrade check` writes.
+    pub upgrade_status: PathBuf,
 }
 
 struct Live {
@@ -140,7 +146,7 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         }
     });
     let shown = Arc::new(AtomicBool::new(true));
-    watch_addons(&cfg, &shown, event_loop.create_proxy());
+    watch_files(&cfg, &shown, event_loop.create_proxy());
     let windows = {
         let waker = event_loop.create_proxy();
         match crate::windows::Windows::connect(move || {
@@ -177,25 +183,111 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
 }
 
-/// A thread that looks at the status and log files once a second and wakes
-/// the loop only when one of them changed: the loop sleeps in between.
-fn watch_addons(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
-    let (status, log) = (cfg.addon_status.clone(), cfg.addon_log.clone());
+/// The files the watcher thread looks at, and what it last saw of them.
+struct Watch {
+    addon_status: PathBuf,
+    addon_log: PathBuf,
+    upgrade_status: PathBuf,
+    addons: addons::Watcher,
+    release: release::Watcher,
+}
+
+impl Watch {
+    fn new(cfg: &Config) -> Watch {
+        Watch {
+            addon_status: cfg.addon_status.clone(),
+            addon_log: cfg.addon_log.clone(),
+            upgrade_status: cfg.upgrade_status.clone(),
+            // The first tick reads the files whatever they hold, so a change
+            // between the menu's first read and now is not lost.
+            addons: addons::Watcher::default(),
+            release: release::Watcher::default(),
+        }
+    }
+
+    /// The wake-ups one look at the files calls for.
+    fn tick(&mut self) -> Vec<Wake> {
+        let mut wakes = Vec::new();
+        if self.addons.tick(&self.addon_status, &self.addon_log) {
+            wakes.push(Wake::Addons);
+        }
+        if self.release.tick(&self.upgrade_status) {
+            wakes.push(Wake::Release);
+        }
+        wakes
+    }
+}
+
+/// A thread that looks at the add-on files and the release status once a
+/// second and wakes the loop only when one of them changed: the loop sleeps
+/// in between.
+fn watch_files(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
     let shown = shown.clone();
-    // The first tick reads the files whatever they hold, so a change between
-    // the menu's first read of the status and now is not lost.
-    let mut watcher = addons::Watcher::default();
+    let mut watch = Watch::new(cfg);
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(ADDON_POLL);
             if !shown.load(Ordering::Relaxed) {
                 continue;
             }
-            if watcher.tick(&status, &log) && waker.send_event(Wake::Addons).is_err() {
-                return;
+            for wake in watch.tick() {
+                if waker.send_event(wake).is_err() {
+                    return;
+                }
             }
         }
     });
+}
+
+/// When the loop must wake for the Upgrade screen's drive poll: while the
+/// person chooses a drive and the window is on screen.
+fn upgrade_wake(screen: Screen, stage: &Stage, shown: bool) -> Option<Duration> {
+    (screen == Screen::Upgrade && *stage == Stage::Choose && shown).then_some(upgrade::POLL)
+}
+
+/// The body of a job's worker thread. Every result goes through `send`:
+/// the start of a program first, a write's progress lines in the order the
+/// tool printed them, and the final result last.
+fn run_job(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) + Clone + Send + 'static) {
+    let result = match job {
+        Job::Save => JobResult::Saved(jobs::save(paths, feed)),
+        Job::Run { id, name, argv } => {
+            let started = send.clone();
+            jobs::run(id, &name, &argv, feed, move |pgid| {
+                started(JobResult::Started { id, pgid })
+            })
+        }
+        Job::Addon { args } => {
+            let started = send.clone();
+            let a = args.clone();
+            jobs::addon(&paths.addon_cmd, &args, feed, move |pgid| {
+                started(JobResult::AddonStarted { args: a, pgid })
+            })
+        }
+        // A tool that cannot start comes back as an `Err` result, so the
+        // Upgrade screen never waits for an answer that is not coming.
+        Job::UpgradeWrite { args } => {
+            let started = send.clone();
+            let lines = send.clone();
+            let status = jobs::upgrade_write(
+                &paths.upgrade_cmd,
+                &args,
+                feed,
+                move |pgid| started(JobResult::UpgradeStarted { pgid }),
+                move |m| lines(JobResult::UpgradeMsg(m)),
+            );
+            JobResult::UpgradeEnded { status }
+        }
+        Job::Drives { all } => JobResult::Drives {
+            all,
+            result: jobs::upgrade_drives(&paths.upgrade_cmd, all, feed),
+        },
+        Job::UpgradeCheck { source } => JobResult::Release {
+            custom: source.is_some(),
+            result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
+        },
+    };
+    send(result);
 }
 
 impl Live {
@@ -380,6 +472,13 @@ impl App {
         }
     }
 
+    /// Read the release status again: a check by the timer, or one the
+    /// Upgrade screen asked for, rewrote it.
+    fn refresh_release(&mut self) {
+        let r = release::read_status(&self.cfg.upgrade_status);
+        self.cfg.menu.upgrade.release_file(r);
+    }
+
     fn start(&self, job: Job) {
         let proxy = self.proxy.clone();
         let feed = self.feed.clone();
@@ -390,50 +489,10 @@ impl App {
             upgrade_cmd: self.cfg.paths.upgrade_cmd.clone(),
         };
         std::thread::spawn(move || {
-            let result = match job {
-                Job::Save => JobResult::Saved(jobs::save(&paths, &feed)),
-                Job::Run { id, name, argv } => {
-                    let started = proxy.clone();
-                    jobs::run(id, &name, &argv, &feed, move |pgid| {
-                        let _ = started.send_event(Wake::Job(JobResult::Started { id, pgid }));
-                    })
-                }
-                Job::Addon { args } => {
-                    let started = proxy.clone();
-                    let a = args.clone();
-                    jobs::addon(&paths.addon_cmd, &args, &feed, move |pgid| {
-                        let _ = started.send_event(Wake::Job(JobResult::AddonStarted { args: a, pgid }));
-                    })
-                }
-                // A tool that cannot start comes back as an `Err` result, so
-                // the Upgrade screen never waits for an answer that is not coming.
-                Job::UpgradeWrite { args } => {
-                    let started = proxy.clone();
-                    let lines = proxy.clone();
-                    let status = jobs::upgrade_write(
-                        &paths.upgrade_cmd,
-                        &args,
-                        &feed,
-                        move |pgid| {
-                            let _ = started.send_event(Wake::Job(JobResult::UpgradeStarted { pgid }));
-                        },
-                        move |m| {
-                            let _ = lines.send_event(Wake::Job(JobResult::UpgradeMsg(m)));
-                        },
-                    );
-                    JobResult::UpgradeEnded { status }
-                }
-                Job::Drives { all } => JobResult::Drives {
-                    all,
-                    result: jobs::upgrade_drives(&paths.upgrade_cmd, all, &feed),
-                },
-                Job::UpgradeCheck { source } => JobResult::Release {
-                    custom: source.is_some(),
-                    result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), &feed),
-                },
-            };
             // The loop is gone only when the menu is exiting; nothing to tell.
-            let _ = proxy.send_event(Wake::Job(result));
+            run_job(job, &paths, &feed, move |r| {
+                let _ = proxy.send_event(Wake::Job(r));
+            });
         });
     }
 
@@ -547,7 +606,10 @@ impl App {
             Some(d) if d.is_zero() => live.window.request_redraw(),
             d => {
                 let egui_wake = d.filter(|d| *d < Duration::from_secs(3600));
-                match egui_wake.into_iter().chain(recheck).min() {
+                // The drive list is polled from `tick`, which runs only in a frame.
+                let menu = &self.cfg.menu;
+                let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, self.shown.load(Ordering::Relaxed));
+                match egui_wake.into_iter().chain(recheck).chain(poll).min() {
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),
                 }
@@ -731,6 +793,7 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             Wake::Addons => self.refresh_addons(),
+            Wake::Release => self.refresh_release(),
             Wake::Windows => self.windows_changed(),
             Wake::Output => {}
         }
@@ -770,7 +833,13 @@ impl ApplicationHandler<Wake> for App {
             // only comes from a client asking. Ending here would be exit 0,
             // which thinfloe-session reads as logout.
             WindowEvent::CloseRequested => return,
-            WindowEvent::Occluded(hidden) => self.shown.store(!hidden, Ordering::Relaxed),
+            WindowEvent::Occluded(hidden) => {
+                self.shown.store(!hidden, Ordering::Relaxed);
+                // The drive poll rested while hidden; a frame starts it again.
+                if !hidden && let Some(live) = self.live.as_ref() {
+                    live.window.request_redraw();
+                }
+            }
             _ => {}
         }
         // While the dialog is up, input is refused rather than handled.
@@ -807,6 +876,106 @@ fn is_input(e: &WindowEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TestDir;
+    use crate::upgrade_proto::Msg;
+    use std::sync::mpsc;
+
+    fn paths(upgrade_cmd: Vec<String>) -> Paths {
+        Paths {
+            save_home: PathBuf::from("/nonexistent/save-home"),
+            state_dir: PathBuf::from("/nonexistent/state"),
+            addon_cmd: vec!["/nonexistent/addon".into()],
+            upgrade_cmd,
+        }
+    }
+
+    #[test]
+    fn a_write_delivers_its_lines_between_start_and_end() {
+        let cmd = ["sh", "-c", r#"echo "@step write W"; echo "@result ok""#, "sh"]
+            .map(String::from)
+            .to_vec();
+        let (tx, rx) = mpsc::channel();
+        let feed = Arc::new(Feed::default());
+        let job = Job::UpgradeWrite { args: Vec::new() };
+        run_job(job, &paths(cmd), &feed, move |r| {
+            let _ = tx.send(r);
+        });
+        let mut got = Vec::new();
+        while let Ok(r) = rx.recv_timeout(Duration::from_secs(10)) {
+            let end = matches!(r, JobResult::UpgradeEnded { .. });
+            got.push(r);
+            if end {
+                break;
+            }
+        }
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert!(matches!(got[0], JobResult::UpgradeStarted { .. }), "{got:?}");
+        assert_eq!(
+            got[1],
+            JobResult::UpgradeMsg(Msg::Step {
+                id: "write".into(),
+                text: "W".into()
+            })
+        );
+        assert_eq!(
+            got[2],
+            JobResult::UpgradeMsg(Msg::Result {
+                ok: true,
+                reason: String::new()
+            })
+        );
+        assert_eq!(got[3], JobResult::UpgradeEnded { status: Ok(Some(0)) });
+    }
+
+    #[test]
+    fn a_tool_that_cannot_start_still_ends_the_write() {
+        let (tx, rx) = mpsc::channel();
+        let feed = Arc::new(Feed::default());
+        let job = Job::UpgradeWrite { args: Vec::new() };
+        run_job(
+            job,
+            &paths(vec!["/nonexistent/thinfloe-upgrade".into()]),
+            &feed,
+            move |r| {
+                let _ = tx.send(r);
+            },
+        );
+        let r = rx.recv_timeout(Duration::from_secs(10)).expect("a result");
+        assert!(matches!(r, JobResult::UpgradeEnded { status: Err(_) }), "{r:?}");
+    }
+
+    #[test]
+    fn a_release_status_change_wakes_the_loop() {
+        let d = TestDir::new("app", "release-wake");
+        let release = d.join("upgrade-status");
+        let mut w = Watch {
+            addon_status: d.join("addon-status"),
+            addon_log: d.join("addon-log"),
+            upgrade_status: release.clone(),
+            addons: addons::Watcher::default(),
+            release: release::Watcher::default(),
+        };
+        let is_release = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Release)).count();
+        // The first look reads both, whatever the files hold.
+        let first = w.tick();
+        assert_eq!(is_release(&first), 1, "{first:?}");
+        assert!(first.iter().any(|w| matches!(w, Wake::Addons)), "{first:?}");
+        assert!(w.tick().is_empty());
+        std::fs::write(&release, "latest=4.1.0\n").unwrap();
+        let next = w.tick();
+        assert_eq!(is_release(&next), 1, "{next:?}");
+        assert!(!next.iter().any(|w| matches!(w, Wake::Addons)), "{next:?}");
+        assert!(w.tick().is_empty());
+    }
+
+    #[test]
+    fn the_drive_poll_wakes_the_loop_only_while_choosing_on_screen() {
+        assert_eq!(upgrade_wake(Screen::Upgrade, &Stage::Choose, true), Some(upgrade::POLL));
+        assert_eq!(upgrade_wake(Screen::Upgrade, &Stage::Choose, false), None);
+        assert_eq!(upgrade_wake(Screen::Upgrade, &Stage::Running, true), None);
+        assert_eq!(upgrade_wake(Screen::Grid, &Stage::Choose, true), None);
+        assert_eq!(upgrade_wake(Screen::Settings, &Stage::Choose, true), None);
+    }
 
     #[test]
     fn the_zoom_factor_is_the_pixels_per_point() {
