@@ -246,6 +246,11 @@ impl Menu {
     }
 
     /// The release this machine runs, from `/etc/thinfloe/version`.
+    /// This boot's home directory was not restored.
+    pub fn restore_failed(&self) -> bool {
+        self.restore_failed
+    }
+
     pub fn set_installed(&mut self, v: Option<String>) {
         self.upgrade.installed = v;
     }

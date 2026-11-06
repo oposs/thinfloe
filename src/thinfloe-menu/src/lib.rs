@@ -24,4 +24,5 @@ pub mod tiles;
 pub mod ui;
 pub mod upgrade;
 pub mod upgrade_proto;
+pub mod upgrade_ui;
 pub mod windows;

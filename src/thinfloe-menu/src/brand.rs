@@ -5,6 +5,8 @@ use std::sync::Arc;
 use egui::{Color32, ColorImage, Context, FontData, FontDefinitions, FontFamily, FontId};
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
+use shadcn_egui::components::item::ItemVariant;
+use shadcn_egui::style::{AppVariant, Paint, Radius, Role, Rung, State};
 use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 
 // The palette. UI code reads these through the theme: the six that are
@@ -103,6 +105,9 @@ pub const MARK_PT: f32 = 11.0;
 /// A dialog's title.
 pub const DIALOG_TITLE_PT: f32 = 24.0;
 
+/// A block heading on the Upgrade screen (Release, Target, ...).
+pub const SECTION_PT: f32 = 18.0;
+
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";
@@ -126,6 +131,10 @@ pub static UBUNTU_LIGHT: FontFiles = FontFiles {
     license: include_str!("../assets/Ubuntu-UFL.txt"),
 };
 
+/// A drive or an action on the Upgrade screen: a tile-coloured row with
+/// a border, the chosen one (`Item::selected`) with the ice border.
+pub const CHOICE_ROW: AppVariant<ItemVariant> = ItemVariant::app("tf-choice");
+
 pub fn theme() -> shadcn_egui::Theme {
     let mut p = Palette::dark();
     p.background = BG;
@@ -140,12 +149,22 @@ pub fn theme() -> shadcn_egui::Theme {
     // One look in both modes, so a light system changes nothing. lyra
     // because it is square in every component, as in the mockups (owner,
     // 2026-11-06); radius 0 alone would not do that for every style.
-    shadcn_egui::Theme::new(Style::lyra(), p, p, 0.0)
+    // lyra's switch alone is round (`rounded-full`); square like the rest.
+    let mut style = Style::lyra();
+    style.switch.radius.set(Radius::Rung(Rung::None));
+    style.switch_thumb.radius.set(Radius::Rung(Rung::None));
+    shadcn_egui::Theme::new(style, p, p, 0.0)
         .fonts(&UBUNTU_LIGHT, None)
         .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
         .color(role::TIME, TIME, TIME)
         .color(role::WARN, WARN, WARN)
         .color(role::GOOD, GOOD, GOOD)
+        .variant(CHOICE_ROW, ItemVariant::Outline, |r, _| {
+            r.item.bg.set(Paint::Role(Role::Card, 1.0));
+            r.item.bg.on(State::HOVER, Paint::Role(Role::Accent, 1.0));
+            r.item.bg.on(State::SELECTED, Paint::Role(role::TILE_ACTIVE, 1.0));
+            r.item.border_color.on(State::SELECTED, Paint::Role(Role::Primary, 1.0));
+        })
 }
 
 /// Apply the theme and install the fonts. Once per context: the context
@@ -264,6 +283,7 @@ mod tests {
             ("header.rs", include_str!("header.rs")),
             ("desktop.rs", include_str!("desktop.rs")),
             ("settings.rs", include_str!("settings.rs")),
+            ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
             let hits = style_literal_lines(name, code);

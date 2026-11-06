@@ -196,6 +196,14 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   and `thinfloe-addon boot` names each add-on ("Installing ThinLinc").
   The picture stays until the session draws, see
   [the tty1 constraint](#tty1-does-not-wait-for-plymouth-the-session-ends-it).
+- Upgrade screen: the Upgrade tile (`X-TF-Action=upgrade`, shipped files
+  only, hidden on netboot) swaps the grid for a screen drawn by
+  `src/thinfloe-menu/src/upgrade_ui.rs` from the state in `upgrade.rs`. It
+  writes through `sudo -n thinfloe-upgrade write` and never sends SIGKILL to
+  it. Restart, Power off and Log out wait for a running write ("Writing
+  SanDisk Cruzer"); on a fresh install the dialog says the stick will not
+  start until it is written again. After a successful write, a step the tool
+  skipped is left out and one it began without `@done` is drawn done.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
@@ -1518,6 +1526,10 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - Not verified on hardware (menu density): the scale chosen from real EDIDs
   (including monitors that report no or a wrong size), and the scaled title
   bars after labwc's reload.
+- Not verified on hardware (Upgrade screen): choosing and clicking a drive
+  with a real mouse, a write to a real stick with its bar, speed and time
+  left, Cancel during a write, and Restart while a stick is written. At
+  1080p the Choose page is taller than its area and scrolls.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

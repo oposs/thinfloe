@@ -10,6 +10,7 @@ use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
 use crate::settings::{self, RowButton, SettingsEvent};
 use crate::tiles::{Action, Origin, Tile};
+use crate::upgrade::UpgradeEvent;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     Align2, Color32, ColorImage, FontId, Rect, Sense, Stroke, StrokeKind, TextFormat, TextureHandle, Ui, UiBuilder,
@@ -228,6 +229,7 @@ pub enum UiEvent {
     Retry(bool),
     /// The person clicked the chip of a folded window (its toplevel id).
     Unfold(u64),
+    Upgrade(UpgradeEvent),
 }
 
 /// Where the header, the grid and the log go on a screen.
@@ -373,17 +375,20 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
     match &menu.logout {
         Some(Logout::Confirm) => {
             let mut chose = None;
-            let addon_jobs = menu.addon_jobs();
-            let title = if menu.jobs.is_empty() {
-                "Add-ons are being changed"
-            } else {
+            let root_jobs = menu.root_jobs();
+            let only_write = menu.addon_jobs().is_empty() && menu.upgrade.writing();
+            let title = if !menu.jobs.is_empty() {
                 "Programs are still running"
+            } else if only_write {
+                "A stick is being written"
+            } else {
+                "Add-ons are being changed"
             };
             dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
                     ui.label(egui::RichText::new(&job.name).color(t.palette().foreground));
                 }
-                for job in &addon_jobs {
+                for job in &root_jobs {
                     ui.label(egui::RichText::new(job).color(t.palette().foreground));
                 }
                 if !menu.jobs.is_empty() {
@@ -392,10 +397,14 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                             .color(t.palette().muted_foreground),
                     );
                 }
-                if !addon_jobs.is_empty() {
+                if !root_jobs.is_empty() {
+                    let what = if only_write {
+                        "The stick is written"
+                    } else {
+                        "The add-on work is finished"
+                    };
                     ui.label(
-                        egui::RichText::new(format!("The add-on work is finished before you {verb}."))
-                            .color(t.palette().muted_foreground),
+                        egui::RichText::new(format!("{what} before you {verb}.")).color(t.palette().muted_foreground),
                     );
                 }
                 ui.add_space(8.0);
@@ -417,9 +426,26 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::WaitAddons) => {
             let mut chose = None;
-            dialog(ui, &format!("Waiting for the add-ons before {verbing}"), |ui, t| {
-                for job in menu.addon_jobs() {
+            let what = if menu.addon_jobs().is_empty() && menu.upgrade.writing() {
+                "the stick"
+            } else {
+                "the add-ons"
+            };
+            dialog(ui, &format!("Waiting for {what} before {verbing}"), |ui, t| {
+                for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
+                }
+                // Stopping a fresh install leaves a stick that does not start.
+                if menu.ending != Action::Logout
+                    && menu.upgrade.fresh_running()
+                    && let Some(drive) = menu.upgrade.job_drive()
+                {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "If you {verb} anyway, the stick in {drive} will not start until it is written again."
+                        ))
+                        .color(t.role(role::WARN)),
+                    );
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -443,8 +469,13 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             return chose.map(UiEvent::Chose);
         }
         Some(Logout::StoppingAddons { go_at }) => {
-            dialog(ui, "Stopping the add-on work", |ui, t| {
-                for job in menu.addon_jobs() {
+            let title = if menu.addon_jobs().is_empty() && menu.upgrade.writing() {
+                "Stopping the write"
+            } else {
+                "Stopping the add-on work"
+            };
+            dialog(ui, title, |ui, t| {
+                for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
             });
@@ -557,6 +588,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         show_log(ui, &menu.log, l.log);
         return event.map(UiEvent::Settings).or(unfold);
     }
+    if menu.screen == Screen::Upgrade {
+        let event = crate::upgrade_ui::show(ui, menu, l.area);
+        show_log(ui, &menu.log, l.log);
+        return event.map(UiEvent::Upgrade).or(unfold);
+    }
     let mut clicked = None;
     let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(l.area));
     egui::ScrollArea::vertical()
@@ -580,6 +616,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                             ui,
                             rect,
                             tile,
+                            &menu.tile_name(index),
                             icons[index].as_ref(),
                             TileState {
                                 hovered: resp.hovered() && enabled,
@@ -1010,7 +1047,7 @@ struct TileState {
     update: bool,
 }
 
-fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: TileState) {
+fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>, state: TileState) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
@@ -1079,11 +1116,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         job.wrap = TextWrapping::truncate_at_width(text_w);
         lines.push(clipped.layout_job(job));
     };
-    line(
-        &tile.name,
-        brand::geo(brand::TILE_NAME_PT),
-        fade(t.palette().foreground),
-    );
+    line(name, brand::geo(brand::TILE_NAME_PT), fade(t.palette().foreground));
     // One second line: why the tile is grey, else its comment, else the
     // note about its file. `--check` has the long form.
     if let Some(why) = &tile.problem {
@@ -2454,6 +2487,390 @@ mod tests {
         assert_eq!(capitalized(ending_words(Action::Poweroff).1), "Powering off");
     }
 
+    // The Upgrade screen. The menu is driven through its own events, so the
+    // screen draws what the state machine holds after real job results.
+
+    const IMAGE: u64 = 3_150_000_000;
+
+    fn drive(device: &str, model: &str, size: u64) -> crate::drives::Drive {
+        crate::drives::Drive {
+            device: device.into(),
+            model: model.into(),
+            size_bytes: size,
+            serial: Some(format!("SN{device}")),
+            transport: Some("usb".into()),
+            removable: true,
+            mounted: false,
+            is_boot: false,
+            is_thinfloe: false,
+            has_tl_old: false,
+            has_tl_new: false,
+            examined: true,
+            id: format!("sn-{device}:{size}"),
+            fits: Some(true),
+            version: None,
+        }
+    }
+
+    /// The boot stick, a second ThinFloe stick and a stick too small.
+    fn three_drives() -> Vec<crate::drives::Drive> {
+        let boot = crate::drives::Drive {
+            is_boot: true,
+            mounted: true,
+            is_thinfloe: true,
+            has_tl_old: true,
+            version: Some("4.0.0".into()),
+            ..drive("/dev/sda", "Kingston DataTraveler", 32_000_000_000)
+        };
+        let other = crate::drives::Drive {
+            is_thinfloe: true,
+            version: Some("3.9.2".into()),
+            ..drive("/dev/sdb", "SanDisk Cruzer", 16_008_609_792)
+        };
+        let small = crate::drives::Drive {
+            fits: Some(false),
+            ..drive("/dev/sdc", "Intenso Rainbow", 2_000_000_000)
+        };
+        vec![boot, other, small]
+    }
+
+    fn internal_disk() -> crate::drives::Drive {
+        crate::drives::Drive {
+            transport: Some("nvme".into()),
+            removable: false,
+            ..drive("/dev/nvme0n1", "Samsung SSD 980", 500_107_862_016)
+        }
+    }
+
+    /// The Upgrade screen open with `release` checked and `drives` listed.
+    fn upgrade_open(
+        release: crate::release::Release,
+        drives: Vec<crate::drives::Drive>,
+        all: bool,
+        now: Instant,
+    ) -> Menu {
+        use crate::jobs::JobResult;
+        let mut menu = Menu::new(shipped_grid(), false);
+        menu.set_usb_boot(true);
+        menu.set_installed(None);
+        let tile = menu.tiles.iter().position(|t| t.action == Action::Upgrade).unwrap();
+        menu.activate(tile, now);
+        assert_eq!(menu.screen, Screen::Upgrade);
+        menu.finished(
+            JobResult::Release {
+                custom: false,
+                result: Ok(release),
+            },
+            now,
+        );
+        if all {
+            menu.upgrade_event(UpgradeEvent::Advanced(true), now);
+            menu.upgrade_event(UpgradeEvent::ShowAll(true), now);
+        }
+        menu.tick(now);
+        menu.finished(
+            JobResult::Drives {
+                all,
+                result: Ok(drives),
+            },
+            now,
+        );
+        menu
+    }
+
+    fn unknown_release() -> crate::release::Release {
+        crate::release::Release {
+            latest: None,
+            image_bytes: Some(IMAGE),
+            ..Default::default()
+        }
+    }
+
+    /// The second stick chosen, to be erased.
+    fn erase_chosen() -> Menu {
+        let now = Instant::now();
+        let mut menu = upgrade_open(unknown_release(), three_drives(), false, now);
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
+        assert!(menu.upgrade.can_confirm());
+        menu
+    }
+
+    /// A fresh write of the second stick, in `write` at `done` of `total`,
+    /// with a rate of 12 MB/s over ten seconds.
+    fn writing_at(done: u64, total: Option<u64>) -> Menu {
+        use crate::jobs::JobResult;
+        use crate::upgrade_proto::Msg;
+        let now = Instant::now();
+        let mut menu = erase_chosen();
+        menu.upgrade_event(UpgradeEvent::Confirm, now);
+        assert!(menu.upgrade.writing());
+        menu.finished(JobResult::UpgradeStarted { pgid: 4242 }, now);
+        menu.finished(
+            JobResult::UpgradeMsg(Msg::Step {
+                id: "write".into(),
+                text: "Downloading and writing".into(),
+            }),
+            now,
+        );
+        let msg = |d| JobResult::UpgradeMsg(Msg::Progress { done: d, total });
+        menu.finished(msg(done - 120_000_000), now);
+        menu.finished(msg(done), now + Duration::from_secs(10));
+        menu
+    }
+
+    /// One frame pair of `show` on a `w` x `h` screen, the second with `events`.
+    fn upgrade_frame(
+        menu: &Menu,
+        w: f32,
+        h: f32,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        // As the app: no animation, a bar is where its value puts it.
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut shapes = vec![];
+        let mut ev = None;
+        for (i, events) in [vec![], vec![], events].into_iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(w, h)),
+                events,
+                time: Some(i as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                ev = show(ui, menu, &icons, &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            shapes = o.shapes;
+        }
+        (shapes, ev)
+    }
+
+    fn upgrade_shapes(menu: &Menu, w: f32, h: f32) -> Vec<egui::epaint::ClippedShape> {
+        upgrade_frame(menu, w, h, vec![]).0
+    }
+
+    fn assert_texts(shapes: &[egui::epaint::ClippedShape], wants: &[&str]) {
+        let texts = all_texts(shapes);
+        for want in wants {
+            assert!(texts.iter().any(|t| t.contains(want)), "{want:?} not in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn the_choose_stage_draws_release_target_and_summary() {
+        let shapes = upgrade_shapes(&erase_chosen(), 1280.0, 2000.0);
+        assert_texts(
+            &shapes,
+            &[
+                "Upgrade",
+                "version unknown",
+                "this machine's stick",
+                "too small (needs 3.2 GB)",
+                "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe",
+                "Upgrade (A/B, active after a restart)",
+                "Erase and install",
+                "Copy this machine's home directory",
+                "Check the stick after writing",
+            ],
+        );
+    }
+
+    /// The fill of a destructive button's face, from a button drawn alone.
+    fn destructive_fill() -> Color32 {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(Button::new("x").variant(ButtonVariant::Destructive));
+        });
+        o.textures_delta.clear();
+        let label = text_rects(&o.shapes)[0].1;
+        o.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.rect.contains_rect(label) && r.fill != Color32::TRANSPARENT => Some(r.fill),
+                _ => None,
+            })
+            .expect("a destructive face")
+    }
+
+    fn face_of(shapes: &[egui::epaint::ClippedShape], label: &str) -> Color32 {
+        // The last one drawn: the screen's title can read like a button.
+        let rect = text_rects(shapes)
+            .into_iter()
+            .rfind(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("{label:?} not drawn"))
+            .1;
+        shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r)
+                    if r.rect.contains_rect(rect) && r.rect.height() < 60.0 && r.fill != Color32::TRANSPARENT =>
+                {
+                    Some(r.fill)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no face under {label:?}"))
+    }
+
+    #[test]
+    fn the_erase_button_is_destructive_and_names_the_drive() {
+        let red = destructive_fill();
+        let shapes = upgrade_shapes(&erase_chosen(), 1280.0, 2000.0);
+        assert_eq!(face_of(&shapes, "Erase SanDisk Cruzer 16 GB"), red);
+        // Upgrade is no erase: not red.
+        let mut menu = erase_chosen();
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Upgrade), Instant::now());
+        let shapes = upgrade_shapes(&menu, 1280.0, 2000.0);
+        assert_ne!(face_of(&shapes, "Upgrade"), red);
+    }
+
+    #[test]
+    fn a_refused_row_cannot_be_chosen() {
+        let menu = upgrade_open(unknown_release(), three_drives(), false, Instant::now());
+        let shapes = upgrade_shapes(&menu, 1280.0, 2000.0);
+        let centre = |title: &str| {
+            text_rects(&shapes)
+                .into_iter()
+                .find(|(t, _)| t.starts_with(title))
+                .unwrap_or_else(|| panic!("{title:?} not drawn"))
+                .1
+                .center()
+        };
+        let (_, ev) = upgrade_frame(&menu, 1280.0, 2000.0, click_at(centre("Intenso Rainbow")));
+        assert!(!matches!(ev, Some(UiEvent::Upgrade(UpgradeEvent::Choose(_)))), "{ev:?}");
+        // The same click on a usable row chooses it.
+        let (_, ev) = upgrade_frame(&menu, 1280.0, 2000.0, click_at(centre("SanDisk Cruzer")));
+        assert_eq!(ev, Some(UiEvent::Upgrade(UpgradeEvent::Choose("/dev/sdb".into()))));
+    }
+
+    /// The track of a progress bar: its fill and height, from one drawn alone.
+    fn progress_track() -> (Color32, f32) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(shadcn_egui::components::progress::Progress::new(0.0));
+        });
+        o.textures_delta.clear();
+        o.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT => Some((r.fill, r.rect.height())),
+                _ => None,
+            })
+            .expect("a progress track")
+    }
+
+    /// The tracks of the progress bars drawn, with how much of each is filled.
+    fn bars(shapes: &[egui::epaint::ClippedShape]) -> Vec<(Rect, f32)> {
+        let (track, h) = progress_track();
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let primary = Theme::current(&ctx).palette().primary;
+        let tracks: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill == track && (r.rect.height() - h).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        tracks
+            .into_iter()
+            .map(|t| {
+                let filled = shapes
+                    .iter()
+                    .filter_map(|c| {
+                        // The indicator is a rect, or a path cut to the track.
+                        let r = match &c.shape {
+                            egui::Shape::Rect(r) if r.fill == primary => r.rect,
+                            egui::Shape::Path(p) if p.fill == primary => c.shape.visual_bounding_rect(),
+                            _ => return None,
+                        };
+                        ((r.center().y - t.center().y).abs() < 0.5)
+                            .then(|| r.intersect(c.clip_rect).intersect(t).width().max(0.0))
+                    })
+                    .fold(0.0, f32::max);
+                (t, filled / t.width())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_running_stage_shows_bar_rate_and_time_left() {
+        let total = 3_100_000_000;
+        let menu = writing_at(total * 42 / 100, Some(total));
+        let shapes = upgrade_shapes(&menu, 1280.0, 2000.0);
+        let bars = bars(&shapes);
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        assert!((bars[0].1 - 0.42).abs() < 0.01, "{bars:?}");
+        assert_texts(
+            &shapes,
+            &["1.3 GB of 3.1 GB", "12.0 MB/s", "about 3 min left", "Cancel"],
+        );
+    }
+
+    #[test]
+    fn no_bar_without_a_total() {
+        for total in [None, Some(1_000_000_000)] {
+            // No total, or one the bytes are past: no bar, no time left.
+            let menu = writing_at(1_302_000_000, total);
+            let shapes = upgrade_shapes(&menu, 1280.0, 2000.0);
+            assert!(bars(&shapes).is_empty(), "{total:?}");
+            assert_texts(&shapes, &["1.3 GB written", "12.0 MB/s"]);
+            let texts = all_texts(&shapes);
+            assert!(
+                !texts.iter().any(|t| t.contains("left") || t.contains('%')),
+                "{texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dialog_names_the_write_and_warns_on_fresh() {
+        let mut menu = writing_at(1_000_000_000, Some(3_100_000_000));
+        // Restart from the Upgrade screen: the dialog draws over it.
+        assert_eq!(menu.screen, Screen::Upgrade);
+        menu.ending = Action::Reboot;
+        menu.logout = Some(Logout::Confirm);
+        let shapes = upgrade_shapes(&menu, 1280.0, 720.0);
+        assert_texts(&shapes, &["A stick is being written", "Writing SanDisk Cruzer"]);
+        menu.logout = Some(Logout::WaitAddons);
+        let shapes = upgrade_shapes(&menu, 1280.0, 720.0);
+        assert_texts(
+            &shapes,
+            &[
+                "Waiting for the stick before restarting",
+                "Writing SanDisk Cruzer",
+                "If you restart anyway, the stick in SanDisk Cruzer will not start until it is written again.",
+                "Restart anyway",
+            ],
+        );
+        // Log out only waits, and says nothing about "anyway".
+        menu.ending = Action::Logout;
+        let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 720.0));
+        assert!(!texts.iter().any(|t| t.contains("anyway")), "{texts:?}");
+    }
+
+    #[test]
+    fn the_upgrade_screen_draws_nothing_rounded() {
+        let now = Instant::now();
+        let mut internal = upgrade_open(unknown_release(), vec![internal_disk()], true, now);
+        internal.upgrade_event(UpgradeEvent::Choose("/dev/nvme0n1".into()), now);
+        for menu in [erase_chosen(), internal, writing_at(1_302_000_000, Some(3_100_000_000))] {
+            let shapes = upgrade_shapes(&menu, 1280.0, 2000.0);
+            assert!(!all_texts(&shapes).is_empty());
+            for c in &shapes {
+                if let egui::Shape::Rect(r) = &c.shape {
+                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect);
+                }
+            }
+        }
+    }
+
     /// Writes PPM files of the Settings screen and a dialog through the real
     /// rasteriser, for looking at. Run by hand:
     /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
@@ -2569,5 +2986,102 @@ mod tests {
         menu.activate(settings, Instant::now());
         shot(&menu, "settings-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
+        let mut newer = Menu::new(shipped_grid(), false);
+        newer.set_usb_boot(true);
+        newer.set_installed(Some("4.0.0".into()));
+        newer.upgrade.release_file(crate::release::Release {
+            latest: Some("4.1.0".into()),
+            ..Default::default()
+        });
+        shot(&newer, "desktop-1080-upgrade-marker.ppm", (1920, 1080), 1.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn shot_upgrade_screens() {
+        use crate::jobs::JobResult;
+        use crate::upgrade_proto::Msg;
+        let now = Instant::now();
+        let release = crate::release::Release {
+            latest: Some("4.1.0".into()),
+            image_bytes: Some(IMAGE),
+            checked: Some(1_793_000_000),
+            ..Default::default()
+        };
+        let mut menu = upgrade_open(release.clone(), three_drives(), false, now);
+        menu.set_installed(Some("4.0.0".into()));
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
+        shot(&menu, "upgrade-choose-1080.ppm", (1920, 1080), 1.0);
+        shot(&menu, "upgrade-choose-21in-4k.ppm", (3840, 2160), 2.25);
+        // The whole page at once, for looking at what scrolls at 1080p.
+        shot(&menu, "upgrade-choose-tall.ppm", (1920, 2600), 1.0);
+
+        let mut drives = three_drives();
+        drives.push(internal_disk());
+        let mut internal = upgrade_open(release.clone(), drives, true, now);
+        internal.upgrade_event(UpgradeEvent::Source("ftp://example.org/thinfloe".into()), now);
+        internal.upgrade_event(UpgradeEvent::Choose("/dev/nvme0n1".into()), now);
+        internal.upgrade_event(UpgradeEvent::Typed("Samsung SSD".into()), now);
+        shot(&internal, "upgrade-choose-internal-1080.ppm", (1920, 1080), 1.0);
+        shot(&internal, "upgrade-choose-internal-tall.ppm", (1920, 2600), 1.0);
+
+        let total = 3_100_000_000;
+        let running = writing_at(total * 42 / 100, Some(total));
+        shot(&running, "upgrade-running-1080.ppm", (1920, 1080), 1.0);
+        shot(
+            &writing_at(1_302_000_000, None),
+            "upgrade-running-unknown-1080.ppm",
+            (1920, 1080),
+            1.0,
+        );
+        let mut ask = writing_at(total * 42 / 100, Some(total));
+        ask.upgrade_event(UpgradeEvent::Cancel, now);
+        shot(&ask, "upgrade-cancel-ask-1080.ppm", (1920, 1080), 1.0);
+
+        let mut done = upgrade_open(release.clone(), three_drives(), false, now);
+        done.upgrade_event(UpgradeEvent::Choose("/dev/sda".into()), now);
+        done.upgrade_event(UpgradeEvent::Confirm, now);
+        done.finished(JobResult::UpgradeStarted { pgid: 4242 }, now);
+        for (id, text) in [
+            ("save", "Saving the home directory"),
+            ("download", "Downloading the new release"),
+            ("check", "Checking the files"),
+            ("switch", "Switching to the new release"),
+        ] {
+            done.finished(
+                JobResult::UpgradeMsg(Msg::Step {
+                    id: id.into(),
+                    text: text.into(),
+                }),
+                now,
+            );
+            done.finished(JobResult::UpgradeMsg(Msg::Done { id: id.into() }), now);
+        }
+        done.finished(
+            JobResult::UpgradeMsg(Msg::Result {
+                ok: true,
+                reason: String::new(),
+            }),
+            now,
+        );
+        done.finished(JobResult::UpgradeEnded { status: Ok(Some(0)) }, now);
+        shot(&done, "upgrade-done-boot-1080.ppm", (1920, 1080), 1.0);
+
+        let mut failed = writing_at(total * 42 / 100, Some(total));
+        failed.finished(
+            JobResult::UpgradeMsg(Msg::Result {
+                ok: false,
+                reason: "the stick was removed while it was written".into(),
+            }),
+            now,
+        );
+        failed.finished(JobResult::UpgradeEnded { status: Ok(Some(1)) }, now);
+        shot(&failed, "upgrade-failed-1080.ppm", (1920, 1080), 1.0);
+
+        let mut dialog = writing_at(total * 42 / 100, Some(total));
+        dialog.ending = Action::Reboot;
+        dialog.logout = Some(Logout::WaitAddons);
+        shot(&dialog, "dialog-writing-1080.ppm", (1920, 1080), 1.0);
     }
 }

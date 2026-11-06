@@ -618,18 +618,44 @@ impl Upgrade {
         Some(Request::Check { source })
     }
 
-    fn confirm(&mut self) -> Option<Request> {
+    /// `Confirm` would start the write now: the screen enables its button.
+    pub fn can_confirm(&self) -> bool {
         if self.stage != Stage::Choose || self.job.is_some() || !self.list_fresh {
+            return false;
+        }
+        let (Some(d), Some(mode)) = (self.chosen_drive(), self.mode) else {
+            return false;
+        };
+        if !self.allowed(mode) {
+            return false;
+        }
+        if mode == Mode::Fresh && drives::internal(d) && !drives::typed_matches(&self.typed, d) {
+            return false;
+        }
+        self.write_args().is_ok()
+    }
+
+    /// The id of the step the running write is in.
+    pub fn current_step(&self) -> Option<&str> {
+        self.job.as_ref()?.current.as_deref()
+    }
+
+    /// The address under Advanced is entered and is not http or https.
+    pub fn source_invalid(&self) -> bool {
+        self.source().is_err()
+    }
+
+    /// The drive of the running write, as the dialogs name it.
+    pub fn job_drive(&self) -> Option<&str> {
+        self.job.as_ref().map(|j| name(&j.drive))
+    }
+
+    fn confirm(&mut self) -> Option<Request> {
+        if !self.can_confirm() {
             return None;
         }
         let d = self.chosen_drive()?.clone();
         let mode = self.mode?;
-        if !self.allowed(mode) {
-            return None;
-        }
-        if mode == Mode::Fresh && drives::internal(&d) && !drives::typed_matches(&self.typed, &d) {
-            return None;
-        }
         let args = self.write_args().ok()?;
         self.steps = planned(mode, self.verify, self.copy_home_effective(), d.is_boot);
         self.progress = None;
@@ -678,7 +704,7 @@ impl Upgrade {
     }
 
     /// The chosen drive, when the last list still has its id on its device.
-    fn chosen_drive(&self) -> Option<&Drive> {
+    pub fn chosen_drive(&self) -> Option<&Drive> {
         let c = self.chosen.as_ref()?;
         self.drives.iter().find(|d| d.id == c.id && d.device == c.device)
     }
@@ -716,7 +742,7 @@ impl Upgrade {
 
     /// The release the write would install: the checked address's when one
     /// is entered, else the default one.
-    fn target_release(&self) -> Option<&Release> {
+    pub fn target_release(&self) -> Option<&Release> {
         match self.source() {
             Ok(None) => Some(&self.release),
             Ok(Some(_)) => self.custom_release.as_ref(),
@@ -728,7 +754,7 @@ impl Upgrade {
         self.target_release()?.latest.as_deref()
     }
 
-    fn image_bytes(&self) -> Option<u64> {
+    pub fn image_bytes(&self) -> Option<u64> {
         self.target_release()?.image_bytes
     }
 }
@@ -739,7 +765,8 @@ fn source_ok(s: &str) -> bool {
     rest.is_some_and(|r| !r.is_empty() && !r.chars().any(char::is_whitespace))
 }
 
-fn name(d: &Drive) -> &str {
+/// The model, or the device when the drive names no model.
+pub fn name(d: &Drive) -> &str {
     if d.model.trim().is_empty() { &d.device } else { &d.model }
 }
 
