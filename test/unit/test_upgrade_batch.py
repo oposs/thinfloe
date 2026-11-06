@@ -1238,6 +1238,19 @@ class TestBatchUpgrade(unittest.TestCase):
             self.assertIn("DEFAULT new", c.read_text())
 
 
+real_sleep = time.sleep
+
+
+def from_esp_lock():
+    """True when the sleep being mocked was called by esp_lock()."""
+    f = sys._getframe(1)
+    while f is not None:
+        if f.f_code.co_name == "esp_lock":
+            return True
+        f = f.f_back
+    return False
+
+
 class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
     """The boot stick's switch step takes /run/thinfloe/esp.lock."""
 
@@ -1255,41 +1268,123 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
         fcntl.flock(fd, fcntl.LOCK_EX)
         return fd
 
+    def locked_by_other(self):
+        import fcntl
+        fd = os.open(str(self.lock), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+
     def test_switch_waits_for_the_esp_lock(self):
         self.checksums()
-        fd = self.hold()
-        released = []
-        def release():
-            released.append(time.monotonic())
-            os.close(fd)
-        threading.Timer(1.0, release).start()
-        started = []
-        real = ui._switch_release
-        def spy(*a, **kw):
-            started.append(time.monotonic())
-            return real(*a, **kw)
-        with mock.patch.object(ui, "_switch_release", side_effect=spy):
+        fd = [self.hold()]
+        sleeps = []
+        order = []
+        (self.esp / "tl.old").mkdir()
+        def sleep(s):
+            if not from_esp_lock():
+                return real_sleep(s)
+            # nothing may be removed while the lock is not ours
+            order.append((self.esp / "tl.old").exists())
+            sleeps.append(s)
+            if fd:
+                os.close(fd.pop())
+        with mock.patch.object(ui.time, "sleep", side_effect=sleep):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 0, out)
-        self.assertEqual(len(started), 1)
-        self.assertGreaterEqual(started[0], released[0])
+        self.assertEqual(order, [True])
+        self.assertFalse((self.esp / "tl.old").exists())
+        self.assertGreaterEqual(len(sleeps), 1)
+        self.assertEqual(out.count("waiting for the boot stick"), 1)
 
-    def test_esp_lock_timeout_fails_before_the_switch(self):
+    def test_removal_of_tl_old_waits_and_times_out(self):
         self.checksums()
+        (self.esp / "tl.old").mkdir()
+        (self.esp / "tl.old" / "x").write_text("x")
         fd = self.hold()
         self.addCleanup(os.close, fd)
         clock = [0.0]
         def sleep(s):
+            if not from_esp_lock():
+                return real_sleep(s)
             clock[0] += max(s, 1.0)
         with mock.patch.object(ui.time, "monotonic", side_effect=lambda: clock[0]), \
-             mock.patch.object(ui.time, "sleep", side_effect=sleep), \
-             mock.patch.object(ui, "_switch_release") as sw:
+             mock.patch.object(ui.time, "sleep", side_effect=sleep):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 1, out)
-        sw.assert_not_called()
         self.assertIn("@result failed the boot stick is busy", out)
+        self.assertTrue((self.esp / "tl.old" / "x").exists())
         self.assertEqual([c.read_bytes() for c in self.cfgs()], self.before)
-        self.assertFalse((self.esp / "tl.new").exists())
+
+    def test_copy_runs_while_someone_else_holds_the_lock(self):
+        self.checksums()
+        seen = []
+        real = ui.run_cmd
+        state = {"fd": None}
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "cp":
+                if not seen:
+                    state["fd"] = self.hold()   # taken after step (a) let go
+                seen.append(self.locked_by_other())
+            return real(cmd, *a, **kw)
+        def sleep(s):                       # the other holder lets go
+            if not from_esp_lock():
+                return real_sleep(s)
+            if state["fd"] is not None:
+                os.close(state["fd"])
+                state["fd"] = None
+        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             mock.patch.object(ui.time, "sleep", side_effect=sleep):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, [True] * len(ui.FIRMWARE_FILES))
+
+    def test_boot_label_waits_and_timeout_leaves_default(self):
+        self.checksums()
+        state = {"fd": None}
+        real = ui.run_cmd
+        def fake(cmd, *a, **kw):
+            r = real(cmd, *a, **kw)
+            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+                state["fd"] = self.hold()   # someone takes it during the copy
+            return r
+        clock = [0.0]
+        def sleep(s):
+            if not from_esp_lock():
+                return real_sleep(s)
+            clock[0] += max(s, 1.0)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             mock.patch.object(ui.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(ui.time, "sleep", side_effect=sleep):
+            rc, out = self.run_upgrade()
+        if state["fd"] is not None:
+            os.close(state["fd"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed the boot stick is busy", out)
+        self.assertIn("still starts the old one", out)
+        self.assertEqual([c.read_bytes() for c in self.cfgs()], self.before)
+
+    def test_another_stick_never_touches_the_lock(self):
+        self.checksums()
+        fd = self.hold()
+        self.addCleanup(os.close, fd)
+        drive = ui.DriveInfo("/dev/sdy", "16G", "Other", "", False,
+                             "/dev/sdy1", 1024, False, False, False)
+        opened = []
+        real_open = os.open
+        def spy(path, *a, **kw):
+            if str(path) == str(self.lock):
+                opened.append(path)
+            return real_open(path, *a, **kw)
+        with mock.patch.object(ui.os, "open", side_effect=spy), \
+             mock.patch.object(ui.time, "sleep", side_effect=AssertionError("waited")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                ui._switch_release(drive, str(self.esp), str(self.srv))
+        self.assertEqual(opened, [])
 
     def test_download_does_not_hold_the_esp_lock(self):
         import fcntl

@@ -595,13 +595,21 @@ home; removing it is later work.
   `/run/thinfloe/addons/`, `esp.lock` is not. Never take an earlier one
   while a later one is held. `thinfloe-save-home` takes
   only `esp.lock` (`flock -w 30`), so a save never waits for dpkg.
-  `thinfloe-upgrade` takes `esp.lock` (`esp_lock()`, 30 s, then `the boot
-  stick is busy` and nothing changed) only around the `switch` step of an
-  upgrade of the boot stick, which includes removing `tl.old/`; never around
-  the download and never for another stick. It holds `/run/thinfloe/upgrade.lock`
-  for the whole write and takes `esp.lock` inside it; `upgrade.lock` is not
-  in the add-on order, so there is no cycle. A missing lock file is skipped
-  with a log line, as `thinfloe-save-home` does.
+  `thinfloe-upgrade` takes `esp.lock` (`esp_lock()`, 30 s each, then `the
+  boot stick is busy`) only on an upgrade of the boot stick and only in two
+  short places of the `switch` step: around the removal of `tl.old/` and any
+  stale `tl.new/`, and around the final `sync` and the boot label
+  (`DEFAULT new` in both `syslinux.cfg` copies). The copy into `tl.new/` runs
+  without it, because a save gives up waiting after 30 s and then writes
+  unlocked, while an add-on store write waits with no limit. If the second
+  wait times out, `tl.new/` stays staged, `DEFAULT` is unchanged and the
+  stick starts the old release; the space check includes the size of
+  `home.tar.gz`, since a save beside the copy writes `home.tar.gz.new`. It
+  never locks for the download or for another stick. It holds
+  `/run/thinfloe/upgrade.lock` for the whole write and takes `esp.lock`
+  inside it; `upgrade.lock` is not in the add-on order, so there is no
+  cycle. A missing lock file is skipped with a log line, as
+  `thinfloe-save-home` does.
 - **Status file** `/run/thinfloe/addons/status`, rewritten atomically, one
   line per known add-on, tab-separated: `id ticked state installed_version
   pending_version auto message`. `ticked` and `auto` are `0`/`1`; `state` is

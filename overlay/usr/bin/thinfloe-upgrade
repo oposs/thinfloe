@@ -1445,11 +1445,11 @@ def _restore_default_current(efi_mount: str) -> bool:
 
 
 @contextlib.contextmanager
-def esp_lock(timeout: float = None):
+def esp_lock(timeout: float = None, note: str = "Nothing was changed."):
     """Holds ESP_LOCK; WriteFailed if another writer keeps it for `timeout` s.
 
     A lock file that does not exist (tmpfiles did not run) is skipped with a
-    log line, as thinfloe-save-home does."""
+    log line, as thinfloe-save-home does. `note` ends the WriteFailed text."""
     if timeout is None:
         timeout = ESP_LOCK_WAIT
     try:
@@ -1460,6 +1460,7 @@ def esp_lock(timeout: float = None):
         return
     try:
         deadline = time.monotonic() + timeout
+        logged = False
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1467,66 +1468,88 @@ def esp_lock(timeout: float = None):
             except OSError as e:
                 if e.errno not in (errno.EAGAIN, errno.EACCES):
                     raise
+            if not logged:
+                logged = True
+                log("waiting for the boot stick: a save or an add-on "
+                    "install is running")
             if time.monotonic() >= deadline:
                 raise WriteFailed(
                     "the boot stick is busy (a home save or an add-on "
-                    "install is running); try again in a minute. "
-                    "Nothing was changed.")
+                    f"install is running); try again in a minute. {note}")
             time.sleep(0.2)
         yield
     finally:
         os.close(fd)
 
 
+def _boot_lock(drive: DriveInfo, note: str = "Nothing was changed."):
+    """esp.lock for the boot stick's ESP, the one saves and add-ons write;
+    nothing for another stick."""
+    if drive.is_boot:
+        return esp_lock(note=note)
+    return contextlib.nullcontext()
+
+
 def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None:
     """Replace the stick's release; the boot label is the last write.
 
     Whatever fails, tl/ stays whole and DEFAULT keeps pointing at something
-    that boots.
+    that boots. On the boot stick esp.lock is held for the removal of tl.old/
+    and tl.new/ and again for the boot label and the final sync, not for the
+    copy: a save waits only 30 s for the lock and then goes on without it, and
+    an add-on store write waits with no limit, so holding it over a copy of
+    several minutes would help neither. The waits are outside
+    _uninterruptible, so a cancel works while waiting.
     """
     tl_path = os.path.join(efi_mount, "tl")
     tl_old_path = os.path.join(efi_mount, "tl.old")
     tl_new_path = os.path.join(efi_mount, "tl.new")
     default_attempted = False
     renamed_tl = False
-    if os.path.exists(tl_new_path):
-        # An upgrade is still staged: a copy may say DEFAULT new. Removing
-        # tl.new/ under it and then failing (or losing power) would leave a
-        # stick whose default entry is gone, and syslinux stops at its prompt.
-        if not _restore_default_current(efi_mount):
-            raise WriteFailed(
-                "the stick still boots a staged upgrade and its boot entry "
-                "could not be set back; nothing was removed")
     try:
         # tl.old goes first: with it in place the stick needed room for three
         # releases (775 MB each does not fit 2000 MB). The release is staged
         # in tl.new/ on both paths; tl/ is the fallback meanwhile.
-        if drive.is_boot:
-            log("Installing firmware to tl.new/ (will activate on reboot)...")
-        else:
-            log("Rotating firmware (tl -> tl.old, installing new tl)...")
-        if os.path.exists(tl_old_path):
-            run_cmd(["rm", "-rf", tl_old_path])
-        if os.path.exists(tl_new_path):
-            run_cmd(["rm", "-rf", tl_new_path])
-        run_cmd(["mkdir", "-p", tl_new_path])
-        for filename in FIRMWARE_FILES:
-            run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
+        with _boot_lock(drive), _uninterruptible():
+            if os.path.exists(tl_new_path):
+                # An upgrade is still staged: a copy may say DEFAULT new.
+                # Removing tl.new/ under it and then failing (or losing
+                # power) would leave a stick whose default entry is gone, and
+                # syslinux stops at its prompt.
+                if not _restore_default_current(efi_mount):
+                    raise WriteFailed(
+                        "the stick still boots a staged upgrade and its boot "
+                        "entry could not be set back; nothing was removed")
+            if drive.is_boot:
+                log("Installing firmware to tl.new/ (will activate on reboot)...")
+            else:
+                log("Rotating firmware (tl -> tl.old, installing new tl)...")
+            if os.path.exists(tl_old_path):
+                run_cmd(["rm", "-rf", tl_old_path])
+            if os.path.exists(tl_new_path):
+                run_cmd(["rm", "-rf", tl_new_path])
+            run_cmd(["mkdir", "-p", tl_new_path])
+        with _uninterruptible():
+            for filename in FIRMWARE_FILES:
+                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
         # Only after tl.new is complete.
-        run_cmd(["sync"])
-        if drive.is_boot:
-            default_attempted = True
-            set_boot_default(efi_mount, "new")
-        else:
-            if os.path.exists(tl_path):
-                os.rename(tl_path, tl_old_path)
-                renamed_tl = True
-            os.rename(tl_new_path, tl_path)
-            # A DEFAULT new left from an unfinished upgrade would point at
-            # the tl.new just renamed.
-            default_attempted = True
-            set_boot_default(efi_mount, "current")
-        run_cmd(["sync"])
+        with _boot_lock(drive, "The new release is copied but not switched "
+                               "to; the stick still starts the old one."), \
+                _uninterruptible():
+            run_cmd(["sync"])
+            if drive.is_boot:
+                default_attempted = True
+                set_boot_default(efi_mount, "new")
+            else:
+                if os.path.exists(tl_path):
+                    os.rename(tl_path, tl_old_path)
+                    renamed_tl = True
+                os.rename(tl_new_path, tl_path)
+                # A DEFAULT new left from an unfinished upgrade would point
+                # at the tl.new just renamed.
+                default_attempted = True
+                set_boot_default(efi_mount, "current")
+            run_cmd(["sync"])
     except (subprocess.CalledProcessError, OSError) as e:
         keep_new = False
         if default_attempted and drive.is_boot:
@@ -1604,6 +1627,11 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
         # Room for one next.* beside every installed add-on's current.*, so
         # the daily check can still fetch an update after the upgrade.
         need += addon_copy_bytes(efi_mount)
+        # A save beside the copy writes home.tar.gz.new next to the archive.
+        try:
+            need += os.path.getsize(os.path.join(efi_mount, "home.tar.gz"))
+        except OSError:
+            pass
         have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
         if have < need:
             raise WriteFailed(
@@ -1612,12 +1640,7 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
                 f"made free. Nothing was changed.")
 
         progress.step("switch", "Switching to the new release")
-        # Only the boot stick's ESP is the one saves and add-ons write.
-        with contextlib.ExitStack() as stack:
-            if drive.is_boot:
-                stack.enter_context(esp_lock())
-            stack.enter_context(_uninterruptible())
-            _switch_release(drive, efi_mount, firmware_dir)
+        _switch_release(drive, efi_mount, firmware_dir)
         progress.done("switch")
     finally:
         if work_dir:
