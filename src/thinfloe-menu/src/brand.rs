@@ -5,7 +5,6 @@ use std::sync::Arc;
 use egui::{Color32, ColorImage, Context, FontData, FontDefinitions, FontFamily, FontId};
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
-use shadcn_egui::style::Radius;
 use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 
 // The palette. UI code reads these through the theme: the six that are
@@ -138,12 +137,10 @@ pub fn theme() -> shadcn_egui::Theme {
     p.ring = ICE;
     p.border = LINE;
     p.muted_foreground = MUTED;
-    // One look in both modes, so a light system changes nothing; square
-    // corners everywhere, as in the mockups.
-    let mut style = Style::vega();
-    // vega's tick box is `rounded-[4px]`, not a step of the theme radius.
-    style.checkbox.radius.set(Radius::Px(0.0));
-    shadcn_egui::Theme::new(style, p, p, 0.0)
+    // One look in both modes, so a light system changes nothing. lyra is
+    // square in every component, as in the mockups (owner, 2026-11-06);
+    // vega rounds its tick box with a fixed 4 px the theme radius misses.
+    shadcn_egui::Theme::new(Style::lyra(), p, p, 0.0)
         .fonts(&UBUNTU_LIGHT, None)
         .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
         .color(role::TIME, TIME, TIME)
