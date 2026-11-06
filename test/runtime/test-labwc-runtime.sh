@@ -212,13 +212,14 @@ fi
 # also logs "thinfloe-menu: icon <name> for <file>: <why>". The count is of
 # the tiles the grid draws: no add-on is installed here (there is no status
 # file), so every shipped add-on tile, one with X-TF-Source-* keys, is hidden.
+# The upgrade tile (X-TF-Action=upgrade) is hidden too, as no ESP is mounted in the container.
 expected_tiles=$(podman run --rm --log-driver=none "$IMAGE" sh -c \
-    'n=0; for f in /etc/thinfloe/menu/*.desktop; do grep -q "^X-TF-Source-" "$f" || n=$((n+1)); done; echo $n')
+    'n=0; for f in /etc/thinfloe/menu/*.desktop; do grep -q "^X-TF-Source-" "$f" || grep -q "^X-TF-Action=upgrade\$" "$f" || n=$((n+1)); done; echo $n')
 icons_line=$(echo "$menu_out" | grep -o 'thinfloe-menu: [0-9]* of [0-9]* tile icons drawn' | tail -1)
 icons_drawn=$(echo "$icons_line" | cut -d' ' -f2)
 icons_total=$(echo "$icons_line" | cut -d' ' -f4)
 if [[ -n "$icons_total" && "$icons_total" -gt 0 && "$icons_total" == "$expected_tiles" && "$icons_drawn" == "$icons_total" ]]; then
-    echo "ok   - thinfloe-menu drew every shipped tile icon ($icons_drawn of $icons_total, add-ons hidden)"
+    echo "ok   - thinfloe-menu drew every shipped tile icon ($icons_drawn of $icons_total, add-ons and Upgrade hidden)"
 else
     echo "FAIL - expected $expected_tiles drawn tiles, each with its icon: ${icons_line:-no icon count printed}"
     echo "$menu_out" | grep 'thinfloe-menu: icon '
