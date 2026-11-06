@@ -1,6 +1,5 @@
 [Desktop Entry]
 Type=Application
-Name=Upgrade image
+Name=Upgrade
 Icon=usb
-Exec=sudo thinfloe-upgrade
-Terminal=true
+X-TF-Action=upgrade

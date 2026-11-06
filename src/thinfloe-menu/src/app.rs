@@ -405,6 +405,32 @@ impl App {
                         let _ = started.send_event(Wake::Job(JobResult::AddonStarted { args: a, pgid }));
                     })
                 }
+                // A tool that cannot start comes back as an `Err` result, so
+                // the Upgrade screen never waits for an answer that is not coming.
+                Job::UpgradeWrite { args } => {
+                    let started = proxy.clone();
+                    let lines = proxy.clone();
+                    let status = jobs::upgrade_write(
+                        &paths.upgrade_cmd,
+                        &args,
+                        &feed,
+                        move |pgid| {
+                            let _ = started.send_event(Wake::Job(JobResult::UpgradeStarted { pgid }));
+                        },
+                        move |m| {
+                            let _ = lines.send_event(Wake::Job(JobResult::UpgradeMsg(m)));
+                        },
+                    );
+                    JobResult::UpgradeEnded { status }
+                }
+                Job::Drives { all } => JobResult::Drives {
+                    all,
+                    result: jobs::upgrade_drives(&paths.upgrade_cmd, all, &feed),
+                },
+                Job::UpgradeCheck { source } => JobResult::Release {
+                    custom: source.is_some(),
+                    result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), &feed),
+                },
             };
             // The loop is gone only when the menu is exiting; nothing to tell.
             let _ = proxy.send_event(Wake::Job(result));

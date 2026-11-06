@@ -31,6 +31,8 @@ pub enum Action {
     Poweroff,
     /// The Settings screen, with the add-ons.
     Settings,
+    /// The Upgrade screen: write or upgrade a stick.
+    Upgrade,
 }
 
 impl Action {
@@ -42,6 +44,7 @@ impl Action {
             Some("reboot") => Ok(Action::Reboot),
             Some("poweroff") => Ok(Action::Poweroff),
             Some("settings") => Ok(Action::Settings),
+            Some("upgrade") => Ok(Action::Upgrade),
             Some(other) => Err(format!("unknown action '{other}'")),
         }
     }
@@ -55,7 +58,7 @@ impl Action {
             Action::Logout => Some(0),
             Action::Reboot => Some(10),
             Action::Poweroff => Some(11),
-            Action::Run | Action::SaveHome | Action::Settings => None,
+            Action::Run | Action::SaveHome | Action::Settings | Action::Upgrade => None,
         }
     }
 
@@ -995,12 +998,39 @@ mod tests {
             std::slice::from_ref(&shipped),
             &[src("50-upgrade-image.desktop", "[Desktop Entry]\nName=Neu\n")],
         );
-        assert!(
-            tiles[0].argv.contains(&"thinfloe-upgrade".to_string()),
-            "{:?}",
-            tiles[0].argv
-        );
+        assert_eq!(tiles[0].action, Action::Upgrade);
         assert_eq!(tiles[0].name, "Neu");
+        assert!(matches!(tiles[0].origin, Origin::Reworded { .. }));
+    }
+
+    #[test]
+    fn the_upgrade_tile_is_a_menu_action() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("50-upgrade-image.desktop")).unwrap();
+        let t = merge(&[src("50-upgrade-image.desktop", &text)], &[]).remove(0);
+        assert_eq!(t.action, Action::Upgrade);
+        assert_eq!(t.name, "Upgrade");
+        assert_eq!(t.icon.as_deref(), Some("usb"));
+        assert!(t.argv.is_empty(), "{:?}", t.argv);
+        assert!(!t.terminal);
+        assert!(t.usable() && !t.addon && !t.multiple && !t.save_on_exit);
+        assert_eq!(Action::Upgrade.exit_code(), None);
+        assert!(!Action::Upgrade.ends());
+    }
+
+    #[test]
+    fn user_file_cannot_use_upgrade_action() {
+        let tiles = merge(
+            &[],
+            &[src(
+                "61-mine.desktop",
+                "[Desktop Entry]\nName=Mine\nX-TF-Action=upgrade\n",
+            )],
+        );
+        assert_eq!(
+            tiles[0].problem.as_deref(),
+            Some("61-mine.desktop: a tile of your own may only use the run action, not 'upgrade'")
+        );
     }
 
     #[test]

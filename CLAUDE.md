@@ -199,7 +199,9 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`
-  a program. `X-TF-Multiple=true` lets a run tile start again while a
+  a program. `X-TF-Action=upgrade` (the Upgrade tile,
+  `50-upgrade-image.desktop`, shown only on USB boots) is honoured only in
+  shipped files, like `settings`. `X-TF-Multiple=true` lets a run tile start again while a
   copy of it still runs (the ThinLinc, oxulnk and Terminal tiles set it); without it a
   tile runs once at a time. A user file rewording a shipped tile cannot set
   it. A user file named like a shipped one may reword `Name`, `Comment`
@@ -703,7 +705,10 @@ home; removing it is later work.
   because the stop signals a process group (`kill(-pgid)`), which would
   otherwise be the menu's own. sudo keeps tfuser's real uid, so it receives
   the SIGTERM and relays it to the tool; tfuser cannot signal the root tool
-  itself. A
+  itself. A stick write started from the Upgrade screen is listed and
+  waited for the same way ("Writing SanDisk Cruzer"). Restart anyway and
+  Power off anyway send it SIGTERM, never SIGKILL: a SIGKILL reaches only
+  sudo, and the tool keeps holding `/run/thinfloe/upgrade.lock`. A
   Save-On-Exit program that ends while the question waits only for an
   add-on job starts no save: the logout save follows, or, on Stay, the
   owed save starts then.

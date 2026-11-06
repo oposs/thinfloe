@@ -14,12 +14,19 @@
 //! failed and the person at the machine chose to log out anyway. Restart
 //! and Power off take the same steps and exit 10 and 11. A running add-on
 //! job is listed in the dialog too; it is waited for, never stopped.
+//!
+//! The Upgrade tile swaps the grid for the Upgrade screen (`upgrade.rs`).
+//! A stick write it started runs on when the person goes back to the grid,
+//! and holds the session's end like an add-on job: Log out waits for it,
+//! Restart anyway and Power off anyway send it SIGTERM, never SIGKILL. A
+//! SIGKILL would reach only sudo, and the tool would go on holding its lock.
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
 use crate::settings::{RetryMarker, SettingsEvent};
 use crate::tiles::{Action, Grid, Origin, Tile};
+use crate::upgrade::{Request, Upgrade, UpgradeEvent};
 use std::time::{Duration, Instant};
 
 /// How long "Home directory saved. Logging out." stays on screen.
@@ -65,15 +72,15 @@ pub enum Logout {
     Confirm,
     /// SIGTERM sent; SIGKILL at `kill_at` to what is left.
     Stopping { kill_at: Instant, killed: bool },
-    /// The programs are gone; an add-on job still runs. Log out does not
-    /// stop it: the job runs as root, and a dpkg cut short leaves a
-    /// half-installed package for the rest of the boot. Stay is offered,
-    /// and for Restart and Power off also "Restart anyway": the rootfs is
-    /// in RAM and goes away with the restart.
+    /// The programs are gone; an add-on job or a stick write still runs.
+    /// Log out does not stop it: the job runs as root, and a dpkg cut
+    /// short leaves a half-installed package for the rest of the boot.
+    /// Stay is offered, and for Restart and Power off also "Restart
+    /// anyway": the rootfs is in RAM and goes away with the restart.
     WaitAddons,
-    /// Restart or Power off anyway: SIGTERM went to the add-on jobs; the
-    /// menu goes on when they ended or at `go_at`, whichever comes first.
-    /// The shutdown ends what is left.
+    /// Restart or Power off anyway: SIGTERM went to the add-on jobs and the
+    /// write; the menu goes on when they ended or at `go_at`, whichever
+    /// comes first. The shutdown ends what is left; nothing gets SIGKILL.
     StoppingAddons { go_at: Instant },
     /// The programs are gone; a background save is still running.
     WaitSave,
@@ -113,6 +120,18 @@ pub enum Job {
     Addon {
         args: Vec<String>,
     },
+    /// `sudo -n /usr/bin/thinfloe-upgrade <args>`, a write.
+    UpgradeWrite {
+        args: Vec<String>,
+    },
+    /// `thinfloe-upgrade drives --no-size [--all]`.
+    Drives {
+        all: bool,
+    },
+    /// `thinfloe-upgrade check [--source URL]`.
+    UpgradeCheck {
+        source: Option<String>,
+    },
 }
 
 /// What fills the space above the log.
@@ -120,6 +139,7 @@ pub enum Job {
 pub enum Screen {
     Grid,
     Settings,
+    Upgrade,
 }
 
 /// The question over the grid: a ticked add-on that has no copy, because
@@ -177,6 +197,10 @@ pub struct Menu {
     /// Windows folded away, as the compositor reports them; the strip
     /// below the log shows them.
     pub folded: Vec<crate::windows::Folded>,
+    /// The Upgrade screen, and the write it runs.
+    pub upgrade: Upgrade,
+    /// The machine booted from a stick; the Upgrade tile is hidden on netboot.
+    usb_boot: bool,
 }
 
 impl Menu {
@@ -212,7 +236,85 @@ impl Menu {
             retry_marker: RetryMarker::memory(),
             retry_held: false,
             folded: Vec::new(),
+            upgrade: Upgrade::new(),
+            usb_boot: false,
         }
+    }
+
+    pub fn set_usb_boot(&mut self, usb: bool) {
+        self.usb_boot = usb;
+    }
+
+    /// The release this machine runs, from `/etc/thinfloe/version`.
+    pub fn set_installed(&mut self, v: Option<String>) {
+        self.upgrade.installed = v;
+    }
+
+    /// A newer release than the installed one, when both are known.
+    fn update_available(&self) -> Option<&str> {
+        crate::release::update_available(&self.upgrade.release, self.upgrade.installed.as_deref())
+    }
+
+    /// A click on the Upgrade screen.
+    pub fn upgrade_event(&mut self, e: UpgradeEvent, now: Instant) -> Option<Effect> {
+        if self.dialog() || self.screen != Screen::Upgrade {
+            return None;
+        }
+        let r = self.upgrade.event(e, self.restore_failed, now)?;
+        self.upgrade_request(r, now)
+    }
+
+    fn upgrade_request(&mut self, r: Request, now: Instant) -> Option<Effect> {
+        match r {
+            Request::Check { source } => Some(Effect::Start(Job::UpgradeCheck { source })),
+            Request::Drives { all } => Some(Effect::Start(Job::Drives { all })),
+            Request::Write { args } => Some(Effect::Start(Job::UpgradeWrite { args })),
+            // Not known yet: the signal goes out with UpgradeStarted.
+            Request::Stop => self.upgrade.pgid().map(|p| Effect::Signal(vec![p], Signal::Term)),
+            Request::Restart => self.begin_ending(Action::Reboot, now),
+            Request::Leave => {
+                self.screen = Screen::Grid;
+                self.offer_retry();
+                None
+            }
+        }
+    }
+
+    /// The root jobs that run, for the end-of-session dialog: the add-on
+    /// jobs, then the stick write.
+    pub fn root_jobs(&self) -> Vec<String> {
+        let mut v = self.addon_jobs();
+        v.extend(self.upgrade.job_name());
+        v
+    }
+
+    /// No add-on job and no stick write runs.
+    fn root_idle(&self) -> bool {
+        self.addon_runs.is_empty() && !self.upgrade.writing()
+    }
+
+    /// The known process groups of the root jobs.
+    fn root_pgids(&self) -> Vec<i32> {
+        self.addon_runs
+            .iter()
+            .filter_map(|a| a.pgid)
+            .chain(self.upgrade.pgid())
+            .collect()
+    }
+
+    /// The name the grid draws: the Upgrade tile names a newer release,
+    /// unless the person gave it a name of their own.
+    pub fn tile_name(&self, index: usize) -> String {
+        let Some(t) = self.tiles.get(index) else {
+            return String::new();
+        };
+        if t.action == Action::Upgrade
+            && !matches!(t.origin, Origin::Reworded { .. })
+            && let Some(v) = self.update_available()
+        {
+            return format!("Upgrade to {v}");
+        }
+        t.name.clone()
     }
 
     /// Where the add-ons offered a retry in this boot are remembered.
@@ -322,8 +424,10 @@ impl Menu {
     /// Put up the retry question for the first ticked add-on without a copy
     /// whose install or check failed and that was not offered in this boot.
     /// On the Settings screen the row shows the same, so it is only noted.
+    /// On the Upgrade screen nothing is recorded: the question waits for
+    /// the grid.
     fn offer_retry(&mut self) {
-        if self.retry_held || self.retry.is_some() || self.logout.is_some() {
+        if self.retry_held || self.retry.is_some() || self.logout.is_some() || self.screen == Screen::Upgrade {
             return;
         }
         let failed: Vec<Retry> = self
@@ -381,6 +485,7 @@ impl Menu {
     pub fn visible(&self, index: usize) -> bool {
         match self.tiles.get(index) {
             Some(t) if t.addon => self.addon_of(index).is_some_and(AddonStatus::present),
+            Some(t) if t.action == Action::Upgrade => self.usb_boot,
             Some(_) => true,
             None => false,
         }
@@ -455,19 +560,27 @@ impl Menu {
             Action::Run => tile.multiple || self.running(index) == 0,
             Action::SaveHome => !self.save.running,
             Action::Logout | Action::Reboot | Action::Poweroff | Action::Settings => true,
+            // While a write runs, pressing it shows the progress.
+            Action::Upgrade => true,
         }
     }
 
     /// Whether the tile is at work: a copy of its program runs, or, for
-    /// the save tile, a save.
+    /// the save tile, a save, or, for the Upgrade tile, a write.
     pub fn active(&self, index: usize) -> bool {
+        let action = self.tiles.get(index).map(|t| t.action);
         self.running(index) > 0
-            || (self.tiles.get(index).is_some_and(|t| t.action == Action::SaveHome) && self.save.running)
+            || (action == Some(Action::SaveHome) && self.save.running)
+            || (action == Some(Action::Upgrade) && self.upgrade.writing())
     }
 
-    /// Whether an add-on update waits for the next boot. Independent of
-    /// whether a copy runs now.
+    /// Whether an add-on update waits for the next boot, or, for the
+    /// Upgrade tile, a newer release is out. Independent of whether a copy
+    /// runs now.
     pub fn pending_update(&self, index: usize) -> bool {
+        if self.tiles.get(index).is_some_and(|t| t.action == Action::Upgrade) {
+            return self.update_available().is_some();
+        }
         self.addon_of(index).is_some_and(|a| a.state == AddonState::Pending)
     }
 
@@ -498,15 +611,24 @@ impl Menu {
                 self.screen = Screen::Settings;
                 None
             }
-            Action::Logout | Action::Reboot | Action::Poweroff => {
-                self.ending = tile.action;
-                if self.jobs.is_empty() && self.addon_runs.is_empty() {
-                    self.logout_after_jobs(now)
-                } else {
-                    self.logout = Some(Logout::Confirm);
-                    None
-                }
+            Action::Upgrade => {
+                self.screen = Screen::Upgrade;
+                let r = self.upgrade.open(now)?;
+                self.upgrade_request(r, now)
             }
+            Action::Logout | Action::Reboot | Action::Poweroff => self.begin_ending(tile.action, now),
+        }
+    }
+
+    /// Log out, Restart or Power off: ask while programs or root jobs run,
+    /// else save at once.
+    fn begin_ending(&mut self, action: Action, now: Instant) -> Option<Effect> {
+        self.ending = action;
+        if self.jobs.is_empty() && self.root_idle() {
+            self.logout_after_jobs(now)
+        } else {
+            self.logout = Some(Logout::Confirm);
+            None
         }
     }
 
@@ -521,9 +643,10 @@ impl Menu {
         Some(Effect::Start(Job::Save))
     }
 
-    /// The programs are gone: wait for the add-on jobs, then go on.
+    /// The programs are gone: wait for the add-on jobs and the stick
+    /// write, then go on.
     fn after_programs(&mut self, now: Instant) -> Option<Effect> {
-        if self.addon_runs.is_empty() {
+        if self.root_idle() {
             return self.logout_after_jobs(now);
         }
         self.logout = Some(Logout::WaitAddons);
@@ -553,6 +676,17 @@ impl Menu {
         self.log.note(Kind::Event, SAVING);
         self.logout = Some(Logout::Saving { since: now });
         Some(Effect::Start(Job::Save))
+    }
+
+    /// An add-on job or the stick write ended: if it was the last thing the
+    /// logout waited for, go on.
+    fn root_job_ended(&mut self, now: Instant) -> Option<Effect> {
+        let waiting = matches!(self.logout, Some(Logout::WaitAddons | Logout::StoppingAddons { .. }))
+            || (self.logout == Some(Logout::Confirm) && self.jobs.is_empty());
+        if waiting && self.root_idle() {
+            return self.logout_after_jobs(now);
+        }
+        None
     }
 
     fn pgids(&self) -> Vec<i32> {
@@ -588,7 +722,7 @@ impl Menu {
                 // Log out was clicked and nothing is left to stop or wait
                 // for: go on without asking. The logout save covers
                 // Save-On-Exit.
-                if self.logout == Some(Logout::Confirm) && self.jobs.is_empty() && self.addon_runs.is_empty() {
+                if self.logout == Some(Logout::Confirm) && self.jobs.is_empty() && self.root_idle() {
                     return self.logout_after_jobs(now);
                 }
                 if !self.tiles[job.tile].save_on_exit {
@@ -607,13 +741,39 @@ impl Menu {
                 }
                 self.request_save()
             }
-            // The upgrade screen handles these (Tasks 7 and 9); the grid
-            // does nothing with them.
-            JobResult::UpgradeStarted { .. }
-            | JobResult::UpgradeMsg(_)
-            | JobResult::UpgradeEnded { .. }
-            | JobResult::Drives { .. }
-            | JobResult::Release { .. } => None,
+            JobResult::UpgradeStarted { pgid } => {
+                if !self.upgrade.writing() {
+                    return None;
+                }
+                self.upgrade.started(pgid);
+                // Restart anyway or Cancel came before the group was known.
+                let stop = matches!(self.logout, Some(Logout::StoppingAddons { .. })) || self.upgrade.cancelling;
+                stop.then(|| Effect::Signal(vec![pgid], Signal::Term))
+            }
+            JobResult::UpgradeMsg(m) => {
+                self.upgrade.message(m, now);
+                None
+            }
+            JobResult::UpgradeEnded { status } => {
+                if !self.upgrade.writing() {
+                    return None;
+                }
+                if let Err(e) = &status {
+                    self.log.note(Kind::Warn, format!("{e}."));
+                }
+                self.upgrade.ended(status);
+                self.root_job_ended(now)
+            }
+            JobResult::Drives { all, result } => {
+                if let Some(line) = self.upgrade.drives_listed(all, result, now) {
+                    self.log.note(Kind::Warn, line);
+                }
+                None
+            }
+            JobResult::Release { custom, result } => {
+                self.upgrade.released(custom, result);
+                None
+            }
             JobResult::AddonStarted { args, pgid } => {
                 let run = self
                     .addon_runs
@@ -637,13 +797,7 @@ impl Menu {
                 if let Some(line) = line {
                     self.log.note(Kind::Warn, line);
                 }
-                // The last thing the logout waited for has ended.
-                let waiting = matches!(self.logout, Some(Logout::WaitAddons | Logout::StoppingAddons { .. }))
-                    || (self.logout == Some(Logout::Confirm) && self.jobs.is_empty());
-                if waiting && self.addon_runs.is_empty() {
-                    return self.logout_after_jobs(now);
-                }
-                None
+                self.root_job_ended(now)
             }
             JobResult::Saved(outcome) => {
                 self.save.running = false;
@@ -690,12 +844,13 @@ impl Menu {
                 None
             }
             (Some(Logout::WaitAddons), Choice::LeaveAnyway) if self.ending != Action::Logout => {
-                let names = self.addon_jobs().join(", ");
+                let names = self.root_jobs().join(", ");
                 self.log.note(Kind::Warn, format!("Stopping {names}."));
                 self.logout = Some(Logout::StoppingAddons {
                     go_at: now + STOP_GRACE,
                 });
-                let pgids: Vec<i32> = self.addon_runs.iter().filter_map(|a| a.pgid).collect();
+                // SIGTERM only, here and later: a write job is never killed.
+                let pgids = self.root_pgids();
                 (!pgids.is_empty()).then_some(Effect::Signal(pgids, Signal::Term))
             }
             (Some(Logout::Confirm), Choice::StopAndLeave) => {
@@ -717,8 +872,13 @@ impl Menu {
     }
 
     /// Called on every frame: kills what did not stop in time, and ends the
-    /// menu once "saved" has been shown for `LOGOUT_PAUSE`.
+    /// menu once "saved" has been shown for `LOGOUT_PAUSE`. On the Upgrade
+    /// screen it also lists the drives when that is due.
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
+        if self.logout.is_none() && self.screen == Screen::Upgrade {
+            let r = self.upgrade.poll(now)?;
+            return self.upgrade_request(r, now);
+        }
         match self.logout {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
             // The shutdown ends what is left of the add-on jobs.
@@ -1942,5 +2102,502 @@ mod tests {
         m.finished(JobResult::Saved(SaveOutcome::Saved), now);
         m.activate(3, now);
         assert_eq!(m.choose(Choice::Stay, now), None);
+    }
+
+    // The Upgrade screen and its write job.
+
+    use crate::drives::{Drive, Mode};
+    use crate::release::Release;
+    use crate::upgrade::{Outcome, POLL, Stage};
+    use crate::upgrade_proto::Msg;
+
+    /// The index of the Upgrade tile in `upgrade_menu`.
+    const UPGRADE: usize = 6;
+    const REBOOT: usize = 4;
+    const LOGOUT: usize = 3;
+
+    fn shipped_upgrade_text() -> String {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        std::fs::read_to_string(dir.join("50-upgrade-image.desktop")).unwrap()
+    }
+
+    /// `grid()` with the shipped Upgrade tile, booted from a stick, 4.0.0.
+    fn upgrade_menu() -> Menu {
+        let mut g = grid();
+        g.tiles.push(
+            merge(
+                &[SourceFile {
+                    name: "50-upgrade-image.desktop".into(),
+                    entry: desktop::parse(&shipped_upgrade_text()),
+                }],
+                &[],
+            )
+            .remove(0),
+        );
+        assert_eq!(g.tiles[UPGRADE].action, Action::Upgrade);
+        let mut m = Menu::new(g, false);
+        m.set_usb_boot(true);
+        m.set_installed(Some("4.0.0".into()));
+        m
+    }
+
+    fn usb_stick(device: &str, id: &str) -> Drive {
+        Drive {
+            device: device.into(),
+            model: "SanDisk Cruzer".into(),
+            size_bytes: 16_008_609_792,
+            serial: Some("AA1".into()),
+            transport: Some("usb".into()),
+            removable: true,
+            mounted: false,
+            is_boot: false,
+            is_thinfloe: false,
+            has_tl_old: false,
+            has_tl_new: false,
+            examined: true,
+            id: id.into(),
+            fits: Some(true),
+            version: None,
+        }
+    }
+
+    fn boot_stick() -> Drive {
+        Drive {
+            is_boot: true,
+            mounted: true,
+            is_thinfloe: true,
+            ..usb_stick("/dev/sda", "sn-B:1:1")
+        }
+    }
+
+    fn release() -> Release {
+        Release {
+            latest: Some("4.1.0".into()),
+            image_bytes: Some(3_100_000_000),
+            ..Release::default()
+        }
+    }
+
+    /// Press the tile, answer the check and one drive list.
+    fn opened(m: &mut Menu, drives: Vec<Drive>, now: Instant) {
+        assert_eq!(
+            m.activate(UPGRADE, now),
+            Some(Effect::Start(Job::UpgradeCheck { source: None }))
+        );
+        assert_eq!(m.screen, Screen::Upgrade);
+        let rel = JobResult::Release {
+            custom: false,
+            result: Ok(release()),
+        };
+        assert_eq!(m.finished(rel, now), None);
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::Drives { all: false })));
+        let list = JobResult::Drives {
+            all: false,
+            result: Ok(drives),
+        };
+        assert_eq!(m.finished(list, now), None);
+    }
+
+    /// Choose `drive` and `mode` and confirm; the write job is asked for.
+    fn confirmed(m: &mut Menu, drive: Drive, mode: Mode, now: Instant) {
+        let device = drive.device.clone();
+        opened(m, vec![drive], now);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Choose(device), now), None);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Mode(mode), now), None);
+        let Some(Effect::Start(Job::UpgradeWrite { args })) = m.upgrade_event(UpgradeEvent::Confirm, now) else {
+            panic!("no write started")
+        };
+        assert!(args.contains(&"--expect-id".to_string()), "{args:?}");
+        assert!(m.upgrade.writing());
+    }
+
+    /// A write of `drive` runs, in process group 4242.
+    fn writing(m: &mut Menu, drive: Drive, mode: Mode, now: Instant) {
+        confirmed(m, drive, mode, now);
+        assert_eq!(m.finished(JobResult::UpgradeStarted { pgid: 4242 }, now), None);
+    }
+
+    fn fresh_write(m: &mut Menu, now: Instant) {
+        writing(m, usb_stick("/dev/sdb", "sn-A:1:1"), Mode::Fresh, now);
+        assert!(m.upgrade.fresh_running());
+    }
+
+    fn msg(m: &mut Menu, msg: Msg) -> Option<Effect> {
+        m.finished(JobResult::UpgradeMsg(msg), Instant::now())
+    }
+
+    fn upgrade_ended(m: &mut Menu, status: Result<Option<i32>, String>) -> Option<Effect> {
+        m.finished(JobResult::UpgradeEnded { status }, Instant::now())
+    }
+
+    fn no_kill(e: &Option<Effect>) -> bool {
+        !matches!(e, Some(Effect::Signal(_, Signal::Kill)))
+    }
+
+    #[test]
+    fn the_upgrade_tile_is_hidden_on_netboot() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        assert!(m.visible(UPGRADE));
+        assert!(m.can_activate(UPGRADE));
+        m.set_usb_boot(false);
+        assert!(!m.visible(UPGRADE));
+        assert!(!m.visible_tiles().contains(&UPGRADE));
+        assert!(!m.can_activate(UPGRADE));
+        assert_eq!(m.activate(UPGRADE, now), None);
+        assert_eq!(m.screen, Screen::Grid);
+    }
+
+    #[test]
+    fn a_newer_release_names_and_marks_the_tile() {
+        let mut m = upgrade_menu();
+        // No release known yet.
+        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
+        assert!(!m.pending_update(UPGRADE));
+        m.upgrade.release_file(release());
+        assert_eq!(m.upgrade.installed.as_deref(), Some("4.0.0"));
+        assert_eq!(m.tile_name(UPGRADE), "Upgrade to 4.1.0");
+        assert!(m.pending_update(UPGRADE));
+        assert_eq!(m.tile_name(0), "ThinLinc");
+        assert!(!m.pending_update(0));
+        // The installed version is not known: no marker, the plain name.
+        m.set_installed(None);
+        assert_eq!(m.upgrade.installed, None);
+        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
+        assert!(!m.pending_update(UPGRADE));
+        // Already on it.
+        m.set_installed(Some("4.1.0".into()));
+        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
+        assert!(!m.pending_update(UPGRADE));
+        // A reworded tile keeps its name and gets the marker.
+        m.set_installed(Some("4.0.0".into()));
+        let shipped = SourceFile {
+            name: "50-upgrade-image.desktop".into(),
+            entry: desktop::parse(&shipped_upgrade_text()),
+        };
+        let user = SourceFile {
+            name: "50-upgrade-image.desktop".into(),
+            entry: desktop::parse("[Desktop Entry]\nName=Neu\n"),
+        };
+        m.tiles[UPGRADE] = merge(&[shipped], &[user]).remove(0);
+        assert_eq!(m.tile_name(UPGRADE), "Neu");
+        assert!(m.pending_update(UPGRADE));
+    }
+
+    #[test]
+    fn pressing_the_tile_checks_and_then_polls() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        assert_eq!(
+            m.activate(UPGRADE, now),
+            Some(Effect::Start(Job::UpgradeCheck { source: None }))
+        );
+        assert_eq!(m.screen, Screen::Upgrade);
+        assert!(!m.can_activate(0), "the grid is not on screen");
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::Drives { all: false })));
+        assert_eq!(m.tick(now), None, "one list at a time");
+        let list = JobResult::Drives {
+            all: false,
+            result: Ok(vec![usb_stick("/dev/sdb", "sn-A:1:1")]),
+        };
+        assert_eq!(m.finished(list, now), None);
+        assert_eq!(m.upgrade.drives.len(), 1);
+        assert_eq!(m.tick(now), None);
+        assert_eq!(m.tick(now + POLL), Some(Effect::Start(Job::Drives { all: false })));
+        // Back on the grid nothing is polled.
+        assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
+        assert_eq!(m.screen, Screen::Grid);
+        let list = JobResult::Drives {
+            all: false,
+            result: Ok(vec![]),
+        };
+        m.finished(list, now);
+        assert_eq!(m.tick(now + POLL * 5), None);
+    }
+
+    #[test]
+    fn a_drive_list_that_cannot_start_keeps_polling() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        m.activate(UPGRADE, now);
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::Drives { all: false })));
+        let failed = JobResult::Drives {
+            all: false,
+            result: Err("sudo could not be started: No such file or directory".into()),
+        };
+        assert_eq!(m.finished(failed, now), None);
+        assert!(
+            log(&m).contains(&warn(
+                "drive list failed: sudo could not be started: No such file or directory"
+            )),
+            "{:?}",
+            log(&m)
+        );
+        assert_eq!(m.tick(now + POLL), Some(Effect::Start(Job::Drives { all: false })));
+    }
+
+    #[test]
+    fn a_check_that_cannot_start_can_be_asked_again() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        m.activate(UPGRADE, now);
+        let failed = JobResult::Release {
+            custom: false,
+            result: Err("sudo could not be started: denied".into()),
+        };
+        assert_eq!(m.finished(failed, now), None);
+        assert_eq!(
+            m.upgrade.release.error.as_deref(),
+            Some("sudo could not be started: denied")
+        );
+        assert_eq!(
+            m.upgrade_event(UpgradeEvent::CheckNow, now),
+            Some(Effect::Start(Job::UpgradeCheck { source: None }))
+        );
+    }
+
+    #[test]
+    fn a_write_that_cannot_start_ends_the_job() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        confirmed(&mut m, usb_stick("/dev/sdb", "sn-A:1:1"), Mode::Fresh, now);
+        assert!(m.active(UPGRADE));
+        assert_eq!(
+            upgrade_ended(&mut m, Err("sudo could not be started: denied".into())),
+            None
+        );
+        assert!(!m.upgrade.writing());
+        assert!(!m.active(UPGRADE));
+        assert!(matches!(m.upgrade.stage, Stage::Finished(Outcome::NoResult { .. })));
+        assert!(
+            log(&m).contains(&warn("sudo could not be started: denied.")),
+            "{:?}",
+            log(&m)
+        );
+        // Nothing holds the session's end any more.
+        m.upgrade_event(UpgradeEvent::Back, now);
+        assert_eq!(m.activate(REBOOT, now), Some(Effect::Start(Job::Save)));
+    }
+
+    #[test]
+    fn cancel_signals_the_write_once_its_group_is_known() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        let mut d = usb_stick("/dev/sdb", "sn-A:1:1");
+        d.is_thinfloe = true;
+        confirmed(&mut m, d, Mode::Upgrade, now);
+        // Not known yet: the signal goes out with the start.
+        assert_eq!(m.upgrade_event(UpgradeEvent::Cancel, now), None);
+        assert_eq!(
+            m.finished(JobResult::UpgradeStarted { pgid: 4242 }, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+        // A fresh install asks first.
+        let mut m = upgrade_menu();
+        fresh_write(&mut m, now);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Cancel, now), None);
+        assert_eq!(
+            m.upgrade_event(UpgradeEvent::CancelYes, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+    }
+
+    #[test]
+    fn restart_waits_for_the_write_and_anyway_warns_on_fresh() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        fresh_write(&mut m, now);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
+        assert_eq!(m.screen, Screen::Grid);
+        let prog = started(&mut m, 1, now);
+        assert_eq!(m.activate(REBOOT, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.root_jobs(), ["Writing SanDisk Cruzer"]);
+        // Only the program's group is stopped, and only it is killed.
+        assert_eq!(
+            m.choose(Choice::StopAndLeave, now),
+            Some(Effect::Signal(vec![1000 + prog as i32], Signal::Term))
+        );
+        assert_eq!(
+            m.tick(now + STOP_GRACE),
+            Some(Effect::Signal(vec![1000 + prog as i32], Signal::Kill))
+        );
+        assert_eq!(ran(&mut m, prog, 137, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert!(!m.refuses_input(), "Stay and Restart anyway are offered");
+        assert_eq!(m.tick(now + STOP_GRACE * 4), None, "the write is waited for");
+        // The dialog can say the stick will not start: a fresh install runs.
+        assert!(m.upgrade.fresh_running());
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+        assert_eq!(
+            m.logout,
+            Some(Logout::StoppingAddons {
+                go_at: now + STOP_GRACE
+            })
+        );
+        for t in [now, now + STOP_GRACE / 2] {
+            let e = m.tick(t);
+            assert!(no_kill(&e), "{e:?}");
+        }
+        assert_eq!(
+            msg(
+                &mut m,
+                Msg::Result {
+                    ok: false,
+                    reason: "cancelled".into()
+                }
+            ),
+            None
+        );
+        assert_eq!(upgrade_ended(&mut m, Ok(Some(130))), Some(Effect::Start(Job::Save)));
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+        assert!(
+            m.upgrade
+                .outcome_text()
+                .0
+                .contains("will not start until it is written again")
+        );
+
+        // A write that does not end within the grace is never killed: the
+        // menu goes on, the shutdown ends it.
+        let mut m = upgrade_menu();
+        fresh_write(&mut m, now);
+        m.upgrade_event(UpgradeEvent::Back, now);
+        m.activate(REBOOT, now);
+        assert_eq!(m.choose(Choice::StopAndLeave, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+        assert_eq!(m.tick(now + STOP_GRACE), Some(Effect::Start(Job::Save)));
+        for k in 1..20 {
+            let e = m.tick(now + STOP_GRACE * k);
+            assert!(no_kill(&e), "{e:?}");
+        }
+        assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Saved), now), None);
+        for k in 1..20 {
+            let e = m.tick(now + STOP_GRACE * k + LOGOUT_PAUSE);
+            assert!(no_kill(&e), "{e:?}");
+        }
+        assert_eq!(m.tick(now + STOP_GRACE + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn restart_anyway_before_the_write_group_is_known() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        confirmed(&mut m, usb_stick("/dev/sdb", "sn-A:1:1"), Mode::Fresh, now);
+        m.upgrade_event(UpgradeEvent::Back, now);
+        m.activate(REBOOT, now);
+        m.choose(Choice::StopAndLeave, now);
+        assert_eq!(m.choose(Choice::LeaveAnyway, now), None);
+        assert_eq!(
+            m.finished(JobResult::UpgradeStarted { pgid: 4243 }, now),
+            Some(Effect::Signal(vec![4243], Signal::Term))
+        );
+    }
+
+    #[test]
+    fn log_out_only_waits_for_the_write() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        let mut d = usb_stick("/dev/sdb", "sn-A:1:1");
+        d.is_thinfloe = true;
+        writing(&mut m, d, Mode::Upgrade, now);
+        m.upgrade_event(UpgradeEvent::Back, now);
+        assert_eq!(m.activate(LOGOUT, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.root_jobs(), ["Upgrading SanDisk Cruzer"]);
+        assert_eq!(m.choose(Choice::StopAndLeave, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(m.choose(Choice::LeaveAnyway, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        for k in 0..20 {
+            assert_eq!(m.tick(now + STOP_GRACE * k), None);
+        }
+        msg(
+            &mut m,
+            Msg::Result {
+                ok: true,
+                reason: String::new(),
+            },
+        );
+        assert_eq!(upgrade_ended(&mut m, Ok(Some(0))), Some(Effect::Start(Job::Save)));
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+        // The write ending while the question is still up goes on, too.
+        let mut m = upgrade_menu();
+        fresh_write(&mut m, now);
+        m.upgrade_event(UpgradeEvent::Back, now);
+        m.activate(LOGOUT, now);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(upgrade_ended(&mut m, Ok(Some(1))), Some(Effect::Start(Job::Save)));
+    }
+
+    #[test]
+    fn back_while_writing_keeps_the_job_and_the_tile_shows_it() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        fresh_write(&mut m, now);
+        assert_eq!(m.upgrade.stage, Stage::Running);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
+        assert_eq!(m.screen, Screen::Grid);
+        assert!(m.upgrade.writing());
+        assert_eq!(m.upgrade.pgid(), Some(4242));
+        assert!(m.active(UPGRADE));
+        assert!(m.can_activate(UPGRADE));
+        m.activate(UPGRADE, now);
+        assert_eq!(m.screen, Screen::Upgrade);
+        assert_eq!(m.upgrade.stage, Stage::Running);
+        assert_eq!(m.tick(now + POLL), None, "no drive list while writing");
+    }
+
+    #[test]
+    fn restart_now_after_a_boot_stick_upgrade_takes_the_restart_steps() {
+        let mut m = upgrade_menu();
+        let now = Instant::now();
+        writing(&mut m, boot_stick(), Mode::Upgrade, now);
+        msg(
+            &mut m,
+            Msg::Result {
+                ok: true,
+                reason: String::new(),
+            },
+        );
+        assert_eq!(upgrade_ended(&mut m, Ok(Some(0))), None);
+        assert_eq!(
+            m.upgrade.stage,
+            Stage::Finished(Outcome::Done {
+                boot_stick: true,
+                late_cancel: false
+            })
+        );
+        assert_eq!(
+            m.upgrade_event(UpgradeEvent::RestartNow, now),
+            Some(Effect::Start(Job::Save))
+        );
+        assert_eq!(m.ending, Action::Reboot);
+        assert_eq!(m.logout, Some(Logout::Saving { since: now }));
+        assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Saved), now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn no_retry_dialog_over_the_upgrade_screen() {
+        let d = crate::testdir::TestDir::new("menu", "upgrade-retry");
+        let mut m = addon_menu(&d);
+        let up = push_tile(&mut m, "50-upgrade-image.desktop", &shipped_upgrade_text());
+        m.set_usb_boot(true);
+        let now = Instant::now();
+        assert!(m.activate(up, now).is_some());
+        assert_eq!(m.screen, Screen::Upgrade);
+        m.set_addons(vec![failed_install("HTTP 404")]);
+        assert_eq!(m.retry, None);
+        assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
+        assert_eq!(m.screen, Screen::Grid);
+        assert_eq!(m.retry.as_ref().map(|r| r.id.as_str()), Some("10-thinlinc"));
     }
 }
