@@ -336,6 +336,11 @@ mod tests {
             ..Default::default()
         };
         settle(&ctx, &input, 2);
+        // Both palettes are the same, so the colours alone pass in light
+        // mode too; lyra's `dark:` rules (the tick box fill, among others)
+        // apply only when the mode itself stays dark.
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(shadcn_egui::Theme::current(&ctx).is_dark());
         assert_eq!(shadcn_egui::Theme::current(&ctx).palette().background, BG);
         assert_eq!(ctx.global_style().visuals.panel_fill, BG);
     }
