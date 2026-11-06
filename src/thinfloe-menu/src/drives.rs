@@ -81,12 +81,13 @@ fn row(v: &Value) -> Option<Drive> {
         serial: text(v, "serial"),
         transport: text(v, "transport"),
         removable: flag(v, "removable", false),
-        mounted: flag(v, "mounted", false),
+        // Fail closed: a row the tool did not describe is in use and unexamined.
+        mounted: flag(v, "mounted", true),
         is_boot: flag(v, "is_boot", false),
         is_thinfloe: flag(v, "is_thinfloe", false),
         has_tl_old: flag(v, "has_tl_old", false),
         has_tl_new: flag(v, "has_tl_new", false),
-        examined: flag(v, "examined", true),
+        examined: flag(v, "examined", false),
         id: id.to_string(),
         fits: v.get("fits").and_then(Value::as_bool),
         version: text(v, "version"),
@@ -138,12 +139,21 @@ pub fn tag(d: &Drive) -> String {
 /// Decimal size: whole MB below 1 GB, one decimal below 10 GB, whole GB
 /// above. `up` rounds up (for what a stick needs), else to the nearest.
 fn size_text(bytes: u64, up: bool) -> String {
-    let div = |unit: u64| if up { bytes.div_ceil(unit) } else { (bytes + unit / 2) / unit };
-    if bytes < 1_000_000_000 {
-        format!("{} MB", div(1_000_000))
-    } else if bytes < 10_000_000_000 {
-        let t = div(100_000_000);
-        format!("{}.{} GB", t / 10, t % 10)
+    let div = |unit: u64| {
+        if up {
+            bytes.div_ceil(unit)
+        } else {
+            bytes.saturating_add(unit / 2) / unit
+        }
+    };
+    // The band follows the rounded value, so 999.6 MB reads "1.0 GB" and
+    // 9.96 GB reads "10 GB".
+    let mb = div(1_000_000);
+    let tenths = div(100_000_000);
+    if mb < 1000 {
+        format!("{mb} MB")
+    } else if tenths < 100 {
+        format!("{}.{} GB", tenths / 10, tenths % 10)
     } else {
         format!("{} GB", div(1_000_000_000))
     }
@@ -169,6 +179,9 @@ fn refusal(d: &Drive, mode: Mode, image_bytes: Option<u64>) -> Result<(), String
     if !d.examined {
         return Err("another write is running; wait for it".to_string());
     }
+    if mode == Mode::Fresh && d.is_boot {
+        return Err("the boot drive of this machine (fresh install not possible)".to_string());
+    }
     if d.mounted && !d.is_boot {
         return Err("in use: a partition is mounted".to_string());
     }
@@ -186,7 +199,10 @@ fn refusal(d: &Drive, mode: Mode, image_bytes: Option<u64>) -> Result<(), String
 
 /// What the person types back before an internal drive is erased.
 pub fn confirm_text(d: &Drive) -> String {
-    format!("{} {}", d.model, format_size(d.size_bytes))
+    // Without a model the device name stands in, so the size alone never
+    // confirms an erase.
+    let name = if d.model.trim().is_empty() { &d.device } else { &d.model };
+    format!("{name} {}", format_size(d.size_bytes))
 }
 
 fn norm(s: &str) -> String {
@@ -364,6 +380,49 @@ mod tests {
         assert_eq!(format_size(15_623_782_400), "16 GB");
         assert_eq!(format_size(7_800_000_000), "7.8 GB");
         assert_eq!(format_size(512_000_000), "512 MB");
+        assert_eq!(format_size(9_960_000_000), "10 GB");
+        assert_eq!(format_size(999_600_000), "1.0 GB");
+        assert_eq!(format_size(u64::MAX), "18446744073 GB");
+        assert_eq!(size_text(999_000_001, true), "1.0 GB");
+        assert_eq!(size_text(9_900_000_001, true), "10 GB");
+    }
+
+    #[test]
+    fn a_row_the_tool_did_not_describe_offers_nothing() {
+        let rows = [
+            r#"{"device":"/dev/sdb","id":"a","model":"M","size_bytes":1}"#,
+            r#"{"device":"/dev/sdb","id":"a","mounted":"true","examined":"yes"}"#,
+            r#"{"device":"/dev/sdb","id":"a","mounted":false}"#,
+            r#"{"device":"/dev/sdb","id":"a","examined":true}"#,
+        ];
+        for r in rows {
+            let v = parse(&format!("[{r}]")).unwrap();
+            for (_, res) in modes(&v[0], None) {
+                assert!(res.is_err(), "{r}");
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_on_the_boot_stick_is_refused() {
+        let mut d = stick();
+        d.is_boot = true;
+        assert_eq!(
+            refusal(&d, Mode::Fresh, None),
+            Err("the boot drive of this machine (fresh install not possible)".to_string())
+        );
+        assert_eq!(refusal(&d, Mode::Upgrade, None), Ok(()));
+    }
+
+    #[test]
+    fn an_empty_model_is_confirmed_by_the_device_name() {
+        let mut d = stick();
+        d.model = String::new();
+        d.device = "/dev/nvme0n1".into();
+        d.size_bytes = 512_110_190_592;
+        assert_eq!(confirm_text(&d), "/dev/nvme0n1 512 GB");
+        assert!(!typed_matches("512 gb", &d));
+        assert!(typed_matches("/dev/NVME0n1  512 GB", &d));
     }
 
     #[test]
