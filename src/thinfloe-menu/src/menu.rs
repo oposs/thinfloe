@@ -607,6 +607,13 @@ impl Menu {
                 }
                 self.request_save()
             }
+            // The upgrade screen handles these (Tasks 7 and 9); the grid
+            // does nothing with them.
+            JobResult::UpgradeStarted { .. }
+            | JobResult::UpgradeMsg(_)
+            | JobResult::UpgradeEnded { .. }
+            | JobResult::Drives { .. }
+            | JobResult::Release { .. } => None,
             JobResult::AddonStarted { args, pgid } => {
                 let run = self
                     .addon_runs

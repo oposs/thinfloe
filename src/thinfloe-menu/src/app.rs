@@ -387,6 +387,7 @@ impl App {
             save_home: self.cfg.paths.save_home.clone(),
             state_dir: self.cfg.paths.state_dir.clone(),
             addon_cmd: self.cfg.paths.addon_cmd.clone(),
+            upgrade_cmd: self.cfg.paths.upgrade_cmd.clone(),
         };
         std::thread::spawn(move || {
             let result = match job {

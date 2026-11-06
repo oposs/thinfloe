@@ -5,7 +5,10 @@
 //! pinging before it starts, and a window that stops answering frame
 //! callbacks for that long looks dead.
 
+use crate::drives::{self, Drive};
 use crate::log::{Feed, Kind, Line, Run, Splitter, local_time};
+use crate::release::{self, Release};
+use crate::upgrade_proto::{self, Msg};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -18,6 +21,18 @@ use std::time::{Duration, Instant};
 /// open for as long as it lives; its lines are still logged, but the tile
 /// is done when the program itself is.
 const DRAIN_GRACE: Duration = Duration::from_millis(300);
+
+/// The log source of everything thinfloe-upgrade prints that is not a
+/// progress line.
+pub const UPGRADE_LOG_SOURCE: &str = "upgrade";
+/// How long `upgrade_write` waits, after the tool exited, for its stdout to
+/// be read to the end. A `@result` printed just before the exit must reach
+/// the caller; this is longer than `DRAIN_GRACE` for that reason.
+pub const UPGRADE_DRAIN: Duration = Duration::from_secs(5);
+/// Most bytes of the drive list that are read; more is an error.
+pub const DRIVES_BYTES: usize = 256 * 1024;
+/// Most bytes of the release status that are read.
+pub const CHECK_BYTES: usize = 4096;
 
 /// What thinfloe-save-home reported, by its exit code. The codes are its
 /// contract, documented at the top of overlay/usr/bin/thinfloe-save-home.
@@ -105,6 +120,22 @@ pub enum JobResult {
         args: Vec<String>,
         status: Result<Option<i32>, String>,
     },
+    /// The upgrade tool runs a write, in a process group of its own.
+    UpgradeStarted { pgid: i32 },
+    /// One progress line of the write.
+    UpgradeMsg(Msg),
+    /// The write ended; `Ok(None)` is a signal.
+    UpgradeEnded { status: Result<Option<i32>, String> },
+    /// The drive list, asked for with or without `--all`.
+    Drives {
+        all: bool,
+        result: Result<Vec<Drive>, String>,
+    },
+    /// The release check; `custom` is true when it used an address typed in.
+    Release {
+        custom: bool,
+        result: Result<Release, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +170,13 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// The add-on tool and what runs it as root; the job's arguments follow.
     pub addon_cmd: Vec<String>,
+    /// The upgrade tool and what runs it as root; the job's arguments follow.
+    pub upgrade_cmd: Vec<String>,
+}
+
+/// Like `default_addon_cmd`, for thinfloe-upgrade.
+pub fn default_upgrade_cmd() -> Vec<String> {
+    ["sudo", "-n", "/usr/bin/thinfloe-upgrade"].map(String::from).to_vec()
 }
 
 /// thinfloe-addon runs as root. tfuser has sudo without a password; `-n`
@@ -148,9 +186,24 @@ pub fn default_addon_cmd() -> Vec<String> {
 }
 
 /// Copy one output pipe into the feed, line by line, until it closes.
-fn pump(mut pipe: impl Read, source: String, feed: Arc<Feed>, done: Sender<()>) {
+fn pump(pipe: impl Read, source: String, feed: Arc<Feed>, done: Sender<()>) {
+    pump_lines(pipe, source, feed, done, |_| false)
+}
+
+/// Like `pump`, but `take` sees the plain text of each line first, in
+/// order; a line it returns true for is not logged.
+fn pump_lines(
+    mut pipe: impl Read,
+    source: String,
+    feed: Arc<Feed>,
+    done: Sender<()>,
+    mut take: impl FnMut(&str) -> bool,
+) {
     let mut split = Splitter::default();
     let mut emit = |runs: Vec<Run>| {
+        if take(&crate::log::plain(&runs)) {
+            return;
+        }
         feed.push(Line {
             time: local_time(),
             source: Some(source.clone()),
@@ -251,6 +304,140 @@ pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl F
     }
 }
 
+/// Start the tool in a process group of its own: `stop` signals a whole
+/// group, which would otherwise be the menu's.
+fn upgrade_command(cmd: &[String], args: &[String]) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..]).args(args).process_group(0).stdin(Stdio::null());
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    c
+}
+
+/// Run `thinfloe-upgrade write` with `args`. Progress lines go to `on_msg`
+/// in order; all other output goes to the log. The tool is never killed
+/// from here: `on_spawn` gets its process group so the caller can send
+/// SIGTERM. Returns only after the stdout pump has delivered every line
+/// (up to `UPGRADE_DRAIN` after the exit), so a `@result` printed just
+/// before the exit is never lost.
+pub fn upgrade_write(
+    cmd: &[String],
+    args: &[String],
+    feed: &Arc<Feed>,
+    on_spawn: impl FnOnce(i32),
+    on_msg: impl Fn(Msg) + Send + 'static,
+) -> Result<Option<i32>, String> {
+    let mut child = upgrade_command(cmd, args)
+        .spawn()
+        .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
+    on_spawn(child.id() as i32);
+    let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+    let mut pumps = 0;
+    if let Some(out) = child.stdout.take() {
+        let (f, t) = (feed.clone(), tx.clone());
+        std::thread::spawn(move || {
+            pump_lines(out, UPGRADE_LOG_SOURCE.to_string(), f, t, |line| match upgrade_proto::parse(line) {
+                Some(m) => {
+                    on_msg(m);
+                    true
+                }
+                None => false,
+            })
+        });
+        pumps += 1;
+    }
+    if let Some(err) = child.stderr.take() {
+        let f = feed.clone();
+        std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, tx));
+        pumps += 1;
+    }
+    let status = child
+        .wait()
+        .map(|s| s.code())
+        .map_err(|e| format!("waiting for {}: {e}", cmd[0]));
+    let deadline = Instant::now() + UPGRADE_DRAIN;
+    for _ in 0..pumps {
+        if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
+            break;
+        }
+    }
+    status
+}
+
+/// Run the tool and read at most `cap` bytes of stdout; stderr goes to the
+/// log. More than `cap` is an error and the tool is stopped with SIGTERM.
+fn upgrade_capture(
+    cmd: &[String],
+    args: &[String],
+    cap: usize,
+    feed: &Arc<Feed>,
+) -> Result<(String, Option<i32>), String> {
+    let mut child = upgrade_command(cmd, args)
+        .spawn()
+        .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
+    let (tx, rx) = mpsc::channel();
+    let mut pumps = 0;
+    if let Some(err) = child.stderr.take() {
+        let f = feed.clone();
+        std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, tx));
+        pumps += 1;
+    }
+    let mut out = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        let _ = pipe.take(cap as u64 + 1).read_to_end(&mut out);
+        // Dropping the pipe here gives a still-writing tool SIGPIPE.
+    }
+    let too_long = out.len() > cap;
+    if too_long {
+        stop(child.id() as i32, Signal::Term);
+    }
+    let status = child.wait().map_err(|e| format!("waiting for {}: {e}", cmd[0]))?;
+    let deadline = Instant::now() + DRAIN_GRACE;
+    for _ in 0..pumps {
+        if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
+            break;
+        }
+    }
+    if too_long {
+        return Err(format!("{} printed more than {cap} bytes", cmd[0]));
+    }
+    Ok((String::from_utf8_lossy(&out).into_owned(), status.code()))
+}
+
+/// The drives the tool offers: `drives --no-size [--all]`.
+pub fn upgrade_drives(cmd: &[String], all: bool, feed: &Arc<Feed>) -> Result<Vec<Drive>, String> {
+    let mut args = vec!["drives".to_string(), "--no-size".to_string()];
+    if all {
+        args.push("--all".to_string());
+    }
+    let (text, status) = upgrade_capture(cmd, &args, DRIVES_BYTES, feed)?;
+    if status != Some(0) {
+        return Err(match status {
+            Some(n) => format!("the drive list failed with status {n}"),
+            None => "the drive list was ended by a signal".to_string(),
+        });
+    }
+    drives::parse(&text)
+}
+
+/// The latest release: `check [--source URL]`. Exit 0 and 1 both carry the
+/// lines (the `error` field says why a check failed); anything else is an
+/// error, as is no output at all.
+pub fn upgrade_check(cmd: &[String], source: Option<&str>, feed: &Arc<Feed>) -> Result<Release, String> {
+    let mut args = vec!["check".to_string()];
+    if let Some(url) = source {
+        args.push("--source".to_string());
+        args.push(url.to_string());
+    }
+    let (text, status) = upgrade_capture(cmd, &args, CHECK_BYTES, feed)?;
+    match status {
+        Some(0) | Some(1) if !text.trim().is_empty() => Ok(release::parse_status(&text)),
+        Some(0) | Some(1) => Err("the release check printed nothing".to_string()),
+        Some(n) => Err(format!("the release check failed with status {n}")),
+        None => Err("the release check was ended by a signal".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,18 +500,21 @@ mod tests {
             save_home: "/bin/true".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
             save_home: "/bin/false".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
             save_home: d.join("nope"),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -548,6 +738,7 @@ mod tests {
             save_home: "/bin/sh".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -555,10 +746,115 @@ mod tests {
             save_home: "/bin/ls".into(),
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
         assert!(!got.is_empty(), "ls wrote nothing to the feed");
         assert!(got.iter().all(|l| l.source.as_deref() == Some("save-home")));
+    }
+
+    fn collect_write(script: &str, feed: &Arc<Feed>) -> (Result<Option<i32>, String>, Vec<Msg>) {
+        let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = got.clone();
+        let st = upgrade_write(&sh(script), &[], feed, |_| {}, move |m| g.lock().unwrap().push(m));
+        let v = got.lock().unwrap().clone();
+        (st, v)
+    }
+
+    #[test]
+    fn upgrade_write_routes_progress_and_logs_the_rest() {
+        let feed = Arc::new(Feed::default());
+        let (st, msgs) = collect_write("echo \"@step write W\"; echo plain; echo err >&2; echo \"@result ok\"", &feed);
+        assert_eq!(st, Ok(Some(0)));
+        assert_eq!(
+            msgs,
+            [
+                Msg::Step { id: "write".into(), text: "W".into() },
+                Msg::Result { ok: true, reason: String::new() }
+            ]
+        );
+        let mut got: Vec<_> = feed.drain().into_iter().map(|l| (l.source.clone(), l.plain())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (Some("upgrade".to_string()), "err".to_string()),
+                (Some("upgrade".to_string()), "plain".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_printed_just_before_exit_is_never_lost() {
+        for run in 0..50 {
+            let feed = Arc::new(Feed::default());
+            let (st, msgs) = collect_write(
+                "i=0; while [ $i -lt 2000 ]; do echo \"@progress $i 2000\"; i=$((i+1)); done; echo \"@result ok\"",
+                &feed,
+            );
+            assert_eq!(st, Ok(Some(0)));
+            assert_eq!(msgs.len(), 2001, "run {run}");
+            assert!(matches!(msgs.last(), Some(Msg::Result { ok: true, .. })), "run {run}");
+        }
+    }
+
+    #[test]
+    fn a_write_job_has_a_process_group_of_its_own() {
+        let feed = Arc::new(Feed::default());
+        let cmd = sh("read -r _ _ _ _ pg _ < /proc/$$/stat; [ \"$pg\" = \"$$\" ] && echo own >&2");
+        let mut pgid = 0;
+        upgrade_write(&cmd, &[], &feed, |p| pgid = p, |_| {}).unwrap();
+        let got: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
+        assert_eq!(got, ["own"]);
+        // SAFETY: getpgrp has no preconditions.
+        assert_ne!(pgid, unsafe { libc::getpgrp() });
+    }
+
+    #[test]
+    fn sudo_refusal_reaches_the_log() {
+        let feed = Arc::new(Feed::default());
+        let (st, msgs) = collect_write("echo \"sudo: a password is required\" >&2; exit 1", &feed);
+        assert_eq!(st, Ok(Some(1)));
+        assert!(msgs.is_empty());
+        let got: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
+        assert_eq!(got, ["sudo: a password is required"]);
+    }
+
+    #[test]
+    fn drives_output_over_the_cap_is_an_error() {
+        let feed = Arc::new(Feed::default());
+        let cmd = sh("head -c 300000 /dev/zero | tr \"\\0\" \" \"");
+        assert!(upgrade_drives(&cmd, false, &feed).is_err());
+    }
+
+    #[test]
+    fn drives_passes_no_size_and_all() {
+        let feed = Arc::new(Feed::default());
+        let cmd: Vec<String> = [
+            "/bin/sh",
+            "-c",
+            "echo \"[{\\\"device\\\":\\\"/dev/sdb\\\",\\\"id\\\":\\\"x\\\",\\\"model\\\":\\\"$*\\\"}]\"",
+            "sh",
+        ]
+        .map(String::from)
+        .to_vec();
+        let d = upgrade_drives(&cmd, true, &feed).unwrap();
+        assert_eq!(d.len(), 1);
+        assert!(d[0].model.contains("drives --no-size --all"), "{:?}", d[0].model);
+        let d = upgrade_drives(&cmd, false, &feed).unwrap();
+        assert!(d[0].model.ends_with("drives --no-size"), "{:?}", d[0].model);
+    }
+
+    #[test]
+    fn check_exit_one_still_returns_the_lines() {
+        let feed = Arc::new(Feed::default());
+        let r = upgrade_check(&sh("echo error=no network; exit 1"), Some("http://x"), &feed).unwrap();
+        assert_eq!(r.error.as_deref(), Some("no network"));
+        let r = upgrade_check(&sh("echo latest=4.1"), None, &feed).unwrap();
+        assert_eq!(r.latest.as_deref(), Some("4.1"));
+        assert!(upgrade_check(&sh("exit 2"), None, &feed).is_err());
+        assert!(upgrade_check(&sh("exit 0"), None, &feed).is_err(), "no lines");
+        assert_eq!(default_upgrade_cmd(), ["sudo", "-n", "/usr/bin/thinfloe-upgrade"]);
     }
 }
