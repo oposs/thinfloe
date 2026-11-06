@@ -17,6 +17,7 @@ pub mod outputs;
 pub mod raster;
 pub mod release;
 pub mod settings;
+pub mod speed;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;
