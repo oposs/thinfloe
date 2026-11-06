@@ -9,7 +9,8 @@ Without arguments it asks its questions on the terminal (SSH). The batch
 interface asks nothing; the menu runs it with `sudo -n` in a process group
 of its own and cancels it with SIGTERM to that group:
 
-  thinfloe-upgrade drives [--all] [--source URL]
+  thinfloe-upgrade drives [--all] [--source URL] [--no-size]
+      With --no-size no request is sent and every row has fits null.
       One JSON list on stdout, one object per drive (device, model,
       size_bytes, serial, transport, removable, mounted, is_boot,
       is_thinfloe, has_tl_old, has_tl_new, efi_partition, examined, id,
@@ -17,6 +18,16 @@ of its own and cancels it with SIGTERM to that group:
       seconds for it and then lists the drives without mounting any ESP:
       a row whose ESP was not looked at has examined false, and its
       is_thinfloe, has_tl_old and has_tl_new say nothing.
+
+  thinfloe-upgrade check [--source URL]
+      Asks the source for its release: <source>/version (one line X.Y.Z)
+      and the size of thinfloe-usb.img.zst. Prints key=value lines on
+      stdout: latest, image_bytes, checked (epoch), source, error; a missing
+      value is empty. Exit 0 when both requests were answered, 1 when one
+      failed (the lines are still printed, error says which), 2 on misuse.
+      Without --source (or with the default) the same lines, plus installed=
+      from INSTALLED_VERSION_FILE, are also written atomically to
+      UPGRADE_STATUS.
 
   thinfloe-upgrade write --device DEV --mode fresh|upgrade --expect-id ID
                    [--source URL] [--copy-home] [--verify] [--allow-internal]
@@ -76,6 +87,13 @@ from typing import List, Optional, Tuple
 # ============ Constants ============
 
 DEFAULT_URL = "https://tobi.oetiker.ch/dbrrg"
+# The release's version: one line X.Y.Z at <source>/version.
+VERSION_ASSET = "version"
+VERSION_RE = r"[0-9A-Za-z.+-]{1,32}"
+# What `check` found at the default source, for the menu and for SSH readers.
+# Module constants so tests can point them elsewhere.
+UPGRADE_STATUS = "/run/thinfloe/upgrade/status"
+INSTALLED_VERSION_FILE = "/etc/thinfloe/version"
 EFI_PARTLABEL = "EFI-SYSTEM"
 FIRMWARE_FILES = ("vmlinuz", "initrd.img", "ramroot.sqsh")
 TFUSER = "tfuser"
@@ -2402,6 +2420,11 @@ def _batch_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("drives", help="list drives as JSON", allow_abbrev=False)
     d.add_argument("--all", action="store_true", help="include internal drives")
     d.add_argument("--source", default=DEFAULT_URL)
+    d.add_argument("--no-size", action="store_true",
+                   help="send no request; fits is null in every row")
+    c = sub.add_parser("check", help="ask the source for its release",
+                       allow_abbrev=False)
+    c.add_argument("--source", default=DEFAULT_URL)
     w = sub.add_parser("write", help="write or upgrade a stick without questions",
                        allow_abbrev=False)
     w.add_argument("--device", required=True)
@@ -2439,6 +2462,84 @@ def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
         if home_restore_failed():
             return "the home directory of this boot was not restored, so it is not copied"
     return None
+
+
+def read_installed_version() -> str:
+    """The version of the running image, empty when it is not recorded."""
+    try:
+        with open(INSTALLED_VERSION_FILE, encoding="utf-8", errors="replace") as f:
+            line = f.readline().strip()
+    except OSError:
+        return ""
+    return line if re.fullmatch(VERSION_RE, line) else ""
+
+
+def _fetch_version(source: str) -> Tuple[str, str]:
+    """(version, error) from <source>/version; exactly one is empty."""
+    try:
+        result = subprocess.run(
+            ["curl", "-fsSL", "--max-filesize", "256", "--max-time", "30", "--",
+             f"{source}/{VERSION_ASSET}"],
+            capture_output=True, timeout=40, check=False, **SPAWN,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "", "the version file could not be fetched"
+    if result.returncode == 22:
+        return "", "no version file at the source"
+    if result.returncode == 63:  # --max-filesize
+        return "", "version file not usable"
+    if result.returncode != 0:
+        return "", "the version file could not be fetched"
+    text = result.stdout.decode("utf-8", errors="replace")
+    first = text.split("\n", 1)[0].strip()
+    if not re.fullmatch(VERSION_RE, first):
+        return "", "version file not usable"
+    return first, ""
+
+
+def _status_value(value) -> str:
+    text = re.sub(r"[\r\n]", " ", "" if value is None else str(value))
+    return text[:200]
+
+
+def write_status(lines: List[Tuple[str, str]]) -> None:
+    """Replace UPGRADE_STATUS whole: a reader sees the old file or the new one."""
+    directory = os.path.dirname(UPGRADE_STATUS)
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    os.chmod(directory, 0o755)
+    tmp = os.path.join(directory, "status.new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        for key, value in lines:
+            f.write(f"{key}={_status_value(value)}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, UPGRADE_STATUS)
+
+
+def release_check(source: str) -> int:
+    """Ask the source for its version and image size; print key=value lines."""
+    latest, version_error = _fetch_version(source)
+    size = image_size(f"{source}/thinfloe-usb.img.zst")
+    errors = [e for e in (version_error,
+                          "" if size is not None else "the image size could not be read")
+              if e]
+    lines = [
+        ("latest", latest),
+        ("image_bytes", "" if size is None else size),
+        ("checked", int(time.time())),
+        ("source", source),
+        ("error", "; ".join(errors)),
+    ]
+    for key, value in lines:
+        print(f"{key}={_status_value(value)}")
+    if source == DEFAULT_URL:
+        try:
+            write_status(lines + [("installed", read_installed_version())])
+        except OSError as e:
+            print(f"thinfloe-upgrade: status not written: {e}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 def batch_main(argv: List[str]) -> int:
@@ -2483,6 +2584,9 @@ def batch_main(argv: List[str]) -> int:
 def _batch_run(args) -> int:
     ensure_root(batch=True)
 
+    if args.command == "check":
+        return release_check(args.source)
+
     if args.command == "drives":
         # A write runs: list the drives without mounting any ESP rather than
         # make the menu wait (it asks again in 2 s).
@@ -2491,7 +2595,8 @@ def _batch_run(args) -> int:
             drives = enumerate_drives(include_internal=args.all, examine=locked)
         finally:
             _release_lock()
-        size = image_size(f"{args.source}/thinfloe-usb.img.zst")
+        size = None if args.no_size else image_size(
+            f"{args.source}/thinfloe-usb.img.zst")
         print(drives_json(drives, size))
         return 0
 
@@ -2547,7 +2652,7 @@ def _lock_for_write(drive: DriveInfo, operation: str, base_url: str,
 
 def main() -> int:
     """Main entry point"""
-    if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write", "check"):
         return batch_main(sys.argv[1:])
     try:
         ensure_root()

@@ -2244,5 +2244,133 @@ class TestIdWithoutSerial(TestBatchRefusals):
         self.m_fresh.assert_called_once()
 
 
+def _run_batch(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = ui.batch_main(argv)
+    return rc, out.getvalue()
+
+
+class _ReleaseCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.status = os.path.join(self.tmp.name, "upgrade", "status")
+        self.installed = os.path.join(self.tmp.name, "version")
+        with open(self.installed, "w") as f:
+            f.write("4.0.0\n")
+        for name, value in (("UPGRADE_STATUS", self.status),
+                            ("INSTALLED_VERSION_FILE", self.installed)):
+            m = mock.patch.object(ui, name, value)
+            m.start()
+            self.addCleanup(m.stop)
+        m = mock.patch.object(ui, "ensure_root")
+        m.start()
+        self.addCleanup(m.stop)
+        self.saved_progress = ui.PROGRESS
+        self.addCleanup(setattr, ui, "PROGRESS", self.saved_progress)
+
+
+class TestDrivesNoSize(_ReleaseCase):
+    def test_no_size_sends_no_request(self):
+        drive = TestBatchRefusals.mk("/dev/sdb")
+        with mock.patch.object(ui, "image_size",
+                               side_effect=AssertionError("request sent")), \
+             mock.patch.object(ui, "enumerate_drives", return_value=[drive]):
+            rc, out = _run_batch(["drives", "--no-size"])
+        self.assertEqual(rc, 0)
+        rows = json.loads(out)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["fits"])
+
+
+class TestCheck(_ReleaseCase):
+    def run_check(self, body=b"4.1.0\n", rc_curl=0, size=3148873728, argv=None):
+        done = subprocess.CompletedProcess([], rc_curl, stdout=body, stderr=b"")
+        with mock.patch.object(ui.subprocess, "run", return_value=done), \
+             mock.patch.object(ui, "image_size", return_value=size):
+            rc, out = _run_batch(argv or ["check"])
+        return rc, dict(l.split("=", 1) for l in out.splitlines())
+
+    def test_check_reads_version_and_size(self):
+        rc, kv = self.run_check()
+        self.assertEqual(rc, 0)
+        self.assertEqual(kv["latest"], "4.1.0")
+        self.assertEqual(kv["image_bytes"], "3148873728")
+        self.assertEqual(kv["error"], "")
+        self.assertEqual(kv["source"], ui.DEFAULT_URL)
+        with open(self.status) as f:
+            lines = f.read().splitlines()
+        self.assertIn("latest=4.1.0", lines)
+        self.assertIn("image_bytes=3148873728", lines)
+        self.assertIn("installed=4.0.0", lines)
+        self.assertEqual(os.stat(self.status).st_mode & 0o777, 0o644)
+        self.assertEqual(os.stat(os.path.dirname(self.status)).st_mode & 0o777, 0o755)
+
+    def test_missing_version_file_is_unknown_not_failed(self):
+        rc, kv = self.run_check(body=b"", rc_curl=22)
+        self.assertEqual(rc, 1)
+        self.assertEqual(kv["latest"], "")
+        self.assertEqual(kv["error"], "no version file at the source")
+        self.assertTrue(os.path.exists(self.status))
+
+    def test_hostile_version_text_is_refused(self):
+        for body in (b"4.1.0; rm -rf /\n", b"\x1b[31m4\n", b"9" * 4096):
+            rc, kv = self.run_check(body=body)
+            self.assertEqual(rc, 1, body)
+            self.assertEqual(kv["latest"], "", body)
+            self.assertEqual(kv["error"], "version file not usable", body)
+
+    def test_unreadable_size_fails_but_keeps_the_version(self):
+        rc, kv = self.run_check(size=None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(kv["latest"], "4.1.0")
+        self.assertEqual(kv["image_bytes"], "")
+        self.assertNotEqual(kv["error"], "")
+
+    def test_custom_source_does_not_write_the_status(self):
+        rc, kv = self.run_check(argv=["check", "--source", "http://127.0.0.1:1/x"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(kv["source"], "http://127.0.0.1:1/x")
+        self.assertFalse(os.path.exists(self.status))
+
+    def test_bad_source_is_misuse(self):
+        rc, out = _run_batch(["check", "--source", "file:///etc/passwd"])
+        self.assertEqual(rc, 2)
+
+    def test_status_write_is_atomic(self):
+        self.run_check(body=b"4.0.5\n")
+        seen = []
+        real = os.replace
+
+        def replace(a, b):
+            with open(b) as f:
+                seen.append(f.read())
+            real(a, b)
+
+        with mock.patch.object(ui.os, "replace", side_effect=replace):
+            self.run_check(body=b"4.1.0\n")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("latest=4.0.5\n", seen[0])
+        self.assertTrue(seen[0].endswith("\n") and "error=" in seen[0])
+        self.assertFalse(os.path.exists(self.status + ".new"))
+        self.assertFalse(os.path.exists(os.path.join(
+            os.path.dirname(self.status), "status.new")))
+
+
+class TestWriteArgsFixture(unittest.TestCase):
+    def test_every_fixture_line_parses(self):
+        path = REPO / "test" / "unit" / "upgrade-write-args.tsv"
+        n = 0
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            argv = line.split("\t")
+            args = ui._batch_parser().parse_args(argv)
+            self.assertEqual(args.command, "write", line)
+            n += 1
+        self.assertGreaterEqual(n, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

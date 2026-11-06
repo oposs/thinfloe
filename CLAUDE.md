@@ -445,7 +445,7 @@ The system implements home directory persistence across reboots:
   unbootable. When the size cannot be learned (no range support, a stream
   compressed from a pipe) it warns and goes on.
 
-- `thinfloe-upgrade drives [--all] [--source URL]` and `write --device DEV
+- `thinfloe-upgrade drives [--all] [--source URL] [--no-size]` and `write --device DEV
   --mode fresh|upgrade --expect-id ID [--source URL] [--copy-home] [--verify]
   [--allow-internal]` are the question-free batch interface the menu calls
   with `sudo -n`; the interactive mode over SSH uses the same functions.
@@ -480,6 +480,13 @@ The system implements home directory persistence across reboots:
   boot server in a namespace: one write cancelled, one complete with
   `--verify`, then an upgrade of the boot disk from a stand-in release and
   a boot of the written stick.
+  `drives --no-size` sends no request and sets `fits` to null in every row.
+  `check [--source URL]` reads `<source>/version` (one line `X.Y.Z`) and the
+  size of `thinfloe-usb.img.zst`, prints `latest`, `image_bytes`, `checked`,
+  `source` and `error` as `key=value` lines and exits 0, or 1 when a request
+  failed. Without `--source` it also writes the lines, plus `installed=` from
+  `/etc/thinfloe/version`, atomically to `/run/thinfloe/upgrade/status`.
+  `test/unit/upgrade-write-args.tsv` lists the `write` calls the menu may make.
 
 This allows WiFi credentials, ThinLinc settings, and user customizations to persist.
 

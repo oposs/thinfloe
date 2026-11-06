@@ -1,0 +1,6 @@
+# Each line is a `write` call the menu may make: one argv, tab-separated.
+write	--device	/dev/sdb	--mode	fresh	--expect-id	sn-AA1:16008609792:3f2a	--verify
+write	--device	/dev/sdb	--mode	fresh	--expect-id	nosn:16008609792:3f2a	--copy-home	--verify
+write	--device	/dev/sda	--mode	upgrade	--expect-id	sn-BOOT:31914983424:9c01
+write	--device	/dev/nvme0n1	--mode	fresh	--expect-id	sn-X:512110190592:77aa	--allow-internal
+write	--device	/dev/sdc	--mode	upgrade	--expect-id	sn-C:8004304896:0011	--source	https://example.org/rel
