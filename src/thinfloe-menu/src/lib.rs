@@ -14,9 +14,11 @@ pub mod log;
 pub mod menu;
 pub mod outputs;
 pub mod raster;
+pub mod release;
 pub mod settings;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;
 pub mod ui;
+pub mod upgrade_proto;
 pub mod windows;
