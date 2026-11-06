@@ -21,6 +21,7 @@
 - The menu and the window title bars now follow a change of screen resolution on a monitor even when the menu window keeps its size.
 - When the title bars cannot be scaled, the system tries the same scale again up to three times, five seconds apart, before it waits for a change.
 - The menu header reads "by oetiker.ai" under the name and sits further from the screen edges.
+- The image now carries the licences of every font built into the menu: `Inter-OFL.txt` and, for the plain, monospace and emoji fonts, the files in `egui/`, both in `/usr/share/thinfloe/fonts/`. The Oxanium font and its licence are gone.
 - The Terminal tile's font and margin, and the window title bars, follow the same screen density as the menu.
 - The first boot of a stick larger than its image enlarges the boot partition to the end of the stick, at most 6 GiB, so there is room for later upgrades, add-ons and the saved home. The boot screen shows "Enlarging the boot stick, once: NN % - do not switch off" while it works. Sticks already in use with 2000 MB are enlarged the same way.
 - New images format the boot partition with 4 KiB clusters instead of 512-byte ones, so "Enlarging the boot stick, once" at the first boot and the check of the boot partition at every boot have an eighth of the clusters to handle. Sticks already in use keep their clusters.

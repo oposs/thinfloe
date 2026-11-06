@@ -149,7 +149,15 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   copies it into the initrd, guarded by
   `test/integration/test-initramfs-commands.sh`, so moving the font path breaks
   the boot screen too. Licence at `/usr/share/thinfloe/fonts/Geo-OFL.txt`. Geo
-  draws names and titles, small text a plain sans, the log monospace. Glyphs Geo
+  draws names and titles, small text a plain sans, the log monospace.
+  The menu's widgets are shadcn-egui from crates.io, `lyra` style (square in
+  every component; owner, 2026-11-06), built once in `brand::theme()`; UI code
+  takes colours from the theme and sizes from named constants in `brand.rs`,
+  and `ui_code_has_no_style_literals` fails on a literal. The plain sans is
+  egui's Ubuntu Light, set as the theme's body font. Inter is linked anyway
+  (shadcn-egui always links it), so its licence ships as
+  `/usr/share/thinfloe/fonts/Inter-OFL.txt`, and egui's built-in fonts'
+  licences in `/usr/share/thinfloe/fonts/egui/`. Glyphs Geo
   lacks fall back: umlauts and emoji do, but CJK has no font in the image yet
   and draws as boxes (egui's default fonts carry no CJK). The Plymouth theme is
   `overlay/usr/share/plymouth/themes/thinfloe/`, a `script` theme
