@@ -88,7 +88,11 @@ for i in hard-drive-download usb log-out rotate-ccw power settings; do
     present "Lucide icon $i" "usr/share/thinfloe/icons/$i\.svg$"
 done
 present "Lucide licence"      'usr/share/thinfloe/icons/LICENSE$'
-present "Oxanium licence"     'usr/share/thinfloe/fonts/Oxanium-OFL\.txt$'
+absent  "Oxanium licence"     'usr/share/thinfloe/fonts/Oxanium-OFL\.txt$'
+present "Inter licence"       'usr/share/thinfloe/fonts/Inter-OFL\.txt$'
+for f in UFL Hack-Regular OFL emoji-icon-font-mit-license egui-icons; do
+    present "egui font licence $f" "usr/share/thinfloe/fonts/egui/$f\\.txt$"
+done
 
 absent  "Xorg server"      'usr/lib/xorg/Xorg$'
 absent  "nodm"             'usr/sbin/nodm$'

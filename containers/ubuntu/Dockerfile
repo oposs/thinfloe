@@ -41,7 +41,7 @@ RUN set -eu; \
 # docs/superpowers/specs/2026-10-01-tile-menu-design.md.
 #
 # The toolchain comes from rustup, pinned by the crate's rust-toolchain.toml:
-# egui 0.36 needs Rust 1.95 and Ubuntu 26.04's archive rustc is 1.93.
+# egui 0.37 needs Rust 1.95 and Ubuntu 26.04's archive rustc is 1.93.
 # Cargo.lock is committed and --locked makes a drifted lock fail the build
 # instead of silently resolving something untested.
 FROM ubuntu:26.04 AS menu-build
@@ -57,7 +57,13 @@ RUN set -eu; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     install -D -m 0644 -t /out/usr/share/thinfloe/icons icons/*.svg icons/LICENSE; \
-    install -D -m 0644 egui_shadcn/assets/Oxanium-OFL.txt /out/usr/share/thinfloe/fonts/Oxanium-OFL.txt; \
+    # Fonts linked into the menu, whose licences ask to travel with them:
+    # egui's built-in set (Ubuntu Light, Hack, Noto Emoji, the emoji and
+    # egui icon fonts) and Inter, the font shadcn-egui always links.
+    one() { set -- $1; test $# = 1 && test -d "$1" || { echo "want one dir, got: $*" >&2; exit 1; }; echo "$1"; }; \
+    egui_fonts=$(one "$CARGO_HOME/registry/src/*/epaint_default_fonts-*")/fonts; \
+    install -D -m 0644 -t /out/usr/share/thinfloe/fonts/egui "$egui_fonts"/*.txt; \
+    install -D -m 0644 "$(one "$CARGO_HOME/registry/src/*/shadcn-egui-font-inter-*")/LICENSE-FONT.txt" /out/usr/share/thinfloe/fonts/Inter-OFL.txt; \
     install -D -m 0644 assets/Geo-Oblique.ttf /out/usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf; \
     install -D -m 0644 assets/Geo-OFL.txt /out/usr/share/thinfloe/fonts/Geo-OFL.txt
 

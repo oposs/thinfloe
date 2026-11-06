@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use egui::{Color32, ColorImage, Context, FontData, FontDefinitions, FontFamily, FontId};
 use resvg::tiny_skia::{Pixmap, Transform};
+use shadcn_egui::style::Radius;
+use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 use resvg::usvg;
 
 /// Ice blue, the accent.
@@ -28,34 +30,46 @@ pub fn geo(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(GEO.into()))
 }
 
-pub fn theme() -> egui_shadcn::Theme {
-    let mut t = egui_shadcn::Theme::dark();
-    t.palette.background = BG;
-    t.palette.card = TILE;
-    t.palette.accent = TILE_HOVER;
+/// egui's own plain sans as the theme's body font, in every weight: the menu
+/// keeps the small text it has always had (owner, 2026-11-05).
+pub static UBUNTU_LIGHT: FontFiles = FontFiles {
+    name: "ubuntu-light",
+    kind: FontKind::Sans,
+    source: FontSource::Static {
+        regular: epaint_default_fonts::UBUNTU_LIGHT,
+        medium: None,
+        semibold: None,
+        bold: None,
+    },
+    y_offset_factor: 0.0,
+    license: include_str!("../assets/Ubuntu-UFL.txt"),
+};
+
+pub fn theme() -> shadcn_egui::Theme {
+    let mut p = Palette::dark();
+    p.background = BG;
+    p.card = TILE;
+    p.accent = TILE_HOVER;
     // The primary button is ice blue with dark text, as in the mockups.
-    t.palette.primary = ICE;
-    t.palette.primary_foreground = Color32::from_rgb(0x04, 0x12, 0x1f);
-    t.palette.ring = ICE;
-    t.palette.border = LINE;
-    t.palette.muted_foreground = MUTED;
-    // Square corners everywhere, as in the mockups.
-    t.radius = 0.0;
-    t
+    p.primary = ICE;
+    p.primary_foreground = Color32::from_rgb(0x04, 0x12, 0x1f);
+    p.ring = ICE;
+    p.border = LINE;
+    p.muted_foreground = MUTED;
+    // One look in both modes, so a light system changes nothing; square
+    // corners everywhere, as in the mockups.
+    let mut style = Style::vega();
+    // vega's tick box is `rounded-[4px]`, not a step of the theme radius.
+    style.checkbox.radius.set(Radius::Px(0.0));
+    shadcn_egui::Theme::new(style, p, p, 0.0).fonts(&UBUNTU_LIGHT, None)
 }
 
-/// Apply the theme and install the fonts. Safe to call every frame: the
-/// font atlas is built once per context.
+/// Apply the theme and install the fonts. Once per context: the context
+/// outlives a replaced window, and a per-frame apply would undo style
+/// writes.
 pub fn apply(ctx: &Context) {
-    // egui_shadcn installs its own fonts on its first call; ours are set
-    // after that, so they replace them.
-    theme().apply(ctx);
-    let id = egui::Id::new("thinfloe::brand_fonts_installed");
-    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-        return;
-    }
-    ctx.set_fonts(fonts());
-    ctx.data_mut(|d| d.insert_temp(id, true));
+    theme().apply_with_fonts(ctx, fonts());
+    ctx.set_theme(egui::Theme::Dark);
 }
 
 /// Geo, unhinted. Its strokes are about 1.5 px at tile size, and egui's
@@ -78,10 +92,6 @@ fn fonts() -> FontDefinitions {
     let mut geo = vec![GEO_FONT.to_string()];
     geo.extend(sans.iter().cloned());
     fonts.families.insert(FontFamily::Name(GEO.into()), geo);
-    // egui_shadcn's Heading style names these two; keep them off Oxanium.
-    for name in [egui_shadcn::theme::FAMILY_MEDIUM, egui_shadcn::theme::FAMILY_SEMIBOLD] {
-        fonts.families.insert(FontFamily::Name(name.into()), sans.clone());
-    }
     fonts
 }
 
@@ -120,7 +130,68 @@ mod tests {
         assert_eq!(TILE, Color32::from_rgb(0x0d, 0x12, 0x18));
         assert_eq!(TILE_ACTIVE, Color32::from_rgb(0x10, 0x1b, 0x26));
         let t = theme();
-        assert_eq!((t.palette.background, t.palette.card, t.palette.ring), (BG, TILE, ICE));
+        for mode in [egui::Theme::Dark, egui::Theme::Light] {
+            let p = t.palette_of(mode);
+            assert_eq!((p.background, p.card, p.ring, p.primary), (BG, TILE, ICE, ICE));
+            assert_eq!((p.accent, p.border, p.muted_foreground), (TILE_HOVER, LINE, MUTED));
+        }
+        assert_eq!(t.radius, 0.0);
+    }
+
+    /// Runs `n` empty passes: fonts land one pass after `apply`.
+    fn settle(ctx: &Context, input: &egui::RawInput, n: usize) {
+        for _ in 0..n {
+            ctx.run_ui(input.clone(), |_| {}).textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn geo_and_the_body_font_survive_the_theme() {
+        let ctx = Context::default();
+        apply(&ctx);
+        settle(&ctx, &Default::default(), 3);
+        ctx.fonts(|f| {
+            let d = f.definitions();
+            let geo = &d.families[&FontFamily::Name(GEO.into())];
+            assert_eq!(geo[0], "Geo-Oblique");
+            // No theme face (Inter's fallback or a body face) sits in Geo's list.
+            assert!(!geo.iter().any(|n| n.starts_with("shadcn-") || n.contains("oxanium")), "{geo:?}");
+            let first = |fam: &FontFamily| (*d.font_data[&d.families[fam][0]].font).as_ref().to_vec();
+            let ubuntu = epaint_default_fonts::UBUNTU_LIGHT;
+            assert!(first(&FontFamily::Proportional) == ubuntu, "body is Ubuntu Light");
+            let heading = FontFamily::Name(shadcn_egui::theme::FAMILY_HEADING.into());
+            if d.families.contains_key(&heading) {
+                assert!(first(&heading) == ubuntu, "headings are Ubuntu Light");
+            }
+            let semibold = FontFamily::Name(shadcn_egui::theme::FAMILY_SEMIBOLD.into());
+            assert!(first(&semibold) == ubuntu, "semibold is Ubuntu Light");
+        });
+    }
+
+    #[test]
+    fn a_light_system_keeps_the_dark_look() {
+        let ctx = Context::default();
+        apply(&ctx);
+        let input = egui::RawInput {
+            system_theme: Some(egui::Theme::Light),
+            ..Default::default()
+        };
+        settle(&ctx, &input, 2);
+        assert_eq!(shadcn_egui::Theme::current(&ctx).palette().background, BG);
+        assert_eq!(ctx.global_style().visuals.panel_fill, BG);
+    }
+
+    #[test]
+    fn the_theme_outlives_a_new_window_pass() {
+        let ctx = Context::default();
+        apply(&ctx);
+        let at = |w, h| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            ..Default::default()
+        };
+        settle(&ctx, &at(1920.0, 1080.0), 1);
+        settle(&ctx, &at(3840.0, 2160.0), 1);
+        assert_eq!(shadcn_egui::Theme::current(&ctx).palette().background, BG);
     }
 
     #[test]
@@ -145,7 +216,10 @@ mod tests {
                 .clone();
             assert_eq!(fam[0], "Geo-Oblique");
             assert!(fam.len() >= 2, "Geo needs a fallback: {fam:?}");
-            assert!(!fam.iter().any(|n| n.contains("oxanium")), "Oxanium is gone: {fam:?}");
+            assert!(
+                !fam.iter().any(|n| n.contains("oxanium") || n.starts_with("shadcn-")),
+                "no theme font in Geo: {fam:?}"
+            );
         });
         ctx.fonts_mut(|f| {
             assert!(f.has_glyphs(&geo(20.0), "Über Straße"), "fallback must cover umlauts");

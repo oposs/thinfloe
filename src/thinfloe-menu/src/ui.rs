@@ -15,8 +15,8 @@ use egui::{
     Align2, Color32, ColorImage, FontId, Rect, Sense, Stroke, StrokeKind, TextFormat, TextureHandle, Ui, UiBuilder,
     Vec2, pos2, vec2,
 };
-use egui_shadcn::Theme;
-use egui_shadcn::components::button::{Button, ButtonVariant};
+use shadcn_egui::Theme;
+use shadcn_egui::components::button::{Button, ButtonVariant};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -154,7 +154,7 @@ pub fn render_icons(
     roots: &IconRoots,
     side: u32,
 ) -> Vec<Option<(PathBuf, Result<ColorImage, String>)>> {
-    let fg = crate::brand::theme().palette.foreground;
+    let fg = crate::brand::theme().palette().foreground;
     let rgb = [fg.r(), fg.g(), fg.b()];
     let (index, jobs): (Vec<usize>, Vec<IconJob>) = tiles
         .iter()
@@ -303,7 +303,7 @@ pub struct Chrome {
 /// Logo, name, host, version and clock along the top of `rect`.
 fn show_header(ui: &mut Ui, chrome: &Chrome, rect: Rect) {
     let p = ui.painter();
-    let fg = brand::theme().palette.foreground;
+    let fg = brand::theme().palette().foreground;
     // The mark and the name sit back at 60 %.
     let dim = |c: Color32| c.gamma_multiply(0.6);
     let top = rect.top() + HEADER_PAD_TOP;
@@ -375,21 +375,21 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             };
             dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
-                    ui.label(egui::RichText::new(&job.name).color(t.palette.foreground));
+                    ui.label(egui::RichText::new(&job.name).color(t.palette().foreground));
                 }
                 for job in &addon_jobs {
-                    ui.label(egui::RichText::new(job).color(t.palette.foreground));
+                    ui.label(egui::RichText::new(job).color(t.palette().foreground));
                 }
                 if !menu.jobs.is_empty() {
                     ui.label(
                         egui::RichText::new("They are stopped before the home directory is saved.")
-                            .color(t.palette.muted_foreground),
+                            .color(t.palette().muted_foreground),
                     );
                 }
                 if !addon_jobs.is_empty() {
                     ui.label(
                         egui::RichText::new(format!("The add-on work is finished before you {verb}."))
-                            .color(t.palette.muted_foreground),
+                            .color(t.palette().muted_foreground),
                     );
                 }
                 ui.add_space(8.0);
@@ -413,7 +413,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             let mut chose = None;
             dialog(ui, &format!("Waiting for the add-ons before {verbing}"), |ui, t| {
                 for job in menu.addon_jobs() {
-                    ui.label(egui::RichText::new(job).color(t.palette.muted_foreground));
+                    ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -439,7 +439,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::StoppingAddons { go_at }) => {
             dialog(ui, "Stopping the add-on work", |ui, t| {
                 for job in menu.addon_jobs() {
-                    ui.label(egui::RichText::new(job).color(t.palette.muted_foreground));
+                    ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
             });
             // Wake for the deadline; the jobs ending arrive as events.
@@ -450,7 +450,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::Stopping { kill_at, killed }) => {
             dialog(ui, "Stopping programs", |ui, t| {
                 for job in &menu.jobs {
-                    ui.label(egui::RichText::new(&job.name).color(t.palette.muted_foreground));
+                    ui.label(egui::RichText::new(&job.name).color(t.palette().muted_foreground));
                 }
             });
             // Wake for the SIGKILL deadline without any input. After it,
@@ -465,7 +465,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::WaitSave) => {
             dialog(ui, &format!("Saving your home directory before {verbing}"), |ui, t| {
                 ui.label(
-                    egui::RichText::new("Waiting for the backup that is running.").color(t.palette.muted_foreground),
+                    egui::RichText::new("Waiting for the backup that is running.").color(t.palette().muted_foreground),
                 );
             });
             return None;
@@ -476,11 +476,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     egui::RichText::new(elapsed(now.duration_since(*since)))
                         .size(28.0)
                         .monospace()
-                        .color(t.palette.ring),
+                        .color(t.palette().ring),
                 );
                 ui.label(
                     egui::RichText::new("On a network-booted machine this can take a minute.")
-                        .color(t.palette.muted_foreground),
+                        .color(t.palette().muted_foreground),
                 );
             });
             ui.ctx().request_repaint_after(Duration::from_secs(1));
@@ -488,7 +488,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::Leaving { until }) => {
             dialog(ui, "Home directory saved", |ui, t| {
-                ui.label(egui::RichText::new(format!("{}.", capitalized(verbing))).color(t.palette.muted_foreground));
+                ui.label(egui::RichText::new(format!("{}.", capitalized(verbing))).color(t.palette().muted_foreground));
             });
             ui.ctx().request_repaint_after(until.saturating_duration_since(now));
             return None;
@@ -499,7 +499,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                 ui.label(egui::RichText::new(message).color(WARN));
                 ui.label(
                     egui::RichText::new(format!("If you {verb} now, the changes since the last save are lost."))
-                        .color(t.palette.muted_foreground),
+                        .color(t.palette().muted_foreground),
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -526,7 +526,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         };
         dialog(ui, "Add-on not installed", |ui, t| {
             ui.label(egui::RichText::new(text).color(WARN));
-            ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette.muted_foreground));
+            ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette().muted_foreground));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.add(Button::new("Retry")).clicked() {
@@ -620,7 +620,7 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                     let mut job = LayoutJob::simple_singleline(
                         title.clone(),
                         FontId::proportional(CHIP_FONT),
-                        t.palette.foreground,
+                        t.palette().foreground,
                     );
                     job.wrap = TextWrapping::truncate_at_width(text_max);
                     let galley = ui.painter().layout_job(job);
@@ -639,7 +639,7 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                         p.rect_stroke(
                             rect.expand(2.0),
                             0.0,
-                            Stroke::new(3.0, t.palette.ring),
+                            Stroke::new(3.0, t.palette().ring),
                             StrokeKind::Outside,
                         );
                     }
@@ -654,7 +654,7 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                     match tex {
                         Some(icon) => draw_icon(p, &icon.chip, icon_rect.min, Color32::WHITE),
                         None => {
-                            p.rect_filled(icon_rect, t.radius_sm(), t.palette.muted);
+                            p.rect_filled(icon_rect, t.radius_sm(), t.palette().muted);
                             let letter: String = title
                                 .chars()
                                 .next()
@@ -665,13 +665,13 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                                 Align2::CENTER_CENTER,
                                 letter,
                                 brand::geo(CHIP_ICON * 0.6),
-                                t.palette.foreground,
+                                t.palette().foreground,
                             );
                         }
                     }
                     let y = rect.center().y - galley.size().y / 2.0;
                     ui.painter_at(rect)
-                        .galley(pos2(icon_rect.right() + 10.0, y), galley, t.palette.foreground);
+                        .galley(pos2(icon_rect.right() + 10.0, y), galley, t.palette().foreground);
                     if resp.clicked() {
                         clicked = Some(f.id);
                     }
@@ -701,12 +701,12 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
         ui.label(
             egui::RichText::new("Add-ons")
                 .font(brand::geo(28.0))
-                .color(t.palette.foreground),
+                .color(t.palette().foreground),
         );
         ui.add_space(12.0);
         // SAFETY: time(NULL) has no preconditions.
         let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
-        ui.label(egui::RichText::new(settings::last_checked(menu.last_check, now)).color(t.palette.muted_foreground));
+        ui.label(egui::RichText::new(settings::last_checked(menu.last_check, now)).color(t.palette().muted_foreground));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(Button::new("Back").variant(ButtonVariant::Secondary)).clicked() {
                 event = Some(SettingsEvent::Back);
@@ -729,7 +729,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
         .show(&mut s_ui, |ui| {
             let rows = settings::rows(menu);
             if rows.is_empty() {
-                ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette.muted_foreground));
+                ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette().muted_foreground));
             }
             ui.spacing_mut().item_spacing.y = TILE_GAP;
             let row_inner = ui.available_width().min(width) - ROW_MARGIN_X;
@@ -767,7 +767,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
     ui.horizontal(|ui| {
         let mut ticked = row.ticked;
         let tick = ui.add_enabled_ui(!row.busy && !row.unusable, |ui| {
-            egui_shadcn::components::checkbox::checkbox(ui, &mut ticked)
+            shadcn_egui::components::checkbox::checkbox(ui, &mut ticked)
         });
         if tick.inner.changed() {
             event = Some(SettingsEvent::Tick {
@@ -791,7 +791,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                     Align2::CENTER_CENTER,
                     letter,
                     brand::geo(ROW_ICON * 0.5),
-                    t.palette.foreground,
+                    t.palette().foreground,
                 );
             }
         }
@@ -841,7 +841,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                                         egui::Label::new(
                                             egui::RichText::new(&row.name)
                                                 .font(brand::geo(20.0))
-                                                .color(t.palette.foreground),
+                                                .color(t.palette().foreground),
                                         )
                                         .truncate(),
                                     );
@@ -862,7 +862,7 @@ fn settings_row(ui: &mut Ui, row: &settings::Row, icon: Option<&Icon>, t: &Theme
                                 job.append(" · ", 0.0, egui::TextFormat::simple(font.clone(), MUTED));
                             }
                             let color = match tone {
-                                settings::Tone::Plain => t.palette.foreground,
+                                settings::Tone::Plain => t.palette().foreground,
                                 settings::Tone::Good => GOOD,
                                 settings::Tone::Ice => ICE,
                                 settings::Tone::Warn => WARN,
@@ -885,8 +885,8 @@ fn show_log(ui: &mut Ui, log: &Log, rect: Rect) {
     let t = Theme::current(ui.ctx());
     let mut log_ui = ui.new_child(UiBuilder::new().max_rect(rect));
     egui::Frame::new()
-        .fill(t.palette.card)
-        .stroke(Stroke::new(1.0, t.palette.border))
+        .fill(t.palette().card)
+        .stroke(Stroke::new(1.0, t.palette().border))
         .corner_radius(t.radius_md())
         .inner_margin(LOG_PAD)
         .show(&mut log_ui, |ui| {
@@ -906,7 +906,7 @@ fn show_log(ui: &mut Ui, log: &Log, rect: Rect) {
                         let galley = ui.painter().layout_job(job);
                         let y = row.center().y - galley.size().y / 2.0;
                         ui.painter_at(row)
-                            .galley(pos2(row.left(), y), galley, t.palette.foreground);
+                            .galley(pos2(row.left(), y), galley, t.palette().foreground);
                     }
                 });
         });
@@ -961,7 +961,7 @@ fn run_color(run: &Run, line_color: Color32, t: &Theme) -> Color32 {
     match (run.fg, run.bold) {
         (Some(Ansi::Basic(n)), true) if n < 8 => ansi_color(Ansi::Basic(n + 8)),
         (Some(a), _) => ansi_color(a),
-        (None, true) => t.palette.foreground,
+        (None, true) => t.palette().foreground,
         (None, false) => line_color,
     }
 }
@@ -970,8 +970,8 @@ fn run_color(run: &Run, line_color: Color32, t: &Theme) -> Color32 {
 fn log_job(line: &Line, t: &Theme) -> LayoutJob {
     let font = FontId::monospace(LOG_FONT);
     let text_color = match line.kind {
-        Kind::Event => t.palette.foreground,
-        Kind::Output => t.palette.muted_foreground,
+        Kind::Event => t.palette().foreground,
+        Kind::Output => t.palette().muted_foreground,
         Kind::Warn => WARN,
         Kind::Good => GOOD,
     };
@@ -1028,7 +1028,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         p.rect_stroke(
             rect.expand(2.0),
             0.0,
-            Stroke::new(3.0, t.palette.ring),
+            Stroke::new(3.0, t.palette().ring),
             StrokeKind::Outside,
         );
     }
@@ -1043,7 +1043,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
     match icon {
         Some(icon) => draw_icon(p, &icon.tile, icon_rect.min, fade(Color32::WHITE)),
         None => {
-            p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette.muted));
+            p.rect_filled(icon_rect, t.radius_sm(), fade(t.palette().muted));
             let letter: String = tile
                 .name
                 .chars()
@@ -1055,7 +1055,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
                 Align2::CENTER_CENTER,
                 letter,
                 brand::geo(ICON_BOX * 0.5),
-                fade(t.palette.foreground),
+                fade(t.palette().foreground),
             );
         }
     }
@@ -1071,7 +1071,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
         job.wrap = TextWrapping::truncate_at_width(text_w);
         lines.push(clipped.layout_job(job));
     };
-    line(&tile.name, brand::geo(21.0), fade(t.palette.foreground));
+    line(&tile.name, brand::geo(21.0), fade(t.palette().foreground));
     // One second line: why the tile is grey, else its comment, else the
     // note about its file. `--check` has the long form.
     if let Some(why) = &tile.problem {
@@ -1124,7 +1124,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, state: Tile
 /// A centred card over the frozen grid.
 fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
     let t = Theme::current(ui.ctx());
-    egui::Area::new(egui::Id::new("dialog"))
+    egui::Area::new(egui::Id::unique("dialog"))
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
@@ -2079,6 +2079,7 @@ mod tests {
             delta: vec2(0.0, -4000.0),
             phase: egui::TouchPhase::Move,
             modifiers: Default::default(),
+            source: egui::MouseWheelSource::Wheel,
         };
         for _ in 0..12 {
             strip_frame(&ctx, &menu, size, vec![egui::Event::PointerMoved(over), wheel.clone()]);
@@ -2207,7 +2208,7 @@ mod tests {
     fn button_face(shapes: &[egui::epaint::ClippedShape], label: Rect, update: bool) -> Rect {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
-        let p = Theme::current(&ctx).palette;
+        let p = *Theme::current(&ctx).palette();
         let fill = if update { p.primary } else { p.secondary };
         shapes
             .iter()

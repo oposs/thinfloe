@@ -118,6 +118,8 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         .map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let ctx = egui::Context::default();
+    // Once per context, before the style writes below, which it would undo.
+    crate::brand::apply(&ctx);
     // Feathering assumes coverage blending, which an integer rasteriser does
     // not do: it shows up as fringes on rounded corners.
     ctx.options_mut(|o| o.tessellation_options.feathering = false);
@@ -437,7 +439,6 @@ impl App {
             self.apply_scale(false);
         }
         let Some(live) = self.live.as_mut() else { return };
-        crate::brand::apply(&self.ctx);
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
@@ -458,7 +459,7 @@ impl App {
             if saving {
                 live.canvas.freeze_dimmed(DIM_KEEP);
             } else {
-                let bg = crate::brand::theme().palette.background;
+                let bg = crate::brand::theme().palette().background;
                 live.canvas.background = Background::Solid(bg);
             }
             self.frozen = saving;
@@ -644,7 +645,7 @@ impl ApplicationHandler<Wake> for App {
             clock: String::new(),
             logo: None,
         };
-        let bg = crate::brand::theme().palette.background;
+        let bg = crate::brand::theme().palette().background;
         self.live = Some(Live {
             window: window.clone(),
             surface,
@@ -730,7 +731,7 @@ impl ApplicationHandler<Wake> for App {
                     if let Err(e) = live.surface.resize(w, h) {
                         eprintln!("thinfloe-menu: resize failed: {e}");
                     }
-                    let bg = crate::brand::theme().palette.background;
+                    let bg = crate::brand::theme().palette().background;
                     live.canvas = Canvas::new(size.width as usize, size.height as usize, bg);
                     self.frozen = false;
                     live.tracker.reset();
