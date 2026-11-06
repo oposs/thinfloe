@@ -63,7 +63,8 @@ RUN set -eu; \
     one() { set -- $1; test $# = 1 && test -d "$1" || { echo "want one dir, got: $*" >&2; exit 1; }; echo "$1"; }; \
     egui_fonts=$(one "$CARGO_HOME/registry/src/*/epaint_default_fonts-*")/fonts; \
     install -D -m 0644 -t /out/usr/share/thinfloe/fonts/egui "$egui_fonts"/*.txt; \
-    install -D -m 0644 "$(one "$CARGO_HOME/registry/src/*/shadcn-egui-font-inter-*")/LICENSE-FONT.txt" /out/usr/share/thinfloe/fonts/Inter-OFL.txt; \
+    inter_font=$(one "$CARGO_HOME/registry/src/*/shadcn-egui-font-inter-*"); \
+    install -D -m 0644 "$inter_font"/LICENSE-FONT.txt /out/usr/share/thinfloe/fonts/Inter-OFL.txt; \
     install -D -m 0644 assets/Geo-Oblique.ttf /out/usr/share/fonts/truetype/thinfloe/Geo-Oblique.ttf; \
     install -D -m 0644 assets/Geo-OFL.txt /out/usr/share/thinfloe/fonts/Geo-OFL.txt
 

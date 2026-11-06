@@ -152,10 +152,13 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   draws names and titles, small text a plain sans, the log monospace.
   The menu's widgets are shadcn-egui from crates.io, `lyra` style (square in
   every component; owner, 2026-11-06), built once in `brand::theme()`; UI code
-  takes colours from the theme and sizes from named constants in `brand.rs`,
-  and `ui_code_has_no_style_literals` fails on a literal. The plain sans is
-  egui's Ubuntu Light, set as the theme's body font. Inter is linked anyway
-  (shadcn-egui always links it), so its licence ships as
+  takes colours from the theme and text sizes from named constants in
+  `brand.rs` (layout distances are still written in place), and
+  `ui_code_has_no_style_literals` fails on a colour or text-size literal.
+  The plain sans is egui's Ubuntu Light, set as the theme's body font. Inter
+  is linked anyway (shadcn-egui always links it) and sits between Ubuntu
+  Light and egui's other fonts, so a glyph Ubuntu Light lacks draws in Inter.
+  Its licence ships as
   `/usr/share/thinfloe/fonts/Inter-OFL.txt`, and egui's built-in fonts'
   licences in `/usr/share/thinfloe/fonts/egui/`. Glyphs Geo
   lacks fall back: umlauts and emoji do, but CJK has no font in the image yet

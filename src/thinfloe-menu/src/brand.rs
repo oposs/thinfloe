@@ -137,9 +137,9 @@ pub fn theme() -> shadcn_egui::Theme {
     p.ring = ICE;
     p.border = LINE;
     p.muted_foreground = MUTED;
-    // One look in both modes, so a light system changes nothing. lyra is
-    // square in every component, as in the mockups (owner, 2026-11-06);
-    // vega rounds its tick box with a fixed 4 px the theme radius misses.
+    // One look in both modes, so a light system changes nothing. lyra
+    // because it is square in every component, as in the mockups (owner,
+    // 2026-11-06); radius 0 alone would not do that for every style.
     shadcn_egui::Theme::new(Style::lyra(), p, p, 0.0)
         .fonts(&UBUNTU_LIGHT, None)
         .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
@@ -210,14 +210,16 @@ mod tests {
     /// A colour or size written into UI code instead of taken from the
     /// theme or a named constant (the build-ui skill's grep, plus `geo(`).
     fn style_literal(line: &str) -> bool {
-        const PLAIN: [&str; 5] = [
-            "Color32::from_",
-            "Color32::WHITE",
-            "Color32::BLACK",
-            "from_black_alpha",
-            "from_white_alpha",
-        ];
+        const PLAIN: [&str; 3] = ["Color32::from_", "from_black_alpha", "from_white_alpha"];
         if PLAIN.iter().any(|p| line.contains(p)) {
+            return true;
+        }
+        // A named colour (`Color32::GRAY`); TRANSPARENT is no colour.
+        let named = line.match_indices("Color32::").any(|(i, p)| {
+            let rest = &line[i + p.len()..];
+            rest.starts_with(|c: char| c.is_ascii_uppercase()) && !rest.starts_with("TRANSPARENT")
+        });
+        if named {
             return true;
         }
         let digit_after = |at: usize| line[at..].starts_with(|c: char| c.is_ascii_digit());
@@ -264,17 +266,43 @@ mod tests {
             ("settings.rs", include_str!("settings.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
-            let mut prev = "";
-            let mut hits = Vec::new();
-            for (n, line) in code.lines().enumerate() {
-                let ok = prev.trim_start().starts_with("// token-ok:");
-                if !ok && style_literal(line) {
-                    hits.push(format!("{name}:{}: {}", n + 1, line.trim()));
-                }
-                prev = line;
-            }
+            let hits = style_literal_lines(name, code);
             assert!(hits.is_empty(), "style literals:\n{}", hits.join("\n"));
         }
+    }
+
+    /// The lines of `code` that hold a style literal, except one under a
+    /// `// token-ok:` comment. A call rustfmt broke after its `(` is
+    /// joined with the next line, so `.size(\n 28.0)` counts too.
+    fn style_literal_lines(name: &str, code: &str) -> Vec<String> {
+        let lines: Vec<&str> = code.lines().collect();
+        let ok_under = |i: usize| i > 0 && lines[i - 1].trim_start().starts_with("// token-ok:");
+        let mut hits = Vec::new();
+        for (n, line) in lines.iter().enumerate() {
+            let joined = n > 0 && lines[n - 1].trim_end().ends_with('(');
+            let text = if joined {
+                format!("{}{}", lines[n - 1].trim(), line.trim_start())
+            } else {
+                line.to_string()
+            };
+            let ok = ok_under(n) || (joined && ok_under(n - 1));
+            if !ok && style_literal(&text) {
+                hits.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn the_literal_scan_sees_named_colours_and_broken_calls() {
+        for bad in ["Color32::GRAY", "Color32::RED", "Color32::LIGHT_GRAY"] {
+            assert!(style_literal(bad), "{bad}");
+        }
+        assert!(!style_literal("Color32::TRANSPARENT"));
+        assert_eq!(style_literal_lines("x", "a.size(\n    28.0,\n)").len(), 1);
+        assert_eq!(style_literal_lines("x", "FontId::new(\n    11.0,\n    f)").len(), 1);
+        assert!(style_literal_lines("x", "// token-ok: why\na.size(\n    28.0,\n)").is_empty());
+        assert!(style_literal_lines("x", "a.size(\n    NAME_PT,\n)").is_empty());
     }
 
     #[test]
@@ -325,6 +353,27 @@ mod tests {
             let semibold = FontFamily::Name(shadcn_egui::theme::FAMILY_SEMIBOLD.into());
             assert!(first(&semibold) == ubuntu, "semibold is Ubuntu Light");
         });
+    }
+
+    /// The fonts a pass draws with are the ones in force inside it; the
+    /// first pass after `apply` must already have Geo and Ubuntu Light.
+    #[test]
+    fn the_first_pass_draws_in_the_theme_fonts() {
+        let ctx = Context::default();
+        apply(&ctx);
+        let mut seen = None;
+        ctx.run_ui(Default::default(), |ui| {
+            seen = Some(ui.ctx().fonts(|f| {
+                let d = f.definitions();
+                let geo = d.families[&FontFamily::Name(GEO.into())][0].clone();
+                let body = &d.families[&FontFamily::Proportional][0];
+                let ubuntu = (*d.font_data[body].font).as_ref() == epaint_default_fonts::UBUNTU_LIGHT;
+                (geo, ubuntu)
+            }));
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(seen, Some(("Geo-Oblique".to_string(), true)));
     }
 
     #[test]
