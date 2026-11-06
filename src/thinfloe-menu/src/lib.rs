@@ -6,6 +6,7 @@ pub mod bounded;
 pub mod brand;
 pub mod damage;
 pub mod density;
+pub mod drives;
 pub mod desktop;
 pub mod header;
 pub mod icons;

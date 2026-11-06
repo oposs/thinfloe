@@ -17,6 +17,7 @@ libc = "0.2.190"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-zoneinfo"] }
+serde_json = "1"
 
 [profile.dev]
 debug = "line-tables-only"
