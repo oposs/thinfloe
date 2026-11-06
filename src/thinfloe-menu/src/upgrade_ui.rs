@@ -91,12 +91,46 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
             }
         });
     });
+    let block_w = width - 2.0 * f32::from(BLOCK_PAD);
+    // The footer is fixed at the bottom of the panel, so the main buttons
+    // never scroll away; the page scrolls in what is left above it. Its
+    // height is the previous pass's, and a change discards the pass, so the
+    // frame is drawn again at once with the right height.
+    let h_id = egui::Id::unique("thinfloe-upgrade-footer-h");
+    let prev_h: f32 = ui.ctx().data(|d| d.get_temp(h_id)).unwrap_or(0.0);
+    let mut f_ui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
+        egui::pos2(panel.left(), panel.bottom() - prev_h),
+        panel.max,
+    )));
+    let footer = match &u.stage {
+        Stage::Choose => choose_footer(&mut f_ui, u, &t, block_w),
+        Stage::Running => running_footer(&mut f_ui, u, &t, block_w),
+        Stage::Finished(o) => finished_footer(&mut f_ui, o, &t, block_w),
+    };
+    let h = f_ui.min_rect().height().max(0.0);
+    if (h - prev_h).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(h_id, h));
+        ui.ctx().request_discard("the Upgrade footer changed its height");
+    }
+    let page_bottom = if h > 0.0 {
+        panel.bottom() - h - BLOCK_GAP
+    } else {
+        panel.bottom()
+    };
+    if footer.is_some() {
+        event = footer;
+    }
     p_ui.add_space(BLOCK_GAP);
+    let page = Rect::from_min_max(
+        p_ui.cursor().min,
+        egui::pos2(panel.right(), page_bottom.max(p_ui.cursor().min.y)),
+    );
+    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(page));
     egui::ScrollArea::vertical()
         .id_salt("upgrade")
         .auto_shrink([false, false])
-        .show(&mut p_ui, |ui| {
-            let block_w = ui.available_width().min(width) - 2.0 * f32::from(BLOCK_PAD);
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .show(&mut s_ui, |ui| {
             let e = match &u.stage {
                 Stage::Choose => choose(ui, menu, &t, block_w),
                 Stage::Running => running(ui, u, &t, block_w),
@@ -109,22 +143,29 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
     event
 }
 
-/// A TILE-coloured block with a heading.
-fn block<R>(ui: &mut Ui, t: &Theme, width: f32, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let r = egui::Frame::new()
+/// A TILE-coloured block, with a heading when `title` is given.
+fn card<R>(ui: &mut Ui, t: &Theme, width: f32, title: Option<&str>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new()
         .fill(t.palette().card)
         .inner_margin(BLOCK_PAD)
         .show(ui, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = LINE_GAP;
-            ui.label(
-                egui::RichText::new(title)
-                    .font(brand::geo(brand::SECTION_PT))
-                    .color(t.palette().foreground),
-            );
+            if let Some(title) = title {
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(brand::geo(brand::SECTION_PT))
+                        .color(t.palette().foreground),
+                );
+            }
             add(ui)
         })
-        .inner;
+        .inner
+}
+
+/// A block of the scrolling page, with a heading.
+fn block<R>(ui: &mut Ui, t: &Theme, width: f32, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let r = card(ui, t, width, Some(title), add);
     ui.add_space(BLOCK_GAP);
     r
 }
@@ -236,7 +277,14 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
             }
         });
     }
-    block(ui, t, w, "Summary", |ui| {
+    event
+}
+
+/// The summary and the confirm button, fixed below the page.
+fn choose_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> {
+    let mut event = None;
+    let fresh = u.mode == Some(Mode::Fresh);
+    card(ui, t, w, Some("Summary"), |ui| {
         let Some(summary) = u.summary() else {
             muted(ui, t, "Choose what to do with the stick.");
             return;
@@ -348,8 +396,15 @@ fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>)
     if let Some(e) = &u.drives_error {
         warn(ui, t, format!("The drives could not be listed: {e}"));
     }
-    if u.drives.is_empty() {
-        muted(ui, t, "No USB stick found. Plug one in.");
+    if u.drives.is_empty() && u.drives_error.is_none() {
+        let text = if !u.listed() {
+            "Looking for drives…"
+        } else if u.show_all {
+            "No drive found. Plug a stick in."
+        } else {
+            "No USB stick found. Plug one in."
+        };
+        muted(ui, t, text);
     }
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = ROW_GAP;
@@ -465,13 +520,23 @@ fn step_row(ui: &mut Ui, u: &Upgrade, t: &Theme, s: &StepView, mark: StepMark) {
 }
 
 fn running(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> {
-    let mut event = None;
     let title = u.summary().unwrap_or_else(|| "Writing".to_string());
     block(ui, t, w, &title, |ui| {
         for s in &u.steps {
             step_row(ui, u, t, s, s.mark);
         }
-        let cancellable = matches!(u.current_step(), Some("write" | "download" | "verify"));
+    });
+    None
+}
+
+/// Cancel, or the question about stopping, fixed below the steps.
+fn running_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> {
+    let cancellable = matches!(u.current_step(), Some("write" | "download" | "verify"));
+    if !u.cancelling && !u.cancel_asked && !cancellable {
+        return None;
+    }
+    let mut event = None;
+    card(ui, t, w, None, |ui| {
         if u.cancelling {
             muted(ui, t, "Cancelling…");
         } else if u.cancel_asked {
@@ -494,10 +559,9 @@ fn running(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> 
                     event = Some(UpgradeEvent::CancelYes);
                 }
             });
-        } else if cancellable
-            && ui
-                .add(Button::new("Cancel").variant(ButtonVariant::Secondary))
-                .clicked()
+        } else if ui
+            .add(Button::new("Cancel").variant(ButtonVariant::Secondary))
+            .clicked()
         {
             event = Some(UpgradeEvent::Cancel);
         }
@@ -506,7 +570,6 @@ fn running(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> 
 }
 
 fn finished(ui: &mut Ui, u: &Upgrade, o: &Outcome, t: &Theme, w: f32) -> Option<UpgradeEvent> {
-    let mut event = None;
     let ok = matches!(o, Outcome::Done { .. });
     let (text, tone) = u.outcome_text();
     block(ui, t, w, if ok { "Done" } else { "Not done" }, |ui| {
@@ -522,6 +585,15 @@ fn finished(ui: &mut Ui, u: &Upgrade, o: &Outcome, t: &Theme, w: f32) -> Option<
             };
             step_row(ui, u, t, s, mark);
         }
+    });
+    None
+}
+
+/// Restart now, Try again and Back, fixed below the outcome.
+fn finished_footer(ui: &mut Ui, o: &Outcome, t: &Theme, w: f32) -> Option<UpgradeEvent> {
+    let ok = matches!(o, Outcome::Done { .. });
+    let mut event = None;
+    card(ui, t, w, None, |ui| {
         ui.horizontal(|ui| {
             if matches!(o, Outcome::Done { boot_stick: true, .. }) && ui.add(Button::new("Restart now")).clicked() {
                 event = Some(UpgradeEvent::RestartNow);

@@ -1529,7 +1529,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - Not verified on hardware (Upgrade screen): choosing and clicking a drive
   with a real mouse, a write to a real stick with its bar, speed and time
   left, Cancel during a write, and Restart while a stick is written. At
-  1080p the Choose page is taller than its area and scrolls.
+  1080p the Choose page is taller than its area: it scrolls with its scroll
+  bar always shown, while the summary and the confirm button (and Cancel,
+  Stop, Restart now, Try again) stay fixed below it.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

@@ -354,6 +354,20 @@ fn ending_words(action: Action) -> (&'static str, &'static str) {
     }
 }
 
+/// What the dialogs wait for: the add-on jobs, the stick write or both.
+fn root_waits(addons: bool, write: bool) -> &'static str {
+    match (addons, write) {
+        (true, true) => "the add-ons and the stick",
+        (false, true) => "the stick",
+        _ => "the add-ons",
+    }
+}
+
+/// The root jobs that run: add-on jobs, and the stick write.
+fn root_kinds(menu: &Menu) -> (bool, bool) {
+    (!menu.addon_jobs().is_empty(), menu.upgrade.writing())
+}
+
 /// The first letter in upper case, for a button or a sentence start.
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
@@ -376,13 +390,12 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::Confirm) => {
             let mut chose = None;
             let root_jobs = menu.root_jobs();
-            let only_write = menu.addon_jobs().is_empty() && menu.upgrade.writing();
-            let title = if !menu.jobs.is_empty() {
-                "Programs are still running"
-            } else if only_write {
-                "A stick is being written"
-            } else {
-                "Add-ons are being changed"
+            let kinds = root_kinds(menu);
+            let title = match kinds {
+                _ if !menu.jobs.is_empty() => "Programs are still running",
+                (false, true) => "A stick is being written",
+                (true, true) => "Add-ons are being changed and a stick is written",
+                _ => "Add-ons are being changed",
             };
             dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
@@ -398,10 +411,10 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     );
                 }
                 if !root_jobs.is_empty() {
-                    let what = if only_write {
-                        "The stick is written"
-                    } else {
-                        "The add-on work is finished"
+                    let what = match kinds {
+                        (false, true) => "The stick is written",
+                        (true, true) => "The add-on work and the write are finished",
+                        _ => "The add-on work is finished",
                     };
                     ui.label(
                         egui::RichText::new(format!("{what} before you {verb}.")).color(t.palette().muted_foreground),
@@ -426,11 +439,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::WaitAddons) => {
             let mut chose = None;
-            let what = if menu.addon_jobs().is_empty() && menu.upgrade.writing() {
-                "the stick"
-            } else {
-                "the add-ons"
-            };
+            let (addons, write) = root_kinds(menu);
+            let what = root_waits(addons, write);
             dialog(ui, &format!("Waiting for {what} before {verbing}"), |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
@@ -469,10 +479,10 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             return chose.map(UiEvent::Chose);
         }
         Some(Logout::StoppingAddons { go_at }) => {
-            let title = if menu.addon_jobs().is_empty() && menu.upgrade.writing() {
-                "Stopping the write"
-            } else {
-                "Stopping the add-on work"
+            let title = match root_kinds(menu) {
+                (false, true) => "Stopping the write",
+                (true, true) => "Stopping the add-on work and the write",
+                _ => "Stopping the add-on work",
             };
             dialog(ui, title, |ui, t| {
                 for job in menu.root_jobs() {
@@ -2853,6 +2863,72 @@ mod tests {
         menu.ending = Action::Logout;
         let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 720.0));
         assert!(!texts.iter().any(|t| t.contains("anyway")), "{texts:?}");
+    }
+
+    /// Where `label` is drawn on a `w` x `h` screen (points), and whether
+    /// it is fully visible: inside its clip and above the log.
+    fn visible_button(menu: &Menu, w: f32, h: f32, label: &str) -> (Rect, bool) {
+        let shapes = upgrade_shapes(menu, w, h);
+        let (rect, clip) = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == label => {
+                    Some((t.galley.rect.translate(t.pos.to_vec2()), c.clip_rect))
+                }
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or_else(|| panic!("{label:?} not drawn"));
+        let log = layout(screen(w, h), menu.visible_tiles().len(), 0).log;
+        (rect, clip.contains_rect(rect) && rect.bottom() < log.top())
+    }
+
+    #[test]
+    fn the_main_buttons_stay_visible_above_the_log() {
+        let total = 3_100_000_000;
+        let mut asked = writing_at(total * 42 / 100, Some(total));
+        asked.upgrade_event(UpgradeEvent::Cancel, Instant::now());
+        // 1080p, and a 21 inch 4K screen at scale 2.25, in points.
+        for (w, h) in [(1920.0, 1080.0), (3840.0 / 2.25, 2160.0 / 2.25)] {
+            for (menu, label) in [
+                (&erase_chosen(), "Erase SanDisk Cruzer 16 GB"),
+                (&writing_at(total * 42 / 100, Some(total)), "Cancel"),
+                (&asked, "Stop"),
+                (&asked, "Keep writing"),
+            ] {
+                let (rect, ok) = visible_button(menu, w, h, label);
+                assert!(ok, "{label:?} at {rect:?} on {w}x{h} is not visible");
+            }
+        }
+    }
+
+    #[test]
+    fn the_target_says_it_looks_until_the_first_list() {
+        let now = Instant::now();
+        let mut menu = Menu::new(shipped_grid(), false);
+        menu.set_usb_boot(true);
+        let tile = menu.tiles.iter().position(|t| t.action == Action::Upgrade).unwrap();
+        menu.activate(tile, now);
+        let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 2000.0));
+        assert!(texts.iter().any(|t| t == "Looking for drives…"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("No USB stick")), "{texts:?}");
+        let empty = upgrade_open(unknown_release(), vec![], false, now);
+        assert_texts(
+            &upgrade_shapes(&empty, 1280.0, 2000.0),
+            &["No USB stick found. Plug one in."],
+        );
+        let all = upgrade_open(unknown_release(), vec![], true, now);
+        assert_texts(
+            &upgrade_shapes(&all, 1280.0, 2000.0),
+            &["No drive found. Plug a stick in."],
+        );
+    }
+
+    #[test]
+    fn the_waiting_titles_name_what_the_dialog_lists() {
+        assert_eq!(root_waits(false, true), "the stick");
+        assert_eq!(root_waits(true, false), "the add-ons");
+        assert_eq!(root_waits(true, true), "the add-ons and the stick");
     }
 
     #[test]

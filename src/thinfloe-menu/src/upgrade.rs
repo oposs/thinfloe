@@ -635,6 +635,12 @@ impl Upgrade {
         self.write_args().is_ok()
     }
 
+    /// The drive list was answered since the screen last entered Choose
+    /// with the current Show all.
+    pub fn listed(&self) -> bool {
+        self.list_fresh
+    }
+
     /// The id of the step the running write is in.
     pub fn current_step(&self) -> Option<&str> {
         self.job.as_ref()?.current.as_deref()
