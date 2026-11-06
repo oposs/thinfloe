@@ -1,0 +1,14 @@
+[Unit]
+Description=Check the ThinFloe release server for a newer image
+
+# The first check comes 5 min after boot, then once a day. The status
+# lives in /run, so a machine that runs for less than a day would otherwise
+# never write it. systemd applies RandomizedDelaySec to every firing, so the
+# boot check can also come up to an hour later than 5 min.
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1d
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -651,6 +651,47 @@ else
     echo "FAIL - could not extract the add-on timers"
     fail=1
 fi
+# The release check runs after boot and once a day, on USB boots only. Its
+# service is skipped (not failed) when the ESP is not mounted, which is the
+# netboot case, and it must not declare Before= (see CLAUDE.md).
+present "upgrade check timer"        'etc/systemd/system/thinfloe-upgrade-check\.timer$'
+present "upgrade check service"      'etc/systemd/system/thinfloe-upgrade-check\.service$'
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-upgrade-check\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-upgrade-check.timer is enabled"
+else
+    echo "FAIL - thinfloe-upgrade-check.timer is not enabled; the release check would never run"
+    fail=1
+fi
+UPGRADECHECK="$DPKG_TMP/upgradecheck/etc/systemd/system"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/upgradecheck" "$SQSH" \
+        etc/systemd/system/thinfloe-upgrade-check.service \
+        etc/systemd/system/thinfloe-upgrade-check.timer >/dev/null 2>&1 &&
+   [[ -f "$UPGRADECHECK/thinfloe-upgrade-check.service" && -f "$UPGRADECHECK/thinfloe-upgrade-check.timer" ]]; then
+    if grep -qxF 'ConditionPathIsMountPoint=/run/thinfloe/storage/efi' "$UPGRADECHECK/thinfloe-upgrade-check.service"; then
+        echo "ok   - thinfloe-upgrade-check.service runs only where the ESP is mounted"
+    else
+        echo "FAIL - thinfloe-upgrade-check.service lacks ConditionPathIsMountPoint=/run/thinfloe/storage/efi"
+        fail=1
+    fi
+    before=$(grep -E '^Before=' "$UPGRADECHECK/thinfloe-upgrade-check.service" | tr -d '\r')
+    if [[ -z "$before" ]]; then
+        echo "ok   - thinfloe-upgrade-check.service declares no Before="
+    else
+        echo "FAIL - thinfloe-upgrade-check.service declares $before (ordering cycle risk)"
+        fail=1
+    fi
+    if grep -qxF 'OnBootSec=5min' "$UPGRADECHECK/thinfloe-upgrade-check.timer" &&
+       grep -qxF 'OnUnitActiveSec=1d' "$UPGRADECHECK/thinfloe-upgrade-check.timer" &&
+       grep -qxF 'RandomizedDelaySec=1h' "$UPGRADECHECK/thinfloe-upgrade-check.timer"; then
+        echo "ok   - thinfloe-upgrade-check.timer runs 5 min after boot, then daily"
+    else
+        echo "FAIL - thinfloe-upgrade-check.timer schedule is not OnBootSec=5min, OnUnitActiveSec=1d, RandomizedDelaySec=1h"
+        fail=1
+    fi
+else
+    echo "FAIL - could not extract the upgrade check units"
+    fail=1
+fi
 ADDONUNIT="$DPKG_TMP/addonunit/etc/systemd/system/thinfloe-addons.service"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/addonunit" "$SQSH" \
         etc/systemd/system/thinfloe-addons.service >/dev/null 2>&1 &&

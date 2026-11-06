@@ -392,6 +392,7 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
     systemctl enable thinfloe-addons.service && \
     systemctl enable thinfloe-addon-check.timer && \
     systemctl enable thinfloe-addon-boot-check.timer && \
+    systemctl enable thinfloe-upgrade-check.timer && \
     systemctl enable thinfloe-dhcp-timezone.path thinfloe-dhcp-timezone.service && \
     systemctl mask systemd-hwdb-update.service && \
     systemctl enable thinfloe-plymouth-fallback.timer && \

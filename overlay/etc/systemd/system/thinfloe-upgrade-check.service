@@ -1,0 +1,16 @@
+[Unit]
+Description=Check the ThinFloe release server for a newer image
+# Started by thinfloe-upgrade-check.timer. It writes
+# /run/thinfloe/upgrade/status, which the menu reads for the Upgrade tile.
+# Only USB boots run it: netboot has no boot stick, so the ESP is not
+# mounted there and the condition skips the unit.
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsMountPoint=/run/thinfloe/storage/efi
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/thinfloe-upgrade check
+# A failed check (no network, server down) is retried after an hour.
+Restart=on-failure
+RestartSec=1h
