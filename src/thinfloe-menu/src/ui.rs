@@ -919,10 +919,8 @@ fn screen_tab(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
             match tab.source {
                 IdleSource::Rc => note(ui, egui::RichText::new("set in ~/.thinfloe-sessionrc").color(muted)),
                 IdleSource::ByHand => {
-                    note(
-                        ui,
-                        egui::RichText::new("This is set by hand in ~/.config/thinfloe/screen").color(muted),
-                    );
+                    let text = format!("This is set by hand in ~/{}", screentab::SCREEN_FILE);
+                    note(ui, egui::RichText::new(text).color(muted));
                     ui.horizontal(|ui| {
                         ui.add_space(indent);
                         if ui
@@ -2448,10 +2446,8 @@ mod tests {
     #[test]
     fn the_screen_tab_offers_take_over() {
         let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::ByHand));
-        for want in [
-            "This is set by hand in ~/.config/thinfloe/screen",
-            "Let the menu manage it",
-        ] {
+        let by_hand = format!("This is set by hand in ~/{}", crate::screentab::SCREEN_FILE);
+        for want in [by_hand.as_str(), "Let the menu manage it"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
     }
@@ -3539,13 +3535,13 @@ mod tests {
         shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
         use crate::screentab::{IdleSource, ScreenTab};
         menu.settings_tab = crate::settings::SettingsTab::Screen;
-        for (source, name) in [
-            (IdleSource::Menu, "settings-screen-1080.ppm"),
-            (IdleSource::Rc, "settings-screen-rc-1080.ppm"),
-            (IdleSource::ByHand, "settings-screen-byhand-1080.ppm"),
+        for (idle, source, name) in [
+            (300, IdleSource::Menu, "settings-screen-1080.ppm"),
+            (900, IdleSource::Rc, "settings-screen-rc-1080.ppm"),
+            (300, IdleSource::ByHand, "settings-screen-byhand-1080.ppm"),
         ] {
             menu.screen_tab = ScreenTab {
-                idle: 300,
+                idle,
                 source,
                 error: None,
             };
@@ -3554,7 +3550,7 @@ mod tests {
         menu.screen_tab = ScreenTab {
             idle: 420,
             source: IdleSource::Menu,
-            error: Some("~/.config/thinfloe/screen could not be written: disk full".into()),
+            error: Some("Could not write ~/.config/thinfloe/screen: No space left on device (os error 28)".into()),
         };
         shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
