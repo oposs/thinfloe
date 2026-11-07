@@ -187,9 +187,31 @@ impl Upgrade {
 
     /// The screen opens: check the release (unless a check runs) and list
     /// the drives at the next poll.
+    /// A finished write is left behind: the screen opens on Choose, so
+    /// another stick can be written without a restart of the menu.
     pub fn open(&mut self, now: Instant) -> Option<Request> {
+        self.reset_finished(now);
         self.next_poll = Some(now);
         self.check()
+    }
+
+    /// From a finished write back to Choose; nothing in other stages.
+    fn reset_finished(&mut self, now: Instant) {
+        if !matches!(self.stage, Stage::Finished(_)) || self.job.is_some() {
+            return;
+        }
+        self.stage = Stage::Choose;
+        // The list is from before the write; a stick may have been pulled
+        // or swapped since.
+        self.list_fresh = false;
+        self.steps.clear();
+        self.progress = None;
+        self.speed = Speed::new();
+        self.cancelling = false;
+        self.cancel_asked = false;
+        // An erase is confirmed again, by typing it again.
+        self.typed.clear();
+        self.next_poll = Some(now);
     }
 
     /// A `Drives` request when one is due: only while choosing, and only
@@ -287,20 +309,7 @@ impl Upgrade {
                 None
             }
             UpgradeEvent::TryAgain => {
-                if matches!(self.stage, Stage::Finished(_)) {
-                    self.stage = Stage::Choose;
-                    // The list is from before the write; a stick may have
-                    // been pulled or swapped since.
-                    self.list_fresh = false;
-                    self.steps.clear();
-                    self.progress = None;
-                    self.speed = Speed::new();
-                    self.cancelling = false;
-                    self.cancel_asked = false;
-                    // An erase is confirmed again, by typing it again.
-                    self.typed.clear();
-                    self.next_poll = Some(now);
-                }
+                self.reset_finished(now);
                 None
             }
             UpgradeEvent::RestartNow => match self.stage {
@@ -1417,7 +1426,29 @@ mod tests {
         u.message(result(true, ""), t);
         u.ended(Ok(Some(0)));
         assert_eq!(ev(&mut u, UpgradeEvent::Back, t), Some(Request::Leave));
-        assert!(matches!(u.stage, Stage::Finished(_)));
+        assert!(matches!(u.stage, Stage::Finished(_)), "Back alone keeps the outcome");
+    }
+
+    #[test]
+    fn reopening_after_a_write_offers_another_write() {
+        let (mut u, t) = running_fresh(true);
+        u.message(result(true, ""), t);
+        u.ended(Ok(Some(0)));
+        assert_eq!(ev(&mut u, UpgradeEvent::Back, t), Some(Request::Leave));
+        let later = t + Duration::from_secs(30);
+        u.open(later);
+        assert_eq!(u.stage, Stage::Choose);
+        assert!(u.steps.is_empty() && u.progress.is_none());
+        assert!(!u.listed(), "the list from before the write confirms nothing");
+        assert!(!u.can_confirm());
+        assert_eq!(u.poll(later), Some(Request::Drives { all: false }));
+        u.drives_listed(false, Ok(vec![stick("/dev/sdb", "sn-A:1:1")]), later);
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), later);
+        assert!(u.can_confirm(), "a second write can start without a restart");
+        // A write that still runs is not reset by opening the screen.
+        let (mut u, t) = running_fresh(true);
+        u.open(t);
+        assert_eq!(u.stage, Stage::Running);
     }
 
     #[test]
