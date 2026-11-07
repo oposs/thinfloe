@@ -1531,9 +1531,13 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - Not verified on hardware (Upgrade screen): choosing and clicking a drive
   with a real mouse, a write to a real stick with its bar, speed and time
   left, Cancel during a write, and Restart while a stick is written. At
-  1080p the Choose page is taller than its area: it scrolls with its scroll
-  bar always shown, while the summary and the confirm button (and Cancel,
-  Stop, Restart now, Try again) stay fixed below it.
+  1080p the Choose page (Release, three drives, Action, Options) fits above
+  the summary and the confirm button, which (like Cancel, Stop, Restart now,
+  Try again) stay fixed below it; `the_choose_blocks_fit_above_the_footer_at_1080p`
+  guards this. A longer list, Advanced with its address, an internal drive's
+  typed confirmation or a 21 inch 4K screen (960 points tall) still makes
+  the page scroll, and the scroll bar egui is asked to show always was not
+  seen in the test pictures.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

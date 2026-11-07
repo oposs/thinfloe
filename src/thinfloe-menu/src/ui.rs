@@ -2725,16 +2725,20 @@ mod tests {
             .rfind(|(t, _)| t == label)
             .unwrap_or_else(|| panic!("{label:?} not drawn"))
             .1;
+        // The smallest filled rect under the label: the button, not the
+        // one-row footer card around it.
         shapes
             .iter()
-            .find_map(|c| match &c.shape {
+            .filter_map(|c| match &c.shape {
                 egui::Shape::Rect(r)
                     if r.rect.contains_rect(rect) && r.rect.height() < 60.0 && r.fill != Color32::TRANSPARENT =>
                 {
-                    Some(r.fill)
+                    Some((r.rect.area(), r.fill))
                 }
                 _ => None,
             })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, fill)| fill)
             .unwrap_or_else(|| panic!("no face under {label:?}"))
     }
 
@@ -2911,6 +2915,38 @@ mod tests {
                 assert!(ok, "{label:?} at {rect:?} on {w}x{h} is not visible");
             }
         }
+    }
+
+    #[test]
+    fn the_choose_blocks_fit_above_the_footer_at_1080p() {
+        let menu = erase_chosen();
+        let (w, h) = (1920.0, 1080.0);
+        for label in [
+            "Release",
+            "Installed",
+            "Check now",
+            "Target",
+            "Intenso Rainbow, 2.0 GB",
+            "Action",
+            "Erase and install",
+            "Upgrade (A/B, active after a restart)",
+            "Options",
+            "Copy this machine's home directory",
+            "Check the stick after writing",
+            "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.",
+            "Erase SanDisk Cruzer 16 GB",
+        ] {
+            let (rect, ok) = visible_button(&menu, w, h, label);
+            assert!(ok, "{label:?} at {rect:?} on {w}x{h} is not visible");
+        }
+        let (last, _) = visible_button(
+            &menu,
+            w,
+            h,
+            "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.",
+        );
+        let (summary, _) = visible_button(&menu, w, h, "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe");
+        assert!(last.bottom() < summary.top(), "{last:?} runs into the footer at {summary:?}");
     }
 
     #[test]

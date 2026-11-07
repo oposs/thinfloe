@@ -17,18 +17,21 @@ use shadcn_egui::components::button::{Button, ButtonVariant};
 use shadcn_egui::components::checkbox::Checkbox;
 use shadcn_egui::components::field::{Field, field_content, field_description, field_label};
 use shadcn_egui::components::input::Input;
-use shadcn_egui::components::item::Item;
+use shadcn_egui::components::item::{Item, ItemSize};
 use shadcn_egui::components::progress::Progress;
 use shadcn_egui::components::switch::Switch;
 
 /// Around the panel, as on the Settings screen (`p-4`).
 const PAD: f32 = 16.0;
-/// Between the header and the page, and between two blocks (`gap-4`).
-const BLOCK_GAP: f32 = 16.0;
-/// Inside a block (`p-5`).
-const BLOCK_PAD: i8 = 20;
-/// Between the lines of a block (`gap-2`).
-const LINE_GAP: f32 = 8.0;
+/// Between the header and the page, and between two blocks (`gap-2`):
+/// tight, so the four Choose blocks fit above the footer at 1080p.
+const BLOCK_GAP: f32 = 8.0;
+/// Inside a block (`p-3`).
+const BLOCK_PAD: i8 = 12;
+/// Between the lines of a block (`gap-1.5`).
+const LINE_GAP: f32 = 6.0;
+/// Between the two halves of a row of choices (`gap-2`).
+const COL_GAP: f32 = 8.0;
 /// Between two rows of a choice (`gap-1`).
 const ROW_GAP: f32 = 4.0;
 /// Between the heading of a block and the header's last-checked text (`gap-3`).
@@ -143,8 +146,16 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
     event
 }
 
-/// A TILE-coloured block, with a heading when `title` is given.
-fn card<R>(ui: &mut Ui, t: &Theme, width: f32, title: Option<&str>, add: impl FnOnce(&mut Ui) -> R) -> R {
+/// A TILE-coloured block, with a heading when `title` is given and a
+/// muted note at the right end of the heading's line.
+fn card<R>(
+    ui: &mut Ui,
+    t: &Theme,
+    width: f32,
+    title: Option<&str>,
+    note: Option<&str>,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
     egui::Frame::new()
         .fill(t.palette().card)
         .inner_margin(BLOCK_PAD)
@@ -152,11 +163,18 @@ fn card<R>(ui: &mut Ui, t: &Theme, width: f32, title: Option<&str>, add: impl Fn
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = LINE_GAP;
             if let Some(title) = title {
-                ui.label(
-                    egui::RichText::new(title)
-                        .font(brand::geo(brand::SECTION_PT))
-                        .color(t.palette().foreground),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(title)
+                            .font(brand::geo(brand::SECTION_PT))
+                            .color(t.palette().foreground),
+                    );
+                    if let Some(note) = note {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            muted(ui, t, note);
+                        });
+                    }
+                });
             }
             add(ui)
         })
@@ -165,9 +183,35 @@ fn card<R>(ui: &mut Ui, t: &Theme, width: f32, title: Option<&str>, add: impl Fn
 
 /// A block of the scrolling page, with a heading.
 fn block<R>(ui: &mut Ui, t: &Theme, width: f32, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let r = card(ui, t, width, Some(title), add);
+    noted_block(ui, t, width, title, None, add)
+}
+
+/// A block with a note on its heading's line.
+fn noted_block<R>(
+    ui: &mut Ui,
+    t: &Theme,
+    width: f32,
+    title: &str,
+    note: Option<&str>,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let r = card(ui, t, width, Some(title), note, add);
     ui.add_space(BLOCK_GAP);
     r
+}
+
+/// Two halves side by side, `COL_GAP` apart: `add` draws half 0, then 1.
+fn halves(ui: &mut Ui, mut add: impl FnMut(&mut Ui, usize)) {
+    let w = ((ui.available_width() - COL_GAP) / 2.0).max(0.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = COL_GAP;
+        for half in 0..2 {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                add(ui, half);
+            });
+        }
+    });
 }
 
 fn muted(ui: &mut Ui, t: &Theme, text: impl Into<String>) {
@@ -201,27 +245,38 @@ fn check(ui: &mut Ui, on: bool, label: &str, line: Option<&str>) -> Option<bool>
 fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     let u = &menu.upgrade;
     let mut event = None;
-    block(ui, t, w, "Release", |ui| {
+    // The heading shares the version line, to keep the block one row high.
+    card(ui, t, w, None, None, |ui| {
         release(ui, u, t, &mut event);
     });
-    block(ui, t, w, "Target", |ui| {
-        target(ui, u, t, &mut event);
-    });
+    ui.add_space(BLOCK_GAP);
+    noted_block(
+        ui,
+        t,
+        w,
+        "Target",
+        Some("The list follows as sticks are plugged in and pulled out."),
+        |ui| {
+            target(ui, u, t, &mut event);
+        },
+    );
     let Some(d) = u.chosen_drive() else {
         return event;
     };
     let modes = drives::modes(d, u.image_bytes());
     if modes.len() == 2 {
         block(ui, t, w, "Action", |ui| {
-            ui.spacing_mut().item_spacing.y = ROW_GAP;
             ui.style_mut().interaction.selectable_labels = false;
-            for (mode, allowed) in &modes {
+            // The two choices side by side, one row.
+            halves(ui, |ui, half| {
+                let Some((mode, allowed)) = modes.get(half) else { return };
                 let title = match mode {
                     Mode::Upgrade => "Upgrade (A/B, active after a restart)",
                     Mode::Fresh => "Erase and install",
                 };
                 let mut item = Item::new()
                     .variant(brand::CHOICE_ROW)
+                    .size(ItemSize::Sm)
                     .title(title)
                     .selected(u.mode == Some(*mode))
                     .sense(Sense::click())
@@ -233,34 +288,43 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
                 if r.clicked() {
                     event = Some(UpgradeEvent::Mode(*mode));
                 }
-            }
+            });
         });
     }
     let fresh = u.mode == Some(Mode::Fresh);
     if fresh {
         block(ui, t, w, "Options", |ui| {
             let restore_failed = menu.restore_failed();
-            let copy = ui
-                .add_enabled_ui(!restore_failed, |ui| {
-                    let line = if restore_failed {
-                        "This boot's home directory was not restored, so it cannot be copied."
-                    } else {
-                        "Left out: the SSH host keys and the WireGuard key. The remote-access password travels with the home."
-                    };
-                    check(
-                        ui,
-                        u.copy_home && !restore_failed,
-                        "Copy this machine's home directory",
-                        Some(line),
-                    )
-                })
-                .inner;
-            if let Some(on) = copy {
-                event = Some(UpgradeEvent::CopyHome(on));
-            }
-            if let Some(on) = check(ui, u.verify, "Check the stick after writing", None) {
-                event = Some(UpgradeEvent::Verify(on));
-            }
+            // The two options side by side, one row.
+            halves(ui, |ui, half| {
+                if half == 0 {
+                    let copy = ui
+                        .add_enabled_ui(!restore_failed, |ui| {
+                            check(
+                                ui,
+                                u.copy_home && !restore_failed,
+                                "Copy this machine's home directory",
+                                None,
+                            )
+                        })
+                        .inner;
+                    if let Some(on) = copy {
+                        event = Some(UpgradeEvent::CopyHome(on));
+                    }
+                } else if let Some(on) = check(ui, u.verify, "Check the stick after writing", None) {
+                    event = Some(UpgradeEvent::Verify(on));
+                }
+            });
+            // The copy's note spans the block: one line, not two in a half.
+            muted(
+                ui,
+                t,
+                if restore_failed {
+                    "This boot's home directory was not restored, so it cannot be copied."
+                } else {
+                    "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home."
+                },
+            );
             if drives::internal(d) {
                 let confirm = drives::confirm_text(d);
                 warn(ui, t, format!("Type {confirm} to erase this drive."));
@@ -280,26 +344,31 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     event
 }
 
-/// The summary and the confirm button, fixed below the page.
+/// The summary and the confirm button, fixed below the page, in one row.
 fn choose_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     let mut event = None;
     let fresh = u.mode == Some(Mode::Fresh);
-    card(ui, t, w, Some("Summary"), |ui| {
+    card(ui, t, w, None, None, |ui| {
         let Some(summary) = u.summary() else {
             muted(ui, t, "Choose what to do with the stick.");
             return;
         };
-        ui.label(egui::RichText::new(summary).color(t.palette().foreground));
-        let label = u.confirm_label().unwrap_or_default();
-        let b = Button::new(label);
-        let b = if fresh {
-            b.variant(ButtonVariant::Destructive)
-        } else {
-            b
-        };
-        if ui.add_enabled(u.can_confirm(), b).clicked() {
-            event = Some(UpgradeEvent::Confirm);
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = u.confirm_label().unwrap_or_default();
+            let b = Button::new(label);
+            let b = if fresh {
+                b.variant(ButtonVariant::Destructive)
+            } else {
+                b
+            };
+            if ui.add_enabled(u.can_confirm(), b).clicked() {
+                event = Some(UpgradeEvent::Confirm);
+            }
+            ui.add_space(HEADER_GAP);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                ui.label(egui::RichText::new(summary).color(t.palette().foreground));
+            });
+        });
     });
     event
 }
@@ -317,12 +386,32 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
         settings::last_checked(rel.and_then(|r| r.checked), now)
     };
     ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Release")
+                .font(brand::geo(brand::SECTION_PT))
+                .color(t.palette().foreground),
+        );
+        ui.add_space(HEADER_GAP);
         muted(ui, t, "Installed");
         ui.label(egui::RichText::new(u.installed.as_deref().unwrap_or(unknown)).color(t.palette().foreground));
         ui.add_space(HEADER_GAP);
         muted(ui, t, "Newest");
         ui.label(egui::RichText::new(latest).color(t.palette().foreground));
         muted(ui, t, format!("· {checked}"));
+        ui.add_space(HEADER_GAP);
+        // Not a Field: a horizontal Field's label takes all the room left,
+        // and Check now would be pushed out of the block.
+        let mut advanced = u.advanced;
+        let switched = ui.add(Switch::new(&mut advanced)).changed();
+        let named = ui
+            .add(egui::Label::new("Advanced").selectable(false).sense(Sense::click()))
+            .clicked();
+        if named {
+            advanced = !advanced;
+        }
+        if switched || named {
+            *event = Some(UpgradeEvent::Advanced(advanced));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(
@@ -338,13 +427,6 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
     if let Some(e) = rel.and_then(|r| r.error.as_deref()) {
         warn(ui, t, format!("The check failed: {e}"));
     }
-    let mut advanced = u.advanced;
-    Field::new().horizontal().id_salt("advanced").show(ui, |ui| {
-        if ui.add(Switch::new(&mut advanced)).changed() {
-            *event = Some(UpgradeEvent::Advanced(advanced));
-        }
-        field_label(ui, "Advanced");
-    });
     let entered = u.source_text.trim();
     if !u.advanced {
         // Off, the address and Show all drives keep their values but the
@@ -430,17 +512,18 @@ fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>)
             let chosen = u.chosen.as_ref().is_some_and(|c| c.id == d.id && c.device == d.device);
             let item = Item::new()
                 .variant(brand::CHOICE_ROW)
+                .size(ItemSize::Sm)
                 .title(format!("{}, {}", upgrade::name(d), drives::format_size(d.size_bytes)))
-                .description(job)
                 .selected(chosen)
                 .sense(Sense::click())
                 .id_salt(("drive", &d.device));
+            // One line per drive: the device and its state at the row's end.
             let r = ui
                 .add_enabled_ui(why.is_none(), |ui| {
                     if why.is_some() {
                         ui.multiply_opacity(REFUSED_OPACITY);
                     }
-                    ui.add(item)
+                    item.show(ui, |ui| ui.label(job)).response
                 })
                 .inner;
             if r.clicked() {
@@ -448,7 +531,6 @@ fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>)
             }
         }
     });
-    muted(ui, t, "The list follows as sticks are plugged in and pulled out.");
 }
 
 /// A step's mark: a square, empty while waiting, filled in the colour of
@@ -541,7 +623,7 @@ fn running_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<Upgrade
         return None;
     }
     let mut event = None;
-    card(ui, t, w, None, |ui| {
+    card(ui, t, w, None, None, |ui| {
         if u.cancelling {
             muted(ui, t, "Cancelling…");
         } else if u.cancel_asked {
@@ -598,7 +680,7 @@ fn finished(ui: &mut Ui, u: &Upgrade, o: &Outcome, t: &Theme, w: f32) -> Option<
 fn finished_footer(ui: &mut Ui, o: &Outcome, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     let ok = matches!(o, Outcome::Done { .. });
     let mut event = None;
-    card(ui, t, w, None, |ui| {
+    card(ui, t, w, None, None, |ui| {
         ui.horizontal(|ui| {
             if matches!(o, Outcome::Done { boot_stick: true, .. }) && ui.add(Button::new("Restart now")).clicked() {
                 event = Some(UpgradeEvent::RestartNow);
