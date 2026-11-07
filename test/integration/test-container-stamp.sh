@@ -48,7 +48,8 @@ mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/artifacts/rootfs" \
 cp "$REPO/Makefile" "$TREE/Makefile"
 : >"$TREE/containers/ubuntu/Dockerfile"
 : >"$TREE/src/thinfloe-menu/src/main.rs"
-touch -d '2020-01-01' "$TREE/containers/ubuntu/Dockerfile" \
+echo 4.0.0 >"$TREE/RELEASE"
+touch -d '2020-01-01' "$TREE/RELEASE" "$TREE/containers/ubuntu/Dockerfile" \
     "$TREE/containers/ubuntu/patches" \
     "$TREE/src/thinfloe-menu/src/main.rs" "$TREE/src/thinfloe-menu/src" "$TREE/src/thinfloe-menu"
 
