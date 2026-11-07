@@ -56,8 +56,14 @@ pub fn write(path: &Path, body: &str) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
+    // A stray one, a symlink above all, goes first; create_new never
+    // follows a link that appears in between.
+    match fs::remove_file(&tmp) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let written = (|| {
-        let mut f = fs::File::create(&tmp)?;
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         writeln!(f, "{HEADER}")?;
         f.write_all(body.as_bytes())?;
         f.sync_all()?;
@@ -93,10 +99,10 @@ pub fn aside(path: &Path) -> PathBuf {
 
 /// `path` as `~/rest` when it lies under $HOME, else as it is.
 pub fn home_relative(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(rest) = path.strip_prefix(home) {
-            return format!("~/{}", rest.display());
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(rest) = path.strip_prefix(home)
+    {
+        return format!("~/{}", rest.display());
     }
     path.display().to_string()
 }
@@ -124,6 +130,20 @@ mod tests {
         write(&p, "idle_timeout=60\n").unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), format!("{HEADER}\nidle_timeout=60\n"));
         assert!(!d.join(".config/thinfloe/screen.tmp").exists());
+    }
+
+    #[test]
+    fn write_never_follows_a_tmp_symlink() {
+        let d = TestDir::new("owned", "tmp-symlink");
+        let outside = d.join("outside");
+        fs::write(&outside, "keep\n").unwrap();
+        let p = d.join("screen");
+        std::os::unix::fs::symlink(&outside, d.join("screen.tmp")).unwrap();
+        write(&p, "idle_timeout=60\n").unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert_eq!(fs::read_to_string(&p).unwrap(), format!("{HEADER}\nidle_timeout=60\n"));
+        assert!(!fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(d.join("screen.tmp")).is_err());
     }
 
     #[test]
