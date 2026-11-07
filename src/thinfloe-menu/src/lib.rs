@@ -17,6 +17,7 @@ pub mod owned;
 pub mod outputs;
 pub mod raster;
 pub mod release;
+pub mod screentab;
 pub mod settings;
 pub mod speed;
 #[cfg(test)]
