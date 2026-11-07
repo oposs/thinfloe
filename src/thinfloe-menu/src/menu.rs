@@ -671,6 +671,8 @@ impl Menu {
     /// The screen file was written, or could not be. `signalled` says the
     /// running session took the new timeout; else it waits for the next.
     /// The file lives in the home directory, so a change is saved.
+    /// Called in the same `apply` as the effect, so no logout can have
+    /// begun in between; hence no logout guard here.
     pub fn screen_written(&mut self, result: Result<ScreenTab, String>, signalled: bool) -> Option<Effect> {
         let tab = match result {
             Ok(tab) => tab,

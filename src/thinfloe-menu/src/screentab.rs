@@ -2,6 +2,7 @@
 //! power off, kept in `~/.config/thinfloe/screen`.
 
 use crate::owned::{self, Owner};
+use std::ffi::OsStr;
 use std::path::Path;
 
 /// Relative to $HOME.
@@ -77,6 +78,16 @@ pub fn load(path: &Path, rc_set: bool) -> ScreenTab {
         tab.idle = idle;
     }
     tab
+}
+
+/// The idle helper's PID from `TF_IDLE_PID`: plain digits above 1, so a
+/// signal never goes to init or to a process group.
+pub fn idle_pid(v: Option<&OsStr>) -> Option<i32> {
+    let v = v?.to_str()?;
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    v.parse().ok().filter(|&pid| pid > 1)
 }
 
 /// The file body for `idle` seconds, without the header.
@@ -158,6 +169,16 @@ mod tests {
     fn options_insert_an_odd_value() {
         assert_eq!(options(420), [0, 60, 120, 300, 420, 600, 900, 1800, 3600]);
         assert_eq!(options(300), CHOICES);
+    }
+
+    #[test]
+    fn idle_pid_parses_only_pids() {
+        use std::ffi::OsStr;
+        assert_eq!(idle_pid(Some(OsStr::new("1234"))), Some(1234));
+        for v in ["1", "0", "-5", "12a", "", "+7", "99999999999"] {
+            assert_eq!(idle_pid(Some(OsStr::new(v))), None, "{v:?}");
+        }
+        assert_eq!(idle_pid(None), None);
     }
 
     #[test]

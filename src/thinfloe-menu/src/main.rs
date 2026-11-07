@@ -9,12 +9,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use thinfloe_menu::addons;
-use thinfloe_menu::app::{self, Config};
+use thinfloe_menu::app::{self, Config, ScreenFile};
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{release, settings, tiles, ui, windows};
+use thinfloe_menu::{release, screentab, settings, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -30,6 +30,22 @@ fn user_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
     home.join(".config/thinfloe/menu")
+}
+
+/// `$HOME/.config/thinfloe/screen`; `TF_SCREEN_FILE` moves it for tests.
+pub fn screen_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("TF_SCREEN_FILE") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
+    home.join(screentab::SCREEN_FILE)
+}
+
+/// Whether the session profile sets the idle time; thinfloe-session says so.
+fn idle_rc_set() -> bool {
+    std::env::var_os("TF_IDLE_TIMEOUT_RC").is_some_and(|v| v == "1")
 }
 
 fn program_path() -> OsString {
@@ -86,6 +102,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // no stick of its own to upgrade.
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
+    menu.screen_tab = screentab::load(&screen_path(), idle_rc_set());
     (menu, paths, IconRoots::system())
 }
 
@@ -214,6 +231,11 @@ fn main() -> ExitCode {
         program_path: program_path(),
         header,
         upgrade_status: upgrade_status_path(),
+        screen: ScreenFile {
+            path: screen_path(),
+            idle_pid: screentab::idle_pid(std::env::var_os("TF_IDLE_PID").as_deref()),
+            rc_set: idle_rc_set(),
+        },
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {

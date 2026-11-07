@@ -68,6 +68,17 @@ pub struct Config {
     pub header: crate::header::Header,
     /// The release status file `thinfloe-upgrade check` writes.
     pub upgrade_status: PathBuf,
+    pub screen: ScreenFile,
+}
+
+/// The screen settings file and who reads it.
+pub struct ScreenFile {
+    /// `~/.config/thinfloe/screen`.
+    pub path: PathBuf,
+    /// The idle helper, told by SIGUSR1 to read the file again.
+    pub idle_pid: Option<i32>,
+    /// The session profile sets the idle time.
+    pub rc_set: bool,
 }
 
 struct Live {
@@ -547,7 +558,10 @@ impl App {
                 self.exit = Some(code);
                 event_loop.exit();
             }
-            Some(Effect::WriteScreen { .. } | Effect::TakeOverScreen) => {}
+            Some(e @ (Effect::WriteScreen { .. } | Effect::TakeOverScreen)) => {
+                let next = apply_screen(e, &self.cfg.screen, &mut self.cfg.menu);
+                self.apply(next, event_loop);
+            }
             None => {}
         }
     }
@@ -918,6 +932,42 @@ fn is_input(e: &WindowEvent) -> bool {
     )
 }
 
+/// Carry out `WriteScreen` or `TakeOverScreen` and report to the menu at
+/// once, as `Menu::screen_written` expects. Returns what the menu asks next.
+fn apply_screen(effect: Effect, screen: &ScreenFile, menu: &mut Menu) -> Option<Effect> {
+    let idle = match effect {
+        Effect::WriteScreen { idle } => idle,
+        Effect::TakeOverScreen => match crate::owned::take_over(&screen.path) {
+            Ok(old) => old
+                .as_deref()
+                .and_then(crate::screentab::parse_idle)
+                .unwrap_or(crate::screentab::DEFAULT_IDLE),
+            Err(e) => {
+                let path = crate::owned::home_relative(&screen.path);
+                return menu.screen_written(Err(format!("Could not take over {path}: {e}")), false);
+            }
+        },
+        _ => return None,
+    };
+    if let Err(e) = crate::owned::write(&screen.path, &crate::screentab::body(idle)) {
+        let path = crate::owned::home_relative(&screen.path);
+        return menu.screen_written(Err(format!("Could not write {path}: {e}")), false);
+    }
+    let signalled = screen.idle_pid.is_some_and(signal_idle_helper);
+    let tab = crate::screentab::load(&screen.path, screen.rc_set);
+    menu.screen_written(Ok(tab), signalled)
+}
+
+/// Tell the idle helper to read the screen file again.
+fn signal_idle_helper(pid: i32) -> bool {
+    // Never init, never a process group.
+    if pid <= 1 {
+        return false;
+    }
+    // SAFETY: kill takes no pointers; a stale pid fails with ESRCH.
+    unsafe { libc::kill(pid, libc::SIGUSR1) == 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,5 +1232,123 @@ mod tests {
         assert!(wake_needs_frame(&reached));
         assert!(!wake_needs_frame(&StartCause::Poll));
         assert!(!wake_needs_frame(&StartCause::Init));
+    }
+
+    fn screen_menu() -> Menu {
+        Menu::new(
+            crate::tiles::Grid {
+                tiles: Vec::new(),
+                banner: Vec::new(),
+            },
+            false,
+        )
+    }
+
+    fn screen_file(d: &TestDir, idle_pid: Option<i32>) -> ScreenFile {
+        ScreenFile {
+            path: d.join(".config/thinfloe/screen"),
+            idle_pid,
+            rc_set: false,
+        }
+    }
+
+    #[test]
+    fn write_screen_writes_signals_and_saves() {
+        use std::os::unix::process::ExitStatusExt;
+        let d = TestDir::new("app", "write-screen");
+        // sleep traps nothing, so SIGUSR1 ends it.
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let screen = screen_file(&d, Some(pid));
+        let mut menu = screen_menu();
+        let next = apply_screen(Effect::WriteScreen { idle: 120 }, &screen, &mut menu);
+        // Reap the child whatever the outcome.
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&screen.path).unwrap(),
+            format!("{}\nidle_timeout=120\n", crate::owned::HEADER)
+        );
+        assert_eq!(status.signal(), Some(libc::SIGUSR1));
+        assert_eq!(next, Some(Effect::Start(Job::Save)));
+        assert_eq!(menu.screen_tab.idle, 120);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
+        assert!(menu.save.running);
+        assert!(!menu.log.lines().any(|l| l.plain() == crate::menu::NEXT_SESSION));
+    }
+
+    #[test]
+    fn write_screen_without_helper_says_next_session() {
+        let d = TestDir::new("app", "write-screen-nopid");
+        let screen = screen_file(&d, None);
+        let mut menu = screen_menu();
+        let next = apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu);
+        assert_eq!(next, Some(Effect::Start(Job::Save)));
+        assert!(menu.log.lines().any(|l| l.plain() == crate::menu::NEXT_SESSION));
+    }
+
+    #[test]
+    fn write_screen_refused_for_a_hand_file() {
+        let d = TestDir::new("app", "write-screen-hand");
+        let screen = screen_file(&d, None);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+        let mut menu = screen_menu();
+        assert_eq!(apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu), None);
+        let e = menu.screen_tab.error.clone().unwrap();
+        let want = format!("Could not write {}: ", crate::owned::home_relative(&screen.path));
+        assert!(e.starts_with(&want), "{e}");
+        assert!(e.ends_with("was written by hand"), "{e}");
+        assert!(!menu.save.running);
+        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
+    }
+
+    #[test]
+    fn take_over_screen_keeps_the_hand_value() {
+        let d = TestDir::new("app", "take-over-screen");
+        let screen = screen_file(&d, None);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+        let mut menu = screen_menu();
+        let next = apply_screen(Effect::TakeOverScreen, &screen, &mut menu);
+        assert_eq!(next, Some(Effect::Start(Job::Save)));
+        assert_eq!(
+            std::fs::read_to_string(&screen.path).unwrap(),
+            format!("{}\nidle_timeout=900\n", crate::owned::HEADER)
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join(".config/thinfloe/screen.by-hand")).unwrap(),
+            "idle_timeout=900\n"
+        );
+        assert_eq!(menu.screen_tab.idle, 900);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
+    }
+
+    #[test]
+    fn take_over_screen_without_a_value_uses_the_default() {
+        let d = TestDir::new("app", "take-over-default");
+        let screen = screen_file(&d, None);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "something else\n").unwrap();
+        let mut menu = screen_menu();
+        apply_screen(Effect::TakeOverScreen, &screen, &mut menu);
+        assert_eq!(menu.screen_tab.idle, crate::screentab::DEFAULT_IDLE);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
+    }
+
+    #[test]
+    fn take_over_screen_refused_when_by_hand_exists() {
+        let d = TestDir::new("app", "take-over-twice");
+        let screen = screen_file(&d, None);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+        std::fs::write(d.join(".config/thinfloe/screen.by-hand"), "old\n").unwrap();
+        let mut menu = screen_menu();
+        assert_eq!(apply_screen(Effect::TakeOverScreen, &screen, &mut menu), None);
+        let e = menu.screen_tab.error.clone().unwrap();
+        let want = format!("Could not take over {}: ", crate::owned::home_relative(&screen.path));
+        assert!(e.starts_with(&want), "{e}");
+        assert!(e.ends_with(".by-hand exists already"), "{e}");
+        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
     }
 }
