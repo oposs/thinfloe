@@ -25,7 +25,9 @@ impl Speed {
     }
 
     /// Records `done` bytes at `now`. A `done` below the last sample means a
-    /// new counter (the download after the save step): start over.
+    /// new counter (the download after the save step): start over. Call it
+    /// once per `@progress` line, not per frame: `SAMPLES_MAX` counts calls,
+    /// so extra calls shorten the stretch the rate is measured over.
     pub fn sample(&mut self, now: Instant, done: u64) {
         if let Some(&(_, last)) = self.samples.back() {
             if done < last {
@@ -54,7 +56,7 @@ impl Speed {
         if span < MIN_SPAN {
             return None;
         }
-        Some((d1 - d0) as f64 / span.as_secs_f64())
+        Some(d1.saturating_sub(d0) as f64 / span.as_secs_f64())
     }
 
     /// Time left for the rest of `total`; `None` without a total, without a
@@ -68,7 +70,8 @@ impl Speed {
         if rate <= 0.0 {
             return None;
         }
-        Some(Duration::from_secs_f64((total - done) as f64 / rate))
+        // A huge total (a bad frame header) is no time left, not a panic.
+        Duration::try_from_secs_f64((total - done) as f64 / rate).ok()
     }
 }
 
@@ -208,6 +211,16 @@ mod tests {
         assert_eq!(bytes_text(1_200_000_000, Some(3_100_000_000)), "1.2 GB of 3.1 GB");
         assert_eq!(bytes_text(1_200_000_000, None), "1.2 GB written");
         assert_eq!(bytes_text(400 * MB, Some(3_100_000_000)), "400 MB of 3.1 GB");
+    }
+
+    #[test]
+    fn a_time_left_too_long_for_a_duration_is_none() {
+        let base = Instant::now();
+        let mut s = Speed::new();
+        // One byte in ten seconds, and a total from a bad frame header.
+        s.sample(at(base, 0), 0);
+        s.sample(at(base, 10), 1);
+        assert_eq!(s.eta(1, Some(u64::MAX)), None);
     }
 
     #[test]

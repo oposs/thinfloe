@@ -249,7 +249,36 @@ fn upgrade_wake(screen: Screen, stage: &Stage, shown: bool) -> Option<Duration> 
 /// the start of a program first, a write's progress lines in the order the
 /// tool printed them, and the final result last.
 fn run_job(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) + Clone + Send + 'static) {
-    let result = match job {
+    // A panic in the job still sends a result: without one the screen's
+    // poll or check would wait for ever.
+    let on_panic = panic_result(&job);
+    let s = send.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job_result(job, paths, feed, s)))
+        .unwrap_or(on_panic);
+    send(result);
+}
+
+/// The failed result of `job`, for a worker that panicked.
+fn panic_result(job: &Job) -> JobResult {
+    let e = "the menu's worker failed; the session log shows why".to_string();
+    match job {
+        Job::Save => JobResult::Saved(jobs::SaveOutcome::Broken(e)),
+        Job::Run { id, .. } => JobResult::Ran { id: *id, status: Err(e) },
+        Job::Addon { args } => JobResult::Addon {
+            args: args.clone(),
+            status: Err(e),
+        },
+        Job::UpgradeWrite { .. } => JobResult::UpgradeEnded { status: Err(e) },
+        Job::Drives { all } => JobResult::Drives { all: *all, result: Err(e) },
+        Job::UpgradeCheck { source } => JobResult::Release {
+            custom: source.is_some(),
+            result: Err(e),
+        },
+    }
+}
+
+fn job_result(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) + Clone + Send + 'static) -> JobResult {
+    match job {
         Job::Save => JobResult::Saved(jobs::save(paths, feed)),
         Job::Run { id, name, argv } => {
             let started = send.clone();
@@ -286,8 +315,7 @@ fn run_job(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) +
             custom: source.is_some(),
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
         },
-    };
-    send(result);
+    }
 }
 
 impl Live {
@@ -607,6 +635,10 @@ impl App {
             d => {
                 let egui_wake = d.filter(|d| *d < Duration::from_secs(3600));
                 // The drive list is polled from `tick`, which runs only in a frame.
+                // This is chosen before the frame's event below is handled; an
+                // event that moves the screen to or from Upgrade still gets its
+                // wake, because every handled event requests a redraw, and that
+                // frame chooses again.
                 let menu = &self.cfg.menu;
                 let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, self.shown.load(Ordering::Relaxed));
                 match egui_wake.into_iter().chain(recheck).chain(poll).min() {
@@ -926,6 +958,31 @@ mod tests {
             })
         );
         assert_eq!(got[3], JobResult::UpgradeEnded { status: Ok(Some(0)) });
+    }
+
+    #[test]
+    fn a_worker_that_panics_still_sends_a_result() {
+        // An empty command line panics in the job; the screen must still
+        // hear back, or its poll and its check stay busy for ever.
+        for job in [
+            Job::Drives { all: true },
+            Job::UpgradeCheck { source: None },
+            Job::UpgradeWrite { args: Vec::new() },
+        ] {
+            let (tx, rx) = mpsc::channel();
+            let feed = Arc::new(Feed::default());
+            run_job(job.clone(), &paths(Vec::new()), &feed, move |r| {
+                let _ = tx.send(r);
+            });
+            let r = rx.recv_timeout(Duration::from_secs(10)).expect("a result");
+            let ok = match (&job, &r) {
+                (Job::Drives { .. }, JobResult::Drives { all: true, result: Err(_) }) => true,
+                (Job::UpgradeCheck { .. }, JobResult::Release { custom: false, result: Err(_) }) => true,
+                (Job::UpgradeWrite { .. }, JobResult::UpgradeEnded { status: Err(_) }) => true,
+                _ => false,
+            };
+            assert!(ok, "{job:?} gave {r:?}");
+        }
     }
 
     #[test]

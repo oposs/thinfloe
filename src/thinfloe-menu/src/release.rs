@@ -249,7 +249,8 @@ mod tests {
         let mut w = Watcher::default();
         assert!(w.tick(&p));
         assert!(!w.tick(&p));
-        fs::write(&p, "latest=1.0.1\n").unwrap();
+        // Another length, so the change shows without relying on mtime.
+        fs::write(&p, "latest=1.0.10\n").unwrap();
         assert!(w.tick(&p));
         assert!(!w.tick(&p));
         let mut w = Watcher::default();

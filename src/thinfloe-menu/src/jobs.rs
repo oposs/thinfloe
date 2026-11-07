@@ -397,7 +397,9 @@ pub fn upgrade_write(
 pub const DRIVES_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 /// After SIGTERM for a timeout, how long to wait for the tool to end.
-/// Then we give up waiting; it may linger, these are not write jobs.
+/// Then we give up waiting; it may linger, these are not write jobs. A tool
+/// that ignores SIGTERM past this is dropped unreaped and stays a zombie
+/// until it ends and the menu exits.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// Wait for `child` until `deadline`; `None` when it still runs.
@@ -939,7 +941,7 @@ mod tests {
         let g = got.clone();
         let t0 = Instant::now();
         let st = upgrade_write(
-            &sh("echo \"@step write W\"; (sleep 7; echo \"@result ok\") & exit 0"),
+            &sh("echo \"@step write W\"; (sleep 8; echo \"@result ok\") & exit 0"),
             &[],
             &feed,
             |_| {},
@@ -947,14 +949,19 @@ mod tests {
         );
         let took = t0.elapsed();
         assert_eq!(st, Ok(Some(0)));
-        assert!(took >= UPGRADE_DRAIN && took < Duration::from_secs(7), "{took:?}");
+        assert!(took >= UPGRADE_DRAIN && took < Duration::from_secs(8), "{took:?}");
         assert_eq!(got.lock().unwrap().len(), 1);
         let lines: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
         assert!(lines.iter().any(|l| l.contains("stayed open")), "{lines:?}");
-        std::thread::sleep(Duration::from_secs(3));
+        // Wait for the late line in the log, however slow the machine.
+        let mut late = Vec::new();
+        let until = Instant::now() + Duration::from_secs(20);
+        while !late.contains(&"@result ok".to_string()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+            late.extend(feed.drain().into_iter().map(|l| l.plain()));
+        }
+        assert!(late.contains(&"@result ok".to_string()), "{late:?}");
         assert_eq!(got.lock().unwrap().len(), 1, "no on_msg after return");
-        let lines: Vec<_> = feed.drain().into_iter().map(|l| l.plain()).collect();
-        assert!(lines.contains(&"@result ok".to_string()), "{lines:?}");
     }
 
     #[test]
