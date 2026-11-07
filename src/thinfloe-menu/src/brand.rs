@@ -108,6 +108,10 @@ pub const DIALOG_TITLE_PT: f32 = 24.0;
 /// A block heading on the Upgrade screen (Release, Target, ...).
 pub const SECTION_PT: f32 = 18.0;
 
+/// The label column of a form row on the Settings screen's Screen tab
+/// (points): "Turn the screen off after" and a gap.
+pub const FORM_LABEL_W: f32 = 240.0;
+
 /// The Upgrade screen's Choose page puts the drives beside Action and
 /// Options when its panel is at least this wide (points); narrower, they
 /// stack in one column.

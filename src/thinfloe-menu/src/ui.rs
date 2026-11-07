@@ -8,7 +8,8 @@ use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
-use crate::settings::{self, RowButton, SettingsEvent};
+use crate::screentab::{self, IdleSource};
+use crate::settings::{self, RowButton, SettingsEvent, SettingsTab};
 use crate::tiles::{Action, Origin, Tile};
 use crate::upgrade::UpgradeEvent;
 use egui::text::{LayoutJob, TextWrapping};
@@ -18,6 +19,8 @@ use egui::{
 };
 use shadcn_egui::Theme;
 use shadcn_egui::components::button::{Button, ButtonVariant};
+use shadcn_egui::components::select::Select;
+use shadcn_egui::components::tabs::Tabs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -769,7 +772,7 @@ const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
-/// The Settings screen in `area`: the add-ons, one row each.
+/// The Settings screen in `area`: the title, the tab bar, and the open tab.
 fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
@@ -780,18 +783,42 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
     s_ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new("Add-ons")
+            egui::RichText::new("Settings")
                 .font(brand::geo(brand::SETTINGS_TITLE_PT))
                 .color(t.palette().foreground),
         );
-        ui.add_space(12.0);
-        // SAFETY: time(NULL) has no preconditions.
-        let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
-        ui.label(egui::RichText::new(settings::last_checked(menu.last_check, now)).color(t.palette().muted_foreground));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(Button::new("Back").variant(ButtonVariant::Secondary)).clicked() {
                 event = Some(SettingsEvent::Back);
             }
+        });
+    });
+    s_ui.add_space(GAP);
+    let labels = SettingsTab::ALL.map(SettingsTab::label);
+    let mut idx = SettingsTab::ALL
+        .iter()
+        .position(|&tab| tab == menu.settings_tab)
+        .unwrap_or(0);
+    if s_ui.add(Tabs::new(&mut idx, &labels).width(f32::INFINITY)).changed() {
+        event = Some(SettingsEvent::Tab(SettingsTab::ALL[idx]));
+    }
+    s_ui.add_space(GAP);
+    let body = match menu.settings_tab {
+        SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
+        SettingsTab::Screen => screen_tab(&mut s_ui, menu),
+    };
+    event.or(body)
+}
+
+/// The Packages tab: when the add-ons were last checked, and one row each.
+fn packages_tab(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], width: f32) -> Option<SettingsEvent> {
+    let t = Theme::current(ui.ctx());
+    let mut event = None;
+    ui.horizontal(|ui| {
+        // SAFETY: time(NULL) has no preconditions.
+        let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+        ui.label(egui::RichText::new(settings::last_checked(menu.last_check, now)).color(t.palette().muted_foreground));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(
                     !menu.checking(),
@@ -803,11 +830,11 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
             }
         });
     });
-    s_ui.add_space(GAP);
+    ui.add_space(GAP);
     egui::ScrollArea::vertical()
         .id_salt("settings")
         .auto_shrink([false, false])
-        .show(&mut s_ui, |ui| {
+        .show(ui, |ui| {
             let rows = settings::rows(menu);
             if rows.is_empty() {
                 ui.label(egui::RichText::new("No add-ons are defined.").color(t.palette().muted_foreground));
@@ -840,6 +867,76 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
                 if let Some(e) = framed.inner {
                     event = Some(e);
                 }
+            }
+        });
+    event
+}
+
+/// The Screen tab: when the screen turns off, in one band. The select is
+/// disabled while the session profile or a file written by hand decides.
+fn screen_tab(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
+    let t = Theme::current(ui.ctx());
+    let tab = &menu.screen_tab;
+    let mut event = None;
+    let values = screentab::options(tab.idle);
+    let texts: Vec<String> = values.iter().map(|&v| screentab::label(v)).collect();
+    let labels: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let mut idx = values.iter().position(|&v| v == tab.idle).unwrap_or(0);
+    let managed = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
+    let muted = t.palette().muted_foreground;
+    let inner_w = ui.available_width() - ROW_MARGIN_X;
+    egui::Frame::new()
+        .fill(t.palette().card)
+        .inner_margin(egui::Margin {
+            left: ROW_LEFT,
+            right: ROW_RIGHT,
+            top: 12,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.horizontal(|ui| {
+                ui.scope(|ui| {
+                    ui.set_min_width(brand::FORM_LABEL_W);
+                    ui.set_max_width(brand::FORM_LABEL_W);
+                    ui.label(egui::RichText::new("Turn the screen off after").color(t.palette().foreground));
+                });
+                if ui
+                    .add_enabled(managed, Select::new("tf-screen-idle", &mut idx, &labels))
+                    .changed()
+                {
+                    event = values.get(idx).map(|&v| SettingsEvent::IdleTimeout(v));
+                }
+            });
+            // The notes stand under the select, in the label column's shadow.
+            let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
+            let note = |ui: &mut Ui, text: egui::RichText| {
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    ui.add(egui::Label::new(text).truncate());
+                });
+            };
+            match tab.source {
+                IdleSource::Rc => note(ui, egui::RichText::new("set in ~/.thinfloe-sessionrc").color(muted)),
+                IdleSource::ByHand => {
+                    note(
+                        ui,
+                        egui::RichText::new("This is set by hand in ~/.config/thinfloe/screen").color(muted),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(indent);
+                        if ui
+                            .add(Button::new("Let the menu manage it").variant(ButtonVariant::Secondary))
+                            .clicked()
+                        {
+                            event = Some(SettingsEvent::ManageScreen);
+                        }
+                    });
+                }
+                IdleSource::Menu | IdleSource::Unset => {}
+            }
+            if let Some(error) = &tab.error {
+                note(ui, egui::RichText::new(error).color(t.role(role::WARN)));
             }
         });
     event
@@ -1478,7 +1575,8 @@ mod tests {
         menu.set_addons(vec![failed()]);
         let texts = texts_of(&menu, &[None, None]);
         for want in [
-            "Add-ons",
+            "Settings",
+            "Packages",
             "not checked yet",
             "Check now",
             "Back",
@@ -2268,12 +2366,165 @@ mod tests {
 
     #[test]
     fn settings_draws_nothing_rounded() {
-        let shapes = settings_shapes(&open_settings(), 1280.0, 720.0);
-        for c in &shapes {
-            if let egui::Shape::Rect(r) = &c.shape {
-                assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "rounded {:?}", r.rect);
+        for tab in crate::settings::SettingsTab::ALL {
+            let mut menu = open_settings();
+            menu.settings_tab = tab;
+            let shapes = settings_shapes(&menu, 1280.0, 720.0);
+            for c in &shapes {
+                if let egui::Shape::Rect(r) = &c.shape {
+                    assert_eq!(
+                        r.corner_radius,
+                        egui::CornerRadius::ZERO,
+                        "{tab:?}: rounded {:?}",
+                        r.rect
+                    );
+                }
             }
         }
+    }
+
+    /// The Settings menu of `four_addons()` on its Screen tab, 5 minutes
+    /// set from `source`.
+    fn screen_settings(source: crate::screentab::IdleSource) -> Menu {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Screen;
+        menu.screen_tab = crate::screentab::ScreenTab {
+            idle: 300,
+            source,
+            error: None,
+        };
+        menu
+    }
+
+    fn settings_texts(menu: &Menu) -> Vec<String> {
+        text_rects(&settings_shapes(menu, 1280.0, 720.0))
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    #[test]
+    fn settings_shows_both_tabs() {
+        for tab in crate::settings::SettingsTab::ALL {
+            let mut menu = open_settings();
+            menu.settings_tab = tab;
+            assert_texts(
+                &settings_shapes(&menu, 1280.0, 720.0),
+                &["Settings", "Packages", "Screen", "Back"],
+            );
+        }
+    }
+
+    #[test]
+    fn the_screen_tab_shows_the_timeout() {
+        use crate::screentab::IdleSource;
+        let texts = settings_texts(&screen_settings(IdleSource::Menu));
+        for want in ["Turn the screen off after", "5 minutes"] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+        // The add-on rows belong to the other tab.
+        assert!(!texts.iter().any(|t| t == "ThinLinc" || t == "Check now"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_screen_tab_says_sessionrc() {
+        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::Rc));
+        assert!(texts.iter().any(|t| t == "set in ~/.thinfloe-sessionrc"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Let the menu manage it"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_screen_tab_offers_take_over() {
+        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::ByHand));
+        for want in [
+            "This is set by hand in ~/.config/thinfloe/screen",
+            "Let the menu manage it",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+    }
+
+    /// Clicks the texts `labels` of `menu`'s screen one after the other,
+    /// each where the frame before drew it, and returns what each reported.
+    /// A label that is not drawn is `None` in `drawn`.
+    fn click_labels(menu: &Menu, labels: &[&str]) -> (Vec<Option<UiEvent>>, Vec<bool>) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1280.0, 720.0)),
+                events,
+                time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut ev = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                ev = show(ui, menu, &[None], &Chrome::default(), Instant::now());
+            });
+            out.textures_delta.clear();
+            (text_rects(&out.shapes), ev)
+        };
+        let mut texts = vec![];
+        for _ in 0..3 {
+            texts = frame(vec![]).0;
+        }
+        let (mut events, mut drawn) = (vec![], vec![]);
+        for label in labels {
+            let at = texts.iter().find(|(t, _)| t == label).map(|(_, r)| r.center());
+            drawn.push(at.is_some());
+            let Some(at) = at else {
+                events.push(None);
+                continue;
+            };
+            let (t, ev) = frame(click_at(at));
+            events.push(ev);
+            // Let a list that opened settle (its enter animation) before the next click.
+            texts = t;
+            for _ in 0..3 {
+                texts = frame(vec![]).0;
+            }
+        }
+        (events, drawn)
+    }
+
+    #[test]
+    fn the_tabs_the_select_and_the_take_over_button_report_their_clicks() {
+        use crate::screentab::IdleSource;
+        use crate::settings::SettingsTab;
+        let s = |e| Some(UiEvent::Settings(e));
+        assert_eq!(
+            click_labels(&open_settings(), &["Screen"]).0,
+            [s(SettingsEvent::Tab(SettingsTab::Screen))]
+        );
+        assert_eq!(
+            click_labels(&screen_settings(IdleSource::Menu), &["Packages"]).0,
+            [s(SettingsEvent::Tab(SettingsTab::Packages))]
+        );
+        assert_eq!(
+            click_labels(&screen_settings(IdleSource::ByHand), &["Let the menu manage it"]).0,
+            [s(SettingsEvent::ManageScreen)]
+        );
+        // The open list offers the other times; a pick reports it.
+        let (events, drawn) = click_labels(&screen_settings(IdleSource::Unset), &["5 minutes", "10 minutes"]);
+        assert_eq!(drawn, [true, true]);
+        assert_eq!(events, [None, s(SettingsEvent::IdleTimeout(600))]);
+        // A disabled select opens no list.
+        for source in [IdleSource::Rc, IdleSource::ByHand] {
+            let (events, drawn) = click_labels(&screen_settings(source), &["5 minutes", "10 minutes"]);
+            assert_eq!((events, drawn), (vec![None, None], vec![true, false]), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn the_screen_tab_shows_its_error_in_warn() {
+        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        menu.screen_tab.error = Some("disk full".into());
+        let shapes = settings_shapes(&menu, 1280.0, 720.0);
+        let color = shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == "disk full" => Some(t.galley.job.sections[0].format.color),
+            _ => None,
+        });
+        assert_eq!(color, Some(WARN), "{:?}", all_texts(&shapes));
     }
 
     #[test]
@@ -3274,6 +3525,27 @@ mod tests {
         menu.activate(settings, Instant::now());
         shot(&menu, "settings-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
+        use crate::screentab::{IdleSource, ScreenTab};
+        menu.settings_tab = crate::settings::SettingsTab::Screen;
+        for (source, name) in [
+            (IdleSource::Menu, "settings-screen-1080.ppm"),
+            (IdleSource::Rc, "settings-screen-rc-1080.ppm"),
+            (IdleSource::ByHand, "settings-screen-byhand-1080.ppm"),
+        ] {
+            menu.screen_tab = ScreenTab {
+                idle: 300,
+                source,
+                error: None,
+            };
+            shot(&menu, name, (1920, 1080), 1.0);
+        }
+        menu.screen_tab = ScreenTab {
+            idle: 420,
+            source: IdleSource::Menu,
+            error: Some("~/.config/thinfloe/screen could not be written: disk full".into()),
+        };
+        shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
+        shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
         let mut newer = Menu::new(shipped_grid(), false);
         newer.set_usb_boot(true);
         newer.set_installed(Some("4.0.0".into()));
