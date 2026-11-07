@@ -3007,6 +3007,66 @@ mod tests {
         }
     }
 
+    /// The block a label is drawn in: the smallest filled rect around it
+    /// that is wider than a button.
+    fn card_of(shapes: &[egui::epaint::ClippedShape], label: &str) -> Rect {
+        let rect = text_rects(shapes)
+            .into_iter()
+            .rfind(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("{label:?} not drawn"))
+            .1;
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                // Wider than any button: a block, not a button's face.
+                egui::Shape::Rect(r)
+                    if r.rect.contains_rect(rect) && r.fill != Color32::TRANSPARENT && r.rect.width() > 400.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("no block around {label:?}"))
+    }
+
+    #[test]
+    fn the_footer_follows_the_page_and_is_pinned_only_on_overflow() {
+        let summary = "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe";
+        // Fits: below the lowest block by the gap between two blocks.
+        let shapes = upgrade_shapes(&erase_chosen(), 1920.0, 1080.0);
+        let gap = card_of(&shapes, "Target").top() - card_of(&shapes, "Release").bottom();
+        assert!(gap > 0.0, "{gap}");
+        let footer = card_of(&shapes, summary);
+        let last = ["Target", "Options"]
+            .iter()
+            .map(|l| card_of(&shapes, l).bottom())
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (footer.top() - (last + gap)).abs() < 1.0,
+            "footer {footer:?}, page ends {last}"
+        );
+        let total = 3_100_000_000;
+        let running = writing_at(total / 2, Some(total));
+        let shapes = upgrade_shapes(&running, 1920.0, 1080.0);
+        let footer = card_of(&shapes, "Cancel");
+        let steps = card_of(&shapes, "Downloading and writing");
+        assert!(
+            (footer.top() - (steps.bottom() + gap)).abs() < 1.0,
+            "{footer:?} {steps:?}"
+        );
+        // Overflows: pinned to the bottom of the panel, button in view.
+        let (w, h) = (1280.0, 600.0);
+        let menu = internal_chosen();
+        let shapes = upgrade_shapes(&menu, w, h);
+        let label = "Erase Samsung SSD 980, 500 GB, and install the newest ThinFloe";
+        let footer = card_of(&shapes, label);
+        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, small_log(&menu)).log;
+        assert!((footer.bottom() - (log.top() - 16.0)).abs() < 1.0, "{footer:?} {log:?}");
+        let (rect, ok) = visible_button(&menu, w, h, "Erase Samsung SSD 980 500 GB");
+        assert!(ok, "{rect:?}");
+    }
+
     #[test]
     fn the_log_is_small_only_while_choosing() {
         let rows = |m: &Menu| {

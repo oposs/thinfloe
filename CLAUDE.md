@@ -1538,15 +1538,17 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - Not verified on hardware (Upgrade screen): choosing and clicking a drive
   with a real mouse, a write to a real stick with its bar, speed and time
   left, Cancel during a write, and Restart while a stick is written. At
-  1080p and on a 21 inch 4K screen the Choose page fits above the summary
-  and the confirm button, which (like Cancel, Stop, Restart now, Try again)
-  stay fixed below it: Release on top, the drives in a left column, Action
-  and Options in a right one (one column below `UPGRADE_TWO_COLUMNS_W` in
-  `brand.rs`), and the log shrinks to `LOG_CHOOSE_ROWS` (4) rows while
-  choosing. `the_choose_blocks_fit_above_the_footer` guards both screens,
-  also with Advanced on and an internal drive chosen. A longer page scrolls
-  with a solid scroll bar drawn also at rest (egui's floating default drew
-  none until hovered).
+  1080p and on a 21 inch 4K screen the Choose page fits without scrolling:
+  Release on top (with Advanced), the drives in a left column under a
+  Target heading that carries "Show all drives", Action and Options in a
+  right one (one column below `UPGRADE_TWO_COLUMNS_W` in `brand.rs`), and
+  the log shrinks to `LOG_CHOOSE_ROWS` (4) rows while choosing. The footer
+  (summary and confirm button; Cancel, Stop; Restart now, Try again) sits
+  one block gap below the last block, and is pinned to the bottom of the
+  panel only when the page overflows, so its buttons never scroll away;
+  then a solid scroll bar shows (egui's floating default drew none until
+  hovered). `the_choose_blocks_fit_above_the_footer` and
+  `the_footer_follows_the_page_and_is_pinned_only_on_overflow` guard this.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

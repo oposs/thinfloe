@@ -98,15 +98,29 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
         });
     });
     let block_w = width - 2.0 * f32::from(BLOCK_PAD);
-    // The footer is fixed at the bottom of the panel, so the main buttons
-    // never scroll away; the page scrolls in what is left above it. Its
-    // height is the previous pass's, and a change discards the pass, so the
-    // frame is drawn again at once with the right height.
+    p_ui.add_space(BLOCK_GAP);
+    let page_top = p_ui.cursor().min.y;
+    // The footer follows the page, one BLOCK_GAP below its last block. When
+    // the page does not fit, the footer is pinned to the bottom of the panel
+    // and the page scrolls above it, so the main buttons never scroll away.
+    // Both heights are the previous pass's; a change discards the pass, so
+    // the frame is drawn again at once with the right ones.
     let h_id = egui::Id::unique("thinfloe-upgrade-footer-h");
+    let c_id = egui::Id::unique("thinfloe-upgrade-content-h");
     let prev_h: f32 = ui.ctx().data(|d| d.get_temp(h_id)).unwrap_or(0.0);
+    let prev_c: f32 = ui.ctx().data(|d| d.get_temp(c_id)).unwrap_or(f32::INFINITY);
+    // The page's height includes the BLOCK_GAP below its last block.
+    let room = (panel.bottom() - prev_h - page_top).max(0.0);
+    let fits = prev_c <= room;
+    let page_bottom = if fits {
+        page_top + prev_c
+    } else {
+        page_top + (room - BLOCK_GAP).max(0.0)
+    };
+    let footer_top = if fits { page_bottom } else { panel.bottom() - prev_h };
     let mut f_ui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
-        egui::pos2(panel.left(), panel.bottom() - prev_h),
-        panel.max,
+        egui::pos2(panel.left(), footer_top),
+        egui::pos2(panel.right(), panel.bottom().max(footer_top)),
     )));
     let footer = match &u.stage {
         Stage::Choose => choose_footer(&mut f_ui, u, &t, block_w),
@@ -114,28 +128,18 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
         Stage::Finished(o) => finished_footer(&mut f_ui, o, &t, block_w),
     };
     let h = f_ui.min_rect().height().max(0.0);
-    if (h - prev_h).abs() > 0.5 {
-        ui.ctx().data_mut(|d| d.insert_temp(h_id, h));
-        ui.ctx().request_discard("the Upgrade footer changed its height");
-    }
-    let page_bottom = if h > 0.0 {
-        panel.bottom() - h - BLOCK_GAP
-    } else {
-        panel.bottom()
-    };
     if footer.is_some() {
         event = footer;
     }
-    p_ui.add_space(BLOCK_GAP);
     let page = Rect::from_min_max(
-        p_ui.cursor().min,
-        egui::pos2(panel.right(), page_bottom.max(p_ui.cursor().min.y)),
+        egui::pos2(panel.left(), page_top),
+        egui::pos2(panel.right(), page_bottom),
     );
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(page));
     // egui's default scroll style is floating, with the bar at zero
-    // opacity until the pointer hovers it, so AlwaysVisible showed nothing
-    // to someone who had not found the page scrolls. A solid bar, drawn
-    // at full opacity also at rest, in the theme's colours.
+    // opacity until the pointer hovers it. A solid bar, drawn at full
+    // opacity also at rest, in the theme's colours, and only when the
+    // page overflows.
     s_ui.spacing_mut().scroll = egui::style::ScrollStyle {
         dormant_background_opacity: SCROLL_REST_OPACITY,
         dormant_handle_opacity: SCROLL_REST_OPACITY,
@@ -143,10 +147,10 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
         active_handle_opacity: SCROLL_REST_OPACITY,
         ..egui::style::ScrollStyle::solid()
     };
-    egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::vertical()
         .id_salt("upgrade")
         .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(&mut s_ui, |ui| {
             let e = match &u.stage {
                 Stage::Choose => choose(ui, menu, &t, block_w),
@@ -157,6 +161,15 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
                 event = e;
             }
         });
+    let c = out.content_size.y;
+    if (h - prev_h).abs() > 0.5 || (c - prev_c).abs() > 0.5 {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(h_id, h);
+            d.insert_temp(c_id, c);
+        });
+        ui.ctx()
+            .request_discard("the Upgrade page or footer changed its height");
+    }
     event
 }
 
@@ -267,14 +280,7 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     let outer = w + 2.0 * f32::from(BLOCK_PAD);
     if outer < brand::UPGRADE_TWO_COLUMNS_W {
         // One column: the drives one row each, the choices side by side.
-        noted_block(
-            ui,
-            t,
-            w,
-            "Target",
-            Some("The list follows as sticks are plugged in and pulled out."),
-            |ui| target(ui, u, t, false, &mut event),
-        );
+        target_block(ui, u, t, w, false, &mut event);
         action_blocks(ui, menu, t, w, true, &mut event);
         return event;
     }
@@ -283,10 +289,7 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = COL_GAP;
         ui.vertical(|ui| {
-            block(ui, t, half, "Target", |ui| {
-                target(ui, u, t, true, &mut event);
-                muted(ui, t, "The list follows as sticks are plugged in and pulled out.");
-            });
+            target_block(ui, u, t, half, true, &mut event);
         });
         ui.vertical(|ui| {
             action_blocks(ui, menu, t, half, false, &mut event);
@@ -400,24 +403,27 @@ fn choose_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeE
             muted(ui, t, "Choose what to do with the stick.");
             return;
         };
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = u.confirm_label().unwrap_or_default();
-            let b = Button::new(label);
-            let b = if fresh {
-                b.variant(ButtonVariant::Destructive)
-            } else {
-                b
-            };
-            if ui.add_enabled(u.can_confirm(), b).clicked() {
-                event = Some(UpgradeEvent::Confirm);
-            }
-            ui.add_space(HEADER_GAP);
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-                |ui| {
-                    ui.label(egui::RichText::new(summary).color(t.palette().foreground));
-                },
-            );
+        // In a row, so the layout below does not take the panel's height.
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = u.confirm_label().unwrap_or_default();
+                let b = Button::new(label);
+                let b = if fresh {
+                    b.variant(ButtonVariant::Destructive)
+                } else {
+                    b
+                };
+                if ui.add_enabled(u.can_confirm(), b).clicked() {
+                    event = Some(UpgradeEvent::Confirm);
+                }
+                ui.add_space(HEADER_GAP);
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+                    |ui| {
+                        ui.label(egui::RichText::new(summary).color(t.palette().foreground));
+                    },
+                );
+            })
         });
     });
     event
@@ -479,13 +485,10 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
     }
     let entered = u.source_text.trim();
     if !u.advanced {
-        // Off, the address and Show all drives keep their values but the
-        // address is not used: say so, never hide it.
+        // Off, the address keeps its value but is not used: say so, never
+        // hide it.
         if !entered.is_empty() {
             muted(ui, t, format!("Not used while Advanced is off: {entered}"));
-        }
-        if u.show_all {
-            muted(ui, t, "All drives are listed.");
         }
         return;
     }
@@ -510,14 +513,6 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
     if entered.is_empty() {
         muted(ui, t, "Empty: the default release is used.");
     }
-    if let Some(on) = check(
-        ui,
-        u.show_all,
-        "Show all drives",
-        Some("Internal drives too. Erasing one needs its name and size typed in."),
-    ) {
-        *event = Some(UpgradeEvent::ShowAll(on));
-    }
 }
 
 /// The reason a drive cannot be used at all: every mode is refused.
@@ -527,6 +522,47 @@ fn refusal(d: &Drive, image_bytes: Option<u64>) -> Option<String> {
         return None;
     }
     modes.into_iter().find_map(|(_, r)| r.err())
+}
+
+/// The Target block: its heading with Show all drives at the right end of
+/// the heading's line, the drive list, and what the list does.
+fn target_block(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32, narrow: bool, event: &mut Option<UpgradeEvent>) {
+    const HINT: &str = "Internal drives too. Erasing one needs its name and size typed in.";
+    card(ui, t, w, None, None, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Target")
+                    .font(brand::geo(brand::SECTION_PT))
+                    .color(t.palette().foreground),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Not a Field, for the reason given at Advanced. Right to
+                // left: the label first, then its box to the left of it.
+                let mut on = u.show_all;
+                let named = ui
+                    .add(
+                        egui::Label::new("Show all drives")
+                            .selectable(false)
+                            .sense(Sense::click()),
+                    )
+                    .on_hover_text(HINT)
+                    .clicked();
+                let ticked = ui.add(Checkbox::new(&mut on)).on_hover_text(HINT).changed();
+                if named {
+                    on = !on;
+                }
+                if named || ticked {
+                    *event = Some(UpgradeEvent::ShowAll(on));
+                }
+            });
+        });
+        target(ui, u, t, narrow, event);
+        muted(ui, t, "The list follows as sticks are plugged in and pulled out.");
+        if u.show_all {
+            muted(ui, t, HINT);
+        }
+    });
+    ui.add_space(BLOCK_GAP);
 }
 
 /// The drive list; `narrow` puts each drive's details under its name.
