@@ -774,8 +774,18 @@ fn finished_footer(ui: &mut Ui, o: &Outcome, t: &Theme, w: f32) -> Option<Upgrad
     let mut event = None;
     card(ui, t, w, None, None, |ui| {
         ui.horizontal(|ui| {
-            if matches!(o, Outcome::Done { boot_stick: true, .. }) && ui.add(Button::new("Restart now")).clicked() {
-                event = Some(UpgradeEvent::RestartNow);
+            if matches!(o, Outcome::Done { boot_stick: true, .. }) {
+                if ui.add(Button::new("Restart now")).clicked() {
+                    event = Some(UpgradeEvent::RestartNow);
+                }
+                // Opening the screen again keeps this outcome for Restart
+                // now, so another stick needs its own way back to Choose.
+                if ui
+                    .add(Button::new("Write another stick").variant(ButtonVariant::Secondary))
+                    .clicked()
+                {
+                    event = Some(UpgradeEvent::WriteAnother);
+                }
             }
             if !ok && ui.add(Button::new("Try again")).clicked() {
                 event = Some(UpgradeEvent::TryAgain);

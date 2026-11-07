@@ -65,6 +65,8 @@ pub enum UpgradeEvent {
     CancelYes,
     CancelNo,
     TryAgain,
+    /// After an upgrade of this machine's stick: choose another stick.
+    WriteAnother,
     RestartNow,
     Back,
 }
@@ -313,6 +315,14 @@ impl Upgrade {
             }
             UpgradeEvent::TryAgain => {
                 self.reset_finished(now);
+                None
+            }
+            UpgradeEvent::WriteAnother => {
+                if matches!(self.stage, Stage::Finished(_)) && self.job.is_none() {
+                    self.reset_finished(now);
+                    // The stick just upgraded is not the next one to write.
+                    self.clear_choice();
+                }
                 None
             }
             UpgradeEvent::RestartNow => match self.stage {
@@ -1463,6 +1473,25 @@ mod tests {
             u.stage
         );
         assert_eq!(ev(&mut u, UpgradeEvent::RestartNow, t), Some(Request::Restart));
+    }
+
+    #[test]
+    fn write_another_stick_after_a_boot_stick_upgrade() {
+        let (mut u, t) = running_upgrade(Drive {
+            is_boot: true,
+            ..stick("/dev/sda", "sn-B:1:1")
+        });
+        u.message(result(true, ""), t);
+        u.ended(Ok(Some(0)));
+        assert_eq!(ev(&mut u, UpgradeEvent::WriteAnother, t), None);
+        assert_eq!(u.stage, Stage::Choose);
+        assert!(u.chosen.is_none() && u.mode.is_none() && u.steps.is_empty());
+        assert!(!u.listed());
+        assert_eq!(u.poll(t), Some(Request::Drives { all: false }));
+        // Only from a finished write.
+        let (mut u, t) = running_fresh(true);
+        ev(&mut u, UpgradeEvent::WriteAnother, t);
+        assert_eq!(u.stage, Stage::Running);
     }
 
     #[test]

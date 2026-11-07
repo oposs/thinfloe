@@ -1547,12 +1547,15 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
   Target heading that carries "Show all drives", Action and Options in a
   right one (one column below `UPGRADE_TWO_COLUMNS_W` in `brand.rs`), and
   the log shrinks to `LOG_CHOOSE_ROWS` (4) rows while choosing. The footer
-  (summary and confirm button; Cancel, Stop; Restart now, Try again) sits
+  (summary and confirm button; Cancel, Stop; Restart now, Write another stick, Try again) sits
   one block gap below the last block, and is pinned to the bottom of the
   panel only when the page overflows, so its buttons never scroll away;
   then a solid scroll bar shows (egui's floating default drew none until
   hovered). `the_choose_blocks_fit_above_the_footer` and
   `the_footer_follows_the_page_and_is_pinned_only_on_overflow` guard this.
+  After an upgrade of this machine's stick the outcome stays when the screen
+  is opened again, for Restart now; Write another stick goes back to Choose
+  with no drive chosen. Any other outcome resets to Choose on opening.
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.

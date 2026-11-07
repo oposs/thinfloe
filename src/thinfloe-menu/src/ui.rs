@@ -3068,6 +3068,29 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_boot_upgrade_offers_restart_and_another_stick() {
+        use crate::jobs::JobResult;
+        use crate::upgrade_proto::Msg;
+        let now = Instant::now();
+        let mut done = upgrade_open(unknown_release(), three_drives(), false, now);
+        done.upgrade_event(UpgradeEvent::Choose("/dev/sda".into()), now);
+        done.upgrade_event(UpgradeEvent::Confirm, now);
+        done.finished(JobResult::UpgradeStarted { pgid: 4242 }, now);
+        done.finished(
+            JobResult::UpgradeMsg(Msg::Result {
+                ok: true,
+                reason: String::new(),
+            }),
+            now,
+        );
+        done.finished(JobResult::UpgradeEnded { status: Ok(Some(0)) }, now);
+        let shapes = upgrade_shapes(&done, 1920.0, 1080.0);
+        assert_texts(&shapes, &["Restart now", "Write another stick", "Back"]);
+        let (rect, ok) = visible_button(&done, 1920.0, 1080.0, "Write another stick");
+        assert!(ok, "{rect:?}");
+    }
+
+    #[test]
     fn the_log_is_small_only_while_choosing() {
         let rows = |m: &Menu| {
             let l = layout_with(screen(1920.0, 1080.0), m.visible_tiles().len(), 0, small_log(m));
