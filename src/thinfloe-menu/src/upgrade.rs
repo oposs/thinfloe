@@ -571,7 +571,7 @@ impl Upgrade {
             } => {
                 let mut s = String::new();
                 if *late_cancel {
-                    s.push_str("The cancel came too late: the upgrade was finished. ");
+                    s.push_str("The cancel came too late: the write was finished. ");
                 }
                 if *boot_stick {
                     match &self.done_version {
@@ -583,7 +583,7 @@ impl Upgrade {
                 }
                 (s, Tone::Good)
             }
-            Outcome::Failed { reason } => (upper_first(reason), Tone::Warn),
+            Outcome::Failed { reason } => (sentence(reason), Tone::Warn),
             Outcome::Refused { reason } => {
                 let reason = reason.trim().trim_end_matches('.');
                 let text = if reason.is_empty() {
@@ -609,7 +609,7 @@ impl Upgrade {
             ),
             Outcome::Cancelled {
                 mode: Mode::Upgrade, ..
-            } => ("Cancelled. The stick is unchanged.".to_string(), Tone::Plain),
+            } => ("Cancelled. The stick still starts its current release.".to_string(), Tone::Plain),
             Outcome::NoResult { status } => (
                 format!("The writer ended without a result ({status}). The log shows why."),
                 Tone::Warn,
@@ -785,12 +785,18 @@ pub fn name(d: &Drive) -> &str {
     if d.model.trim().is_empty() { &d.device } else { &d.model }
 }
 
-fn upper_first(s: &str) -> String {
+/// The tool's reason as a sentence: a capital first, a full stop last.
+fn sentence(s: &str) -> String {
+    let s = s.trim();
     let mut c = s.chars();
-    match c.next() {
+    let mut out: String = match c.next() {
         Some(f) => f.to_uppercase().chain(c).collect(),
-        None => "The write failed".to_string(),
+        None => return "The write failed.".to_string(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
     }
+    out
 }
 
 /// The steps the tool will run, all waiting.
@@ -1080,7 +1086,7 @@ mod tests {
                 reason: "the stick was removed".into()
             })
         );
-        assert_eq!(u.outcome_text(), ("The stick was removed".to_string(), Tone::Warn));
+        assert_eq!(u.outcome_text(), ("The stick was removed.".to_string(), Tone::Warn));
         assert_eq!(mark(&u, "write"), StepMark::Failed);
         assert_eq!(mark(&u, "verify"), StepMark::Waiting);
         assert!(!u.writing());
@@ -1293,7 +1299,7 @@ mod tests {
                 written: false
             })
         );
-        assert_eq!(u.outcome_text().0, "Cancelled. The stick is unchanged.");
+        assert_eq!(u.outcome_text().0, "Cancelled. The stick still starts its current release.");
     }
 
     #[test]
@@ -1328,7 +1334,7 @@ mod tests {
         );
         assert_eq!(
             u.outcome_text().0,
-            "The cancel came too late: the upgrade was finished. ThinFloe 4.1.0 is ready. It starts after a restart."
+            "The cancel came too late: the write was finished. ThinFloe 4.1.0 is ready. It starts after a restart."
         );
         assert_eq!(ev(&mut u, UpgradeEvent::RestartNow, t), Some(Request::Restart));
     }

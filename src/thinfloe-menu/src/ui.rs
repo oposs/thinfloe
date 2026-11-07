@@ -452,7 +452,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                 {
                     ui.label(
                         egui::RichText::new(format!(
-                            "If you {verb} anyway, the stick in {drive} will not start until it is written again."
+                            "If you {verb} anyway, {drive} will not start until it is written again."
                         ))
                         .color(t.role(role::WARN)),
                     );
@@ -2689,6 +2689,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_invalid_address_says_so_beside_the_release() {
+        let now = Instant::now();
+        let mut menu = upgrade_open(unknown_release(), three_drives(), false, now);
+        menu.upgrade_event(UpgradeEvent::Advanced(true), now);
+        menu.upgrade_event(UpgradeEvent::Source("ftp://x".into()), now);
+        let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 2000.0));
+        assert!(texts.iter().any(|t| t == "· address not valid"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("not checked yet")), "{texts:?}");
+    }
+
     /// The fill of a destructive button's face, from a button drawn alone.
     fn destructive_fill() -> Color32 {
         let ctx = egui::Context::default();
@@ -2855,7 +2866,7 @@ mod tests {
             &[
                 "Waiting for the stick before restarting",
                 "Writing SanDisk Cruzer",
-                "If you restart anyway, the stick in SanDisk Cruzer will not start until it is written again.",
+                "If you restart anyway, SanDisk Cruzer will not start until it is written again.",
                 "Restart anyway",
             ],
         );

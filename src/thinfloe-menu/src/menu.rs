@@ -888,8 +888,14 @@ impl Menu {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
             // The shutdown ends what is left of the add-on jobs.
             Some(Logout::StoppingAddons { go_at }) if now >= go_at => {
+                let jobs = self.root_jobs();
+                let what = if jobs.is_empty() {
+                    "The work".to_string()
+                } else {
+                    jobs.join(", ")
+                };
                 self.log
-                    .note(Kind::Warn, "The add-on work did not stop in time; going on anyway.");
+                    .note(Kind::Warn, format!("{what} did not stop in time; going on anyway."));
                 self.logout_after_jobs(now)
             }
             Some(Logout::Stopping { kill_at, killed: false }) if now >= kill_at => {
@@ -2478,7 +2484,13 @@ mod tests {
             m.choose(Choice::LeaveAnyway, now),
             Some(Effect::Signal(vec![4242], Signal::Term))
         );
+        let job = m.upgrade.job_name().unwrap();
         assert_eq!(m.tick(now + STOP_GRACE), Some(Effect::Start(Job::Save)));
+        assert!(
+            log(&m).contains(&(Kind::Warn, format!("{job} did not stop in time; going on anyway."))),
+            "{:?}",
+            log(&m)
+        );
         for k in 1..20 {
             let e = m.tick(now + STOP_GRACE * k);
             assert!(no_kill(&e), "{e:?}");

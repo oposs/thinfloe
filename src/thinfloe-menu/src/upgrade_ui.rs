@@ -310,7 +310,12 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
     let latest = rel.and_then(|r| r.latest.as_deref()).unwrap_or(unknown);
     // SAFETY: time(NULL) has no preconditions.
     let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
-    let checked = settings::last_checked(rel.and_then(|r| r.checked), now);
+    // An address that cannot be checked was never checked: say why.
+    let checked = if u.source_invalid() {
+        "address not valid".to_string()
+    } else {
+        settings::last_checked(rel.and_then(|r| r.checked), now)
+    };
     ui.horizontal(|ui| {
         muted(ui, t, "Installed");
         ui.label(egui::RichText::new(u.installed.as_deref().unwrap_or(unknown)).color(t.palette().foreground));
