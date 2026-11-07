@@ -66,12 +66,16 @@ Writes a USB disk with `thinfloe-upgrade write` and boots it. See
 ```bash
 scripts/publish.sh
 ```
-Uploads `vmlinuz`, `initrd.img`, `ramroot.sqsh` and
+Uploads `version`, `vmlinuz`, `initrd.img`, `ramroot.sqsh` and
 `thinfloe-usb.img.zst` with its checksum to the upgrade server
 `https://tobi.oetiker.ch/dbrrg`, which kept its name through the rename.
 It also uploads the image as `dbrrg-usb.img.zst` (a hard link under
 `artifacts/images/bridge/`), because the 3.x `upgrade-image` fetches only
 that name. `vmlinuz`, `initrd.img` and `ramroot.sqsh` keep their names.
+`version` is `artifacts/rootfs/version`, which the export copies from the
+built image's `/etc/thinfloe/version`; `thinfloe-upgrade check` reads it,
+and the script refuses to publish when it is missing or not one line
+`X.Y.Z`. Raise `RELEASE` before a release.
 
 ## Boot Flow Architecture
 
@@ -183,8 +187,11 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   `virtio-gpu`, which is also left out of the initrd). `DeviceScale=1` in
   `overlay/etc/plymouth/plymouthd.conf` keeps Plymouth from guessing scale 2
   on 4K and doubling the whole screen; the same test guards both. The host name reaches it through
-  `plymouth display-message` in `tf_write_hostname`. The version shows in the header only when
-  `/etc/thinfloe/version` exists; nothing writes it yet.
+  `plymouth display-message` in `tf_write_hostname`. The version shows in the header, from
+  `/etc/thinfloe/version`, which the build writes from `RELEASE` in the
+  repository root (one line `X.Y.Z`, else the build fails; a prerequisite
+  of `.ubuntu-container`). `test/integration/test-release-version.sh`
+  guards the chain, `test-session-packages.sh` the file in the image.
   Above the host name a step line says what the machine does, in English.
   It arrives through `plymouth update --status`: a text that starts with
   `tf:` is shown as it is, anything else is a systemd unit id, which a table

@@ -40,7 +40,7 @@ TREE="$WORK/tree"
 mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/src/thinfloe-menu/src" \
     "$TREE/overlay/etc/x.d" "$TREE/brand" "$TREE/artifacts/rootfs"
 cp "$REPO/Makefile" "$TREE/Makefile"
-inputs=(containers/ubuntu/Dockerfile src/thinfloe-menu/src/main.rs
+inputs=(RELEASE containers/ubuntu/Dockerfile src/thinfloe-menu/src/main.rs
         overlay/etc/keep overlay/etc/x.d/gone.conf brand/keep.svg brand/gone.svg)
 
 # Prints "up-to-date" when make would not rebuild the stamp, "rebuild"
@@ -49,7 +49,7 @@ reset() {
     rm -rf "$TREE/overlay" "$TREE/brand"
     mkdir -p "$TREE/overlay/etc/x.d" "$TREE/brand"
     for f in "${inputs[@]}"; do : >"$TREE/$f"; done
-    (cd "$TREE" && find containers src overlay brand -exec touch -d '2020-01-01' {} +)
+    (cd "$TREE" && find RELEASE containers src overlay brand -exec touch -d '2020-01-01' {} +)
     echo sha256:aaaa >"$TREE/.ubuntu-container"
     touch -d '2021-01-01' "$TREE/.ubuntu-container"
 }
@@ -90,6 +90,14 @@ if [[ $(state) == rebuild ]]; then
     ok "deleting a brand file rebuilds the image"
 else
     bad "deleting a brand file left the image standing"
+fi
+
+reset
+touch "$TREE/RELEASE"
+if [[ $(state) == rebuild ]]; then
+    ok "a new RELEASE rebuilds the image"
+else
+    bad "a changed RELEASE left the image with the old /etc/thinfloe/version"
 fi
 
 # Rewriting bytecode touches the pyc and its __pycache__, not overlay/usr/bin.

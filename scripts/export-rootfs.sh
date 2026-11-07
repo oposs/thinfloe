@@ -33,6 +33,12 @@ INITRD_SRC=$(find /boot -name 'initrd.img-*' -type f | sort | tail -1)
 cp "$INITRD_SRC" "${ARTIFACT_DIR}/initrd.img"
 log_success "Initramfs exported"
 
+# Export the release number, from the image, so it always matches it
+log_step "Exporting release number..."
+[[ -f /etc/thinfloe/version ]] || die "No /etc/thinfloe/version in the image"
+cp /etc/thinfloe/version "${ARTIFACT_DIR}/version"
+log_success "Release $(cat "${ARTIFACT_DIR}/version") exported"
+
 # Cleanup
 log_step "Cleaning up rootfs..."
 rm -rf /boot/* /.dockerenv /etc/machine-id /var/lib/dbus/machine-id /var/log/* /tmp/* /var/tmp/*

@@ -926,6 +926,19 @@ else
     fail=1
 fi
 
+# The release number: RELEASE of the checkout, written at build time.
+REL_TMP=$(mktemp -d)
+want=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
+if unsquashfs -no-xattrs -q -d "$REL_TMP/x" "$SQSH" etc/thinfloe/version >/dev/null 2>&1 \
+        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] \
+        && [[ "$(cat "$REL_TMP/x/etc/thinfloe/version")" == "$want" ]] && [[ -n "$want" ]]; then
+    echo "ok   - /etc/thinfloe/version is RELEASE ($want)"
+else
+    echo "FAIL - /etc/thinfloe/version does not match RELEASE ('$want')"
+    fail=1
+fi
+rm -rf "$REL_TMP"
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

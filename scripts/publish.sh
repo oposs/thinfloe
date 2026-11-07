@@ -8,8 +8,22 @@ ARTIFACT_DIR="$PROJECT_DIR/artifacts"
 
 TARGET="oetiker@web-volki-01-adm:public_html/dbrrg/"
 
+# The release number thinfloe-upgrade check reads: one line X.Y.Z, taken
+# from the built image by the export. Without it every machine's check fails.
+VERSION_FILE="$ARTIFACT_DIR/rootfs/version"
+if [[ ! -f "$VERSION_FILE" ]]; then
+    echo "ERROR: Missing file: $VERSION_FILE" >&2
+    echo "Run 'make' first to build artifacts." >&2
+    exit 1
+fi
+if [[ $(wc -l <"$VERSION_FILE") != 1 ]] || ! grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' "$VERSION_FILE"; then
+    echo "ERROR: $VERSION_FILE is not one line X.Y.Z" >&2
+    exit 1
+fi
+
 # Files to publish
 FILES=(
+    "$VERSION_FILE"
     "$ARTIFACT_DIR/rootfs/vmlinuz"
     "$ARTIFACT_DIR/rootfs/initrd.img"
     "$ARTIFACT_DIR/rootfs/ramroot.sqsh"
