@@ -364,6 +364,87 @@ fi
 mv "$WORK/wlopm.off" "$WORK/bin/wlopm"
 rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN"
 
+# --- TERM and INT --------------------------------------------------------
+# Run the session in the background, as labwc does; its PID is the shell's.
+# Job control, because bash starts a plain background job with SIGINT
+# ignored, and a shell cannot trap a signal it was started ignoring. labwc
+# resets every signal for the session.
+start_session() { # menu-code
+    rm -f "$WORK"/idle.* "$WORK/seen" "$WORK/menu.ready" "$WORK/signalled" "$WORK/foot.args" \
+        "$WORK/thinfloe-session.status" "$WORK/sudo.args" "$WORK/steps"
+    printf '#!/bin/sh\n%s\n' "$1" >"$WORK/bin/menu"
+    chmod 755 "$WORK/bin/menu"
+    set -m
+    env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+        TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+        TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1 &
+    session_pid=$!
+    set +m
+}
+# Wait up to 3 s for file $1.
+wait_file() {
+    local n
+    for n in $(seq 30); do [[ -e $1 ]] && return 0; sleep 0.1; done
+    return 1
+}
+# A signal while the menu runs waits for the menu: the helpers stay up
+# with it, its exit status decides as usual, and the helpers end after it.
+for sig in TERM INT; do
+    start_session "wait-idle; echo \"\$TF_IDLE_PID\" >'$WORK/idle-helper'; : >'$WORK/menu.ready'
+n=0; while [ ! -e '$WORK/signalled' ] && [ \$n -lt 30 ]; do sleep 0.1; n=\$((n + 1)); done
+sleep 0.3
+for f in '$WORK'/idle.*; do kill -0 \"\${f##*.}\" 2>/dev/null && echo swayidle-up; done >'$WORK/seen'
+kill -0 \"\$TF_IDLE_PID\" 2>/dev/null && echo helper-up >>'$WORK/seen'
+exit 10"
+    wait_file "$WORK/menu.ready"
+    kill -"$sig" "$session_pid"
+    : >"$WORK/signalled"
+    wait "$session_pid"
+    rc=$?
+    hp=$(cat "$WORK/idle-helper" 2>/dev/null)
+    idle_pids=""
+    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids="$idle_pids ${f##*.}"; done
+    alive=$(still_alive $hp $idle_pids)
+    if [[ "$(cat "$WORK/seen" 2>/dev/null)" == $'swayidle-up\nhelper-up' && $rc -eq 0 &&
+          "$(cat "$WORK/thinfloe-session.status" 2>/dev/null)" == 10 &&
+          "$(cat "$WORK/sudo.args" 2>/dev/null)" == "systemctl reboot" &&
+          ! -e "$WORK/foot.args" && -n $hp && -z $alive ]]; then
+        ok "$sig during the menu: blanking stays until the menu ends, its restart goes ahead, the helpers end"
+    else
+        bad "$sig during the menu: seen '$(cat "$WORK/seen" 2>/dev/null)' rc=$rc status '$(cat "$WORK/thinfloe-session.status" 2>/dev/null)' sudo '$(cat "$WORK/sudo.args" 2>/dev/null)' foot '$(cat "$WORK/foot.args" 2>/dev/null)' alive '$alive'"
+    fi
+done
+# A signal before the menu starts (here while the boot screen helper runs)
+# ends the session: no menu without screen blanking, no failure window.
+cat >"$WORK/bin/step" <<STUB
+#!/bin/sh
+echo "\$*" >>"$WORK/steps"
+: >"$WORK/step.running"
+sleep 1
+STUB
+for sig in TERM INT; do
+    rm -f "$WORK/step.running"
+    start_session "echo menu >>'$WORK/steps'; exit 0"
+    wait_file "$WORK/step.running"
+    "$WORK/bin/wait-idle"
+    idle_pids=""
+    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids="$idle_pids ${f##*.}"; done
+    kill -"$sig" "$session_pid"
+    wait "$session_pid"
+    rc=$?
+    alive=$(still_alive $idle_pids)
+    if [[ $rc -ne 0 && "$(cat "$WORK/steps" 2>/dev/null)" == quit-retain && -n $idle_pids && -z $alive &&
+          ! -e "$WORK/thinfloe-session.status" && ! -e "$WORK/foot.args" ]]; then
+        ok "$sig before the menu: the session ends, no menu, no failure window, swayidle ends"
+    else
+        bad "$sig before the menu: rc=$rc steps '$(cat "$WORK/steps" 2>/dev/null)' swayidle '$idle_pids' alive '$alive' status '$(cat "$WORK/thinfloe-session.status" 2>/dev/null)'"
+    fi
+done
+cat >"$WORK/bin/step" <<STUB
+#!/bin/sh
+echo "\$*" >>"$WORK/steps"
+STUB
+
 # --- session-verdict ---------------------------------------------------
 S="$WORK/vstatus"
 C="$WORK/vcount"

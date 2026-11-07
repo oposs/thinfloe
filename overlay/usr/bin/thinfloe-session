@@ -44,15 +44,26 @@ fi
 
 # Background helpers. Every one of them must die with the session: labwc
 # terminates when this script returns, and an orphan would linger against the
-# next session's compositor. One trap covers all of them, so adding a helper
-# means appending its PID here and nothing else.
+# next session's compositor. The traps below kill all of them, so adding a
+# helper means appending its PID here and nothing else.
 HELPER_PIDS=""
 kill_helpers() {
     for _p in $HELPER_PIDS; do
         kill "$_p" 2>/dev/null
     done
 }
-trap kill_helpers EXIT INT TERM
+# INT or TERM before the menu starts ends the session; without the exit the
+# shell would go on and start the menu with its helpers already dead. While
+# the menu runs, dash holds the trap until the menu has ended, and the
+# menu's exit status then decides as usual.
+tf_signalled() {
+    kill_helpers
+    [ -n "$menu_started" ] || exit "$1"
+}
+menu_started=
+trap kill_helpers EXIT
+trap 'tf_signalled 130' INT
+trap 'tf_signalled 143' TERM
 
 # Screen blanking. Wayland splits this in two: labwc reports idleness via
 # ext_idle_notifier_v1 but has no timeout of its own, so without a policy
@@ -257,6 +268,7 @@ fi
 "${TF_LABWC_SCALE:-/usr/libexec/thinfloe/labwc-scale}" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
 HELPER_PIDS="$HELPER_PIDS $!"
 
+menu_started=1
 "$TF_MENU"
 menu_rc=$?
 echo "$menu_rc" >"$TF_SESSION_STATUS" 2>/dev/null || true
