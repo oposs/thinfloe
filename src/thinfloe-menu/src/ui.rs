@@ -3145,6 +3145,14 @@ mod tests {
         let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let mut textures = crate::raster::Textures::default();
         let mut canvas = crate::raster::Canvas::new(px.0 as usize, px.1 as usize, crate::brand::rgb::BG);
+        // As the real header: the logo at the screen's pixel density (as
+        // app.rs loads it) and the release the build writes.
+        let logo = ctx.load_texture(
+            "thinfloe-logo",
+            crate::brand::logo((LOGO_H * s).round() as u32),
+            egui::TextureOptions::LINEAR,
+        );
+        let version = include_str!("../../../RELEASE").trim().to_string();
         for frame in 0..12 {
             let mut input = input.clone();
             input.time = Some(frame as f64 * 0.1);
@@ -3152,10 +3160,10 @@ mod tests {
                 let chrome = Chrome {
                     header: crate::header::Header {
                         host: "thinfloe-a1b2c3".into(),
-                        version: None,
+                        version: Some(version.clone()),
                     },
                     clock: "Thu 30 Oct 14:05".into(),
-                    logo: None,
+                    logo: Some(logo.clone()),
                 };
                 show(ui, menu, &icons, &chrome, Instant::now());
             });
