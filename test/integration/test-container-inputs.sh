@@ -11,6 +11,10 @@
 # Runs the real Makefile in a scratch tree with a stub container runtime and
 # asks `make -q` whether the stamp is up to date.
 #
+# It also builds a FROM-scratch probe with podman (CONTAINER_RUNTIME) against
+# the repository root, to check the build context; without podman the test
+# fails.
+#
 # Usage: test/integration/test-container-inputs.sh
 
 set -uo pipefail
@@ -120,27 +124,27 @@ RT="${CONTAINER_RUNTIME:-podman}"
 if ! command -v "$RT" >/dev/null 2>&1; then
     bad "no $RT to check the build context with"
 else
-    PROBE_DIR="${TMPDIR:-/scratch/oetiker/claude-tmp/thinfloe-tests}"
-    mkdir -p "$PROBE_DIR"
-    PROBE=$(mktemp -d "$PROBE_DIR/context-probe.XXXXXX")
+    PROBE="$WORK/context-probe"
+    mkdir -p "$PROBE"
     TAG="localhost/thinfloe-context-probe:$$"
     {
         echo "FROM scratch"
         # Dockerfiles whose build context is the repository root (Makefile).
         for df in containers/ubuntu/Dockerfile; do
-            grep -E '^(COPY|ADD)[[:space:]]' "$REPO/$df" | grep -v -- '--from' \
-                | sed -E 's/^ADD/COPY/'
+            grep -iE '^(COPY|ADD)[[:space:]]' "$REPO/$df" | grep -vi -- '--from' \
+                | sed -E 's/^[Aa][Dd][Dd]/COPY/; s/^[Cc][Oo][Pp][Yy]/COPY/'
         done
     } >"$PROBE/Dockerfile"
     n=$(grep -c '^COPY' "$PROBE/Dockerfile")
-    if "$RT" build --network=none --pull=never -q -t "$TAG" \
+    if [[ $n -eq 0 ]]; then
+        bad "no COPY/ADD line found in containers/ubuntu/Dockerfile; the probe checks nothing"
+    elif "$RT" build --network=none --pull=never -q -t "$TAG" \
             -f "$PROBE/Dockerfile" "$REPO" >"$PROBE/log" 2>&1; then
         ok "the build context has every source of the $n COPY/ADD lines"
     else
         bad "the build context lacks a COPY/ADD source (.dockerignore?): $(grep -m1 -iE 'error|no items' "$PROBE/log")"
     fi
     "$RT" rmi -f "$TAG" >/dev/null 2>&1
-    rm -rf "$PROBE"
 fi
 
 exit $fail
