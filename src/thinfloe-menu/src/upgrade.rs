@@ -609,7 +609,10 @@ impl Upgrade {
             ),
             Outcome::Cancelled {
                 mode: Mode::Upgrade, ..
-            } => ("Cancelled. The stick still starts its current release.".to_string(), Tone::Plain),
+            } => (
+                "Cancelled. The stick still starts its current release.".to_string(),
+                Tone::Plain,
+            ),
             Outcome::NoResult { status } => (
                 format!("The writer ended without a result ({status}). The log shows why."),
                 Tone::Warn,
@@ -1299,7 +1302,10 @@ mod tests {
                 written: false
             })
         );
-        assert_eq!(u.outcome_text().0, "Cancelled. The stick still starts its current release.");
+        assert_eq!(
+            u.outcome_text().0,
+            "Cancelled. The stick still starts its current release."
+        );
     }
 
     #[test]
@@ -1417,7 +1423,10 @@ mod tests {
         assert_eq!(u.mode, Some(Mode::Fresh));
         assert!(u.copy_home && !u.verify);
         // A write is confirmed again only from a list made after this one.
-        let tf = Drive { is_thinfloe: true, ..stick("/dev/sdc", "sn-C:1:1") };
+        let tf = Drive {
+            is_thinfloe: true,
+            ..stick("/dev/sdc", "sn-C:1:1")
+        };
         u.drives_listed(false, Ok(vec![tf]), t);
         assert_eq!(write_of(ev(&mut u, UpgradeEvent::Confirm, t)), first);
     }
@@ -1560,7 +1569,10 @@ mod tests {
         );
         // A failed check keeps its reason.
         ev(&mut u, UpgradeEvent::Advanced(false), t);
-        assert_eq!(ev(&mut u, UpgradeEvent::CheckNow, t), Some(Request::Check { source: None }));
+        assert_eq!(
+            ev(&mut u, UpgradeEvent::CheckNow, t),
+            Some(Request::Check { source: None })
+        );
         u.released(false, Err("no network".into()));
         assert_eq!(u.release.error.as_deref(), Some("no network"));
     }

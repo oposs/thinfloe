@@ -365,9 +365,12 @@ fn choose_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<UpgradeE
                 event = Some(UpgradeEvent::Confirm);
             }
             ui.add_space(HEADER_GAP);
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                ui.label(egui::RichText::new(summary).color(t.palette().foreground));
-            });
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+                |ui| {
+                    ui.label(egui::RichText::new(summary).color(t.palette().foreground));
+                },
+            );
         });
     });
     event

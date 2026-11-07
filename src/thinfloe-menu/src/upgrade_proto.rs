@@ -16,7 +16,8 @@ pub enum Msg {
 
 fn valid_id(s: &str) -> bool {
     (1..=ID_MAX).contains(&s.len())
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 fn cut(s: &str) -> String {
@@ -37,7 +38,10 @@ pub fn parse(line: &str) -> Option<Msg> {
                 Some((i, t)) => (i, t),
                 None => (rest, ""),
             };
-            valid_id(id).then(|| Msg::Step { id: id.to_string(), text: cut(text) })
+            valid_id(id).then(|| Msg::Step {
+                id: id.to_string(),
+                text: cut(text),
+            })
         }
         "@progress" => {
             let mut it = rest.split(' ');
@@ -62,7 +66,10 @@ pub fn parse(line: &str) -> Option<Msg> {
                 "failed" => false,
                 _ => return None,
             };
-            Some(Msg::Result { ok, reason: cut(reason) })
+            Some(Msg::Result {
+                ok,
+                reason: cut(reason),
+            })
         }
         _ => None,
     }
@@ -76,13 +83,22 @@ mod tests {
     fn step() {
         assert_eq!(
             parse("@step write Downloading and writing"),
-            Some(Msg::Step { id: "write".into(), text: "Downloading and writing".into() })
+            Some(Msg::Step {
+                id: "write".into(),
+                text: "Downloading and writing".into()
+            })
         );
     }
 
     #[test]
     fn progress() {
-        assert_eq!(parse("@progress 10 100"), Some(Msg::Progress { done: 10, total: Some(100) }));
+        assert_eq!(
+            parse("@progress 10 100"),
+            Some(Msg::Progress {
+                done: 10,
+                total: Some(100)
+            })
+        );
         assert_eq!(parse("@progress 10 -"), Some(Msg::Progress { done: 10, total: None }));
         assert_eq!(parse("@progress 10 0"), Some(Msg::Progress { done: 10, total: None }));
     }
@@ -90,10 +106,19 @@ mod tests {
     #[test]
     fn done_and_result() {
         assert_eq!(parse("@done verify"), Some(Msg::Done { id: "verify".into() }));
-        assert_eq!(parse("@result ok"), Some(Msg::Result { ok: true, reason: String::new() }));
+        assert_eq!(
+            parse("@result ok"),
+            Some(Msg::Result {
+                ok: true,
+                reason: String::new()
+            })
+        );
         assert_eq!(
             parse("@result failed the stick was removed"),
-            Some(Msg::Result { ok: false, reason: "the stick was removed".into() })
+            Some(Msg::Result {
+                ok: false,
+                reason: "the stick was removed".into()
+            })
         );
     }
 

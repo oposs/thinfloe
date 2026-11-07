@@ -41,16 +41,14 @@ pub enum Mode {
 }
 
 fn device_ok(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("/dev/") else { return false };
-    (1..=32).contains(&rest.len())
-        && rest.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    let Some(rest) = s.strip_prefix("/dev/") else {
+        return false;
+    };
+    (1..=32).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 fn id_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= ID_MAX
-        && !s.starts_with('-')
-        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+    !s.is_empty() && s.len() <= ID_MAX && !s.starts_with('-') && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 fn cut(s: &str) -> String {
@@ -329,10 +327,7 @@ mod tests {
         d.version = Some("4.0.0".into());
         let m = modes(&d, None);
         assert_eq!(m, vec![(Mode::Upgrade, Ok(())), (Mode::Fresh, Ok(()))]);
-        assert_eq!(
-            tag(&d),
-            "ThinFloe stick, version 4.0.0, has fallback, upgrade pending"
-        );
+        assert_eq!(tag(&d), "ThinFloe stick, version 4.0.0, has fallback, upgrade pending");
         assert_eq!(modes(&stick(), None), vec![(Mode::Fresh, Ok(()))]);
         assert_eq!(tag(&stick()), "other drive");
         let mut i = stick();
@@ -359,7 +354,10 @@ mod tests {
         assert_eq!(m[0].1, Err("too small (needs 3.2 GB)".to_string()));
         d.size_bytes = 16_000_000_000;
         d.fits = Some(false);
-        assert_eq!(modes(&d, Some(3_148_873_728))[0].1, Err("too small (needs 3.2 GB)".to_string()));
+        assert_eq!(
+            modes(&d, Some(3_148_873_728))[0].1,
+            Err("too small (needs 3.2 GB)".to_string())
+        );
         assert_eq!(modes(&d, None)[0].1, Err("too small".to_string()));
         d.fits = None;
         assert_eq!(modes(&d, None)[0].1, Ok(()));

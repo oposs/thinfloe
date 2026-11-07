@@ -253,8 +253,8 @@ fn run_job(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) +
     // poll or check would wait for ever.
     let on_panic = panic_result(&job);
     let s = send.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job_result(job, paths, feed, s)))
-        .unwrap_or(on_panic);
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job_result(job, paths, feed, s))).unwrap_or(on_panic);
     send(result);
 }
 
@@ -263,13 +263,19 @@ fn panic_result(job: &Job) -> JobResult {
     let e = "the menu's worker failed; the session log shows why".to_string();
     match job {
         Job::Save => JobResult::Saved(jobs::SaveOutcome::Broken(e)),
-        Job::Run { id, .. } => JobResult::Ran { id: *id, status: Err(e) },
+        Job::Run { id, .. } => JobResult::Ran {
+            id: *id,
+            status: Err(e),
+        },
         Job::Addon { args } => JobResult::Addon {
             args: args.clone(),
             status: Err(e),
         },
         Job::UpgradeWrite { .. } => JobResult::UpgradeEnded { status: Err(e) },
-        Job::Drives { all } => JobResult::Drives { all: *all, result: Err(e) },
+        Job::Drives { all } => JobResult::Drives {
+            all: *all,
+            result: Err(e),
+        },
         Job::UpgradeCheck { source } => JobResult::Release {
             custom: source.is_some(),
             result: Err(e),
@@ -277,7 +283,12 @@ fn panic_result(job: &Job) -> JobResult {
     }
 }
 
-fn job_result(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) + Clone + Send + 'static) -> JobResult {
+fn job_result(
+    job: Job,
+    paths: &Paths,
+    feed: &Arc<Feed>,
+    send: impl Fn(JobResult) + Clone + Send + 'static,
+) -> JobResult {
     match job {
         Job::Save => JobResult::Saved(jobs::save(paths, feed)),
         Job::Run { id, name, argv } => {
@@ -975,12 +986,22 @@ mod tests {
                 let _ = tx.send(r);
             });
             let r = rx.recv_timeout(Duration::from_secs(10)).expect("a result");
-            let ok = match (&job, &r) {
-                (Job::Drives { .. }, JobResult::Drives { all: true, result: Err(_) }) => true,
-                (Job::UpgradeCheck { .. }, JobResult::Release { custom: false, result: Err(_) }) => true,
-                (Job::UpgradeWrite { .. }, JobResult::UpgradeEnded { status: Err(_) }) => true,
-                _ => false,
-            };
+            let ok = matches!(
+                (&job, &r),
+                (
+                    Job::Drives { .. },
+                    JobResult::Drives {
+                        all: true,
+                        result: Err(_)
+                    }
+                ) | (
+                    Job::UpgradeCheck { .. },
+                    JobResult::Release {
+                        custom: false,
+                        result: Err(_)
+                    }
+                ) | (Job::UpgradeWrite { .. }, JobResult::UpgradeEnded { status: Err(_) })
+            );
             assert!(ok, "{job:?} gave {r:?}");
         }
     }

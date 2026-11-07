@@ -1,7 +1,7 @@
 //! The release status the tool writes to `/run/thinfloe/upgrade/status`
 //! (`key=value` lines) and the comparison of version numbers.
 
-use crate::addons::{stamp, Stamp};
+use crate::addons::{Stamp, stamp};
 use std::cmp::Ordering;
 use std::io::Read;
 use std::path::Path;
@@ -43,7 +43,9 @@ pub fn parse_status(text: &str) -> Release {
 /// Read the status file. A missing or unusable file is `Release::default()`.
 /// Only the first `STATUS_BYTES` count; a line cut by the limit is dropped.
 pub fn read_status(path: &Path) -> Release {
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return Release::default() };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Release::default();
+    };
     if !meta.file_type().is_file() {
         return Release::default();
     }
@@ -52,10 +54,10 @@ pub fn read_status(path: &Path) -> Release {
     if read.is_err() {
         return Release::default();
     }
-    if bytes.len() as u64 == STATUS_BYTES {
-        if let Some(i) = bytes.iter().rposition(|&b| b == b'\n') {
-            bytes.truncate(i + 1);
-        }
+    if bytes.len() as u64 == STATUS_BYTES
+        && let Some(i) = bytes.iter().rposition(|&b| b == b'\n')
+    {
+        bytes.truncate(i + 1);
     }
     parse_status(&String::from_utf8_lossy(&bytes))
 }
@@ -163,9 +165,7 @@ mod tests {
 
     #[test]
     fn parses_every_field() {
-        let r = parse_status(
-            "latest=4.1.0\nimage_bytes=3148873728\nchecked=1762412345\nsource=https://x\nerror=\n",
-        );
+        let r = parse_status("latest=4.1.0\nimage_bytes=3148873728\nchecked=1762412345\nsource=https://x\nerror=\n");
         assert_eq!(
             r,
             Release {
@@ -234,7 +234,10 @@ mod tests {
 
     #[test]
     fn update_marker() {
-        let r = Release { latest: Some("4.1.0".into()), ..Default::default() };
+        let r = Release {
+            latest: Some("4.1.0".into()),
+            ..Default::default()
+        };
         assert_eq!(update_available(&r, Some("4.0.0")), Some("4.1.0"));
         assert_eq!(update_available(&r, Some("4.1.0")), None);
         assert_eq!(update_available(&r, None), None);

@@ -2945,8 +2945,16 @@ mod tests {
             h,
             "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.",
         );
-        let (summary, _) = visible_button(&menu, w, h, "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe");
-        assert!(last.bottom() < summary.top(), "{last:?} runs into the footer at {summary:?}");
+        let (summary, _) = visible_button(
+            &menu,
+            w,
+            h,
+            "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe",
+        );
+        assert!(
+            last.bottom() < summary.top(),
+            "{last:?} runs into the footer at {summary:?}"
+        );
     }
 
     #[test]

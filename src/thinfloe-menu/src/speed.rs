@@ -29,10 +29,10 @@ impl Speed {
     /// once per `@progress` line, not per frame: `SAMPLES_MAX` counts calls,
     /// so extra calls shorten the stretch the rate is measured over.
     pub fn sample(&mut self, now: Instant, done: u64) {
-        if let Some(&(_, last)) = self.samples.back() {
-            if done < last {
-                self.samples.clear();
-            }
+        if let Some(&(_, last)) = self.samples.back()
+            && done < last
+        {
+            self.samples.clear();
         }
         self.samples.push_back((now, done));
         while self.samples.len() > SAMPLES_MAX {

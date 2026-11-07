@@ -121,11 +121,15 @@ pub enum JobResult {
         status: Result<Option<i32>, String>,
     },
     /// The upgrade tool runs a write, in a process group of its own.
-    UpgradeStarted { pgid: i32 },
+    UpgradeStarted {
+        pgid: i32,
+    },
     /// One progress line of the write.
     UpgradeMsg(Msg),
     /// The write ended; `Ok(None)` is a signal.
-    UpgradeEnded { status: Result<Option<i32>, String> },
+    UpgradeEnded {
+        status: Result<Option<i32>, String>,
+    },
     /// The drive list, asked for with or without `--all`.
     Drives {
         all: bool,
@@ -454,22 +458,35 @@ fn upgrade_capture(
         Err(_) => {
             stop(child.id() as i32, Signal::Term);
             wait_until(&mut child, Instant::now() + STOP_WAIT);
-            return Err(format!("{} did not answer within {} s", cmd[0], timeout.as_secs_f32().round()));
+            return Err(format!(
+                "{} did not answer within {} s",
+                cmd[0],
+                timeout.as_secs_f32().round()
+            ));
         }
     };
     let too_long = out.len() > cap;
     if too_long {
         stop(child.id() as i32, Signal::Term);
     }
-    let left = timeout.saturating_sub(started.elapsed()).max(if too_long { STOP_WAIT } else { Duration::ZERO });
+    let left = timeout
+        .saturating_sub(started.elapsed())
+        .max(if too_long { STOP_WAIT } else { Duration::ZERO });
     let Some(status) = wait_until(&mut child, Instant::now() + left) else {
         stop(child.id() as i32, Signal::Term);
         wait_until(&mut child, Instant::now() + STOP_WAIT);
-        return Err(format!("{} did not end within {} s", cmd[0], timeout.as_secs_f32().round()));
+        return Err(format!(
+            "{} did not end within {} s",
+            cmd[0],
+            timeout.as_secs_f32().round()
+        ));
     };
     let deadline = Instant::now() + DRAIN_GRACE;
     for _ in 0..pumps {
-        if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
+        if rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .is_err()
+        {
             break;
         }
     }
@@ -840,16 +857,29 @@ mod tests {
     #[test]
     fn upgrade_write_routes_progress_and_logs_the_rest() {
         let feed = Arc::new(Feed::default());
-        let (st, msgs) = collect_write("echo \"@step write W\"; echo plain; echo err >&2; echo \"@result ok\"", &feed);
+        let (st, msgs) = collect_write(
+            "echo \"@step write W\"; echo plain; echo err >&2; echo \"@result ok\"",
+            &feed,
+        );
         assert_eq!(st, Ok(Some(0)));
         assert_eq!(
             msgs,
             [
-                Msg::Step { id: "write".into(), text: "W".into() },
-                Msg::Result { ok: true, reason: String::new() }
+                Msg::Step {
+                    id: "write".into(),
+                    text: "W".into()
+                },
+                Msg::Result {
+                    ok: true,
+                    reason: String::new()
+                }
             ]
         );
-        let mut got: Vec<_> = feed.drain().into_iter().map(|l| (l.source.clone(), l.plain())).collect();
+        let mut got: Vec<_> = feed
+            .drain()
+            .into_iter()
+            .map(|l| (l.source.clone(), l.plain()))
+            .collect();
         got.sort();
         assert_eq!(
             got,
