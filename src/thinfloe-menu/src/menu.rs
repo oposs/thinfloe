@@ -24,7 +24,8 @@
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
-use crate::settings::{RetryMarker, SettingsEvent};
+use crate::screentab::{self, IdleSource, ScreenTab};
+use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::tiles::{Action, Grid, Origin, Tile};
 use crate::upgrade::{Request, Upgrade, UpgradeEvent};
 use std::time::{Duration, Instant};
@@ -33,6 +34,9 @@ use std::time::{Duration, Instant};
 pub const LOGOUT_PAUSE: Duration = Duration::from_millis(1500);
 
 pub const RESTORE_FAILED_REASON: &str = "this boot's home restore failed, so saving would overwrite the stored home";
+
+/// A screen timeout the running session did not take.
+pub const NEXT_SESSION: &str = "The new screen timeout applies from the next session.";
 
 /// How long programs get to end after SIGTERM before SIGKILL, at logout.
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -163,6 +167,14 @@ pub enum Effect {
     /// Send the signal to each of these process groups.
     Signal(Vec<i32>, Signal),
     Exit(i32),
+    /// Write the screen file with this idle time, then report with
+    /// `screen_written`.
+    WriteScreen {
+        idle: u32,
+    },
+    /// Put the menu's header on the screen file written by hand, then
+    /// report with `screen_written`.
+    TakeOverScreen,
 }
 
 pub struct Menu {
@@ -201,6 +213,10 @@ pub struct Menu {
     pub upgrade: Upgrade,
     /// The machine booted from a stick; the Upgrade tile is hidden on netboot.
     usb_boot: bool,
+    /// The tab the Settings screen shows; Packages each time it opens.
+    pub settings_tab: SettingsTab,
+    /// The screen timeout, as the Screen tab shows it.
+    pub screen_tab: ScreenTab,
 }
 
 impl Menu {
@@ -238,6 +254,8 @@ impl Menu {
             folded: Vec::new(),
             upgrade: Upgrade::new(),
             usb_boot: false,
+            settings_tab: SettingsTab::Packages,
+            screen_tab: ScreenTab::default(),
         }
     }
 
@@ -410,6 +428,18 @@ impl Menu {
                 self.screen = Screen::Grid;
                 self.offer_retry();
                 return None;
+            }
+            SettingsEvent::Tab(tab) => {
+                self.settings_tab = tab;
+                return None;
+            }
+            SettingsEvent::IdleTimeout(idle) => {
+                let tab = &self.screen_tab;
+                let open = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
+                return (open && idle != tab.idle).then_some(Effect::WriteScreen { idle });
+            }
+            SettingsEvent::ManageScreen => {
+                return (self.screen_tab.source == IdleSource::ByHand).then_some(Effect::TakeOverScreen);
             }
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
@@ -614,6 +644,7 @@ impl Menu {
             Action::SaveHome => self.request_save(),
             Action::Settings => {
                 self.screen = Screen::Settings;
+                self.settings_tab = SettingsTab::Packages;
                 None
             }
             Action::Upgrade => {
@@ -635,6 +666,34 @@ impl Menu {
             self.logout = Some(Logout::Confirm);
             None
         }
+    }
+
+    /// The screen file was written, or could not be. `signalled` says the
+    /// running session took the new timeout; else it waits for the next.
+    /// The file lives in the home directory, so a change is saved.
+    pub fn screen_written(&mut self, result: Result<ScreenTab, String>, signalled: bool) -> Option<Effect> {
+        let tab = match result {
+            Ok(tab) => tab,
+            Err(message) => {
+                self.log.note(Kind::Warn, message.clone());
+                self.screen_tab.error = Some(message);
+                return None;
+            }
+        };
+        let text = match tab.idle {
+            0 => "Screen never turns off.".to_string(),
+            n => format!("Screen turns off after {}.", screentab::label(n)),
+        };
+        self.screen_tab = ScreenTab { error: None, ..tab };
+        self.log.note(Kind::Event, text);
+        if !signalled {
+            self.log.note(Kind::Event, NEXT_SESSION);
+        }
+        if self.restore_failed {
+            self.log.note(Kind::Warn, SaveOutcome::RestoreFailed.message());
+            return None;
+        }
+        self.request_save()
     }
 
     /// Start a background save, or queue one more behind the running one.
@@ -931,7 +990,8 @@ mod tests {
     use crate::desktop;
     use crate::jobs::{JobId, Signal};
     use crate::log::Kind;
-    use crate::settings::{RetryMarker, RowButton, SettingsEvent};
+    use crate::screentab::{IdleSource, ScreenTab};
+    use crate::settings::{RetryMarker, RowButton, SettingsEvent, SettingsTab};
     use crate::tiles::{SourceFile, merge};
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1883,6 +1943,124 @@ mod tests {
         m.set_addons(vec![s]);
         let i = m.tiles.iter().position(|t| t.file == "my+app.desktop").unwrap();
         assert!(m.visible(i));
+    }
+
+    fn screen(idle: u32, source: IdleSource) -> ScreenTab {
+        ScreenTab {
+            idle,
+            source,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn settings_opens_on_packages() {
+        let (_d, mut m) = settings_menu("tabs");
+        assert_eq!(m.settings_tab, SettingsTab::Packages);
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Screen)), None);
+        assert_eq!(m.settings_tab, SettingsTab::Screen);
+        assert_eq!(m.settings(SettingsEvent::Back), None);
+        assert_eq!(m.activate(2, Instant::now()), None);
+        assert_eq!(m.screen, Screen::Settings);
+        assert_eq!(m.settings_tab, SettingsTab::Packages);
+    }
+
+    #[test]
+    fn idle_change_asks_for_a_write() {
+        let (_d, mut m) = settings_menu("idle");
+        m.screen_tab = screen(300, IdleSource::Menu);
+        assert_eq!(
+            m.settings(SettingsEvent::IdleTimeout(600)),
+            Some(Effect::WriteScreen { idle: 600 })
+        );
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(300)), None, "unchanged");
+        m.screen_tab = screen(300, IdleSource::Unset);
+        assert_eq!(
+            m.settings(SettingsEvent::IdleTimeout(0)),
+            Some(Effect::WriteScreen { idle: 0 })
+        );
+        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "nothing to take over");
+    }
+
+    #[test]
+    fn idle_change_refused_when_rc_or_by_hand() {
+        let (_d, mut m) = settings_menu("idle-refused");
+        m.screen_tab = screen(300, IdleSource::Rc);
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
+        assert_eq!(m.settings(SettingsEvent::ManageScreen), None);
+        m.screen_tab = screen(300, IdleSource::ByHand);
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
+        assert_eq!(m.settings(SettingsEvent::ManageScreen), Some(Effect::TakeOverScreen));
+        m.logout = Some(Logout::Confirm);
+        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "not during a logout");
+        m.screen_tab = screen(300, IdleSource::Menu);
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None, "not during a logout");
+    }
+
+    #[test]
+    fn screen_written_queues_one_save() {
+        let mut m = Menu::new(grid(), false);
+        assert_eq!(
+            m.screen_written(Ok(screen(600, IdleSource::Menu)), true),
+            Some(Effect::Start(Job::Save))
+        );
+        assert!(m.save.running && !m.save.again);
+        assert_eq!(m.screen_written(Ok(screen(0, IdleSource::Menu)), true), None);
+        assert!(m.save.again);
+        assert_eq!(m.screen_tab, screen(0, IdleSource::Menu));
+        assert_eq!(
+            log(&m),
+            [
+                ev("Screen turns off after 10 minutes."),
+                ev("Saving the home directory…"),
+                ev("Screen never turns off."),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_change_does_not_save_after_failed_restore() {
+        let mut m = Menu::new(grid(), true);
+        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert!(!m.save.running);
+        assert_eq!(
+            log(&m),
+            [
+                ev("Screen turns off after 5 minutes."),
+                warn(&SaveOutcome::RestoreFailed.message()),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_written_without_signal_says_next_session() {
+        let mut m = Menu::new(grid(), false);
+        assert_eq!(
+            m.screen_written(Ok(screen(60, IdleSource::Menu)), false),
+            Some(Effect::Start(Job::Save))
+        );
+        assert_eq!(
+            log(&m),
+            [
+                ev("Screen turns off after 1 minute."),
+                ev("The new screen timeout applies from the next session."),
+                ev("Saving the home directory…"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_write_error_shows_on_the_tab() {
+        let mut m = Menu::new(grid(), false);
+        m.screen_tab = screen(300, IdleSource::Menu);
+        assert_eq!(m.screen_written(Err("disk full".into()), true), None);
+        assert_eq!(m.screen_tab.error.as_deref(), Some("disk full"));
+        assert_eq!(m.screen_tab.idle, 300);
+        assert!(!m.save.running);
+        assert_eq!(log(&m), [warn("disk full")]);
+        // A later write that works clears it.
+        m.screen_written(Ok(screen(600, IdleSource::Menu)), true);
+        assert_eq!(m.screen_tab.error, None);
     }
 
     /// The Settings menu with a Restart tile (index 3), back on the grid,

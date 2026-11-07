@@ -547,6 +547,7 @@ impl App {
                 self.exit = Some(code);
                 event_loop.exit();
             }
+            Some(Effect::WriteScreen { .. } | Effect::TakeOverScreen) => {}
             None => {}
         }
     }

@@ -21,6 +21,29 @@ pub enum SettingsEvent {
     UpdateNow(String),
     CheckNow,
     Back,
+    Tab(SettingsTab),
+    /// The screen timeout select, in seconds; 0 is never.
+    IdleTimeout(u32),
+    /// Let the menu manage a screen file written by hand.
+    ManageScreen,
+}
+
+/// The tabs of the Settings screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Packages,
+    Screen,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 2] = [SettingsTab::Packages, SettingsTab::Screen];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Packages => "Packages",
+            SettingsTab::Screen => "Screen",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
