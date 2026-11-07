@@ -111,4 +111,36 @@ else
     bad "a __pycache__ under overlay/ makes the image rebuild"
 fi
 
+# The build context: .dockerignore is an allow-list, and a COPY of a file it
+# leaves out fails the build ("no items matching glob", RELEASE, 2026-11-07).
+# A FROM-scratch probe runs every COPY/ADD from the repository (not --from)
+# of the Dockerfiles built from the repository root, against the real
+# .dockerignore, with the container runtime itself as the judge.
+RT="${CONTAINER_RUNTIME:-podman}"
+if ! command -v "$RT" >/dev/null 2>&1; then
+    bad "no $RT to check the build context with"
+else
+    PROBE_DIR="${TMPDIR:-/scratch/oetiker/claude-tmp/thinfloe-tests}"
+    mkdir -p "$PROBE_DIR"
+    PROBE=$(mktemp -d "$PROBE_DIR/context-probe.XXXXXX")
+    TAG="localhost/thinfloe-context-probe:$$"
+    {
+        echo "FROM scratch"
+        # Dockerfiles whose build context is the repository root (Makefile).
+        for df in containers/ubuntu/Dockerfile; do
+            grep -E '^(COPY|ADD)[[:space:]]' "$REPO/$df" | grep -v -- '--from' \
+                | sed -E 's/^ADD/COPY/'
+        done
+    } >"$PROBE/Dockerfile"
+    n=$(grep -c '^COPY' "$PROBE/Dockerfile")
+    if "$RT" build --network=none --pull=never -q -t "$TAG" \
+            -f "$PROBE/Dockerfile" "$REPO" >"$PROBE/log" 2>&1; then
+        ok "the build context has every source of the $n COPY/ADD lines"
+    else
+        bad "the build context lacks a COPY/ADD source (.dockerignore?): $(grep -m1 -iE 'error|no items' "$PROBE/log")"
+    fi
+    "$RT" rmi -f "$TAG" >/dev/null 2>&1
+    rm -rf "$PROBE"
+fi
+
 exit $fail

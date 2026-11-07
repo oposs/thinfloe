@@ -56,28 +56,8 @@ for f in short two prefix; do
     fi
 done
 
-# .dockerignore is an allow-list: the last pattern that matches decides,
-# a leading ! lets the file into the build context. Without !RELEASE the
-# COPY found nothing and the build failed.
-if python3 -I - "$REPO/.dockerignore" RELEASE <<'PY'
-import fnmatch, sys
-keep = True
-for line in open(sys.argv[1]).read().splitlines():
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    neg = line.startswith("!")
-    pat = line[1:] if neg else line
-    if fnmatch.fnmatchcase(sys.argv[2], pat.rstrip("/")):
-        keep = neg
-sys.exit(0 if keep else 1)
-PY
-then
-    ok ".dockerignore lets RELEASE into the build context"
-else
-    bad ".dockerignore filters RELEASE out of the build context"
-fi
-
+# That .dockerignore lets RELEASE into the build context is checked by
+# test-container-inputs.sh, with the container runtime itself.
 if grep -qE '^\.ubuntu-container:.* RELEASE( |$)' "$REPO/Makefile"; then
     ok "RELEASE is a prerequisite of .ubuntu-container"
 else
