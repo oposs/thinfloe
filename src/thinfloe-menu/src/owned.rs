@@ -73,9 +73,7 @@ pub fn write(path: &Path, body: &str) -> io::Result<()> {
 /// text, so the menu can own the name. An earlier `.by-hand` is never
 /// overwritten.
 pub fn take_over(path: &Path) -> Result<Option<String>, String> {
-    let mut aside = path.as_os_str().to_owned();
-    aside.push(".by-hand");
-    let aside = PathBuf::from(aside);
+    let aside = aside(path);
     if fs::symlink_metadata(&aside).is_ok() {
         return Err(format!("{} exists already", home_relative(&aside)));
     }
@@ -84,6 +82,13 @@ pub fn take_over(path: &Path) -> Result<Option<String>, String> {
         fs::rename(path, &aside).map_err(|e| e.to_string())?;
     }
     Ok(old)
+}
+
+/// Where `take_over` keeps a hand-written `path`: `<path>.by-hand`.
+pub fn aside(path: &Path) -> PathBuf {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".by-hand");
+    PathBuf::from(aside)
 }
 
 /// `path` as `~/rest` when it lies under $HOME, else as it is.

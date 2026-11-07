@@ -934,24 +934,32 @@ fn is_input(e: &WindowEvent) -> bool {
 
 /// Carry out `WriteScreen` or `TakeOverScreen` and report to the menu at
 /// once, as `Menu::screen_written` expects. Returns what the menu asks next.
+/// On an error the tab is read again first, so it shows who owns the file
+/// now: a take-over whose write failed leaves no file, and the select works
+/// again; a file written by hand meanwhile offers the take-over.
 fn apply_screen(effect: Effect, screen: &ScreenFile, menu: &mut Menu) -> Option<Effect> {
+    let path = crate::owned::home_relative(&screen.path);
+    let failed = |menu: &mut Menu, message: String| {
+        menu.screen_tab = crate::screentab::load(&screen.path, screen.rc);
+        menu.screen_written(Err(message), false)
+    };
     let idle = match effect {
         Effect::WriteScreen { idle } => idle,
         Effect::TakeOverScreen => match crate::owned::take_over(&screen.path) {
-            Ok(old) => old
-                .as_deref()
-                .and_then(crate::screentab::parse_idle)
-                .unwrap_or(crate::screentab::DEFAULT_IDLE),
-            Err(e) => {
-                let path = crate::owned::home_relative(&screen.path);
-                return menu.screen_written(Err(format!("Could not take over {path}: {e}")), false);
+            Ok(old) => {
+                let aside = crate::owned::home_relative(&crate::owned::aside(&screen.path));
+                menu.log
+                    .note(crate::log::Kind::Event, format!("Your old settings are kept in {aside}."));
+                old.as_deref()
+                    .and_then(crate::screentab::parse_idle)
+                    .unwrap_or(crate::screentab::DEFAULT_IDLE)
             }
+            Err(e) => return failed(menu, format!("Could not take over {path}: {e}")),
         },
         _ => return None,
     };
     if let Err(e) = crate::owned::write(&screen.path, &crate::screentab::body(idle)) {
-        let path = crate::owned::home_relative(&screen.path);
-        return menu.screen_written(Err(format!("Could not write {path}: {e}")), false);
+        return failed(menu, format!("Could not write {path}: {e}"));
     }
     let signalled = screen.idle_pid.is_some_and(signal_idle_helper);
     let tab = crate::screentab::load(&screen.path, screen.rc);
@@ -1322,6 +1330,46 @@ mod tests {
         );
         assert_eq!(menu.screen_tab.idle, 900);
         assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
+        let aside = crate::owned::home_relative(&d.join(".config/thinfloe/screen.by-hand"));
+        let kept = format!("Your old settings are kept in {aside}.");
+        assert!(menu.log.lines().any(|l| l.plain() == kept), "{kept}");
+    }
+
+    #[test]
+    fn take_over_then_failed_write_unlocks_the_select() {
+        let d = TestDir::new("app", "take-over-write-fails");
+        let screen = screen_file(&d, None);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+        // A directory where the write puts its temporary file.
+        std::fs::create_dir(d.join(".config/thinfloe/screen.tmp")).unwrap();
+        let mut menu = screen_menu();
+        menu.screen_tab = crate::screentab::load(&screen.path, None);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::ByHand);
+        assert_eq!(apply_screen(Effect::TakeOverScreen, &screen, &mut menu), None);
+        // The file is aside now, so the select works again.
+        assert!(!screen.path.exists());
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Unset);
+        let e = menu.screen_tab.error.clone().unwrap();
+        let want = format!("Could not write {}: ", crate::owned::home_relative(&screen.path));
+        assert!(e.starts_with(&want), "{e}");
+        assert!(!menu.save.running);
+    }
+
+    #[test]
+    fn a_hand_file_written_meanwhile_offers_take_over() {
+        let d = TestDir::new("app", "hand-meanwhile");
+        let screen = screen_file(&d, None);
+        let mut menu = screen_menu();
+        menu.screen_tab = crate::screentab::load(&screen.path, None);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Unset);
+        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
+        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+        assert_eq!(apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu), None);
+        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::ByHand);
+        assert_eq!(menu.screen_tab.idle, 900);
+        assert!(menu.screen_tab.error.as_deref().unwrap().ends_with("was written by hand"));
+        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
     }
 
     #[test]
