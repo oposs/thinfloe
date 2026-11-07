@@ -122,7 +122,16 @@ for f in short two prefix; do
         bad "publish.sh published a version file that is $f"
     fi
 done
+# A version file newer than the image is from a later build than it.
 cp "$WORK/good" "$TREE/artifacts/rootfs/version"
+touch -d '2030-01-01' "$TREE/artifacts/rootfs/version"
+touch -d '2029-01-01' "$TREE/artifacts/images/thinfloe-usb.img.zst"
+if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
+    ok "publish.sh refuses a version file newer than the image"
+else
+    bad "publish.sh published a version file newer than the image"
+fi
+touch -d '2028-01-01' "$TREE/artifacts/rootfs/version"
 if publish && grep -qx "$TREE/artifacts/rootfs/version" "$WORK/rsync.args"; then
     ok "publish.sh uploads the version file"
 else

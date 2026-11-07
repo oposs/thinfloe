@@ -21,6 +21,15 @@ if [[ $(wc -l <"$VERSION_FILE") != 1 ]] || ! grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' 
     exit 1
 fi
 
+# The image is made from the exported rootfs, so it is never older than the
+# version file of its own build. A newer version file means the rootfs was
+# exported again after the image: they would publish different releases.
+IMAGE="$ARTIFACT_DIR/images/thinfloe-usb.img.zst"
+if [[ -f "$IMAGE" && "$VERSION_FILE" -nt "$IMAGE" ]]; then
+    echo "ERROR: $VERSION_FILE is newer than $IMAGE; run 'make image' first." >&2
+    exit 1
+fi
+
 # Files to publish
 FILES=(
     "$VERSION_FILE"
