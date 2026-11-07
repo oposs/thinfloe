@@ -151,7 +151,13 @@ mod tests {
 
     #[test]
     fn parse_idle_refuses_garbage() {
-        for t in ["idle_timeout=-5", "idle_timeout=5m", "idle_timeout=86401", "idle_timeout= 60", ""] {
+        for t in [
+            "idle_timeout=-5",
+            "idle_timeout=5m",
+            "idle_timeout=86401",
+            "idle_timeout= 60",
+            "",
+        ] {
             assert_eq!(parse_idle(t), None, "{t:?}");
         }
     }

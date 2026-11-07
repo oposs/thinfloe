@@ -172,7 +172,10 @@ mod tests {
         fs::write(&p, "idle_timeout=60\n").unwrap();
         assert_eq!(take_over(&p).unwrap().as_deref(), Some("idle_timeout=60\n"));
         assert!(!p.exists());
-        assert_eq!(fs::read_to_string(d.join("screen.by-hand")).unwrap(), "idle_timeout=60\n");
+        assert_eq!(
+            fs::read_to_string(d.join("screen.by-hand")).unwrap(),
+            "idle_timeout=60\n"
+        );
     }
 
     #[test]

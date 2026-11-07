@@ -948,8 +948,10 @@ fn apply_screen(effect: Effect, screen: &ScreenFile, menu: &mut Menu) -> Option<
         Effect::TakeOverScreen => match crate::owned::take_over(&screen.path) {
             Ok(old) => {
                 let aside = crate::owned::home_relative(&crate::owned::aside(&screen.path));
-                menu.log
-                    .note(crate::log::Kind::Event, format!("Your old settings are kept in {aside}."));
+                menu.log.note(
+                    crate::log::Kind::Event,
+                    format!("Your old settings are kept in {aside}."),
+                );
                 old.as_deref()
                     .and_then(crate::screentab::parse_idle)
                     .unwrap_or(crate::screentab::DEFAULT_IDLE)
@@ -1368,7 +1370,13 @@ mod tests {
         assert_eq!(apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu), None);
         assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::ByHand);
         assert_eq!(menu.screen_tab.idle, 900);
-        assert!(menu.screen_tab.error.as_deref().unwrap().ends_with("was written by hand"));
+        assert!(
+            menu.screen_tab
+                .error
+                .as_deref()
+                .unwrap()
+                .ends_with("was written by hand")
+        );
         assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
     }
 
