@@ -111,6 +111,22 @@ if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
 else
     bad "publish.sh published a version file newer than the image"
 fi
+refusal=$(PATH="$WORK/bin:$PATH" bash "$TREE/scripts/publish.sh" 2>&1 >/dev/null)
+if grep -q "touch .*thinfloe-usb.img.zst" <<<"$refusal"; then
+    ok "the refusal says how to fix a copy that reordered the times"
+else
+    bad "the refusal does not name 'touch artifacts/images/thinfloe-usb.img.zst'"
+fi
+# A missing image is refused by the file check, not waved through.
+mv "$TREE/artifacts/images/thinfloe-usb.img.zst" "$WORK/zst"
+touch -d '2028-01-01' "$TREE/artifacts/rootfs/version"
+if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
+    ok "publish.sh refuses without thinfloe-usb.img.zst"
+else
+    bad "publish.sh published without thinfloe-usb.img.zst"
+fi
+mv "$WORK/zst" "$TREE/artifacts/images/thinfloe-usb.img.zst"
+touch -d '2029-01-01' "$TREE/artifacts/images/thinfloe-usb.img.zst"
 touch -d '2028-01-01' "$TREE/artifacts/rootfs/version"
 if publish && grep -qx "$TREE/artifacts/rootfs/version" "$WORK/rsync.args"; then
     ok "publish.sh uploads the version file"

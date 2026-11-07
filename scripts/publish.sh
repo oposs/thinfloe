@@ -26,7 +26,11 @@ fi
 # exported again after the image: they would publish different releases.
 IMAGE="$ARTIFACT_DIR/images/thinfloe-usb.img.zst"
 if [[ -f "$IMAGE" && "$VERSION_FILE" -nt "$IMAGE" ]]; then
-    echo "ERROR: $VERSION_FILE is newer than $IMAGE; run 'make image' first." >&2
+    echo "ERROR: $VERSION_FILE is newer than $IMAGE." >&2
+    echo "The rootfs was exported again after the image was made: run 'make image'." >&2
+    echo "A plain copy of the artifacts (cp without -p) can also reorder the times;" >&2
+    echo "if both come from one build (check: cat $VERSION_FILE), run" >&2
+    echo "'touch $IMAGE' and publish again." >&2
     exit 1
 fi
 
