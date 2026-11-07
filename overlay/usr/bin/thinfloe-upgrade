@@ -89,7 +89,7 @@ from typing import List, Optional, Tuple
 DEFAULT_URL = "https://tobi.oetiker.ch/dbrrg"
 # The release's version: one line X.Y.Z at <source>/version.
 VERSION_ASSET = "version"
-VERSION_RE = r"[0-9A-Za-z.+-]{1,32}"
+VERSION_RE = r"[0-9A-Za-z][0-9A-Za-z.+-]{0,31}"
 # What `check` found at the default source, for the menu and for SSH readers.
 # Module constants so tests can point them elsewhere.
 UPGRADE_STATUS = "/run/thinfloe/upgrade/status"
@@ -1532,11 +1532,13 @@ def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None
         with _uninterruptible():
             for filename in FIRMWARE_FILES:
                 run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
+            # Flush the copy before the lock: on a slow stick this takes long,
+            # and a save waits only 30 s for the lock.
+            run_cmd(["sync"])
         # Only after tl.new is complete.
         with _boot_lock(drive, "The new release is copied but not switched "
                                "to; the stick still starts the old one."), \
                 _uninterruptible():
-            run_cmd(["sync"])
             if drive.is_boot:
                 default_attempted = True
                 set_boot_default(efi_mount, "new")
@@ -1629,7 +1631,7 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
         need += addon_copy_bytes(efi_mount)
         # A save beside the copy writes home.tar.gz.new next to the archive.
         try:
-            need += os.path.getsize(os.path.join(efi_mount, "home.tar.gz"))
+            need += os.path.getsize(os.path.join(efi_mount, HOME_ARCHIVE_NAME))
         except OSError:
             pass
         have = free_bytes(efi_mount) + tree_bytes(tl_old_path) + tree_bytes(tl_new_path)
@@ -2565,7 +2567,8 @@ def _fetch_version(source: str) -> Tuple[str, str]:
 
 
 def _status_value(value) -> str:
-    text = re.sub(r"[\r\n]", " ", "" if value is None else str(value))
+    """One line with no control characters, at most 200 characters."""
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", "" if value is None else str(value))
     return text[:200]
 
 
@@ -2574,15 +2577,33 @@ def write_status(lines: List[Tuple[str, str]]) -> None:
     directory = os.path.dirname(UPGRADE_STATUS)
     os.makedirs(directory, mode=0o755, exist_ok=True)
     os.chmod(directory, 0o755)
-    tmp = os.path.join(directory, "status.new")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        for key, value in lines:
-            f.write(f"{key}={_status_value(value)}\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, UPGRADE_STATUS)
+    # A temporary name of its own: two checks at once (the timer and the
+    # menu) must not write into one file.
+    fd, tmp = tempfile.mkstemp(prefix="status.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for key, value in lines:
+                f.write(f"{key}={_status_value(value)}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, UPGRADE_STATUS)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _read_status_file() -> dict:
+    """The key=value lines of UPGRADE_STATUS; empty when there is none."""
+    try:
+        with open(UPGRADE_STATUS, encoding="utf-8", errors="replace") as f:
+            text = f.read(4096)
+    except OSError:
+        return {}
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
 
 
 def release_check(source: str) -> int:
@@ -2592,6 +2613,14 @@ def release_check(source: str) -> int:
     errors = [e for e in (version_error,
                           "" if size is not None else "the image size could not be read")
               if e]
+    if source == DEFAULT_URL and errors:
+        # A check that failed says nothing new about the release: keep what
+        # the last one found, with the error beside it.
+        previous = _read_status_file()
+        if not latest and re.fullmatch(VERSION_RE, previous.get("latest", "")):
+            latest = previous["latest"]
+        if size is None and previous.get("image_bytes", "").isdigit():
+            size = int(previous["image_bytes"])
     lines = [
         ("latest", latest),
         ("image_bytes", "" if size is None else size),
@@ -2610,7 +2639,7 @@ def release_check(source: str) -> int:
 
 
 def batch_main(argv: List[str]) -> int:
-    """The question-free commands `drives` and `write`."""
+    """The question-free commands `check`, `drives` and `write`."""
     global PROGRESS
     PROGRESS = Progress(sys.stdout, batch=True)
     try:

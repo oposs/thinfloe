@@ -1262,10 +1262,16 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
         m.start()
         self.addCleanup(m.stop)
 
-    def hold(self):
+    def hold(self, wait=True):
+        """Take the lock from another fd. With wait=False the test fails at
+        once when the tool holds it, instead of blocking for ever."""
         import fcntl
         fd = os.open(str(self.lock), os.O_RDONLY)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            os.close(fd)
+            self.fail("the tool holds esp.lock")
         return fd
 
     def locked_by_other(self):
@@ -1328,7 +1334,7 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
         def fake(cmd, *a, **kw):
             if cmd[0] == "cp":
                 if not seen:
-                    state["fd"] = self.hold()   # taken after step (a) let go
+                    state["fd"] = self.hold(wait=False)  # taken after step (a) let go
                 seen.append(self.locked_by_other())
             return real(cmd, *a, **kw)
         def sleep(s):                       # the other holder lets go
@@ -1342,6 +1348,21 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 0, out)
         self.assertEqual(seen, [True] * len(ui.FIRMWARE_FILES))
+
+    def test_the_copy_is_flushed_before_the_lock_is_taken(self):
+        self.checksums()
+        seen = []
+        real = ui.run_cmd
+        def fake(cmd, *a, **kw):
+            if cmd[0] == "sync":
+                seen.append(self.locked_by_other())
+            return real(cmd, *a, **kw)
+        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+            rc, out = self.run_upgrade()
+        self.assertEqual(rc, 0, out)
+        # The long flush of the copy runs unlocked, the last short one locked.
+        self.assertEqual(seen[0], False, seen)
+        self.assertEqual(seen[-1], True, seen)
 
     def test_boot_label_waits_and_timeout_leaves_default(self):
         self.checksums()
@@ -2483,6 +2504,48 @@ class TestCheck(_ReleaseCase):
         self.assertIn("installed=4.0.0", lines)
         self.assertEqual(os.stat(self.status).st_mode & 0o777, 0o644)
         self.assertEqual(os.stat(os.path.dirname(self.status)).st_mode & 0o777, 0o755)
+
+    def test_a_failed_check_keeps_the_known_release(self):
+        self.run_check(body=b"4.1.0\n", size=3148873728)
+        rc, kv = self.run_check(body=b"", rc_curl=22, size=None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(kv["latest"], "4.1.0")
+        self.assertEqual(kv["image_bytes"], "3148873728")
+        self.assertIn("no version file at the source", kv["error"])
+        with open(self.status) as f:
+            lines = f.read().splitlines()
+        self.assertIn("latest=4.1.0", lines)
+        self.assertIn("image_bytes=3148873728", lines)
+        # Another source's answer is never carried.
+        rc, kv = self.run_check(body=b"", rc_curl=22, size=None,
+                                argv=["check", "--source", "http://127.0.0.1:1/x"])
+        self.assertEqual(kv["latest"], "")
+
+    def test_control_characters_never_reach_the_status(self):
+        rc, kv = self.run_check(argv=["check", "--source", "http://x/\x1b[31m\x07y\x7f"])
+        self.assertEqual(kv["source"], "http://x/ [31m y ")
+
+    def test_a_version_must_start_with_a_letter_or_digit(self):
+        for body in (b"-4.1.0\n", b".4\n", b"+1\n"):
+            rc, kv = self.run_check(body=body)
+            self.assertEqual(kv["latest"], "", body)
+        with open(self.installed, "w") as f:
+            f.write("--help\n")
+        self.assertEqual(ui.read_installed_version(), "")
+
+    def test_status_temp_file_is_not_shared(self):
+        names = []
+        real = os.replace
+        def replace(a, b):
+            names.append(os.path.basename(a))
+            real(a, b)
+        with mock.patch.object(ui.os, "replace", side_effect=replace):
+            self.run_check()
+            self.run_check()
+        self.assertEqual(len(names), 2)
+        self.assertNotEqual(names[0], names[1])
+        self.assertNotIn("status.new", names)
+        self.assertEqual(os.listdir(os.path.dirname(self.status)), ["status"])
 
     def test_missing_version_file_is_unknown_not_failed(self):
         rc, kv = self.run_check(body=b"", rc_curl=22)

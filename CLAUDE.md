@@ -469,8 +469,10 @@ The system implements home directory persistence across reboots:
   <done> <total or ->`, `@done <id>` and one `@result ok|failed <reason>`;
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
   that is cancelled or fails wipes the start of the stick, so it does not
-  try to boot half-written; an upgrade that is cancelled or fails leaves the
-  stick as it was. The `id` is `sn-<serial>` (`nosn` without a serial),
+  try to boot half-written; an upgrade that is cancelled or fails leaves a
+  stick that starts its current release (`tl/` whole, `DEFAULT` on a release
+  that boots), though `tl.old/` may be gone and a complete `tl.new/` may stay
+  staged. The `id` is `sn-<serial>` (`nosn` without a serial),
   size and partition table, joined by `:`, so two blank sticks of one
   model without a serial get the same id; it never starts with `-`, so
   `--expect-id ID` and `--expect-id=ID` both work. A write
@@ -609,8 +611,8 @@ home; removing it is later work.
   boot stick is busy`) only on an upgrade of the boot stick and only in two
   short places of the `switch` step: around the removal of `tl.old/` and any
   stale `tl.new/`, and around the final `sync` and the boot label
-  (`DEFAULT new` in both `syslinux.cfg` copies). The copy into `tl.new/` runs
-  without it, because a save gives up waiting after 30 s and then writes
+  (`DEFAULT new` in both `syslinux.cfg` copies). The copy into `tl.new/`, and
+  the `sync` that flushes it, run without it, because a save gives up waiting after 30 s and then writes
   unlocked, while an add-on store write waits with no limit. If the second
   wait times out, `tl.new/` stays staged, `DEFAULT` is unchanged and the
   stick starts the old release; the space check includes the size of
