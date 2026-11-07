@@ -3290,6 +3290,8 @@ mod tests {
         internal.upgrade_event(UpgradeEvent::Typed("Samsung SSD".into()), now);
         shot(&internal, "upgrade-choose-internal-1080.ppm", (1920, 1080), 1.0);
         shot(&internal, "upgrade-choose-internal-tall.ppm", (1920, 2600), 1.0);
+        // Too tall for the screen: the footer is pinned, the page scrolls.
+        shot(&internal, "upgrade-choose-overflow.ppm", (1280, 600), 1.0);
 
         let total = 3_100_000_000;
         let running = writing_at(total * 42 / 100, Some(total));
