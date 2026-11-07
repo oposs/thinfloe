@@ -188,9 +188,12 @@ impl Upgrade {
     /// The screen opens: check the release (unless a check runs) and list
     /// the drives at the next poll.
     /// A finished write is left behind: the screen opens on Choose, so
-    /// another stick can be written without a restart of the menu.
+    /// another stick can be written without a restart of the menu. An
+    /// upgrade of this machine's stick stays: its Restart now is still due.
     pub fn open(&mut self, now: Instant) -> Option<Request> {
-        self.reset_finished(now);
+        if !matches!(self.stage, Stage::Finished(Outcome::Done { boot_stick: true, .. })) {
+            self.reset_finished(now);
+        }
         self.next_poll = Some(now);
         self.check()
     }
@@ -1442,6 +1445,24 @@ mod tests {
         u.ended(Ok(Some(0)));
         assert_eq!(ev(&mut u, UpgradeEvent::Back, t), Some(Request::Leave));
         assert!(matches!(u.stage, Stage::Finished(_)), "Back alone keeps the outcome");
+    }
+
+    #[test]
+    fn reopening_after_a_boot_stick_upgrade_keeps_restart_now() {
+        let (mut u, t) = running_upgrade(Drive {
+            is_boot: true,
+            ..stick("/dev/sda", "sn-B:1:1")
+        });
+        u.message(result(true, ""), t);
+        u.ended(Ok(Some(0)));
+        assert_eq!(ev(&mut u, UpgradeEvent::Back, t), Some(Request::Leave));
+        u.open(t + Duration::from_secs(30));
+        assert!(
+            matches!(u.stage, Stage::Finished(Outcome::Done { boot_stick: true, .. })),
+            "{:?}",
+            u.stage
+        );
+        assert_eq!(ev(&mut u, UpgradeEvent::RestartNow, t), Some(Request::Restart));
     }
 
     #[test]
