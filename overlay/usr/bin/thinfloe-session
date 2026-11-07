@@ -90,11 +90,20 @@ trap kill_helpers EXIT INT TERM
 # so a SIGUSR1 to this shell would wait until the menu exits. Running the
 # menu in the background instead would make it, and every program it
 # starts, ignore SIGINT, and Ctrl-C in a terminal would stop working.
-# TF_IDLE_TIMEOUT_RC=1 tells the menu that the sessionrc sets the timeout.
+# TF_IDLE_TIMEOUT_RC=1 tells the menu that the sessionrc sets the timeout,
+# and TF_IDLE_TIMEOUT is then the one in force, as plain digits, so the
+# menu can show it without reading a shell file.
 if [ -n "${TF_IDLE_TIMEOUT:-}" ] || [ -n "${DBRRG_IDLE_TIMEOUT:-}" ]; then
     : "${TF_IDLE_TIMEOUT:=$DBRRG_IDLE_TIMEOUT}"
+    if [ "$TF_IDLE_TIMEOUT" -gt 0 ] 2>/dev/null; then
+        # [ ] takes " 900", "+900" and "0900" as 900; so do swayidle and the
+        # menu from here on.
+        TF_IDLE_TIMEOUT=$(printf '%s\n' "$TF_IDLE_TIMEOUT" | tr -d ' \t+' | sed 's/^0*//')
+    else
+        TF_IDLE_TIMEOUT=0
+    fi
     TF_IDLE_TIMEOUT_RC=1
-    export TF_IDLE_TIMEOUT_RC
+    export TF_IDLE_TIMEOUT TF_IDLE_TIMEOUT_RC
 else
     unset TF_IDLE_TIMEOUT_RC
 fi

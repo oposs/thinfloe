@@ -250,7 +250,7 @@ still_alive() {
 mkdir -p "${SCREEN%/*}"
 # The menu stub's default: wait for swayidle, record its arguments and the
 # environment the menu got.
-SEEN_MENU="wait-idle; { cat '$WORK'/idle.*; echo \"pid=\$TF_IDLE_PID\"; echo \"rc=\${TF_IDLE_TIMEOUT_RC:-}\"; } >'$WORK/seen'"
+SEEN_MENU="wait-idle; { cat '$WORK'/idle.*; echo \"pid=\$TF_IDLE_PID\"; echo \"tf=\${TF_IDLE_TIMEOUT-unset}\"; echo \"rc=\${TF_IDLE_TIMEOUT_RC:-}\"; } >'$WORK/seen'"
 idle_run() { # sessionrc-content screen-content|- [menu-code]
     rm -f "$WORK"/idle.* "$WORK/seen" "$WORK/idle-kids"
     printf '%s\n' "$1" >"$WORK/home/.thinfloe-sessionrc"
@@ -286,21 +286,31 @@ case "$(idle_run '' 'idle_timeout=86400')" in
 esac
 for name in TF_IDLE_TIMEOUT DBRRG_IDLE_TIMEOUT; do
     case "$(idle_run "$name=900" 'idle_timeout=600')" in
-        *"timeout 900 "*"rc=1") ok "idle: sessionrc wins ($name)" ;;
+        *"timeout 900 "*"tf=900"*"rc=1") ok "idle: sessionrc wins ($name), the menu gets 900" ;;
         *) bad "idle: sessionrc $name: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
     esac
 done
+# The menu gets the value swayidle uses, as plain digits.
+case "$(idle_run 'TF_IDLE_TIMEOUT=+0900' 'idle_timeout=600')" in
+    *"timeout 900 "*"tf=900"*"rc=1") ok "idle: sessionrc +0900 is exported as 900" ;;
+    *) bad "idle: sessionrc +0900: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+esac
+case "$(idle_run '' 'idle_timeout=600')" in
+    *"tf=unset"*"rc=") ok "idle: without the sessionrc the menu gets no TF_IDLE_TIMEOUT" ;;
+    *) bad "idle: no sessionrc value: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+esac
 case "$(idle_run 'TF_IDLE_TIMEOUT=600
 DBRRG_IDLE_TIMEOUT=900' -)" in
     *"timeout 600 "*"rc=1") ok "idle: TF_IDLE_TIMEOUT wins over the old name" ;;
     *) bad "idle: new name did not win: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
 esac
 # A sessionrc value that is no positive number disables blanking, as before.
-for v in 0 garbage; do
+# The menu then gets 0, so it shows "Never".
+for v in 0 garbage -5; do
     idle_run "TF_IDLE_TIMEOUT=$v" 'idle_timeout=600' \
-        "sleep 1; echo \"pid=\$TF_IDLE_PID rc=\${TF_IDLE_TIMEOUT_RC:-}\" >'$WORK/seen'" >/dev/null
-    if ! ls "$WORK"/idle.* >/dev/null 2>&1 && grep -q '^pid=[0-9][0-9]* rc=1$' "$WORK/seen" 2>/dev/null; then
-        ok "idle: sessionrc TF_IDLE_TIMEOUT=$v starts no swayidle"
+        "sleep 1; echo \"pid=\$TF_IDLE_PID tf=\${TF_IDLE_TIMEOUT-unset} rc=\${TF_IDLE_TIMEOUT_RC:-}\" >'$WORK/seen'" >/dev/null
+    if ! ls "$WORK"/idle.* >/dev/null 2>&1 && grep -q '^pid=[0-9][0-9]* tf=0 rc=1$' "$WORK/seen" 2>/dev/null; then
+        ok "idle: sessionrc TF_IDLE_TIMEOUT=$v starts no swayidle, the menu gets 0"
     else
         bad "idle: sessionrc TF_IDLE_TIMEOUT=$v: '$(cat "$WORK/seen" 2>/dev/null)' $(ls "$WORK"/idle.* 2>/dev/null)"
     fi

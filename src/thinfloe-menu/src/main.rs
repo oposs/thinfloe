@@ -43,9 +43,12 @@ pub fn screen_path() -> PathBuf {
     home.join(screentab::SCREEN_FILE)
 }
 
-/// Whether the session profile sets the idle time; thinfloe-session says so.
-fn idle_rc_set() -> bool {
-    std::env::var_os("TF_IDLE_TIMEOUT_RC").is_some_and(|v| v == "1")
+/// The idle time the session profile sets, as thinfloe-session exports it.
+fn idle_rc() -> Option<u32> {
+    screentab::rc_idle(
+        std::env::var_os("TF_IDLE_TIMEOUT_RC").as_deref(),
+        std::env::var_os("TF_IDLE_TIMEOUT").as_deref(),
+    )
 }
 
 fn program_path() -> OsString {
@@ -102,7 +105,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // no stick of its own to upgrade.
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
-    menu.screen_tab = screentab::load(&screen_path(), idle_rc_set());
+    menu.screen_tab = screentab::load(&screen_path(), idle_rc());
     (menu, paths, IconRoots::system())
 }
 
@@ -234,7 +237,7 @@ fn main() -> ExitCode {
         screen: ScreenFile {
             path: screen_path(),
             idle_pid: screentab::idle_pid(std::env::var_os("TF_IDLE_PID").as_deref()),
-            rc_set: idle_rc_set(),
+            rc: idle_rc(),
         },
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),

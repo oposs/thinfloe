@@ -77,8 +77,8 @@ pub struct ScreenFile {
     pub path: PathBuf,
     /// The idle helper, told by SIGUSR1 to read the file again.
     pub idle_pid: Option<i32>,
-    /// The session profile sets the idle time.
-    pub rc_set: bool,
+    /// The idle time the session profile sets, which wins over the file.
+    pub rc: Option<u32>,
 }
 
 struct Live {
@@ -954,7 +954,7 @@ fn apply_screen(effect: Effect, screen: &ScreenFile, menu: &mut Menu) -> Option<
         return menu.screen_written(Err(format!("Could not write {path}: {e}")), false);
     }
     let signalled = screen.idle_pid.is_some_and(signal_idle_helper);
-    let tab = crate::screentab::load(&screen.path, screen.rc_set);
+    let tab = crate::screentab::load(&screen.path, screen.rc);
     menu.screen_written(Ok(tab), signalled)
 }
 
@@ -1248,7 +1248,7 @@ mod tests {
         ScreenFile {
             path: d.join(".config/thinfloe/screen"),
             idle_pid,
-            rc_set: false,
+            rc: None,
         }
     }
 

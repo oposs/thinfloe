@@ -2434,6 +2434,18 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_tab_shows_the_sessionrc_value() {
+        let d = crate::testdir::TestDir::new("ui", "rc-value");
+        for (rc, want) in [(0, "Never"), (900, "15 minutes"), (450, "450 seconds")] {
+            let mut menu = screen_settings(crate::screentab::IdleSource::Rc);
+            menu.screen_tab = crate::screentab::load(&d.join("screen"), Some(rc));
+            let texts = settings_texts(&menu);
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+            assert!(!texts.iter().any(|t| t == "5 minutes"), "{texts:?}");
+        }
+    }
+
+    #[test]
     fn the_screen_tab_offers_take_over() {
         let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::ByHand));
         for want in [
