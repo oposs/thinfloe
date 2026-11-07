@@ -15,6 +15,7 @@ VERDICT="$ROOT/overlay/usr/libexec/thinfloe/session-verdict"
 WORK=$(mktemp -d)
 # Kill whatever a case left running (an idle helper, a swayidle stub, the
 # sleep a helper runs for timeout 0) before the work directory goes.
+# shellcheck disable=SC2329 # run by the EXIT trap
 cleanup() {
     local f p
     for f in "$WORK"/idle.* "$WORK"/*.pid "$WORK"/idle-kids "$WORK"/idle-helper; do
@@ -238,14 +239,14 @@ rc=$?
 SCREEN="$WORK/home/.config/thinfloe/screen"
 # The PIDs among $@ still running after up to 2 s.
 still_alive() {
-    local n p left
-    for n in $(seq 20); do
+    local _ p left
+    for _ in $(seq 20); do
         left=""
         for p in "$@"; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
         [[ -z $left ]] && break
         sleep 0.1
     done
-    echo $left
+    echo "${left# }"
 }
 mkdir -p "${SCREEN%/*}"
 # The menu stub's default: wait for swayidle, record its arguments and the
@@ -318,17 +319,17 @@ done
 # Zero: no swayidle, the helper still runs (and its sleep must end with it).
 idle_run '' 'idle_timeout=0' \
     "sleep 1; echo \"pid=\$TF_IDLE_PID\" >'$WORK/seen'; pgrep -P \"\$TF_IDLE_PID\" >'$WORK/idle-kids'" >/dev/null
-zero_kids=$(cat "$WORK/idle-kids" 2>/dev/null)
+mapfile -t zero_kids < <(cat "$WORK/idle-kids" 2>/dev/null)
 if ! ls "$WORK"/idle.* >/dev/null 2>&1 && grep -q '^pid=[0-9][0-9]*$' "$WORK/seen" 2>/dev/null; then
     ok "idle: zero starts no swayidle, TF_IDLE_PID still set"
 else
     bad "idle: zero: '$(cat "$WORK/seen" 2>/dev/null)' $(ls "$WORK"/idle.* 2>/dev/null)"
 fi
-alive=$(still_alive $zero_kids)
-if [[ -n $zero_kids && -z $alive ]]; then
+alive=$(still_alive "${zero_kids[@]}")
+if [[ ${#zero_kids[@]} -gt 0 && -z $alive ]]; then
     ok "idle: the helper's sleep for zero ends with the session"
 else
-    bad "idle: zero: children '$zero_kids', alive '$alive'"
+    bad "idle: zero: children '${zero_kids[*]}', alive '$alive'"
 fi
 # The menu changes the file twice and signals each time: one swayidle is
 # left, with the last value.
@@ -345,13 +346,13 @@ else
 fi
 # Everything the helper started ends with the session.
 hp=$(cat "$WORK/idle-helper" 2>/dev/null)
-idle_pids=""
-for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids="$idle_pids ${f##*.}"; done
-alive=$(still_alive $hp $idle_pids)
+idle_pids=()
+for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids+=("${f##*.}"); done
+alive=$(still_alive "$hp" "${idle_pids[@]}")
 if [[ -n $hp && -z $alive ]]; then
     ok "idle: idle helper and swayidle end with the session"
 else
-    bad "idle: still running after the session: '$alive' (helper '$hp', swayidle '$idle_pids')"
+    bad "idle: still running after the session: '$alive' (helper '$hp', swayidle '${idle_pids[*]}')"
 fi
 # No swayidle or no wlopm: no helper, no TF_IDLE_PID.
 mv "$WORK/bin/wlopm" "$WORK/wlopm.off"
@@ -383,8 +384,8 @@ start_session() { # menu-code
 }
 # Wait up to 3 s for file $1.
 wait_file() {
-    local n
-    for n in $(seq 30); do [[ -e $1 ]] && return 0; sleep 0.1; done
+    local _
+    for _ in $(seq 30); do [[ -e $1 ]] && return 0; sleep 0.1; done
     return 1
 }
 # A signal while the menu runs waits for the menu: the helpers stay up
@@ -402,9 +403,9 @@ exit 10"
     wait "$session_pid"
     rc=$?
     hp=$(cat "$WORK/idle-helper" 2>/dev/null)
-    idle_pids=""
-    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids="$idle_pids ${f##*.}"; done
-    alive=$(still_alive $hp $idle_pids)
+    idle_pids=()
+    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids+=("${f##*.}"); done
+    alive=$(still_alive "$hp" "${idle_pids[@]}")
     if [[ "$(cat "$WORK/seen" 2>/dev/null)" == $'swayidle-up\nhelper-up' && $rc -eq 0 &&
           "$(cat "$WORK/thinfloe-session.status" 2>/dev/null)" == 10 &&
           "$(cat "$WORK/sudo.args" 2>/dev/null)" == "systemctl reboot" &&
@@ -427,17 +428,17 @@ for sig in TERM INT; do
     start_session "echo menu >>'$WORK/steps'; exit 0"
     wait_file "$WORK/step.running"
     "$WORK/bin/wait-idle"
-    idle_pids=""
-    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids="$idle_pids ${f##*.}"; done
+    idle_pids=()
+    for f in "$WORK"/idle.*; do [[ -e $f ]] && idle_pids+=("${f##*.}"); done
     kill -"$sig" "$session_pid"
     wait "$session_pid"
     rc=$?
-    alive=$(still_alive $idle_pids)
-    if [[ $rc -ne 0 && "$(cat "$WORK/steps" 2>/dev/null)" == quit-retain && -n $idle_pids && -z $alive &&
+    alive=$(still_alive "${idle_pids[@]}")
+    if [[ $rc -ne 0 && "$(cat "$WORK/steps" 2>/dev/null)" == quit-retain && ${#idle_pids[@]} -gt 0 && -z $alive &&
           ! -e "$WORK/thinfloe-session.status" && ! -e "$WORK/foot.args" ]]; then
         ok "$sig before the menu: the session ends, no menu, no failure window, swayidle ends"
     else
-        bad "$sig before the menu: rc=$rc steps '$(cat "$WORK/steps" 2>/dev/null)' swayidle '$idle_pids' alive '$alive' status '$(cat "$WORK/thinfloe-session.status" 2>/dev/null)'"
+        bad "$sig before the menu: rc=$rc steps '$(cat "$WORK/steps" 2>/dev/null)' swayidle '${idle_pids[*]}' alive '$alive' status '$(cat "$WORK/thinfloe-session.status" 2>/dev/null)'"
     fi
 done
 cat >"$WORK/bin/step" <<STUB

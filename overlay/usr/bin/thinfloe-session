@@ -56,6 +56,7 @@ kill_helpers() {
 # shell would go on and start the menu with its helpers already dead. While
 # the menu runs, dash holds the trap until the menu has ended, and the
 # menu's exit status then decides as usual.
+# shellcheck disable=SC2329 # run by the INT and TERM traps
 tf_signalled() {
     kill_helpers
     [ -n "$menu_started" ] || exit "$1"
@@ -158,6 +159,7 @@ tf_idle_timeout() {
 # names it while the helper waits. dash drops a signal that reaches a child
 # it has forked but not yet set up, so a killed child gets the signal again
 # after 0.1 s; it is not reaped before that, so its PID is still its own.
+# shellcheck disable=SC2329 # run by the idle loop's traps
 tf_idle_kill() {
     kill "$!" ${_c:+"$_c"} 2>/dev/null
 }
