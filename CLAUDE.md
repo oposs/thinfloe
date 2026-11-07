@@ -1538,13 +1538,15 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 - Not verified on hardware (Upgrade screen): choosing and clicking a drive
   with a real mouse, a write to a real stick with its bar, speed and time
   left, Cancel during a write, and Restart while a stick is written. At
-  1080p the Choose page (Release, three drives, Action, Options) fits above
-  the summary and the confirm button, which (like Cancel, Stop, Restart now,
-  Try again) stay fixed below it; `the_choose_blocks_fit_above_the_footer_at_1080p`
-  guards this. A longer list, Advanced with its address, an internal drive's
-  typed confirmation or a 21 inch 4K screen (960 points tall) still makes
-  the page scroll, and the scroll bar egui is asked to show always was not
-  seen in the test pictures.
+  1080p and on a 21 inch 4K screen the Choose page fits above the summary
+  and the confirm button, which (like Cancel, Stop, Restart now, Try again)
+  stay fixed below it: Release on top, the drives in a left column, Action
+  and Options in a right one (one column below `UPGRADE_TWO_COLUMNS_W` in
+  `brand.rs`), and the log shrinks to `LOG_CHOOSE_ROWS` (4) rows while
+  choosing. `the_choose_blocks_fit_above_the_footer` guards both screens,
+  also with Advanced on and an internal drive chosen. A longer page scrolls
+  with a solid scroll bar drawn also at rest (egui's floating default drew
+  none until hovered).
 - Not seen on hardware: two programs at once, Stop them and log out, the
   colours of a real `oxulnk-desktop` log, the menu staying behind a clicked
   program, the Restart and Power off tiles.
@@ -1626,7 +1628,9 @@ an icon draws its letter.
 
 ### The menu's log
 
-The bottom 30 % of the menu (at least eight rows) is a log:
+The bottom 30 % of the menu (at least eight rows) is a log (four rows
+while the Upgrade screen offers its choices; normal again once a write
+starts):
 `HH:MM:SS  source | text`, in local time. It shows every tile start and
 exit (with the exit status or signal), each save and its outcome, and every
 line a tile's program or `thinfloe-save-home` writes to stdout or stderr, with

@@ -51,6 +51,9 @@ const EDGE_W: f32 = 5.0;
 /// `LOG_MIN_ROWS` rows.
 pub const LOG_SHARE: f32 = 0.3;
 pub const LOG_MIN_ROWS: usize = 8;
+/// The log's rows while the Upgrade screen offers its choices: the page
+/// needs the room, and nothing is written yet.
+pub const LOG_CHOOSE_ROWS: usize = 4;
 /// One log row, in points; the log draws one line per row.
 pub const LOG_ROW: f32 = 18.0;
 const LOG_PAD: f32 = 10.0;
@@ -250,8 +253,24 @@ pub struct Layout {
     pub strip: Option<Rect>,
 }
 
+/// The log is small while the Upgrade screen offers its choices; it is
+/// back to its size once a write starts, and on every other screen.
+pub fn small_log(menu: &Menu) -> bool {
+    menu.screen == Screen::Upgrade && menu.upgrade.stage == crate::upgrade::Stage::Choose
+}
+
 pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
-    let log_h = (screen.height() * LOG_SHARE).max(LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD);
+    layout_with(screen, tiles, folded, false)
+}
+
+/// The layout, with a log of `LOG_CHOOSE_ROWS` rows when `small_log`.
+pub fn layout_with(screen: Rect, tiles: usize, folded: usize, small_log: bool) -> Layout {
+    let small_h = LOG_CHOOSE_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
+    let log_h = if small_log {
+        small_h
+    } else {
+        (screen.height() * LOG_SHARE).max(LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD)
+    };
     let (strip, log_bottom) = if folded == 0 {
         (None, screen.bottom() - GAP)
     } else {
@@ -262,7 +281,11 @@ pub fn layout(screen: Rect, tiles: usize, folded: usize) -> Layout {
         (Some(strip), strip.top() - STRIP_GAP)
     };
     // The strip takes its room from the log only, down to the log's minimum.
-    let log_min = LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD;
+    let log_min = if small_log {
+        small_h
+    } else {
+        LOG_MIN_ROWS as f32 * LOG_ROW + 2.0 * LOG_PAD
+    };
     let log_top = (screen.bottom() - GAP - log_h).min(log_bottom - log_min);
     let log = Rect::from_min_max(
         pos2(screen.left() + GAP, log_top),
@@ -587,7 +610,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         return chose.map(UiEvent::Retry);
     }
     let shown = menu.visible_tiles();
-    let l = layout(ui.max_rect(), shown.len(), menu.folded.len());
+    let l = layout_with(ui.max_rect(), shown.len(), menu.folded.len(), small_log(menu));
     show_header(ui, chrome, l.header);
     let unfold = l
         .strip
@@ -2894,7 +2917,7 @@ mod tests {
             })
             .next_back()
             .unwrap_or_else(|| panic!("{label:?} not drawn"));
-        let log = layout(screen(w, h), menu.visible_tiles().len(), 0).log;
+        let log = layout_with(screen(w, h), menu.visible_tiles().len(), 0, small_log(menu)).log;
         (rect, clip.contains_rect(rect) && rect.bottom() < log.top())
     }
 
@@ -2917,44 +2940,87 @@ mod tests {
         }
     }
 
+    /// The internal-drive fixture of the shots: Advanced on with an
+    /// address, Show all, four drives, the SSD chosen and its name typed.
+    fn internal_chosen() -> Menu {
+        let now = Instant::now();
+        let mut drives = three_drives();
+        drives.push(internal_disk());
+        let mut m = upgrade_open(unknown_release(), drives, true, now);
+        m.upgrade_event(UpgradeEvent::Source("ftp://example.org/thinfloe".into()), now);
+        m.upgrade_event(UpgradeEvent::Choose("/dev/nvme0n1".into()), now);
+        m.upgrade_event(UpgradeEvent::Typed("Samsung SSD".into()), now);
+        m
+    }
+
     #[test]
-    fn the_choose_blocks_fit_above_the_footer_at_1080p() {
-        let menu = erase_chosen();
-        let (w, h) = (1920.0, 1080.0);
-        for label in [
+    fn the_choose_blocks_fit_above_the_footer() {
+        let note = "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.";
+        let common = [
             "Release",
             "Installed",
             "Check now",
             "Target",
             "Intenso Rainbow, 2.0 GB",
-            "Action",
-            "Erase and install",
-            "Upgrade (A/B, active after a restart)",
             "Options",
             "Copy this machine's home directory",
             "Check the stick after writing",
-            "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.",
-            "Erase SanDisk Cruzer 16 GB",
-        ] {
-            let (rect, ok) = visible_button(&menu, w, h, label);
-            assert!(ok, "{label:?} at {rect:?} on {w}x{h} is not visible");
+            note,
+        ];
+        // 1080p, and a 21 inch 4K screen at scale 2.25, in points.
+        for (w, h) in [(1920.0, 1080.0), (3840.0 / 2.25, 2160.0 / 2.25)] {
+            for (menu, extra, summary) in [
+                (
+                    erase_chosen(),
+                    // An internal drive offers only Erase, so no Action block.
+                    vec![
+                        "Action",
+                        "Erase and install",
+                        "Upgrade (A/B, active after a restart)",
+                        "Erase SanDisk Cruzer 16 GB",
+                    ],
+                    "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe",
+                ),
+                (
+                    internal_chosen(),
+                    vec![
+                        "Samsung SSD 980, 500 GB",
+                        "Show all drives",
+                        "Erase Samsung SSD 980 500 GB",
+                    ],
+                    "Erase Samsung SSD 980, 500 GB, and install the newest ThinFloe",
+                ),
+            ] {
+                for label in common.iter().chain(extra.iter()) {
+                    let (rect, ok) = visible_button(&menu, w, h, label);
+                    assert!(ok, "{label:?} at {rect:?} on {w}x{h} is not visible");
+                }
+                let (summary, _) = visible_button(&menu, w, h, summary);
+                for label in [note, "Intenso Rainbow, 2.0 GB"] {
+                    let (r, _) = visible_button(&menu, w, h, label);
+                    assert!(
+                        r.bottom() < summary.top(),
+                        "{label:?} at {r:?} runs into the footer on {w}x{h}"
+                    );
+                }
+            }
         }
-        let (last, _) = visible_button(
-            &menu,
-            w,
-            h,
-            "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home.",
-        );
-        let (summary, _) = visible_button(
-            &menu,
-            w,
-            h,
-            "Erase SanDisk Cruzer, 16 GB, and install the newest ThinFloe",
-        );
-        assert!(
-            last.bottom() < summary.top(),
-            "{last:?} runs into the footer at {summary:?}"
-        );
+    }
+
+    #[test]
+    fn the_log_is_small_only_while_choosing() {
+        let rows = |m: &Menu| {
+            let l = layout_with(screen(1920.0, 1080.0), m.visible_tiles().len(), 0, small_log(m));
+            ((l.log.height() - 2.0 * LOG_PAD) / LOG_ROW).round() as usize
+        };
+        let choosing = erase_chosen();
+        assert_eq!(rows(&choosing), LOG_CHOOSE_ROWS);
+        let total = 3_100_000_000;
+        let running = writing_at(total / 2, Some(total));
+        assert!(rows(&running) >= LOG_MIN_ROWS, "{}", rows(&running));
+        let mut desktop = erase_chosen();
+        desktop.upgrade_event(UpgradeEvent::Back, Instant::now());
+        assert_eq!(rows(&desktop), rows(&running));
     }
 
     #[test]

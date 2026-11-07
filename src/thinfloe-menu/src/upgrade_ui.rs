@@ -30,8 +30,11 @@ const BLOCK_GAP: f32 = 8.0;
 const BLOCK_PAD: i8 = 12;
 /// Between the lines of a block (`gap-1.5`).
 const LINE_GAP: f32 = 6.0;
-/// Between the two halves of a row of choices (`gap-2`).
+/// Between the two halves of a row of choices, and between the two
+/// columns of the Choose page (`gap-2`).
 const COL_GAP: f32 = 8.0;
+/// The page's scroll bar is drawn whole, also while the pointer is away.
+const SCROLL_REST_OPACITY: f32 = 1.0;
 /// Between two rows of a choice (`gap-1`).
 const ROW_GAP: f32 = 4.0;
 /// Between the heading of a block and the header's last-checked text (`gap-3`).
@@ -129,6 +132,17 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
         egui::pos2(panel.right(), page_bottom.max(p_ui.cursor().min.y)),
     );
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(page));
+    // egui's default scroll style is floating, with the bar at zero
+    // opacity until the pointer hovers it, so AlwaysVisible showed nothing
+    // to someone who had not found the page scrolls. A solid bar, drawn
+    // at full opacity also at rest, in the theme's colours.
+    s_ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        dormant_background_opacity: SCROLL_REST_OPACITY,
+        dormant_handle_opacity: SCROLL_REST_OPACITY,
+        active_background_opacity: SCROLL_REST_OPACITY,
+        active_handle_opacity: SCROLL_REST_OPACITY,
+        ..egui::style::ScrollStyle::solid()
+    };
     egui::ScrollArea::vertical()
         .id_salt("upgrade")
         .auto_shrink([false, false])
@@ -250,26 +264,50 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
         release(ui, u, t, &mut event);
     });
     ui.add_space(BLOCK_GAP);
-    noted_block(
-        ui,
-        t,
-        w,
-        "Target",
-        Some("The list follows as sticks are plugged in and pulled out."),
-        |ui| {
-            target(ui, u, t, &mut event);
-        },
-    );
-    let Some(d) = u.chosen_drive() else {
+    let outer = w + 2.0 * f32::from(BLOCK_PAD);
+    if outer < brand::UPGRADE_TWO_COLUMNS_W {
+        // One column: the drives one row each, the choices side by side.
+        noted_block(
+            ui,
+            t,
+            w,
+            "Target",
+            Some("The list follows as sticks are plugged in and pulled out."),
+            |ui| target(ui, u, t, false, &mut event),
+        );
+        action_blocks(ui, menu, t, w, true, &mut event);
         return event;
+    }
+    // Two columns: the drives on the left, Action and Options on the right.
+    let half = (outer - COL_GAP) / 2.0 - 2.0 * f32::from(BLOCK_PAD);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = COL_GAP;
+        ui.vertical(|ui| {
+            block(ui, t, half, "Target", |ui| {
+                target(ui, u, t, true, &mut event);
+                muted(ui, t, "The list follows as sticks are plugged in and pulled out.");
+            });
+        });
+        ui.vertical(|ui| {
+            action_blocks(ui, menu, t, half, false, &mut event);
+        });
+    });
+    event
+}
+
+/// Action and Options for the chosen drive; `wide` puts each block's two
+/// choices side by side, else they are stacked.
+fn action_blocks(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32, wide: bool, event: &mut Option<UpgradeEvent>) {
+    let u = &menu.upgrade;
+    let Some(d) = u.chosen_drive() else {
+        return;
     };
     let modes = drives::modes(d, u.image_bytes());
     if modes.len() == 2 {
         block(ui, t, w, "Action", |ui| {
             ui.style_mut().interaction.selectable_labels = false;
-            // The two choices side by side, one row.
-            halves(ui, |ui, half| {
-                let Some((mode, allowed)) = modes.get(half) else { return };
+            pair(ui, wide, |ui, i| {
+                let Some((mode, allowed)) = modes.get(i) else { return };
                 let title = match mode {
                     Mode::Upgrade => "Upgrade (A/B, active after a restart)",
                     Mode::Fresh => "Erase and install",
@@ -286,62 +324,71 @@ fn choose(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32) -> Option<UpgradeEvent> {
                 }
                 let r = ui.add_enabled_ui(allowed.is_ok(), |ui| ui.add(item)).inner;
                 if r.clicked() {
-                    event = Some(UpgradeEvent::Mode(*mode));
+                    *event = Some(UpgradeEvent::Mode(*mode));
                 }
             });
         });
     }
-    let fresh = u.mode == Some(Mode::Fresh);
-    if fresh {
-        block(ui, t, w, "Options", |ui| {
-            let restore_failed = menu.restore_failed();
-            // The two options side by side, one row.
-            halves(ui, |ui, half| {
-                if half == 0 {
-                    let copy = ui
-                        .add_enabled_ui(!restore_failed, |ui| {
-                            check(
-                                ui,
-                                u.copy_home && !restore_failed,
-                                "Copy this machine's home directory",
-                                None,
-                            )
-                        })
-                        .inner;
-                    if let Some(on) = copy {
-                        event = Some(UpgradeEvent::CopyHome(on));
-                    }
-                } else if let Some(on) = check(ui, u.verify, "Check the stick after writing", None) {
-                    event = Some(UpgradeEvent::Verify(on));
+    if u.mode != Some(Mode::Fresh) {
+        return;
+    }
+    block(ui, t, w, "Options", |ui| {
+        let restore_failed = menu.restore_failed();
+        pair(ui, wide, |ui, i| {
+            if i == 0 {
+                let copy = ui
+                    .add_enabled_ui(!restore_failed, |ui| {
+                        check(
+                            ui,
+                            u.copy_home && !restore_failed,
+                            "Copy this machine's home directory",
+                            None,
+                        )
+                    })
+                    .inner;
+                if let Some(on) = copy {
+                    *event = Some(UpgradeEvent::CopyHome(on));
                 }
-            });
-            // The copy's note spans the block: one line, not two in a half.
-            muted(
-                ui,
-                t,
-                if restore_failed {
-                    "This boot's home directory was not restored, so it cannot be copied."
-                } else {
-                    "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home."
-                },
-            );
-            if drives::internal(d) {
-                let confirm = drives::confirm_text(d);
-                warn(ui, t, format!("Type {confirm} to erase this drive."));
-                let mut typed = u.typed.clone();
-                let r = ui.add(
-                    Input::new(&mut typed)
-                        .hint(confirm)
-                        .max_width(FIELD_W)
-                        .id_salt("upgrade-typed"),
-                );
-                if r.changed() {
-                    event = Some(UpgradeEvent::Typed(typed));
-                }
+            } else if let Some(on) = check(ui, u.verify, "Check the stick after writing", None) {
+                *event = Some(UpgradeEvent::Verify(on));
             }
         });
+        // The copy's note spans the block.
+        muted(
+            ui,
+            t,
+            if restore_failed {
+                "This boot's home directory was not restored, so it cannot be copied."
+            } else {
+                "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home."
+            },
+        );
+        if drives::internal(d) {
+            let confirm = drives::confirm_text(d);
+            warn(ui, t, format!("Type {confirm} to erase this drive."));
+            let mut typed = u.typed.clone();
+            let r = ui.add(
+                Input::new(&mut typed)
+                    .hint(confirm)
+                    .max_width(FIELD_W)
+                    .id_salt("upgrade-typed"),
+            );
+            if r.changed() {
+                *event = Some(UpgradeEvent::Typed(typed));
+            }
+        }
+    });
+}
+
+/// Two choices: side by side when `wide`, else one under the other.
+fn pair(ui: &mut Ui, wide: bool, mut add: impl FnMut(&mut Ui, usize)) {
+    if wide {
+        halves(ui, add);
+    } else {
+        ui.spacing_mut().item_spacing.y = ROW_GAP;
+        add(ui, 0);
+        add(ui, 1);
     }
-    event
 }
 
 /// The summary and the confirm button, fixed below the page, in one row.
@@ -482,7 +529,8 @@ fn refusal(d: &Drive, image_bytes: Option<u64>) -> Option<String> {
     modes.into_iter().find_map(|(_, r)| r.err())
 }
 
-fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>) {
+/// The drive list; `narrow` puts each drive's details under its name.
+fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, narrow: bool, event: &mut Option<UpgradeEvent>) {
     if let Some(e) = &u.drives_error {
         warn(ui, t, format!("The drives could not be listed: {e}"));
     }
@@ -520,13 +568,18 @@ fn target(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>)
                 .selected(chosen)
                 .sense(Sense::click())
                 .id_salt(("drive", &d.device));
-            // One line per drive: the device and its state at the row's end.
+            // Wide: one line, the device and its state at the row's end.
+            // Narrow: they go under the name, where they may wrap.
             let r = ui
                 .add_enabled_ui(why.is_none(), |ui| {
                     if why.is_some() {
                         ui.multiply_opacity(REFUSED_OPACITY);
                     }
-                    item.show(ui, |ui| ui.label(job)).response
+                    if narrow {
+                        ui.add(item.description(job))
+                    } else {
+                        item.show(ui, |ui| ui.label(job)).response
+                    }
                 })
                 .inner;
             if r.clicked() {

@@ -108,6 +108,11 @@ pub const DIALOG_TITLE_PT: f32 = 24.0;
 /// A block heading on the Upgrade screen (Release, Target, ...).
 pub const SECTION_PT: f32 = 18.0;
 
+/// The Upgrade screen's Choose page puts the drives beside Action and
+/// Options when its panel is at least this wide (points); narrower, they
+/// stack in one column.
+pub const UPGRADE_TWO_COLUMNS_W: f32 = 720.0;
+
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";
