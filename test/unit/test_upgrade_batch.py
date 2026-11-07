@@ -2530,6 +2530,14 @@ class TestCheck(_ReleaseCase):
         rc, kv = self.run_check(body=b"4.2.0\n", size=None)
         self.assertEqual(kv["image_bytes"], "")
 
+    def test_a_size_is_carried_for_the_same_release(self):
+        self.run_check(body=b"4.1.0\n", size=3148873728)
+        rc, kv = self.run_check(body=b"4.1.0\n", size=None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(kv["latest"], "4.1.0")
+        self.assertEqual(kv["image_bytes"], "3148873728")
+        self.assertIn("image size", kv["error"])
+
     def test_control_characters_never_reach_the_status(self):
         rc, kv = self.run_check(argv=["check", "--source", "http://x/\x1b[31m\x07y\x7f"])
         self.assertEqual(kv["source"], "http://x/ [31m y ")
