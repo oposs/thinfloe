@@ -505,6 +505,10 @@ The system implements home directory persistence across reboots:
   `source` and `error` as `key=value` lines and exits 0, or 1 when a request
   failed. Without `--source` it also writes the lines, plus `installed=` from
   `/etc/thinfloe/version`, atomically to `/run/thinfloe/upgrade/status`.
+  A failed check of the default source keeps what the last one found: an
+  unreadable version keeps the previous `latest=`, and an unreadable size
+  keeps the previous `image_bytes=` only when `latest=` is the version that
+  size was read for; `error=` says what failed.
   `test/unit/upgrade-write-args.tsv` lists the `write` calls the menu may make.
 - `thinfloe-upgrade-boot-check.timer` runs `thinfloe-upgrade check` 5 min
   after boot without random delay, and `thinfloe-upgrade-check.timer` runs it

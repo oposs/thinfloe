@@ -2619,7 +2619,10 @@ def release_check(source: str) -> int:
         previous = _read_status_file()
         if not latest and re.fullmatch(VERSION_RE, previous.get("latest", "")):
             latest = previous["latest"]
-        if size is None and previous.get("image_bytes", "").isdigit():
+        # A size belongs to its release: carried only when the version is
+        # the one it was read for.
+        if (size is None and latest and latest == previous.get("latest")
+                and previous.get("image_bytes", "").isdigit()):
             size = int(previous["image_bytes"])
     lines = [
         ("latest", latest),
