@@ -225,6 +225,19 @@ fn in_subnet(a: Ipv4Addr, b: Ipv4Addr, prefix: u8) -> bool {
     u32::from(a) & mask == u32::from(b) & mask
 }
 
+/// The network or the broadcast address of `a`'s network; none for /31
+/// (RFC 3021: two hosts) and /32.
+fn network_end(a: Ipv4Addr, prefix: u8) -> bool {
+    if prefix > 30 {
+        return false;
+    }
+    let host_bits = u32::MAX >> prefix;
+    let host = u32::from(a) & host_bits;
+    host == 0 || host == host_bits
+}
+
+const ENDS_ERR: &str = "the first and last address of the network cannot be used";
+
 /// The fields of the fixed-address form. The messages are shown as they
 /// are.
 pub fn parse_wired_form(address: &str, gateway: &str, dns: &str) -> Result<Wired, String> {
@@ -235,6 +248,9 @@ pub fn parse_wired_form(address: &str, gateway: &str, dns: &str) -> Result<Wired
     if !(1..=32).contains(&prefix) {
         return Err(ADDRESS_ERR.to_string());
     }
+    if network_end(ip, prefix) {
+        return Err(format!("Address: {ENDS_ERR}"));
+    }
     let gateway = match gateway.trim() {
         "" => None,
         g => {
@@ -243,6 +259,12 @@ pub fn parse_wired_form(address: &str, gateway: &str, dns: &str) -> Result<Wired
                 .map_err(|_| "Gateway: not in the network of the address".to_string())?;
             if !in_subnet(ip, gw, prefix) {
                 return Err("Gateway: not in the network of the address".to_string());
+            }
+            if gw == ip {
+                return Err("Gateway: must differ from the address".to_string());
+            }
+            if network_end(gw, prefix) {
+                return Err(format!("Gateway: {ENDS_ERR}"));
             }
             Some(gw)
         }
@@ -473,6 +495,38 @@ mod tests {
         let bare = parse_wired_form("10.0.0.2/32", "", "").unwrap();
         assert!(matches!(bare, Wired::Static { gateway: None, ref dns, prefix: 32, .. } if dns.is_empty()));
         assert!(parse_wired_form("10.0.0.2/1", "10.1.0.1", "").is_ok());
+    }
+
+    #[test]
+    fn parse_wired_form_refuses_addresses_that_cut_the_machine_off() {
+        let ends = "the first and last address of the network cannot be used";
+        let host_err = format!("Address: {ends}");
+        let gw_err = format!("Gateway: {ends}");
+        let same = "Gateway: must differ from the address";
+        // The network and the broadcast address as host, up to /30.
+        for bad in ["192.168.1.0/24", "192.168.1.255/24", "10.0.0.4/30", "10.0.0.7/30"] {
+            assert_eq!(parse_wired_form(bad, "", "").unwrap_err(), host_err, "{bad}");
+        }
+        // And as gateway.
+        for gw in ["192.168.1.0", "192.168.1.255"] {
+            assert_eq!(parse_wired_form("192.168.1.10/24", gw, "").unwrap_err(), gw_err, "{gw}");
+        }
+        assert_eq!(parse_wired_form("192.168.1.10/24", "192.168.1.10", "").unwrap_err(), same);
+        // The last host is fine, as host and as gateway; so is the first.
+        assert!(parse_wired_form("192.168.1.254/24", "192.168.1.1", "").is_ok());
+        assert!(parse_wired_form("192.168.1.1/24", "192.168.1.254", "").is_ok());
+        assert!(parse_wired_form("10.0.0.5/30", "10.0.0.6", "").is_ok());
+        // /31 has two hosts and no network or broadcast address (RFC 3021).
+        assert!(parse_wired_form("10.0.0.0/31", "10.0.0.1", "").is_ok());
+        assert!(parse_wired_form("10.0.0.1/31", "10.0.0.0", "").is_ok());
+        assert_eq!(parse_wired_form("10.0.0.0/31", "10.0.0.0", "").unwrap_err(), same);
+        // /32 is the address alone: no gateway can be in its network.
+        assert!(parse_wired_form("10.0.0.2/32", "", "").is_ok());
+        assert_eq!(parse_wired_form("10.0.0.2/32", "10.0.0.2", "").unwrap_err(), same);
+        assert_eq!(
+            parse_wired_form("10.0.0.2/32", "10.0.0.1", "").unwrap_err(),
+            "Gateway: not in the network of the address"
+        );
     }
 
     #[test]
