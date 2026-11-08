@@ -2407,7 +2407,7 @@ mod tests {
             (1920.0, 1080.0),
             &[
                 "Office",
-                "WEP is not supported",
+                "This security type is not supported",
                 "Scan again",
                 "Hidden network",
                 "Password",
@@ -2668,6 +2668,7 @@ mod tests {
             signal_dbm,
             secured,
             supported,
+            name_ok: true,
         };
         net.scan_done(Ok(vec![
             in_range("Cafe", -75, false, true),
@@ -2894,6 +2895,24 @@ mod tests {
         assert_eq!(net_clicks(&menu, &["Add network"]).0, [None]);
     }
 
+    /// Ruling 21: one reason per cause on an unsupported row.
+    #[test]
+    fn unsupported_rows_say_why() {
+        use crate::network::NetEvent;
+        let mut net = two_networks();
+        net.event(NetEvent::OpenAdd, false);
+        let scan = r#"{"device":"w","networks":[
+            {"ssid":"back\\slash","signal_dbm":-50,"secured":true,"supported":true},
+            {"ssid":"Old Router","signal_dbm":-60,"secured":true,"supported":false},
+            {"ssid":"Cafe","signal_dbm":-70,"secured":false,"supported":true}]}"#;
+        net.scan_done(crate::nettab::parse_scan(scan));
+        let texts = net_texts(&network_settings(net));
+        let at = |name: &str| texts.iter().position(|t| t == name).unwrap_or_else(|| panic!("{name} not in {texts:?}"));
+        assert_eq!(texts[at("back\\slash") + 1], "This name cannot be used.", "{texts:?}");
+        assert_eq!(texts[at("Old Router") + 1], "This security type is not supported", "{texts:?}");
+        assert!(!has(&texts, "WEP is not supported"), "{texts:?}");
+    }
+
     #[test]
     fn the_add_dialog_shows_the_password_note() {
         use crate::network::NetEvent;
@@ -2903,7 +2922,7 @@ mod tests {
             "Office",
             "Cafe",
             "Old Router",
-            "WEP is not supported",
+            "This security type is not supported",
             "Scan again",
             "Hidden network",
             "Password",
@@ -3047,6 +3066,7 @@ mod tests {
             signal_dbm: -60,
             secured: false,
             supported: true,
+            name_ok: true,
         }]));
         let menu = network_settings(net);
         let texts = net_texts(&menu);

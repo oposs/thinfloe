@@ -693,6 +693,7 @@ mod tests {
             signal_dbm: dbm,
             secured,
             supported,
+            name_ok: true,
         }
     }
 

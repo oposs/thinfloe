@@ -57,6 +57,23 @@ pub struct InRange {
     pub signal_dbm: i32,
     pub secured: bool,
     pub supported: bool,
+    /// False for a name the menu refuses (cut, or `netfiles::check_ssid`
+    /// fails); `supported` is then false too.
+    pub name_ok: bool,
+}
+
+impl InRange {
+    /// Why the menu cannot add this network, or None when it can
+    /// (Ruling 21: the tool's JSON says only `supported`).
+    pub fn unsupported_reason(&self) -> Option<&'static str> {
+        if self.supported {
+            None
+        } else if !self.name_ok {
+            Some("This name cannot be used.")
+        } else {
+            Some("This security type is not supported")
+        }
+    }
 }
 
 fn cut(s: &str) -> String {
@@ -147,6 +164,7 @@ fn in_range(v: &Value) -> Option<InRange> {
         signal_dbm: dbm(v, "signal_dbm").unwrap_or(NO_SIGNAL_DBM),
         secured: v.get("secured").and_then(Value::as_bool).unwrap_or(true),
         supported: v.get("supported").and_then(Value::as_bool).unwrap_or(false) && usable,
+        name_ok: usable,
     })
 }
 
@@ -369,6 +387,7 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].ssid.len(), 32);
         assert!(!got[0].supported, "a cut name is not the network's name");
+        assert_eq!(got[0].unsupported_reason(), Some("This name cannot be used."));
         assert_eq!(got[1].ssid, "Café");
         assert!(got[1].supported && !got[1].secured);
         assert!(parse_scan("{").is_err());
@@ -387,6 +406,9 @@ mod tests {
         let got = parse_scan(j).unwrap();
         let ok: Vec<bool> = got.iter().map(|n| n.supported).collect();
         assert_eq!(ok, [false, false, false, true]);
+        let why: Vec<_> = got.iter().map(InRange::unsupported_reason).collect();
+        let name = Some("This name cannot be used.");
+        assert_eq!(why, [name, name, Some("This security type is not supported"), None]);
     }
 
     #[test]

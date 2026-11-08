@@ -357,8 +357,8 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
                     // A selectable name would take the click meant for its row.
                     ui.style_mut().interaction.selectable_labels = false;
                     for n in &view.in_range {
-                        let line = if !n.supported {
-                            RichText::new("WEP is not supported").color(t.role(role::WARN))
+                        let line = if let Some(why) = n.unsupported_reason() {
+                            RichText::new(why).color(t.role(role::WARN))
                         } else if n.secured {
                             RichText::new(format!("{LOCK} {}", nettab::signal_word(n.signal_dbm)))
                                 .color(t.palette().muted_foreground)
