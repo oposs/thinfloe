@@ -47,18 +47,22 @@ fi
 # next session's compositor. The traps below kill all of them, so adding a
 # helper means appending its PID here and nothing else.
 HELPER_PIDS=""
+# $! too: a helper forked just before a signal is not in the list yet.
 kill_helpers() {
-    for _p in $HELPER_PIDS; do
+    for _p in $HELPER_PIDS $!; do
         kill "$_p" 2>/dev/null
     done
 }
-# INT or TERM before the menu starts ends the session; without the exit the
-# shell would go on and start the menu with its helpers already dead. While
-# the menu runs, dash holds the trap until the menu has ended, and the
-# menu's exit status then decides as usual.
+# INT or TERM before the menu starts ends the session, and the EXIT trap
+# kills the helpers; without the exit the shell would go on and start the
+# menu with its helpers already dead. Once the menu has started, the trap
+# does nothing: dash holds it until the menu has ended, the menu's exit
+# status decides as usual, and the helpers end with the session, so a
+# failure window still blanks the screen. A trap that killed them here
+# would also catch a signal between "menu_started=1" and the menu's fork,
+# and the menu would run without them.
 # shellcheck disable=SC2329 # run by the INT and TERM traps
 tf_signalled() {
-    kill_helpers
     [ -n "$menu_started" ] || exit "$1"
 }
 menu_started=

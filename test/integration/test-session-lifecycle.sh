@@ -415,6 +415,38 @@ exit 10"
         bad "$sig during the menu: seen '$(cat "$WORK/seen" 2>/dev/null)' rc=$rc status '$(cat "$WORK/thinfloe-session.status" 2>/dev/null)' sudo '$(cat "$WORK/sudo.args" 2>/dev/null)' foot '$(cat "$WORK/foot.args" 2>/dev/null)' alive '$alive'"
     fi
 done
+# Once the menu has started, a signal leaves the helpers to the end of the
+# session: a failure window after a failed menu still blanks the screen.
+# (A trap that killed them would also catch a signal that came between
+# marking the menu as started and its fork, and the menu would run without
+# them.) The foot stub notes whether swayidle is up.
+cat >"$WORK/bin/foot" <<STUB
+#!/bin/sh
+echo "\$@" >"$WORK/foot.args"
+for f in '$WORK'/idle.*; do kill -0 "\${f##*.}" 2>/dev/null && echo swayidle-up; done >"$WORK/foot.seen"
+STUB
+for sig in TERM INT; do
+    rm -f "$WORK/foot.seen"
+    start_session "wait-idle; echo \"\$TF_IDLE_PID\" >'$WORK/idle-helper'; : >'$WORK/menu.ready'
+n=0; while [ ! -e '$WORK/signalled' ] && [ \$n -lt 30 ]; do sleep 0.1; n=\$((n + 1)); done
+exit 1"
+    wait_file "$WORK/menu.ready"
+    kill -"$sig" "$session_pid"
+    : >"$WORK/signalled"
+    wait "$session_pid"
+    rc=$?
+    hp=$(cat "$WORK/idle-helper" 2>/dev/null)
+    alive=$(still_alive "$hp")
+    if [[ $rc -eq 1 && "$(cat "$WORK/foot.seen" 2>/dev/null)" == swayidle-up && -n $hp && -z $alive ]]; then
+        ok "$sig during a failing menu: the failure window still blanks, the helpers end with the session"
+    else
+        bad "$sig during a failing menu: rc=$rc foot saw '$(cat "$WORK/foot.seen" 2>/dev/null)' alive '$alive'"
+    fi
+done
+cat >"$WORK/bin/foot" <<STUB
+#!/bin/sh
+echo "\$@" >"$WORK/foot.args"
+STUB
 # A signal before the menu starts (here while the boot screen helper runs)
 # ends the session: no menu without screen blanking, no failure window.
 cat >"$WORK/bin/step" <<STUB
