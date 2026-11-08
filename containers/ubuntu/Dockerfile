@@ -278,8 +278,11 @@ RUN addgroup --gid 1001 tfuser && \
 ADD overlay/ /__overlay
 # netplan refuses world-readable config ("Permissions for ... are too open")
 # and git cannot store mode 0600, so set it here.
+# The 644 copy of the DHCP default is what the settings tab shows and restores,
+# since /etc/netplan/ethernet.yaml itself is unreadable for tfuser.
 RUN tar cf - --exclude="*~" --exclude="__pycache__" -C /__overlay . | tar xf - && rm -rf /__overlay \
-    && chmod 600 /etc/netplan/*.yaml
+    && chmod 600 /etc/netplan/*.yaml \
+    && install -D -m 644 /etc/netplan/ethernet.yaml /usr/share/thinfloe/netplan/ethernet.yaml
 RUN chown -R tfuser:tfuser /home/tfuser
 
 # The release number from RELEASE in the repository: one line X.Y.Z. The menu

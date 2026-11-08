@@ -771,10 +771,10 @@ restore_home() {
     return 0
 }
 
-# install_local_network <newroot>
+# install_local_network <newroot> [<ramroot-url>]
 #
-# Copy the per-machine ~/wifi.yaml and ~/wg0.conf out of the restored home
-# into the new root's /etc, and enable wg-quick@wg0. /etc is a fresh RAM
+# Copy the per-machine ~/wifi.yaml, ~/ethernet.yaml and ~/wg0.conf out of the
+# restored home into the new root's /etc, and enable wg-quick@wg0. /etc is a fresh RAM
 # overlay every boot, so nothing else puts them there.
 #
 # This is in the initramfs, not in the session and not in a unit, because the
@@ -786,7 +786,12 @@ restore_home() {
 # graphical session, which is how a machine with a broken session stays
 # reachable.
 #
-# The two halves are independent: a missing wifi.yaml must not stop the VPN.
+# ~/ethernet.yaml replaces the shipped DHCP file, except on netboot: a wrong
+# static address there would cut off the only way the machine gets its image
+# and its home, and nobody at the machine could repair it. A remote ramroot
+# URL means netboot.
+#
+# The three parts are independent: a missing wifi.yaml must not stop the VPN.
 # Symlinks are refused because in the initramfs an absolute link target
 # resolves against the initramfs root, not the new root.
 #
@@ -794,6 +799,7 @@ restore_home() {
 # return aborts the boot.
 install_local_network() {
     local _iln_root="$1"
+    local _iln_ramroot="${2:-}"
     local _iln_home="$_iln_root/home/tfuser"
     local _iln_wants="$_iln_root/etc/systemd/system/multi-user.target.wants"
 
@@ -814,6 +820,23 @@ install_local_network() {
         fi
     else
         tf_log "thinfloe: no usable ~/wifi.yaml, skipping"
+    fi
+
+    if [ -f "$_iln_home/ethernet.yaml" ] && [ ! -L "$_iln_home/ethernet.yaml" ]; then
+        if is_remote_url "$_iln_ramroot"; then
+            tf_log "thinfloe: netboot, ~/ethernet.yaml not installed"
+        else
+            tf_log "thinfloe: installing ethernet.yaml into /etc/netplan"
+            if mkdir -p "$_iln_root/etc/netplan" && \
+               cp "$_iln_home/ethernet.yaml" "$_iln_root/etc/netplan/ethernet.yaml" && \
+               chmod 600 "$_iln_root/etc/netplan/ethernet.yaml"; then
+                :
+            else
+                warn "thinfloe: could not install ethernet.yaml"
+            fi
+        fi
+    else
+        tf_log "thinfloe: no usable ~/ethernet.yaml, skipping"
     fi
 
     if [ -f "$_iln_home/wg0.conf" ] && [ ! -L "$_iln_home/wg0.conf" ]; then

@@ -74,9 +74,10 @@ tf_write_hostname "$NEWROOT" "$machine_id" "$TF_STATE"
 restore_home "$NEWROOT" "$TF_STORAGE/efi" "$TF_STATE" \
     "$(cat /tmp/thinfloe-ramroot 2>/dev/null)"
 
-# Install ~/wifi.yaml and ~/wg0.conf into /etc now, before systemd starts in
-# the new root, so the netplan generator sees them. Always returns 0.
-install_local_network "$NEWROOT"
+# Install ~/wifi.yaml, ~/ethernet.yaml and ~/wg0.conf into /etc now, before
+# systemd starts in the new root, so the netplan generator sees them. The
+# ramroot URL tells it whether this is a netboot. Always returns 0.
+install_local_network "$NEWROOT" "$(cat /tmp/thinfloe-ramroot 2>/dev/null)"
 
 echo "$zram_dev" > "$TF_STATE/zram-device"
 

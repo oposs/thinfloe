@@ -480,6 +480,65 @@ else
     bad "symlinked wifi.yaml was installed or rc=$rc"
 fi
 
+# --- install_local_network: ethernet.yaml ---
+
+mkship() {  # mkship <newroot>: the DHCP default the image ships
+    mkdir -p "$1/etc/netplan"
+    echo "shipped: dhcp" >"$1/etc/netplan/ethernet.yaml"
+}
+
+nr=$(mkhome net-eth); mkship "$nr"
+echo "network: {ethernets: {eth0: {dhcp4: false}}}" >"$nr/home/tfuser/ethernet.yaml"
+install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+if [[ $rc -eq 0 ]] && cmp -s "$nr/home/tfuser/ethernet.yaml" "$nr/etc/netplan/ethernet.yaml" \
+        && [[ "$(stat -c%a "$nr/etc/netplan/ethernet.yaml")" == 600 ]]; then
+    ok "ethernet.yaml installed with mode 600"
+else
+    bad "ethernet.yaml not installed intact with mode 600 (rc=$rc)"
+fi
+
+nr=$(mkhome net-eth-link); mkship "$nr"
+echo secret >"$WORK/eth-target.yaml"
+ln -s "$WORK/eth-target.yaml" "$nr/home/tfuser/ethernet.yaml"
+install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" ]]; then
+    ok "ethernet.yaml symlink refused (shipped file unchanged)"
+else
+    bad "symlinked ethernet.yaml was installed or rc=$rc"
+fi
+
+nr=$(mkhome net-eth-none); mkship "$nr"
+install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" ]]; then
+    ok "no ethernet.yaml leaves the shipped file"
+else
+    bad "no ethernet.yaml: rc=$rc, shipped file changed"
+fi
+
+nr=$(mkhome net-eth-netboot); mkship "$nr"
+echo "network: {version: 2}" >"$nr/home/tfuser/wifi.yaml"
+echo "custom: static" >"$nr/home/tfuser/ethernet.yaml"
+install_local_network "$nr" "https://boot.example/ramroot.sqsh"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" \
+        && -f "$nr/etc/netplan/wifi.yaml" ]]; then
+    ok "netboot skips ethernet.yaml but installs wifi.yaml"
+else
+    bad "netboot: rc=$rc, ethernet.yaml installed or wifi.yaml missing"
+fi
+
+# A regular file where the directory should be makes the copy fail.
+nr=$(mkhome net-eth-fail)
+mkdir -p "$nr/etc"
+echo "not a dir" >"$nr/etc/netplan"
+echo "custom: static" >"$nr/home/tfuser/ethernet.yaml"
+echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
+install_local_network "$nr" "tl/ramroot.sqsh" 2>/dev/null; rc=$?
+if [[ $rc -eq 0 && -f "$nr/etc/wireguard/wg0.conf" ]]; then
+    ok "a failing ethernet copy still installs wg0"
+else
+    bad "failing ethernet copy: rc=$rc, wg0 not installed"
+fi
+
 # --- tf_write_hostname ---
 
 nr="$WORK/host-ok"; mkdir -p "$nr/etc"
