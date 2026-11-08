@@ -43,11 +43,16 @@ pub fn read(path: &Path) -> io::Result<Option<String>> {
 /// Replace `path` with the header and `body`. A file written by hand is
 /// refused with `PermissionDenied`; see `take_over`.
 pub fn write(path: &Path, body: &str) -> io::Result<()> {
-    if owner(read(path)?.as_deref()) == Owner::ByHand {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} was written by hand", home_relative(path)),
-        ));
+    write_with(path, body, |_| false)
+}
+
+/// As `write`, but a file written by hand whose text `replaceable` accepts
+/// may be replaced too (the shipped template of ~/wifi.yaml). A link is
+/// never replaced: `read` refuses it.
+pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io::Result<()> {
+    let old = read(path)?;
+    if owner(old.as_deref()) == Owner::ByHand && !old.as_deref().is_some_and(replaceable) {
+        return Err(by_hand(path));
     }
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -73,6 +78,28 @@ pub fn write(path: &Path, body: &str) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// Remove a file the menu wrote. A missing file is fine; one written by
+/// hand, or a link (never followed), is refused with `PermissionDenied`.
+pub fn remove(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+        Ok(m) if !m.file_type().is_file() => return Err(by_hand(path)),
+        Ok(_) => {}
+    }
+    if owner(read(path)?.as_deref()) != Owner::Menu {
+        return Err(by_hand(path));
+    }
+    fs::remove_file(path)
+}
+
+fn by_hand(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("{} was written by hand", home_relative(path)),
+    )
 }
 
 /// Move a hand-written `path` aside to `<path>.by-hand` and return its old
@@ -188,5 +215,65 @@ mod tests {
         assert!(e.ends_with(".by-hand exists already"), "{e}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "new\n");
         assert_eq!(fs::read_to_string(d.join("screen.by-hand")).unwrap(), "old\n");
+    }
+
+    fn is_link(p: &Path) -> bool {
+        fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    #[test]
+    fn write_with_replaces_only_what_it_may() {
+        let d = TestDir::new("owned", "write-with");
+        let p = d.join("wifi.yaml");
+        let template = |t: &str| t.starts_with("# template");
+        fs::write(&p, "# template\n").unwrap();
+        write_with(&p, "a: 1\n", template).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), format!("{HEADER}\na: 1\n"));
+        write_with(&p, "a: 2\n", template).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), format!("{HEADER}\na: 2\n"));
+        fs::write(&p, "hand: 1\n").unwrap();
+        let e = write_with(&p, "a: 3\n", template).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&p).unwrap(), b"hand: 1\n");
+        // A link is never replaced, whatever the rule says.
+        let target = d.join("target");
+        fs::write(&target, "# template\n").unwrap();
+        fs::remove_file(&p).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        assert!(write_with(&p, "a: 4\n", |_| true).is_err());
+        assert!(is_link(&p));
+        assert_eq!(fs::read(&target).unwrap(), b"# template\n");
+    }
+
+    #[test]
+    fn remove_keeps_hand_and_link() {
+        let d = TestDir::new("owned", "remove");
+        let p = d.join("ethernet.yaml");
+        remove(&p).unwrap();
+        fs::write(&p, MENU_FILE).unwrap();
+        remove(&p).unwrap();
+        assert!(fs::symlink_metadata(&p).is_err());
+        fs::write(&p, "hand: 1\n").unwrap();
+        assert_eq!(remove(&p).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&p).unwrap(), b"hand: 1\n");
+        // A link to a menu file counts as by hand: neither goes.
+        fs::remove_file(&p).unwrap();
+        let target = d.join("target");
+        fs::write(&target, MENU_FILE).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        assert_eq!(remove(&p).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(is_link(&p));
+        assert_eq!(fs::read_to_string(&target).unwrap(), MENU_FILE);
+    }
+
+    #[test]
+    fn read_refuses_a_link() {
+        let d = TestDir::new("owned", "read-link");
+        let target = d.join("target");
+        fs::write(&target, MENU_FILE).unwrap();
+        let p = d.join("screen");
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        assert!(read(&p).is_err());
+        assert_eq!(read(&target).unwrap().as_deref(), Some(MENU_FILE));
     }
 }

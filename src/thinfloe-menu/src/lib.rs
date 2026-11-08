@@ -13,6 +13,7 @@ pub mod icons;
 pub mod jobs;
 pub mod log;
 pub mod menu;
+pub mod netfiles;
 pub mod outputs;
 pub mod owned;
 pub mod raster;
