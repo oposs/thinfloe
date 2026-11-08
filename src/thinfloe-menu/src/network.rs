@@ -382,9 +382,11 @@ impl NetTab {
         let adapter = self.adapter_changed();
         let wifi = (self.wifi_changed() || adapter).then(|| self.networks().to_vec());
         for n in wifi.iter().flatten() {
-            netfiles::check_ssid(&n.ssid)?;
+            // Named, as take-over does, so the person knows which to forget.
+            let named = |e: String| format!("{}: {e}", n.ssid);
+            netfiles::check_ssid(&n.ssid).map_err(named)?;
             if let Some(p) = &n.password {
-                netfiles::check_password(p)?;
+                netfiles::check_password(p).map_err(named)?;
             }
         }
         Ok(Change { wifi, wired })
@@ -831,7 +833,8 @@ mod tests {
         );
         t.event(NetEvent::Forget("B".into()), false);
         assert_eq!(t.event(NetEvent::Apply, false), None);
-        assert_eq!(t.error(), Some("The password needs 8 to 63 characters."));
+        // The refusal names the network, so the person knows what to forget.
+        assert_eq!(t.error(), Some("Old: The password needs 8 to 63 characters."));
     }
 
     #[test]
