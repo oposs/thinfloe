@@ -169,6 +169,10 @@ class Env(unittest.TestCase):
             SYS_NET=str(self.sys), BUSY_WAIT=0.05)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # No test line may reach the journal of the host.
+        patcher = mock.patch.object(nw, "syslog")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         env = mock.patch.dict(os.environ, {"TF_NETWORK_ASSUME_ROOT": "1"})
         env.start()
         self.addCleanup(env.stop)
@@ -288,6 +292,196 @@ class StatusTests(Env):
         self.assertEqual(rc, 2)
         self.assertEqual(json.loads(out)["result"], "failed")
         self.assertIn("usage", err)
+
+
+WIFI = "network:\n  version: 2\n  wifis:\n    wlan0:\n      access-points:\n        Office: {password: pw}\n"
+TEMPLATE_WIFI = "# Put the device name of your wifi card here\nnetwork:\n  version: 2\n"
+WIRED_HOME = "network:\n  version: 2\n  ethernets:\n    eth0: {addresses: [10.0.0.2/24]}\n"
+WIRED_DEFAULT = "network:\n  version: 2\n  ethernets:\n    all: {dhcp4: true}\n"
+ETC_WIFI = "network:\n  version: 2\n  wifis:\n    wlan0:\n      access-points:\n        Old: {password: old}\n"
+
+
+class ApplyTests(Env):
+    """Fake netplan: generate fails while the flag file generate-fails exists,
+    apply while apply-fails exists; the files of the check root are copied to
+    seen/ so that the tests see what generate was given."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.dir / "home"
+        self.etc = self.dir / "etc"
+        self.home.mkdir()
+        self.etc.mkdir()
+        self.default = self.dir / "default-ethernet.yaml"
+        self.default.write_text(WIRED_DEFAULT)
+        self.script("netplan", 'case "$1" in\n'
+                    'generate) rm -rf %(d)s/seen; cp -r "$3/etc/netplan" %(d)s/seen\n'
+                    '  echo "$3" > %(d)s/check-root\n'
+                    '  if [ -e %(d)s/generate-fails ]; then\n'
+                    '    echo "Invalid YAML at wifi.yaml line 3" >&2\n'
+                    '    echo "Failed to reload systemctl daemon-reload" >&2; exit 1; fi\n'
+                    '  echo "Failed to connect to bus: systemctl daemon-reload" >&2 ;;\n'
+                    'apply) if [ -e %(d)s/apply-fails ]; then echo "apply broke" >&2; exit 1; fi ;;\n'
+                    'esac' % {"d": self.dir})
+        patcher = mock.patch.multiple(
+            nw, HOME_DIR=str(self.home), ETC_NETPLAN=str(self.etc),
+            DEFAULT_WIRED=str(self.default), NETPLAN=str(self.dir / "netplan"),
+            LOCK=str(self.dir / "run" / "network.lock"), WORK_DIR=str(self.dir / "work"),
+            is_netboot=lambda: False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def snapshot(self):
+        return {p.name: p.read_bytes() for p in sorted(self.etc.iterdir())}
+
+    def netplan_calls(self):
+        return [c for c in self.recorded() if c.startswith("netplan")]
+
+    def test_apply_installs_home_files_mode_600(self):
+        (self.home / "wifi.yaml").write_text(WIFI)
+        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        (self.etc / "wifi.yaml").write_text(ETC_WIFI)
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual((rc, json.loads(out)), (0, {"result": "ok", "reason": ""}))
+        self.assertEqual((self.etc / "wifi.yaml").read_text(), WIFI)
+        self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_HOME)
+        for name in ("wifi.yaml", "ethernet.yaml"):
+            self.assertEqual(stat.S_IMODE((self.etc / name).stat().st_mode), 0o600)
+        self.assertEqual(sorted(self.snapshot()), ["ethernet.yaml", "wifi.yaml"])
+        calls = self.netplan_calls()
+        self.assertEqual(calls[0].split()[:3], ["netplan", "generate", "--root-dir"])
+        self.assertEqual(calls[-1], "netplan apply")
+        root = Path((self.dir / "check-root").read_text().strip())
+        self.assertFalse(root.exists())
+        self.assertEqual(sorted(os.listdir(self.home)), ["ethernet.yaml", "wifi.yaml"])
+
+    def test_apply_template_leaves_etc_wifi(self):
+        (self.home / "wifi.yaml").write_text(TEMPLATE_WIFI)
+        (self.etc / "wifi.yaml").write_text(ETC_WIFI)
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.etc / "wifi.yaml").read_text(), ETC_WIFI)
+        # The checked set holds the wifi file that stays in force.
+        self.assertEqual((self.dir / "seen" / "wifi.yaml").read_text(), ETC_WIFI)
+
+    def test_apply_missing_home_files_use_defaults(self):
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.snapshot(), {"ethernet.yaml": WIRED_DEFAULT.encode()})
+
+    def test_apply_dhcp_installs_default_copy(self):
+        (self.home / "ethernet.yaml").write_text("# only a comment\n")
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_DEFAULT)
+        self.assertEqual(stat.S_IMODE((self.etc / "ethernet.yaml").stat().st_mode), 0o600)
+
+    def test_apply_checks_other_etc_files_too(self):
+        (self.etc / "50-cloud.yaml").write_text("network: {version: 2}\n")
+        (self.etc / "notes.txt").write_text("x")
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(os.listdir(self.dir / "seen")), ["50-cloud.yaml", "ethernet.yaml"])
+
+    def test_apply_rejects_bad_home_file(self):
+        (self.home / "wifi.yaml").write_text(WIFI)
+        (self.etc / "wifi.yaml").write_text(ETC_WIFI)
+        (self.etc / "ethernet.yaml").write_text(WIRED_DEFAULT)
+        before = self.snapshot()
+        (self.dir / "generate-fails").write_text("")
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        got = json.loads(out)
+        self.assertEqual(got["result"], "failed")
+        self.assertIn("Invalid YAML", got["reason"])
+        self.assertNotIn("systemctl", got["reason"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn("netplan apply", self.recorded())
+        self.assertFalse(Path((self.dir / "check-root").read_text().strip()).exists())
+
+    def test_apply_refuses_linked_home_file(self):
+        target = self.dir / "elsewhere.yaml"
+        target.write_text(WIFI)
+        os.symlink(target, self.home / "wifi.yaml")
+        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        before = self.snapshot()
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out), {"result": "failed", "reason": "wifi.yaml is a link"})
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.netplan_calls(), [])
+
+    def test_apply_refuses_other_than_regular_and_big_files(self):
+        os.mkfifo(self.home / "wifi.yaml")
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("not a regular file", json.loads(out)["reason"])
+        os.unlink(self.home / "wifi.yaml")
+        (self.home / "wifi.yaml").write_text("#" * (64 * 1024) + "x")
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("64 KiB", json.loads(out)["reason"])
+        self.assertEqual(self.snapshot(), {})
+        self.assertEqual(self.netplan_calls(), [])
+
+    def test_apply_netboot_ignores_home_wired(self):
+        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        with mock.patch.object(nw, "is_netboot", lambda: True):
+            rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_DEFAULT)
+
+    def test_apply_reports_netplan_apply_failure(self):
+        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        (self.dir / "apply-fails").write_text("")
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        got = json.loads(out)
+        self.assertEqual(got["result"], "failed")
+        self.assertIn("apply broke", got["reason"])
+        # The files stay: they are what the next boot installs.
+        self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_HOME)
+        self.assertEqual(sorted(os.listdir(self.etc)), ["ethernet.yaml"])
+
+    def test_apply_apply_timeout_kills_netplan(self):
+        self.script("netplan", 'case "$1" in apply) echo $$ > %s; exec sleep 60 ;; esac' % (self.dir / "pid"))
+        started = time.monotonic()
+        with mock.patch.object(nw, "APPLY_TIMEOUT", 1):
+            rc, out, _ = self.run_main("apply")
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(rc, 1)
+        self.assertIn("too long", json.loads(out)["reason"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.dir / "pid").read_text()), 0)
+
+    def test_apply_waits_for_the_lock(self):
+        import fcntl
+        (self.dir / "run").mkdir()
+        fd = os.open(self.dir / "run" / "network.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with mock.patch.object(nw, "LOCK_WAIT", 0.3):
+            rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("Another", json.loads(out)["reason"])
+        self.assertEqual(self.netplan_calls(), [])
+
+    def test_apply_needs_root(self):
+        with mock.patch.dict(os.environ, {"TF_NETWORK_ASSUME_ROOT": ""}), \
+                mock.patch.object(nw.os, "geteuid", return_value=1000):
+            rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(out), {"result": "failed", "reason": "needs root"})
+        self.assertEqual(self.netplan_calls(), [])
+
+
+class NetbootTests(unittest.TestCase):
+    def test_is_netboot_follows_the_mount_point(self):
+        with mock.patch.object(nw, "ESP_DIR", "/"):
+            self.assertFalse(nw.is_netboot())
+        with tempfile.TemporaryDirectory(prefix="tf-network-") as d, \
+                mock.patch.object(nw, "ESP_DIR", d):
+            self.assertTrue(nw.is_netboot())
 
 
 class ImportTests(unittest.TestCase):

@@ -10,18 +10,27 @@ Commands:
             "ssid", "signal_dbm", "handshake_age_s"}]}
   scan     {"device", "networks": [{"ssid", "signal_dbm", "secured",
             "supported"}]}, strongest first, at most 64
+  apply    {"result": "ok", "reason": ""}: checks ~/wifi.yaml and
+            ~/ethernet.yaml of the user, installs them into /etc/netplan and
+            runs netplan apply
 
 Exit 0 on success, 1 on a failure, 2 on misuse. A failure prints
 {"result": "failed", "reason": "..."}. Log lines go to stderr and the journal.
 """
 
+import errno
+import fcntl
 import json
 import os
+import pwd
 import re
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import syslog
+import tempfile
 import time
 from typing import List, Optional, Tuple
 
@@ -37,7 +46,26 @@ BUSY_WAIT = 2
 MAX_NETWORKS = 64
 HANDSHAKE_FRESH_S = 180
 
-USAGE = "usage: thinfloe-network status | scan"
+# apply: the files of the user, the installed set, and the work areas.
+# HOME_DIR None means the home of tfuser.
+HOME_DIR = os.environ.get("TF_NETWORK_HOME")
+ETC_NETPLAN = os.environ.get("TF_NETWORK_ETC", "/etc/netplan")
+DEFAULT_WIRED = os.environ.get("TF_NETWORK_DEFAULT_WIRED",
+                               "/usr/share/thinfloe/netplan/ethernet.yaml")
+ESP_DIR = os.environ.get("TF_NETWORK_ESP", "/run/thinfloe/storage/efi")
+NETPLAN = os.environ.get("TF_NETWORK_NETPLAN", "netplan")
+LOCK = os.environ.get("TF_NETWORK_LOCK", "/run/thinfloe/network.lock")
+# The check root lives here, never in the home of the user.
+WORK_DIR = os.environ.get("TF_NETWORK_TMP", "/run/thinfloe/network-tmp")
+
+MAX_FILE = 64 * 1024
+LOCK_WAIT = 30
+GENERATE_TIMEOUT = 30
+APPLY_TIMEOUT = 120
+TEMPLATE_MARKER = "device name of your wifi card"
+INSTALLED = ("wifi.yaml", "ethernet.yaml")
+
+USAGE = "usage: thinfloe-network status | scan | apply"
 
 
 class NetworkError(Exception):
@@ -332,9 +360,216 @@ def scan() -> dict:
     raise NetworkError("The WiFi scan failed")
 
 
+# ============ apply ============
+
+def is_template(text: str) -> bool:
+    """As is_template of the menu: the marker, nothing, or only comments."""
+    return TEMPLATE_MARKER in text or all(
+        not l.strip() or l.strip().startswith("#") for l in text.splitlines())
+
+
+def read_home_file(path: str) -> Optional[bytes]:
+    """The bytes of a file of the user, None when it is missing. A link, a
+    file that is not regular or one over 64 KiB is a failure."""
+    name = os.path.basename(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK):
+            raise NetworkError("%s is a link" % name)
+        raise NetworkError("cannot read %s: %s" % (name, e.strerror))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise NetworkError("%s is not a regular file" % name)
+        data = b""
+        while len(data) <= MAX_FILE:
+            chunk = os.read(fd, MAX_FILE + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError as e:
+        raise NetworkError("cannot read %s: %s" % (name, e.strerror))
+    finally:
+        os.close(fd)
+    if len(data) > MAX_FILE:
+        raise NetworkError("%s is larger than 64 KiB" % name)
+    return data
+
+
+def read_system_file(path: str) -> Optional[bytes]:
+    """A file of root: the installed one, or the default."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(MAX_FILE + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise NetworkError("cannot read %s: %s" % (path, e.strerror))
+
+
+def home_dir() -> str:
+    if HOME_DIR:
+        return HOME_DIR
+    try:
+        return pwd.getpwnam("tfuser").pw_dir
+    except KeyError:
+        raise NetworkError("user tfuser does not exist")
+
+
+def is_netboot() -> bool:
+    """On a USB boot the initramfs mounts the ESP of the stick there."""
+    return not os.path.ismount(ESP_DIR)
+
+
+def lock_file():
+    """Take the exclusive lock; the caller closes the descriptor."""
+    os.makedirs(os.path.dirname(LOCK), mode=0o755, exist_ok=True)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > deadline:
+                os.close(fd)
+                raise NetworkError("Another network change is running")
+            time.sleep(0.1)
+
+
+def write_file(path: str, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def check_files(files: dict) -> None:
+    """netplan generate on a scratch root holding the set that will be in
+    force: the files to install and the other *.yaml of ETC_NETPLAN."""
+    os.makedirs(WORK_DIR, mode=0o700, exist_ok=True)
+    root = tempfile.mkdtemp(prefix="check-", dir=WORK_DIR)
+    try:
+        conf = os.path.join(root, "etc", "netplan")
+        os.makedirs(conf, mode=0o700)
+        try:
+            names = sorted(os.listdir(ETC_NETPLAN))
+        except FileNotFoundError:
+            names = []
+        for name in names:
+            src = os.path.join(ETC_NETPLAN, name)
+            if name.endswith(".yaml") and name not in INSTALLED and os.path.isfile(src):
+                write_file(os.path.join(conf, name), read_system_file(src) or b"")
+        for name, data in files.items():
+            write_file(os.path.join(conf, name), data)
+        try:
+            rc, out, err = run([NETPLAN, "generate", "--root-dir", root], GENERATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise NetworkError("netplan generate took too long")
+        if rc != 0:
+            lines = [l.strip() for l in (err or out).splitlines()
+                     if l.strip() and "systemctl" not in l and "daemon-reload" not in l]
+            reason = " ".join(lines)[:300] or "netplan rejected the network files"
+            raise NetworkError(reason)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def install_files(files: dict) -> None:
+    """Write each file next to its place (netplan reads *.yaml only), then
+    rename it over the old one; mode 600."""
+    tmps = []
+    try:
+        for name, data in files.items():
+            tmp = os.path.join(ETC_NETPLAN, ".%s.%d.tmp" % (name, os.getpid()))
+            tmps.append(tmp)
+            write_file(tmp, data)
+        for name, tmp in zip(files, tmps):
+            os.rename(tmp, os.path.join(ETC_NETPLAN, name))
+            log("installed %s" % name)
+    except OSError as e:
+        raise NetworkError("cannot install the network files: %s" % (e.strerror or e))
+    finally:
+        for tmp in tmps:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def apply() -> Tuple[int, str]:
+    """(0, "") when installed and applied, else (1, reason). Nothing is
+    installed unless the whole set passed netplan generate."""
+    try:
+        fd = lock_file()
+    except NetworkError as e:
+        return 1, str(e)
+    except OSError as e:
+        return 1, "cannot take the lock: %s" % (e.strerror or e)
+    try:
+        home = home_dir()
+        wifi = read_home_file(os.path.join(home, "wifi.yaml"))
+        wired = read_home_file(os.path.join(home, "ethernet.yaml"))
+        files = {}
+        install = []
+        if wifi is not None and not is_template(wifi.decode("utf-8", "replace")):
+            files["wifi.yaml"] = wifi
+            install.append("wifi.yaml")
+            log("wifi.yaml: from the home")
+        else:
+            current = read_system_file(os.path.join(ETC_NETPLAN, "wifi.yaml"))
+            if current is not None:
+                files["wifi.yaml"] = current
+            log("wifi.yaml: left as it is")
+        if wired is not None and not is_template(wired.decode("utf-8", "replace")) \
+                and not is_netboot():
+            files["ethernet.yaml"] = wired
+            install.append("ethernet.yaml")
+            log("ethernet.yaml: from the home")
+        else:
+            default = read_system_file(DEFAULT_WIRED)
+            if default is None:
+                raise NetworkError("The default wired setup is missing")
+            files["ethernet.yaml"] = default
+            install.append("ethernet.yaml")
+            log("ethernet.yaml: the default")
+        check_files(files)
+        log("the files passed netplan generate")
+        install_files({k: files[k] for k in install})
+        try:
+            rc, out, err = run([NETPLAN, "apply"], APPLY_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise NetworkError("netplan apply took too long")
+        if rc != 0:
+            log("netplan apply: %s" % (err.strip() or out.strip()))
+            raise NetworkError("netplan apply failed: %s"
+                               % ((err.strip() or out.strip())[:300] or "exit %d" % rc))
+        log("netplan apply done")
+        return 0, ""
+    except NetworkError as e:
+        return 1, str(e)
+    except OSError as e:
+        return 1, "cannot apply the network files: %s" % (e.strerror or e)
+    finally:
+        os.close(fd)
+
+
+def apply_command() -> dict:
+    rc, reason = apply()
+    if rc != 0:
+        raise NetworkError(reason)
+    return {"result": "ok", "reason": ""}
+
+
 # ============ Entry point ============
 
-COMMANDS = {"status": status, "scan": scan}
+COMMANDS = {"status": status, "scan": scan, "apply": apply_command}
 
 
 def fail(reason: str) -> None:
