@@ -2371,25 +2371,69 @@ mod tests {
 
     #[test]
     fn settings_draws_nothing_rounded() {
-        let mut menus: Vec<(String, Menu)> = crate::settings::SettingsTab::ALL
+        // (name, menu, screen, texts that must be drawn): the Network
+        // cases at 1080p, where every band is on screen, and each case
+        // must show its widgets so the check cannot pass on an empty frame.
+        type Case = (String, Menu, (f32, f32), &'static [&'static str]);
+        let mut cases: Vec<Case> = crate::settings::SettingsTab::ALL
             .into_iter()
             .map(|tab| {
                 let mut menu = open_settings();
                 menu.settings_tab = tab;
-                if tab == crate::settings::SettingsTab::Network {
-                    menu.network = two_networks();
-                }
-                (format!("{tab:?}"), menu)
+                let (size, wants): ((f32, f32), &[&str]) = match tab {
+                    crate::settings::SettingsTab::Network => {
+                        menu.network = two_networks();
+                        (
+                            (1920.0, 1080.0),
+                            &[
+                                "Fixed address",
+                                "192.168.1.10/24",
+                                "Hidden",
+                                "Forget",
+                                "Add network",
+                                "Apply",
+                            ],
+                        )
+                    }
+                    crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
+                    crate::settings::SettingsTab::Screen => ((1280.0, 720.0), &["Turn the screen off after"]),
+                };
+                (format!("{tab:?}"), menu, size, wants)
             })
             .collect();
-        menus.push(("add dialog".into(), network_settings(add_dialog_open())));
-        for (tab, menu) in menus {
-            let shapes = settings_shapes(&menu, 1280.0, 720.0);
-            for c in &shapes {
-                if let egui::Shape::Rect(r) = &c.shape {
-                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "{tab}: rounded {:?}", r.rect);
-                }
+        cases.push((
+            "add dialog".into(),
+            network_settings(add_dialog_open()),
+            (1920.0, 1080.0),
+            &[
+                "Office",
+                "WEP is not supported",
+                "Scan again",
+                "Hidden network",
+                "Password",
+                "Add",
+                "Cancel",
+            ],
+        ));
+        for (tab, menu, (w, h), wants) in cases {
+            let shapes = settings_shapes(&menu, w, h);
+            let texts = all_texts(&shapes);
+            for want in wants {
+                assert!(texts.iter().any(|t| t == want), "{tab}: {want} not drawn in {texts:?}");
             }
+            // Components such as Item draw their box inside a Shape::Vec.
+            for r in shapes.iter().flat_map(|c| flat_rects(&c.shape)) {
+                assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "{tab}: rounded {:?}", r.rect);
+            }
+        }
+    }
+
+    /// Every rect in `shape`, also those nested in a `Shape::Vec`.
+    fn flat_rects(shape: &egui::Shape) -> Vec<egui::epaint::RectShape> {
+        match shape {
+            egui::Shape::Rect(r) => vec![r.clone()],
+            egui::Shape::Vec(v) => v.iter().flat_map(flat_rects).collect(),
+            _ => vec![],
         }
     }
 
@@ -2908,6 +2952,80 @@ mod tests {
         assert_eq!(net_clicks(&menu, &["Scan again"]).0, [ev(NetEvent::Rescan)]);
         // The tab under the dialog takes no clicks.
         assert_eq!(net_clicks(&menu, &["Forget"]).0, [None]);
+    }
+
+    /// The shapes of `menu` at 1080p once the dialog's fade-in is over
+    /// (no animation, as in the app), so its colours are the final ones.
+    fn dialog_shapes(menu: &Menu) -> Vec<egui::epaint::ClippedShape> {
+        upgrade_frame(menu, 1920.0, 1080.0, vec![]).0
+    }
+
+    /// The rects drawn with an ice border around the text `label`: the
+    /// mark of a chosen row.
+    fn ice_frames_around(shapes: &[egui::epaint::ClippedShape], label: &str) -> usize {
+        let Some(at) = text_rects(shapes)
+            .into_iter()
+            .find(|(t, _)| t == label)
+            .map(|(_, r)| r.center())
+        else {
+            panic!("{label} not drawn");
+        };
+        shapes
+            .iter()
+            .flat_map(|c| flat_rects(&c.shape))
+            .filter(|r| r.stroke.color == ICE && r.stroke.width > 0.0 && r.rect.contains(at))
+            .count()
+    }
+
+    #[test]
+    fn the_add_dialog_shows_the_name_it_adds() {
+        use crate::network::NetEvent;
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        // Nothing picked, no name typed: Add is greyed and no row is chosen.
+        let menu = network_settings(add_dialog_open());
+        assert_eq!(net_clicks(&menu, &["Add"]).0, [None]);
+        let shapes = dialog_shapes(&menu);
+        assert_eq!(ice_frames_around(&shapes, "Office"), 0);
+        // Picked: the row is drawn chosen, and Add acts.
+        let mut net = add_dialog_open();
+        net.event(NetEvent::PickNetwork("Office".into()), false);
+        let menu = network_settings(net);
+        let shapes = dialog_shapes(&menu);
+        assert!(ice_frames_around(&shapes, "Office") > 0, "Office not drawn as chosen");
+        assert_eq!(ice_frames_around(&shapes, "Cafe"), 0);
+        assert_eq!(net_clicks(&menu, &["Add"]).0, [ev(NetEvent::Add)]);
+        // Hidden ticked after the pick: the name is in the name field.
+        let mut net = add_dialog_open();
+        net.event(NetEvent::PickNetwork("Office".into()), false);
+        net.event(
+            NetEvent::AddText {
+                ssid: "Office".into(),
+                password: String::new(),
+                hidden: true,
+            },
+            false,
+        );
+        let texts = net_texts(&network_settings(net));
+        let field = texts.iter().position(|t| t == "Network name").expect("the name field");
+        assert!(texts[field..].iter().any(|t| t == "Office"), "{texts:?}");
+        // Unticked again: no row chosen, no name field, Add greyed.
+        let mut net = add_dialog_open();
+        net.event(NetEvent::PickNetwork("Office".into()), false);
+        for hidden in [true, false] {
+            net.event(
+                NetEvent::AddText {
+                    ssid: "Office".into(),
+                    password: String::new(),
+                    hidden,
+                },
+                false,
+            );
+        }
+        let menu = network_settings(net);
+        let shapes = dialog_shapes(&menu);
+        assert_eq!(ice_frames_around(&shapes, "Office"), 0);
+        assert!(!has(&net_texts(&menu), "Network name"));
+        assert_eq!(net_clicks(&menu, &["Add"]).0, [None]);
     }
 
     #[test]

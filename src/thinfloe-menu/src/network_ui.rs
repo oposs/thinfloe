@@ -404,7 +404,9 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
         if ticked {
             event = Some(text(view.ssid.clone(), view.password.clone(), hidden));
         }
-        if view.hidden {
+        // The name Add acts on is always on screen: a chosen row, or the
+        // name field.
+        if view.hidden || (view.picked.is_none() && !view.ssid.is_empty()) {
             let mut ssid = view.ssid.clone();
             let typed = Field::new()
                 .label("Network name")
@@ -415,7 +417,7 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
                 })
                 .inner;
             if typed {
-                event = Some(text(ssid, view.password.clone(), true));
+                event = Some(text(ssid, view.password.clone(), view.hidden));
             }
         }
         if !view.open_network() {
@@ -443,7 +445,7 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
         }
         ui.add_space(BUTTON_GAP);
         ui.horizontal(|ui| {
-            if ui.add(Button::new("Add")).clicked() {
+            if ui.add_enabled(!view.ssid.is_empty(), Button::new("Add")).clicked() {
                 event = Some(NetEvent::Add);
             }
             if ui

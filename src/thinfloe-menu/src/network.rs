@@ -273,7 +273,11 @@ impl NetTab {
                 if ssid != view.ssid || hidden {
                     view.picked = None;
                 }
-                view.ssid = ssid;
+                // Unticking Hidden takes the name field off the dialog;
+                // the name typed in it goes with it, so Add never acts on
+                // a name the dialog does not show.
+                let unticked = view.hidden && !hidden;
+                view.ssid = if unticked { String::new() } else { ssid };
                 view.password = password;
                 view.hidden = hidden;
                 None
@@ -844,6 +848,28 @@ mod tests {
             ]
         );
         assert!(t.dirty());
+    }
+
+    /// Unticking Hidden drops the name typed for the hidden network: the
+    /// dialog no longer shows a field for it, so Add must not use it.
+    #[test]
+    fn unticking_hidden_drops_the_name() {
+        let mut t = tab();
+        t.event(NetEvent::OpenAdd, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        t.event(NetEvent::PickNetwork("Office".into()), false);
+        assert_eq!(t.add_view().unwrap().picked, Some(true));
+        // Tick: the picked name moves into the name field.
+        t.event(add_text("Office", "", true), false);
+        let v = t.add_view().unwrap();
+        assert_eq!((v.ssid.as_str(), v.picked, v.hidden), ("Office", None, true));
+        // Untick: no row is picked and no name field shows; no name is left.
+        t.event(add_text("Office", "", false), false);
+        let v = t.add_view().unwrap();
+        assert_eq!((v.ssid.as_str(), v.picked, v.hidden), ("", None, false));
+        // Add saves nothing, least of all Office as an open network.
+        assert_eq!(t.event(NetEvent::Add, false), None);
+        assert_eq!(t.networks(), [net("Home", Some("secret123"))]);
     }
 
     #[test]
