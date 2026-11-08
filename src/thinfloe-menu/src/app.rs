@@ -537,6 +537,8 @@ impl App {
             state_dir: self.cfg.paths.state_dir.clone(),
             addon_cmd: self.cfg.paths.addon_cmd.clone(),
             upgrade_cmd: self.cfg.paths.upgrade_cmd.clone(),
+            network_cmd: self.cfg.paths.network_cmd.clone(),
+            homes: self.cfg.paths.homes.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -991,6 +993,8 @@ mod tests {
             state_dir: PathBuf::from("/nonexistent/state"),
             addon_cmd: vec!["/nonexistent/addon".into()],
             upgrade_cmd,
+            network_cmd: jobs::default_network_cmd(),
+            homes: crate::netfiles::Homes::from_env(),
         }
     }
 

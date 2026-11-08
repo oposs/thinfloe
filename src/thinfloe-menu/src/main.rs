@@ -88,6 +88,8 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
         addon_cmd: jobs::default_addon_cmd(),
         upgrade_cmd: jobs::default_upgrade_cmd(),
+        network_cmd: jobs::default_network_cmd(),
+        homes: thinfloe_menu::netfiles::Homes::from_env(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

@@ -7,6 +7,8 @@
 
 use crate::drives::{self, Drive};
 use crate::log::{Feed, Kind, Line, Run, Splitter, local_time};
+use crate::netfiles;
+use crate::nettab::{self, Iface, InRange};
 use crate::release::{self, Release};
 use crate::upgrade_proto::{self, Msg};
 use std::io::{ErrorKind, Read};
@@ -140,6 +142,16 @@ pub enum JobResult {
         custom: bool,
         result: Result<Release, String>,
     },
+    /// The network files as read, and the machine's WiFi adapters.
+    NetLoaded(netfiles::WifiFile, netfiles::WiredFile, Vec<String>),
+    NetStatus(Result<Vec<Iface>, String>),
+    NetScan(Result<Vec<InRange>, String>),
+    /// The network tool applies the settings, in a process group of its own.
+    NetApplyStarted {
+        pgid: i32,
+    },
+    NetApplied(Result<(), String>),
+    NetTakenOver(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,11 +188,20 @@ pub struct Paths {
     pub addon_cmd: Vec<String>,
     /// The upgrade tool and what runs it as root; the job's arguments follow.
     pub upgrade_cmd: Vec<String>,
+    /// The network tool and what runs it as root; the subcommand follows.
+    pub network_cmd: Vec<String>,
+    /// Where the network files live.
+    pub homes: netfiles::Homes,
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
 pub fn default_upgrade_cmd() -> Vec<String> {
     ["sudo", "-n", "/usr/bin/thinfloe-upgrade"].map(String::from).to_vec()
+}
+
+/// Like `default_addon_cmd`, for thinfloe-network.
+pub fn default_network_cmd() -> Vec<String> {
+    ["sudo", "-n", "/usr/bin/thinfloe-network"].map(String::from).to_vec()
 }
 
 /// thinfloe-addon runs as root. tfuser has sudo without a password; `-n`
@@ -424,22 +445,38 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
 /// Run the tool and read at most `cap` bytes of stdout; stderr goes to the
 /// log. More than `cap` is an error and the tool is stopped with SIGTERM,
 /// as is a tool that does not finish within `timeout`.
-fn upgrade_capture(
+fn capture(
     cmd: &[String],
     args: &[String],
     cap: usize,
     timeout: Duration,
     feed: &Arc<Feed>,
 ) -> Result<(String, Option<i32>), String> {
+    capture_as(cmd, args, cap, timeout, feed, UPGRADE_LOG_SOURCE, |_| {})
+}
+
+/// `capture` for any tool: stderr goes to the log under `source`, and
+/// `on_spawn` gets the process group before the wait.
+fn capture_as(
+    cmd: &[String],
+    args: &[String],
+    cap: usize,
+    timeout: Duration,
+    feed: &Arc<Feed>,
+    source: &str,
+    on_spawn: impl FnOnce(i32),
+) -> Result<(String, Option<i32>), String> {
     let mut child = upgrade_command(cmd, args)
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
+    on_spawn(child.id() as i32);
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     let mut pumps = 0;
     if let Some(err) = child.stderr.take() {
         let f = feed.clone();
-        std::thread::spawn(move || pump(err, UPGRADE_LOG_SOURCE.to_string(), f, tx));
+        let source = source.to_string();
+        std::thread::spawn(move || pump(err, source, f, tx));
         pumps += 1;
     }
     let (out_tx, out_rx) = mpsc::channel();
@@ -502,7 +539,7 @@ pub fn upgrade_drives(cmd: &[String], all: bool, feed: &Arc<Feed>) -> Result<Vec
     if all {
         args.push("--all".to_string());
     }
-    let (text, status) = upgrade_capture(cmd, &args, DRIVES_BYTES, DRIVES_TIMEOUT, feed)?;
+    let (text, status) = capture(cmd, &args, DRIVES_BYTES, DRIVES_TIMEOUT, feed)?;
     if status != Some(0) {
         return Err(match status {
             Some(n) => format!("the drive list failed with status {n}"),
@@ -521,13 +558,82 @@ pub fn upgrade_check(cmd: &[String], source: Option<&str>, feed: &Arc<Feed>) -> 
         args.push("--source".to_string());
         args.push(url.to_string());
     }
-    let (text, status) = upgrade_capture(cmd, &args, CHECK_BYTES, CHECK_TIMEOUT, feed)?;
+    let (text, status) = capture(cmd, &args, CHECK_BYTES, CHECK_TIMEOUT, feed)?;
     match status {
         Some(0) | Some(1) if !text.trim().is_empty() => Ok(release::parse_status(&text)),
         Some(0) | Some(1) => Err("the release check printed nothing".to_string()),
         Some(n) => Err(format!("the release check failed with status {n}")),
         None => Err("the release check was ended by a signal".to_string()),
     }
+}
+
+/// Source name of the network tool's output in the menu log.
+pub const NETWORK_LOG_SOURCE: &str = "network";
+/// Output limit of the network tool's calls.
+pub const NETWORK_BYTES: usize = 256 * 1024;
+pub const NETWORK_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+pub const NETWORK_SCAN_TIMEOUT: Duration = Duration::from_secs(40);
+/// The tool's worst case for `apply`: 30 s + 30 s + 120 s = 180 s, plus
+/// 20 s of margin.
+pub const NETWORK_APPLY_TIMEOUT: Duration = Duration::from_secs(200);
+
+/// Run a `thinfloe-network` subcommand that prints JSON and must exit 0.
+fn network_json(
+    paths: &Paths,
+    args: &[&str],
+    timeout: Duration,
+    feed: &Arc<Feed>,
+    on_spawn: impl FnOnce(i32),
+) -> Result<String, String> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (text, status) = capture_as(
+        &paths.network_cmd,
+        &args,
+        NETWORK_BYTES,
+        timeout,
+        feed,
+        NETWORK_LOG_SOURCE,
+        on_spawn,
+    )?;
+    match status {
+        // Exit 1 is a failure the tool explains in its JSON.
+        Some(0) | Some(1) => Ok(text),
+        Some(n) => Err(format!("the network tool failed with status {n}")),
+        None => Err("the network tool was ended by a signal".to_string()),
+    }
+}
+
+/// A failed call prints `{"result": "failed", "reason": ...}`; show that
+/// reason instead of a parse error.
+fn failed_reason(text: &str) -> Option<String> {
+    nettab::parse_result(text).err().filter(|_| text.contains("\"failed\""))
+}
+
+/// The interfaces: `status`.
+pub fn network_status(paths: &Paths, feed: &Arc<Feed>) -> Result<Vec<Iface>, String> {
+    let text = network_json(paths, &["status"], NETWORK_STATUS_TIMEOUT, feed, |_| {})?;
+    nettab::parse_status(&text).map_err(|e| failed_reason(&text).unwrap_or(e))
+}
+
+/// The WiFi networks in range: `scan`.
+pub fn network_scan(paths: &Paths, feed: &Arc<Feed>) -> Result<Vec<InRange>, String> {
+    let text = network_json(paths, &["scan"], NETWORK_SCAN_TIMEOUT, feed, |_| {})?;
+    nettab::parse_scan(&text).map_err(|e| failed_reason(&text).unwrap_or(e))
+}
+
+/// Save `change` into the home, then (only when that worked) let the root
+/// tool `apply` it, in a process group of its own that `on_spawn` gets.
+/// `netboot` is the caller's to know.
+pub fn network_apply(
+    paths: &Paths,
+    change: &netfiles::Change,
+    netboot: bool,
+    feed: &Arc<Feed>,
+    on_spawn: impl FnOnce(i32),
+) -> Result<(), String> {
+    netfiles::save(&paths.homes, change, netboot)?;
+    let text = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)?;
+    nettab::parse_result(&text)
 }
 
 #[cfg(test)]
@@ -593,6 +699,8 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: default_network_cmd(),
+            homes: netfiles::Homes::from_env(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -600,6 +708,8 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: default_network_cmd(),
+            homes: netfiles::Homes::from_env(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -607,6 +717,8 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: default_network_cmd(),
+            homes: netfiles::Homes::from_env(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -831,6 +943,8 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: default_network_cmd(),
+            homes: netfiles::Homes::from_env(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -839,6 +953,8 @@ mod tests {
             state_dir: d.to_path_buf(),
             addon_cmd: default_addon_cmd(),
             upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: default_network_cmd(),
+            homes: netfiles::Homes::from_env(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -998,8 +1114,100 @@ mod tests {
     fn a_tool_that_does_not_answer_is_stopped_at_the_deadline() {
         let feed = Arc::new(Feed::default());
         let t0 = Instant::now();
-        let r = upgrade_capture(&sh("sleep 5"), &[], 100, Duration::from_millis(300), &feed);
+        let r = capture(&sh("sleep 5"), &[], 100, Duration::from_millis(300), &feed);
         assert!(r.unwrap_err().contains("did not answer"));
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    }
+
+    fn net_paths(d: &Path, netplan: &str, tool: &str) -> Paths {
+        let mut p = Paths {
+            save_home: PathBuf::from("/nonexistent/save-home"),
+            state_dir: PathBuf::from("/nonexistent/state"),
+            addon_cmd: default_addon_cmd(),
+            upgrade_cmd: default_upgrade_cmd(),
+            network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
+            homes: netfiles::Homes::from_env(),
+        };
+        p.homes = netfiles::Homes {
+            home: d.join("home"),
+            sys_net: d.join("sys"),
+            netplan: netplan.to_string(),
+            default_wired: d.join("missing-default"),
+        };
+        std::fs::create_dir_all(d.join("home")).unwrap();
+        std::fs::create_dir_all(d.join("sys/eno1")).unwrap();
+        p
+    }
+
+    #[test]
+    fn network_apply_skips_apply_after_failed_save() {
+        let d = dir("net-apply-fail");
+        let marker = d.join("called");
+        let tool = format!(
+            "touch {}; echo '{{\"result\":\"ok\",\"reason\":\"\"}}'",
+            marker.display()
+        );
+        // The default wired file is missing, so no new set can be built.
+        let p = net_paths(&d, "/bin/true", &tool);
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(netfiles::Wired::Dhcp),
+        };
+        let feed = Arc::new(Feed::default());
+        let spawned = std::cell::Cell::new(false);
+        let r = network_apply(&p, &change, false, &feed, |_| spawned.set(true));
+        assert!(r.is_err(), "{r:?}");
+        assert!(!marker.exists(), "the root tool ran after a failed save");
+        assert!(!spawned.get());
+        // netplan refusing the set fails the save as well.
+        let p = net_paths(&d, "/bin/false", &tool);
+        let change = netfiles::Change {
+            wifi: Some(Vec::new()),
+            wired: None,
+        };
+        assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn network_apply_runs_the_tool_after_a_save_and_reads_its_result() {
+        let d = dir("net-apply-ok");
+        let marker = d.join("called");
+        let tool = format!(
+            "touch {}; echo noise; echo '{{\"result\":\"ok\",\"reason\":\"\"}}'",
+            marker.display()
+        );
+        let p = net_paths(&d, "/bin/true", &tool);
+        let feed = Arc::new(Feed::default());
+        let pgid = std::cell::Cell::new(0);
+        let r = network_apply(&p, &netfiles::Change::default(), false, &feed, |g| pgid.set(g));
+        assert_eq!(r, Ok(()));
+        assert!(marker.exists());
+        assert!(pgid.get() > 1);
+        let tool = "echo '{\"result\":\"failed\",\"reason\":\"no link\"}'; exit 1";
+        let p = net_paths(&d, "/bin/true", tool);
+        assert_eq!(
+            network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}),
+            Err("no link".to_string())
+        );
+        let p = net_paths(&d, "/bin/true", "exit 2");
+        assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
+    }
+
+    #[test]
+    fn network_status_and_scan_parse_the_tool_output() {
+        let d = dir("net-status");
+        let feed = Arc::new(Feed::default());
+        let status = r#"echo '{"interfaces":[{"name":"eno1","kind":"wired","state":"no-cable"}]}'"#;
+        let got = network_status(&net_paths(&d, "/bin/true", status), &feed).unwrap();
+        assert_eq!(got.len(), 1);
+        let scan =
+            r#"echo '{"device":"w","networks":[{"ssid":"a","signal_dbm":-40,"secured":true,"supported":true}]}'"#;
+        assert_eq!(network_scan(&net_paths(&d, "/bin/true", scan), &feed).unwrap().len(), 1);
+        let failed = r#"echo '{"result":"failed","reason":"no adapter"}'; exit 1"#;
+        assert_eq!(
+            network_scan(&net_paths(&d, "/bin/true", failed), &feed),
+            Err("no adapter".to_string())
+        );
     }
 }

@@ -840,6 +840,13 @@ impl Menu {
                 self.upgrade.released(custom, result);
                 None
             }
+            // The Network tab takes these over (state machine: next task).
+            JobResult::NetLoaded(..)
+            | JobResult::NetStatus(_)
+            | JobResult::NetScan(_)
+            | JobResult::NetApplyStarted { .. }
+            | JobResult::NetApplied(_)
+            | JobResult::NetTakenOver(_) => None,
             JobResult::AddonStarted { args, pgid } => {
                 let run = self
                     .addon_runs
