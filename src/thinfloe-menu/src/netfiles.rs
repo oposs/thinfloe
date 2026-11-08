@@ -1256,7 +1256,10 @@ exit 0
         // can keep; a hand file loses them all (above).
         let menu = format!(
             "{HEADER}\n{}",
-            good.replace("cafe:\n", "cafe:\n          password: secret123\n          auth:\n            key-management: psk\n")
+            good.replace(
+                "cafe:\n",
+                "cafe:\n          password: secret123\n          auth:\n            key-management: psk\n"
+            )
         );
         let f = parse_wifi(Some(&menu));
         assert_eq!(f.state, FileState::Menu);

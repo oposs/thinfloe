@@ -2907,9 +2907,18 @@ mod tests {
             {"ssid":"Cafe","signal_dbm":-70,"secured":false,"supported":true}]}"#;
         net.scan_done(crate::nettab::parse_scan(scan));
         let texts = net_texts(&network_settings(net));
-        let at = |name: &str| texts.iter().position(|t| t == name).unwrap_or_else(|| panic!("{name} not in {texts:?}"));
+        let at = |name: &str| {
+            texts
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("{name} not in {texts:?}"))
+        };
         assert_eq!(texts[at("back\\slash") + 1], "This name cannot be used.", "{texts:?}");
-        assert_eq!(texts[at("Old Router") + 1], "This security type is not supported", "{texts:?}");
+        assert_eq!(
+            texts[at("Old Router") + 1],
+            "This security type is not supported",
+            "{texts:?}"
+        );
         assert!(!has(&texts, "WEP is not supported"), "{texts:?}");
     }
 

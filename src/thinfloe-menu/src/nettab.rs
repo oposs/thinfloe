@@ -434,7 +434,14 @@ mod tests {
         let name = Some("This name cannot be used.");
         assert_eq!(
             why,
-            [name, name, Some("This security type is not supported"), None, name, name]
+            [
+                name,
+                name,
+                Some("This security type is not supported"),
+                None,
+                name,
+                name
+            ]
         );
     }
 
@@ -511,7 +518,10 @@ mod tests {
         for gw in ["192.168.1.0", "192.168.1.255"] {
             assert_eq!(parse_wired_form("192.168.1.10/24", gw, "").unwrap_err(), gw_err, "{gw}");
         }
-        assert_eq!(parse_wired_form("192.168.1.10/24", "192.168.1.10", "").unwrap_err(), same);
+        assert_eq!(
+            parse_wired_form("192.168.1.10/24", "192.168.1.10", "").unwrap_err(),
+            same
+        );
         // The last host is fine, as host and as gateway; so is the first.
         assert!(parse_wired_form("192.168.1.254/24", "192.168.1.1", "").is_ok());
         assert!(parse_wired_form("192.168.1.1/24", "192.168.1.254", "").is_ok());
