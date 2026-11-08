@@ -3029,6 +3029,44 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_name_no_row_shows_is_in_the_name_field() {
+        use crate::nettab::InRange;
+        use crate::network::NetEvent;
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        let mut net = office_picked_rescanning();
+        // While the scan runs the list is not drawn: the name is in the field.
+        let texts = net_texts(&network_settings(office_picked_rescanning()));
+        let field = texts
+            .iter()
+            .position(|t| t == "Network name")
+            .expect("the name field while scanning");
+        assert!(texts[field..].iter().any(|t| t == "Office"), "{texts:?}");
+        // Scan again, and Office is gone from the new list.
+        net.scan_done(Ok(vec![InRange {
+            ssid: "Cafe".into(),
+            signal_dbm: -60,
+            secured: false,
+            supported: true,
+        }]));
+        let menu = network_settings(net);
+        let texts = net_texts(&menu);
+        let field = texts.iter().position(|t| t == "Network name").expect("the name field");
+        assert!(texts[field..].iter().any(|t| t == "Office"), "{texts:?}");
+        assert_eq!(ice_frames_around(&dialog_shapes(&menu), "Cafe"), 0);
+        // Add acts on that shown name.
+        assert_eq!(net_clicks(&menu, &["Add"]).0, [ev(NetEvent::Add)]);
+    }
+
+    /// `add_dialog_open()` with Office picked and a rescan running.
+    fn office_picked_rescanning() -> crate::network::NetTab {
+        use crate::network::NetEvent;
+        let mut net = add_dialog_open();
+        net.event(NetEvent::PickNetwork("Office".into()), false);
+        net.event(NetEvent::Rescan, false);
+        net
+    }
+
+    #[test]
     fn the_apply_confirmation_names_the_remote_session() {
         use crate::network::NetEvent;
         let mut net = two_networks();

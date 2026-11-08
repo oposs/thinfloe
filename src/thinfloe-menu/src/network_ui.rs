@@ -370,7 +370,7 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
                             .size(ItemSize::Sm)
                             .title(n.ssid.as_str())
                             .description(line)
-                            .selected(view.picked.is_some() && view.ssid == n.ssid)
+                            .selected(view.picked_row_shown() && view.ssid == n.ssid)
                             .sense(Sense::click())
                             .id_salt(("in-range", &n.ssid));
                         if ui.add_enabled_ui(n.supported, |ui| ui.add(item)).inner.clicked() {
@@ -406,7 +406,7 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
         }
         // The name Add acts on is always on screen: a chosen row, or the
         // name field.
-        if view.hidden || (view.picked.is_none() && !view.ssid.is_empty()) {
+        if view.name_field_shown() {
             let mut ssid = view.ssid.clone();
             let typed = Field::new()
                 .label("Network name")

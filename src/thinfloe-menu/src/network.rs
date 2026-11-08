@@ -116,6 +116,19 @@ impl AddView {
     pub fn open_network(&self) -> bool {
         self.picked == Some(false)
     }
+
+    /// The picked network stands on screen as a chosen row: the list is
+    /// drawn (no scan runs) and still holds the name.
+    pub fn picked_row_shown(&self) -> bool {
+        !self.scanning && self.picked.is_some() && self.in_range.iter().any(|n| n.ssid == self.ssid)
+    }
+
+    /// The name field is on screen: for a hidden network, and for any set
+    /// name no chosen row shows. Add acts on `ssid`, so with this the
+    /// dialog always shows the name Add saves.
+    pub fn name_field_shown(&self) -> bool {
+        self.hidden || (!self.ssid.is_empty() && !self.picked_row_shown())
+    }
 }
 
 #[derive(Debug)]
@@ -870,6 +883,45 @@ mod tests {
         // Add saves nothing, least of all Office as an open network.
         assert_eq!(t.event(NetEvent::Add, false), None);
         assert_eq!(t.networks(), [net("Home", Some("secret123"))]);
+    }
+
+    /// Every way to set a name leaves it on screen: a chosen row, or the
+    /// name field.
+    #[test]
+    fn the_name_add_saves_is_always_shown() {
+        let shown = |t: &NetTab| {
+            let v = t.add_view().unwrap();
+            v.ssid.is_empty() || v.picked_row_shown() || v.name_field_shown()
+        };
+        let mut t = tab();
+        t.event(NetEvent::OpenAdd, false);
+        assert!(shown(&t));
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        t.event(NetEvent::PickNetwork("Office".into()), false);
+        assert!(t.add_view().unwrap().picked_row_shown());
+        assert!(!t.add_view().unwrap().name_field_shown());
+        // A rescan: while it runs the list is not drawn, so the field shows.
+        t.event(NetEvent::Rescan, false);
+        assert!(!t.add_view().unwrap().picked_row_shown());
+        assert!(t.add_view().unwrap().name_field_shown());
+        // The new list has Office again: back to the chosen row.
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        assert!(t.add_view().unwrap().picked_row_shown());
+        // A new list without Office: the field, with the name.
+        t.event(NetEvent::Rescan, false);
+        t.scan_done(Ok(vec![in_range("Cafe", -60, false, true)]));
+        let v = t.add_view().unwrap();
+        assert!(!v.picked_row_shown() && v.name_field_shown() && v.ssid == "Office");
+        assert!(shown(&t));
+        // Hidden ticked and unticked.
+        t.event(add_text("Office", "", true), false);
+        assert!(t.add_view().unwrap().name_field_shown());
+        t.event(add_text("Office", "", false), false);
+        assert!(shown(&t));
+        // Cancel and reopen: an empty form.
+        t.event(NetEvent::CloseAdd, false);
+        t.event(NetEvent::OpenAdd, false);
+        assert!(t.add_view().unwrap().ssid.is_empty());
     }
 
     #[test]
