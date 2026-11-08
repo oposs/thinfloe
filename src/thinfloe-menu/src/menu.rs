@@ -936,7 +936,9 @@ impl Menu {
                 }
                 match &r {
                     Ok(()) => self.log.note(Kind::Event, "Network settings applied."),
-                    Err(e) => self.log.note(Kind::Warn, format!("Network settings not applied: {e}")),
+                    Err(e) => self
+                        .log
+                        .note(Kind::Warn, format!("Network settings not applied: {}", e.reason)),
                 }
                 let save = self.network.apply_done(r);
                 // The logout save, if the logout waited for this, covers it.
@@ -2430,6 +2432,7 @@ mod tests {
 
     // The Network tab and its jobs.
 
+    use crate::jobs::ApplyFailed;
     use crate::netfiles::{FileState, Net, WifiFile, Wired, WiredFile};
     use crate::network::{NetEvent, POLL as NET_POLL};
 
@@ -2683,7 +2686,16 @@ mod tests {
         let mut m = net_menu(false);
         let now = Instant::now();
         net_apply(&mut m);
-        assert_eq!(m.finished(JobResult::NetApplied(Err("no link".into())), now), None);
+        assert_eq!(
+            m.finished(
+                JobResult::NetApplied(Err(ApplyFailed {
+                    reason: "no link".into(),
+                    home_changed: false
+                })),
+                now
+            ),
+            None
+        );
         assert!(!m.save.running);
         assert_eq!(m.network.error(), Some("no link"));
         assert_eq!(log(&m), [warn("Network settings not applied: no link")]);
@@ -2691,6 +2703,28 @@ mod tests {
         assert_eq!(m.finished(JobResult::NetApplied(Ok(())), now), None);
         assert_eq!(m.finished(JobResult::NetApplyStarted { pgid: 3 }, now), None);
         assert_eq!(m.network.pgid(), None);
+    }
+
+    #[test]
+    fn a_home_not_put_back_is_saved() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        let failed = ApplyFailed {
+            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            home_changed: true,
+        };
+        assert_eq!(
+            m.finished(JobResult::NetApplied(Err(failed)), now),
+            Some(Effect::Start(Job::Save))
+        );
+        assert_eq!(
+            log(&m),
+            [
+                warn("Network settings not applied: x; ~/wifi.yaml could not be put back: busy"),
+                ev("Saving the home directory…"),
+            ]
+        );
     }
 
     #[test]

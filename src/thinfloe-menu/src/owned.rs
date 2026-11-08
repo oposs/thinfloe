@@ -54,10 +54,18 @@ pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io:
     if owner(old.as_deref()) == Owner::ByHand && !old.as_deref().is_some_and(replaceable) {
         return Err(by_hand(path));
     }
+    replace(path, |f| {
+        writeln!(f, "{HEADER}")?;
+        f.write_all(body.as_bytes())
+    })
+}
+
+/// Write `path` anew through a file beside it and a rename, so a crash
+/// never leaves half a file and a link at `path` is replaced, not followed.
+fn replace(path: &Path, fill: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    // Write beside the target and rename, so a crash never leaves half a file.
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -69,8 +77,7 @@ pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io:
     }
     let written = (|| {
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        writeln!(f, "{HEADER}")?;
-        f.write_all(body.as_bytes())?;
+        fill(&mut f)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
     })();
@@ -78,6 +85,28 @@ pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io:
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// The bytes of `path`, or `None` when there is no such file. A link or
+/// anything but a regular file is an error, as for `read`.
+pub fn read_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
+    crate::bounded::read_bounded(path, MAX_BYTES, false)
+        .map(Some)
+        .map_err(io::Error::other)
+}
+
+/// Undo a write of the menu: `path` gets the bytes `old` back, or, when
+/// it had none, the menu's file is removed. A link is never followed.
+pub fn put_back(path: &Path, old: Option<&[u8]>) -> io::Result<()> {
+    match old {
+        Some(bytes) => replace(path, |f| f.write_all(bytes)),
+        None => remove(path),
+    }
 }
 
 /// Remove a file the menu wrote. A missing file is fine; one written by

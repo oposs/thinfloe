@@ -150,7 +150,7 @@ pub enum JobResult {
     NetApplyStarted {
         pgid: i32,
     },
-    NetApplied(Result<(), String>),
+    NetApplied(Result<(), ApplyFailed>),
     NetTakenOver(Result<(), String>),
 }
 
@@ -646,6 +646,24 @@ pub fn network_scan(paths: &Paths, feed: &Arc<Feed>) -> Result<Vec<InRange>, Str
     nettab::parse_scan(&text).map_err(|e| failed_reason(&text).unwrap_or(e))
 }
 
+/// A network Apply that did not happen. `home_changed`: the home files
+/// could not be put back as they were, so the home is to be saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyFailed {
+    pub reason: String,
+    pub home_changed: bool,
+}
+
+impl ApplyFailed {
+    /// Failed, with the home as it was.
+    pub fn new(reason: String) -> ApplyFailed {
+        ApplyFailed {
+            reason,
+            home_changed: false,
+        }
+    }
+}
+
 /// Save `change` into the home, then (only when that worked) let the root
 /// tool `apply` it, in a process group of its own that `on_spawn` gets.
 /// `netboot` is the caller's to know.
@@ -655,10 +673,45 @@ pub fn network_apply(
     netboot: bool,
     feed: &Arc<Feed>,
     on_spawn: impl FnOnce(i32),
-) -> Result<(), String> {
-    netfiles::save(&paths.homes, change, netboot)?;
-    let text = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)?;
-    nettab::parse_result(&text)
+) -> Result<(), ApplyFailed> {
+    // Ruling 16: what the home held, so a failed apply can put it back.
+    // `save` writes only menu, template and missing files, all readable.
+    let files = [
+        (netfiles::WIFI_FILE, change.wifi.is_some()),
+        (netfiles::WIRED_FILE, change.wired.is_some()),
+    ];
+    let before: Vec<(&str, Option<Vec<u8>>)> = files
+        .iter()
+        .filter(|(_, touched)| *touched)
+        .filter_map(|(name, _)| {
+            crate::owned::read_bytes(&paths.homes.home.join(name))
+                .ok()
+                .map(|b| (*name, b))
+        })
+        .collect();
+    netfiles::save(&paths.homes, change, netboot).map_err(ApplyFailed::new)?;
+    let result = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)
+        .and_then(|text| nettab::parse_result(&text));
+    result.map_err(|reason| put_back(&paths.homes.home, &before, reason))
+}
+
+/// Put back each file of `before` that the save changed. A file that
+/// cannot be put back is named in the reason, and the home counts as
+/// changed.
+fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> ApplyFailed {
+    let mut failed = ApplyFailed::new(reason);
+    for (name, old) in before {
+        let path = home.join(name);
+        let now = crate::owned::read_bytes(&path);
+        if now.as_ref().is_ok_and(|b| b == old) {
+            continue;
+        }
+        if let Err(e) = crate::owned::put_back(&path, old.as_deref()) {
+            failed.reason = format!("{}; ~/{name} could not be put back: {e}", failed.reason);
+            failed.home_changed = true;
+        }
+    }
+    failed
 }
 
 #[cfg(test)]
@@ -1213,10 +1266,122 @@ mod tests {
         let p = net_paths(&d, "/bin/true", tool);
         assert_eq!(
             network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}),
-            Err("no link".to_string())
+            Err(ApplyFailed::new("no link".to_string()))
         );
         let p = net_paths(&d, "/bin/true", "exit 2");
         assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
+    }
+
+    /// `net_paths` with a shipped wired file, a menu ~/wifi.yaml and,
+    /// when `wired` is given, a menu ~/ethernet.yaml.
+    fn net_home(d: &Path, tool: &str, wired: Option<&str>) -> Paths {
+        let mut p = net_paths(d, "/bin/true", tool);
+        let default = d.join("default-ethernet.yaml");
+        std::fs::write(
+            &default,
+            "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: 'en*'\n      dhcp4: true\n",
+        )
+        .unwrap();
+        p.homes.default_wired = default;
+        let home = d.join("home");
+        for f in ["wifi.yaml", "ethernet.yaml"] {
+            let path = home.join(f);
+            if path.is_dir() {
+                std::fs::remove_dir(&path).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        std::fs::write(
+            home.join("wifi.yaml"),
+            format!("{}\nnetwork:\n  version: 2\n  # old\n", crate::owned::HEADER),
+        )
+        .unwrap();
+        if let Some(w) = wired {
+            std::fs::write(home.join("ethernet.yaml"), format!("{}\n{w}", crate::owned::HEADER)).unwrap();
+        }
+        p
+    }
+
+    fn home_bytes(p: &Paths) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        let get = |f: &str| std::fs::read(p.homes.home.join(f)).ok();
+        (get("wifi.yaml"), get("ethernet.yaml"))
+    }
+
+    fn fixed_wired() -> netfiles::Wired {
+        netfiles::Wired::Static {
+            address: "192.168.1.10".parse().unwrap(),
+            prefix: 24,
+            gateway: None,
+            dns: Vec::new(),
+        }
+    }
+
+    const FAILS: &str = r#"echo '{"result":"failed","reason":"x"}'; exit 1"#;
+
+    #[test]
+    fn a_failed_network_apply_puts_the_home_back() {
+        let d = dir("net-put-back");
+        let feed = Arc::new(Feed::default());
+        // A changed WiFi file and a new wired file.
+        let p = net_home(&d, FAILS, None);
+        let before = home_bytes(&p);
+        let change = netfiles::Change {
+            wifi: Some(Vec::new()),
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {});
+        assert_eq!(
+            r,
+            Err(ApplyFailed {
+                reason: "x".into(),
+                home_changed: false
+            })
+        );
+        assert_eq!(home_bytes(&p), before);
+        assert!(before.1.is_none(), "the new wired file is removed");
+        // A wired file that existed comes back after DHCP removed it.
+        let p = net_home(&d, FAILS, Some("network:\n  version: 2\n  # fixed\n"));
+        let before = home_bytes(&p);
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(netfiles::Wired::Dhcp),
+        };
+        assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
+        assert_eq!(home_bytes(&p), before);
+        assert!(before.1.is_some());
+        // The same change that works keeps the new files.
+        let p = net_home(&d, r#"echo '{"result":"ok","reason":""}'"#, None);
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(fixed_wired()),
+        };
+        assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
+        assert!(home_bytes(&p).1.is_some());
+    }
+
+    #[test]
+    fn a_home_that_cannot_be_put_back_says_so() {
+        let d = dir("net-no-put-back");
+        let feed = Arc::new(Feed::default());
+        // The tool fails and leaves a directory where ~/ethernet.yaml was.
+        let home = d.join("home");
+        let tool = format!(
+            r#"rm -f {0}/ethernet.yaml; mkdir {0}/ethernet.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            home.display()
+        );
+        let p = net_home(&d, &tool, None);
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.home_changed);
+        assert!(
+            r.reason.starts_with("x; ~/ethernet.yaml could not be put back: "),
+            "{}",
+            r.reason
+        );
     }
 
     #[test]

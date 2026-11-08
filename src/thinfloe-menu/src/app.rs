@@ -321,7 +321,7 @@ fn net_failed(job: &Job, e: String) -> JobResult {
         ),
         Job::NetStatus => JobResult::NetStatus(Err(e)),
         Job::NetScan => JobResult::NetScan(Err(e)),
-        Job::NetApply { .. } => JobResult::NetApplied(Err(e)),
+        Job::NetApply { .. } => JobResult::NetApplied(Err(jobs::ApplyFailed::new(e))),
         _ => JobResult::NetTakenOver(Err(e)),
     }
 }

@@ -10,6 +10,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::jobs::ApplyFailed;
 use crate::netfiles::{self, Change, FileState, Net, WifiFile, Wired, WiredFile};
 use crate::nettab::{self, Iface, InRange};
 
@@ -449,8 +450,9 @@ impl NetTab {
         }
     }
 
-    /// The Apply ended. `true`: the home changed and is to be saved.
-    pub fn apply_done(&mut self, r: Result<(), String>) -> bool {
+    /// The Apply ended. `true`: the home changed and is to be saved, after
+    /// a success or when a failed Apply could not put the home back.
+    pub fn apply_done(&mut self, r: Result<(), ApplyFailed>) -> bool {
         if !self.applying {
             return false;
         }
@@ -463,9 +465,12 @@ impl NetTab {
                 self.load_due = true;
                 true
             }
+            // The home was put back, or names what could not be: read
+            // it again; the draft stays for another try.
             Err(e) => {
-                self.error = Some(e);
-                false
+                self.error = Some(e.reason);
+                self.load_due = true;
+                e.home_changed
             }
         }
     }
@@ -1004,7 +1009,10 @@ mod tests {
         let mut t = with_fixed_draft();
         t.event(NetEvent::Apply, false);
         t.apply_started(7);
-        assert!(!t.apply_done(Err("netplan apply failed".into())));
+        assert!(!t.apply_done(Err(ApplyFailed {
+            reason: "netplan apply failed".into(),
+            home_changed: false
+        })));
         assert!(!t.applying());
         assert_eq!(t.pgid(), None);
         assert_eq!(t.error(), Some("netplan apply failed"));
@@ -1013,6 +1021,39 @@ mod tests {
         // Tried again, the same change goes out.
         assert_eq!(t.event(NetEvent::Apply, false), Some(NetRequest::Apply(fixed_change())));
         assert_eq!(t.error(), None);
+    }
+
+    #[test]
+    fn apply_failure_reloads_the_files() {
+        let mut t = with_fixed_draft();
+        let now = Instant::now();
+        assert_eq!(t.poll(now, true), Some(NetRequest::Load));
+        t.loaded(
+            wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
+            wired(FileState::Menu, Wired::Dhcp),
+            vec!["wlp1".to_string()],
+        );
+        t.event(NetEvent::Apply, false);
+        assert!(!t.apply_done(Err(ApplyFailed {
+            reason: "x".into(),
+            home_changed: false
+        })));
+        assert_eq!(t.poll(now, true), Some(NetRequest::Load), "the home was put back");
+        assert!(t.dirty(), "the draft is kept");
+        assert_eq!(t.error(), Some("x"));
+        t.loaded(
+            wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
+            wired(FileState::Menu, Wired::Dhcp),
+            vec!["wlp1".to_string()],
+        );
+        assert!(t.dirty(), "the draft outlives the reload");
+        // The home could not be put back: it changed, and is saved.
+        t.event(NetEvent::Apply, false);
+        assert!(t.apply_done(Err(ApplyFailed {
+            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            home_changed: true
+        })));
+        assert_eq!(t.poll(now, true), Some(NetRequest::Load));
     }
 
     #[test]
