@@ -452,8 +452,11 @@ fn capture(
     timeout: Duration,
     feed: &Arc<Feed>,
 ) -> Result<(String, Option<i32>), String> {
-    capture_as(cmd, args, cap, timeout, feed, UPGRADE_LOG_SOURCE, |_| {})
+    capture_as(cmd, args, cap, timeout, feed, UPGRADE_LOG_SOURCE, |_| {}).map(|(out, status, _)| (out, status))
 }
+
+/// How much of a tool's stderr `capture_as` keeps for the caller.
+const STDERR_KEEP: usize = 4096;
 
 /// `capture` for any tool: stderr goes to the log under `source`, and
 /// `on_spawn` gets the process group before the wait.
@@ -465,7 +468,7 @@ fn capture_as(
     feed: &Arc<Feed>,
     source: &str,
     on_spawn: impl FnOnce(i32),
-) -> Result<(String, Option<i32>), String> {
+) -> Result<(String, Option<i32>, String), String> {
     let mut child = upgrade_command(cmd, args)
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
@@ -473,10 +476,21 @@ fn capture_as(
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     let mut pumps = 0;
+    let kept = Arc::new(std::sync::Mutex::new(String::new()));
     if let Some(err) = child.stderr.take() {
         let f = feed.clone();
         let source = source.to_string();
-        std::thread::spawn(move || pump(err, source, f, tx));
+        let kept = kept.clone();
+        std::thread::spawn(move || {
+            pump_lines(err, source, f, tx, |line| {
+                let mut k = kept.lock().unwrap_or_else(|e| e.into_inner());
+                if k.len() < STDERR_KEEP {
+                    k.push_str(line);
+                    k.push('\n');
+                }
+                false
+            })
+        });
         pumps += 1;
     }
     let (out_tx, out_rx) = mpsc::channel();
@@ -530,7 +544,8 @@ fn capture_as(
     if too_long {
         return Err(format!("{} printed more than {cap} bytes", cmd[0]));
     }
-    Ok((String::from_utf8_lossy(&out).into_owned(), status.code()))
+    let stderr = kept.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Ok((String::from_utf8_lossy(&out).into_owned(), status.code(), stderr))
 }
 
 /// The drives the tool offers: `drives --no-size [--all]`.
@@ -586,7 +601,7 @@ fn network_json(
     on_spawn: impl FnOnce(i32),
 ) -> Result<String, String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let (text, status) = capture_as(
+    let (text, status, stderr) = capture_as(
         &paths.network_cmd,
         &args,
         NETWORK_BYTES,
@@ -595,18 +610,28 @@ fn network_json(
         NETWORK_LOG_SOURCE,
         on_spawn,
     )?;
-    match status {
-        // Exit 1 is a failure the tool explains in its JSON.
-        Some(0) | Some(1) => Ok(text),
-        Some(n) => Err(format!("the network tool failed with status {n}")),
-        None => Err("the network tool was ended by a signal".to_string()),
+    if status == Some(0) {
+        return Ok(text);
     }
+    // The tool's own reason, else what sudo or the shell said, else the code.
+    Err(nettab::failed_reason(&text)
+        .or_else(|| {
+            stderr
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(|l| l.chars().take(200).collect())
+        })
+        .unwrap_or_else(|| match status {
+            Some(n) => format!("The network tool did not answer (exit {n})."),
+            None => "The network tool did not answer (killed).".to_string(),
+        }))
 }
 
 /// A failed call prints `{"result": "failed", "reason": ...}`; show that
 /// reason instead of a parse error.
 fn failed_reason(text: &str) -> Option<String> {
-    nettab::parse_result(text).err().filter(|_| text.contains("\"failed\""))
+    nettab::failed_reason(text)
 }
 
 /// The interfaces: `status`.
@@ -1192,6 +1217,27 @@ mod tests {
         );
         let p = net_paths(&d, "/bin/true", "exit 2");
         assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_network_failure_says_why() {
+        let d = dir("net-why");
+        let feed = Arc::new(Feed::default());
+        let why = |tool: &str| network_status(&net_paths(&d, "/bin/true", tool), &feed).unwrap_err();
+        assert_eq!(
+            why(r#"echo '{"result":"failed","reason":"bad usage"}'; exit 2"#),
+            "bad usage"
+        );
+        assert_eq!(
+            why("echo 'sudo: a password is required' >&2; exit 1"),
+            "sudo: a password is required"
+        );
+        assert_eq!(why("exit 3"), "The network tool did not answer (exit 3).");
+        // The tool's reason wins over stderr.
+        assert_eq!(
+            why(r#"echo noise >&2; echo '{"result":"failed","reason":"no adapter"}'; exit 1"#),
+            "no adapter"
+        );
     }
 
     #[test]

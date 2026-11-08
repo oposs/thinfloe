@@ -188,6 +188,18 @@ pub fn parse_result(stdout: &str) -> Result<(), String> {
     }
 }
 
+/// The reason of a last JSON line `{"result": "failed", "reason": ...}`;
+/// `None` for any other output or an empty reason.
+pub fn failed_reason(stdout: &str) -> Option<String> {
+    let line = stdout.lines().rev().map(str::trim).find(|l| l.starts_with('{'))?;
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("result").and_then(Value::as_str) != Some("failed") {
+        return None;
+    }
+    let reason: String = v.get("reason")?.as_str()?.chars().take(REASON_MAX).collect();
+    (!reason.trim().is_empty()).then_some(reason)
+}
+
 // ---- The wired address form ----
 
 fn in_subnet(a: Ipv4Addr, b: Ipv4Addr, prefix: u8) -> bool {
