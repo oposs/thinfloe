@@ -400,6 +400,13 @@ pub fn wifi_devices(sys_net: &Path) -> Vec<String> {
     devs
 }
 
+/// A character the netplan files cannot carry: control characters (the
+/// emitter writes them unquoted), U+2028 and U+2029 (libyaml refuses them
+/// in a plain key) and U+FFFE, U+FFFF (libyaml refuses them anywhere).
+fn unusable_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}')
+}
+
 /// A backslash is refused: netplan 1.2 writes `ssid=P"..."` without escaping
 /// it, and wpa_supplicant's printf_decode then drops or reinterprets it (seen
 /// in the image: `back\slash` is joined as `backslash`). Passwords keep
@@ -408,7 +415,7 @@ pub fn check_ssid(s: &str) -> Result<(), String> {
     if s.is_empty() || s.len() > 32 {
         return Err("The name needs 1 to 32 bytes.".to_string());
     }
-    if s.contains(TEMPLATE_MARKER) || s.contains('\\') || s.chars().any(char::is_control) {
+    if s.contains(TEMPLATE_MARKER) || s.contains('\\') || s.chars().any(unusable_char) {
         return Err("This name cannot be used.".to_string());
     }
     Ok(())
@@ -422,7 +429,7 @@ pub fn check_password(p: &str) -> Result<(), String> {
     if !hex_key && !(8..=63).contains(&p.len()) {
         return Err("The password needs 8 to 63 characters.".to_string());
     }
-    if p.contains(TEMPLATE_MARKER) || p.chars().any(char::is_control) {
+    if p.contains(TEMPLATE_MARKER) || p.chars().any(unusable_char) {
         return Err("This password cannot be used.".to_string());
     }
     Ok(())
@@ -1645,6 +1652,8 @@ exit 0
             net("", None, false),
             net(TEMPLATE_MARKER, None, false),
             net("back\\slash", None, false),
+            net("line\u{2028}sep", None, false),
+            net("home", Some("secret\u{ffff}123"), false),
         ] {
             assert!(
                 save(
@@ -1777,6 +1786,17 @@ exit 0
         let bad = Err("This name cannot be used.".to_string());
         assert_eq!(check_ssid("back\\slash"), bad);
         assert_eq!(check_ssid("trailing\\"), bad);
+        // libyaml refuses these in a plain key (U+2028, U+2029) or anywhere
+        // (U+FFFE, U+FFFF), and the emitter writes them unquoted.
+        for c in ['\u{2028}', '\u{2029}', '\u{fffe}', '\u{ffff}'] {
+            assert_eq!(check_ssid(&format!("a{c}b")), bad, "{c:?}");
+            assert_eq!(
+                check_password(&format!("secret{c}123")),
+                Err("This password cannot be used.".to_string()),
+                "{c:?}"
+            );
+        }
+        assert_eq!(check_ssid("caf\u{e9}\u{feff}"), Ok(()));
     }
 
     #[test]

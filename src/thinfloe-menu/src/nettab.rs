@@ -402,13 +402,18 @@ mod tests {
             {"ssid":"back\\slash","signal_dbm":-50,"secured":true,"supported":true},
             {"ssid":"tab\there","signal_dbm":-50,"secured":true,"supported":true},
             {"ssid":"fine","signal_dbm":-50,"secured":true,"supported":false},
-            {"ssid":"ok","signal_dbm":-50,"secured":true,"supported":true}]}"#;
+            {"ssid":"ok","signal_dbm":-50,"secured":true,"supported":true},
+            {"ssid":"line\u2028sep","signal_dbm":-50,"secured":true,"supported":true},
+            {"ssid":"non\uffffchar","signal_dbm":-50,"secured":true,"supported":true}]}"#;
         let got = parse_scan(j).unwrap();
         let ok: Vec<bool> = got.iter().map(|n| n.supported).collect();
-        assert_eq!(ok, [false, false, false, true]);
+        assert_eq!(ok, [false, false, false, true, false, false]);
         let why: Vec<_> = got.iter().map(InRange::unsupported_reason).collect();
         let name = Some("This name cannot be used.");
-        assert_eq!(why, [name, name, Some("This security type is not supported"), None]);
+        assert_eq!(
+            why,
+            [name, name, Some("This security type is not supported"), None, name, name]
+        );
     }
 
     #[test]
