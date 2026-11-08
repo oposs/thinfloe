@@ -112,6 +112,13 @@ pub const SECTION_PT: f32 = 18.0;
 /// (points): "Turn the screen off after" and a gap.
 pub const FORM_LABEL_W: f32 = 240.0;
 
+/// The widest an address field on the Network tab gets (points).
+pub const NET_FIELD_W: f32 = 320.0;
+
+/// The tallest the list of networks in range gets in the add dialog
+/// (points); a longer list scrolls.
+pub const NET_LIST_H: f32 = 240.0;
+
 /// The Upgrade screen's Choose page puts the drives beside Action and
 /// Options when its panel is at least this wide (points); narrower, they
 /// stack in one column.
@@ -293,6 +300,7 @@ mod tests {
             ("desktop.rs", include_str!("desktop.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
+            ("network_ui.rs", include_str!("network_ui.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
             let hits = style_literal_lines(name, code);

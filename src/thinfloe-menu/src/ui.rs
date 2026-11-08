@@ -766,9 +766,9 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
 }
 
 /// The left and right padding of a Settings row; the button ends `ROW_RIGHT` from its edge.
-const ROW_LEFT: i8 = 22;
-const ROW_RIGHT: i8 = 16;
-const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
+pub(crate) const ROW_LEFT: i8 = 22;
+pub(crate) const ROW_RIGHT: i8 = 16;
+pub(crate) const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
 /// The side of a row's icon on the Settings screen.
 const ROW_ICON: f32 = 40.0;
 
@@ -781,6 +781,10 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     let width = GROUP_W.min(inner.width());
     let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
+    // A Network dialog is modal: the screen under it takes no clicks.
+    if menu.settings_tab == SettingsTab::Network && crate::network_ui::dialog_open(&menu.network) {
+        s_ui.disable();
+    }
     s_ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Settings")
@@ -806,8 +810,9 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     let body = match menu.settings_tab {
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
         SettingsTab::Screen => screen_tab(&mut s_ui, menu),
-        // Drawn in the next step of the Network tab.
-        SettingsTab::Network => None,
+        SettingsTab::Network => {
+            crate::network_ui::network_tab(&mut s_ui, &menu.network, icons, width).map(SettingsEvent::Network)
+        }
     };
     event.or(body)
 }
@@ -1302,7 +1307,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>,
 }
 
 /// A centred card over the frozen grid.
-fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
+pub(crate) fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
     let t = Theme::current(ui.ctx());
     egui::Area::new(egui::Id::unique("dialog"))
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2366,18 +2371,23 @@ mod tests {
 
     #[test]
     fn settings_draws_nothing_rounded() {
-        for tab in crate::settings::SettingsTab::ALL {
-            let mut menu = open_settings();
-            menu.settings_tab = tab;
+        let mut menus: Vec<(String, Menu)> = crate::settings::SettingsTab::ALL
+            .into_iter()
+            .map(|tab| {
+                let mut menu = open_settings();
+                menu.settings_tab = tab;
+                if tab == crate::settings::SettingsTab::Network {
+                    menu.network = two_networks();
+                }
+                (format!("{tab:?}"), menu)
+            })
+            .collect();
+        menus.push(("add dialog".into(), network_settings(add_dialog_open())));
+        for (tab, menu) in menus {
             let shapes = settings_shapes(&menu, 1280.0, 720.0);
             for c in &shapes {
                 if let egui::Shape::Rect(r) = &c.shape {
-                    assert_eq!(
-                        r.corner_radius,
-                        egui::CornerRadius::ZERO,
-                        "{tab:?}: rounded {:?}",
-                        r.rect
-                    );
+                    assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "{tab}: rounded {:?}", r.rect);
                 }
             }
         }
@@ -2458,11 +2468,16 @@ mod tests {
     /// each where the frame before drew it, and returns what each reported.
     /// A label that is not drawn is `None` in `drawn`.
     fn click_labels(menu: &Menu, labels: &[&str]) -> (Vec<Option<UiEvent>>, Vec<bool>) {
+        click_labels_at(menu, labels, (1280.0, 720.0))
+    }
+
+    /// `click_labels` on a screen of `size` points.
+    fn click_labels_at(menu: &Menu, labels: &[&str], size: (f32, f32)) -> (Vec<Option<UiEvent>>, Vec<bool>) {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
         let frame = |events: Vec<egui::Event>| {
             let input = egui::RawInput {
-                screen_rect: Some(screen(1280.0, 720.0)),
+                screen_rect: Some(screen(size.0, size.1)),
                 events,
                 time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
                 ..Default::default()
@@ -2535,6 +2550,396 @@ mod tests {
             _ => None,
         });
         assert_eq!(color, Some(WARN), "{:?}", all_texts(&shapes));
+    }
+
+    fn saved_net(ssid: &str, password: Option<&str>, hidden: bool) -> crate::netfiles::Net {
+        crate::netfiles::Net {
+            ssid: ssid.into(),
+            hidden,
+            password: password.map(String::from),
+        }
+    }
+
+    fn fixed_wired() -> crate::netfiles::Wired {
+        crate::netfiles::Wired::Static {
+            address: "192.168.1.10".parse().unwrap(),
+            prefix: 24,
+            gateway: Some("192.168.1.1".parse().unwrap()),
+            dns: vec!["1.1.1.1".parse().unwrap(), "9.9.9.9".parse().unwrap()],
+        }
+    }
+
+    /// A Network tab with its files read: WiFi on adapter `wlp1`.
+    fn net_tab(
+        netboot: bool,
+        wifi: (crate::netfiles::FileState, Vec<crate::netfiles::Net>, bool),
+        wired: (crate::netfiles::FileState, crate::netfiles::Wired),
+    ) -> crate::network::NetTab {
+        let mut net = crate::network::NetTab::new(netboot);
+        net.loaded(
+            crate::netfiles::WifiFile {
+                state: wifi.0,
+                device: Some("wlp1".into()),
+                networks: wifi.1,
+                manageable: wifi.2,
+                error: None,
+            },
+            crate::netfiles::WiredFile {
+                state: wired.0,
+                wired: wired.1,
+                manageable: true,
+                error: None,
+            },
+            vec!["wlp1".into()],
+        );
+        net
+    }
+
+    /// Menu-owned files: two saved networks (one secured, one open and
+    /// hidden) and a fixed wired address.
+    fn two_networks() -> crate::network::NetTab {
+        use crate::netfiles::FileState;
+        net_tab(
+            false,
+            (
+                FileState::Menu,
+                vec![
+                    saved_net("Home", Some("secret123"), false),
+                    saved_net("Lab", None, true),
+                ],
+                true,
+            ),
+            (FileState::Menu, fixed_wired()),
+        )
+    }
+
+    /// `two_networks()` with the add dialog open, the scan done.
+    fn add_dialog_open() -> crate::network::NetTab {
+        use crate::nettab::InRange;
+        use crate::network::NetEvent;
+        let mut net = two_networks();
+        net.event(NetEvent::OpenAdd, false);
+        let in_range = |ssid: &str, signal_dbm, secured, supported| InRange {
+            ssid: ssid.into(),
+            signal_dbm,
+            secured,
+            supported,
+        };
+        net.scan_done(Ok(vec![
+            in_range("Cafe", -75, false, true),
+            in_range("Office", -55, true, true),
+            in_range("Old Router", -65, true, false),
+        ]));
+        net
+    }
+
+    fn network_settings(net: crate::network::NetTab) -> Menu {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Network;
+        menu.network = net;
+        menu
+    }
+
+    /// The Network tab is drawn on a 1080p screen, where it fits; on a
+    /// smaller one it scrolls.
+    fn net_texts(menu: &Menu) -> Vec<String> {
+        text_rects(&settings_shapes(menu, 1920.0, 1080.0))
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    fn net_clicks(menu: &Menu, labels: &[&str]) -> (Vec<Option<UiEvent>>, Vec<bool>) {
+        click_labels_at(menu, labels, (1920.0, 1080.0))
+    }
+
+    fn has(texts: &[String], want: &str) -> bool {
+        texts.iter().any(|t| t == want)
+    }
+
+    #[test]
+    fn the_network_tab_lists_connections() {
+        use crate::nettab::{IfKind, IfState, Iface};
+        let mut net = two_networks();
+        let lines = [
+            Iface {
+                name: "enp1s0".into(),
+                kind: IfKind::Wired,
+                state: IfState::Connected,
+                addresses: vec!["192.168.1.10/24".into()],
+                ssid: None,
+                signal_dbm: None,
+                handshake_age_s: None,
+            },
+            Iface {
+                name: "wlp1".into(),
+                kind: IfKind::Wifi,
+                state: IfState::Connected,
+                addresses: vec!["10.0.0.7/24".into()],
+                ssid: Some("Home".into()),
+                signal_dbm: Some(-50),
+                handshake_age_s: None,
+            },
+        ];
+        net.status_done(Ok(lines.to_vec()));
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "Connections now"), "{texts:?}");
+        for i in &lines {
+            let line = crate::nettab::iface_line(i);
+            assert!(has(&texts, &line), "{line} not in {texts:?}");
+        }
+        assert!(!has(&texts, "No network adapter found"), "{texts:?}");
+        let mut net = two_networks();
+        net.status_done(Ok(Vec::new()));
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "No network adapter found"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_network_tab_shows_fixed_address_fields() {
+        use crate::netfiles::{FileState, Wired};
+        use crate::network::NetEvent;
+        let texts = net_texts(&network_settings(two_networks()));
+        for want in ["Wired", "Fixed address", "Address", "Gateway", "DNS servers"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // The values as saved, in the inputs.
+        for want in ["192.168.1.10/24", "192.168.1.1", "1.1.1.1, 9.9.9.9"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // DHCP: the select only.
+        let dhcp = || net_tab(false, (FileState::Menu, vec![], true), (FileState::Menu, Wired::Dhcp));
+        let texts = net_texts(&network_settings(dhcp()));
+        assert!(has(&texts, "Automatic (DHCP)"), "{texts:?}");
+        assert!(!has(&texts, "Gateway") && !has(&texts, "DNS servers"), "{texts:?}");
+        // Switched to fixed with nothing typed: the placeholders.
+        let mut fresh = dhcp();
+        fresh.event(NetEvent::WiredMode(true), false);
+        let texts = net_texts(&network_settings(fresh));
+        for want in ["192.168.1.10/24", "192.168.1.1", "1.1.1.1, 9.9.9.9"] {
+            assert!(has(&texts, want), "placeholder {want} not in {texts:?}");
+        }
+        // The select reports the pick.
+        let (events, drawn) = net_clicks(&network_settings(dhcp()), &["Automatic (DHCP)", "Fixed address"]);
+        assert_eq!(drawn, [true, true]);
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::WiredMode(true))))
+            ]
+        );
+    }
+
+    #[test]
+    fn the_network_tab_hides_fixed_on_netboot() {
+        use crate::netfiles::{FileState, Wired};
+        let net = net_tab(true, (FileState::Menu, vec![], true), (FileState::Menu, Wired::Dhcp));
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "A netbooted machine always uses DHCP."), "{texts:?}");
+        for gone in ["Automatic (DHCP)", "Fixed address", "Gateway", "DNS servers"] {
+            assert!(!has(&texts, gone), "{gone} in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn the_network_tab_shows_hand_wifi_read_only() {
+        use crate::netfiles::FileState;
+        use crate::network::NetEvent;
+        let hand = |manageable| {
+            net_tab(
+                false,
+                (FileState::Hand, vec![saved_net("Home", None, false)], manageable),
+                (FileState::Menu, fixed_wired()),
+            )
+        };
+        let texts = net_texts(&network_settings(hand(true)));
+        for want in [
+            "WiFi networks",
+            "Home",
+            "This is set by hand in ~/wifi.yaml",
+            "Let the menu manage it",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        for gone in ["Forget", "Add network"] {
+            assert!(!has(&texts, gone), "{gone} in {texts:?}");
+        }
+        let (events, _) = net_clicks(&network_settings(hand(true)), &["Let the menu manage it"]);
+        assert_eq!(
+            events,
+            [Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::TakeOver(
+                "wifi"
+            ))))]
+        );
+        let texts = net_texts(&network_settings(hand(false)));
+        assert!(has(&texts, "This is set by hand in ~/wifi.yaml"), "{texts:?}");
+        assert!(!has(&texts, "Let the menu manage it"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_network_tab_shows_a_hand_wired_file_read_only() {
+        use crate::netfiles::FileState;
+        use crate::network::NetEvent;
+        let net = net_tab(false, (FileState::Menu, vec![], true), (FileState::Hand, fixed_wired()));
+        let menu = network_settings(net);
+        let texts = net_texts(&menu);
+        for want in [
+            "Fixed address",
+            "192.168.1.10/24",
+            "This is set by hand in ~/ethernet.yaml",
+            "Let the menu manage it",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // The select is greyed: no list opens.
+        assert_eq!(
+            net_clicks(&menu, &["Fixed address", "Automatic (DHCP)"]).1,
+            [true, false]
+        );
+        assert_eq!(
+            net_clicks(&menu, &["Let the menu manage it"]).0,
+            [Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::TakeOver(
+                "wired"
+            ))))]
+        );
+    }
+
+    #[test]
+    fn the_network_tab_reports_forget_add_and_apply() {
+        use crate::network::NetEvent;
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        let texts = net_texts(&network_settings(two_networks()));
+        for want in ["Home", "Lab", "Hidden", "Add network", "Apply"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        let (events, _) = net_clicks(&network_settings(two_networks()), &["Forget"]);
+        assert_eq!(events, [ev(NetEvent::Forget("Home".into()))]);
+        let (events, _) = net_clicks(&network_settings(two_networks()), &["Add network"]);
+        assert_eq!(events, [ev(NetEvent::OpenAdd)]);
+        // Nothing changed: Apply does nothing.
+        let (events, _) = net_clicks(&network_settings(two_networks()), &["Apply"]);
+        assert_eq!(events, [None]);
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        let menu = network_settings(net);
+        let (events, _) = net_clicks(&menu, &["Apply"]);
+        assert_eq!(events, [ev(NetEvent::Apply)]);
+        // On a 720p screen the bands scroll; Apply stays in view.
+        assert_eq!(click_labels(&menu, &["Apply"]).0, [ev(NetEvent::Apply)]);
+        // No adapter: Add network is greyed and says why.
+        let mut net = crate::network::NetTab::new(false);
+        net.loaded(
+            crate::netfiles::WifiFile {
+                state: crate::netfiles::FileState::Missing,
+                device: None,
+                networks: vec![],
+                manageable: true,
+                error: None,
+            },
+            crate::netfiles::WiredFile {
+                state: crate::netfiles::FileState::Missing,
+                wired: crate::netfiles::Wired::Dhcp,
+                manageable: true,
+                error: None,
+            },
+            vec![],
+        );
+        let menu = network_settings(net);
+        assert!(has(&net_texts(&menu), "No WiFi adapter found"));
+        assert_eq!(net_clicks(&menu, &["Add network"]).0, [None]);
+    }
+
+    #[test]
+    fn the_add_dialog_shows_the_password_note() {
+        use crate::network::NetEvent;
+        let note = "The password is saved with the home directory. Anyone who has the stick can read it.";
+        let texts = net_texts(&network_settings(add_dialog_open()));
+        for want in [
+            "Office",
+            "Cafe",
+            "Old Router",
+            "WEP is not supported",
+            "Scan again",
+            "Hidden network",
+            "Password",
+            note,
+            "Add",
+            "Cancel",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // Strongest first.
+        let at = |name: &str| texts.iter().position(|t| t == name).unwrap();
+        assert!(
+            at("Office") < at("Old Router") && at("Old Router") < at("Cafe"),
+            "{texts:?}"
+        );
+        assert!(!has(&texts, "Network name"), "{texts:?}");
+        // A picked open network asks for no password.
+        let mut net = add_dialog_open();
+        net.event(NetEvent::PickNetwork("Cafe".into()), false);
+        let texts = net_texts(&network_settings(net));
+        assert!(!has(&texts, "Password") && !has(&texts, note), "{texts:?}");
+        // Hidden: the name is typed.
+        let mut net = add_dialog_open();
+        net.event(
+            NetEvent::AddText {
+                ssid: String::new(),
+                password: String::new(),
+                hidden: true,
+            },
+            false,
+        );
+        assert!(has(&net_texts(&network_settings(net)), "Network name"));
+        // While the scan runs.
+        let mut net = two_networks();
+        net.event(NetEvent::OpenAdd, false);
+        assert!(has(&net_texts(&network_settings(net)), "Looking for networks…"));
+        // A click on a network picks it; one the menu cannot join does nothing.
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        let menu = network_settings(add_dialog_open());
+        assert_eq!(
+            net_clicks(&menu, &["Office"]).0,
+            [ev(NetEvent::PickNetwork("Office".into()))]
+        );
+        assert_eq!(net_clicks(&menu, &["Old Router"]).0, [None]);
+        assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CloseAdd)]);
+        assert_eq!(net_clicks(&menu, &["Scan again"]).0, [ev(NetEvent::Rescan)]);
+        // The tab under the dialog takes no clicks.
+        assert_eq!(net_clicks(&menu, &["Forget"]).0, [None]);
+    }
+
+    #[test]
+    fn the_apply_confirmation_names_the_remote_session() {
+        use crate::network::NetEvent;
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        net.event(NetEvent::Apply, true);
+        assert!(net.confirm_open());
+        let menu = network_settings(net);
+        let texts = net_texts(&menu);
+        for want in [
+            "The remote session may disconnect for a few seconds.",
+            "Apply",
+            "Cancel",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CancelApply)]);
+    }
+
+    #[test]
+    fn the_lock_mark_has_a_glyph() {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        for _ in 0..2 {
+            ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        }
+        ctx.fonts_mut(|f| {
+            assert!(f.has_glyphs(&FontId::proportional(14.0), crate::network_ui::LOCK));
+        });
     }
 
     #[test]
@@ -3556,6 +3961,23 @@ mod tests {
         };
         shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
+        // The Network tab: menu-owned files, two networks, a fixed address.
+        let mut net = two_networks();
+        net.status_done(Ok(vec![crate::nettab::Iface {
+            name: "enp1s0".into(),
+            kind: crate::nettab::IfKind::Wired,
+            state: crate::nettab::IfState::Connected,
+            addresses: vec!["192.168.1.10/24".into()],
+            ssid: None,
+            signal_dbm: None,
+            handshake_age_s: None,
+        }]));
+        menu.settings_tab = crate::settings::SettingsTab::Network;
+        menu.network = net;
+        shot(&menu, "settings-network-1080.ppm", (1920, 1080), 1.0);
+        shot(&menu, "settings-network-21in-4k.ppm", (3840, 2160), 2.25);
+        menu.network = add_dialog_open();
+        shot(&menu, "settings-network-add-1080.ppm", (1920, 1080), 1.0);
         let mut newer = Menu::new(shipped_grid(), false);
         newer.set_usb_boot(true);
         newer.set_installed(Some("4.0.0".into()));
