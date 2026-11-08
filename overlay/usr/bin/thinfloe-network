@@ -42,6 +42,8 @@ SYS_NET = os.environ.get("TF_NETWORK_SYS", "/sys/class/net")
 
 DEFAULT_SCAN_TIMEOUT = 20
 TOOL_TIMEOUT = 10
+# Each step of status: the menu gives the whole call 5 s.
+STATUS_STEP_TIMEOUT = 1.5
 BUSY_WAIT = 2
 MAX_NETWORKS = 64
 HANDSHAKE_FRESH_S = 180
@@ -278,10 +280,10 @@ def parse_scan(text: str) -> List[dict]:
 
 def status() -> dict:
     try:
-        rc, link, err = run([IP, "-j", "-d", "link", "show"])
+        rc, link, err = run([IP, "-j", "-d", "link", "show"], STATUS_STEP_TIMEOUT)
         if rc != 0:
             raise NetworkError("ip link failed: %s" % err.strip())
-        rc, addr, err = run([IP, "-j", "-4", "addr", "show"])
+        rc, addr, err = run([IP, "-j", "-4", "addr", "show"], STATUS_STEP_TIMEOUT)
         if rc != 0:
             raise NetworkError("ip addr failed: %s" % err.strip())
         interfaces = parse_ip(link, addr, SYS_NET)
@@ -293,12 +295,13 @@ def status() -> dict:
             continue
         try:
             if i["kind"] == "wifi":
-                rc, out, _ = run([IW, "dev", i["name"], "link"])
+                rc, out, _ = run([IW, "dev", i["name"], "link"], STATUS_STEP_TIMEOUT)
                 ssid, dbm = parse_iw_link(out) if rc == 0 else (None, None)
                 if ssid is not None:
                     i["state"], i["ssid"], i["signal_dbm"] = "connected", ssid, dbm
             elif i["kind"] == "wireguard":
-                rc, out, _ = run([WG, "show", i["name"], "latest-handshakes"])
+                rc, out, _ = run([WG, "show", i["name"], "latest-handshakes"],
+                                 STATUS_STEP_TIMEOUT)
                 age = parse_handshake(out, int(time.time())) if rc == 0 else None
                 i["handshake_age_s"] = age
                 if age is not None and age <= HANDSHAKE_FRESH_S:

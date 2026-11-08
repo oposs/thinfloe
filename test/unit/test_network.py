@@ -280,6 +280,21 @@ class StatusTests(Env):
         self.assertEqual(got["wlan0"]["state"], "not-connected")
         self.assertIsNone(got["wlan0"]["ssid"])
 
+    def test_status_steps_time_out_within_the_menu_deadline(self):
+        # Ruling 24: a stuck `iw dev link` costs 1.5 s, not 10, so the
+        # whole status fits the menu's 5 s and still answers.
+        self.script("ip", 'case "$*" in\n  *"-d link"*) cat %s ;;\n  *addr*) cat %s ;;\nesac'
+                    % (FIX / "ip-link.json", FIX / "ip-addr.json"))
+        self.script("iw", "exec sleep 30")
+        self.script("wg", "printf 'KEY=\\t1731000000\\n'")
+        started = time.monotonic()
+        rc, out, _ = self.run_main("status")
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(rc, 0)
+        got = by_name(json.loads(out)["interfaces"])
+        self.assertIsNone(got["wlan0"]["ssid"])
+        self.assertIn("wg0", got)
+
     def test_status_needs_root(self):
         with mock.patch.dict(os.environ, {"TF_NETWORK_ASSUME_ROOT": ""}), \
                 mock.patch.object(nw.os, "geteuid", return_value=1000):
