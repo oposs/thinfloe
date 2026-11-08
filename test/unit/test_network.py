@@ -127,12 +127,15 @@ class ParseTests(unittest.TestCase):
         text = (bss("Corp", "RSN", "IEEE 802.1X") + bss("Enhanced", "RSN", "OWE")
                 + bss("Mixed", "RSN", "IEEE 802.1X PSK") + bss("Three", "RSN", "SAE")
                 + bss("FtPsk", "RSN", "FT/PSK") + bss("Sha", "RSN", "PSK/SHA-256")
-                + bss("FtSae", "RSN", "FT/SAE")
+                + bss("FtSae", "RSN", "FT/SAE") + bss("ExtKey", "RSN", "SAE-EXT-KEY")
+                + bss("SaeBoth", "RSN", "SAE SAE-EXT-KEY") + bss("PskFt", "RSN", "PSK FT/PSK")
+                + bss("Sha384", "RSN", "PSK/SHA-384")
                 + bss("FtCorp", "RSN", "FT/IEEE 802.1X IEEE 802.1X/SHA-256")
                 + bss("OldCorp", "WPA", "IEEE 802.1X"))
         got = {n["ssid"]: n for n in nw.parse_scan(text)}
         want = {"Corp": False, "Enhanced": False, "Mixed": True, "Three": True,
-                "FtPsk": True, "Sha": True, "FtSae": True, "FtCorp": False, "OldCorp": False}
+                "FtPsk": False, "Sha": True, "FtSae": False, "ExtKey": False,
+                "SaeBoth": True, "PskFt": True, "Sha384": False, "FtCorp": False, "OldCorp": False}
         self.assertEqual({k: v["supported"] for k, v in got.items()}, want)
         self.assertTrue(all(v["secured"] for v in got.values()))
 

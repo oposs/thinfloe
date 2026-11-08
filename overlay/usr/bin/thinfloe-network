@@ -187,14 +187,17 @@ def parse_handshake(text: str, now: int) -> Optional[int]:
     return max(0, now - latest)
 
 
-# Authentication suites (iw's spellings) that a password opens.
-PASSWORD_SUITE = re.compile(r"(?<![\w/.-])(?:PSK|PSK/SHA-256|FT/PSK|SAE|FT/SAE)(?![\w/.-])")
+# Authentication suites (iw's spellings) that a plain password can join:
+# netplan renders a password as key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE, so
+# wpa_supplicant joins nothing else (not FT/*, SAE-EXT-KEY, PSK/SHA-384,
+# 802.1X, OWE, FILS).
+PASSWORD_SUITE = re.compile(r"(?<![\w/.-])(?:PSK|PSK/SHA-256|SAE)(?![\w/.-])")
 
 
 def _supported(privacy: bool, rsn_wpa: bool, suites: List[str]) -> bool:
     """May the menu join with a plain password (or without one)?
     WEP, 802.1X-only and OWE-only networks: no. Without a suites line the
-    default of iw is PSK."""
+    default of iw is PSK. iw normally prints a suites line, so this is rare."""
     if rsn_wpa:
         return not suites or any(PASSWORD_SUITE.search(s) for s in suites)
     return not privacy
