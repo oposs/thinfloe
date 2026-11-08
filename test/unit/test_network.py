@@ -370,11 +370,19 @@ class ApplyTests(Env):
         self.assertEqual(self.snapshot(), {"ethernet.yaml": WIRED_DEFAULT.encode()})
 
     def test_apply_dhcp_installs_default_copy(self):
-        (self.home / "ethernet.yaml").write_text("# only a comment\n")
+        # Automatic: the menu removed ~/ethernet.yaml; an old static file is in /etc.
+        (self.etc / "ethernet.yaml").write_text(WIRED_HOME)
         rc, _, _ = self.run_main("apply")
         self.assertEqual(rc, 0)
         self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_DEFAULT)
         self.assertEqual(stat.S_IMODE((self.etc / "ethernet.yaml").stat().st_mode), 0o600)
+
+    def test_apply_installs_comment_only_wired_file_as_is(self):
+        (self.home / "ethernet.yaml").write_text("# only a comment\n")
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.etc / "ethernet.yaml").read_text(), "# only a comment\n")
+        self.assertEqual((self.dir / "seen" / "ethernet.yaml").read_text(), "# only a comment\n")
 
     def test_apply_checks_other_etc_files_too(self):
         (self.etc / "50-cloud.yaml").write_text("network: {version: 2}\n")

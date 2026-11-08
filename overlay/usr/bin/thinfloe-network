@@ -527,8 +527,8 @@ def apply() -> Tuple[int, str]:
             if current is not None:
                 files["wifi.yaml"] = current
             log("wifi.yaml: left as it is")
-        if wired is not None and not is_template(wired.decode("utf-8", "replace")) \
-                and not is_netboot():
+        # No template rule for the wired file: the boot installs it as it is.
+        if wired is not None and not is_netboot():
             files["ethernet.yaml"] = wired
             install.append("ethernet.yaml")
             log("ethernet.yaml: from the home")
