@@ -503,6 +503,8 @@ impl NetTab {
                 true
             }
             Err(e) => {
+                // It may have failed after the rename: read the files again.
+                self.load_due = true;
                 self.error = Some(e);
                 false
             }
@@ -1006,6 +1008,8 @@ mod tests {
         );
         assert!(!t.take_over_done(Err("~/wifi.yaml: busy".into())));
         assert_eq!(t.error(), Some("~/wifi.yaml: busy"));
+        // A failed take-over may have changed the files: read them again.
+        assert!(t.load_due);
         // A menu file or an unknown name is not taken over.
         let mut m = tab();
         assert_eq!(m.event(NetEvent::TakeOver("wifi"), false), None);

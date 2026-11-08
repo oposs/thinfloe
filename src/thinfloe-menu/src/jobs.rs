@@ -689,7 +689,8 @@ pub fn network_apply(
                 .map(|b| (*name, b))
         })
         .collect();
-    netfiles::save(&paths.homes, change, netboot).map_err(ApplyFailed::new)?;
+    // A save can fail after it wrote one file; that one goes back too.
+    netfiles::save(&paths.homes, change, netboot).map_err(|e| put_back(&paths.homes.home, &before, e))?;
     let result = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)
         .and_then(|text| nettab::parse_result(&text));
     result.map_err(|reason| put_back(&paths.homes.home, &before, reason))
@@ -1361,6 +1362,29 @@ mod tests {
         };
         assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
         assert!(home_bytes(&p).1.is_some());
+    }
+
+    /// Ruling 16 for a save that fails halfway: ~/wifi.yaml is written,
+    /// then ~/ethernet.yaml cannot be, so ~/wifi.yaml goes back as it was.
+    #[test]
+    fn a_save_that_fails_halfway_puts_the_home_back() {
+        let d = dir("net-save-halfway");
+        let feed = Arc::new(Feed::default());
+        let marker = d.join("called");
+        let tool = format!("touch {}; {FAILS}", marker.display());
+        let p = net_home(&d, &tool, None);
+        // A directory where the wired write puts its temporary file.
+        std::fs::create_dir_all(p.homes.home.join("ethernet.yaml.tmp/x")).unwrap();
+        let before = home_bytes(&p);
+        let change = netfiles::Change {
+            wifi: Some(Vec::new()),
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(!r.home_changed, "{r:?}");
+        assert!(!r.reason.is_empty());
+        assert_eq!(home_bytes(&p), before, "~/wifi.yaml is put back");
+        assert!(!marker.exists(), "the root tool ran after a failed save");
     }
 
     #[test]

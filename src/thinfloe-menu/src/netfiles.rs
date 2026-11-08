@@ -920,8 +920,19 @@ pub fn take_over(h: &Homes, which: &str) -> Result<(), String> {
         check_set(h, now.wifi_in_force().as_deref(), &wired)?;
     }
     owned::take_over(&path)?;
-    if let Some(t) = &new {
-        owned::write(&path, body(t)).map_err(|e| e.to_string())?;
+    if let Some(t) = &new
+        && let Err(e) = owned::write(&path, body(t))
+    {
+        // The hand file goes back, unless something took its place.
+        let aside = owned::aside(&path);
+        let back = match fs::symlink_metadata(&path) {
+            Err(m) if m.kind() == io::ErrorKind::NotFound => fs::rename(&aside, &path),
+            _ => Err(io::Error::other("the place is taken")),
+        };
+        return Err(match back {
+            Ok(()) => e.to_string(),
+            Err(b) => format!("{e}; ~/{name} stays as {}: {b}", owned::home_relative(&aside)),
+        });
     }
     Ok(())
 }
@@ -1675,6 +1686,17 @@ exit 0
         let before = g.snapshot();
         assert_eq!(take_over(&g.h, "wifi"), Err("ERROR: x: bad".into()));
         assert_eq!(g.snapshot(), before);
+    }
+
+    /// The write after the rename fails: the hand file comes back.
+    #[test]
+    fn take_over_that_cannot_write_puts_the_hand_file_back() {
+        let f = Fixture::new("take-write-fails", &["wlp58s0"]);
+        f.put(WIFI_FILE, HAND_WIFI);
+        fs::create_dir_all(f.h.home.join("wifi.yaml.tmp/x")).unwrap();
+        assert!(take_over(&f.h, "wifi").is_err());
+        assert_eq!(f.text(WIFI_FILE).as_deref(), Some(HAND_WIFI));
+        assert!(fs::symlink_metadata(f.h.home.join("wifi.yaml.by-hand")).is_err());
     }
 
     #[test]
