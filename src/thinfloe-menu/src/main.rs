@@ -75,6 +75,15 @@ fn usb_boot(esp: &Path) -> bool {
     dir.is_dir() && dir.dev() != parent.dev()
 }
 
+/// `sudo -n /usr/bin/thinfloe-network`; `TF_NETWORK_CMD` (space-separated)
+/// replaces it for tests.
+fn network_cmd() -> Vec<String> {
+    match std::env::var("TF_NETWORK_CMD") {
+        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(String::from).collect(),
+        _ => jobs::default_network_cmd(),
+    }
+}
+
 fn addon_last_check_path() -> PathBuf {
     env_path("TF_ADDON_LAST_CHECK", addons::LAST_CHECK_PATH)
 }
@@ -88,7 +97,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
         addon_cmd: jobs::default_addon_cmd(),
         upgrade_cmd: jobs::default_upgrade_cmd(),
-        network_cmd: jobs::default_network_cmd(),
+        network_cmd: network_cmd(),
         homes: thinfloe_menu::netfiles::Homes::from_env(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());

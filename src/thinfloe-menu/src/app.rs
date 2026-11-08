@@ -12,8 +12,10 @@ use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu, Screen};
 use crate::netfiles;
+use crate::network;
 use crate::raster::{Background, Canvas, Textures};
 use crate::release;
+use crate::settings::SettingsTab;
 use crate::ui;
 use crate::upgrade::{self, Stage};
 use egui::ViewportId;
@@ -257,16 +259,30 @@ fn upgrade_wake(screen: Screen, stage: &Stage, shown: bool) -> Option<Duration> 
     (screen == Screen::Upgrade && *stage == Stage::Choose && shown).then_some(upgrade::POLL)
 }
 
+/// When the loop must wake for the Network tab's status poll: while the tab
+/// is open and the window is on screen.
+fn network_wake(screen: Screen, tab: SettingsTab, shown: bool) -> Option<Duration> {
+    (screen == Screen::Settings && tab == SettingsTab::Network && shown).then_some(network::POLL)
+}
+
 /// The body of a job's worker thread. Every result goes through `send`:
 /// the start of a program first, a write's progress lines in the order the
 /// tool printed them, and the final result last.
-fn run_job(job: Job, paths: &Paths, feed: &Arc<Feed>, send: impl Fn(JobResult) + Clone + Send + 'static) {
+fn run_job(
+    job: Job,
+    paths: &Paths,
+    feed: &Arc<Feed>,
+    netboot: bool,
+    send: impl Fn(JobResult) + Clone + Send + 'static,
+) {
     // A panic in the job still sends a result: without one the screen's
     // poll or check would wait for ever.
     let on_panic = panic_result(&job);
     let s = send.clone();
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job_result(job, paths, feed, s))).unwrap_or(on_panic);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        job_result(job, paths, feed, netboot, s)
+    }))
+    .unwrap_or(on_panic);
     send(result);
 }
 
@@ -330,6 +346,7 @@ fn job_result(
     job: Job,
     paths: &Paths,
     feed: &Arc<Feed>,
+    netboot: bool,
     send: impl Fn(JobResult) + Clone + Send + 'static,
 ) -> JobResult {
     match job {
@@ -369,10 +386,20 @@ fn job_result(
             custom: source.is_some(),
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
         },
-        // Run on the worker in the next step of the Network tab.
-        Job::NetLoad | Job::NetStatus | Job::NetScan | Job::NetApply { .. } | Job::NetTakeOver { .. } => {
-            net_failed(&job, "the network jobs are not wired yet".to_string())
+        Job::NetLoad => {
+            let (wifi, wired) = netfiles::load(&paths.homes);
+            JobResult::NetLoaded(wifi, wired, netfiles::wifi_devices(&paths.homes.sys_net))
         }
+        Job::NetStatus => JobResult::NetStatus(jobs::network_status(paths, feed)),
+        Job::NetScan => JobResult::NetScan(jobs::network_scan(paths, feed)),
+        // The root tool's group is reported at once, so a logout can stop it.
+        Job::NetApply { change } => {
+            let started = send.clone();
+            JobResult::NetApplied(jobs::network_apply(paths, &change, netboot, feed, move |pgid| {
+                started(JobResult::NetApplyStarted { pgid })
+            }))
+        }
+        Job::NetTakeOver { which } => JobResult::NetTakenOver(netfiles::take_over(&paths.homes, which)),
     }
 }
 
@@ -566,6 +593,8 @@ impl App {
     }
 
     fn start(&self, job: Job) {
+        // Read here, on the UI thread: the Network tab holds the one answer.
+        let netboot = self.cfg.menu.network.netboot();
         let proxy = self.proxy.clone();
         let feed = self.feed.clone();
         let paths = Paths {
@@ -578,7 +607,7 @@ impl App {
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
-            run_job(job, &paths, &feed, move |r| {
+            run_job(job, &paths, &feed, netboot, move |r| {
                 let _ = proxy.send_event(Wake::Job(r));
             });
         });
@@ -704,7 +733,11 @@ impl App {
                 // wake, because every handled event requests a redraw, and that
                 // frame chooses again.
                 let menu = &self.cfg.menu;
-                let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, self.shown.load(Ordering::Relaxed));
+                let shown = self.shown.load(Ordering::Relaxed);
+                let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, shown)
+                    .into_iter()
+                    .chain(network_wake(menu.screen, menu.settings_tab, shown))
+                    .min();
                 match egui_wake.into_iter().chain(recheck).chain(poll).min() {
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),
@@ -1042,7 +1075,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let feed = Arc::new(Feed::default());
         let job = Job::UpgradeWrite { args: Vec::new() };
-        run_job(job, &paths(cmd), &feed, move |r| {
+        run_job(job, &paths(cmd), &feed, false, move |r| {
             let _ = tx.send(r);
         });
         let mut got = Vec::new();
@@ -1073,6 +1106,75 @@ mod tests {
     }
 
     #[test]
+    fn net_jobs_report_their_results() {
+        let d = TestDir::new("app", "net-jobs");
+        let tool = r#"case "$1" in
+status) echo '{"interfaces":[{"name":"eno1","kind":"wired","state":"no-cable"}]}';;
+scan) echo '{"device":"w","networks":[{"ssid":"a","signal_dbm":-40,"secured":true,"supported":true}]}';;
+apply) echo '{"result":"ok","reason":""}';;
+esac"#;
+        let home = d.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(d.join("sys/wlan0/wireless")).unwrap();
+        let default_wired = d.join("default-ethernet.yaml");
+        std::fs::write(
+            &default_wired,
+            "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: 'en*'\n      dhcp4: true\n",
+        )
+        .unwrap();
+        let mut p = paths(Vec::new());
+        p.network_cmd = ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec();
+        p.homes = netfiles::Homes {
+            home: home.clone(),
+            sys_net: d.join("sys"),
+            netplan: "/bin/true".into(),
+            default_wired,
+        };
+        let run = |job: Job| {
+            let (tx, rx) = mpsc::channel();
+            run_job(job, &p, &Arc::new(Feed::default()), false, move |r| {
+                let _ = tx.send(r);
+            });
+            rx.try_iter().collect::<Vec<_>>()
+        };
+        let got = run(Job::NetLoad);
+        assert!(
+            matches!(&got[..], [JobResult::NetLoaded(_, _, devs)] if devs == &["wlan0".to_string()]),
+            "{got:?}"
+        );
+        let got = run(Job::NetStatus);
+        assert!(
+            matches!(&got[..], [JobResult::NetStatus(Ok(v))] if v.len() == 1),
+            "{got:?}"
+        );
+        let got = run(Job::NetScan);
+        assert!(
+            matches!(&got[..], [JobResult::NetScan(Ok(v))] if v.len() == 1),
+            "{got:?}"
+        );
+        let change = netfiles::Change {
+            wifi: Some(vec![netfiles::Net {
+                ssid: "Home".into(),
+                hidden: false,
+                password: None,
+            }]),
+            wired: None,
+        };
+        let got = run(Job::NetApply { change });
+        assert!(
+            matches!(
+                &got[..],
+                [JobResult::NetApplyStarted { .. }, JobResult::NetApplied(Ok(()))]
+            ),
+            "{got:?}"
+        );
+        let text = std::fs::read_to_string(home.join("wifi.yaml")).unwrap();
+        assert!(text.starts_with(crate::owned::HEADER), "{text}");
+        let got = run(Job::NetTakeOver { which: "wifi" });
+        assert!(matches!(&got[..], [JobResult::NetTakenOver(_)]), "{got:?}");
+    }
+
+    #[test]
     fn a_worker_that_panics_still_sends_a_result() {
         // An empty command line panics in the job; the screen must still
         // hear back, or its poll and its check stay busy for ever.
@@ -1083,7 +1185,7 @@ mod tests {
         ] {
             let (tx, rx) = mpsc::channel();
             let feed = Arc::new(Feed::default());
-            run_job(job.clone(), &paths(Vec::new()), &feed, move |r| {
+            run_job(job.clone(), &paths(Vec::new()), &feed, false, move |r| {
                 let _ = tx.send(r);
             });
             let r = rx.recv_timeout(Duration::from_secs(10)).expect("a result");
@@ -1116,6 +1218,7 @@ mod tests {
             job,
             &paths(vec!["/nonexistent/thinfloe-upgrade".into()]),
             &feed,
+            false,
             move |r| {
                 let _ = tx.send(r);
             },
@@ -1155,6 +1258,13 @@ mod tests {
         assert_eq!(upgrade_wake(Screen::Upgrade, &Stage::Running, true), None);
         assert_eq!(upgrade_wake(Screen::Grid, &Stage::Choose, true), None);
         assert_eq!(upgrade_wake(Screen::Settings, &Stage::Choose, true), None);
+        assert_eq!(
+            network_wake(Screen::Settings, SettingsTab::Network, true),
+            Some(network::POLL)
+        );
+        assert_eq!(network_wake(Screen::Settings, SettingsTab::Network, false), None);
+        assert_eq!(network_wake(Screen::Settings, SettingsTab::Packages, true), None);
+        assert_eq!(network_wake(Screen::Grid, SettingsTab::Network, true), None);
     }
 
     #[test]
