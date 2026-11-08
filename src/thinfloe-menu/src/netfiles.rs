@@ -390,11 +390,15 @@ pub fn wifi_devices(sys_net: &Path) -> Vec<String> {
     devs
 }
 
+/// A backslash is refused: netplan 1.2 writes `ssid=P"..."` without escaping
+/// it, and wpa_supplicant's printf_decode then drops or reinterprets it (seen
+/// in the image: `back\slash` is joined as `backslash`). Passwords keep
+/// backslashes, since wpa_supplicant does not decode `psk="..."`.
 pub fn check_ssid(s: &str) -> Result<(), String> {
     if s.is_empty() || s.len() > 32 {
         return Err("The name needs 1 to 32 bytes.".to_string());
     }
-    if s.contains(TEMPLATE_MARKER) || s.chars().any(char::is_control) {
+    if s.contains(TEMPLATE_MARKER) || s.contains('\\') || s.chars().any(char::is_control) {
         return Err("This name cannot be used.".to_string());
     }
     Ok(())
@@ -1116,7 +1120,7 @@ exit 0
     #[test]
     fn render_round_trips_odd_text() {
         let pw = "p@ss: \"x\" #1\\";
-        let mut nets: Vec<Net> = ["Café \"Nord\"", " lead", "a:b #c", "back\\slash", "yes", "123"]
+        let mut nets: Vec<Net> = ["Café \"Nord\"", " lead", "a:b #c", "yes", "123"]
             .iter()
             .enumerate()
             .map(|(i, s)| net(s, Some(pw), i % 2 == 0))
@@ -1593,6 +1597,7 @@ exit 0
             net("home", Some("short"), false),
             net("", None, false),
             net(TEMPLATE_MARKER, None, false),
+            net("back\\slash", None, false),
         ] {
             assert!(
                 save(
@@ -1711,6 +1716,9 @@ exit 0
             Err("This name cannot be used.".to_string())
         );
         assert_eq!(check_ssid("a\nb"), Err("This name cannot be used.".to_string()));
+        let bad = Err("This name cannot be used.".to_string());
+        assert_eq!(check_ssid("back\\slash"), bad);
+        assert_eq!(check_ssid("trailing\\"), bad);
     }
 
     #[test]
@@ -1744,7 +1752,7 @@ exit 0
         );
         fs::write(dir.join("wifi-two.yaml"), two).unwrap();
         let pw = "p@ss: \"x\" #1\\";
-        let mut odd: Vec<Net> = ["Caf\u{e9} \"Nord\"", " lead", "a:b #c", "back\\slash", "yes", "123"]
+        let mut odd: Vec<Net> = ["Caf\u{e9} \"Nord\"", " lead", "a:b #c", "yes", "123"]
             .iter()
             .enumerate()
             .map(|(i, s)| net(s, Some(pw), i % 2 == 0))

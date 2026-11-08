@@ -111,12 +111,11 @@ network:
   wifis:
     wlp58s0:
       access-points:
-        "yes": {password: "p@ss: \"x\" #1\\", hidden: true}
+        "yes": {password: "p@ss: \"x\" #1\\"}
         "Café \"Nord\"": {password: "p@ss: \"x\" #1\\", hidden: true}
         "a:b #c": {password: "p@ss: \"x\" #1\\", hidden: true}
-        "123": {password: "p@ss: \"x\" #1\\"}
+        "123": {password: "p@ss: \"x\" #1\\", hidden: true}
         " lead": {password: "p@ss: \"x\" #1\\"}
-        "back\\slash": {password: "p@ss: \"x\" #1\\"}
         "open": {}
       dhcp4: true
       optional: true
@@ -124,7 +123,7 @@ YAML
 gen hand "$W/hand.yaml"; hrc=$?
 if [[ $rc -eq 0 && $hrc -eq 0 ]] \
     && [[ "$(blocks "$odd_conf")" == "$(blocks "$R/run/netplan/wpa-wlp58s0.conf")" ]] \
-    && [[ $(grep -c '^network={' "$odd_conf") -eq 7 ]]; then
+    && [[ $(grep -c '^network={' "$odd_conf") -eq 6 ]]; then
     ok "odd text reaches wpa conf as a hand-written file gives it"
 else
     bad "odd text reaches wpa conf"; cat "$W/odd/out" "$W/hand/out"
@@ -133,14 +132,27 @@ fi
 echo "# netplan wrote for the odd names:" >&2
 grep -E '^\s*(ssid|psk)=' "$odd_conf" | sed 's/^/#   /' >&2
 
-# --- backslash reaches wpa as typed ---
-# wpa_supplicant decodes ssid=P"..." printf-style, so netplan must write a
-# backslash doubled. Ask wpa_supplicant itself what it read.
-wpa_ssids=$(timeout 5 wpa_supplicant -ddd -c "$odd_conf" -i lo -D wext -N 2>&1 | grep -a "^   id=[0-9]* ssid=")
-if grep -qF "ssid='a:b #c'" <<<"$wpa_ssids" && grep -qF 'ssid='"'"'back\\slash'"'" <<<"$wpa_ssids"; then
-    ok "backslash reaches wpa as typed"
+# --- netplan still drops a backslash in ssid (the menu refuses it) ---
+# netplan writes ssid=P"..." without escaping a backslash, and wpa_supplicant
+# decodes it printf-style: back\slash is joined as backslash. The menu refuses
+# a backslash in a name for that reason. Ask wpa_supplicant what it read.
+cat >"$W/bs.yaml" <<'YAML'
+network:
+  version: 2
+  renderer: networkd
+  wifis:
+    wlp58s0:
+      dhcp4: true
+      access-points:
+        "back\\slash": {password: "secret123"}
+        "plain": {password: "secret123"}
+YAML
+gen bs "$W/bs.yaml"; rc=$?
+wpa_ssids=$(timeout 5 wpa_supplicant -ddd -c "$R/run/netplan/wpa-wlp58s0.conf" -i lo -D wext -N 2>&1 | grep -a "^   id=[0-9]* ssid=")
+if [[ $rc -eq 0 ]] && grep -qF "ssid='plain'" <<<"$wpa_ssids" && grep -qF "ssid='backslash'" <<<"$wpa_ssids"; then
+    ok "netplan still drops a backslash in ssid (the menu refuses it)"
 else
-    bad "backslash reaches wpa as typed (wpa_supplicant read: $(grep -o "ssid='back[^']*'" <<<"$wpa_ssids"))"
+    bad "netplan no longer drops a backslash in ssid (wpa_supplicant read: $(grep -o "ssid='[^']*'" <<<"$wpa_ssids" | paste -sd' ')): netplan was fixed, the menu rule in check_ssid can be lifted"
 fi
 
 # --- bare wifi file passes ---
