@@ -400,10 +400,12 @@ pub fn check_ssid(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 8 to 63 characters, or the key itself as 64 hex digits.
+/// 8 to 63 bytes, as netplan and wpa_supplicant count them, or the key
+/// itself as 64 hex digits. The message says characters; for an ASCII
+/// password that is the same.
 pub fn check_password(p: &str) -> Result<(), String> {
     let hex_key = p.len() == 64 && p.bytes().all(|b| b.is_ascii_hexdigit());
-    if !hex_key && !(8..=63).contains(&p.chars().count()) {
+    if !hex_key && !(8..=63).contains(&p.len()) {
         return Err("The password needs 8 to 63 characters.".to_string());
     }
     if p.contains(TEMPLATE_MARKER) || p.chars().any(char::is_control) {
@@ -1687,7 +1689,12 @@ exit 0
         assert_eq!(check_password(&"a".repeat(7)), need);
         assert_eq!(check_password(&"a".repeat(8)), Ok(()));
         assert_eq!(check_password(&"a".repeat(63)), Ok(()));
-        assert_eq!(check_password(&"é".repeat(63)), Ok(()));
+        // Bytes are counted, as netplan does: é is two.
+        assert_eq!(check_password(&"é".repeat(31)), Ok(()));
+        assert_eq!(check_password(&format!("{}a", "é".repeat(31))), Ok(()));
+        assert_eq!(check_password(&"é".repeat(32)), need);
+        assert_eq!(check_password(&"é".repeat(4)), Ok(()));
+        assert_eq!(check_password(&"é".repeat(3)), need);
         assert_eq!(check_password(&"0123456789abcdefABCDEF".repeat(3)[..64]), Ok(()));
         assert_eq!(check_password(&"g".repeat(64)), need);
         assert!(check_password(&format!("x{TEMPLATE_MARKER}")).is_err());
