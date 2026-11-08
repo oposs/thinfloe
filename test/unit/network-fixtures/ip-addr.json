@@ -1,0 +1,7 @@
+[{"ifindex":1,"ifname":"lo","flags":["LOOPBACK","UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8,"scope":"host","label":"lo"},{"family":"inet6","local":"::1","prefixlen":128,"scope":"host"}]},
+{"ifindex":2,"ifname":"eth0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"192.168.1.20","prefixlen":24,"scope":"global","label":"eth0"},{"family":"inet","local":"192.168.1.21","prefixlen":24,"scope":"global","secondary":true,"label":"eth0"},{"family":"inet6","local":"fe80::5054:ff:fe12:3456","prefixlen":64,"scope":"link"}]},
+{"ifindex":3,"ifname":"eth1","flags":["NO-CARRIER","BROADCAST","MULTICAST","UP"],"addr_info":[]},
+{"ifindex":4,"ifname":"wlan0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"10.0.0.7","prefixlen":16,"scope":"global","label":"wlan0"}]},
+{"ifindex":5,"ifname":"wg0","flags":["POINTOPOINT","NOARP","UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"10.8.0.2","prefixlen":32,"scope":"global","label":"wg0"}]},
+{"ifindex":6,"ifname":"br0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"172.17.0.1","prefixlen":16,"scope":"global","label":"br0"}]},
+{"ifindex":7,"ifname":"eth2","flags":["BROADCAST","MULTICAST"],"addr_info":[]}]

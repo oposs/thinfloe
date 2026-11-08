@@ -1,0 +1,115 @@
+BSS 8c:8d:28:11:22:33(on wlan0) -- associated
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 5180
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -52.00 dBm
+	last seen: 1200 ms ago
+	SSID: Office WiFi
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Authentication suites: PSK
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS 8c:8d:28:11:22:34(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2437
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -71.00 dBm
+	last seen: 1200 ms ago
+	SSID: Office WiFi
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Authentication suites: PSK
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:01(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2412
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -80.00 dBm
+	last seen: 1200 ms ago
+	SSID: Old WEP
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:02(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2412
+	beacon interval: 100 TUs
+	capability: ESS ShortSlotTime (0x0401)
+	signal: -60.50 dBm
+	last seen: 1200 ms ago
+	SSID: Guest
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:03(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2462
+	beacon interval: 100 TUs
+	capability: ESS Privacy (0x0011)
+	signal: -77.00 dBm
+	last seen: 1200 ms ago
+	SSID: Legacy WPA
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	WPA:	 * Version: 1
+		 * Group cipher: TKIP
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:04(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2462
+	beacon interval: 100 TUs
+	capability: ESS Privacy (0x0011)
+	signal: -65.00 dBm
+	last seen: 1200 ms ago
+	SSID: \x00\x00\x00\x00
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:05(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2462
+	beacon interval: 100 TUs
+	capability: ESS (0x0001)
+	signal: -66.00 dBm
+	last seen: 1200 ms ago
+	SSID: 
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	Extended capabilities:
+		 * Extended Channel Switching
+BSS aa:aa:aa:00:00:06(on wlan0)
+	last seen: 1.2s [boottime]
+	TSF: 123456789 usec (0d, 00:02:03)
+	freq: 2462
+	beacon interval: 100 TUs
+	capability: ESS Privacy (0x0011)
+	signal: -90.00 dBm
+	last seen: 1200 ms ago
+	SSID: Caf\xc3\xa9 \\ Bar
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0
+	DS Parameter set: channel 1
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Authentication suites: PSK
+	Extended capabilities:
+		 * Extended Channel Switching

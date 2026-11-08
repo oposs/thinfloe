@@ -1,0 +1,345 @@
+#!/usr/bin/python3 -I
+"""
+thinfloe-network - network state and WiFi scan for the menu
+
+The menu runs this as root (sudo -n) and reads one JSON line from stdout.
+
+Commands:
+  status   {"interfaces": [{"name", "kind": wired|wifi|wireguard,
+            "state": connected|no-cable|not-connected|off, "addresses",
+            "ssid", "signal_dbm", "handshake_age_s"}]}
+  scan     {"device", "networks": [{"ssid", "signal_dbm", "secured",
+            "supported"}]}, strongest first, at most 64
+
+Exit 0 on success, 1 on a failure, 2 on misuse. A failure prints
+{"result": "failed", "reason": "..."}. Log lines go to stderr and the journal.
+"""
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import syslog
+import time
+from typing import List, Optional, Tuple
+
+# Module constants; the environment overrides them for the tests.
+IP = os.environ.get("TF_NETWORK_IP", "ip")
+IW = os.environ.get("TF_NETWORK_IW", "iw")
+WG = os.environ.get("TF_NETWORK_WG", "wg")
+SYS_NET = os.environ.get("TF_NETWORK_SYS", "/sys/class/net")
+
+DEFAULT_SCAN_TIMEOUT = 20
+TOOL_TIMEOUT = 10
+BUSY_WAIT = 2
+MAX_NETWORKS = 64
+HANDSHAKE_FRESH_S = 180
+
+USAGE = "usage: thinfloe-network status | scan"
+
+
+class NetworkError(Exception):
+    """A failure. The text is the reason the menu shows."""
+
+
+# ============ Log ============
+
+_syslog_open = False
+
+
+def log(text: str) -> None:
+    global _syslog_open
+    text = "".join(c if c.isprintable() else " " for c in str(text))[:1024]
+    print("thinfloe-network: " + text, file=sys.stderr, flush=True)
+    try:
+        if not _syslog_open:
+            syslog.openlog("thinfloe-network")
+            _syslog_open = True
+        syslog.syslog(syslog.LOG_INFO, text)
+    except OSError:
+        pass
+
+
+# ============ Running tools ============
+
+def run(cmd: List[str], timeout: float = TOOL_TIMEOUT) -> Tuple[int, str, str]:
+    """Run cmd in a session of its own; on timeout the whole process group is
+    killed and subprocess.TimeoutExpired is raised."""
+    env = dict(os.environ, LC_ALL="C")
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=env, start_new_session=True)
+    except OSError as e:
+        raise NetworkError("cannot run %s: %s" % (cmd[0], e.strerror or e))
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.communicate()
+        raise
+    return (p.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+
+
+# ============ Parsing ============
+
+def _read_text(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read(64).strip()
+    except OSError:
+        return None
+
+
+def parse_ip(link_json: str, addr_json: str, sys_net: str) -> List[dict]:
+    """The wired, WiFi and WireGuard interfaces of `ip -j -d link` and
+    `ip -j -4 addr`. A WireGuard interface is not-connected here; status()
+    decides from its handshake."""
+    addresses = {}
+    for entry in json.loads(addr_json):
+        found = []
+        for a in entry.get("addr_info", []):
+            if a.get("family") == "inet" and "local" in a and "prefixlen" in a:
+                found.append("%s/%d" % (a["local"], a["prefixlen"]))
+        addresses[entry.get("ifname")] = found
+
+    result = []
+    for entry in json.loads(link_json):
+        name = entry.get("ifname")
+        if not isinstance(name, str) or "/" in name:
+            continue
+        flags = entry.get("flags", [])
+        base = os.path.join(sys_net, name)
+        if (entry.get("linkinfo") or {}).get("info_kind") == "wireguard":
+            kind = "wireguard"
+        elif os.path.exists(os.path.join(base, "wireless")):
+            kind = "wifi"
+        elif os.path.exists(os.path.join(base, "device")) \
+                and _read_text(os.path.join(base, "type")) == "1":
+            kind = "wired"
+        else:
+            continue
+        if "UP" not in flags:
+            state = "off"
+        elif kind == "wired":
+            state = "connected" if "LOWER_UP" in flags else "no-cable"
+        else:
+            state = "not-connected"
+        result.append({"name": name, "kind": kind, "state": state,
+                       "addresses": addresses.get(name, []),
+                       "ssid": None, "signal_dbm": None, "handshake_age_s": None})
+    return result
+
+
+def _decode_ssid(raw: str) -> str:
+    """iw prints a name with \\\\ for a backslash and \\xNN for bytes that are
+    not printable ASCII."""
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and raw[i + 1:i + 2] == "\\":
+            out += b"\\"
+            i += 2
+        elif raw[i] == "\\" and re.fullmatch(r"x[0-9a-fA-F]{2}", raw[i + 1:i + 4]):
+            out.append(int(raw[i + 2:i + 4], 16))
+            i += 4
+        else:
+            out += raw[i].encode("utf-8")
+            i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _dbm(text: str) -> Optional[int]:
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*dBm", text)
+    return int(round(float(m.group(1)))) if m else None
+
+
+def parse_iw_link(text: str) -> Tuple[Optional[str], Optional[int]]:
+    """(ssid, signal in dBm) of `iw dev <if> link`; (None, None) when the
+    device is not connected."""
+    ssid = signal_dbm = None
+    for line in text.splitlines():
+        m = re.match(r"\s*SSID: (.*)$", line)
+        if m and ssid is None:
+            ssid = _decode_ssid(m.group(1)) or None
+        m = re.match(r"\s*signal: (.*)$", line)
+        if m and signal_dbm is None:
+            signal_dbm = _dbm(m.group(1))
+    if ssid is None:
+        return None, None
+    return ssid, signal_dbm
+
+
+def parse_handshake(text: str, now: int) -> Optional[int]:
+    """Seconds since the latest handshake in `wg show <if> latest-handshakes`,
+    None when no peer ever shook hands (0)."""
+    latest = 0
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].isdigit():
+            latest = max(latest, int(parts[-1]))
+    if latest == 0:
+        return None
+    return max(0, now - latest)
+
+
+def parse_scan(text: str) -> List[dict]:
+    """The networks of `iw dev <if> scan`, strongest first, one per name."""
+    blocks = []
+    for line in text.splitlines():
+        if line.startswith("BSS "):
+            blocks.append([])
+        elif blocks:
+            blocks[-1].append(line)
+
+    best = {}
+    for lines in blocks:
+        ssid = signal_dbm = None
+        privacy = rsn_wpa = False
+        for line in lines:
+            m = re.match(r"\t(SSID|signal|capability): ?(.*)$", line)
+            if m:
+                key, value = m.groups()
+                if key == "SSID" and ssid is None:
+                    ssid = _decode_ssid(value)
+                elif key == "signal":
+                    signal_dbm = _dbm(value)
+                elif key == "capability":
+                    privacy = "Privacy" in value.split()
+            elif re.match(r"\t(RSN|WPA):", line):
+                rsn_wpa = True
+        if not ssid or not ssid.strip("\0") or signal_dbm is None:
+            continue
+        net = {"ssid": ssid, "signal_dbm": signal_dbm,
+               "secured": rsn_wpa or privacy, "supported": rsn_wpa or not privacy}
+        if ssid not in best or signal_dbm > best[ssid]["signal_dbm"]:
+            best[ssid] = net
+    nets = sorted(best.values(), key=lambda n: -n["signal_dbm"])
+    return nets[:MAX_NETWORKS]
+
+
+# ============ Commands ============
+
+def status() -> dict:
+    try:
+        rc, link, err = run([IP, "-j", "-d", "link", "show"])
+        if rc != 0:
+            raise NetworkError("ip link failed: %s" % err.strip())
+        rc, addr, err = run([IP, "-j", "-4", "addr", "show"])
+        if rc != 0:
+            raise NetworkError("ip addr failed: %s" % err.strip())
+        interfaces = parse_ip(link, addr, SYS_NET)
+    except (ValueError, subprocess.TimeoutExpired) as e:
+        raise NetworkError("cannot read the interfaces: %s" % e)
+
+    for i in interfaces:
+        if i["state"] == "off":
+            continue
+        try:
+            if i["kind"] == "wifi":
+                rc, out, _ = run([IW, "dev", i["name"], "link"])
+                ssid, dbm = parse_iw_link(out) if rc == 0 else (None, None)
+                if ssid is not None:
+                    i["state"], i["ssid"], i["signal_dbm"] = "connected", ssid, dbm
+            elif i["kind"] == "wireguard":
+                rc, out, _ = run([WG, "show", i["name"], "latest-handshakes"])
+                age = parse_handshake(out, int(time.time())) if rc == 0 else None
+                i["handshake_age_s"] = age
+                if age is not None and age <= HANDSHAKE_FRESH_S:
+                    i["state"] = "connected"
+        except (NetworkError, subprocess.TimeoutExpired) as e:
+            log("%s: %s" % (i["name"], e))
+    return {"interfaces": interfaces}
+
+
+def scan_timeout() -> float:
+    try:
+        value = float(os.environ.get("TF_NETWORK_SCAN_TIMEOUT", DEFAULT_SCAN_TIMEOUT))
+    except ValueError:
+        return DEFAULT_SCAN_TIMEOUT
+    return value if value > 0 else DEFAULT_SCAN_TIMEOUT
+
+
+def wifi_device() -> Optional[str]:
+    try:
+        names = sorted(os.listdir(SYS_NET))
+    except OSError:
+        return None
+    for name in names:
+        if os.path.exists(os.path.join(SYS_NET, name, "wireless")):
+            return name
+    return None
+
+
+def _link_is_up(dev: str) -> bool:
+    rc, out, _ = run([IP, "-j", "link", "show", "dev", dev])
+    try:
+        return rc == 0 and "UP" in json.loads(out)[0].get("flags", [])
+    except (ValueError, IndexError, AttributeError):
+        return False
+
+
+def scan() -> dict:
+    dev = wifi_device()
+    if dev is None:
+        raise NetworkError("No WiFi adapter found")
+    try:
+        if not _link_is_up(dev):
+            rc, _, err = run([IP, "link", "set", dev, "up"])
+            if rc != 0:
+                raise NetworkError("Cannot switch the WiFi adapter on")
+        timeout = scan_timeout()
+        for attempt in (1, 2):
+            rc, out, err = run([IW, "dev", dev, "scan"], timeout)
+            if rc == 0:
+                return {"device": dev, "networks": parse_scan(out)}
+            if "Device or resource busy" in out + err and attempt == 1:
+                time.sleep(BUSY_WAIT)
+                continue
+            log("iw scan failed: %s" % (err.strip() or out.strip()))
+            break
+    except subprocess.TimeoutExpired:
+        log("iw scan took longer than %s s" % scan_timeout())
+        raise NetworkError("The WiFi scan took too long")
+    raise NetworkError("The WiFi scan failed")
+
+
+# ============ Entry point ============
+
+COMMANDS = {"status": status, "scan": scan}
+
+
+def fail(reason: str) -> None:
+    print(json.dumps({"result": "failed", "reason": reason}), flush=True)
+
+
+def is_root() -> bool:
+    return os.geteuid() == 0 or os.environ.get("TF_NETWORK_ASSUME_ROOT") == "1"
+
+
+def main(argv: List[str]) -> int:
+    """Exit 0 on success, 1 on a failure, 2 on misuse."""
+    if len(argv) != 1 or argv[0] not in COMMANDS:
+        print(USAGE, file=sys.stderr)
+        fail(USAGE)
+        return 2
+    if not is_root():
+        log("needs root")
+        fail("needs root")
+        return 2
+    try:
+        result = COMMANDS[argv[0]]()
+    except NetworkError as e:
+        log("%s failed: %s" % (argv[0], e))
+        fail(str(e))
+        return 1
+    print(json.dumps(result), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

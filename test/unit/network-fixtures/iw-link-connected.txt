@@ -1,0 +1,11 @@
+Connected to 8c:8d:28:11:22:33 (on wlan0)
+	SSID: Office WiFi
+	freq: 5180.0
+	RX: 1234567 bytes (4321 packets)
+	TX: 765432 bytes (3210 packets)
+	signal: -52 dBm
+	rx bitrate: 433.3 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 1
+
+	bss flags:	short-slot-time
+	dtim period:	2
+	beacon int:	100
