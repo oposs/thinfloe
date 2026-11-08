@@ -11,6 +11,7 @@ use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu, Screen};
+use crate::netfiles;
 use crate::raster::{Background, Canvas, Textures};
 use crate::release;
 use crate::ui;
@@ -291,6 +292,37 @@ fn panic_result(job: &Job) -> JobResult {
             custom: source.is_some(),
             result: Err(e),
         },
+        Job::NetLoad | Job::NetStatus | Job::NetScan | Job::NetApply { .. } | Job::NetTakeOver { .. } => {
+            net_failed(job, e)
+        }
+    }
+}
+
+/// The failed result of a network job: the files read as unreadable, the
+/// calls as failed.
+fn net_failed(job: &Job, e: String) -> JobResult {
+    let wifi = || netfiles::WifiFile {
+        state: netfiles::FileState::Hand,
+        device: None,
+        networks: Vec::new(),
+        manageable: false,
+        error: Some(e.clone()),
+    };
+    match job {
+        Job::NetLoad => JobResult::NetLoaded(
+            wifi(),
+            netfiles::WiredFile {
+                state: netfiles::FileState::Hand,
+                wired: netfiles::Wired::Dhcp,
+                manageable: false,
+                error: Some(e.clone()),
+            },
+            Vec::new(),
+        ),
+        Job::NetStatus => JobResult::NetStatus(Err(e)),
+        Job::NetScan => JobResult::NetScan(Err(e)),
+        Job::NetApply { .. } => JobResult::NetApplied(Err(e)),
+        _ => JobResult::NetTakenOver(Err(e)),
     }
 }
 
@@ -337,6 +369,10 @@ fn job_result(
             custom: source.is_some(),
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
         },
+        // Run on the worker in the next step of the Network tab.
+        Job::NetLoad | Job::NetStatus | Job::NetScan | Job::NetApply { .. } | Job::NetTakeOver { .. } => {
+            net_failed(&job, "the network jobs are not wired yet".to_string())
+        }
     }
 }
 

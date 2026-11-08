@@ -24,6 +24,8 @@
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
+use crate::netfiles;
+use crate::network::{NetRequest, NetTab};
 use crate::screentab::{self, IdleSource, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::tiles::{Action, Grid, Origin, Tile};
@@ -136,6 +138,21 @@ pub enum Job {
     UpgradeCheck {
         source: Option<String>,
     },
+    /// Read the network files of the home and the machine's WiFi adapters.
+    NetLoad,
+    /// `thinfloe-network status`.
+    NetStatus,
+    /// `thinfloe-network scan`.
+    NetScan,
+    /// Save `change` into the home, then `sudo -n thinfloe-network apply`,
+    /// in a process group of its own.
+    NetApply {
+        change: netfiles::Change,
+    },
+    /// *Let the menu manage it* for `"wifi"` or `"wired"`.
+    NetTakeOver {
+        which: &'static str,
+    },
 }
 
 /// What fills the space above the log.
@@ -217,6 +234,8 @@ pub struct Menu {
     pub settings_tab: SettingsTab,
     /// The screen timeout, as the Screen tab shows it.
     pub screen_tab: ScreenTab,
+    /// The Network tab, and the Apply it runs.
+    pub network: NetTab,
 }
 
 impl Menu {
@@ -256,11 +275,44 @@ impl Menu {
             usb_boot: false,
             settings_tab: SettingsTab::Packages,
             screen_tab: ScreenTab::default(),
+            // Until `set_usb_boot` says otherwise: netboot offers less.
+            network: NetTab::new(true),
         }
     }
 
     pub fn set_usb_boot(&mut self, usb: bool) {
         self.usb_boot = usb;
+        self.network = NetTab::new(!usb);
+    }
+
+    fn net_request(&self, r: NetRequest) -> Effect {
+        Effect::Start(match r {
+            NetRequest::Load => Job::NetLoad,
+            NetRequest::Status => Job::NetStatus,
+            NetRequest::Scan => Job::NetScan,
+            NetRequest::Apply(change) => Job::NetApply { change },
+            NetRequest::TakeOver(which) => Job::NetTakeOver { which },
+        })
+    }
+
+    /// A ThinLinc or OxuLnk session runs: an Apply may cut it off.
+    fn remote_running(&self) -> bool {
+        self.jobs.iter().any(|j| {
+            self.tiles
+                .get(j.tile)
+                .is_some_and(|t| matches!(addon_id(t), "10-thinlinc" | "20-oxulnk"))
+        })
+    }
+
+    /// An Apply or a take-over changed the home: save it. While the
+    /// end-of-session question is up the logout save follows, unless the
+    /// person stays: then this one is owed.
+    fn net_changed_home(&mut self) -> Option<Effect> {
+        if self.logout.is_some() && !self.restore_failed {
+            self.deferred_save = true;
+            return None;
+        }
+        self.save_after_change()
     }
 
     /// This boot's home directory was not restored.
@@ -304,16 +356,19 @@ impl Menu {
     }
 
     /// The root jobs that run, for the end-of-session dialog: the add-on
-    /// jobs, then the stick write.
+    /// jobs, then the stick write, then a network Apply.
     pub fn root_jobs(&self) -> Vec<String> {
         let mut v = self.addon_jobs();
         v.extend(self.upgrade.job_name());
+        if self.network.applying() {
+            v.push(NET_APPLYING.to_string());
+        }
         v
     }
 
-    /// No add-on job and no stick write runs.
+    /// No add-on job, no stick write and no network Apply runs.
     fn root_idle(&self) -> bool {
-        self.addon_runs.is_empty() && !self.upgrade.writing()
+        self.addon_runs.is_empty() && !self.upgrade.writing() && !self.network.applying()
     }
 
     /// The known process groups of the root jobs.
@@ -322,6 +377,7 @@ impl Menu {
             .iter()
             .filter_map(|a| a.pgid)
             .chain(self.upgrade.pgid())
+            .chain(self.network.pgid())
             .collect()
     }
 
@@ -425,6 +481,10 @@ impl Menu {
         }
         let (verb, id) = match event {
             SettingsEvent::Back => {
+                // Plan call 5: what was not applied goes with the screen.
+                if self.network.drop_draft() {
+                    self.log.note(Kind::Warn, NET_DROPPED);
+                }
                 self.screen = Screen::Grid;
                 self.offer_retry();
                 return None;
@@ -440,6 +500,10 @@ impl Menu {
             }
             SettingsEvent::ManageScreen => {
                 return (self.screen_tab.source == IdleSource::ByHand).then_some(Effect::TakeOverScreen);
+            }
+            SettingsEvent::Network(e) => {
+                let r = self.network.event(e, self.remote_running())?;
+                return Some(self.net_request(r));
             }
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
@@ -691,6 +755,11 @@ impl Menu {
         if !signalled {
             self.log.note(Kind::Event, NEXT_SESSION);
         }
+        self.save_after_change()
+    }
+
+    /// A file of the home changed: save, or say why not.
+    fn save_after_change(&mut self) -> Option<Effect> {
         if self.restore_failed {
             self.log.note(Kind::Warn, SaveOutcome::RestoreFailed.message());
             return None;
@@ -840,13 +909,59 @@ impl Menu {
                 self.upgrade.released(custom, result);
                 None
             }
-            // The Network tab takes these over (state machine: next task).
-            JobResult::NetLoaded(..)
-            | JobResult::NetStatus(_)
-            | JobResult::NetScan(_)
-            | JobResult::NetApplyStarted { .. }
-            | JobResult::NetApplied(_)
-            | JobResult::NetTakenOver(_) => None,
+            JobResult::NetLoaded(wifi, wired, devices) => {
+                self.network.loaded(wifi, wired, devices);
+                None
+            }
+            JobResult::NetStatus(r) => {
+                self.network.status_done(r);
+                None
+            }
+            JobResult::NetScan(r) => {
+                self.network.scan_done(r);
+                None
+            }
+            JobResult::NetApplyStarted { pgid } => {
+                if !self.network.applying() {
+                    return None;
+                }
+                self.network.apply_started(pgid);
+                // Restart anyway came before the group was known.
+                matches!(self.logout, Some(Logout::StoppingAddons { .. }))
+                    .then(|| Effect::Signal(vec![pgid], Signal::Term))
+            }
+            JobResult::NetApplied(r) => {
+                if !self.network.applying() {
+                    return None;
+                }
+                match &r {
+                    Ok(()) => self.log.note(Kind::Event, "Network settings applied."),
+                    Err(e) => self.log.note(Kind::Warn, format!("Network settings not applied: {e}")),
+                }
+                let save = self.network.apply_done(r);
+                // The logout save, if the logout waited for this, covers it.
+                if let Some(next) = self.root_job_ended(now) {
+                    return Some(next);
+                }
+                if save { self.net_changed_home() } else { None }
+            }
+            JobResult::NetTakenOver(r) => {
+                if !self.network.taking_over() {
+                    return None;
+                }
+                let which = self.network.taking_over_file();
+                match &r {
+                    Ok(()) => self
+                        .log
+                        .note(Kind::Event, format!("~/{which} is now managed by the menu.")),
+                    Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
+                }
+                if self.network.take_over_done(r) {
+                    self.net_changed_home()
+                } else {
+                    None
+                }
+            }
             JobResult::AddonStarted { args, pgid } => {
                 let run = self
                     .addon_runs
@@ -948,6 +1063,11 @@ impl Menu {
     /// menu once "saved" has been shown for `LOGOUT_PAUSE`. On the Upgrade
     /// screen it also lists the drives when that is due.
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
+        let net_open =
+            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
+        if let Some(r) = self.network.poll(now, net_open) {
+            return Some(self.net_request(r));
+        }
         if self.logout.is_none() && self.screen == Screen::Upgrade {
             let r = self.upgrade.poll(now)?;
             return self.upgrade_request(r, now);
@@ -978,6 +1098,12 @@ impl Menu {
 }
 
 const SAVING: &str = "Saving the home directory…";
+
+/// *Back* dropped a network draft (plan call 5).
+pub const NET_DROPPED: &str = "Network changes that were not applied were dropped.";
+
+/// The network Apply as the end-of-session dialog names it.
+pub const NET_APPLYING: &str = "Applying network settings";
 
 fn run_message(name: &str, status: &Result<Option<i32>, String>) -> (Kind, String) {
     match status {
@@ -2300,6 +2426,318 @@ mod tests {
         m.finished(JobResult::Saved(SaveOutcome::Saved), now);
         m.activate(3, now);
         assert_eq!(m.choose(Choice::Stay, now), None);
+    }
+
+    // The Network tab and its jobs.
+
+    use crate::netfiles::{FileState, Net, WifiFile, Wired, WiredFile};
+    use crate::network::{NetEvent, POLL as NET_POLL};
+
+    const DROPPED: &str = "Network changes that were not applied were dropped.";
+
+    fn net_loaded() -> JobResult {
+        JobResult::NetLoaded(
+            WifiFile {
+                state: FileState::Menu,
+                device: Some("wlp1".into()),
+                networks: vec![Net {
+                    ssid: "Home".into(),
+                    hidden: false,
+                    password: Some("secret123".into()),
+                }],
+                manageable: true,
+                error: None,
+            },
+            WiredFile {
+                state: FileState::Menu,
+                wired: Wired::Dhcp,
+                manageable: true,
+                error: None,
+            },
+            vec!["wlp1".into()],
+        )
+    }
+
+    /// `grid()` on a stick-booted machine, on the Network tab, files read.
+    fn net_menu(restore_failed: bool) -> Menu {
+        let mut m = Menu::new(grid(), restore_failed);
+        m.set_usb_boot(true);
+        m.screen = Screen::Settings;
+        m.settings_tab = SettingsTab::Network;
+        assert_eq!(m.finished(net_loaded(), Instant::now()), None);
+        m
+    }
+
+    fn net(m: &mut Menu, e: NetEvent) -> Option<Effect> {
+        m.settings(SettingsEvent::Network(e))
+    }
+
+    /// Forget the saved network and Apply.
+    fn net_apply(m: &mut Menu) {
+        assert_eq!(net(m, NetEvent::Forget("Home".into())), None);
+        assert_eq!(
+            net(m, NetEvent::Apply),
+            Some(Effect::Start(Job::NetApply {
+                change: netfiles::Change {
+                    wifi: Some(Vec::new()),
+                    wired: None
+                }
+            }))
+        );
+        assert!(m.network.applying());
+    }
+
+    #[test]
+    fn settings_has_three_tabs() {
+        assert_eq!(
+            SettingsTab::ALL,
+            [SettingsTab::Packages, SettingsTab::Network, SettingsTab::Screen]
+        );
+        assert_eq!(SettingsTab::Network.label(), "Network");
+    }
+
+    #[test]
+    fn back_drops_the_draft_with_a_line() {
+        let mut m = net_menu(false);
+        net(&mut m, NetEvent::WiredMode(true));
+        net(&mut m, NetEvent::Forget("Home".into()));
+        // Another tab keeps the draft.
+        m.settings(SettingsEvent::Tab(SettingsTab::Screen));
+        assert!(m.network.dirty());
+        m.settings(SettingsEvent::Back);
+        assert!(!m.network.dirty());
+        assert_eq!(log(&m), [warn(DROPPED)]);
+        // Nothing to drop: no line.
+        m.screen = Screen::Settings;
+        m.settings(SettingsEvent::Back);
+        assert_eq!(log(&m), [warn(DROPPED)]);
+    }
+
+    #[test]
+    fn network_events_only_on_the_settings_screen() {
+        let mut m = net_menu(false);
+        m.screen = Screen::Grid;
+        assert_eq!(net(&mut m, NetEvent::Forget("Home".into())), None);
+        assert!(!m.network.dirty());
+        m.screen = Screen::Settings;
+        m.logout = Some(Logout::Confirm);
+        assert_eq!(net(&mut m, NetEvent::Forget("Home".into())), None);
+        assert!(!m.network.dirty());
+    }
+
+    #[test]
+    fn apply_while_thinlinc_runs_asks_first() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        m.screen = Screen::Grid;
+        started(&mut m, 0, now);
+        m.screen = Screen::Settings;
+        net(&mut m, NetEvent::Forget("Home".into()));
+        assert_eq!(net(&mut m, NetEvent::Apply), None);
+        assert!(m.network.confirm_open());
+        assert!(matches!(
+            net(&mut m, NetEvent::ConfirmApply),
+            Some(Effect::Start(Job::NetApply { .. }))
+        ));
+        // A Terminal is no remote session.
+        let mut m = net_menu(false);
+        m.screen = Screen::Grid;
+        started(&mut m, 1, now);
+        m.screen = Screen::Settings;
+        net(&mut m, NetEvent::Forget("Home".into()));
+        assert!(matches!(
+            net(&mut m, NetEvent::Apply),
+            Some(Effect::Start(Job::NetApply { .. }))
+        ));
+    }
+
+    #[test]
+    fn tick_polls_only_on_the_network_tab() {
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        m.screen = Screen::Settings;
+        assert_eq!(m.tick(now), None, "Packages tab");
+        m.settings_tab = SettingsTab::Network;
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::NetLoad)));
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::NetStatus)));
+        assert_eq!(m.tick(now), None);
+        m.finished(JobResult::NetStatus(Ok(Vec::new())), now);
+        assert_eq!(m.tick(now + NET_POLL), Some(Effect::Start(Job::NetStatus)));
+        m.finished(JobResult::NetStatus(Ok(Vec::new())), now);
+        m.screen = Screen::Grid;
+        assert_eq!(m.tick(now + NET_POLL * 2), None);
+    }
+
+    #[test]
+    fn restart_waits_for_network_apply() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        // Back during the Apply drops nothing: the change is in flight.
+        m.settings(SettingsEvent::Back);
+        assert!(!log(&m).contains(&warn(DROPPED)));
+        assert_eq!(m.activate(4, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.root_jobs(), ["Applying network settings"]);
+        assert_eq!(m.finished(JobResult::NetApplyStarted { pgid: 4242 }, now), None);
+        assert_eq!(m.choose(Choice::StopAndLeave, now), None);
+        assert_eq!(m.logout, Some(Logout::WaitAddons));
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Signal(vec![4242], Signal::Term))
+        );
+        // Ended: the logout save follows, and covers the change.
+        assert_eq!(
+            m.finished(JobResult::NetApplied(Ok(())), now),
+            Some(Effect::Start(Job::Save))
+        );
+        assert!(matches!(m.logout, Some(Logout::Saving { .. })));
+        assert!(!m.deferred_save);
+    }
+
+    #[test]
+    fn stay_after_a_network_apply_saves() {
+        // A program still runs while the Apply ends: the logout save may
+        // never come, so Stay saves.
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        m.settings(SettingsEvent::Back);
+        started(&mut m, 1, now);
+        let i = m.tiles.iter().position(|t| t.action == Action::Logout).unwrap();
+        assert_eq!(m.activate(i, now), None);
+        assert_eq!(m.logout, Some(Logout::Confirm));
+        assert_eq!(m.finished(JobResult::NetApplied(Ok(())), now), None);
+        assert!(!m.save.running);
+        assert_eq!(m.choose(Choice::Stay, now), Some(Effect::Start(Job::Save)));
+    }
+
+    #[test]
+    fn restart_anyway_stops_an_apply_started_late() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        m.settings(SettingsEvent::Back);
+        m.activate(4, now);
+        assert_eq!(m.choose(Choice::StopAndLeave, now), None);
+        assert_eq!(m.choose(Choice::LeaveAnyway, now), None, "no group known yet");
+        assert_eq!(
+            m.finished(JobResult::NetApplyStarted { pgid: 77 }, now),
+            Some(Effect::Signal(vec![77], Signal::Term))
+        );
+    }
+
+    #[test]
+    fn network_apply_queues_one_save() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        assert_eq!(m.finished(JobResult::NetApplyStarted { pgid: 9 }, now), None);
+        assert_eq!(m.root_jobs(), ["Applying network settings"]);
+        assert_eq!(
+            m.finished(JobResult::NetApplied(Ok(())), now),
+            Some(Effect::Start(Job::Save))
+        );
+        assert!(m.save.running && !m.save.again);
+        assert!(m.root_jobs().is_empty());
+        // The files are read again.
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::NetLoad)));
+        // A take-over while that save runs queues one more.
+        m.finished(
+            JobResult::NetLoaded(
+                WifiFile {
+                    state: FileState::Hand,
+                    device: None,
+                    networks: Vec::new(),
+                    manageable: true,
+                    error: None,
+                },
+                WiredFile {
+                    state: FileState::Menu,
+                    wired: Wired::Dhcp,
+                    manageable: true,
+                    error: None,
+                },
+                Vec::new(),
+            ),
+            now,
+        );
+        assert_eq!(
+            net(&mut m, NetEvent::TakeOver("wifi")),
+            Some(Effect::Start(Job::NetTakeOver { which: "wifi" }))
+        );
+        assert_eq!(m.finished(JobResult::NetTakenOver(Ok(())), now), None);
+        assert!(m.save.again);
+        assert_eq!(
+            log(&m),
+            [
+                ev("Network settings applied."),
+                ev("Saving the home directory…"),
+                ev("~/wifi.yaml is now managed by the menu."),
+            ]
+        );
+    }
+
+    #[test]
+    fn network_apply_failure_is_logged_and_not_saved() {
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        net_apply(&mut m);
+        assert_eq!(m.finished(JobResult::NetApplied(Err("no link".into())), now), None);
+        assert!(!m.save.running);
+        assert_eq!(m.network.error(), Some("no link"));
+        assert_eq!(log(&m), [warn("Network settings not applied: no link")]);
+        // An answer nobody asked for is dropped.
+        assert_eq!(m.finished(JobResult::NetApplied(Ok(())), now), None);
+        assert_eq!(m.finished(JobResult::NetApplyStarted { pgid: 3 }, now), None);
+        assert_eq!(m.network.pgid(), None);
+    }
+
+    #[test]
+    fn network_apply_after_failed_restore_does_not_save() {
+        let mut m = net_menu(true);
+        let now = Instant::now();
+        net_apply(&mut m);
+        assert_eq!(m.finished(JobResult::NetApplied(Ok(())), now), None);
+        assert!(!m.save.running);
+        assert_eq!(
+            log(&m),
+            [
+                ev("Network settings applied."),
+                warn(&SaveOutcome::RestoreFailed.message())
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_written_still_saves() {
+        let mut m = Menu::new(grid(), false);
+        assert_eq!(
+            m.screen_written(Ok(screen(300, IdleSource::Menu)), true),
+            Some(Effect::Start(Job::Save))
+        );
+        let mut m = Menu::new(grid(), true);
+        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert_eq!(
+            log(&m),
+            [
+                ev("Screen turns off after 5 minutes."),
+                warn(&SaveOutcome::RestoreFailed.message())
+            ]
+        );
+    }
+
+    #[test]
+    fn netboot_offers_no_fixed_address() {
+        let mut m = Menu::new(grid(), false);
+        m.screen = Screen::Settings;
+        m.finished(net_loaded(), Instant::now());
+        net(&mut m, NetEvent::WiredMode(true));
+        assert!(!m.network.dirty(), "netboot is the default");
+        m.set_usb_boot(true);
+        m.finished(net_loaded(), Instant::now());
+        net(&mut m, NetEvent::WiredMode(true));
+        assert!(m.network.dirty());
     }
 
     // The Upgrade screen and its write job.

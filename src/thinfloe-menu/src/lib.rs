@@ -15,6 +15,7 @@ pub mod log;
 pub mod menu;
 pub mod netfiles;
 pub mod nettab;
+pub mod network;
 pub mod outputs;
 pub mod owned;
 pub mod raster;

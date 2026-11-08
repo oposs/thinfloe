@@ -5,6 +5,7 @@
 
 use crate::addons::{self, AddonState, AddonStatus};
 use crate::menu::Menu;
+use crate::network::NetEvent;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -26,21 +27,25 @@ pub enum SettingsEvent {
     IdleTimeout(u32),
     /// Let the menu manage a screen file written by hand.
     ManageScreen,
+    /// Something on the Network tab.
+    Network(NetEvent),
 }
 
 /// The tabs of the Settings screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Packages,
+    Network,
     Screen,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 2] = [SettingsTab::Packages, SettingsTab::Screen];
+    pub const ALL: [SettingsTab; 3] = [SettingsTab::Packages, SettingsTab::Network, SettingsTab::Screen];
 
     pub fn label(self) -> &'static str {
         match self {
             SettingsTab::Packages => "Packages",
+            SettingsTab::Network => "Network",
             SettingsTab::Screen => "Screen",
         }
     }

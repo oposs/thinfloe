@@ -806,6 +806,8 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     let body = match menu.settings_tab {
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
         SettingsTab::Screen => screen_tab(&mut s_ui, menu),
+        // Drawn in the next step of the Network tab.
+        SettingsTab::Network => None,
     };
     event.or(body)
 }
