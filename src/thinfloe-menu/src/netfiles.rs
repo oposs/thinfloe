@@ -1727,4 +1727,38 @@ exit 0
         assert_eq!(parse_wifi(Some(&t)).networks, [net("fine", None, false)]);
         assert!(!render_wifi(Some(TEMPLATE_MARKER), &[net("fine", None, false)]).contains(TEMPLATE_MARKER));
     }
+
+    /// Writes the files that test/integration/test-network-netplan.sh feeds to
+    /// the netplan of the built image. Does nothing unless TF_NETPLAN_FIXTURES
+    /// names a directory.
+    #[test]
+    fn write_netplan_fixtures() {
+        let Some(dir) = std::env::var_os("TF_NETPLAN_FIXTURES") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        fs::create_dir_all(&dir).unwrap();
+        let two = render_wifi(
+            Some("wlp58s0"),
+            &[net("hidden net", Some("secret123"), true), net("open net", None, false)],
+        );
+        fs::write(dir.join("wifi-two.yaml"), two).unwrap();
+        let pw = "p@ss: \"x\" #1\\";
+        let mut odd: Vec<Net> = ["Caf\u{e9} \"Nord\"", " lead", "a:b #c", "back\\slash", "yes", "123"]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| net(s, Some(pw), i % 2 == 0))
+            .collect();
+        odd.push(net("open", None, false));
+        fs::write(dir.join("wifi-odd.yaml"), render_wifi(Some("wlp58s0"), &odd)).unwrap();
+        fs::write(dir.join("wifi-bare.yaml"), render_wifi(Some("wlp58s0"), &[])).unwrap();
+        let wired = Wired::Static {
+            address: Ipv4Addr::new(192, 168, 1, 10),
+            prefix: 24,
+            gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
+        };
+        let text = render_wired(SHIPPED_WIRED, &wired).unwrap().unwrap();
+        fs::write(dir.join("ethernet-static.yaml"), text).unwrap();
+    }
 }

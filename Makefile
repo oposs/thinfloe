@@ -497,6 +497,7 @@ test: test-unit rootfs
 	@test/integration/test-plymouth-step.sh
 	@test/integration/test-make-clean.sh
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
+	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
 
 # Runtime session tests. Needs network (installs python3-xlib into a
 # test-only image) and runs a compositor, so it is deliberately not part of
