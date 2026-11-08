@@ -2639,6 +2639,40 @@ mod tests {
         net
     }
 
+    /// A Network tab with the given file states and adapters; the menu
+    /// file, when there is one, holds one saved network on `wlp1`.
+    fn net_files(
+        netboot: bool,
+        wifi: crate::netfiles::FileState,
+        wired: crate::netfiles::FileState,
+        devices: &[&str],
+    ) -> crate::network::NetTab {
+        use crate::netfiles::FileState;
+        let mut net = crate::network::NetTab::new(netboot);
+        let networks = if wifi == FileState::Menu {
+            vec![saved_net("Home", Some("secret123"), false)]
+        } else {
+            vec![]
+        };
+        net.loaded(
+            crate::netfiles::WifiFile {
+                state: wifi,
+                device: (!devices.is_empty()).then(|| "wlp1".to_string()),
+                networks,
+                manageable: true,
+                error: None,
+            },
+            crate::netfiles::WiredFile {
+                state: wired,
+                wired: crate::netfiles::Wired::Dhcp,
+                manageable: true,
+                error: None,
+            },
+            devices.iter().map(|d| d.to_string()).collect(),
+        );
+        net
+    }
+
     /// Menu-owned files: two saved networks (one secured, one open and
     /// hidden) and a fixed wired address.
     fn two_networks() -> crate::network::NetTab {
@@ -4161,8 +4195,55 @@ mod tests {
         menu.network = net;
         shot(&menu, "settings-network-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-network-21in-4k.ppm", (3840, 2160), 2.25);
+        shot(&menu, "settings-network-4k.ppm", (3840, 2160), 2.0);
         menu.network = add_dialog_open();
         shot(&menu, "settings-network-add-1080.ppm", (1920, 1080), 1.0);
+        {
+            use crate::netfiles::FileState;
+            use crate::network::NetEvent;
+            let one = (1920, 1080);
+            // Both files written by hand.
+            let mut m = open_settings();
+            m.settings_tab = crate::settings::SettingsTab::Network;
+            m.network = net_files(false, FileState::Hand, FileState::Hand, &["wlp1"]);
+            shot(&m, "settings-network-hand-1080.ppm", one, 1.0);
+            // Netboot: always DHCP.
+            m.network = net_files(true, FileState::Menu, FileState::Menu, &["wlp1"]);
+            shot(&m, "settings-network-netboot-1080.ppm", one, 1.0);
+            // No adapter at all.
+            m.network = net_files(false, FileState::Missing, FileState::Missing, &[]);
+            m.network.status_done(Ok(Vec::new()));
+            shot(&m, "settings-network-noadapter-1080.ppm", one, 1.0);
+            // A saved network whose adapter is gone.
+            m.network = net_files(false, FileState::Menu, FileState::Menu, &["wlp9"]);
+            shot(&m, "settings-network-adapter-changed-1080.ppm", one, 1.0);
+            // The Apply confirmation (remote session).
+            m.network = two_networks();
+            m.network.event(NetEvent::Forget("Lab".into()), true);
+            m.network.event(NetEvent::Apply, true);
+            shot(&m, "settings-network-confirm-1080.ppm", one, 1.0);
+            // The add dialog with a hidden network typed.
+            m.network = add_dialog_open();
+            m.network.event(
+                NetEvent::AddText {
+                    ssid: "Guest".into(),
+                    password: "hunter2hunter2".into(),
+                    hidden: true,
+                },
+                false,
+            );
+            shot(&m, "settings-network-add-hidden-1080.ppm", one, 1.0);
+            // An Apply that failed.
+            m.network = two_networks();
+            m.network.event(NetEvent::Forget("Lab".into()), false);
+            m.network.event(NetEvent::Apply, false);
+            m.network.apply_started(7);
+            m.network.apply_done(Err(crate::jobs::ApplyFailed {
+                reason: "netplan apply failed: Invalid YAML in /etc/netplan/90-thinfloe.yaml".into(),
+                home_changed: false,
+            }));
+            shot(&m, "settings-network-error-1080.ppm", one, 1.0);
+        }
         let mut newer = Menu::new(shipped_grid(), false);
         newer.set_usb_boot(true);
         newer.set_installed(Some("4.0.0".into()));
