@@ -101,12 +101,21 @@ pub fn read_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// Undo a write of the menu: `path` gets the bytes `old` back, or, when
-/// it had none, the menu's file is removed. A link is never followed.
+/// it had none, the menu's file is removed. Only the menu's own file is
+/// replaced, or an empty place filled: a link or a file written by hand
+/// that appeared meanwhile is refused with `PermissionDenied` and kept.
 pub fn put_back(path: &Path, old: Option<&[u8]>) -> io::Result<()> {
-    match old {
-        Some(bytes) => replace(path, |f| f.write_all(bytes)),
-        None => remove(path),
+    let Some(bytes) = old else {
+        return remove(path);
+    };
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+        Ok(m) if !m.file_type().is_file() => return Err(by_hand(path)),
+        Ok(_) if owner(read(path)?.as_deref()) != Owner::Menu => return Err(by_hand(path)),
+        Ok(_) => {}
     }
+    replace(path, |f| f.write_all(bytes))
 }
 
 /// Remove a file the menu wrote. A missing file is fine; one written by
@@ -293,6 +302,38 @@ mod tests {
         assert_eq!(remove(&p).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(is_link(&p));
         assert_eq!(fs::read_to_string(&target).unwrap(), MENU_FILE);
+    }
+
+    #[test]
+    fn put_back_replaces_only_a_menu_file() {
+        let d = TestDir::new("owned", "put-back");
+        let p = d.join("wifi.yaml");
+        // Nothing there: recreated; a menu file: replaced.
+        put_back(&p, Some(b"old: 1\n")).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"old: 1\n");
+        fs::write(&p, MENU_FILE).unwrap();
+        put_back(&p, Some(b"old: 2\n")).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"old: 2\n");
+        // A hand file is refused and kept.
+        fs::write(&p, "hand: 1\n").unwrap();
+        assert_eq!(
+            put_back(&p, Some(b"old\n")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::read(&p).unwrap(), b"hand: 1\n");
+        // A link, even to a menu file, is refused and stays a link.
+        fs::remove_file(&p).unwrap();
+        let target = d.join("target");
+        fs::write(&target, MENU_FILE).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        assert_eq!(
+            put_back(&p, Some(b"old\n")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(is_link(&p));
+        assert_eq!(fs::read_link(&p).unwrap(), target);
+        assert_eq!(fs::read_to_string(&target).unwrap(), MENU_FILE);
+        assert!(!d.join("wifi.yaml.tmp").exists());
     }
 
     #[test]

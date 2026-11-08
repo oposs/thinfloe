@@ -702,6 +702,9 @@ fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> 
     let mut failed = ApplyFailed::new(reason);
     for (name, old) in before {
         let path = home.join(name);
+        // Unchanged: nothing to do. Anything else, a read that fails
+        // included, goes to `put_back`, which keeps a link or a hand file
+        // and says so.
         let now = crate::owned::read_bytes(&path);
         if now.as_ref().is_ok_and(|b| b == old) {
             continue;
@@ -1382,6 +1385,52 @@ mod tests {
             "{}",
             r.reason
         );
+    }
+
+    #[test]
+    fn putting_back_never_writes_over_a_link_or_a_hand_file() {
+        let d = dir("net-put-back-refused");
+        let feed = Arc::new(Feed::default());
+        let home = d.join("home");
+        let target = d.join("elsewhere.yaml");
+        let change = netfiles::Change {
+            wifi: Some(Vec::new()),
+            wired: None,
+        };
+        // (a) A link appears at ~/wifi.yaml during the apply.
+        let tool = format!(
+            r#"rm -f {0}/wifi.yaml; ln -s {1} {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            home.display(),
+            target.display()
+        );
+        let p = net_home(&d, &tool, None);
+        std::fs::write(&target, "elsewhere: 1\n").unwrap();
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.home_changed);
+        assert!(
+            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
+            "{}",
+            r.reason
+        );
+        let link = home.join("wifi.yaml");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"elsewhere: 1\n");
+        std::fs::remove_file(&link).unwrap();
+        // (b) A hand file without the header appears.
+        let tool = format!(
+            r#"printf 'hand: 1\n' > {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            home.display()
+        );
+        let p = net_home(&d, &tool, None);
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.home_changed);
+        assert!(
+            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
+            "{}",
+            r.reason
+        );
+        assert_eq!(std::fs::read(home.join("wifi.yaml")).unwrap(), b"hand: 1\n");
     }
 
     #[test]
