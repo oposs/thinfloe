@@ -291,6 +291,8 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
     let root = docs.first().and_then(Yaml::as_hash);
     let network = get_hash(root, "network");
     let wifis = get_hash(network, "wifis");
+    // Per network: its AP keys are all the menu's own (Ruling 22).
+    let mut ap_ok = Vec::new();
     let mut ok = docs.len() == 1
         && root.is_some_and(|h| keys_within(h, &["network"]))
         && network.is_some_and(|h| keys_within(h, &["version", "renderer", "wifis"]))
@@ -313,27 +315,35 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
                 hidden: false,
                 password: None,
             };
+            let mut this_ok = true;
             match ap {
                 Yaml::Null => {}
                 Yaml::Hash(a) => {
-                    ok &= keys_within(a, &["password", "hidden"]);
+                    this_ok &= keys_within(a, &["password", "hidden"]);
                     if let Some(p) = get(a, "password") {
                         n.password = text_of(p);
-                        ok &= n.password.is_some();
+                        this_ok &= n.password.is_some();
                     }
                     if let Some(h) = get(a, "hidden") {
                         n.hidden = flag(h).unwrap_or(false);
-                        ok &= flag(h).is_some();
+                        this_ok &= flag(h).is_some();
                     }
                 }
-                _ => ok = false,
+                _ => this_ok = false,
             }
+            ok &= this_ok;
+            ap_ok.push(this_ok);
             f.networks.push(n);
         }
     }
+    // A file the loader cannot fully keep loses its passwords; the menu's
+    // own file only those of the networks whose AP has other keys.
     if !ok {
-        for n in &mut f.networks {
-            n.password = None;
+        let menu = f.state == FileState::Menu;
+        for (n, kept) in f.networks.iter_mut().zip(ap_ok) {
+            if !(menu && kept) {
+                n.password = None;
+            }
         }
     }
     f.manageable = ok;
@@ -720,14 +730,14 @@ pub struct Homes {
 }
 
 impl Homes {
-    /// $HOME, /sys/class/net, `netplan` and `DEFAULT_WIRED`; tests set
+    /// $HOME, /sys/class/net, `/usr/sbin/netplan` and `DEFAULT_WIRED`; tests set
     /// `TF_NETWORK_SYS`, `TF_NETPLAN` and `TF_NETWORK_DEFAULT_WIRED`.
     pub fn from_env() -> Homes {
         let var = |name: &str, default: &str| std::env::var_os(name).unwrap_or_else(|| default.into());
         Homes {
             home: var("HOME", "/home/tfuser").into(),
             sys_net: var("TF_NETWORK_SYS", "/sys/class/net").into(),
-            netplan: var("TF_NETPLAN", "netplan").to_string_lossy().into_owned(),
+            netplan: var("TF_NETPLAN", "/usr/sbin/netplan").to_string_lossy().into_owned(),
             default_wired: var("TF_NETWORK_DEFAULT_WIRED", DEFAULT_WIRED).into(),
         }
     }
@@ -948,6 +958,14 @@ mod tests {
 
     const SHIPPED_WIRED: &str = include_str!("../../../overlay/etc/netplan/ethernet.yaml");
     const SHIPPED_WIFI: &str = include_str!("../../../overlay/home/tfuser/wifi.yaml");
+
+    /// Ruling 23: netplan by its full path, whatever PATH the session has.
+    #[test]
+    fn netplan_runs_by_its_full_path() {
+        if std::env::var_os("TF_NETPLAN").is_none() {
+            assert_eq!(Homes::from_env().netplan, "/usr/sbin/netplan");
+        }
+    }
 
     /// Stands in for netplan: records what it was asked to check, and fails
     /// like netplan when the file `fail` lies beside it.
@@ -1215,6 +1233,24 @@ exit 0
             f.networks,
             [
                 net("home", None, false),
+                net("cafe", None, false),
+                net("bar", None, false)
+            ]
+        );
+
+        // Ruling 22: a menu file keeps the passwords of the networks it
+        // can keep; a hand file loses them all (above).
+        let menu = format!(
+            "{HEADER}\n{}",
+            good.replace("cafe:\n", "cafe:\n          password: secret123\n          auth:\n            key-management: psk\n")
+        );
+        let f = parse_wifi(Some(&menu));
+        assert_eq!(f.state, FileState::Menu);
+        assert!(!f.manageable);
+        assert_eq!(
+            f.networks,
+            [
+                net("home", Some("00012345"), true),
                 net("cafe", None, false),
                 net("bar", None, false)
             ]
