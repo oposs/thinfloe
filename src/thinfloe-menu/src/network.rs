@@ -456,6 +456,14 @@ impl NetTab {
         match r {
             Ok(mut list) => {
                 list.sort_by_key(|n| std::cmp::Reverse(n.signal_dbm));
+                // The picked network as the new list has it: its security
+                // may have changed, or the menu can no longer join it. A
+                // name the list lacks keeps what was known.
+                if view.picked.is_some()
+                    && let Some(n) = list.iter().find(|n| n.ssid == view.ssid)
+                {
+                    view.picked = n.supported.then_some(n.secured);
+                }
                 view.in_range = list;
                 view.scan_error = None;
             }
@@ -889,6 +897,39 @@ mod tests {
         // Add saves nothing, least of all Office as an open network.
         assert_eq!(t.event(NetEvent::Add, false), None);
         assert_eq!(t.networks(), [net("Home", Some("secret123"))]);
+    }
+
+    /// A rescan brings the picked name back with other security: Add acts
+    /// on the new list, and a network now unsupported is no longer picked.
+    #[test]
+    fn a_rescan_takes_the_picked_network_from_the_new_list() {
+        let mut t = tab();
+        t.event(NetEvent::OpenAdd, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        t.event(NetEvent::PickNetwork("Office".into()), false);
+        assert!(!t.add_view().unwrap().open_network());
+        // Office is open now: no password is asked for, and Add saves it open.
+        t.event(NetEvent::Rescan, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, false, true)]));
+        let v = t.add_view().unwrap();
+        assert_eq!(v.picked, Some(false));
+        assert!(v.open_network() && v.picked_row_shown() && !v.name_field_shown());
+        // And secured again: the password is asked for.
+        t.event(NetEvent::Rescan, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        assert_eq!(t.add_view().unwrap().picked, Some(true));
+        // Now unsupported: not picked; the name stays in the name field.
+        t.event(NetEvent::Rescan, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, true, false)]));
+        let v = t.add_view().unwrap();
+        assert_eq!(v.picked, None);
+        assert!(!v.picked_row_shown() && v.name_field_shown() && v.ssid == "Office");
+        // A typed name is not a pick, and a rescan does not make it one.
+        let mut t = tab();
+        t.event(NetEvent::OpenAdd, false);
+        t.event(add_text("Office", "", true), false);
+        t.scan_done(Ok(vec![in_range("Office", -50, false, true)]));
+        assert_eq!(t.add_view().unwrap().picked, None);
     }
 
     /// Every way to set a name leaves it on screen: a chosen row, or the
