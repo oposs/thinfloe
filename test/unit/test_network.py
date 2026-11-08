@@ -117,6 +117,25 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((got["Legacy WPA"]["secured"], got["Legacy WPA"]["supported"]), (True, True))
         self.assertEqual((got["Old WEP"]["secured"], got["Old WEP"]["supported"]), (True, False))
 
+    def test_parse_scan_authentication_suites(self):
+        def bss(ssid, section, suites):
+            return ("BSS 00:11:22:33:44:55(on wlan0)\n\tcapability: ESS Privacy (0x0011)\n"
+                    "\tsignal: -50.00 dBm\n\tSSID: %s\n\t%s:\t * Version: 1\n"
+                    "\t\t * Group cipher: CCMP\n\t\t * Authentication suites: %s\n"
+                    "\t\t * Capabilities: 16-PTKSA-RC (0x000c)\n"
+                    "\tExtended capabilities:\n" % (ssid, section, suites))
+        text = (bss("Corp", "RSN", "IEEE 802.1X") + bss("Enhanced", "RSN", "OWE")
+                + bss("Mixed", "RSN", "IEEE 802.1X PSK") + bss("Three", "RSN", "SAE")
+                + bss("FtPsk", "RSN", "FT/PSK") + bss("Sha", "RSN", "PSK/SHA-256")
+                + bss("FtSae", "RSN", "FT/SAE")
+                + bss("FtCorp", "RSN", "FT/IEEE 802.1X IEEE 802.1X/SHA-256")
+                + bss("OldCorp", "WPA", "IEEE 802.1X"))
+        got = {n["ssid"]: n for n in nw.parse_scan(text)}
+        want = {"Corp": False, "Enhanced": False, "Mixed": True, "Three": True,
+                "FtPsk": True, "Sha": True, "FtSae": True, "FtCorp": False, "OldCorp": False}
+        self.assertEqual({k: v["supported"] for k, v in got.items()}, want)
+        self.assertTrue(all(v["secured"] for v in got.values()))
+
     def test_parse_scan_decodes_escapes(self):
         text = fixture("iw-scan.txt")
         names = [n["ssid"] for n in nw.parse_scan(text)]

@@ -187,6 +187,19 @@ def parse_handshake(text: str, now: int) -> Optional[int]:
     return max(0, now - latest)
 
 
+# Authentication suites (iw's spellings) that a password opens.
+PASSWORD_SUITE = re.compile(r"(?<![\w/.-])(?:PSK|PSK/SHA-256|FT/PSK|SAE|FT/SAE)(?![\w/.-])")
+
+
+def _supported(privacy: bool, rsn_wpa: bool, suites: List[str]) -> bool:
+    """May the menu join with a plain password (or without one)?
+    WEP, 802.1X-only and OWE-only networks: no. Without a suites line the
+    default of iw is PSK."""
+    if rsn_wpa:
+        return not suites or any(PASSWORD_SUITE.search(s) for s in suites)
+    return not privacy
+
+
 def parse_scan(text: str) -> List[dict]:
     """The networks of `iw dev <if> scan`, strongest first, one per name."""
     blocks = []
@@ -199,8 +212,15 @@ def parse_scan(text: str) -> List[dict]:
     best = {}
     for lines in blocks:
         ssid = signal_dbm = None
-        privacy = rsn_wpa = False
+        privacy = rsn_wpa = in_section = False
+        suites: List[str] = []
         for line in lines:
+            if in_section and line.startswith("\t\t"):
+                m = re.search(r"Authentication suites: (.*)$", line)
+                if m:
+                    suites.append(m.group(1))
+                continue
+            in_section = False
             m = re.match(r"\t(SSID|signal|capability): ?(.*)$", line)
             if m:
                 key, value = m.groups()
@@ -211,11 +231,12 @@ def parse_scan(text: str) -> List[dict]:
                 elif key == "capability":
                     privacy = "Privacy" in value.split()
             elif re.match(r"\t(RSN|WPA):", line):
-                rsn_wpa = True
+                rsn_wpa = in_section = True
         if not ssid or not ssid.strip("\0") or signal_dbm is None:
             continue
         net = {"ssid": ssid, "signal_dbm": signal_dbm,
-               "secured": rsn_wpa or privacy, "supported": rsn_wpa or not privacy}
+               "secured": rsn_wpa or privacy,
+               "supported": _supported(privacy, rsn_wpa, suites)}
         if ssid not in best or signal_dbm > best[ssid]["signal_dbm"]:
             best[ssid] = net
     nets = sorted(best.values(), key=lambda n: -n["signal_dbm"])
