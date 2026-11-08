@@ -476,6 +476,13 @@ pub fn parse_wired(text: Option<&str>) -> WiredFile {
         f.manageable = false;
         return f;
     };
+    // Ruling 25: the menu writes the default's `match` and `optional`, so
+    // a take-over keeps only a file that has those, or neither.
+    ok &= get(eth, "match").is_none_or(|m| {
+        m.as_hash()
+            .is_some_and(|h| h.len() == 1 && get(h, "name").and_then(text_of).as_deref() == Some("en*"))
+    });
+    ok &= get(eth, "optional").is_none_or(|o| flag(o) == Some(true));
     let dhcp4 = get(eth, "dhcp4").and_then(flag);
     match get(eth, "addresses") {
         None => {
@@ -1708,6 +1715,33 @@ exit 0
         take_over(&g.h, "wired").unwrap();
         assert_eq!(g.text(WIRED_FILE), None);
         assert_eq!(g.text("ethernet.yaml.by-hand").as_deref(), Some(SHIPPED_WIRED));
+    }
+
+    /// Ruling 25: a take-over keeps the content, so a hand file that
+    /// matches another NIC, or is not optional, is not the menu's to manage.
+    #[test]
+    fn wired_take_over_needs_the_default_match_and_optional() {
+        assert!(parse_wired(Some(SHIPPED_WIRED)).manageable);
+        let bare = "network:\n  version: 2\n  ethernets:\n    eth:\n      dhcp4: true\n";
+        assert!(parse_wired(Some(bare)).manageable, "absent is the default");
+        for other in [
+            SHIPPED_WIRED.replace("name: 'en*'", "macaddress: '00:11:22:33:44:55'"),
+            SHIPPED_WIRED.replace("name: 'en*'", "name: eno1"),
+            SHIPPED_WIRED.replace("name: 'en*'", "name: 'en*'\n                driver: e1000e"),
+            SHIPPED_WIRED.replace("optional: true", "optional: false"),
+        ] {
+            assert!(!parse_wired(Some(&other)).manageable, "{other}");
+        }
+        // And take-over refuses it, leaving the file alone.
+        let f = Fixture::new("take-wired-match", &["wlp58s0"]);
+        let mac = SHIPPED_WIRED.replace("name: 'en*'", "macaddress: '00:11:22:33:44:55'");
+        f.put(WIRED_FILE, &mac);
+        let before = f.snapshot();
+        assert_eq!(
+            take_over(&f.h, "wired"),
+            Err("~/ethernet.yaml has settings the menu cannot keep".into())
+        );
+        assert_eq!(f.snapshot(), before);
     }
 
     #[test]
