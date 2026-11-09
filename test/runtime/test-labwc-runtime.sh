@@ -361,4 +361,120 @@ else
     fail=1
 fi
 
+
+# Part D gate: the building blocks of the monitor arrangement. kanshi applies
+# a profile written by the menu, and re-applies it after an edit. The image's
+# kanshi 1.9 has no --version and ships no kanshictl, so a reload is SIGHUP.
+# The headless outputs have one mode, 1280x720 without a refresh rate, so the
+# fixture names the mode without one and the test checks placement only.
+KANSHI_CONTAINER_NAME="thinfloe-runtime-test-kanshi-$$"
+FIXTURE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+KANSHI_SCRIPT='echo "kanshi-package=$(dpkg-query -W kanshi)"
+command -v kanshictl >/dev/null && echo "kanshictl=present" || echo "kanshictl=absent"
+cp /fixture/kanshi-two.conf /tmp/kanshi.conf
+kanshi -c /tmp/kanshi.conf >/tmp/kanshi.log 2>&1 &
+KP=$!
+pos() { wlr-randr --json | python3 -c "
+import json,sys
+for o in json.load(sys.stdin):
+    if o[\"name\"]==\"HEADLESS-2\":
+        m=[m for m in o[\"modes\"] if m.get(\"current\")][0]
+        print(\"%dx%d@%d,%d\" % (m[\"width\"],m[\"height\"],o[\"position\"][\"x\"],o[\"position\"][\"y\"]))
+"; }
+wait_pos() { for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.5; [ "$(pos)" = "$1" ] && return; done; }
+wait_pos 1280x720@1280,0
+echo "kanshi-first=$(pos)"
+sed -i "s/position 1280,0/position 0,720/" /tmp/kanshi.conf
+kill -HUP $KP
+wait_pos 1280x720@0,720
+echo "kanshi-second=$(pos)"
+echo "--- kanshi.log ---"; cat /tmp/kanshi.log'
+
+kanshi_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$KANSHI_CONTAINER_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=2 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e KANSHI_SCRIPT="$KANSHI_SCRIPT" \
+    -v "$FIXTURE_DIR/kanshi-two.conf:/fixture/kanshi-two.conf:ro,z" \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           printf "%s\n" "$KANSHI_SCRIPT" >/tmp/kanshi.sh &&
+           labwc -C /etc/thinfloe/labwc -S "sh /tmp/kanshi.sh"' 2>&1)
+kanshi_rc=$?
+
+if [[ $kanshi_rc -eq 124 || $kanshi_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during kanshi test)"
+    echo "$kanshi_out"
+    podman rm -f "$KANSHI_CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+
+echo "info - $(echo "$kanshi_out" | grep -E '^kanshi-package=') $(echo "$kanshi_out" | grep -E '^kanshictl=')"
+if echo "$kanshi_out" | grep -qx 'kanshi-first=1280x720@1280,0' \
+    && echo "$kanshi_out" | grep -qx 'kanshi-second=1280x720@0,720'; then
+    echo "ok   - kanshi applies a profile and re-applies it after the file changes (SIGHUP)"
+else
+    echo "FAIL - kanshi did not apply the profile or did not re-apply it on SIGHUP"
+    echo "$kanshi_out"
+    fail=1
+fi
+
+# MoveToOutput as a window rule: the menu maps on the named output. The system
+# rc.xml is copied and edited inside the container before labwc starts (labwc
+# reads it once). The menu is configured on the output under the cursor first
+# and moved at map, so the LAST configure line is the one that counts. A second
+# menu process started later stands in for a window created after a change.
+run_move_case() {
+    local output="$1" name="thinfloe-runtime-test-move-$$-$1" script out rc
+    script='wlr-randr --output HEADLESS-2 --custom-mode 1024x768
+(TF_MENU_DEBUG=1 timeout 9 thinfloe-menu 2>&1 | sed "s/^/first: /") &
+sleep 3
+(TF_MENU_DEBUG=1 timeout 6 thinfloe-menu 2>&1 | sed "s/^/second: /") &
+wait'
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=2 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e MOVE_OUTPUT="$output" \
+        -e MOVE_SCRIPT="$script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$MOVE_SCRIPT" >/tmp/move.sh &&
+               cp -r /etc/thinfloe/labwc /tmp/lw &&
+               sed -i "s|<action name=\"ToggleAlwaysOnBottom\" />|<action name=\"MoveToOutput\" output=\"$MOVE_OUTPUT\"/>\n      &|" /tmp/lw/rc.xml &&
+               labwc -C /tmp/lw -S "bash /tmp/move.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during MoveToOutput test)"
+        echo "$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    MOVE_RESULT="$out"
+    MOVE_FIRST=$(echo "$out" | grep -E '^first: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
+    MOVE_SECOND=$(echo "$out" | grep -E '^second: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
+}
+
+run_move_case HEADLESS-2
+if [[ "$MOVE_FIRST" == 1024x768 && "$MOVE_SECOND" == 1024x768 ]]; then
+    echo "ok   - menu maps on the MoveToOutput output, also a second one started later (1024x768)"
+else
+    echo "FAIL - menu did not end up on HEADLESS-2 through MoveToOutput (first $MOVE_FIRST, second $MOVE_SECOND)"
+    echo "$MOVE_RESULT"
+    fail=1
+fi
+
+run_move_case HEADLESS-9
+if [[ "$MOVE_FIRST" =~ ^(1280x720|1024x768)$ && "$MOVE_SECOND" =~ ^(1280x720|1024x768)$ ]] \
+    && ! echo "$MOVE_RESULT" | grep -Eqi 'segmentation|core dumped|panicked'; then
+    echo "ok   - MoveToOutput to a missing output leaves the menu mapped ($MOVE_FIRST, $MOVE_SECOND)"
+else
+    echo "FAIL - MoveToOutput to a missing output broke the menu or labwc"
+    echo "$MOVE_RESULT"
+    fail=1
+fi
+
 exit $fail
