@@ -109,18 +109,18 @@ fn absolute(p: &Profile, i: usize, cache: &mut [Option<(i32, i32)>], depth: usiz
                     Place::Next { .. } => return Err("The monitors are placed in a circle.".into()),
                 }
             }
-            if !p.outputs[t].enabled {
-                (0, 0)
+            // A disabled origin is a zero-size anchor at 0,0.
+            let ((tx, ty), (tw, th)) = if p.outputs[t].enabled {
+                (absolute(p, t, cache, depth + 1)?, size(&p.outputs[t]))
             } else {
-                let (tx, ty) = absolute(p, t, cache, depth + 1)?;
-                let (tw, th) = size(&p.outputs[t]);
-                let (w, h) = size(&p.outputs[i]);
-                match side {
-                    Side::RightOf => (tx + tw, ty),
-                    Side::LeftOf => (tx - w, ty),
-                    Side::Below => (tx, ty + th),
-                    Side::Above => (tx, ty - h),
-                }
+                ((0, 0), (0, 0))
+            };
+            let (w, h) = size(&p.outputs[i]);
+            match side {
+                Side::RightOf => (tx + tw, ty),
+                Side::LeftOf => (tx - w, ty),
+                Side::Below => (tx, ty + th),
+                Side::Above => (tx, ty - h),
             }
         }
     };
@@ -545,6 +545,18 @@ mod tests {
         b.enabled = false;
         let p = profile(vec![set("A", 1920, 1080, Place::Origin), b, set("C", 1280, 1024, next("B", Side::RightOf))]);
         assert_eq!(positions(&p).unwrap(), vec![(0, 0), (1920, 0)]);
+    }
+
+    #[test]
+    fn a_disabled_origin_anchors_both_sides() {
+        let mut x = set("X", 500, 500, Place::Origin);
+        x.enabled = false;
+        let p = profile(vec![
+            x,
+            set("L", 1000, 800, next("X", Side::LeftOf)),
+            set("R", 1200, 800, next("X", Side::RightOf)),
+        ]);
+        assert_eq!(positions(&p).unwrap(), vec![(0, 0), (1000, 0)]);
     }
 
     fn sample() -> Vec<Profile> {
