@@ -9,6 +9,7 @@ pub mod density;
 pub mod desktop;
 pub mod drives;
 pub mod header;
+pub mod heads;
 pub mod icons;
 pub mod jobs;
 pub mod log;
