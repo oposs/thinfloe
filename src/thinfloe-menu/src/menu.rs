@@ -1018,10 +1018,19 @@ impl Menu {
                 }
                 self.monitors.applied(r).map(Menu::mon_request)
             }
-            JobResult::MonKept => {
-                self.monitors.kept();
-                self.log.note(Kind::Event, "Monitor arrangement kept.");
-                self.net_changed_home()
+            JobResult::MonKept(r) => {
+                let ok = r.is_ok();
+                match &r {
+                    Ok(()) => self.log.note(Kind::Event, "Monitor arrangement kept."),
+                    Err(e) => self.log.note(
+                        Kind::Warn,
+                        format!("The monitor arrangement could not be confirmed: {e}"),
+                    ),
+                }
+                if !self.monitors.kept(r) {
+                    return None;
+                }
+                if ok { self.net_changed_home() } else { None }
             }
             JobResult::MonReverted(r) => {
                 match &r {
@@ -3445,6 +3454,17 @@ mod tests {
     }
 
     #[test]
+    fn a_keep_that_fails_is_logged_and_saves_nothing() {
+        let now = Instant::now();
+        let mut m = mon_menu();
+        assert!(m.monitors_event(MonEvent::Apply, now).is_some());
+        assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
+        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert_eq!(m.finished(JobResult::MonKept(Err("EISDIR".into())), now), None);
+        assert!(m.log.last().unwrap().plain().contains("could not be confirmed: EISDIR"));
+    }
+
+    #[test]
     fn a_kept_monitor_layout_saves_the_home() {
         let now = Instant::now();
         let mut m = mon_menu();
@@ -3455,7 +3475,10 @@ mod tests {
         ));
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
         assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
-        assert_eq!(m.finished(JobResult::MonKept, now), Some(Effect::Start(Job::Save)));
+        assert_eq!(
+            m.finished(JobResult::MonKept(Ok(())), now),
+            Some(Effect::Start(Job::Save))
+        );
         // A failed Apply says why in the log.
         assert!(m.monitors_event(MonEvent::Apply, now).is_some());
         assert_eq!(

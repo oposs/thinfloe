@@ -337,7 +337,8 @@ fn panic_result(job: &Job) -> JobResult {
         // Unreadable: nothing is written over a file nobody could read.
         Job::MonLoad => JobResult::MonLoaded(Err(e), crate::owned::Owner::ByHand),
         Job::MonApply { .. } => JobResult::MonApplied(Err(e)),
-        Job::MonKeep => JobResult::MonKept,
+        // The marker may still be there: the next session would go back.
+        Job::MonKeep => JobResult::MonKept(Err(e)),
         Job::MonRevert => JobResult::MonReverted(Err(e)),
         Job::MonTakeOver => JobResult::MonTakenOver(Err(e)),
     }
@@ -437,10 +438,7 @@ fn job_result(
         Job::MonApply { text, prev, .. } => {
             JobResult::MonApplied(jobs::mon_apply(&paths.kanshi, &text, prev.as_deref()))
         }
-        Job::MonKeep => {
-            jobs::mon_keep(&paths.kanshi);
-            JobResult::MonKept
-        }
+        Job::MonKeep => JobResult::MonKept(jobs::mon_keep(&paths.kanshi)),
         Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
         Job::MonTakeOver => JobResult::MonTakenOver(jobs::mon_take_over(&paths.kanshi)),
     }
@@ -1107,6 +1105,12 @@ mod tests {
     use crate::testdir::TestDir;
     use crate::upgrade_proto::Msg;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_keep_job_that_panics_does_not_report_success() {
+        assert!(matches!(panic_result(&Job::MonKeep), JobResult::MonKept(Err(_))));
+        assert!(matches!(panic_result(&Job::MonRevert), JobResult::MonReverted(Err(_))));
+    }
 
     fn paths(upgrade_cmd: Vec<String>) -> Paths {
         Paths {

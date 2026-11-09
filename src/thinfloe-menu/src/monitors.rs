@@ -207,10 +207,17 @@ impl MonTab {
         }
     }
 
-    /// The new arrangement is the saved one now.
-    pub fn kept(&mut self) {
+    /// The new arrangement is the saved one now. When the undo marker could
+    /// not be removed, the file holds it too, but the next session goes
+    /// back: the tab says so. Returns whether the tab waited for this.
+    pub fn kept(&mut self, r: Result<(), String>) -> bool {
         if self.phase != Phase::Keeping {
-            return;
+            return false;
+        }
+        if let Err(e) = r {
+            self.error = Some(format!(
+                "The arrangement could not be confirmed: {e}. It goes back at the next login."
+            ));
         }
         if let Some(p) = self.pending.take() {
             self.profiles = p;
@@ -220,6 +227,7 @@ impl MonTab {
         }
         self.phase = Phase::Idle;
         self.rebuild();
+        true
     }
 
     /// The old arrangement is back. When that failed, nobody knows what the
@@ -821,7 +829,7 @@ mod tests {
         // Once kept, the file is the menu's: the next Apply needs none.
         assert_eq!(t.applied(Ok(())), None);
         assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
-        t.kept();
+        assert!(t.kept(Ok(())));
         let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
             panic!("no Apply")
         };
@@ -857,7 +865,7 @@ mod tests {
             Some(MonRequest::Keep)
         );
         assert_eq!(t.tick(now + Duration::from_secs(20)), None);
-        t.kept();
+        assert!(t.kept(Ok(())));
         assert_eq!(output(&t, "DP-2").rotation, Rotation::R180);
         assert_eq!(t.owner(), Owner::Menu);
         assert_eq!(t.countdown(now + Duration::from_secs(5)), None);
@@ -867,6 +875,24 @@ mod tests {
         assert!(ev(&mut t, MonEvent::Apply, now).is_some());
         assert_eq!(t.tick(now + Duration::from_secs(15)), None);
         assert_eq!(t.applied(Ok(())), Some(MonRequest::Revert));
+    }
+
+    #[test]
+    fn a_keep_that_fails_says_the_layout_goes_back() {
+        let now = Instant::now();
+        let mut t = tab(two(), None);
+        ev(&mut t, MonEvent::Select("DP-2".into()), now);
+        ev(&mut t, MonEvent::Rotation(Rotation::R90), now);
+        applied_tab(&mut t, now);
+        assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
+        assert!(t.kept(Err("busy".into())));
+        assert!(t.error().unwrap().contains("goes back at the next login"));
+        assert_eq!(
+            output(&t, "DP-2").rotation,
+            Rotation::R90,
+            "the file holds it until then"
+        );
+        assert!(!t.kept(Ok(())), "nothing was asked");
     }
 
     #[test]
