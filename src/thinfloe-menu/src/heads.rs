@@ -272,7 +272,11 @@ impl Dispatch<ZwlrOutputHeadV1, u32> for State {
             }
             head_v1::Event::Finished => {
                 if let Some(h) = state.live.remove(&id) {
-                    h.release();
+                    // `release` exists from version 3 on; older ones would
+                    // take it as a protocol error.
+                    if h.version() >= 3 {
+                        h.release();
+                    }
                 }
                 state.mode_owner.retain(|_, &mut owner| owner != id);
                 HeadEvent::Finished
@@ -428,9 +432,15 @@ mod tests {
     #[test]
     fn heads_are_sorted_by_name() {
         let mut c = HeadCollector::default();
-        c.head(1, HeadEvent::Name("eDP-1".into()));
-        c.head(2, HeadEvent::Name("HDMI-A-1".into()));
-        let names: Vec<_> = c.done().into_iter().map(|h| h.name).collect();
-        assert_eq!(names, ["HDMI-A-1", "eDP-1"]);
+        let names = ["eDP-1", "DP-3", "HDMI-A-1", "DP-1", "HDMI-A-2", "DP-2", "Virtual-1", "DP-10"];
+        for (i, n) in names.iter().enumerate() {
+            c.head(i as u32 + 1, HeadEvent::Name((*n).into()));
+        }
+        let got: Vec<_> = c.done().into_iter().map(|h| h.name).collect();
+        let mut want: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(got[0], "DP-1");
+        assert_eq!(got[2], "DP-2");
     }
 }
