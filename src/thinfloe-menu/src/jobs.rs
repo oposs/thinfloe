@@ -733,7 +733,8 @@ pub struct Kanshi {
     /// `~/.config/kanshi/config`.
     pub config: PathBuf,
     /// `$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed`; thinfloe-session
-    /// undoes the layout when it finds it. `None` without a runtime dir.
+    /// undoes the layout when it finds it. `None` without a runtime dir:
+    /// then no Apply is made.
     pub marker: Option<PathBuf>,
     /// kanshi, when none runs; `-c <config>` follows.
     pub cmd: Vec<String>,
@@ -897,6 +898,10 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
     if crate::owned::owner(old_text.as_deref()) == crate::owned::Owner::ByHand {
         return Err(format!("{rel} was written by hand"));
     }
+    // Ruling 15: no crash guard, no Apply.
+    let Some(marker) = &k.marker else {
+        return Err("There is no XDG_RUNTIME_DIR for the undo marker; nothing was changed.".to_string());
+    };
     let prev = k.prev();
     let kept = match (&old, prev_body) {
         (Some(b), _) => write_new(&prev, b),
@@ -909,11 +914,9 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
             crate::owned::home_relative(&prev)
         )
     })?;
-    if let Some(m) = &k.marker
-        && let Err(e) = write_new(m, b"prev\n")
-    {
+    if let Err(e) = write_new(marker, b"prev\n") {
         let _ = remove_if_there(&prev);
-        return Err(format!("Could not write {}: {e}", m.display()));
+        return Err(format!("Could not write {}: {e}", marker.display()));
     }
     crate::owned::write(&k.config, text)
         .map_err(|e| format!("Could not write {rel}: {e}"))
@@ -1895,6 +1898,24 @@ mod tests {
         assert!(!k.prev().exists());
         assert!(!k.marker.as_ref().unwrap().exists());
         assert!(!d.join("started").exists());
+    }
+
+    #[test]
+    fn mon_apply_without_a_runtime_dir_changes_nothing() {
+        let d = dir("mon-no-xdg");
+        let mut k = kanshi_home(&d, &recording(&d));
+        k.marker = None;
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
+        assert!(e.contains("XDG_RUNTIME_DIR"), "{e}");
+        assert_eq!(read(&k.config), Some(old_layout()));
+        assert!(!k.prev().exists());
+        assert!(!d.join("started").exists());
+        // Nor without a file.
+        fs::remove_file(&k.config).unwrap();
+        assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
+        assert!(!k.config.exists() && !k.prev().exists());
     }
 
     #[test]
