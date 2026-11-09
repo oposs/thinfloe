@@ -8,7 +8,7 @@ use crate::brand::{self, role};
 use crate::netfiles::{self, FileState};
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
-use crate::ui::{self, GAP, Icon, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
+use crate::ui::{self, GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
 use egui::{Rect, RichText, Sense, Ui};
 use shadcn_egui::Theme;
 use shadcn_egui::components::badge::{Badge, BadgeVariant};
@@ -35,7 +35,7 @@ pub fn dialog_open(net: &NetTab) -> bool {
 }
 
 /// The Network tab, `width` wide, and its dialogs.
-pub fn network_tab(ui: &mut Ui, net: &NetTab, _icons: &[Option<Icon>], width: f32) -> Option<NetEvent> {
+pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
     let t = Theme::current(ui.ctx());
     // Apply and its error follow the bands, as the Upgrade screen's footer;
     // pinned to the foot of the panel only when the bands scroll.
@@ -162,6 +162,7 @@ fn connections(ui: &mut Ui, t: &Theme, net: &NetTab) {
     }
     match net.status_error() {
         Some(e) => warn(ui, t, e),
+        None if !net.status_known() => muted(ui, t, "Looking for network adapters…"),
         None if net.ifaces().is_empty() => muted(ui, t, "No network adapter found"),
         None => {}
     }
@@ -463,7 +464,12 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
             }
         });
     });
-    event
+    event.or_else(|| escape(ui).then_some(NetEvent::CloseAdd))
+}
+
+/// Escape was pressed this frame: a dialog closes as with Cancel.
+fn escape(ui: &Ui) -> bool {
+    ui.input(|i| i.key_pressed(egui::Key::Escape))
 }
 
 /// Apply while ThinLinc or OxuLnk runs: the session may drop for a moment.
@@ -484,5 +490,5 @@ fn confirm_dialog(ui: &Ui) -> Option<NetEvent> {
             }
         });
     });
-    event
+    event.or_else(|| escape(ui).then_some(NetEvent::CancelApply))
 }

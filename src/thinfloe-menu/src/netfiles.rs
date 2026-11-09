@@ -84,7 +84,9 @@ pub struct WifiFile {
     pub state: FileState,
     /// The device of the only WiFi definition.
     pub device: Option<String>,
-    /// Passwords are kept only when `manageable`.
+    /// Passwords are kept when `manageable`; a menu file that is not keeps
+    /// those of the networks whose AP has no keys besides `password` and
+    /// `hidden`.
     pub networks: Vec<Net>,
     /// The menu can take the file over without losing a setting.
     pub manageable: bool,

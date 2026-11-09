@@ -108,6 +108,9 @@ pub struct AddView {
     pub hidden: bool,
     /// The name was picked from the scan: `Some(secured)`.
     pub picked: Option<bool>,
+    /// The name field was typed in; it stays on screen, even emptied,
+    /// until a row is picked or Hidden is unticked.
+    pub typing: bool,
     pub error: Option<String>,
 }
 
@@ -127,7 +130,7 @@ impl AddView {
     /// name no chosen row shows. Add acts on `ssid`, so with this the
     /// dialog always shows the name Add saves.
     pub fn name_field_shown(&self) -> bool {
-        self.hidden || (!self.ssid.is_empty() && !self.picked_row_shown())
+        self.hidden || self.typing || (!self.ssid.is_empty() && !self.picked_row_shown())
     }
 }
 
@@ -138,6 +141,8 @@ pub struct NetTab {
     wired: Option<WiredFile>,
     devices: Vec<String>,
     ifaces: Vec<Iface>,
+    /// A status call has answered once, with a list or an error.
+    status_known: bool,
     status_error: Option<String>,
     /// `None`: unchanged.
     draft_wifi: Option<Vec<Net>>,
@@ -164,6 +169,7 @@ impl NetTab {
             wired: None,
             devices: Vec::new(),
             ifaces: Vec::new(),
+            status_known: false,
             status_error: None,
             draft_wifi: None,
             draft_wired: None,
@@ -274,6 +280,7 @@ impl NetTab {
                 let view = self.add.as_mut()?;
                 let found = view.in_range.iter().find(|n| n.ssid == ssid && n.supported)?;
                 view.picked = Some(found.secured);
+                view.typing = false;
                 view.ssid = ssid;
                 view.password.clear();
                 view.hidden = false;
@@ -290,6 +297,8 @@ impl NetTab {
                 // the name typed in it goes with it, so Add never acts on
                 // a name the dialog does not show.
                 let unticked = view.hidden && !hidden;
+                // Only the name field changes the name.
+                view.typing = !unticked && (view.typing || ssid != view.ssid);
                 view.ssid = if unticked { String::new() } else { ssid };
                 view.password = password;
                 view.hidden = hidden;
@@ -437,6 +446,7 @@ impl NetTab {
 
     pub fn status_done(&mut self, r: Result<Vec<Iface>, String>) {
         self.status_busy = false;
+        self.status_known = true;
         match r {
             Ok(list) => {
                 self.ifaces = list;
@@ -582,6 +592,11 @@ impl NetTab {
 
     pub fn ifaces(&self) -> &[Iface] {
         &self.ifaces
+    }
+
+    /// The interfaces are known: an empty list means there are none.
+    pub fn status_known(&self) -> bool {
+        self.status_known
     }
 
     /// Why the last status call failed.
@@ -969,6 +984,34 @@ mod tests {
         t.event(NetEvent::CloseAdd, false);
         t.event(NetEvent::OpenAdd, false);
         assert!(t.add_view().unwrap().ssid.is_empty());
+    }
+
+    /// Clearing the name field to type another name keeps the field: it
+    /// goes only with a picked row or an unticked Hidden.
+    #[test]
+    fn a_cleared_name_field_stays_on_screen() {
+        let mut t = tab();
+        t.event(NetEvent::OpenAdd, false);
+        t.scan_done(Ok(vec![in_range("Office", -50, true, true)]));
+        t.event(NetEvent::PickNetwork("Office".into()), false);
+        t.event(NetEvent::Rescan, false);
+        t.scan_done(Ok(vec![in_range("Cafe", -60, false, true)]));
+        assert!(t.add_view().unwrap().name_field_shown());
+        t.event(add_text("O", "", false), false);
+        t.event(add_text("", "", false), false);
+        let v = t.add_view().unwrap();
+        assert!(v.ssid.is_empty() && v.name_field_shown());
+        t.event(add_text("Lab", "", false), false);
+        assert!(t.add_view().unwrap().name_field_shown());
+        // Picking a row takes the field away again.
+        t.event(NetEvent::PickNetwork("Cafe".into()), false);
+        let v = t.add_view().unwrap();
+        assert!(v.picked_row_shown() && !v.name_field_shown());
+        // As does unticking Hidden, which drops the name typed there.
+        t.event(add_text("Cafe", "", true), false);
+        t.event(add_text("", "", true), false);
+        t.event(add_text("", "", false), false);
+        assert!(!t.add_view().unwrap().name_field_shown());
     }
 
     #[test]

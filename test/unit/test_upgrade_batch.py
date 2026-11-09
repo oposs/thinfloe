@@ -1605,6 +1605,11 @@ class TestExamineMounted(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, rc, "", "")
         with mock.patch.object(ui, "run_cmd", side_effect=run):
             ui.examine_efi_partition("/dev/sdz1")
+        # Nothing was mounted for real: the kept mount point is an empty
+        # directory in $TMPDIR. Remove it before the entries are cleared.
+        for kind, path in list(ui._cleanup_items):
+            if kind == "dir":
+                self.addCleanup(os.rmdir, path)
         kinds = [t for t, _ in ui._cleanup_items]
         self.assertIn("mount", kinds)
 
@@ -1730,6 +1735,17 @@ class TestClosedStdout(TestFreshInstall):
         p.step("write", "Writing")
         p.progress(1, 2)
         p.result(False, "x")  # nothing raises
+
+    def test_log_to_hung_up_terminal_is_silent(self):
+        # An SSH session that hung up leaves a tty that answers EIO, not EPIPE.
+        class HungUp:
+            def write(self, text):
+                raise OSError(errno.EIO, "Input/output error")
+
+            def flush(self):
+                pass
+        with mock.patch.object(sys, "stdout", HungUp()):
+            ui.log("Copying")  # nothing raises
 
     def test_unexpected_error_during_write_wipes_and_propagates(self):
         def boom(*a, **kw):

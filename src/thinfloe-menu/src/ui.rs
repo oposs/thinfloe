@@ -811,7 +811,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
         SettingsTab::Screen => screen_tab(&mut s_ui, menu),
         SettingsTab::Network => {
-            crate::network_ui::network_tab(&mut s_ui, &menu.network, icons, width).map(SettingsEvent::Network)
+            crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
         }
     };
     event.or(body)
@@ -2832,6 +2832,10 @@ mod tests {
             assert!(has(&texts, &line), "{line} not in {texts:?}");
         }
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
+        // Before the first status answer nothing is known yet.
+        let texts = net_texts(&network_settings(two_networks()));
+        assert!(!has(&texts, "No network adapter found"), "{texts:?}");
+        assert!(has(&texts, "Looking for network adapters…"), "{texts:?}");
         let mut net = two_networks();
         net.status_done(Ok(Vec::new()));
         let texts = net_texts(&network_settings(net));
@@ -3240,6 +3244,35 @@ mod tests {
         }
         let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
         assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CancelApply)]);
+    }
+
+    /// Escape closes a Network dialog as Cancel does.
+    #[test]
+    fn escape_closes_the_network_dialogs() {
+        use crate::network::NetEvent;
+        let escape = || {
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        let menu = network_settings(add_dialog_open());
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, escape()).1, ev(NetEvent::CloseAdd));
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        net.event(NetEvent::Apply, true);
+        let menu = network_settings(net);
+        assert_eq!(
+            upgrade_frame(&menu, 1920.0, 1080.0, escape()).1,
+            ev(NetEvent::CancelApply)
+        );
+        // Without a dialog, Escape does nothing on the tab.
+        let menu = network_settings(two_networks());
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, escape()).1, None);
     }
 
     #[test]

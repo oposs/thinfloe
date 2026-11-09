@@ -157,7 +157,8 @@ fn in_range(v: &Value) -> Option<InRange> {
     let full = v.get("ssid")?.as_str().filter(|s| !s.is_empty())?;
     let ssid = cut_bytes(full, SSID_MAX);
     // A cut name is not the network's name; the menu refuses names the
-    // netplan files cannot carry (backslash, control characters).
+    // netplan files cannot carry (see `netfiles::check_ssid`: backslash,
+    // control and line-separator characters, the template marker).
     let usable = ssid.len() == full.len() && netfiles::check_ssid(ssid).is_ok();
     Some(InRange {
         ssid: ssid.to_string(),

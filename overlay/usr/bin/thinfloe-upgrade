@@ -385,7 +385,9 @@ def log(message: str) -> None:
     """Print log message; a closed stdout is no reason to stop the job."""
     try:
         print(f"==> {message}", flush=True)
-    except (BrokenPipeError, ValueError):
+    # OSError: a broken pipe, or EIO from a terminal whose SSH session hung
+    # up. ValueError: a closed file.
+    except (OSError, ValueError):
         _silence_stdout(sys.stdout)
 
 
