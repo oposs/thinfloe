@@ -4,6 +4,18 @@
 //! "Restart anyway", "Power off anyway") following a failed save.
 //! thinfloe-session saves on no status at all; any other status means the menu
 //! failed.
+//!
+//! Debugging, through the environment:
+//!
+//! - `TF_MENU_DEBUG` (any value): stderr gets the window's configure sizes,
+//!   the scale and the monitor it was taken from, the frames rasterised,
+//!   the tile icons drawn, folded windows, the menu output asked of
+//!   labwc-scale and each window replacement.
+//! - `TF_MENU_DEBUG_MOVE=<connector>`: from the start and for as long as
+//!   it runs, the menu acts as if *Show the menu here* chose that monitor,
+//!   whatever the Screen tab holds: it writes the name to its output file
+//!   and replaces its window once labwc-scale confirms (a test hook for
+//!   the runtime tests).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -251,6 +263,7 @@ fn main() -> ExitCode {
             idle_pid: screentab::idle_pid(std::env::var_os("TF_IDLE_PID").as_deref()),
             rc: idle_rc(),
         },
+        debug_move: std::env::var("TF_MENU_DEBUG_MOVE").ok().filter(|n| !n.is_empty()),
     }) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {

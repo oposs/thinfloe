@@ -514,4 +514,97 @@ else
     fail=1
 fi
 
+# The menu moves to its monitor by replacing its window (TF_MENU_DEBUG_MOVE
+# stands in for *Show the menu here*). The session's own parts: the composed
+# config dir and labwc-scale, which turns the menu's output file into a
+# MoveToOutput rule, reconfigures labwc and confirms in <file>.applied. Same
+# layout as the MoveToOutput gate above: labwc places a new window on
+# HEADLESS-2 (1024x768, under the cursor), so the move targets HEADLESS-1
+# (1000x600) and the control run without a move must stay on 1024x768. Every
+# menu line is stamped with the seconds since the menu started.
+run_menu_move_case() {
+    local mode="$1" name="thinfloe-runtime-test-menumove-$$-$1" script out rc
+    script='wlr-randr --output HEADLESS-1 --custom-mode 1000x600 --output HEADLESS-2 --custom-mode 1024x768 --pos 1000,0
+export TF_MENU_DEBUG=1
+if [ "$MM_MODE" = unanswered ]; then
+    export TF_MENU_OUTPUT_FILE=/tmp/xdg/test-menu-output
+else
+    /usr/libexec/thinfloe/labwc-scale >/tmp/scale.log 2>&1 &
+    scale_pid=$!
+fi
+[ "$MM_MODE" != control ] && export TF_MENU_DEBUG_MOVE=HEADLESS-1
+t0=$EPOCHREALTIME
+timeout 10 thinfloe-menu 2>&1 | while IFS= read -r l; do
+    printf "menu %s: %s\n" "$(awk -v a="$t0" -v b="$EPOCHREALTIME" "BEGIN { printf \"%.2f\", b - a }")" "$l"
+done
+[ -n "${scale_pid:-}" ] && kill "$scale_pid" 2>/dev/null
+f=${TF_MENU_OUTPUT_FILE:-/tmp/xdg/thinfloe-menu-output}
+echo "output-file: $(cat "$f" 2>/dev/null || echo missing)"
+echo "applied: $(cat "$f.applied" 2>/dev/null || echo missing)"
+sed "s/^/scale: /" /tmp/scale.log 2>/dev/null
+true'
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=2 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e MM_MODE="$mode" \
+        -e MM_SCRIPT="$script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$MM_SCRIPT" >/tmp/mm.sh &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /nonexistent /tmp/xdg/thinfloe-labwc &&
+               labwc -C /tmp/xdg/thinfloe-labwc -S "bash /tmp/mm.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during menu move test)"
+        echo "$out" | grep -E '^(menu|scale|output-file|applied)'
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    MM_RESULT=$(echo "$out" | grep -E '^menu .*(configure |window|moved)|^(scale|output-file|applied):|panicked')
+    MM_CONFIGURES=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | grep -o '[0-9]*x[0-9]*$' | tr '\n' ' ')
+    MM_FIRST=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | head -1 | grep -o '[0-9]*x[0-9]*$')
+    MM_LAST=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
+    MM_OUTPUT_FILE=$(echo "$out" | sed -n 's/^output-file: //p')
+    MM_APPLIED=$(echo "$out" | sed -n 's/^applied: //p')
+    # The seconds of the warning, and whether a configure came after it,
+    # which only a new window gets: nothing else resizes the menu here.
+    MM_WARN_AT=$(echo "$out" | grep -F 'The menu could not be moved to HEADLESS-1.' | head -1 | sed -n 's/^menu \([0-9.]*\): .*/\1/p')
+    MM_CONF_AFTER_WARN=$(echo "$out" | awk '/The menu could not be moved to HEADLESS-1\./ { w = 1 } w && /thinfloe-menu: configure / { n++ } END { print n + 0 }')
+}
+
+# Control: no move asked. The menu stays where labwc puts it, so the moves
+# case below can fail.
+run_menu_move_case control
+if [[ "$MM_FIRST" == 1024x768 && "$MM_LAST" == 1024x768 && "$MM_CONFIGURES" != *1000x600* \
+      && -z "$MM_WARN_AT" && -z "$MM_APPLIED" ]]; then
+    echo "ok   - without a chosen monitor the menu stays on the cursor output (1024x768)"
+else
+    echo "FAIL - control run: configures '$MM_CONFIGURES', applied '$MM_APPLIED', warning at '$MM_WARN_AT'"
+    echo "$MM_RESULT"
+    fail=1
+fi
+
+run_menu_move_case moves
+if [[ "$MM_FIRST" == 1024x768 && "$MM_LAST" == 1000x600 && "$MM_APPLIED" == HEADLESS-1 \
+      && "$MM_OUTPUT_FILE" == HEADLESS-1 && -z "$MM_WARN_AT" ]]; then
+    echo "ok   - the menu replaces its window and moves to HEADLESS-1 once labwc-scale confirms it (configures $MM_CONFIGURES)"
+else
+    echo "FAIL - the menu did not move to HEADLESS-1: configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED', warning at '$MM_WARN_AT'"
+    echo "$MM_RESULT"
+    fail=1
+fi
+
+run_menu_move_case unanswered
+if [[ -n "$MM_WARN_AT" ]] && awk -v t="$MM_WARN_AT" 'BEGIN { exit !(t >= 3 && t < 8) }' \
+      && [[ "$MM_CONF_AFTER_WARN" -ge 1 && "$MM_LAST" == 1024x768 \
+      && "$MM_OUTPUT_FILE" == HEADLESS-1 && "$MM_APPLIED" == missing ]]; then
+    echo "ok   - unanswered, the menu replaces its window after 3 s and logs that it could not be moved (at ${MM_WARN_AT}s, $MM_CONF_AFTER_WARN configure after)"
+else
+    echo "FAIL - unanswered move: warning at '$MM_WARN_AT', configures after it $MM_CONF_AFTER_WARN, configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED'"
+    echo "$MM_RESULT"
+    fail=1
+fi
+
 exit $fail

@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod kanshi;
 pub mod log;
 pub mod menu;
+pub mod menu_move;
 pub mod monitors;
 pub mod netfiles;
 pub mod nettab;

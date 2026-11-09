@@ -11,6 +11,7 @@ use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
 use crate::menu::{Effect, Job, Menu, Screen};
+use crate::menu_move::{self, MenuMove, Replace};
 use crate::netfiles;
 use crate::network;
 use crate::raster::{Background, Canvas, Textures};
@@ -74,6 +75,9 @@ pub struct Config {
     /// The release status file `thinfloe-upgrade check` writes.
     pub upgrade_status: PathBuf,
     pub screen: ScreenFile,
+    /// `TF_MENU_DEBUG_MOVE`: the output the menu belongs on whatever the
+    /// Screen tab says, for the runtime tests.
+    pub debug_move: Option<String>,
 }
 
 /// The screen settings file and who reads it.
@@ -134,6 +138,11 @@ pub struct App {
     /// The monitors; `None` when the compositor cannot tell, then the
     /// Screen tab shows none.
     heads: Option<crate::heads::Heads>,
+    /// The menu's output file for labwc-scale; `None` without
+    /// `XDG_RUNTIME_DIR`, then the menu stays where labwc puts it.
+    output_file: Option<PathBuf>,
+    /// The output the menu asked labwc-scale for, and the wait for it.
+    menu_move: MenuMove,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -214,6 +223,8 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         live: None,
         exit: None,
         frozen: false,
+        output_file: menu_move::output_file_path(),
+        menu_move: MenuMove::default(),
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.exit
@@ -842,6 +853,132 @@ fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, canvas: &C
 }
 
 impl App {
+    /// A new window with its surface and input state.
+    fn create_live(&self, event_loop: &ActiveEventLoop) -> Result<Live, String> {
+        // The app_id labwc's window rule in /etc/thinfloe/labwc/rc.xml matches
+        // to keep the menu at the bottom and out of the window list.
+        let attrs = Window::default_attributes()
+            .with_title("thinfloe-menu")
+            .with_name("thinfloe-menu", "")
+            .with_decorations(false)
+            .with_maximized(true);
+        let window = event_loop
+            .create_window(attrs)
+            .map(Rc::new)
+            .map_err(|e| format!("cannot create a window: {e}"))?;
+        let surface = softbuffer::Context::new(window.clone())
+            .and_then(|c| softbuffer::Surface::new(&c, window.clone()))
+            .map_err(|e| format!("cannot create a drawing surface: {e}"))?;
+        let egui = egui_winit::State::new(
+            self.ctx.clone(),
+            ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        let chrome = ui::Chrome {
+            header: self.cfg.header.clone(),
+            clock: String::new(),
+            logo: None,
+        };
+        let bg = crate::brand::theme().palette().background;
+        Ok(Live {
+            window,
+            surface,
+            egui,
+            canvas: Canvas::new(1, 1, bg),
+            textures: Textures::default(),
+            tracker: Tracker::default(),
+            icons: Vec::new(),
+            chrome,
+            ppp: 0.0,
+            scale: 1.0,
+            monitor: None,
+            started: Instant::now(),
+            outputs: read_outputs(self.cfg.debug),
+            presented: false,
+        })
+    }
+
+    /// Replace the window by a new one, which labwc places by its window
+    /// rules: the way the menu moves to another monitor. The old window
+    /// goes only once the new one exists, so a failure keeps the menu on
+    /// screen. Everything but the window lives in `App` and stays: the
+    /// menu, its log, running jobs, the countdown of *Keep this
+    /// arrangement?*, the Settings tab.
+    fn replace_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.live.is_none() {
+            return;
+        }
+        let mut live = match self.create_live(event_loop) {
+            Ok(live) => live,
+            Err(e) => {
+                eprintln!("thinfloe-menu: the window stays where it is: {e}");
+                return;
+            }
+        };
+        // egui sends each texture once: the new window takes over the
+        // rasteriser's copies.
+        if let Some(old) = self.live.as_mut() {
+            live.textures = std::mem::take(&mut old.textures);
+        }
+        // The old window goes here, after the new one exists.
+        self.live = Some(live);
+        if self.cfg.debug {
+            eprintln!("thinfloe-menu: window replaced");
+        }
+        // A new canvas: the dialog's dimmed grid is frozen again from it.
+        self.frozen = false;
+        self.apply_scale(true);
+        if let Some(live) = self.live.as_ref() {
+            live.window.request_redraw();
+        }
+    }
+
+    /// Ask labwc-scale for the monitor the menu belongs on when that
+    /// changed, and replace the window once it confirms, or after
+    /// `menu_move::CONFIRM_WAIT` without an answer.
+    ///
+    /// The file is a few bytes in `XDG_RUNTIME_DIR`, a tmpfs, written like
+    /// the scale file beside it: on the UI thread, a temp file and a rename.
+    fn sync_menu_output(&mut self, event_loop: &ActiveEventLoop) {
+        if self.live.is_none() {
+            return;
+        }
+        let Some(path) = self.output_file.clone() else { return };
+        let now = Instant::now();
+        let wanted = match &self.cfg.debug_move {
+            Some(name) => Some(name.clone()),
+            None => self.cfg.menu.monitors.menu_output().map(str::to_string),
+        };
+        if self.menu_move.want(wanted.as_deref(), now) {
+            if self.cfg.debug {
+                eprintln!("thinfloe-menu: menu output {}", wanted.as_deref().unwrap_or("(none)"));
+            }
+            if let Err(e) = menu_move::write_output_file(&path, wanted.as_deref()) {
+                eprintln!("thinfloe-menu: cannot write the menu output file: {e}");
+            }
+        }
+        if !self.menu_move.waiting() {
+            return;
+        }
+        let applied = menu_move::read_applied(&path);
+        match self.menu_move.poll(applied.as_deref(), now) {
+            Some(Replace::Confirmed) => self.replace_window(event_loop),
+            Some(Replace::Unconfirmed(asked)) => {
+                if let Some(name) = asked {
+                    self.cfg.menu.log.note(
+                        crate::log::Kind::Warn,
+                        format!("The menu could not be moved to {name}."),
+                    );
+                }
+                self.replace_window(event_loop);
+            }
+            None => {}
+        }
+    }
+
     /// Logs, under TF_MENU_DEBUG, the windows folded or unfolded since the
     /// last call.
     fn windows_changed(&mut self) {
@@ -868,76 +1005,44 @@ impl ApplicationHandler<Wake> for App {
         if self.live.is_some() {
             return;
         }
-        // The app_id labwc's window rule in /etc/thinfloe/labwc/rc.xml matches
-        // to keep the menu at the bottom and out of the window list.
-        let attrs = Window::default_attributes()
-            .with_title("thinfloe-menu")
-            .with_name("thinfloe-menu", "")
-            .with_decorations(false)
-            .with_maximized(true);
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
+        match self.create_live(event_loop) {
+            Ok(live) => self.live = Some(live),
             Err(e) => {
-                eprintln!("thinfloe-menu: cannot create a window: {e}");
+                eprintln!("thinfloe-menu: {e}");
                 self.exit = Some(1);
                 event_loop.exit();
                 return;
             }
-        };
-        let surface =
-            softbuffer::Context::new(window.clone()).and_then(|c| softbuffer::Surface::new(&c, window.clone()));
-        let surface = match surface {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("thinfloe-menu: cannot create a drawing surface: {e}");
-                self.exit = Some(1);
-                event_loop.exit();
-                return;
-            }
-        };
-        let egui = egui_winit::State::new(
-            self.ctx.clone(),
-            ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-        let chrome = ui::Chrome {
-            header: self.cfg.header.clone(),
-            clock: String::new(),
-            logo: None,
-        };
-        let bg = crate::brand::theme().palette().background;
-        self.live = Some(Live {
-            window: window.clone(),
-            surface,
-            egui,
-            canvas: Canvas::new(1, 1, bg),
-            textures: Textures::default(),
-            tracker: Tracker::default(),
-            icons: Vec::new(),
-            chrome,
-            ppp: 0.0,
-            scale: 1.0,
-            monitor: None,
-            started: Instant::now(),
-            outputs: read_outputs(self.cfg.debug),
-            presented: false,
-        });
+        }
         // Icons and logo are drawn at the scale, so it comes first. Forced,
         // so the scale file exists even at 1.
         self.apply_scale(true);
-        if self.cfg.debug
-            && let Some(live) = self.live.as_ref()
-        {
-            // Hidden add-on tiles too: the Settings screen shows their icon
-            // when it renders.
-            let shown = self.cfg.menu.visible_tiles();
-            let drawn = shown.iter().filter(|&&i| live.icons[i].is_some()).count();
-            eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
+        if let Some(live) = self.live.as_ref() {
+            if self.cfg.debug {
+                // Hidden add-on tiles too: the Settings screen shows their icon
+                // when it renders.
+                let shown = self.cfg.menu.visible_tiles();
+                let drawn = shown.iter().filter(|&&i| live.icons[i].is_some()).count();
+                eprintln!("thinfloe-menu: {drawn} of {} tile icons drawn", shown.len());
+            }
+            live.window.request_redraw();
         }
-        window.request_redraw();
+    }
+
+    // After every batch of events: whatever changed the monitor the menu
+    // belongs on (the monitors, a loaded file, an Apply, its revert) has
+    // been handled by now.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_menu_output(event_loop);
+        let now = Instant::now();
+        if let Some(d) = self.menu_move.next_wake(now) {
+            let at = now + d;
+            match event_loop.control_flow() {
+                ControlFlow::WaitUntil(t) if t <= at => {}
+                ControlFlow::Poll => {}
+                _ => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            }
+        }
     }
 
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
@@ -982,8 +1087,9 @@ impl ApplicationHandler<Wake> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if self.live.is_none() {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // An event still queued for a window the menu replaced is dropped.
+        if self.live.as_ref().is_none_or(|l| l.window.id() != id) {
             return;
         }
         match &event {
