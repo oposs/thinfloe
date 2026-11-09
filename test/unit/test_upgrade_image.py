@@ -11,6 +11,7 @@ needs no privileges and the archive's contents are the assertion.
 """
 
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -870,6 +871,7 @@ class TestHomeCopyQuestion(unittest.TestCase):
                  mock.patch.object(ui, "download_firmware", return_value=fw), \
                  mock.patch.object(ui, "free_bytes", return_value=1 << 30), \
                  mock.patch.object(ui, "run_cmd"), \
+                 mock.patch.object(ui, "copy_firmware"), \
                  mock.patch.object(ui, "copy_home_to_drive") as copy, \
                  contextlib.redirect_stdout(io.StringIO()):
                 ui.do_ab_upgrade(_drive(is_boot=True), "http://x")
@@ -1293,6 +1295,58 @@ class TestAbUpgradeBootDefault(unittest.TestCase):
         self.assertEqual(self.defaults(), ["DEFAULT current", "DEFAULT current"])
 
 
+class TestAbUpgradeCopyProgress(TestAbUpgradeBootDefault):
+    """The copy to the stick is the long part of an upgrade on a fast
+    network: it reports flushed bytes, as the fresh write does."""
+
+    def test_the_copy_reports_progress_up_to_the_total(self):
+        fw = Path(ui.download_firmware(None, None, None))
+        sizes = {"vmlinuz": 5000, "initrd.img": 7000, "ramroot.sqsh": 20000}
+        for name, size in sizes.items():
+            (fw / name).write_bytes(bytes(range(256)) * (size // 256) + b"x" * (size % 256))
+        out = io.StringIO()
+        with mock.patch.object(ui, "SYNC_EVERY", 4096), \
+             mock.patch.object(ui, "WRITE_BLOCK", 1024):
+            ui.do_ab_upgrade(self.drive(True), "http://example.invalid",
+                             ui.Progress(out, True, 0))
+        lines = out.getvalue().splitlines()
+        start = lines.index("@step switch Copying the new release to the stick")
+        end = lines.index("@done switch")
+        done = [l.split()[1:] for l in lines[start:end] if l.startswith("@progress")]
+        total = str(sum(sizes.values()))
+        self.assertGreater(len(done), 3, lines)
+        self.assertTrue(all(t == total for _, t in done), done)
+        self.assertEqual([int(d) for d, _ in done], sorted(int(d) for d, _ in done))
+        self.assertEqual(done[-1][0], total)
+        for name in sizes:
+            self.assertEqual((self.esp / "tl.new" / name).read_bytes(),
+                             (fw / name).read_bytes())
+
+
+    def test_a_hung_up_terminal_does_not_stop_the_copy(self):
+        # Over SSH the copy now prints a line every SYNC_EVERY bytes; a
+        # dropped connection makes the tty write fail with EIO, which is
+        # not a stick error.
+        class HungUp:
+            def write(self, text):
+                raise OSError(errno.EIO, "Input/output error")
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                raise OSError(errno.EBADF, "gone")
+        fw = Path(ui.download_firmware(None, None, None))
+        (fw / "ramroot.sqsh").write_bytes(b"r" * 20000)
+        with mock.patch.object(ui, "SYNC_EVERY", 4096), \
+             mock.patch.object(ui, "WRITE_BLOCK", 1024), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ui.do_ab_upgrade(self.drive(True), "http://example.invalid",
+                             ui.Progress(HungUp(), False, 0))
+        self.assertEqual((self.esp / "tl.new" / "ramroot.sqsh").read_bytes(), b"r" * 20000)
+        self.assertEqual(self.defaults(), ["DEFAULT new", "DEFAULT new"])
+
+
 class TestAbUpgradeSpace(TestAbUpgradeBootDefault):
     """A stick holds at most two releases: tl.old goes before tl.new is staged."""
 
@@ -1300,12 +1354,11 @@ class TestAbUpgradeSpace(TestAbUpgradeBootDefault):
         (self.esp / "tl.old").mkdir()
         (self.esp / "tl.old" / "ramroot.sqsh").write_text("older")
         seen = []
-        run = ui.run_cmd
-        def spy(cmd, *a, **kw):
-            if cmd[0] == "cp":
-                seen.append((self.esp / "tl.old").exists())
-            return run(cmd, *a, **kw)
-        with mock.patch.object(ui, "run_cmd", side_effect=spy), \
+        copy = ui._copy_one
+        def spy(*a, **kw):
+            seen.append((self.esp / "tl.old").exists())
+            return copy(*a, **kw)
+        with mock.patch.object(ui, "_copy_one", side_effect=spy), \
              contextlib.redirect_stdout(io.StringIO()):
             ui.do_ab_upgrade(self.drive(True), "http://example.invalid")
         self.assertTrue(seen)

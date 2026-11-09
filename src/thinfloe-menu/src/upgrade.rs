@@ -836,7 +836,7 @@ fn planned(mode: Mode, verify: bool, copy_home: bool, boot_stick: bool) -> Vec<S
             }
             v.push(("download", "Downloading the new release"));
             v.push(("check", "Checking the files"));
-            v.push(("switch", "Switching to the new release"));
+            v.push(("switch", "Copying the new release to the stick"));
         }
     }
     v.into_iter()
@@ -1067,6 +1067,8 @@ mod tests {
         let fresh = planned(Mode::Fresh, true, true, false);
         assert_eq!(fresh[0].label, "Downloading and writing");
         assert_eq!(fresh[4].label, "Saving this machine's home");
+        let upgrade = planned(Mode::Upgrade, true, true, false);
+        assert_eq!(upgrade[2].label, "Copying the new release to the stick");
         assert_eq!(
             planned(Mode::Upgrade, true, true, true)[0].label,
             "Saving the home directory"

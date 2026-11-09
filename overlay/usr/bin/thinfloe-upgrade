@@ -197,7 +197,9 @@ class Progress:
         try:
             self.out.write(text)
             self.out.flush()
-        except (BrokenPipeError, ValueError):  # ValueError: closed file
+        # OSError: a broken pipe, or EIO from a terminal whose SSH session
+        # hung up. ValueError: a closed file.
+        except (OSError, ValueError):
             self._gone = True
             _silence_stdout(self.out)
 
@@ -1490,7 +1492,52 @@ def _boot_lock(drive: DriveInfo, note: str = "Nothing was changed."):
     return contextlib.nullcontext()
 
 
-def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None:
+def _copy_one(src: str, dest: str, on_flushed) -> None:
+    """Copy src to dest; on_flushed(n) after every n bytes are on the disk.
+
+    As the fresh write, the file is flushed every SYNC_EVERY bytes and only
+    flushed bytes are counted, so a bar shows what is on the stick, not in
+    the page cache. Raises OSError.
+    """
+    with open(src, "rb") as f:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            pending = 0
+            for block in iter(lambda: f.read(WRITE_BLOCK), b""):
+                view = memoryview(block)
+                while view:
+                    view = view[os.write(fd, view):]
+                pending += len(block)
+                if pending >= SYNC_EVERY:
+                    os.fdatasync(fd)
+                    on_flushed(pending)
+                    pending = 0
+            os.fdatasync(fd)
+            on_flushed(pending)
+        finally:
+            os.close(fd)
+
+
+def copy_firmware(firmware_dir: str, dest_dir: str, progress: Progress) -> None:
+    """Copy the firmware files into dest_dir; one bar covers all of them.
+
+    Raises OSError, which _switch_release turns into a removed tl.new/.
+    """
+    sources = [os.path.join(firmware_dir, f) for f in FIRMWARE_FILES]
+    total = sum(os.path.getsize(src) for src in sources)
+    done = [0]
+
+    def on_flushed(n: int) -> None:
+        done[0] += n
+        progress.progress(done[0], total)
+
+    progress.progress(0, total)
+    for src in sources:
+        _copy_one(src, os.path.join(dest_dir, os.path.basename(src)), on_flushed)
+
+
+def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str,
+                    progress: Progress = None) -> None:
     """Replace the stick's release; the boot label is the last write.
 
     Whatever fails, tl/ stays whole and DEFAULT keeps pointing at something
@@ -1501,6 +1548,7 @@ def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None
     several minutes would help neither. The waits are outside
     _uninterruptible, so a cancel works while waiting.
     """
+    progress = progress or PROGRESS
     tl_path = os.path.join(efi_mount, "tl")
     tl_old_path = os.path.join(efi_mount, "tl.old")
     tl_new_path = os.path.join(efi_mount, "tl.new")
@@ -1530,10 +1578,10 @@ def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str) -> None
                 run_cmd(["rm", "-rf", tl_new_path])
             run_cmd(["mkdir", "-p", tl_new_path])
         with _uninterruptible():
-            for filename in FIRMWARE_FILES:
-                run_cmd(["cp", os.path.join(firmware_dir, filename), tl_new_path])
-            # Flush the copy before the lock: on a slow stick this takes long,
-            # and a save waits only 30 s for the lock.
+            # Flushed while copying: on a slow stick this takes long, and a
+            # save waits only 30 s for the lock. The sync writes the
+            # directory entries.
+            copy_firmware(firmware_dir, tl_new_path, progress)
             run_cmd(["sync"])
         # Only after tl.new is complete.
         with _boot_lock(drive, "The new release is copied but not switched "
@@ -1641,8 +1689,8 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
                 f"{need // (1024 * 1024)} MB, {have // (1024 * 1024)} MB can be "
                 f"made free. Nothing was changed.")
 
-        progress.step("switch", "Switching to the new release")
-        _switch_release(drive, efi_mount, firmware_dir)
+        progress.step("switch", "Copying the new release to the stick")
+        _switch_release(drive, efi_mount, firmware_dir, progress)
         progress.done("switch")
     finally:
         if work_dir:

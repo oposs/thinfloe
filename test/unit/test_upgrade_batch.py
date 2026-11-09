@@ -1173,12 +1173,12 @@ class TestBatchUpgrade(unittest.TestCase):
         self.assertStickUntouched()
 
     def test_a_failed_copy_removes_the_partial_tl_new(self):
-        run = ui.run_cmd
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
-                raise subprocess.CalledProcessError(1, cmd)
-            return run(cmd, *a, **kw)
-        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+        copy = ui._copy_one
+        def fake(src, *a, **kw):
+            if src.endswith("ramroot.sqsh"):
+                raise OSError(errno.EIO, "I/O error")
+            return copy(src, *a, **kw)
+        with mock.patch.object(ui, "_copy_one", side_effect=fake):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 1, out)
         self.assertIn("@result failed the new release could not be installed", out)
@@ -1329,21 +1329,20 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
     def test_copy_runs_while_someone_else_holds_the_lock(self):
         self.checksums()
         seen = []
-        real = ui.run_cmd
+        real = ui._copy_one
         state = {"fd": None}
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp":
-                if not seen:
-                    state["fd"] = self.hold(wait=False)  # taken after step (a) let go
-                seen.append(self.locked_by_other())
-            return real(cmd, *a, **kw)
+        def fake(*a, **kw):
+            if not seen:
+                state["fd"] = self.hold(wait=False)  # taken after step (a) let go
+            seen.append(self.locked_by_other())
+            return real(*a, **kw)
         def sleep(s):                       # the other holder lets go
             if not from_esp_lock():
                 return real_sleep(s)
             if state["fd"] is not None:
                 os.close(state["fd"])
                 state["fd"] = None
-        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+        with mock.patch.object(ui, "_copy_one", side_effect=fake), \
              mock.patch.object(ui.time, "sleep", side_effect=sleep):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 0, out)
@@ -1367,10 +1366,10 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
     def test_boot_label_waits_and_timeout_leaves_default(self):
         self.checksums()
         state = {"fd": None}
-        real = ui.run_cmd
-        def fake(cmd, *a, **kw):
-            r = real(cmd, *a, **kw)
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
+        real = ui._copy_one
+        def fake(src, *a, **kw):
+            r = real(src, *a, **kw)
+            if src.endswith("ramroot.sqsh"):
                 state["fd"] = self.hold()   # someone takes it during the copy
             return r
         clock = [0.0]
@@ -1378,7 +1377,7 @@ class TestEspLock(TestBatchUpgrade):  # noqa: inherits fixtures
             if not from_esp_lock():
                 return real_sleep(s)
             clock[0] += max(s, 1.0)
-        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+        with mock.patch.object(ui, "_copy_one", side_effect=fake), \
              mock.patch.object(ui.time, "monotonic", side_effect=lambda: clock[0]), \
              mock.patch.object(ui.time, "sleep", side_effect=sleep):
             rc, out = self.run_upgrade()
@@ -1456,12 +1455,12 @@ class TestNonBootRotation(unittest.TestCase):
             ui._switch_release(self.drive, str(self.esp), str(self.fw))
 
     def test_copy_failure_leaves_tl(self):
-        run = ui.run_cmd
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
-                raise subprocess.CalledProcessError(1, cmd)
-            return run(cmd, *a, **kw)
-        with mock.patch.object(ui, "run_cmd", side_effect=fake), \
+        copy = ui._copy_one
+        def fake(src, *a, **kw):
+            if src.endswith("ramroot.sqsh"):
+                raise OSError(errno.EIO, "I/O error")
+            return copy(src, *a, **kw)
+        with mock.patch.object(ui, "_copy_one", side_effect=fake), \
              self.assertRaises(ui.WriteFailed):
             self.switch()
         for f in ui.FIRMWARE_FILES:
@@ -1657,10 +1656,10 @@ class TestChildIsolation(unittest.TestCase):
         self.assertEqual(seen, [True, True])
 
     def test_group_sigterm_during_the_switch_still_completes(self):
-        # The real thing: the tool runs in a group of its own, a slow cp is
-        # on PATH, and the whole group gets SIGTERM while cp runs.
+        # The real thing: the tool runs in a group of its own, the copy of
+        # each file is slow, and the whole group gets SIGTERM during it.
         runner = r"""
-import contextlib, io, os, signal, sys, types
+import contextlib, io, os, signal, sys, time, types
 from unittest import mock
 import importlib.machinery, importlib.util
 spec = importlib.util.spec_from_loader("u", importlib.machinery.SourceFileLoader("u", sys.argv[1]))
@@ -1668,6 +1667,11 @@ ui = importlib.util.module_from_spec(spec); spec.loader.exec_module(ui)
 esp, srv = sys.argv[2], sys.argv[3]
 ui.BOOT_EFI_MOUNT = esp
 ui.save_home_before_finish = lambda: 0
+copy = ui._copy_one
+def slow(*a, **kw):
+    time.sleep(2)
+    return copy(*a, **kw)
+ui._copy_one = slow
 d = ui.DriveInfo("/dev/sdz", "16G", "T", "", True, "/dev/sdz1", 1024, True, False, False)
 p = ui.Progress(sys.stdout, True, 0)
 signal.signal(signal.SIGTERM, ui._cancel_on_signal)
@@ -1681,21 +1685,17 @@ sys.exit(rc)
 """
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
-            esp, srv, bin_ = root / "esp", root / "srv", root / "bin"
+            esp, srv = root / "esp", root / "srv"
             (esp / "tl").mkdir(parents=True)
             srv.mkdir()
-            bin_.mkdir()
             for f in ui.FIRMWARE_FILES:
                 (esp / "tl" / f).write_text("old")
                 (srv / f).write_text("new " + f)
             (esp / "syslinux.cfg").write_text(
                 "DEFAULT current\nLABEL current\n  APPEND ramroot=tl/ramroot.sqsh\n")
-            (bin_ / "cp").write_text("#!/bin/sh\necho cp-start >&2\nsleep 2\nexec /bin/cp \"$@\"\n")
-            (bin_ / "cp").chmod(0o755)
-            env = dict(os.environ, PATH=str(bin_) + ":" + os.environ["PATH"])
             proc = subprocess.Popen(
                 ["python3", "-B", "-c", runner, str(SCRIPT), str(esp), str(srv)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, text=True)
             self.addCleanup(lambda: proc.poll() is None and proc.kill())
             lines = []
@@ -1704,7 +1704,7 @@ sys.exit(rc)
                 if line.startswith("@step switch"):
                     break
             import time
-            time.sleep(0.7)  # cp is sleeping now
+            time.sleep(0.7)  # the first copy is sleeping now
             os.killpg(proc.pid, signal.SIGTERM)
             out, err = proc.communicate(timeout=60)
             lines.append(out)
@@ -1797,26 +1797,26 @@ class TestStagedUpgrade(TestBatchUpgrade):
             self.assertEqual((self.esp / "tl" / f).read_text(), "old " + f)
 
     def test_failed_copy_leaves_a_bootable_stick(self):
-        run = ui.run_cmd
+        copy = ui._copy_one
 
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
-                raise subprocess.CalledProcessError(1, cmd)
-            return run(cmd, *a, **kw)
-        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+        def fake(src, *a, **kw):
+            if src.endswith("ramroot.sqsh"):
+                raise OSError(errno.EIO, "I/O error")
+            return copy(src, *a, **kw)
+        with mock.patch.object(ui, "_copy_one", side_effect=fake):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 1, out)
         self.assertBootable()
 
     def test_a_failed_copy_removes_the_partial_tl_new(self):
         # Staged: the restore puts DEFAULT current back, then the copy fails.
-        run = ui.run_cmd
+        copy = ui._copy_one
 
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
-                raise subprocess.CalledProcessError(1, cmd)
-            return run(cmd, *a, **kw)
-        with mock.patch.object(ui, "run_cmd", side_effect=fake):
+        def fake(src, *a, **kw):
+            if src.endswith("ramroot.sqsh"):
+                raise OSError(errno.EIO, "I/O error")
+            return copy(src, *a, **kw)
+        with mock.patch.object(ui, "_copy_one", side_effect=fake):
             rc, out = self.run_upgrade()
         self.assertEqual(rc, 1, out)
         self.assertFalse((self.esp / "tl.new").exists())
@@ -1858,14 +1858,14 @@ class TestStagedUpgrade(TestBatchUpgrade):
     def test_non_boot_staged_failed_copy_leaves_a_bootable_stick(self):
         self.drive = ui.DriveInfo("/dev/sdz", "16G", "Test", "", True,
                                   "/dev/sdz1", 1024, False, False, False)
-        run = ui.run_cmd
+        copy = ui._copy_one
 
-        def fake(cmd, *a, **kw):
-            if cmd[0] == "cp" and cmd[1].endswith("ramroot.sqsh"):
-                raise subprocess.CalledProcessError(1, cmd)
-            return run(cmd, *a, **kw)
+        def fake(src, *a, **kw):
+            if src.endswith("ramroot.sqsh"):
+                raise OSError(errno.EIO, "I/O error")
+            return copy(src, *a, **kw)
         with contextlib.redirect_stdout(io.StringIO()), \
-             mock.patch.object(ui, "run_cmd", side_effect=fake), \
+             mock.patch.object(ui, "_copy_one", side_effect=fake), \
              self.assertRaises(ui.WriteFailed):
             ui._switch_release(self.drive, str(self.esp), str(self.srv))
         self.assertBootable()

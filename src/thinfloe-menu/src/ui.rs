@@ -4388,7 +4388,7 @@ mod tests {
             ("save", "Saving the home directory"),
             ("download", "Downloading the new release"),
             ("check", "Checking the files"),
-            ("switch", "Switching to the new release"),
+            ("switch", "Copying the new release to the stick"),
         ] {
             done.finished(
                 JobResult::UpgradeMsg(Msg::Step {
