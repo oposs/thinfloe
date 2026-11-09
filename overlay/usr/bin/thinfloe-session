@@ -261,6 +261,36 @@ tf_hold() {
 sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
     >/dev/null 2>&1 || true
 
+# Monitor layout. The menu writes ~/.config/kanshi/config and kanshi is the
+# only thing that sets outputs. A new layout stays unconfirmed until the person
+# confirms it within 15 s; the menu leaves the marker below while it waits.
+# Finding it here means the session ended in that window: put the old layout
+# back BEFORE kanshi starts, so kanshi never applies the unconfirmed one.
+#   prev   restore config.prev over config
+#   none   there was no config before: remove config
+#   other  unknown content: leave the config alone
+kanshi_dir=$HOME/.config/kanshi
+layout_marker=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed}
+if [ -n "$layout_marker" ] && [ -e "$layout_marker" ]; then
+    read -r layout_undo <"$layout_marker" 2>/dev/null || true
+    case "$layout_undo" in
+        prev)
+            [ -e "$kanshi_dir/config.prev" ] &&
+                mv -f "$kanshi_dir/config.prev" "$kanshi_dir/config"
+            ;;
+        none)
+            rm -f "$kanshi_dir/config" "$kanshi_dir/config.prev"
+            ;;
+    esac
+    rm -f "$layout_marker"
+fi
+# A kanshi the sessionrc started by hand is left alone: two would fight.
+if [ -r "$kanshi_dir/config" ] && command -v kanshi >/dev/null 2>&1 &&
+   ! pgrep -u "$(id -u)" -x kanshi >/dev/null 2>&1; then
+    kanshi -c "$kanshi_dir/config" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
+    HELPER_PIDS="$HELPER_PIDS $!"
+fi
+
 # The title bars follow the menu's scale: drop a scale file left by an earlier
 # session (the helper would apply it before the menu has measured), then let
 # the helper wait for the menu's new one.

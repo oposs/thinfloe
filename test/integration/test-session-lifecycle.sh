@@ -599,4 +599,109 @@ else
     bad "profile: dead boot screen: rc=$ps_rc calls '$(steps)' out=$(cat "$WORK/ps/out")"
 fi
 
+# ---------------------------------------------------------------------------
+# kanshi: the session undoes an unconfirmed layout, then starts kanshi on the
+# menu's config. The fake records one argv line per start and its pid, and
+# stays alive, so "not started" is an absent file and "once" is one line.
+# ---------------------------------------------------------------------------
+KDIR="$WORK/home/.config/kanshi"
+MARKER="$WORK/thinfloe-layout-unconfirmed"
+cat >"$WORK/bin/kanshi" <<STUB
+#!/bin/sh
+echo "\$*" >>"$WORK/kanshi.argv"
+cp "\$2" "$WORK/kanshi.seen" 2>/dev/null
+echo \$\$ >>"$WORK/kanshi.pid"
+while :; do sleep 1; done
+STUB
+chmod 755 "$WORK/bin/kanshi"
+kanshi_reset() {
+    local p
+    for p in $(cat "$WORK/kanshi.pid" 2>/dev/null); do kill "$p" 2>/dev/null; done
+    rm -rf "$KDIR" "$MARKER" "$WORK/kanshi.argv" "$WORK/kanshi.pid" "$WORK/kanshi.seen" "$WORK/home/.thinfloe-sessionrc"
+}
+kanshi_reset
+if pgrep -u "$(id -u)" -x kanshi >/dev/null; then
+    echo "skip - kanshi cases: a kanshi of this user is already running"
+else
+    # Menu stub: give a started kanshi a moment to write its argv.
+    KMENU='sleep 0.3; exit 0'
+
+    mkdir -p "$KDIR"
+    echo "profile a {}" >"$KDIR/config"
+    run_session "$KMENU"
+    if [[ "$(cat "$WORK/kanshi.argv" 2>/dev/null)" == "-c $WORK/home/.config/kanshi/config" ]]; then
+        ok "kanshi started when the config exists: once, with -c <config>"
+    else
+        bad "kanshi started: argv '$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
+    fi
+    sleep 1.2
+    kp=$(head -n1 "$WORK/kanshi.pid" 2>/dev/null)
+    if [[ -n $kp ]] && ! kill -0 "$kp" 2>/dev/null; then
+        ok "kanshi ends with the session (helper)"
+    else
+        bad "kanshi pid '$kp' still running after the session"
+    fi
+    kanshi_reset
+
+    run_session "$KMENU"
+    if [[ ! -e "$WORK/kanshi.argv" ]]; then
+        ok "no config: no kanshi"
+    else
+        bad "no config: kanshi was started: $(cat "$WORK/kanshi.argv")"
+    fi
+    kanshi_reset
+
+    # Already running: the sessionrc starts the fake by hand.
+    mkdir -p "$KDIR"
+    echo "profile a {}" >"$KDIR/config"
+    printf 'kanshi -c "$HOME/.config/kanshi/config" &\n' >"$WORK/home/.thinfloe-sessionrc"
+    run_session "sleep 0.5; exit 0"
+    if [[ "$(wc -l <"$WORK/kanshi.argv" 2>/dev/null)" -eq 1 ]] &&
+       [[ "$(wc -l <"$WORK/kanshi.pid" 2>/dev/null)" -eq 1 ]]; then
+        ok "kanshi already running: session starts no second one"
+    else
+        bad "kanshi already running: argv lines: $(cat "$WORK/kanshi.argv" 2>/dev/null)"
+    fi
+    kanshi_reset
+
+    # An unconfirmed layout is undone before kanshi starts: the config
+    # kanshi is given is already the old one.
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo old >"$KDIR/config.prev"
+    echo prev >"$MARKER"
+    run_session "$KMENU"
+    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == old && ! -e "$KDIR/config.prev" && ! -e "$MARKER" &&
+          "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
+        ok "unconfirmed layout is undone: prev (before kanshi starts)"
+    else
+        bad "undo prev: config='$(cat "$KDIR/config" 2>/dev/null)' prev=$([[ -e $KDIR/config.prev ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
+    fi
+    kanshi_reset
+
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo none >"$MARKER"
+    run_session "$KMENU"
+    if [[ ! -e "$KDIR/config" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]]; then
+        ok "unconfirmed layout is undone: none (config gone, no kanshi)"
+    else
+        bad "undo none: config=$([[ -e $KDIR/config ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
+    fi
+    kanshi_reset
+
+    # Unknown marker content: config stays, marker goes.
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo old >"$KDIR/config.prev"
+    echo garbage >"$MARKER"
+    run_session "$KMENU"
+    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == new && -e "$KDIR/config.prev" && ! -e "$MARKER" ]]; then
+        ok "unconfirmed layout: unknown marker content leaves the config alone"
+    else
+        bad "unknown marker: config='$(cat "$KDIR/config" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
+    fi
+    kanshi_reset
+fi
+
 exit $fail

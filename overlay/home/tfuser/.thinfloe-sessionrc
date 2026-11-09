@@ -11,6 +11,10 @@
 # ---------------------------------------------------------------------------
 # DISPLAYS
 # ---------------------------------------------------------------------------
+# The menu manages the monitor layout now: it writes ~/.config/kanshi/config
+# and the session starts kanshi on it. A kanshi line of your own below still
+# works (the session then starts no second one).
+#
 # wlr-randr replaces xrandr on this system. List what is connected with:
 #
 #   wlr-randr
