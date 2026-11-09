@@ -566,6 +566,9 @@ true'
     MM_CONFIGURES=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | grep -o '[0-9]*x[0-9]*$' | tr '\n' ' ')
     MM_FIRST=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | head -1 | grep -o '[0-9]*x[0-9]*$')
     MM_LAST=$(echo "$out" | grep -E '^menu .*: thinfloe-menu: configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
+    # One line per window replacement (TF_MENU_DEBUG): a replace loop that
+    # ends on the right output must still fail.
+    MM_REPLACES=$(echo "$out" | grep -cE '^menu .*: thinfloe-menu: window replaced$')
     MM_OUTPUT_FILE=$(echo "$out" | sed -n 's/^output-file: //p')
     MM_APPLIED=$(echo "$out" | sed -n 's/^applied: //p')
     # The seconds of the warning, and whether a configure came after it,
@@ -578,20 +581,20 @@ true'
 # case below can fail.
 run_menu_move_case control
 if [[ "$MM_FIRST" == 1024x768 && "$MM_LAST" == 1024x768 && "$MM_CONFIGURES" != *1000x600* \
-      && -z "$MM_WARN_AT" && -z "$MM_APPLIED" ]]; then
+      && -z "$MM_WARN_AT" && -z "$MM_APPLIED" && "$MM_REPLACES" -eq 0 ]]; then
     echo "ok   - without a chosen monitor the menu stays on the cursor output (1024x768)"
 else
-    echo "FAIL - control run: configures '$MM_CONFIGURES', applied '$MM_APPLIED', warning at '$MM_WARN_AT'"
+    echo "FAIL - control run: configures '$MM_CONFIGURES', applied '$MM_APPLIED', warning at '$MM_WARN_AT', $MM_REPLACES window replacements"
     echo "$MM_RESULT"
     fail=1
 fi
 
 run_menu_move_case moves
 if [[ "$MM_FIRST" == 1024x768 && "$MM_LAST" == 1000x600 && "$MM_APPLIED" == HEADLESS-1 \
-      && "$MM_OUTPUT_FILE" == HEADLESS-1 && -z "$MM_WARN_AT" ]]; then
-    echo "ok   - the menu replaces its window and moves to HEADLESS-1 once labwc-scale confirms it (configures $MM_CONFIGURES)"
+      && "$MM_OUTPUT_FILE" == HEADLESS-1 && -z "$MM_WARN_AT" && "$MM_REPLACES" -eq 1 ]]; then
+    echo "ok   - the menu replaces its window once and moves to HEADLESS-1 once labwc-scale confirms it (configures $MM_CONFIGURES)"
 else
-    echo "FAIL - the menu did not move to HEADLESS-1: configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED', warning at '$MM_WARN_AT'"
+    echo "FAIL - the menu did not move to HEADLESS-1 with one window replacement: configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED', warning at '$MM_WARN_AT', $MM_REPLACES window replacements"
     echo "$MM_RESULT"
     fail=1
 fi
@@ -599,10 +602,10 @@ fi
 run_menu_move_case unanswered
 if [[ -n "$MM_WARN_AT" ]] && awk -v t="$MM_WARN_AT" 'BEGIN { exit !(t >= 3 && t < 8) }' \
       && [[ "$MM_CONF_AFTER_WARN" -ge 1 && "$MM_LAST" == 1024x768 \
-      && "$MM_OUTPUT_FILE" == HEADLESS-1 && "$MM_APPLIED" == missing ]]; then
-    echo "ok   - unanswered, the menu replaces its window after 3 s and logs that it could not be moved (at ${MM_WARN_AT}s, $MM_CONF_AFTER_WARN configure after)"
+      && "$MM_OUTPUT_FILE" == HEADLESS-1 && "$MM_APPLIED" == missing && "$MM_REPLACES" -eq 1 ]]; then
+    echo "ok   - unanswered, the menu replaces its window once after 3 s and logs that it could not be moved (at ${MM_WARN_AT}s, $MM_CONF_AFTER_WARN configure after)"
 else
-    echo "FAIL - unanswered move: warning at '$MM_WARN_AT', configures after it $MM_CONF_AFTER_WARN, configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED'"
+    echo "FAIL - unanswered move: warning at '$MM_WARN_AT', configures after it $MM_CONF_AFTER_WARN, configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED', $MM_REPLACES window replacements"
     echo "$MM_RESULT"
     fail=1
 fi

@@ -314,6 +314,14 @@ if [ -z "$scale_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     scale_file=$XDG_RUNTIME_DIR/thinfloe-scale
 fi
 [ -n "$scale_file" ] && rm -f "$scale_file"
+# Likewise the monitor an earlier session's menu asked for, and labwc-scale's
+# confirmation of it: the helper would put this menu there, and the menu
+# writes the file only when its own choice changes.
+menu_output_file=${TF_MENU_OUTPUT_FILE:-}
+if [ -z "$menu_output_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    menu_output_file=$XDG_RUNTIME_DIR/thinfloe-menu-output
+fi
+[ -n "$menu_output_file" ] && rm -f "$menu_output_file" "$menu_output_file.applied"
 "${TF_LABWC_SCALE:-/usr/libexec/thinfloe/labwc-scale}" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
 HELPER_PIDS="$HELPER_PIDS $!"
 

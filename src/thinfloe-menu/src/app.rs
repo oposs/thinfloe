@@ -952,19 +952,23 @@ impl App {
             Some(name) => Some(name.clone()),
             None => self.cfg.menu.monitors.menu_output().map(str::to_string),
         };
-        if self.menu_move.want(wanted.as_deref(), now) {
-            if self.cfg.debug {
-                eprintln!("thinfloe-menu: menu output {}", wanted.as_deref().unwrap_or("(none)"));
-            }
-            if let Err(e) = menu_move::write_output_file(&path, wanted.as_deref()) {
-                eprintln!("thinfloe-menu: cannot write the menu output file: {e}");
-            }
-        }
-        if !self.menu_move.waiting() {
+        let changes = self.menu_move.changes(wanted.as_deref());
+        if !changes && !self.menu_move.waiting() {
             return;
         }
         let applied = menu_move::read_applied(&path);
-        match self.menu_move.poll(applied.as_deref(), now) {
+        if self.menu_move.want(wanted.as_deref(), applied.as_ref(), now) && self.cfg.debug {
+            eprintln!("thinfloe-menu: menu output {}", wanted.as_deref().unwrap_or("(none)"));
+        }
+        if self.menu_move.write_due(now) {
+            let r = menu_move::write_output_file(&path, self.menu_move.asked());
+            if self.menu_move.wrote(r.is_ok(), now)
+                && let Err(e) = r
+            {
+                eprintln!("thinfloe-menu: cannot write the menu output file: {e}");
+            }
+        }
+        match self.menu_move.poll(applied.as_ref(), now) {
             Some(Replace::Confirmed) => self.replace_window(event_loop),
             Some(Replace::Unconfirmed(asked)) => {
                 if let Some(name) = asked {

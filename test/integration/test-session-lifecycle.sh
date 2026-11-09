@@ -140,6 +140,47 @@ else
     [[ -n "$hp" ]] && kill "$hp" 2>/dev/null
 fi
 
+# A menu output of an earlier session would put this session's menu on a
+# monitor nobody chose: labwc-scale applies it at its start. The session
+# removes the file and its .applied before the helper starts, at the path
+# TF_MENU_OUTPUT_FILE names and at the default one in XDG_RUNTIME_DIR.
+cat >"$WORK/bin/output-helper" <<STUB
+#!/bin/sh
+f=\${TF_MENU_OUTPUT_FILE:-\$XDG_RUNTIME_DIR/thinfloe-menu-output}
+if [ -e "\$f" ] || [ -e "\$f.applied" ]; then echo stale; else echo gone; fi >"$WORK/output-helper.out"
+STUB
+chmod 755 "$WORK/bin/output-helper"
+# The menu outlives the helper's look: the session stops it when the menu ends.
+printf '#!/bin/sh\nsleep 0.5\nexit 0\n' >"$WORK/bin/menu"
+chmod 755 "$WORK/bin/menu"
+for where in named default; do
+    rm -f "$WORK/output-helper.out"
+    if [[ $where == named ]]; then
+        out_file="$WORK/stale-menu-output"
+        echo HDMI-A-1 >"$out_file"
+        echo HDMI-A-1 >"$out_file.applied"
+        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+            TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+            TF_MENU_OUTPUT_FILE="$out_file" TF_LABWC_SCALE="$WORK/bin/output-helper" \
+            sh "$SESSION" >/dev/null 2>&1
+    else
+        out_file="$WORK/thinfloe-menu-output"
+        echo HDMI-A-1 >"$out_file"
+        echo HDMI-A-1 >"$out_file.applied"
+        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+            TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
+            TF_LABWC_SCALE="$WORK/bin/output-helper" \
+            sh "$SESSION" >/dev/null 2>&1
+    fi
+    if [[ ! -e "$out_file" && ! -e "$out_file.applied" \
+          && "$(cat "$WORK/output-helper.out" 2>/dev/null)" == gone ]]; then
+        ok "session: a stale menu output file ($where) and its .applied are gone before labwc-scale starts"
+    else
+        bad "session: stale menu output ($where): file $([[ -e $out_file ]] && echo kept || echo gone), .applied $([[ -e $out_file.applied ]] && echo kept || echo gone), helper saw '$(cat "$WORK/output-helper.out" 2>/dev/null)'"
+    fi
+    rm -f "$out_file" "$out_file.applied"
+done
+
 # No usable scale file path (TF_SCALE_FILE and XDG_RUNTIME_DIR unset or
 # empty, as the menu reads them): the session removes nothing.
 printf '#!/bin/sh\necho "$*" >>"%s/rm.args"\nexec /bin/rm "$@"\n' "$WORK" >"$WORK/bin/rm"
