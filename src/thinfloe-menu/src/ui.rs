@@ -1306,6 +1306,70 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>,
     }
 }
 
+/// A page's scroll bar is drawn whole, also while the pointer is away.
+const SCROLL_REST_OPACITY: f32 = 1.0;
+
+/// A scrolling page above a footer in `rect`. The footer follows the page,
+/// which ends with `gap` of its own. When the page does not fit, the
+/// footer is pinned to the bottom of `rect` and the page scrolls above it,
+/// `gap` apart, so the main buttons never scroll away. Both heights are
+/// the previous pass's; a change discards the pass, so the frame is drawn
+/// again at once with the right ones. `salt` names the page.
+pub(crate) fn page_with_footer<F, P>(
+    ui: &mut Ui,
+    salt: &'static str,
+    rect: Rect,
+    gap: f32,
+    footer: impl FnOnce(&mut Ui) -> F,
+    page: impl FnOnce(&mut Ui) -> P,
+) -> (F, P) {
+    let h_id = egui::Id::unique((salt, "footer-h"));
+    let c_id = egui::Id::unique((salt, "content-h"));
+    let prev_h: f32 = ui.ctx().data(|d| d.get_temp(h_id)).unwrap_or(0.0);
+    let prev_c: f32 = ui.ctx().data(|d| d.get_temp(c_id)).unwrap_or(f32::INFINITY);
+    let room = (rect.bottom() - prev_h - rect.top()).max(0.0);
+    let fits = prev_c <= room;
+    let page_bottom = if fits {
+        rect.top() + prev_c
+    } else {
+        rect.top() + (room - gap).max(0.0)
+    };
+    let footer_top = if fits { page_bottom } else { rect.bottom() - prev_h };
+    let mut f_ui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
+        pos2(rect.left(), footer_top),
+        pos2(rect.right(), rect.bottom().max(footer_top)),
+    )));
+    let f = footer(&mut f_ui);
+    let h = f_ui.min_rect().height().max(0.0);
+    let mut s_ui =
+        ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(rect.min, pos2(rect.right(), page_bottom))));
+    // egui's default scroll style is floating, with the bar at zero
+    // opacity until the pointer hovers it. A solid bar, drawn at full
+    // opacity also at rest, in the theme's colours, and only when the
+    // page overflows.
+    s_ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        dormant_background_opacity: SCROLL_REST_OPACITY,
+        dormant_handle_opacity: SCROLL_REST_OPACITY,
+        active_background_opacity: SCROLL_REST_OPACITY,
+        active_handle_opacity: SCROLL_REST_OPACITY,
+        ..egui::style::ScrollStyle::solid()
+    };
+    let out = egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(&mut s_ui, page);
+    let c = out.content_size.y;
+    if (h - prev_h).abs() > 0.5 || (c - prev_c).abs() > 0.5 {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(h_id, h);
+            d.insert_temp(c_id, c);
+        });
+        ui.ctx().request_discard("a page or its footer changed its height");
+    }
+    (f, out.inner)
+}
+
 /// A centred card over the frozen grid.
 pub(crate) fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
     let t = Theme::current(ui.ctx());
@@ -2929,6 +2993,35 @@ mod tests {
         assert_eq!(net_clicks(&menu, &["Add network"]).0, [None]);
     }
 
+    /// The fonts have no emoji: a lock drawn as text came out as a broken
+    /// glyph on hardware. The marks are icons; the rows give the strength
+    /// as a word and in dBm.
+    #[test]
+    fn network_rows_draw_no_emoji_and_give_the_dbm() {
+        let saved = net_texts(&network_settings(two_networks()));
+        let dialog = net_texts(&network_settings(add_dialog_open()));
+        for t in saved.iter().chain(&dialog) {
+            assert!(!t.chars().any(|c| u32::from(c) >= 0x1f000), "emoji in {t:?}");
+        }
+        assert!(has(&dialog, "strong · -55 dBm"), "{dialog:?}");
+        assert!(has(&dialog, "weak · -75 dBm"), "{dialog:?}");
+    }
+
+    /// Apply sits below the bands, as the Upgrade screen's footer, and is
+    /// pinned to the panel's foot only when the bands scroll.
+    #[test]
+    fn apply_follows_the_bands_on_a_tall_screen() {
+        let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 2400.0);
+        let band = card_of(&shapes, "Add network");
+        let apply = text_rects(&shapes)
+            .into_iter()
+            .rfind(|(t, _)| t == "Apply")
+            .expect("Apply drawn")
+            .1;
+        let gap = apply.top() - band.bottom();
+        assert!(gap > 0.0 && gap < 3.0 * GAP, "Apply {apply:?}, band {band:?}");
+    }
+
     /// Ruling 21: one reason per cause on an unsupported row.
     #[test]
     fn unsupported_rows_say_why() {
@@ -3147,18 +3240,6 @@ mod tests {
         }
         let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
         assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CancelApply)]);
-    }
-
-    #[test]
-    fn the_lock_mark_has_a_glyph() {
-        let ctx = egui::Context::default();
-        crate::brand::apply(&ctx);
-        for _ in 0..2 {
-            ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
-        }
-        ctx.fonts_mut(|f| {
-            assert!(f.has_glyphs(&FontId::proportional(14.0), crate::network_ui::LOCK));
-        });
     }
 
     #[test]

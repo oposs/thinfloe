@@ -9,6 +9,7 @@ use crate::drives::{self, Drive, Mode};
 use crate::menu::Menu;
 use crate::settings::{self, Tone};
 use crate::speed;
+use crate::ui;
 use crate::upgrade::{self, Outcome, Stage, StepMark, StepView, Upgrade, UpgradeEvent};
 use egui::text::LayoutJob;
 use egui::{Color32, FontId, Rect, Sense, Stroke, StrokeKind, TextFormat, Ui, UiBuilder, Vec2, vec2};
@@ -33,8 +34,6 @@ const LINE_GAP: f32 = 6.0;
 /// Between the two halves of a row of choices, and between the two
 /// columns of the Choose page (`gap-2`).
 const COL_GAP: f32 = 8.0;
-/// The page's scroll bar is drawn whole, also while the pointer is away.
-const SCROLL_REST_OPACITY: f32 = 1.0;
 /// Between two rows of a choice (`gap-1`).
 const ROW_GAP: f32 = 4.0;
 /// Between the heading of a block and the header's last-checked text (`gap-3`).
@@ -100,77 +99,26 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
     let block_w = width - 2.0 * f32::from(BLOCK_PAD);
     p_ui.add_space(BLOCK_GAP);
     let page_top = p_ui.cursor().min.y;
-    // The footer follows the page, one BLOCK_GAP below its last block. When
-    // the page does not fit, the footer is pinned to the bottom of the panel
-    // and the page scrolls above it, so the main buttons never scroll away.
-    // Both heights are the previous pass's; a change discards the pass, so
-    // the frame is drawn again at once with the right ones.
-    let h_id = egui::Id::unique("thinfloe-upgrade-footer-h");
-    let c_id = egui::Id::unique("thinfloe-upgrade-content-h");
-    let prev_h: f32 = ui.ctx().data(|d| d.get_temp(h_id)).unwrap_or(0.0);
-    let prev_c: f32 = ui.ctx().data(|d| d.get_temp(c_id)).unwrap_or(f32::INFINITY);
-    // The page's height includes the BLOCK_GAP below its last block.
-    let room = (panel.bottom() - prev_h - page_top).max(0.0);
-    let fits = prev_c <= room;
-    let page_bottom = if fits {
-        page_top + prev_c
-    } else {
-        page_top + (room - BLOCK_GAP).max(0.0)
-    };
-    let footer_top = if fits { page_bottom } else { panel.bottom() - prev_h };
-    let mut f_ui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
-        egui::pos2(panel.left(), footer_top),
-        egui::pos2(panel.right(), panel.bottom().max(footer_top)),
-    )));
-    let footer = match &u.stage {
-        Stage::Choose => choose_footer(&mut f_ui, u, &t, block_w),
-        Stage::Running => running_footer(&mut f_ui, u, &t, block_w),
-        Stage::Finished(o) => finished_footer(&mut f_ui, o, &t, block_w),
-    };
-    let h = f_ui.min_rect().height().max(0.0);
-    if footer.is_some() {
-        event = footer;
-    }
-    let page = Rect::from_min_max(
-        egui::pos2(panel.left(), page_top),
-        egui::pos2(panel.right(), page_bottom),
+    // The footer follows the page, one BLOCK_GAP below its last block (the
+    // page's height includes that gap); pinned when the page overflows.
+    let rect = Rect::from_min_max(egui::pos2(panel.left(), page_top), panel.max);
+    let (footer, page) = ui::page_with_footer(
+        ui,
+        "upgrade",
+        rect,
+        BLOCK_GAP,
+        |ui| match &u.stage {
+            Stage::Choose => choose_footer(ui, u, &t, block_w),
+            Stage::Running => running_footer(ui, u, &t, block_w),
+            Stage::Finished(o) => finished_footer(ui, o, &t, block_w),
+        },
+        |ui| match &u.stage {
+            Stage::Choose => choose(ui, menu, &t, block_w),
+            Stage::Running => running(ui, u, &t, block_w),
+            Stage::Finished(o) => finished(ui, u, o, &t, block_w),
+        },
     );
-    let mut s_ui = ui.new_child(UiBuilder::new().max_rect(page));
-    // egui's default scroll style is floating, with the bar at zero
-    // opacity until the pointer hovers it. A solid bar, drawn at full
-    // opacity also at rest, in the theme's colours, and only when the
-    // page overflows.
-    s_ui.spacing_mut().scroll = egui::style::ScrollStyle {
-        dormant_background_opacity: SCROLL_REST_OPACITY,
-        dormant_handle_opacity: SCROLL_REST_OPACITY,
-        active_background_opacity: SCROLL_REST_OPACITY,
-        active_handle_opacity: SCROLL_REST_OPACITY,
-        ..egui::style::ScrollStyle::solid()
-    };
-    let out = egui::ScrollArea::vertical()
-        .id_salt("upgrade")
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(&mut s_ui, |ui| {
-            let e = match &u.stage {
-                Stage::Choose => choose(ui, menu, &t, block_w),
-                Stage::Running => running(ui, u, &t, block_w),
-                Stage::Finished(o) => finished(ui, u, o, &t, block_w),
-            };
-            if e.is_some() {
-                event = e;
-            }
-        });
-    let c = out.content_size.y;
-    if (h - prev_h).abs() > 0.5 || (c - prev_c).abs() > 0.5 {
-        ui.ctx().data_mut(|d| {
-            d.insert_temp(h_id, h);
-            d.insert_temp(c_id, c);
-        });
-        ui.ctx()
-            .request_discard("the Upgrade page or footer changed its height");
-    }
-    event
+    page.or(footer).or(event)
 }
 
 /// A TILE-coloured block, with a heading when `title` is given and a

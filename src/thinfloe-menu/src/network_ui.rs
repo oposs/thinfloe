@@ -9,18 +9,18 @@ use crate::netfiles::{self, FileState};
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
 use crate::ui::{self, GAP, Icon, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
-use egui::{RichText, Sense, Ui};
+use egui::{Rect, RichText, Sense, Ui};
 use shadcn_egui::Theme;
 use shadcn_egui::components::badge::{Badge, BadgeVariant};
 use shadcn_egui::components::button::{Button, ButtonVariant};
 use shadcn_egui::components::checkbox::Checkbox;
 use shadcn_egui::components::field::{Field, field_label};
+use shadcn_egui::components::icon::IconView;
 use shadcn_egui::components::input::Input;
 use shadcn_egui::components::item::{Item, ItemSize};
 use shadcn_egui::components::select::Select;
+use shadcn_egui::icons::lucide;
 
-/// The mark of a secured network.
-pub const LOCK: &str = "\u{1f512}";
 /// The wired select: index 1 is a fixed address.
 const WIRED_MODES: [&str; 2] = ["Automatic (DHCP)", "Fixed address"];
 const PASSWORD_NOTE: &str = "The password is saved with the home directory. Anyone who has the stick can read it.";
@@ -28,8 +28,6 @@ const PASSWORD_NOTE: &str = "The password is saved with the home directory. Anyo
 const BAND_PAD: i8 = 12;
 /// Before the buttons of a dialog, as the other dialogs.
 const BUTTON_GAP: f32 = 8.0;
-/// The tab's scroll bar is drawn whole, also while the pointer is away.
-const SCROLL_REST_OPACITY: f32 = 1.0;
 
 /// A dialog of the tab is open; the screen under it takes no clicks.
 pub fn dialog_open(net: &NetTab) -> bool {
@@ -39,53 +37,46 @@ pub fn dialog_open(net: &NetTab) -> bool {
 /// The Network tab, `width` wide, and its dialogs.
 pub fn network_tab(ui: &mut Ui, net: &NetTab, _icons: &[Option<Icon>], width: f32) -> Option<NetEvent> {
     let t = Theme::current(ui.ctx());
-    let mut event = None;
-    // Apply and its error stand at the foot of the panel, so a page that
-    // scrolls never hides them; the bands scroll in the room above.
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        if let Some(e) = net.error() {
-            warn(ui, &t, e);
-        }
-        let label = if net.applying() { "Applying…" } else { "Apply" };
-        if ui
-            .add_enabled(net.dirty() && !net.applying(), Button::new(label))
-            .clicked()
-        {
-            event = Some(NetEvent::Apply);
-        }
-        ui.add_space(GAP);
-        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-            // A solid bar, drawn also at rest, as on the Upgrade screen:
-            // egui's floating one is invisible until hovered.
-            ui.spacing_mut().scroll = egui::style::ScrollStyle {
-                dormant_background_opacity: SCROLL_REST_OPACITY,
-                dormant_handle_opacity: SCROLL_REST_OPACITY,
-                active_background_opacity: SCROLL_REST_OPACITY,
-                active_handle_opacity: SCROLL_REST_OPACITY,
-                ..egui::style::ScrollStyle::solid()
-            };
-            egui::ScrollArea::vertical()
-                .id_salt("network")
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                .show(ui, |ui| {
-                    let inner = ui.available_width().min(width) - ROW_MARGIN_X;
-                    let between = ui.spacing().item_spacing.y;
-                    ui.spacing_mut().item_spacing.y = TILE_GAP;
-                    band(ui, &t, inner, between, "Connections now", |ui| connections(ui, &t, net));
-                    // Nothing to edit before the files are read, nor while
-                    // an Apply or a take-over runs.
-                    if net.wifi_file().is_some() && net.wired_file().is_some() {
-                        ui.add_enabled_ui(!net.applying() && !net.taking_over(), |ui| {
-                            band(ui, &t, inner, between, "Wired", |ui| wired(ui, &t, net, &mut event));
-                            band(ui, &t, inner, between, "WiFi networks", |ui| {
-                                wifi(ui, &t, net, &mut event)
-                            });
-                        });
-                    }
+    // Apply and its error follow the bands, as the Upgrade screen's footer;
+    // pinned to the foot of the panel only when the bands scroll.
+    let rect = Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
+    let (apply, edit) = ui::page_with_footer(
+        ui,
+        "network",
+        rect,
+        GAP,
+        |ui| {
+            let label = if net.applying() { "Applying…" } else { "Apply" };
+            let clicked = ui
+                .add_enabled(net.dirty() && !net.applying(), Button::new(label))
+                .clicked();
+            if let Some(e) = net.error() {
+                warn(ui, &t, e);
+            }
+            clicked.then_some(NetEvent::Apply)
+        },
+        |ui| {
+            let mut event = None;
+            let inner = ui.available_width().min(width) - ROW_MARGIN_X;
+            let between = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = TILE_GAP;
+            band(ui, &t, inner, between, "Connections now", |ui| connections(ui, &t, net));
+            // Nothing to edit before the files are read, nor while
+            // an Apply or a take-over runs.
+            if net.wifi_file().is_some() && net.wired_file().is_some() {
+                ui.add_enabled_ui(!net.applying() && !net.taking_over(), |ui| {
+                    band(ui, &t, inner, between, "Wired", |ui| wired(ui, &t, net, &mut event));
+                    band(ui, &t, inner, between, "WiFi networks", |ui| {
+                        wifi(ui, &t, net, &mut event)
+                    });
                 });
-        });
-    });
+            }
+            // The footer's gap belongs to the page.
+            ui.add_space(GAP);
+            event
+        },
+    );
+    let mut event = edit.or(apply);
     if let Some(view) = net.add_view() {
         if let Some(e) = add_dialog(ui, view) {
             event = Some(e);
@@ -270,7 +261,7 @@ fn wifi(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
                 return;
             }
             if n.password.is_some() {
-                muted(ui, t, LOCK);
+                ui.add(IconView::new(&lucide::LOCK).color(t.palette().muted_foreground));
             }
             if n.hidden {
                 ui.add(Badge::new("Hidden").variant(BadgeVariant::Outline));
@@ -341,6 +332,15 @@ fn by_hand(
     });
 }
 
+/// The strength mark of a network in range: more arcs, more signal.
+fn signal_icon(dbm: i32) -> shadcn_egui::Icon {
+    match nettab::signal_word(dbm) {
+        "strong" => lucide::WIFI,
+        "good" => lucide::WIFI_HIGH,
+        _ => lucide::WIFI_LOW,
+    }
+}
+
 /// The add dialog: the networks in range, or a hidden network's name,
 /// and the password.
 fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
@@ -359,21 +359,28 @@ fn add_dialog(ui: &Ui, view: &AddView) -> Option<NetEvent> {
                     for n in &view.in_range {
                         let line = if let Some(why) = n.unsupported_reason() {
                             RichText::new(why).color(t.role(role::WARN))
-                        } else if n.secured {
-                            RichText::new(format!("{LOCK} {}", nettab::signal_word(n.signal_dbm)))
-                                .color(t.palette().muted_foreground)
                         } else {
-                            RichText::new(nettab::signal_word(n.signal_dbm)).color(t.palette().muted_foreground)
+                            RichText::new(nettab::signal_line(n.signal_dbm)).color(t.palette().muted_foreground)
                         };
                         let item = Item::new()
                             .variant(brand::CHOICE_ROW)
                             .size(ItemSize::Sm)
+                            .icon(signal_icon(n.signal_dbm))
                             .title(n.ssid.as_str())
                             .description(line)
                             .selected(view.picked_row_shown() && view.ssid == n.ssid)
                             .sense(Sense::click())
                             .id_salt(("in-range", &n.ssid));
-                        if ui.add_enabled_ui(n.supported, |ui| ui.add(item)).inner.clicked() {
+                        let lock = |ui: &mut Ui| {
+                            if n.secured {
+                                ui.add(IconView::new(&lucide::LOCK).color(t.palette().muted_foreground));
+                            }
+                        };
+                        if ui
+                            .add_enabled_ui(n.supported, |ui| item.show(ui, lock).response)
+                            .inner
+                            .clicked()
+                        {
                             event = Some(NetEvent::PickNetwork(n.ssid.clone()));
                         }
                     }

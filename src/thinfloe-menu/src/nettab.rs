@@ -299,6 +299,11 @@ pub fn signal_word(dbm: i32) -> &'static str {
     }
 }
 
+/// The strength of a network in range: `strong · -55 dBm`.
+pub fn signal_line(dbm: i32) -> String {
+    format!("{} · {dbm} dBm", signal_word(dbm))
+}
+
 /// One line for the status list, for example
 /// `WiFi wlp58s0 · Home Net · strong · 192.168.1.23/24`.
 pub fn iface_line(i: &Iface) -> String {
