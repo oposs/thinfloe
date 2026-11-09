@@ -152,6 +152,12 @@ pub enum JobResult {
     },
     NetApplied(Result<(), ApplyFailed>),
     NetTakenOver(Result<(), String>),
+    /// The monitor layout file, `None` when missing, and who wrote it.
+    MonLoaded(Result<Option<String>, String>, crate::owned::Owner),
+    MonApplied(Result<(), String>),
+    MonKept,
+    MonReverted(Result<(), String>),
+    MonTakenOver(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +198,8 @@ pub struct Paths {
     pub network_cmd: Vec<String>,
     /// Where the network files live.
     pub homes: netfiles::Homes,
+    /// The monitor layout file and the kanshi that applies it.
+    pub kanshi: Kanshi,
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
@@ -718,6 +726,243 @@ fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> 
     failed
 }
 
+/// The monitor layout: kanshi's config, the files that make an Apply
+/// undoable, and how kanshi is found and started.
+#[derive(Debug, Clone)]
+pub struct Kanshi {
+    /// `~/.config/kanshi/config`.
+    pub config: PathBuf,
+    /// `$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed`; thinfloe-session
+    /// undoes the layout when it finds it. `None` without a runtime dir.
+    pub marker: Option<PathBuf>,
+    /// kanshi, when none runs; `-c <config>` follows.
+    pub cmd: Vec<String>,
+    /// Where running processes are looked for: `/proc`.
+    pub proc_dir: PathBuf,
+}
+
+/// How long a kanshi the menu started may take to fail at once.
+pub const KANSHI_START_GRACE: Duration = Duration::from_millis(300);
+
+impl Kanshi {
+    /// The session's files; `TF_KANSHI` replaces the kanshi program.
+    pub fn from_env() -> Kanshi {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
+        let marker = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|d| !d.is_empty())
+            .map(|d| PathBuf::from(d).join("thinfloe-layout-unconfirmed"));
+        let cmd = match std::env::var("TF_KANSHI") {
+            Ok(v) if !v.trim().is_empty() => vec![v],
+            _ => vec!["kanshi".to_string()],
+        };
+        Kanshi {
+            config: home.join(".config/kanshi/config"),
+            marker,
+            cmd,
+            proc_dir: PathBuf::from("/proc"),
+        }
+    }
+
+    /// The config as it was before an Apply that is not confirmed yet.
+    pub fn prev(&self) -> PathBuf {
+        let mut p = self.config.as_os_str().to_owned();
+        p.push(".prev");
+        PathBuf::from(p)
+    }
+}
+
+/// Write `bytes` to `path` through a new file beside it and a rename.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+fn remove_if_there(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// The text of the layout file and who wrote it.
+pub fn mon_load(k: &Kanshi) -> (Result<Option<String>, String>, crate::owned::Owner) {
+    match crate::owned::read(&k.config) {
+        Ok(t) => {
+            let owner = crate::owned::owner(t.as_deref());
+            (Ok(t), owner)
+        }
+        Err(e) => (
+            Err(format!(
+                "Could not read {}: {e}",
+                crate::owned::home_relative(&k.config)
+            )),
+            crate::owned::Owner::ByHand,
+        ),
+    }
+}
+
+/// The processes of this user whose name is `kanshi`, as thinfloe-session
+/// finds them.
+pub fn kanshi_pids(proc_dir: &Path) -> Vec<i32> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let Ok(dir) = std::fs::read_dir(proc_dir) else {
+        return Vec::new();
+    };
+    let mut pids: Vec<i32> = dir
+        .flatten()
+        .filter_map(|e| {
+            let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+            let meta = std::fs::metadata(e.path()).ok()?;
+            let comm = crate::bounded::read_bounded(&e.path().join("comm"), 64, true).ok()?;
+            (pid > 1 && meta.uid() == uid && comm.strip_suffix(b"\n").unwrap_or(&comm) == b"kanshi").then_some(pid)
+        })
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// Tell the running kanshi to read its config again; when none runs,
+/// start one in a session of its own, so it outlives the menu.
+pub fn kanshi_reload(k: &Kanshi) -> Result<(), String> {
+    // SAFETY: kill takes no pointers; a stale pid fails with ESRCH.
+    let told = kanshi_pids(&k.proc_dir)
+        .into_iter()
+        .filter(|&pid| unsafe { libc::kill(pid, libc::SIGHUP) } == 0)
+        .count();
+    if told > 0 {
+        return Ok(());
+    }
+    use std::os::unix::process::CommandExt;
+    let (prog, args) = k.cmd.split_first().ok_or("no kanshi program")?;
+    let mut cmd = Command::new(prog);
+    cmd.args(args).arg("-c").arg(&k.config).stdin(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("kanshi could not be started: {e}"))?;
+    let deadline = Instant::now() + KANSHI_START_GRACE;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(s)) if s.success() => return Ok(()),
+            Ok(Some(s)) => return Err(format!("kanshi stopped at once ({s}).")),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("kanshi: {e}")),
+        }
+    }
+    // Reaped when it ends, so it leaves no zombie behind.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Write the new layout and let kanshi apply it. First the old file goes
+/// to `config.prev` (or none is left) and the marker says which, so a crash
+/// at any later point is undone by the next session. On a failure the old
+/// file is put back and both go.
+pub fn mon_apply(k: &Kanshi, text: &str) -> Result<(), String> {
+    let rel = crate::owned::home_relative(&k.config);
+    let old = crate::owned::read_bytes(&k.config).map_err(|e| format!("Could not read {rel}: {e}"))?;
+    let old_text = old.as_deref().map(String::from_utf8_lossy);
+    if crate::owned::owner(old_text.as_deref()) == crate::owned::Owner::ByHand {
+        return Err(format!("{rel} was written by hand"));
+    }
+    let prev = k.prev();
+    let kept = match &old {
+        Some(b) => write_new(&prev, b),
+        None => remove_if_there(&prev),
+    };
+    kept.map_err(|e| {
+        format!(
+            "Could not keep the old layout in {}: {e}",
+            crate::owned::home_relative(&prev)
+        )
+    })?;
+    if let Some(m) = &k.marker
+        && let Err(e) = write_new(m, if old.is_some() { b"prev\n" } else { b"none\n" })
+    {
+        let _ = remove_if_there(&prev);
+        return Err(format!("Could not write {}: {e}", m.display()));
+    }
+    crate::owned::write(&k.config, text)
+        .map_err(|e| format!("Could not write {rel}: {e}"))
+        .and_then(|()| kanshi_reload(k))
+        .map_err(|reason| mon_undo(k, old.as_deref(), reason))
+}
+
+/// Put `old` back after a failed Apply. Only when that worked do the
+/// marker and `config.prev` go: else the next session undoes it.
+fn mon_undo(k: &Kanshi, old: Option<&[u8]>, reason: String) -> String {
+    if let Err(e) = crate::owned::put_back(&k.config, old) {
+        return format!(
+            "{reason}; {} could not be put back: {e}",
+            crate::owned::home_relative(&k.config)
+        );
+    }
+    if let Some(m) = &k.marker {
+        let _ = remove_if_there(m);
+    }
+    let _ = remove_if_there(&k.prev());
+    reason
+}
+
+/// The new layout is confirmed: nothing is left to undo.
+pub fn mon_keep(k: &Kanshi) {
+    if let Some(m) = &k.marker {
+        let _ = remove_if_there(m);
+    }
+    let _ = remove_if_there(&k.prev());
+}
+
+/// Go back to the layout before the Apply: `config.prev` goes back over
+/// the config, or the config goes when there was none, and kanshi reads
+/// it again. The marker stays when the file could not be put back, so the
+/// next session tries.
+pub fn mon_revert(k: &Kanshi) -> Result<(), String> {
+    let prev = k.prev();
+    let old = crate::owned::read_bytes(&prev)
+        .map_err(|e| format!("Could not read {}: {e}", crate::owned::home_relative(&prev)))?;
+    crate::owned::put_back(&k.config, old.as_deref())
+        .map_err(|e| format!("{} could not be put back: {e}", crate::owned::home_relative(&k.config)))?;
+    let _ = remove_if_there(&prev);
+    if let Some(m) = &k.marker {
+        let _ = remove_if_there(m);
+    }
+    if old.is_some() { kanshi_reload(k) } else { Ok(()) }
+}
+
+/// *Let the menu manage it*: the hand-written file goes to `config.by-hand`.
+pub fn mon_take_over(k: &Kanshi) -> Result<(), String> {
+    crate::owned::take_over(&k.config).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +1028,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -792,6 +1038,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -801,6 +1048,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1027,6 +1275,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1037,6 +1286,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -1209,6 +1459,7 @@ mod tests {
             upgrade_cmd: default_upgrade_cmd(),
             network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
             homes: netfiles::Homes::from_env(),
+            kanshi: Kanshi::from_env(),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
@@ -1493,5 +1744,209 @@ mod tests {
             network_scan(&net_paths(&d, "/bin/true", failed), &feed),
             Err("no adapter".to_string())
         );
+    }
+
+    /// A layout home under `d`: no kanshi runs (an empty proc dir), and
+    /// starting one runs `start` with `-c <config>` as `$1 $2`.
+    fn kanshi_home(d: &Path, start: &str) -> Kanshi {
+        fs::create_dir_all(d.join("proc")).unwrap();
+        Kanshi {
+            config: d.join("home/.config/kanshi/config"),
+            marker: Some(d.join("run/thinfloe-layout-unconfirmed")),
+            cmd: ["/bin/sh", "-c", start, "sh"].map(String::from).to_vec(),
+            proc_dir: d.join("proc"),
+        }
+    }
+
+    /// A start script that appends its arguments and what the three files
+    /// hold at that moment to `<d>/started`.
+    fn recording(d: &Path) -> String {
+        let log = d.join("started");
+        format!(
+            "{{ echo \"args $*\"; echo \"marker $(cat {m} 2>/dev/null)\"; echo \"prev $(tail -n 1 {p} 2>/dev/null)\"; echo \"config $(tail -n 1 {c} 2>/dev/null)\"; }} >> {log}",
+            m = d.join("run/thinfloe-layout-unconfirmed").display(),
+            p = d.join("home/.config/kanshi/config.prev").display(),
+            c = d.join("home/.config/kanshi/config").display(),
+            log = log.display()
+        )
+    }
+
+    fn old_layout() -> String {
+        format!("{}\nold\n", crate::owned::HEADER)
+    }
+
+    fn read(p: &Path) -> Option<String> {
+        fs::read_to_string(p).ok()
+    }
+
+    #[test]
+    fn mon_apply_writes_prev_marker_and_config() {
+        let d = dir("mon-apply");
+        let k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
+        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
+        assert_eq!(read(&k.prev()), Some(old_layout()));
+        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
+        // kanshi was started on the config, with marker and prev in place.
+        let want = format!("args -c {}\nmarker prev\nprev old\nconfig new\n", k.config.display());
+        assert_eq!(read(&d.join("started")), Some(want));
+
+        // No file before: the marker says so, and a stale prev goes.
+        let d = dir("mon-apply-none");
+        let k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(k.prev(), "stale").unwrap();
+        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
+        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("none\n"));
+        assert!(!k.prev().exists());
+        assert!(
+            read(&d.join("started"))
+                .unwrap()
+                .contains("marker none\nprev \nconfig new\n")
+        );
+    }
+
+    #[test]
+    fn mon_apply_tells_a_running_kanshi_and_starts_none() {
+        use std::os::unix::process::ExitStatusExt;
+        let d = dir("mon-hup");
+        let k = kanshi_home(&d, &recording(&d));
+        // A child of this test stands in for kanshi in the fake proc dir.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let entry = d.join("proc").join(child.id().to_string());
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join("comm"), "kanshi\n").unwrap();
+        assert_eq!(kanshi_pids(&k.proc_dir), vec![child.id() as i32]);
+        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
+        let t0 = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if t0.elapsed() > Duration::from_secs(3) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGHUP));
+        assert!(!d.join("started").exists(), "a second kanshi was started");
+    }
+
+    #[test]
+    fn kanshi_pids_match_the_name_only() {
+        let d = dir("mon-pids");
+        let p = d.join("proc");
+        for (pid, comm) in [
+            ("4242", "kanshi\n"),
+            ("4243", "kanshi-x\n"),
+            ("4244", "bash\n"),
+            ("1", "kanshi\n"),
+            ("self", "kanshi\n"),
+        ] {
+            fs::create_dir_all(p.join(pid)).unwrap();
+            fs::write(p.join(pid).join("comm"), comm).unwrap();
+        }
+        fs::create_dir_all(p.join("4245")).unwrap();
+        assert_eq!(kanshi_pids(&p), vec![4242]);
+        assert_eq!(kanshi_pids(&d.join("missing")), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn mon_apply_failure_puts_the_old_file_back() {
+        let d = dir("mon-fail");
+        let k = kanshi_home(&d, "exit 3");
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        let e = mon_apply(&k, "\nnew\n").unwrap_err();
+        assert!(e.contains("stopped at once"), "{e}");
+        assert_eq!(read(&k.config), Some(old_layout()));
+        assert!(!k.prev().exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+
+        // No file before: none after.
+        fs::remove_file(&k.config).unwrap();
+        assert!(mon_apply(&k, "\nnew\n").is_err());
+        assert!(!k.config.exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+
+        // A file written by hand is not touched, and kanshi not started.
+        let k = kanshi_home(&d, &recording(&d));
+        fs::write(&k.config, "profile {\n\toutput * enable\n}\n").unwrap();
+        let e = mon_apply(&k, "\nnew\n").unwrap_err();
+        assert!(e.contains("written by hand"), "{e}");
+        assert_eq!(read(&k.config).as_deref(), Some("profile {\n\toutput * enable\n}\n"));
+        assert!(!k.prev().exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!d.join("started").exists());
+    }
+
+    #[test]
+    fn mon_revert_restores_prev() {
+        let d = dir("mon-revert");
+        let k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        mon_apply(&k, "\nnew\n").unwrap();
+        assert_eq!(mon_revert(&k), Ok(()));
+        assert_eq!(read(&k.config), Some(old_layout()));
+        assert!(!k.prev().exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+        // kanshi read the old file again.
+        let log = read(&d.join("started")).unwrap();
+        assert!(log.ends_with("marker \nprev \nconfig old\n"), "{log}");
+
+        // No file before: the menu's file goes.
+        fs::remove_file(&k.config).unwrap();
+        mon_apply(&k, "\nnew\n").unwrap();
+        assert_eq!(mon_revert(&k), Ok(()));
+        assert!(!k.config.exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+
+        // A file written by hand meanwhile is kept, and so is the marker.
+        mon_apply(&k, "\nnew\n").unwrap();
+        fs::write(&k.config, "by hand\n").unwrap();
+        assert!(mon_revert(&k).is_err());
+        assert_eq!(read(&k.config).as_deref(), Some("by hand\n"));
+        assert!(k.marker.as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn mon_keep_removes_marker_and_prev() {
+        let d = dir("mon-keep");
+        let k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        mon_apply(&k, "\nnew\n").unwrap();
+        mon_keep(&k);
+        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
+        assert!(!k.prev().exists());
+        assert!(!k.marker.as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn mon_load_and_take_over() {
+        let d = dir("mon-load");
+        let k = kanshi_home(&d, "exit 0");
+        assert_eq!(mon_load(&k), (Ok(None), crate::owned::Owner::Missing));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        assert_eq!(mon_load(&k), (Ok(Some(old_layout())), crate::owned::Owner::Menu));
+        fs::write(&k.config, "by hand\n").unwrap();
+        assert_eq!(
+            mon_load(&k),
+            (Ok(Some("by hand\n".into())), crate::owned::Owner::ByHand)
+        );
+        assert_eq!(mon_take_over(&k), Ok(()));
+        assert!(!k.config.exists());
+        assert_eq!(read(&crate::owned::aside(&k.config)).as_deref(), Some("by hand\n"));
+        // A link is not read through.
+        std::os::unix::fs::symlink(d.join("elsewhere"), &k.config).unwrap();
+        let (r, owner) = mon_load(&k);
+        assert!(r.unwrap_err().starts_with("Could not read"));
+        assert_eq!(owner, crate::owned::Owner::ByHand);
     }
 }

@@ -24,6 +24,7 @@
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::log::{Kind, Log};
+use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
 use crate::network::{NetRequest, NetTab};
 use crate::screentab::{self, IdleSource, ScreenTab};
@@ -153,6 +154,19 @@ pub enum Job {
     NetTakeOver {
         which: &'static str,
     },
+    /// Read `~/.config/kanshi/config`.
+    MonLoad,
+    /// Write the monitor layout and let kanshi apply it, undoably.
+    MonApply {
+        text: String,
+        menu_output: Option<String>,
+    },
+    /// The new layout is confirmed.
+    MonKeep,
+    /// Put the layout before the Apply back.
+    MonRevert,
+    /// Move a hand-written kanshi config aside.
+    MonTakeOver,
 }
 
 /// What fills the space above the log.
@@ -236,6 +250,8 @@ pub struct Menu {
     pub screen_tab: ScreenTab,
     /// The Network tab, and the Apply it runs.
     pub network: NetTab,
+    /// The monitors of the Screen tab, and the Apply it runs.
+    pub monitors: MonTab,
 }
 
 impl Menu {
@@ -277,6 +293,7 @@ impl Menu {
             screen_tab: ScreenTab::default(),
             // Until `set_usb_boot` says otherwise: netboot offers less.
             network: NetTab::new(true),
+            monitors: MonTab::default(),
         }
     }
 
@@ -293,6 +310,36 @@ impl Menu {
             NetRequest::Apply(change) => Job::NetApply { change },
             NetRequest::TakeOver(which) => Job::NetTakeOver { which },
         })
+    }
+
+    fn mon_request(r: MonRequest) -> Effect {
+        Effect::Start(match r {
+            MonRequest::Load => Job::MonLoad,
+            MonRequest::Apply { text, menu_output } => Job::MonApply { text, menu_output },
+            MonRequest::Keep => Job::MonKeep,
+            MonRequest::Revert => Job::MonRevert,
+            MonRequest::TakeOver => Job::MonTakeOver,
+        })
+    }
+
+    /// The compositor reported the monitors.
+    pub fn heads_changed(&mut self, heads: Vec<crate::heads::Head>) -> Option<Effect> {
+        self.monitors.heads_changed(heads).map(Menu::mon_request)
+    }
+
+    /// Something on the monitor part of the Screen tab.
+    pub fn monitors_event(&mut self, e: MonEvent, now: Instant) -> Option<Effect> {
+        if self.logout.is_some() {
+            return None;
+        }
+        self.monitors.event(e, now).map(Menu::mon_request)
+    }
+
+    /// A ThinLinc client runs; the Screen tab says so.
+    fn thinlinc_running(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|j| self.tiles.get(j.tile).is_some_and(|t| addon_id(t) == "10-thinlinc"))
     }
 
     /// A ThinLinc or OxuLnk session runs: an Apply may cut it off.
@@ -505,6 +552,7 @@ impl Menu {
                 let r = self.network.event(e, self.remote_running())?;
                 return Some(self.net_request(r));
             }
+            SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
             // offers, and the next boot would install that unattended.
@@ -699,6 +747,7 @@ impl Menu {
                     name: tile.name.clone(),
                     pgid: None,
                 });
+                self.monitors.set_thinlinc(self.thinlinc_running());
                 Some(Effect::Start(Job::Run {
                     id,
                     name: tile.name.clone(),
@@ -845,6 +894,7 @@ impl Menu {
             JobResult::Ran { id, status } => {
                 let pos = self.jobs.iter().position(|j| j.id == id)?;
                 let job = self.jobs.remove(pos);
+                self.monitors.set_thinlinc(self.thinlinc_running());
                 let (kind, text) = run_message(&job.name, &status);
                 self.log.note(kind, text);
                 if let Some(Logout::Stopping { .. }) = self.logout {
@@ -946,6 +996,45 @@ impl Menu {
                     return Some(next);
                 }
                 if save { self.net_changed_home() } else { None }
+            }
+            JobResult::MonLoaded(text, owner) => {
+                self.monitors.loaded(text, owner);
+                None
+            }
+            JobResult::MonApplied(r) => {
+                if let Err(e) = &r {
+                    self.log
+                        .note(Kind::Warn, format!("The monitor arrangement was not applied: {e}"));
+                }
+                self.monitors.applied(r).map(Menu::mon_request)
+            }
+            JobResult::MonKept => {
+                self.monitors.kept();
+                self.log.note(Kind::Event, "Monitor arrangement kept.");
+                self.net_changed_home()
+            }
+            JobResult::MonReverted(r) => {
+                match &r {
+                    Ok(()) => self.log.note(Kind::Event, "The previous monitor arrangement is back."),
+                    Err(e) => self.log.note(
+                        Kind::Warn,
+                        format!("The previous monitor arrangement could not be put back: {e}"),
+                    ),
+                }
+                self.monitors.reverted(r).map(Menu::mon_request)
+            }
+            JobResult::MonTakenOver(r) => {
+                let ok = r.is_ok();
+                match &r {
+                    Ok(()) => self
+                        .log
+                        .note(Kind::Event, "~/.config/kanshi/config is now managed by the menu."),
+                    Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
+                }
+                if !self.monitors.taken_over(r) {
+                    return None;
+                }
+                if ok { self.net_changed_home() } else { None }
             }
             JobResult::NetTakenOver(r) => {
                 if !self.network.taking_over() {
@@ -1065,6 +1154,9 @@ impl Menu {
     /// menu once "saved" has been shown for `LOGOUT_PAUSE`. On the Upgrade
     /// screen it also lists the drives when that is due.
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
+        if let Some(r) = self.monitors.tick(now) {
+            return Some(Menu::mon_request(r));
+        }
         let net_open =
             self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
         if let Some(r) = self.network.poll(now, net_open) {
@@ -3275,5 +3367,104 @@ mod tests {
         assert_eq!(m.upgrade_event(UpgradeEvent::Back, now), None);
         assert_eq!(m.screen, Screen::Grid);
         assert_eq!(m.retry.as_ref().map(|r| r.id.as_str()), Some("10-thinlinc"));
+    }
+
+    fn mon_head(name: &str, x: i32) -> crate::heads::Head {
+        crate::heads::Head {
+            name: name.into(),
+            make: "Dell".into(),
+            model: "U".into(),
+            serial: String::new(),
+            phys_mm: (0, 0),
+            enabled: true,
+            modes: vec![crate::heads::Mode {
+                w: 1920,
+                h: 1080,
+                refresh_mhz: 60_000,
+                preferred: true,
+            }],
+            current: Some(0),
+            pos: (x, 0),
+            rotation: crate::heads::Rotation::Normal,
+        }
+    }
+
+    /// `grid()` with two monitors reported and no layout file.
+    fn mon_menu() -> Menu {
+        let mut m = Menu::new(grid(), false);
+        let heads = vec![mon_head("DP-1", 0), mon_head("DP-2", 1920)];
+        assert_eq!(m.heads_changed(heads), Some(Effect::Start(Job::MonLoad)));
+        assert_eq!(
+            m.finished(
+                JobResult::MonLoaded(Ok(None), crate::owned::Owner::Missing),
+                Instant::now()
+            ),
+            None
+        );
+        m
+    }
+
+    #[test]
+    fn the_monitor_apply_runs_as_jobs_and_reverts_from_the_tick() {
+        let now = Instant::now();
+        let mut m = mon_menu();
+        m.screen = Screen::Settings;
+        m.settings_tab = SettingsTab::Screen;
+        m.monitors_event(MonEvent::Select("DP-2".into()), now);
+        assert_eq!(m.monitors_event(MonEvent::MenuHere, now), None);
+        let Some(Effect::Start(Job::MonApply { text, menu_output })) = m.monitors_event(MonEvent::Apply, now) else {
+            panic!("no Apply job")
+        };
+        assert!(text.contains("# thinfloe menu DP-2"), "{text}");
+        assert_eq!(menu_output.as_deref(), Some("DP-2"));
+        assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
+        // The countdown runs on whatever the screen shows.
+        m.screen = Screen::Grid;
+        assert_eq!(m.tick(now + Duration::from_secs(14)), None);
+        assert_eq!(
+            m.tick(now + Duration::from_secs(15)),
+            Some(Effect::Start(Job::MonRevert))
+        );
+        assert_eq!(m.finished(JobResult::MonReverted(Ok(())), now), None);
+        assert_eq!(
+            m.log.last().unwrap().plain(),
+            "The previous monitor arrangement is back."
+        );
+        assert_eq!(m.monitors.menu_output(), None);
+    }
+
+    #[test]
+    fn a_kept_monitor_layout_saves_the_home() {
+        let now = Instant::now();
+        let mut m = mon_menu();
+        m.screen = Screen::Settings;
+        assert!(matches!(
+            m.settings(SettingsEvent::Monitors(MonEvent::Apply)),
+            Some(Effect::Start(Job::MonApply { .. }))
+        ));
+        assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
+        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert_eq!(m.finished(JobResult::MonKept, now), Some(Effect::Start(Job::Save)));
+        // A failed Apply says why in the log.
+        assert!(m.monitors_event(MonEvent::Apply, now).is_some());
+        assert_eq!(
+            m.finished(JobResult::MonApplied(Err("kanshi stopped at once".into())), now),
+            None
+        );
+        assert!(m.log.last().unwrap().plain().contains("kanshi stopped at once"));
+    }
+
+    #[test]
+    fn the_screen_tab_notes_a_running_thinlinc() {
+        let now = Instant::now();
+        let mut m = mon_menu();
+        assert!(!m.monitors.thinlinc_note());
+        let id = started(&mut m, 0, now);
+        assert!(m.monitors.thinlinc_note());
+        ran(&mut m, id, 0, now);
+        assert!(!m.monitors.thinlinc_note());
+        // A Terminal is no ThinLinc.
+        started(&mut m, 1, now);
+        assert!(!m.monitors.thinlinc_note());
     }
 }

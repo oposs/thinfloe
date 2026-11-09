@@ -50,6 +50,8 @@ pub enum Wake {
     Windows,
     /// The release status file of thinfloe-upgrade changed.
     Release,
+    /// The compositor reported the monitors anew.
+    Heads,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -129,6 +131,9 @@ pub struct App {
     windows: Option<crate::windows::Windows>,
     /// The folded list at the last wake, to name what changed.
     folded_seen: Vec<crate::windows::Folded>,
+    /// The monitors; `None` when the compositor cannot tell, then the
+    /// Screen tab shows none.
+    heads: Option<crate::heads::Heads>,
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -178,9 +183,27 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     if let Some(w) = windows.as_ref() {
         cfg.menu.folded = w.folded();
     }
+    let heads = {
+        let waker = event_loop.create_proxy();
+        match crate::heads::Heads::connect(move || {
+            let _ = waker.send_event(Wake::Heads);
+        }) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("thinfloe-menu: no monitor list: {e}");
+                None
+            }
+        }
+    };
+    // The monitors present now came before the change callback was set:
+    // the loop reads them first thing.
+    if heads.is_some() {
+        let _ = event_loop.create_proxy().send_event(Wake::Heads);
+    }
     let mut app = App {
         windows,
         folded_seen: Vec::new(),
+        heads,
         addon_log: AddonLog::new(cfg.addon_log.clone()),
         addon_log_read: false,
         shown,
@@ -311,6 +334,12 @@ fn panic_result(job: &Job) -> JobResult {
         Job::NetLoad | Job::NetStatus | Job::NetScan | Job::NetApply { .. } | Job::NetTakeOver { .. } => {
             net_failed(job, e)
         }
+        // Unreadable: nothing is written over a file nobody could read.
+        Job::MonLoad => JobResult::MonLoaded(Err(e), crate::owned::Owner::ByHand),
+        Job::MonApply { .. } => JobResult::MonApplied(Err(e)),
+        Job::MonKeep => JobResult::MonKept,
+        Job::MonRevert => JobResult::MonReverted(Err(e)),
+        Job::MonTakeOver => JobResult::MonTakenOver(Err(e)),
     }
 }
 
@@ -400,6 +429,18 @@ fn job_result(
             }))
         }
         Job::NetTakeOver { which } => JobResult::NetTakenOver(netfiles::take_over(&paths.homes, which)),
+        Job::MonLoad => {
+            let (text, owner) = jobs::mon_load(&paths.kanshi);
+            JobResult::MonLoaded(text, owner)
+        }
+        // The connector name is for the window move, which the menu does.
+        Job::MonApply { text, .. } => JobResult::MonApplied(jobs::mon_apply(&paths.kanshi, &text)),
+        Job::MonKeep => {
+            jobs::mon_keep(&paths.kanshi);
+            JobResult::MonKept
+        }
+        Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
+        Job::MonTakeOver => JobResult::MonTakenOver(jobs::mon_take_over(&paths.kanshi)),
     }
 }
 
@@ -604,6 +645,7 @@ impl App {
             upgrade_cmd: self.cfg.paths.upgrade_cmd.clone(),
             network_cmd: self.cfg.paths.network_cmd.clone(),
             homes: self.cfg.paths.homes.clone(),
+            kanshi: self.cfg.paths.kanshi.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -734,9 +776,11 @@ impl App {
                 // frame chooses again.
                 let menu = &self.cfg.menu;
                 let shown = self.shown.load(Ordering::Relaxed);
+                // The countdown of *Keep this arrangement?* runs, shown or not.
                 let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, shown)
                     .into_iter()
                     .chain(network_wake(menu.screen, menu.settings_tab, shown))
+                    .chain(menu.monitors.next_wake(now))
                     .min();
                 match egui_wake.into_iter().chain(recheck).chain(poll).min() {
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + d)),
@@ -925,6 +969,12 @@ impl ApplicationHandler<Wake> for App {
             Wake::Addons => self.refresh_addons(),
             Wake::Release => self.refresh_release(),
             Wake::Windows => self.windows_changed(),
+            Wake::Heads => {
+                if let Some(heads) = self.heads.as_ref() {
+                    let effect = self.cfg.menu.heads_changed(heads.snapshot());
+                    self.apply(effect, event_loop);
+                }
+            }
             Wake::Output => {}
         }
         if let Some(live) = self.live.as_ref() {
@@ -1064,6 +1114,7 @@ mod tests {
             upgrade_cmd,
             network_cmd: jobs::default_network_cmd(),
             homes: crate::netfiles::Homes::from_env(),
+            kanshi: jobs::Kanshi::from_env(),
         }
     }
 

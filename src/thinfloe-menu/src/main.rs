@@ -99,6 +99,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         upgrade_cmd: jobs::default_upgrade_cmd(),
         network_cmd: network_cmd(),
         homes: thinfloe_menu::netfiles::Homes::from_env(),
+        kanshi: jobs::Kanshi::from_env(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

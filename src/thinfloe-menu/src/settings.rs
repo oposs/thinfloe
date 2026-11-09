@@ -29,6 +29,8 @@ pub enum SettingsEvent {
     ManageScreen,
     /// Something on the Network tab.
     Network(NetEvent),
+    /// Something on the monitor part of the Screen tab.
+    Monitors(crate::monitors::MonEvent),
 }
 
 /// The tabs of the Settings screen.
