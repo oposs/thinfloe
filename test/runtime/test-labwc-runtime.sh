@@ -412,6 +412,8 @@ if [[ $kanshi_rc -eq 124 || $kanshi_rc -eq 137 ]]; then
 fi
 
 echo "info - $(echo "$kanshi_out" | grep -E '^kanshi-package=') $(echo "$kanshi_out" | grep -E '^kanshictl=')"
+# kanshi-first equals labwc's own placement of HEADLESS-2, so only
+# kanshi-second (a position labwc never picks) proves that kanshi acted.
 if echo "$kanshi_out" | grep -qx 'kanshi-first=1280x720@1280,0' \
     && echo "$kanshi_out" | grep -qx 'kanshi-second=1280x720@0,720'; then
     echo "ok   - kanshi applies a profile and re-applies it after the file changes (SIGHUP)"
@@ -423,56 +425,91 @@ fi
 
 # MoveToOutput as a window rule: the menu maps on the named output. The system
 # rc.xml is copied and edited inside the container before labwc starts (labwc
-# reads it once). The menu is configured on the output under the cursor first
-# and moved at map, so the LAST configure line is the one that counts. A second
-# menu process started later stands in for a window created after a change.
+# reads it once). Layout: HEADLESS-1 1000x600 at 0,0 and HEADLESS-2 1024x768
+# at 1000,0. With no rule the menu lands on HEADLESS-2 (the output under the
+# cursor), so the rule targets HEADLESS-1 and the case can fail. The menu is
+# configured on the cursor output first and moved at map, so the LAST configure
+# line is the one that counts. A second menu process started later stands in
+# for a window created after a change.
 run_move_case() {
-    local output="$1" name="thinfloe-runtime-test-move-$$-$1" script out rc
-    script='wlr-randr --output HEADLESS-2 --custom-mode 1024x768
+    local rule_output="$1" name="thinfloe-runtime-test-move-$$-$1" script out rc
+    script='wlr-randr --output HEADLESS-1 --custom-mode 1000x600 --output HEADLESS-2 --custom-mode 1024x768 --pos 1000,0
 (TF_MENU_DEBUG=1 timeout 9 thinfloe-menu 2>&1 | sed "s/^/first: /") &
 sleep 3
 (TF_MENU_DEBUG=1 timeout 6 thinfloe-menu 2>&1 | sed "s/^/second: /") &
+sleep 1
+wlr-randr --json | python3 -c "
+import json,sys
+for o in json.load(sys.stdin):
+    m=[m for m in o[\"modes\"] if m.get(\"current\")][0]
+    print(\"size %s %dx%d\" % (o[\"name\"], m[\"width\"], m[\"height\"]))
+"
 wait'
     out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
         -e WLR_BACKENDS=headless \
         -e WLR_HEADLESS_OUTPUTS=2 \
         -e WLR_RENDERER=pixman \
         -e XDG_RUNTIME_DIR=/tmp/xdg \
-        -e MOVE_OUTPUT="$output" \
+        -e MOVE_OUTPUT="$rule_output" \
         -e MOVE_SCRIPT="$script" \
         "$IMAGE" \
         sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
                printf "%s\n" "$MOVE_SCRIPT" >/tmp/move.sh &&
                cp -r /etc/thinfloe/labwc /tmp/lw &&
-               sed -i "s|<action name=\"ToggleAlwaysOnBottom\" />|<action name=\"MoveToOutput\" output=\"$MOVE_OUTPUT\"/>\n      &|" /tmp/lw/rc.xml &&
-               labwc -C /tmp/lw -S "bash /tmp/move.sh"' 2>&1)
+               if [ "$MOVE_OUTPUT" != none ]; then
+                   sed -i "s|<action name=\"ToggleAlwaysOnBottom\" />|<action name=\"MoveToOutput\" output=\"$MOVE_OUTPUT\"/>\n      &|" /tmp/lw/rc.xml &&
+                   grep -qF "<action name=\"MoveToOutput\" output=\"$MOVE_OUTPUT\"/>" /tmp/lw/rc.xml &&
+                   echo "rule-inserted"
+               fi &&
+               labwc --debug -C /tmp/lw -S "bash /tmp/move.sh"' 2>&1)
     rc=$?
     if [[ $rc -eq 124 || $rc -eq 137 ]]; then
         echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during MoveToOutput test)"
-        echo "$out"
+        echo "$out" | grep -E 'configure|size |rule-|Invalid output|Handling action' 
         podman rm -f "$name" >/dev/null 2>&1
         exit 1
     fi
-    MOVE_RESULT="$out"
+    # Keep the lines the assertions use; the labwc debug log is long.
+    MOVE_RESULT=$(echo "$out" | grep -E '^(first|second): .*configure |^size |^rule-inserted|Invalid output|MoveToOutput|segmentation|core dumped|panicked')
+    MOVE_RULE_OK=0
+    [[ "$rule_output" == none ]] && MOVE_RULE_OK=1
+    echo "$out" | grep -qx 'rule-inserted' && MOVE_RULE_OK=1
     MOVE_FIRST=$(echo "$out" | grep -E '^first: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
     MOVE_SECOND=$(echo "$out" | grep -E '^second: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
+    MOVE_INVALID=0
+    echo "$out" | grep -q 'Invalid output' && MOVE_INVALID=1
+    MOVE_CRASH=0
+    echo "$out" | grep -Eqi 'segmentation|core dumped|panicked' && MOVE_CRASH=1
 }
 
-run_move_case HEADLESS-2
+# Control: no rule. The menu must NOT end on HEADLESS-1, or the next case
+# proves nothing.
+run_move_case none
 if [[ "$MOVE_FIRST" == 1024x768 && "$MOVE_SECOND" == 1024x768 ]]; then
-    echo "ok   - menu maps on the MoveToOutput output, also a second one started later (1024x768)"
+    echo "ok   - without a rule the menu lands on the cursor output (1024x768), not on HEADLESS-1"
 else
-    echo "FAIL - menu did not end up on HEADLESS-2 through MoveToOutput (first $MOVE_FIRST, second $MOVE_SECOND)"
+    echo "FAIL - control run: the menu is on $MOVE_FIRST / $MOVE_SECOND, expected 1024x768 (the MoveToOutput case would prove nothing)"
+    echo "$MOVE_RESULT"
+    fail=1
+fi
+
+run_move_case HEADLESS-1
+if [[ $MOVE_RULE_OK -eq 1 && "$MOVE_FIRST" == 1000x600 && "$MOVE_SECOND" == 1000x600 ]] \
+    && echo "$MOVE_RESULT" | grep -qx 'size HEADLESS-1 1000x600' \
+    && echo "$MOVE_RESULT" | grep -qx 'size HEADLESS-2 1024x768'; then
+    echo "ok   - MoveToOutput moves the menu to HEADLESS-1 (1000x600), also a second one started later; HEADLESS-2 keeps 1024x768"
+else
+    echo "FAIL - menu did not end up on HEADLESS-1 through MoveToOutput (rule inserted $MOVE_RULE_OK, first $MOVE_FIRST, second $MOVE_SECOND)"
     echo "$MOVE_RESULT"
     fail=1
 fi
 
 run_move_case HEADLESS-9
-if [[ "$MOVE_FIRST" =~ ^(1280x720|1024x768)$ && "$MOVE_SECOND" =~ ^(1280x720|1024x768)$ ]] \
-    && ! echo "$MOVE_RESULT" | grep -Eqi 'segmentation|core dumped|panicked'; then
-    echo "ok   - MoveToOutput to a missing output leaves the menu mapped ($MOVE_FIRST, $MOVE_SECOND)"
+if [[ $MOVE_RULE_OK -eq 1 && $MOVE_INVALID -eq 1 && $MOVE_CRASH -eq 0 ]] \
+    && [[ "$MOVE_FIRST" == 1024x768 && "$MOVE_SECOND" == 1024x768 ]]; then
+    echo "ok   - MoveToOutput to a missing output is refused (labwc: Invalid output) and leaves the menu mapped ($MOVE_FIRST, $MOVE_SECOND)"
 else
-    echo "FAIL - MoveToOutput to a missing output broke the menu or labwc"
+    echo "FAIL - MoveToOutput to a missing output: rule inserted $MOVE_RULE_OK, 'Invalid output' logged $MOVE_INVALID, crash $MOVE_CRASH, menu $MOVE_FIRST / $MOVE_SECOND"
     echo "$MOVE_RESULT"
     fail=1
 fi
