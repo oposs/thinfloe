@@ -920,6 +920,8 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
         )
     })?;
     if let Err(e) = write_new(marker, b"prev\n") {
+        // No marker is there: it did not exist above, and the failed write
+        // left none behind (the rename is its last step).
         let _ = remove_if_there(&prev);
         return Err(format!("Could not write {}: {e}", marker.display()));
     }
@@ -938,8 +940,9 @@ fn mon_undo(k: &Kanshi, old: Option<&[u8]>, reason: String) -> String {
             crate::owned::home_relative(&k.config)
         );
     }
-    if let Some(m) = &k.marker {
-        let _ = remove_if_there(m);
+    // The marker first, and prev only once it is gone; see `mon_revert`.
+    if let Err(e) = remove_marker(k) {
+        return format!("{reason}; {e}");
     }
     let _ = remove_if_there(&k.prev());
     reason
@@ -2062,6 +2065,22 @@ mod tests {
         assert!(mon_revert(&k).is_err());
         assert_eq!(read(&k.config), Some(old_layout()));
         assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
+    }
+
+    #[test]
+    fn a_failed_apply_removes_the_marker_before_prev() {
+        // The fake kanshi blocks the marker, then fails: the undo cannot
+        // remove the marker, so prev must stay for the session's undo.
+        let d = dir("mon-undo-order");
+        let m = d.join("run/thinfloe-layout-unconfirmed");
+        let start = format!("rm -f {m}; mkdir -p {m}; touch {m}/x; exit 3", m = m.display());
+        let k = kanshi_home(&d, &start);
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
+        assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
+        assert_eq!(read(&k.config), Some(old_layout()));
+        assert!(e.contains("undo marker"), "{e}");
     }
 
     #[test]
