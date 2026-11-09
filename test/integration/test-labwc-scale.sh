@@ -43,7 +43,7 @@ chmod +x "$WORK/labwc"
 
 # Fresh composed dir, empty scale file state, empty stub log.
 setup() {
-    rm -rf "$WORK/run" "$WORK/scale" "$WORK/calls"
+    rm -rf "$WORK/run" "$WORK/scale" "$WORK/calls" "$WORK/menu-output" "$WORK/menu-output.applied"
     mkdir -p "$WORK/run"
     : >"$WORK/calls"
     : >"$WORK/home-env"
@@ -52,7 +52,8 @@ setup() {
 
 # run [--wait N]: run the helper once (--once); stderr in $WORK/err, status in $rc.
 run() {
-    TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="${DIR:-$WORK/run/thinfloe-labwc}" \
+    TF_SCALE_FILE="$WORK/scale" TF_MENU_OUTPUT_FILE="$WORK/menu-output" \
+        TF_LABWC_DIR="${DIR:-$WORK/run/thinfloe-labwc}" \
         TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$HELPER" --once "$@" 2>"$WORK/err"
     rc=$?
 }
@@ -183,7 +184,8 @@ hpid=
 # --- a failed apply is tried again, a bounded number of times ------------
 # follow ENV...: start the helper with the poll at 0.1 s and the retry at 0.3 s.
 follow() {
-    env TF_SCALE_POLL=0.1 TF_SCALE_RETRY=0.3 TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="$D" \
+    env TF_SCALE_POLL=0.1 TF_SCALE_RETRY=0.3 TF_SCALE_FILE="$WORK/scale" \
+        TF_MENU_OUTPUT_FILE="$WORK/menu-output" TF_LABWC_DIR="$D" \
         TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$@" "$HELPER" --wait 2 2>"$WORK/err" &
     hpid=$!
 }
@@ -215,5 +217,111 @@ echo 3 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
 calls_ge() { [[ $(calls) -ge $1 ]]; }
 waitfor "retry: a changed file is tried at once" calls_ge 10
 stop
+
+# --- the menu output -----------------------------------------------------
+# The menu names its monitor in $WORK/menu-output; the helper puts a
+# MoveToOutput action in the thinfloe-menu window rule, before
+# ToggleAlwaysOnBottom, and writes the name to menu-output.applied.
+OUT="$WORK/menu-output"
+APPLIED="$WORK/menu-output.applied"
+rule() { sed -n '/<windowRule identifier="thinfloe-menu"/,/<\/windowRule>/p' "$D/rc.xml"; }
+# rule_has NAME: the rule holds exactly one MoveToOutput for NAME, on the line
+# before ToggleAlwaysOnBottom.
+rule_has() {
+    local r
+    r=$(rule)
+    [[ $(grep -c 'MoveToOutput' <<<"$r") -eq 1 ]] &&
+        [[ $(grep -B1 'ToggleAlwaysOnBottom' <<<"$r" | head -1 | sed 's/^ *//') == \
+           "<action name=\"MoveToOutput\" output=\"$1\"/>" ]]
+}
+no_keybinding() { ! grep -q '<keybind\|<default' "$D/rc.xml"; }
+applied_is() { [[ -f $APPLIED && $(cat "$APPLIED") == "$1" ]]; }
+no_temp_files() { [[ -z $(ls -A "$WORK" | grep '^\.applied\.') ]]; }
+
+# Control: no output file, scale 2 -> no rule at all, and no .applied.
+setup; echo 2 >"$WORK/scale"; run --wait 2
+{ [[ -f $D/rc.xml ]] && [[ -n $(rule) ]] && ! grep -q 'MoveToOutput' "$D/rc.xml"; } \
+    && ok "output control: missing file, no MoveToOutput" || bad "output control: rule present or rule block not found"
+[[ ! -e $APPLIED ]] && ok "output control: .applied not written" || bad "output control: .applied exists"
+no_keybinding && ok "output control: no keybinding" || bad "output control: keybinding"
+
+# Control: empty output file, scale 2 -> no rule.
+setup; echo 2 >"$WORK/scale"; : >"$OUT"; run --wait 2
+{ [[ -n $(rule) ]] && ! grep -q 'MoveToOutput' "$D/rc.xml"; } \
+    && ok "output control: empty file, no MoveToOutput" || bad "output control: empty file gave a rule"
+
+# Output only, scale 1.
+setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"; run --wait 2
+{ [[ $rc -eq 0 ]] && [[ -f $D/rc.xml && ! -L $D/rc.xml ]]; } \
+    && ok "output only: rc.xml is a regular file" || bad "output only: rc.xml still a link (rc $rc)"
+rule_has HDMI-A-1 && ok "output only: rule before ToggleAlwaysOnBottom" || bad "output only: rule wrong: $(rule)"
+[[ $(grep -c '<font place=.*size="10"' "$D/rc.xml") -eq 2 ]] \
+    && ok "output only: fonts unscaled" || bad "output only: fonts"
+applied_is HDMI-A-1 && ok "output only: .applied holds the name" || bad "output only: .applied: $(cat "$APPLIED" 2>&1)"
+[[ $(cat "$WORK/calls") == "--reconfigure" ]] \
+    && ok "output only: one --reconfigure" || bad "output only: labwc calls: $(cat "$WORK/calls")"
+no_keybinding && ok "output only: no keybinding" || bad "output only: keybinding"
+no_temp_files && ok "output only: no temp file left behind" || bad "output only: temp file left"
+[[ $(cksum "$SYSDIR/rc.xml" "$SYSDIR/themerc-override") == "$sums" ]] \
+    && ok "output only: system files untouched" || bad "output only: system files changed"
+
+# Output and scale 2 in one rc.xml.
+setup; echo 2 >"$WORK/scale"; echo DP-2 >"$OUT"; run --wait 2
+{ fonts_are 20 && rule_has DP-2; } \
+    && ok "output and scale 2: both in one rc.xml" || bad "output and scale 2: fonts or rule missing"
+applied_is DP-2 && ok "output and scale 2: .applied holds the name" || bad "output and scale 2: .applied"
+grep -qx 'window.button.width: 52' "$D/themerc-override" \
+    && ok "output and scale 2: theme scaled" || bad "output and scale 2: theme"
+no_keybinding && ok "output and scale 2: no keybinding" || bad "output and scale 2: keybinding"
+diff <(grep -v '<font\|MoveToOutput' "$D/rc.xml") <(grep -v '<font' "$SYSDIR/rc.xml") >/dev/null \
+    && ok "output and scale 2: only font and rule lines differ" || bad "output and scale 2: other lines differ"
+
+# No scale file at all: the output file alone is enough (the helper waits for it).
+setup; ( sleep 1; echo eDP-1 >"$OUT.tmp"; mv "$OUT.tmp" "$OUT" ) &
+run --wait 5; wait
+{ [[ ! -e $WORK/scale ]] && rule_has eDP-1 && applied_is eDP-1; } \
+    && ok "no scale file: the output alone works" || bad "no scale file: output ignored (rc $rc, err $(cat "$WORK/err"))"
+no_keybinding && ok "no scale file: no keybinding" || bad "no scale file: keybinding"
+
+# A name that is not a safe output name: refused, nothing written.
+for badname in 'a"<b' 'a b' 'x&y' "$(printf 'a%.0s' {1..65})"; do
+    setup; echo 1 >"$WORK/scale"; printf '%s\n' "$badname" >"$OUT"; run --wait 2
+    { [[ $rc -eq 0 ]] && untouched && [[ $(calls) -eq 0 ]] && [[ ! -e $APPLIED ]]; } \
+        && ok "refused name '${badname:0:12}': links kept, no reconfigure, no .applied" \
+        || bad "refused name '${badname:0:12}': something changed"
+    grep -q 'thinfloe: menu output not applied' "$WORK/err" \
+        && ok "refused name '${badname:0:12}': reason on stderr" || bad "refused name '${badname:0:12}': stderr: $(cat "$WORK/err")"
+done
+setup; echo 2 >"$WORK/scale"; echo 'a"<b' >"$OUT"; run --wait 2
+{ fonts_are 20 && ! grep -q 'MoveToOutput' "$D/rc.xml" && [[ ! -e $APPLIED ]]; } \
+    && ok "refused name with scale 2: scale applied, no rule, no .applied" || bad "refused name with scale 2"
+no_keybinding && ok "refused name with scale 2: no keybinding" || bad "refused name with scale 2: keybinding"
+
+# Cleared: the links come back and .applied is empty. Then a name again.
+setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"
+follow
+waitfor "cleared: the rule is applied first" applied_is HDMI-A-1
+rule_has HDMI-A-1 && ok "cleared: rule present before the clear" || bad "cleared: rule missing before the clear"
+: >"$OUT.tmp"; mv "$OUT.tmp" "$OUT"
+waitfor "cleared: the links come back" untouched
+waitfor "cleared: .applied is empty" applied_is ""
+[[ -f $APPLIED && ! -s $APPLIED ]] && ok "cleared: .applied is an empty file" || bad "cleared: .applied not empty"
+calls_are 2 && ok "cleared: reconfigure after the restore" || bad "cleared: calls $(calls)"
+echo DP-1 >"$OUT.tmp"; mv "$OUT.tmp" "$OUT"
+waitfor "cleared: a new name applies again" applied_is DP-1
+rule_has DP-1 && ok "cleared: new rule in place" || bad "cleared: new rule wrong"
+# A refused name later keeps the last good output and logs once.
+printf '%s\n' 'a"<b' >"$OUT.tmp"; mv "$OUT.tmp" "$OUT"
+sleep 0.6
+{ rule_has DP-1 && applied_is DP-1; } \
+    && ok "cleared: a refused name keeps the last output" || bad "cleared: refused name changed state"
+[[ $(grep -c 'menu output not applied' "$WORK/err") -eq 1 ]] \
+    && ok "cleared: the refusal is logged once" || bad "cleared: stderr: $(cat "$WORK/err")"
+stop
+
+# labwc fails: .applied is not written.
+setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"; STUB_FAIL=1 run --wait 2
+{ untouched && [[ ! -e $APPLIED ]]; } \
+    && ok "failing labwc with an output: links back, no .applied" || bad "failing labwc with an output"
 
 exit $fail

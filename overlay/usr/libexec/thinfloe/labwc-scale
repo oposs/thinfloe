@@ -1,5 +1,6 @@
 #!/bin/sh
-# Make labwc's title bars follow the scale thinfloe-menu chose.
+# Make labwc's title bars follow the scale thinfloe-menu chose, and put the
+# menu on the output it chose.
 #
 # Usage: labwc-scale [--wait SECONDS] [--once]     (--wait default 15)
 #
@@ -11,6 +12,17 @@
 # symlinks rc.xml and themerc-override by scaled copies and runs
 # "labwc --reconfigure" (TF_LABWC overrides the command). /etc/thinfloe/labwc
 # is never edited.
+#
+# The menu also writes the name of the monitor it belongs on (a connector
+# name such as HDMI-A-1, one line) to $XDG_RUNTIME_DIR/thinfloe-menu-output
+# (TF_MENU_OUTPUT_FILE overrides the path). An empty or missing file means no
+# choice. A name sets a MoveToOutput action in the thinfloe-menu window rule of
+# rc.xml. After labwc was reconfigured, the helper writes the same name to
+# "<that file>.applied" (temp file and rename; empty for no choice), so the
+# menu knows labwc has it. A name that is not 1 to 64 characters of
+# A-Z a-z 0-9 . _ - is refused: stderr gets
+# "thinfloe: menu output not applied: <why>", nothing else changes. The helper
+# is the only program that writes the composed rc.xml.
 #
 #   rc.xml           the size="10" of each <font place=...> line becomes
 #                    round(10 * scale), in points (<theme><font size>)
@@ -30,14 +42,15 @@
 # the end) and reads the file once a second (TF_SCALE_POLL overrides). Each
 # change is applied again, always from the system files the symlinks pointed
 # at, never from the copies of the last run; a change to a scale that rounds
-# to 1 puts the symlinks back. labwc is reconfigured after each change. An
+# to 1 with no output name puts the symlinks back. labwc is reconfigured after each change. An
 # unchanged file, or one that holds no valid scale, causes nothing.
 #
-# With --once the helper handles the first scale and exits (for tests).
+# With --once the helper handles the first state and exits (for tests).
 #
-# Exit 0, nothing done: no usable scale file within --wait seconds, or no
+# Exit 0, nothing done: no usable scale file and no output name within --wait
+# seconds, or no
 # composed dir (the session fell back to /etc/thinfloe/labwc), or a first
-# scale that rounds to 1. Any failure logs
+# state of scale 1 and no output name. Any failure logs
 # "thinfloe: title bar scale not applied: <why>" to stderr, puts the symlinks
 # back (and, when labwc failed, reconfigures once more); the helper then keeps
 # running and tries the same value up to 3 more times, 5 s apart
@@ -65,12 +78,38 @@ if [ -z "$dir" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
 fi
 labwc=${TF_LABWC:-labwc}
 poll=${TF_SCALE_POLL:-1}
+out_file=${TF_MENU_OUTPUT_FILE:-}
+if [ -z "$out_file" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    out_file=$XDG_RUNTIME_DIR/thinfloe-menu-output
+fi
 
 # The scale from the file, or nothing.
 read_scale() {
     [ -n "$scale_file" ] && [ -r "$scale_file" ] || return 0
     awk 'NR == 1 && NF == 1 && $1 ~ /^[0-9]+(\.[0-9]+)?$/ &&
              $1 + 0 >= 0.5 && $1 + 0 <= 8 { print $1 + 0 }' "$scale_file" 2>/dev/null
+}
+
+# The first line of the output file as it stands (empty when none).
+read_output() {
+    [ -n "$out_file" ] && [ -r "$out_file" ] || return 0
+    line=
+    IFS= read -r line <"$out_file" 2>/dev/null || true
+    printf '%s' "$line"
+}
+
+valid_output() {
+    printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9._-]{1,64}'
+}
+
+# Tell the menu which output labwc has: temp file and rename, same directory.
+write_applied() {
+    [ -n "$out_file" ] || return 0
+    applied=$out_file.applied
+    tmp_applied=$(mktemp "$(dirname "$applied")/.applied.XXXXXX") || return 0
+    if [ -n "$1" ]; then printf '%s\n' "$1" >"$tmp_applied"; else : >"$tmp_applied"; fi
+    chmod 644 "$tmp_applied" 2>/dev/null
+    mv -f "$tmp_applied" "$applied" || rm -f "$tmp_applied"
 }
 
 is_one() {
@@ -83,6 +122,7 @@ i=0
 while :; do
     scale=$(read_scale)
     [ -n "$scale" ] && break
+    [ -n "$(read_output)" ] && { scale=1; break; }
     [ "$i" -ge "${tries:-0}" ] && exit 0
     i=$((i + 1))
     sleep 0.2
@@ -118,20 +158,31 @@ fail() {
     return 1
 }
 
-# Scaled copies of the system files for $1, then labwc reconfigures.
+# Scaled copies of the system files for scale $1 and menu output $2 (may be
+# empty), then labwc reconfigures.
 apply() {
     scale=$1
+    out=$2
     reload_after_restore=
     [ -r "$rc_link" ] && [ -r "$theme_link" ] || { fail "cannot read the system config"; return; }
 
     tmp_rc=$(mktemp "$dir/.rc.xml.XXXXXX") || { fail "cannot write in $dir"; return; }
     tmp_theme=$(mktemp "$dir/.themerc-override.XXXXXX") || { fail "cannot write in $dir"; return; }
 
-    awk -v s="$scale" '
+    awk -v s="$scale" -v out="$out" '
         /<font place=/ && /size="10"/ {
             sub(/size="10"/, "size=\"" int(10 * s + 0.5) "\"")
         }
-        { print }' "$rc_link" >"$tmp_rc" || { fail "cannot scale rc.xml"; return; }
+        /<windowRule identifier="thinfloe-menu"/ { in_rule = 1 }
+        in_rule && out != "" && /<action name="ToggleAlwaysOnBottom"/ {
+            match($0, /^[ \t]*/)
+            print substr($0, 1, RLENGTH) "<action name=\"MoveToOutput\" output=\"" out "\"/>"
+            placed = 1
+        }
+        /<\/windowRule>/ { in_rule = 0 }
+        { print }
+        END { if (out != "" && !placed) exit 1 }' "$rc_link" >"$tmp_rc" ||
+        { fail "cannot scale rc.xml or place the menu output"; return; }
 
     awk -v s="$scale" '
         BEGIN {
@@ -173,15 +224,20 @@ apply() {
     fi
 }
 
-# Handle one scale: the copies, or the links back when it rounds to 1.
+# Handle one state ($1 scale, $2 output): the copies, or the links back when
+# the scale rounds to 1 and there is no output name.
 handle() {
     if is_one "$1"; then
-        if [ -n "$replaced" ]; then
-            restore
-            "$labwc" --reconfigure >/dev/null 2>&1
+        if [ -z "$2" ]; then
+            if [ -n "$replaced" ]; then
+                restore
+                "$labwc" --reconfigure >/dev/null 2>&1
+            fi
+            return
         fi
+        apply 1 "$2"
     else
-        apply "$1"
+        apply "$1" "$2"
     fi
 }
 
@@ -195,32 +251,57 @@ retry_polls=${retry_polls:-5}
 retries_left=0
 wait_polls=0
 
-# handle, then arm the retry when it failed.
+# handle, then arm the retry when it failed. When it worked, the menu is told
+# which output labwc has now.
 attempt() {
-    if handle "$1"; then
+    if handle "$1" "$2"; then
         retries_left=0
+        if [ "$2" != "$applied_out" ]; then
+            write_applied "$2"
+            applied_out=$2
+        fi
     else
         wait_polls=0
     fi
 }
 
-last=$scale
+# The wanted output from the file: a valid name, nothing, or the output kept
+# from before when the file holds a refused name (logged once per value).
+out=
+refused=
+pick_output() {
+    raw=$(read_output)
+    if [ -z "$raw" ] || valid_output "$raw"; then
+        out=$raw
+        refused=
+    elif [ "$raw" != "$refused" ]; then
+        refused=$raw
+        echo "thinfloe: menu output not applied: not a valid output name" >&2
+    fi
+}
+
+applied_out=
+pick_output
+last="$scale|$out"
 retries_left=3
-attempt "$scale"
+attempt "$scale" "$out"
 [ -n "$once" ] && exit 0
 
 while :; do
     sleep "$poll"
-    scale=$(read_scale)
-    if [ -n "$scale" ] && [ "$scale" != "$last" ]; then
-        last=$scale
+    s=$(read_scale)
+    [ -n "$s" ] && scale=$s
+    pick_output
+    now="$scale|$out"
+    if [ "$now" != "$last" ]; then
+        last=$now
         retries_left=3
-        attempt "$scale"
-    elif [ "$retries_left" -gt 0 ] && [ "$scale" = "$last" ]; then
+        attempt "$scale" "$out"
+    elif [ "$retries_left" -gt 0 ]; then
         wait_polls=$((wait_polls + 1))
         if [ "$wait_polls" -ge "$retry_polls" ]; then
             retries_left=$((retries_left - 1))
-            attempt "$scale"
+            attempt "$scale" "$out"
         fi
     fi
 done
