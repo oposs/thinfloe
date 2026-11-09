@@ -99,22 +99,32 @@ read_output() {
 }
 
 valid_output() {
-    printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9._-]{1,64}'
+    printf '%s\n' "$1" | LC_ALL=C grep -Eqx '[A-Za-z0-9._-]{1,64}'
 }
 
 # Tell the menu which output labwc has: temp file and rename, same directory.
 write_applied() {
     [ -n "$out_file" ] || return 0
     applied=$out_file.applied
-    tmp_applied=$(mktemp "$(dirname "$applied")/.applied.XXXXXX") || return 0
+    tmp_applied=$(mktemp "$(dirname "$applied")/.applied.XXXXXX") || {
+        echo "thinfloe: menu output state not written: cannot write next to $out_file" >&2
+        return 0
+    }
     if [ -n "$1" ]; then printf '%s\n' "$1" >"$tmp_applied"; else : >"$tmp_applied"; fi
     chmod 644 "$tmp_applied" 2>/dev/null
-    mv -f "$tmp_applied" "$applied" || rm -f "$tmp_applied"
+    mv -f "$tmp_applied" "$applied" || {
+        echo "thinfloe: menu output state not written: cannot replace $applied" >&2
+        rm -f "$tmp_applied"
+    }
 }
 
 is_one() {
     [ "$(awk -v s="$1" 'BEGIN { print (int(s * 10 + 0.5) == 10) ? 1 : 0 }')" = 1 ]
 }
+
+# Nothing is in effect yet: whatever an earlier run left in .applied is stale.
+applied_out=
+write_applied ""
 
 scale=
 tries=$(awk -v w="$wait_s" 'BEGIN { print int(w * 5) }' 2>/dev/null)
@@ -251,17 +261,19 @@ retry_polls=${retry_polls:-5}
 retries_left=0
 wait_polls=0
 
-# handle, then arm the retry when it failed. When it worked, the menu is told
-# which output labwc has now.
+# handle, then arm the retry when it failed. Afterwards the menu is told the
+# output that is in effect: the wanted one when the copies are in place, none
+# when the links are back (also after a failed change).
 attempt() {
     if handle "$1" "$2"; then
         retries_left=0
-        if [ "$2" != "$applied_out" ]; then
-            write_applied "$2"
-            applied_out=$2
-        fi
     else
         wait_polls=0
+    fi
+    if [ -n "$replaced" ]; then eff=$2; else eff=; fi
+    if [ "$eff" != "$applied_out" ]; then
+        write_applied "$eff"
+        applied_out=$eff
     fi
 }
 
@@ -280,7 +292,6 @@ pick_output() {
     fi
 }
 
-applied_out=
 pick_output
 last="$scale|$out"
 retries_left=3

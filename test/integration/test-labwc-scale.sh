@@ -37,6 +37,12 @@ cat >"$WORK/labwc" <<'STUB'
 #!/bin/sh
 echo "$*" >>"$STUB_LOG"
 n=$(wc -l <"$STUB_LOG")
+if [ -n "${STUB_FAIL_RANGE:-}" ]; then
+    # STUB_FAIL_RANGE="A B": calls A to B fail, all others work.
+    set -- $STUB_FAIL_RANGE
+    [ "$n" -lt "$1" ] || [ "$n" -gt "$2" ]
+    exit
+fi
 [ -z "${STUB_FAIL:-}" ] && [ "$n" -gt "${STUB_FAIL_FIRST:-0}" ]
 STUB
 chmod +x "$WORK/labwc"
@@ -242,7 +248,7 @@ no_temp_files() { [[ -z $(ls -A "$WORK" | grep '^\.applied\.') ]]; }
 setup; echo 2 >"$WORK/scale"; run --wait 2
 { [[ -f $D/rc.xml ]] && [[ -n $(rule) ]] && ! grep -q 'MoveToOutput' "$D/rc.xml"; } \
     && ok "output control: missing file, no MoveToOutput" || bad "output control: rule present or rule block not found"
-[[ ! -e $APPLIED ]] && ok "output control: .applied not written" || bad "output control: .applied exists"
+applied_is "" && ok "output control: .applied exists and is empty" || bad "output control: .applied: $(cat "$APPLIED" 2>&1)"
 no_keybinding && ok "output control: no keybinding" || bad "output control: keybinding"
 
 # Control: empty output file, scale 2 -> no rule.
@@ -286,15 +292,15 @@ no_keybinding && ok "no scale file: no keybinding" || bad "no scale file: keybin
 # A name that is not a safe output name: refused, nothing written.
 for badname in 'a"<b' 'a b' 'x&y' "$(printf 'a%.0s' {1..65})"; do
     setup; echo 1 >"$WORK/scale"; printf '%s\n' "$badname" >"$OUT"; run --wait 2
-    { [[ $rc -eq 0 ]] && untouched && [[ $(calls) -eq 0 ]] && [[ ! -e $APPLIED ]]; } \
-        && ok "refused name '${badname:0:12}': links kept, no reconfigure, no .applied" \
+    { [[ $rc -eq 0 ]] && untouched && [[ $(calls) -eq 0 ]] && applied_is ""; } \
+        && ok "refused name '${badname:0:12}': links kept, no reconfigure, .applied empty" \
         || bad "refused name '${badname:0:12}': something changed"
     grep -q 'thinfloe: menu output not applied' "$WORK/err" \
         && ok "refused name '${badname:0:12}': reason on stderr" || bad "refused name '${badname:0:12}': stderr: $(cat "$WORK/err")"
 done
 setup; echo 2 >"$WORK/scale"; echo 'a"<b' >"$OUT"; run --wait 2
-{ fonts_are 20 && ! grep -q 'MoveToOutput' "$D/rc.xml" && [[ ! -e $APPLIED ]]; } \
-    && ok "refused name with scale 2: scale applied, no rule, no .applied" || bad "refused name with scale 2"
+{ fonts_are 20 && ! grep -q 'MoveToOutput' "$D/rc.xml" && applied_is ""; } \
+    && ok "refused name with scale 2: scale applied, no rule, .applied empty" || bad "refused name with scale 2"
 no_keybinding && ok "refused name with scale 2: no keybinding" || bad "refused name with scale 2: keybinding"
 
 # Cleared: the links come back and .applied is empty. Then a name again.
@@ -321,7 +327,34 @@ stop
 
 # labwc fails: .applied is not written.
 setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"; STUB_FAIL=1 run --wait 2
-{ untouched && [[ ! -e $APPLIED ]]; } \
-    && ok "failing labwc with an output: links back, no .applied" || bad "failing labwc with an output"
+{ untouched && applied_is ""; } \
+    && ok "failing labwc with an output: links back, .applied empty" || bad "failing labwc with an output"
+
+# A .applied left by an earlier run is reset at startup to what is in effect.
+setup; echo 1 >"$WORK/scale"; echo STALE >"$APPLIED"; run --wait 2
+applied_is "" && ok "stale .applied: reset at start" || bad "stale .applied kept: $(cat "$APPLIED")"
+setup; echo STALE >"$APPLIED"; run --wait 1
+applied_is "" && ok "stale .applied: reset even when nothing is done" || bad "stale .applied kept (no state): $(cat "$APPLIED")"
+setup; echo 1 >"$WORK/scale"; echo STALE >"$APPLIED"; echo HDMI-A-1 >"$OUT"; run --wait 2
+applied_is HDMI-A-1 && ok "stale .applied: replaced by the applied name" || bad "stale .applied with a name: $(cat "$APPLIED")"
+
+# A failed change puts the links back and .applied follows; a later change works.
+setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"
+follow STUB_FAIL_RANGE="2 3" TF_SCALE_RETRY=30
+waitfor "failed change: first name applied" applied_is HDMI-A-1
+echo DP-1 >"$OUT.tmp"; mv "$OUT.tmp" "$OUT"
+waitfor "failed change: .applied drops to what is in effect" applied_is ""
+untouched && ok "failed change: links restored" || bad "failed change: links not restored"
+calls_are 3 && ok "failed change: reconfigure plus the one after the restore" || bad "failed change: calls $(calls)"
+echo DP-2 >"$OUT.tmp"; mv "$OUT.tmp" "$OUT"
+waitfor "failed change: the next change is applied" applied_is DP-2
+rule_has DP-2 && ok "failed change: rule for the next name" || bad "failed change: rule wrong"
+stop
+# The same failure with the normal retry: the retry applies the name.
+setup; echo 1 >"$WORK/scale"; echo HDMI-A-1 >"$OUT"
+follow STUB_FAIL_RANGE="1 2"
+waitfor "retry: .applied holds the name after the retry" applied_is HDMI-A-1
+rule_has HDMI-A-1 && ok "retry: rule in place" || bad "retry: rule wrong"
+stop
 
 exit $fail
