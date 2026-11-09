@@ -92,7 +92,7 @@ run_session() {
         XDG_RUNTIME_DIR="$WORK" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
         TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
-        sh "$SESSION" >/dev/null 2>&1
+        sh "$SESSION" >/dev/null 2>"$WORK/session.err"
 }
 
 # The session ends Plymouth, leaving its picture, before the menu starts.
@@ -611,9 +611,14 @@ cat >"$WORK/bin/kanshi" <<STUB
 echo "\$*" >>"$WORK/kanshi.argv"
 cp "\$2" "$WORK/kanshi.seen" 2>/dev/null
 echo \$\$ >>"$WORK/kanshi.pid"
-while :; do sleep 1; done
+trap 'kill \$s 2>/dev/null; exit 0' TERM
+sleep 2147483647 &
+s=\$!
+wait \$s
 STUB
-chmod 755 "$WORK/bin/kanshi"
+# A pgrep that finds nothing: the already-running check must not need it.
+printf '#!/bin/sh\nexit 1\n' >"$WORK/bin/pgrep"
+chmod 755 "$WORK/bin/kanshi" "$WORK/bin/pgrep"
 kanshi_reset() {
     local p
     for p in $(cat "$WORK/kanshi.pid" 2>/dev/null); do kill "$p" 2>/dev/null; done
@@ -658,7 +663,7 @@ else
     run_session "sleep 0.5; exit 0"
     if [[ "$(wc -l <"$WORK/kanshi.argv" 2>/dev/null)" -eq 1 ]] &&
        [[ "$(wc -l <"$WORK/kanshi.pid" 2>/dev/null)" -eq 1 ]]; then
-        ok "kanshi already running: session starts no second one"
+        ok "kanshi already running: session starts no second one (pgrep finds nothing)"
     else
         bad "kanshi already running: argv lines: $(cat "$WORK/kanshi.argv" 2>/dev/null)"
     fi
@@ -700,6 +705,34 @@ else
         ok "unconfirmed layout: unknown marker content leaves the config alone"
     else
         bad "unknown marker: config='$(cat "$KDIR/config" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
+    fi
+    kanshi_reset
+
+    # The undo comes before the sessionrc runs: a kanshi started there sees
+    # the restored config.
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo old >"$KDIR/config.prev"
+    echo prev >"$MARKER"
+    printf 'kanshi -c "$HOME/.config/kanshi/config" &\n' >"$WORK/home/.thinfloe-sessionrc"
+    run_session "$KMENU"
+    if [[ "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old && "$(wc -l <"$WORK/kanshi.argv")" -eq 1 ]]; then
+        ok "unconfirmed layout is undone before the sessionrc starts kanshi"
+    else
+        bad "undo before sessionrc: seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
+    fi
+    kanshi_reset
+
+    # prev without config.prev: nothing to restore, so config goes, with a message.
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo prev >"$MARKER"
+    run_session "$KMENU"
+    if [[ ! -e "$KDIR/config" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]] &&
+       grep -q 'without config.prev' "$WORK/session.err"; then
+        ok "unconfirmed layout: prev without config.prev removes the config and says so"
+    else
+        bad "prev without config.prev: config=$([[ -e $KDIR/config ]] && echo kept || echo gone) err='$(cat "$WORK/session.err")'"
     fi
     kanshi_reset
 fi

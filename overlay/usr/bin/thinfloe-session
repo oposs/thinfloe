@@ -17,6 +17,33 @@
 # here - it would overwrite the running session's home with the on-disk copy
 # midway through.
 
+# Monitor layout. The menu writes ~/.config/kanshi/config and kanshi is the
+# only thing that sets outputs. A new layout stays unconfirmed until the person
+# confirms it within 15 s; the menu leaves the marker below while it waits.
+# Finding it here means the session ended in that window: put the old layout
+# back BEFORE kanshi starts, so kanshi never applies the unconfirmed one.
+#   prev   restore config.prev over config
+#   none   there was no config before: remove config
+#   other  unknown content: leave the config alone
+kanshi_dir=$HOME/.config/kanshi
+layout_marker=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed}
+if [ -n "$layout_marker" ] && [ -e "$layout_marker" ]; then
+    read -r layout_undo <"$layout_marker" 2>/dev/null || true
+    case "$layout_undo" in
+        prev)
+            if [ -e "$kanshi_dir/config.prev" ]; then
+                mv -f "$kanshi_dir/config.prev" "$kanshi_dir/config"
+            else
+                echo "thinfloe: unconfirmed layout without config.prev: removing the kanshi config" >&2
+                rm -f "$kanshi_dir/config"
+            fi
+            ;;
+        none)
+            rm -f "$kanshi_dir/config" "$kanshi_dir/config.prev"
+            ;;
+    esac
+    rm -f "$layout_marker"
+fi
 # Per-device session customisation, sourced after the home restore so the
 # user's own saved copy wins.
 #
@@ -261,32 +288,18 @@ tf_hold() {
 sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
     >/dev/null 2>&1 || true
 
-# Monitor layout. The menu writes ~/.config/kanshi/config and kanshi is the
-# only thing that sets outputs. A new layout stays unconfirmed until the person
-# confirms it within 15 s; the menu leaves the marker below while it waits.
-# Finding it here means the session ended in that window: put the old layout
-# back BEFORE kanshi starts, so kanshi never applies the unconfirmed one.
-#   prev   restore config.prev over config
-#   none   there was no config before: remove config
-#   other  unknown content: leave the config alone
-kanshi_dir=$HOME/.config/kanshi
-layout_marker=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed}
-if [ -n "$layout_marker" ] && [ -e "$layout_marker" ]; then
-    read -r layout_undo <"$layout_marker" 2>/dev/null || true
-    case "$layout_undo" in
-        prev)
-            [ -e "$kanshi_dir/config.prev" ] &&
-                mv -f "$kanshi_dir/config.prev" "$kanshi_dir/config"
-            ;;
-        none)
-            rm -f "$kanshi_dir/config" "$kanshi_dir/config.prev"
-            ;;
-    esac
-    rm -f "$layout_marker"
-fi
 # A kanshi the sessionrc started by hand is left alone: two would fight.
+# Scans /proc rather than calling pgrep: procps is not guaranteed.
+tf_kanshi_running() {
+    for _d in /proc/[0-9]*; do
+        [ -O "$_d" ] || continue
+        read -r _n 2>/dev/null <"$_d/comm" || continue
+        [ "$_n" = kanshi ] && return 0
+    done
+    return 1
+}
 if [ -r "$kanshi_dir/config" ] && command -v kanshi >/dev/null 2>&1 &&
-   ! pgrep -u "$(id -u)" -x kanshi >/dev/null 2>&1; then
+   ! tf_kanshi_running; then
     kanshi -c "$kanshi_dir/config" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
     HELPER_PIDS="$HELPER_PIDS $!"
 fi
