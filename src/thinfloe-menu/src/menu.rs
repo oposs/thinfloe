@@ -160,6 +160,8 @@ pub enum Job {
     MonApply {
         text: String,
         menu_output: Option<String>,
+        /// Kept as `config.prev` when there is no file yet.
+        prev: Option<String>,
     },
     /// The new layout is confirmed.
     MonKeep,
@@ -315,7 +317,15 @@ impl Menu {
     fn mon_request(r: MonRequest) -> Effect {
         Effect::Start(match r {
             MonRequest::Load => Job::MonLoad,
-            MonRequest::Apply { text, menu_output } => Job::MonApply { text, menu_output },
+            MonRequest::Apply {
+                text,
+                menu_output,
+                prev,
+            } => Job::MonApply {
+                text,
+                menu_output,
+                prev,
+            },
             MonRequest::Keep => Job::MonKeep,
             MonRequest::Revert => Job::MonRevert,
             MonRequest::TakeOver => Job::MonTakeOver,
@@ -3412,7 +3422,8 @@ mod tests {
         m.settings_tab = SettingsTab::Screen;
         m.monitors_event(MonEvent::Select("DP-2".into()), now);
         assert_eq!(m.monitors_event(MonEvent::MenuHere, now), None);
-        let Some(Effect::Start(Job::MonApply { text, menu_output })) = m.monitors_event(MonEvent::Apply, now) else {
+        let Some(Effect::Start(Job::MonApply { text, menu_output, .. })) = m.monitors_event(MonEvent::Apply, now)
+        else {
             panic!("no Apply job")
         };
         assert!(text.contains("# thinfloe menu DP-2"), "{text}");

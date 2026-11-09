@@ -40,7 +40,14 @@ pub enum MonRequest {
     Load,
     /// Write `text` as the file's body and let kanshi apply it.
     /// `menu_output` is the connector name the arrangement puts the menu on.
-    Apply { text: String, menu_output: Option<String> },
+    /// `prev` is the body of a file for the layout on screen now, sent when
+    /// there is no file: the revert puts it back, so going back works on
+    /// the first Apply too.
+    Apply {
+        text: String,
+        menu_output: Option<String>,
+        prev: Option<String>,
+    },
     /// The person kept the new arrangement.
     Keep,
     /// Put the arrangement before the Apply back.
@@ -419,6 +426,8 @@ impl MonTab {
             None => profiles.push(draft.clone()),
         }
         let text = format!("\n{}", kanshi::render(&profiles));
+        let prev =
+            (self.owner == Owner::Missing).then(|| format!("\n{}", kanshi::render(&[kanshi::from_heads(&self.heads)])));
         self.pending = Some(profiles);
         self.error = None;
         self.phase = Phase::Applying {
@@ -430,7 +439,11 @@ impl MonTab {
             .as_deref()
             .and_then(|c| self.connector(c))
             .map(String::from);
-        Some(MonRequest::Apply { text, menu_output })
+        Some(MonRequest::Apply {
+            text,
+            menu_output,
+            prev,
+        })
     }
 
     // ---- Bookkeeping ----
@@ -783,7 +796,8 @@ mod tests {
             ev(&mut t, MonEvent::Apply, now),
             Some(MonRequest::Apply {
                 text,
-                menu_output: Some("DP-2".into())
+                menu_output: Some("DP-2".into()),
+                prev: None,
             })
         );
         assert_eq!(t.countdown(now), Some(15));
@@ -791,6 +805,27 @@ mod tests {
         assert_eq!(t.countdown(now + Duration::from_millis(14_500)), Some(1));
         // A second Apply while the first runs sends nothing.
         assert_eq!(ev(&mut t, MonEvent::Apply, now), None);
+    }
+
+    #[test]
+    fn without_a_file_apply_sends_the_layout_on_screen_to_go_back_to() {
+        let now = Instant::now();
+        let mut t = tab(two(), None);
+        ev(&mut t, MonEvent::Select("DP-2".into()), now);
+        ev(&mut t, MonEvent::Rotation(Rotation::R90), now);
+        let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
+            panic!("no Apply")
+        };
+        let on_screen = format!("\n{}", kanshi::render(&[kanshi::from_heads(&two())]));
+        assert_eq!(prev, Some(on_screen));
+        // Once kept, the file is the menu's: the next Apply needs none.
+        assert_eq!(t.applied(Ok(())), None);
+        assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
+        t.kept();
+        let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
+            panic!("no Apply")
+        };
+        assert_eq!(prev, None);
     }
 
     #[test]

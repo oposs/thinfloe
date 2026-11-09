@@ -884,10 +884,13 @@ pub fn kanshi_reload(k: &Kanshi) -> Result<(), String> {
 }
 
 /// Write the new layout and let kanshi apply it. First the old file goes
-/// to `config.prev` (or none is left) and the marker says which, so a crash
-/// at any later point is undone by the next session. On a failure the old
-/// file is put back and both go.
-pub fn mon_apply(k: &Kanshi, text: &str) -> Result<(), String> {
+/// to `config.prev`, and the marker `prev` says so, so a crash at any
+/// later point is undone by the next session. Without a file, `prev_body`
+/// (the body of a file for the layout on screen) is kept instead: a revert
+/// needs a layout to go back to, since kanshi keeps the last one it set.
+/// The menu never writes the marker `none`. On a failure the old file is
+/// put back and both go.
+pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), String> {
     let rel = crate::owned::home_relative(&k.config);
     let old = crate::owned::read_bytes(&k.config).map_err(|e| format!("Could not read {rel}: {e}"))?;
     let old_text = old.as_deref().map(String::from_utf8_lossy);
@@ -895,9 +898,10 @@ pub fn mon_apply(k: &Kanshi, text: &str) -> Result<(), String> {
         return Err(format!("{rel} was written by hand"));
     }
     let prev = k.prev();
-    let kept = match &old {
-        Some(b) => write_new(&prev, b),
-        None => remove_if_there(&prev),
+    let kept = match (&old, prev_body) {
+        (Some(b), _) => write_new(&prev, b),
+        (None, Some(body)) => write_new(&prev, format!("{}\n{body}", crate::owned::HEADER).as_bytes()),
+        (None, None) => return Err("The layout on screen is not known; nothing was changed.".to_string()),
     };
     kept.map_err(|e| {
         format!(
@@ -906,7 +910,7 @@ pub fn mon_apply(k: &Kanshi, text: &str) -> Result<(), String> {
         )
     })?;
     if let Some(m) = &k.marker
-        && let Err(e) = write_new(m, if old.is_some() { b"prev\n" } else { b"none\n" })
+        && let Err(e) = write_new(m, b"prev\n")
     {
         let _ = remove_if_there(&prev);
         return Err(format!("Could not write {}: {e}", m.display()));
@@ -1785,7 +1789,7 @@ mod tests {
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
+        assert_eq!(mon_apply(&k, "\nnew\n", None), Ok(()));
         assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
         assert_eq!(read(&k.prev()), Some(old_layout()));
         assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
@@ -1793,19 +1797,27 @@ mod tests {
         let want = format!("args -c {}\nmarker prev\nprev old\nconfig new\n", k.config.display());
         assert_eq!(read(&d.join("started")), Some(want));
 
-        // No file before: the marker says so, and a stale prev goes.
+        // No file before: the layout on screen is kept instead, over a
+        // stale prev, and the marker still says prev.
         let d = dir("mon-apply-none");
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(k.prev(), "stale").unwrap();
-        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
-        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("none\n"));
-        assert!(!k.prev().exists());
+        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
+        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
+        assert_eq!(read(&k.prev()), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
         assert!(
             read(&d.join("started"))
                 .unwrap()
-                .contains("marker none\nprev \nconfig new\n")
+                .contains("marker prev\nprev onscreen\nconfig new\n")
         );
+
+        // Neither a file nor the layout on screen: nothing is written.
+        let d = dir("mon-apply-unknown");
+        let k = kanshi_home(&d, &recording(&d));
+        assert!(mon_apply(&k, "\nnew\n", None).is_err());
+        assert!(!k.config.exists() && !k.prev().exists() && !k.marker.as_ref().unwrap().exists());
+        assert!(!d.join("started").exists());
     }
 
     #[test]
@@ -1819,7 +1831,7 @@ mod tests {
         fs::create_dir_all(&entry).unwrap();
         fs::write(entry.join("comm"), "kanshi\n").unwrap();
         assert_eq!(kanshi_pids(&k.proc_dir), vec![child.id() as i32]);
-        assert_eq!(mon_apply(&k, "\nnew\n"), Ok(()));
+        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
         let t0 = Instant::now();
         let status = loop {
             if let Some(s) = child.try_wait().unwrap() {
@@ -1861,7 +1873,7 @@ mod tests {
         let k = kanshi_home(&d, "exit 3");
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        let e = mon_apply(&k, "\nnew\n").unwrap_err();
+        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
         assert!(e.contains("stopped at once"), "{e}");
         assert_eq!(read(&k.config), Some(old_layout()));
         assert!(!k.prev().exists());
@@ -1869,14 +1881,15 @@ mod tests {
 
         // No file before: none after.
         fs::remove_file(&k.config).unwrap();
-        assert!(mon_apply(&k, "\nnew\n").is_err());
+        assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
+        assert!(!k.prev().exists());
         assert!(!k.config.exists());
         assert!(!k.marker.as_ref().unwrap().exists());
 
         // A file written by hand is not touched, and kanshi not started.
         let k = kanshi_home(&d, &recording(&d));
         fs::write(&k.config, "profile {\n\toutput * enable\n}\n").unwrap();
-        let e = mon_apply(&k, "\nnew\n").unwrap_err();
+        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
         assert!(e.contains("written by hand"), "{e}");
         assert_eq!(read(&k.config).as_deref(), Some("profile {\n\toutput * enable\n}\n"));
         assert!(!k.prev().exists());
@@ -1890,7 +1903,7 @@ mod tests {
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n").unwrap();
+        mon_apply(&k, "\nnew\n", None).unwrap();
         assert_eq!(mon_revert(&k), Ok(()));
         assert_eq!(read(&k.config), Some(old_layout()));
         assert!(!k.prev().exists());
@@ -1899,19 +1912,70 @@ mod tests {
         let log = read(&d.join("started")).unwrap();
         assert!(log.ends_with("marker \nprev \nconfig old\n"), "{log}");
 
-        // No file before: the menu's file goes.
+        // No file before: the layout on screen comes back, and kanshi
+        // reads it.
         fs::remove_file(&k.config).unwrap();
-        mon_apply(&k, "\nnew\n").unwrap();
+        mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).unwrap();
         assert_eq!(mon_revert(&k), Ok(()));
-        assert!(!k.config.exists());
+        assert_eq!(read(&k.config), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
+        assert!(!k.prev().exists());
         assert!(!k.marker.as_ref().unwrap().exists());
+        let log = read(&d.join("started")).unwrap();
+        assert!(log.ends_with("marker \nprev \nconfig onscreen\n"), "{log}");
 
         // A file written by hand meanwhile is kept, and so is the marker.
-        mon_apply(&k, "\nnew\n").unwrap();
+        mon_apply(&k, "\nnew\n", None).unwrap();
         fs::write(&k.config, "by hand\n").unwrap();
         assert!(mon_revert(&k).is_err());
         assert_eq!(read(&k.config).as_deref(), Some("by hand\n"));
         assert!(k.marker.as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn a_first_apply_then_revert_leaves_the_layout_on_screen() {
+        use crate::heads::{Head, Mode, Rotation};
+        use crate::monitors::{MonEvent, MonRequest, MonTab};
+        let head = |name: &str, x: i32| Head {
+            name: name.into(),
+            make: "Dell".into(),
+            model: "U".into(),
+            serial: String::new(),
+            phys_mm: (0, 0),
+            enabled: true,
+            modes: vec![Mode {
+                w: 1920,
+                h: 1080,
+                refresh_mhz: 60_000,
+                preferred: true,
+            }],
+            current: Some(0),
+            pos: (x, 0),
+            rotation: Rotation::Normal,
+        };
+        let heads = vec![head("DP-1", 0), head("DP-2", 1920)];
+        let d = dir("mon-first");
+        let k = kanshi_home(&d, &recording(&d));
+        let now = Instant::now();
+        let mut t = MonTab::default();
+        t.heads_changed(heads.clone());
+        let (text, owner) = mon_load(&k);
+        t.loaded(text, owner);
+        t.event(MonEvent::Select("DP-2".into()), now);
+        t.event(MonEvent::Rotation(Rotation::R90), now);
+        let Some(MonRequest::Apply { text, prev, .. }) = t.event(MonEvent::Apply, now) else {
+            panic!("no Apply")
+        };
+        assert_eq!(mon_apply(&k, &text, prev.as_deref()), Ok(()));
+        assert_eq!(t.event(MonEvent::GoBack, now), None, "the job has not ended yet");
+        assert_eq!(t.applied(Ok(())), Some(MonRequest::Revert));
+        assert_eq!(mon_revert(&k), Ok(()));
+        let want = format!(
+            "{}\n\n{}",
+            crate::owned::HEADER,
+            crate::kanshi::render(&[crate::kanshi::from_heads(&heads)])
+        );
+        assert_eq!(read(&k.config), Some(want));
+        assert_eq!(mon_load(&k).1, crate::owned::Owner::Menu);
     }
 
     #[test]
@@ -1920,7 +1984,7 @@ mod tests {
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n").unwrap();
+        mon_apply(&k, "\nnew\n", None).unwrap();
         mon_keep(&k);
         assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
         assert!(!k.prev().exists());

@@ -434,7 +434,9 @@ fn job_result(
             JobResult::MonLoaded(text, owner)
         }
         // The connector name is for the window move, which the menu does.
-        Job::MonApply { text, .. } => JobResult::MonApplied(jobs::mon_apply(&paths.kanshi, &text)),
+        Job::MonApply { text, prev, .. } => {
+            JobResult::MonApplied(jobs::mon_apply(&paths.kanshi, &text, prev.as_deref()))
+        }
         Job::MonKeep => {
             jobs::mon_keep(&paths.kanshi);
             JobResult::MonKept
