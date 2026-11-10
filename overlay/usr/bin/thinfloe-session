@@ -292,12 +292,19 @@ sudo -n "${TF_PLYMOUTH_STEP:-/usr/libexec/thinfloe/plymouth-step}" quit-retain \
     >/dev/null 2>&1 || true
 
 # A kanshi the sessionrc started by hand is left alone: two would fight.
-# Scans /proc rather than calling pgrep: procps is not guaranteed.
+# Scans /proc rather than calling pgrep: procps is not guaranteed. Only a
+# kanshi of this user counts: the effective UID on the Uid: line of its
+# status file (real, effective, saved, filesystem) is this user's.
 tf_kanshi_running() {
+    _uid=$(id -u)
     for _d in /proc/[0-9]*; do
-        [ -O "$_d" ] || continue
         read -r _n 2>/dev/null <"$_d/comm" || continue
-        [ "$_n" = kanshi ] && return 0
+        [ "$_n" = kanshi ] || continue
+        while read -r _k _real _eff _rest; do
+            [ "$_k" = Uid: ] || continue
+            [ "$_eff" = "$_uid" ] && return 0
+            break
+        done 2>/dev/null <"$_d/status"
     done
     return 1
 }
