@@ -12,21 +12,28 @@ use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 // The palette. UI code reads these through the theme: the six that are
 // shadcn roles as `Theme::palette()` (ICE primary and ring, BG background,
 // TILE card, TILE_HOVER accent, LINE border, MUTED muted_foreground), the
-// other four as the app colours in `role`.
+// other four as the app colours in `role`. The status area draws SVG, not egui
+// widgets, and takes the colours marked `pub(crate)` directly.
 
 /// Ice blue, the accent.
-const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
+pub(crate) const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
 const BG: Color32 = Color32::from_rgb(0x05, 0x07, 0x0a);
-const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
+pub(crate) const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
 const TILE_ACTIVE: Color32 = Color32::from_rgb(0x10, 0x1b, 0x26);
 const TILE_HOVER: Color32 = Color32::from_rgb(0x13, 0x1c, 0x26);
 const LINE: Color32 = Color32::from_rgb(0x15, 0x1b, 0x22);
-const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
 /// The grey of timestamps.
 const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
 /// A warning amber, for reasons drawn on a disabled tile.
-const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
-const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+pub(crate) const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
+pub(crate) const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+/// A battery about to run out.
+pub(crate) const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
+/// The light grid lines of a status element's graph, a step above `TILE`.
+pub(crate) const GRID: Color32 = Color32::from_rgb(0x1c, 0x25, 0x30);
+/// The axes of a status element's graph.
+pub(crate) const AXIS: Color32 = Color32::from_rgb(0x3a, 0x46, 0x54);
 
 /// The palette's values, for tests that look for a colour in drawn shapes.
 #[cfg(test)]
@@ -127,6 +134,8 @@ pub const UPGRADE_TWO_COLUMNS_W: f32 = 720.0;
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";
+/// Geo itself, for egui and for the status area's SVG text.
+pub static GEO_TTF: &[u8] = include_bytes!("../assets/Geo-Oblique.ttf");
 
 pub fn geo(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(GEO.into()))
@@ -196,7 +205,7 @@ pub fn apply(ctx: &Context) {
 /// row next to vertical stems spread over two, so the bars of "e", "a" and
 /// "B" looked too thin.
 fn geo_data() -> FontData {
-    let mut data = FontData::from_static(include_bytes!("../assets/Geo-Oblique.ttf"));
+    let mut data = FontData::from_static(GEO_TTF);
     data.tweak.hinting = Some(false);
     data
 }

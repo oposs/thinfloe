@@ -2,12 +2,14 @@
 
 pub mod addons;
 pub mod app;
+pub mod battery;
 pub mod bounded;
 pub mod brand;
 pub mod damage;
 pub mod density;
 pub mod desktop;
 pub mod drives;
+pub mod hardware;
 pub mod header;
 pub mod heads;
 pub mod icons;
@@ -19,6 +21,7 @@ pub mod menu_move;
 pub mod monitors;
 pub mod monitors_ui;
 pub mod netfiles;
+pub mod netstat;
 pub mod nettab;
 pub mod network;
 pub mod network_ui;
@@ -29,6 +32,7 @@ pub mod release;
 pub mod screentab;
 pub mod settings;
 pub mod speed;
+pub mod status;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;
