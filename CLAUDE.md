@@ -301,12 +301,18 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   through `zwlr_output_manager_v1` and never sets them. It writes
   `~/.config/kanshi/config` (an owned file with a header line; a hand-written
   one is shown read-only until "Let the menu manage it", which keeps it as
-  `config.by-hand`) and reloads kanshi with SIGHUP. `thinfloe-session` starts
-  `kanshi -c ~/.config/kanshi/config` when that file is readable and no kanshi
-  of this user runs (found through `/proc/<pid>/comm`). Before that it undoes
-  an unconfirmed layout: the marker `~/.config/kanshi/thinfloe-layout-unconfirmed`
-  (in the home so that a home save carries it) holds `prev`, which restores
-  `config.prev`, or `none`, which removes `config`. The monitor for the menu
+  `config.by-hand`) and reloads kanshi with SIGHUP. When no kanshi runs, the
+  menu starts `kanshi -c ~/.config/kanshi/config` itself, in a session of its own; that
+  kanshi is not in the session's `HELPER_PIDS` and ends when labwc's socket
+  goes. `thinfloe-session` starts `kanshi -c ~/.config/kanshi/config` when that
+  file is readable and no kanshi of this user runs (found through
+  `/proc/<pid>/comm` and the `Uid:` line of `/proc/<pid>/status`). Before that
+  it undoes an unconfirmed layout: the marker
+  `~/.config/kanshi/thinfloe-layout-unconfirmed` (in the home so that a home
+  save carries it) holds `prev` or `none`. `prev` restores `config.prev` over
+  `config`; with no `config.prev` it removes `config` and logs "thinfloe:
+  unconfirmed layout without config.prev: removing the kanshi config". `none`
+  removes `config` and `config.prev`. The monitor for the menu
   goes through `$XDG_RUNTIME_DIR/thinfloe-menu-output`: the menu writes the
   output name there (empty means no choice), `labwc-scale` writes a
   `MoveToOutput` window rule into the composed `rc.xml`, runs
