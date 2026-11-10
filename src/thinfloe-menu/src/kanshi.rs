@@ -41,7 +41,10 @@ impl Side {
 pub enum Place {
     Origin,
     /// Beside the output with criteria `to`.
-    Next { to: String, side: Side },
+    Next {
+        to: String,
+        side: Side,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,12 +68,22 @@ pub struct Profile {
 /// string.
 pub fn criteria(head: &Head, all: &[Head]) -> String {
     let text = |h: &Head| {
-        let or_unknown = |s: &str| if s.is_empty() { "Unknown".to_string() } else { s.to_string() };
+        let or_unknown = |s: &str| {
+            if s.is_empty() {
+                "Unknown".to_string()
+            } else {
+                s.to_string()
+            }
+        };
         format!("{} {} {}", or_unknown(&h.make), or_unknown(&h.model), h.serial)
     };
     let mine = text(head);
     let clash = all.iter().filter(|h| text(h) == mine).count() > 1;
-    if head.serial.is_empty() || clash { head.name.clone() } else { mine }
+    if head.serial.is_empty() || clash {
+        head.name.clone()
+    } else {
+        mine
+    }
 }
 
 /// The size `o` takes on the desktop: its mode, turned by its rotation.
@@ -156,7 +169,10 @@ pub fn positions(p: &Profile) -> Result<Vec<(i32, i32)>, String> {
             let (Some(a), Some(b)) = (a, b) else { continue };
             let (sa, sb) = (size(&p.outputs[i]), size(&p.outputs[j]));
             if a.0 < b.0 + sb.0 && b.0 < a.0 + sa.0 && a.1 < b.1 + sb.1 && b.1 < a.1 + sa.1 {
-                return Err(format!("{} and {} overlap.", p.outputs[i].criteria, p.outputs[j].criteria));
+                return Err(format!(
+                    "{} and {} overlap.",
+                    p.outputs[i].criteria, p.outputs[j].criteria
+                ));
             }
         }
     }
@@ -215,7 +231,11 @@ fn transform_word(r: Rotation) -> &'static str {
 }
 
 fn quoted(criteria: &str) -> String {
-    if criteria.contains(' ') { format!("\"{criteria}\"") } else { criteria.to_string() }
+    if criteria.contains(' ') {
+        format!("\"{criteria}\"")
+    } else {
+        criteria.to_string()
+    }
 }
 
 /// The body of the file (`owned::write` adds the header): one kanshi
@@ -240,7 +260,12 @@ pub fn render(profiles: &[Profile]) -> String {
             }
             for o in &p.outputs {
                 if let Place::Next { to, side } = &o.place {
-                    s.push_str(&format!("\t# thinfloe place {} {} {}\n", quoted(&o.criteria), side.word(), quoted(to)));
+                    s.push_str(&format!(
+                        "\t# thinfloe place {} {} {}\n",
+                        quoted(&o.criteria),
+                        side.word(),
+                        quoted(to)
+                    ));
                 }
             }
             if let Some(m) = &p.menu_output {
@@ -301,7 +326,12 @@ fn parse_mode(text: &str) -> Option<Mode> {
             hz.parse::<u32>().ok()? * 1000 + mhz.parse::<u32>().ok()?
         }
     };
-    Some(Mode { w: w.parse().ok()?, h: h.parse().ok()?, refresh_mhz, preferred: false })
+    Some(Mode {
+        w: w.parse().ok()?,
+        h: h.parse().ok()?,
+        refresh_mhz,
+        preferred: false,
+    })
 }
 
 /// A disabled output keeps no mode in the file; it reads back as 0x0.
@@ -315,8 +345,29 @@ fn parse_output(t: &[String], line: &str) -> Result<OutputSet, String> {
     };
     let words: Vec<&str> = t.iter().map(String::as_str).collect();
     match words[..] {
-        [_, _, "disable"] => Ok(make(false, Mode { w: 0, h: 0, refresh_mhz: 0, preferred: false }, Rotation::Normal)),
-        [_, _, "enable", "mode", mode, "position", _, "transform", rot, "scale", "1"] => {
+        [_, _, "disable"] => Ok(make(
+            false,
+            Mode {
+                w: 0,
+                h: 0,
+                refresh_mhz: 0,
+                preferred: false,
+            },
+            Rotation::Normal,
+        )),
+        [
+            _,
+            _,
+            "enable",
+            "mode",
+            mode,
+            "position",
+            _,
+            "transform",
+            rot,
+            "scale",
+            "1",
+        ] => {
             let rotation = match rot {
                 "normal" => Rotation::Normal,
                 "90" => Rotation::R90,
@@ -350,7 +401,12 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
         let Some(p) = cur.as_mut() else {
             match words[..] {
                 [] => {}
-                ["profile", "{"] => cur = Some(Profile { outputs: Vec::new(), menu_output: None }),
+                ["profile", "{"] => {
+                    cur = Some(Profile {
+                        outputs: Vec::new(),
+                        menu_output: None,
+                    })
+                }
                 _ => return bad(line),
             }
             continue;
@@ -360,9 +416,16 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
             ["}"] => profiles.extend(cur.take()),
             ["output", ..] => p.outputs.push(parse_output(&t, line)?),
             ["#", "thinfloe", "place", who, side, to] => {
-                let Some(side) = Side::from_word(side) else { return bad(line) };
+                let Some(side) = Side::from_word(side) else {
+                    return bad(line);
+                };
                 match p.outputs.iter_mut().find(|o| o.criteria == who) {
-                    Some(o) => o.place = Place::Next { to: to.to_string(), side },
+                    Some(o) => {
+                        o.place = Place::Next {
+                            to: to.to_string(),
+                            side,
+                        }
+                    }
                     None => return bad(line),
                 }
             }
@@ -397,7 +460,12 @@ pub fn from_heads(heads: &[Head]) -> Profile {
             .or_else(|| h.modes.iter().find(|m| m.preferred))
             .or_else(|| h.modes.first())
             .cloned()
-            .unwrap_or(Mode { w: 0, h: 0, refresh_mhz: 0, preferred: false })
+            .unwrap_or(Mode {
+                w: 0,
+                h: 0,
+                refresh_mhz: 0,
+                preferred: false,
+            })
     };
     let mut order: Vec<&Head> = heads.iter().filter(|h| h.enabled).collect();
     order.sort_by_key(|h| (h.pos.0, h.pos.1));
@@ -417,20 +485,33 @@ pub fn from_heads(heads: &[Head]) -> Profile {
         let (w, hh) = size(&o);
         if h.enabled {
             let (x, y) = h.pos;
-            let right = rects.iter().position(|r| x == r.0 + r.2 && y < r.1 + r.3 && r.1 < y + hh);
-            let below = rects.iter().position(|r| y == r.1 + r.3 && x < r.0 + r.2 && r.0 < x + w);
+            let right = rects
+                .iter()
+                .position(|r| x == r.0 + r.2 && y < r.1 + r.3 && r.1 < y + hh);
+            let below = rects
+                .iter()
+                .position(|r| y == r.1 + r.3 && x < r.0 + r.2 && r.0 < x + w);
             let found = right.map(|i| (i, Side::RightOf)).or(below.map(|i| (i, Side::Below)));
             let prev = rects.len().checked_sub(1).map(|i| (i, Side::RightOf));
             if let Some((i, side)) = found.or(prev) {
-                o.place = Place::Next { to: outputs[i].criteria.clone(), side };
+                o.place = Place::Next {
+                    to: outputs[i].criteria.clone(),
+                    side,
+                };
             }
             rects.push((x, y, w, hh));
         } else if let Some(last) = outputs.last() {
-            o.place = Place::Next { to: last.criteria.clone(), side: Side::RightOf };
+            o.place = Place::Next {
+                to: last.criteria.clone(),
+                side: Side::RightOf,
+            };
         }
         outputs.push(o);
     }
-    Profile { outputs, menu_output: None }
+    Profile {
+        outputs,
+        menu_output: None,
+    }
 }
 
 #[cfg(test)]
@@ -438,11 +519,22 @@ mod tests {
     use super::*;
 
     fn mode(w: u32, h: u32, mhz: u32) -> Mode {
-        Mode { w, h, refresh_mhz: mhz, preferred: false }
+        Mode {
+            w,
+            h,
+            refresh_mhz: mhz,
+            preferred: false,
+        }
     }
 
     fn set(c: &str, w: u32, h: u32, place: Place) -> OutputSet {
-        OutputSet { criteria: c.into(), enabled: true, mode: mode(w, h, 60_000), rotation: Rotation::Normal, place }
+        OutputSet {
+            criteria: c.into(),
+            enabled: true,
+            mode: mode(w, h, 60_000),
+            rotation: Rotation::Normal,
+            place,
+        }
     }
 
     fn next(to: &str, side: Side) -> Place {
@@ -450,7 +542,10 @@ mod tests {
     }
 
     fn profile(outputs: Vec<OutputSet>) -> Profile {
-        Profile { outputs, menu_output: None }
+        Profile {
+            outputs,
+            menu_output: None,
+        }
     }
 
     fn head(name: &str, make: &str, model: &str, serial: &str, pos: (i32, i32), w: u32, h: u32) -> Head {
@@ -472,8 +567,14 @@ mod tests {
     fn renders_the_runtime_fixture() {
         let p = Profile {
             outputs: vec![
-                OutputSet { mode: mode(1280, 720, 0), ..set("HEADLESS-1", 0, 0, Place::Origin) },
-                OutputSet { mode: mode(1280, 720, 0), ..set("HEADLESS-2", 0, 0, next("HEADLESS-1", Side::RightOf)) },
+                OutputSet {
+                    mode: mode(1280, 720, 0),
+                    ..set("HEADLESS-1", 0, 0, Place::Origin)
+                },
+                OutputSet {
+                    mode: mode(1280, 720, 0),
+                    ..set("HEADLESS-2", 0, 0, next("HEADLESS-1", Side::RightOf))
+                },
             ],
             menu_output: Some("HEADLESS-1".into()),
         };
@@ -490,20 +591,35 @@ mod tests {
 
     #[test]
     fn criteria_fall_back_to_the_name_when_make_model_serial_collide() {
-        let two = [head("DP-1", "Dell Inc.", "U2419H", "", (0, 0), 1, 1), head("DP-2", "Dell Inc.", "U2419H", "", (0, 0), 1, 1)];
+        let two = [
+            head("DP-1", "Dell Inc.", "U2419H", "", (0, 0), 1, 1),
+            head("DP-2", "Dell Inc.", "U2419H", "", (0, 0), 1, 1),
+        ];
         assert_eq!(criteria(&two[0], &two), "DP-1");
         assert_eq!(criteria(&two[1], &two), "DP-2");
-        let same = [head("DP-1", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1), head("DP-2", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1)];
+        let same = [
+            head("DP-1", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1),
+            head("DP-2", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1),
+        ];
         assert_eq!(criteria(&same[0], &same), "DP-1");
-        let ok = [head("DP-1", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1), head("DP-2", "Dell Inc.", "U2419H", "DEF", (0, 0), 1, 1)];
+        let ok = [
+            head("DP-1", "Dell Inc.", "U2419H", "ABC", (0, 0), 1, 1),
+            head("DP-2", "Dell Inc.", "U2419H", "DEF", (0, 0), 1, 1),
+        ];
         assert_eq!(criteria(&ok[0], &ok), "Dell Inc. U2419H ABC");
     }
 
     #[test]
     fn right_of_aligns_tops_below_aligns_left() {
-        let p = profile(vec![set("A", 1920, 1080, Place::Origin), set("B", 1280, 1024, next("A", Side::RightOf))]);
+        let p = profile(vec![
+            set("A", 1920, 1080, Place::Origin),
+            set("B", 1280, 1024, next("A", Side::RightOf)),
+        ]);
         assert_eq!(positions(&p).unwrap(), vec![(0, 0), (1920, 0)]);
-        let p = profile(vec![set("A", 1920, 1080, Place::Origin), set("B", 1280, 1024, next("A", Side::Below))]);
+        let p = profile(vec![
+            set("A", 1920, 1080, Place::Origin),
+            set("B", 1280, 1024, next("A", Side::Below)),
+        ]);
         assert_eq!(positions(&p).unwrap(), vec![(0, 0), (0, 1080)]);
     }
 
@@ -517,7 +633,10 @@ mod tests {
 
     #[test]
     fn left_of_is_shifted_to_zero() {
-        let p = profile(vec![set("A", 1920, 1080, Place::Origin), set("B", 1280, 1024, next("A", Side::LeftOf))]);
+        let p = profile(vec![
+            set("A", 1920, 1080, Place::Origin),
+            set("B", 1280, 1024, next("A", Side::LeftOf)),
+        ]);
         assert_eq!(positions(&p).unwrap(), vec![(1280, 0), (0, 0)]);
     }
 
@@ -533,7 +652,10 @@ mod tests {
 
     #[test]
     fn set_place_swaps_a_cycle() {
-        let mut p = profile(vec![set("A", 100, 100, Place::Origin), set("B", 100, 100, next("A", Side::RightOf))]);
+        let mut p = profile(vec![
+            set("A", 100, 100, Place::Origin),
+            set("B", 100, 100, next("A", Side::RightOf)),
+        ]);
         set_place(&mut p, "A", next("B", Side::RightOf));
         assert_eq!(p.outputs[1].place, Place::Origin);
         assert_eq!(p.outputs[0].place, next("B", Side::RightOf));
@@ -544,7 +666,11 @@ mod tests {
     fn a_disabled_anchor_passes_its_place_on() {
         let mut b = set("B", 500, 500, next("A", Side::RightOf));
         b.enabled = false;
-        let p = profile(vec![set("A", 1920, 1080, Place::Origin), b, set("C", 1280, 1024, next("B", Side::RightOf))]);
+        let p = profile(vec![
+            set("A", 1920, 1080, Place::Origin),
+            b,
+            set("C", 1280, 1024, next("B", Side::RightOf)),
+        ]);
         assert_eq!(positions(&p).unwrap(), vec![(0, 0), (1920, 0)]);
     }
 
@@ -593,7 +719,10 @@ mod tests {
 
     #[test]
     fn profile_for_matches_the_connected_set_only() {
-        let profiles = vec![profile(vec![set("A", 1, 1, Place::Origin), set("B", 1, 1, next("A", Side::RightOf))])];
+        let profiles = vec![profile(vec![
+            set("A", 1, 1, Place::Origin),
+            set("B", 1, 1, next("A", Side::RightOf)),
+        ])];
         let a = head("A", "m", "x", "", (0, 0), 1, 1);
         let b = head("B", "m", "x", "", (1, 0), 1, 1);
         assert_eq!(profile_for(&profiles, &[a.clone(), b]), Some(0));
@@ -602,10 +731,16 @@ mod tests {
 
     #[test]
     fn from_heads_reads_side_by_side_and_stacked() {
-        let side = from_heads(&[head("A", "m", "x", "", (0, 0), 1920, 1080), head("B", "m", "x", "", (1920, 0), 1920, 1080)]);
+        let side = from_heads(&[
+            head("A", "m", "x", "", (0, 0), 1920, 1080),
+            head("B", "m", "x", "", (1920, 0), 1920, 1080),
+        ]);
         assert_eq!(side.outputs[0].place, Place::Origin);
         assert_eq!(side.outputs[1].place, next("A", Side::RightOf));
-        let stack = from_heads(&[head("A", "m", "x", "", (0, 0), 1920, 1080), head("B", "m", "x", "", (0, 1080), 1920, 1080)]);
+        let stack = from_heads(&[
+            head("A", "m", "x", "", (0, 0), 1920, 1080),
+            head("B", "m", "x", "", (0, 1080), 1920, 1080),
+        ]);
         assert_eq!(stack.outputs[1].place, next("A", Side::Below));
     }
 }

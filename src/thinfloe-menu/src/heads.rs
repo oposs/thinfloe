@@ -265,11 +265,9 @@ impl Dispatch<ZwlrOutputHeadV1, u32> for State {
                 state.collector.head(id, HeadEvent::Mode { id: mode_id });
                 return;
             }
-            head_v1::Event::CurrentMode { mode } => {
-                HeadEvent::CurrentMode {
-                    id: mode.data::<u32>().copied().unwrap_or(0),
-                }
-            }
+            head_v1::Event::CurrentMode { mode } => HeadEvent::CurrentMode {
+                id: mode.data::<u32>().copied().unwrap_or(0),
+            },
             head_v1::Event::Finished => {
                 if let Some(h) = state.live.remove(&id) {
                     // `release` exists from version 3 on; older ones would
@@ -432,7 +430,16 @@ mod tests {
     #[test]
     fn heads_are_sorted_by_name() {
         let mut c = HeadCollector::default();
-        let names = ["eDP-1", "DP-3", "HDMI-A-1", "DP-1", "HDMI-A-2", "DP-2", "Virtual-1", "DP-10"];
+        let names = [
+            "eDP-1",
+            "DP-3",
+            "HDMI-A-1",
+            "DP-1",
+            "HDMI-A-2",
+            "DP-2",
+            "Virtual-1",
+            "DP-10",
+        ];
         for (i, n) in names.iter().enumerate() {
             c.head(i as u32 + 1, HeadEvent::Name((*n).into()));
         }

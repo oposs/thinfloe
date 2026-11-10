@@ -548,10 +548,7 @@ impl MonTab {
 
     /// *Keep this arrangement?* is up: the same phases `countdown` counts.
     pub fn question_up(&self) -> bool {
-        matches!(
-            self.phase,
-            Phase::Applying { answer: None, .. } | Phase::Asking { .. }
-        )
+        matches!(self.phase, Phase::Applying { answer: None, .. } | Phase::Asking { .. })
     }
 
     /// How long the loop may sleep before the countdown shows another

@@ -623,13 +623,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
 
 /// The screen without a dialog: the grid, Settings or Upgrade, with the
 /// header, the log and the strip. A dialog freezes this, dimmed, behind it.
-pub fn show_screen(
-    ui: &mut Ui,
-    menu: &Menu,
-    icons: &[Option<Icon>],
-    chrome: &Chrome,
-    now: Instant,
-) -> Option<UiEvent> {
+pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
     let shown = menu.visible_tiles();
     let l = layout_with(ui.max_rect(), shown.len(), menu.folded.len(), small_log(menu));
     show_header(ui, chrome, l.header);
@@ -4666,11 +4660,29 @@ mod tests {
         let wide = (big.width() + gap) / (small.width() + gap);
         let tall = (big.height() + gap) / (small.height() + gap);
         assert!((wide - 4.0 / 3.0).abs() < 0.01, "width ratio {wide}: {small:?} {big:?}");
-        assert!((tall - 4.0 / 3.0).abs() < 0.01, "height ratio {tall}: {small:?} {big:?}");
-        assert!(big.left() >= small.right(), "DP-1 is right of HDMI-A-1: {small:?} {big:?}");
-        assert!((big.top() - small.top()).abs() < 0.5, "aligned at the top: {small:?} {big:?}");
+        assert!(
+            (tall - 4.0 / 3.0).abs() < 0.01,
+            "height ratio {tall}: {small:?} {big:?}"
+        );
+        assert!(
+            big.left() >= small.right(),
+            "DP-1 is right of HDMI-A-1: {small:?} {big:?}"
+        );
+        assert!(
+            (big.top() - small.top()).abs() < 0.5,
+            "aligned at the top: {small:?} {big:?}"
+        );
         let texts = all_texts(&shapes);
-        for want in ["Monitors", "P2419H", "U2720Q", "On", "Resolution", "Rotation", "Position", "Apply"] {
+        for want in [
+            "Monitors",
+            "P2419H",
+            "U2720Q",
+            "On",
+            "Resolution",
+            "Rotation",
+            "Position",
+            "Apply",
+        ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
         }
         assert!(has(&texts, "1920 × 1080 @ 60 Hz"), "{texts:?}");
