@@ -385,6 +385,9 @@ pub struct Chrome {
     /// `HH:MM`; the app refreshes it before every frame.
     pub clock: String,
     pub logo: Option<TextureHandle>,
+    /// The frame's wall time, read once by the caller; `None`: now. The
+    /// header's minute wake counts from it.
+    pub wall: Option<std::time::SystemTime>,
 }
 
 /// Logo, name, host, version and clock along the top of `rect`.
@@ -465,8 +468,9 @@ fn capitalized(text: &str) -> String {
 /// Draw one frame.
 pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
     // The clock changes on the minute and at no other time.
-    ui.ctx()
-        .request_repaint_after(until_next_minute(std::time::SystemTime::now()));
+    ui.ctx().request_repaint_after(until_next_minute(
+        chrome.wall.unwrap_or_else(std::time::SystemTime::now),
+    ));
     let (verb, verbing) = ending_words(menu.ending);
     // No background fill here: the canvas restores the page colour itself,
     // and while the dialog is up it holds the frozen grid, which a fill
@@ -1643,6 +1647,12 @@ mod tests {
         m
     }
 
+    /// A wall time well inside a minute (second 10), so no test depends on
+    /// how close the real clock is to the next minute.
+    fn fixed_wall() -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000 / 60 * 60 + 10)
+    }
+
     /// The shapes of one 1280 x 720 frame, `at` the frame's time, and the
     /// repaint delay egui was asked for.
     fn status_frame(
@@ -1678,6 +1688,7 @@ mod tests {
         let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
         let chrome = Chrome {
             covered,
+            wall: Some(fixed_wall()),
             ..Chrome::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
@@ -1819,12 +1830,6 @@ mod tests {
 
     #[test]
     fn the_network_elements_ask_for_a_frame_a_second_only_while_shown() {
-        // `show` always asks for the next minute, and that wins in the last
-        // second of one: start past the boundary when it is close.
-        let left = until_next_minute(std::time::SystemTime::now());
-        if left < Duration::from_secs(5) {
-            std::thread::sleep(left);
-        }
         let t0 = Instant::now();
         // No battery device and no clock: only the network elements ask.
         let mut menu = net_menu(Vec::new(), t0);
@@ -4929,6 +4934,7 @@ mod tests {
             clock: "Thu 30 Oct 14:05".into(),
             logo: Some(logo),
             covered: false,
+            wall: None,
         };
         // As the app: a dialog stands on the screen under it, frozen and
         // dimmed.

@@ -804,7 +804,9 @@ impl App {
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
-        live.chrome.clock = crate::header::clock_text(std::time::SystemTime::now());
+        let wall = std::time::SystemTime::now();
+        live.chrome.wall = Some(wall);
+        live.chrome.clock = crate::header::clock_text(wall);
         live.chrome.covered = covered;
         // The sampler's latest copy, taken under its lock for as long as a
         // copy of 600 numbers takes.
@@ -1034,6 +1036,7 @@ impl App {
             clock: String::new(),
             logo: None,
             covered: false,
+            wall: None,
         };
         let bg = crate::brand::theme().palette().background;
         Ok(Live {

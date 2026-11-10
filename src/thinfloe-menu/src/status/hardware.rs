@@ -260,7 +260,9 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, show: Show) {
         if v.size().x <= right - left + 0.01 {
             p.galley(pos2(x, mid - v.size().y / 2.0), v, c);
         }
-        p.galley(pos2(left, mid - label.size().y / 2.0), label, c);
+        if label.size().x <= x - m.gap - left + 0.01 {
+            p.galley(pos2(left, mid - label.size().y / 2.0), label, c);
+        }
     }
 }
 
