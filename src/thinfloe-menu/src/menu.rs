@@ -679,7 +679,7 @@ impl Menu {
 
     /// Whether a dialog is up, so the grid behind it is frozen and dimmed.
     pub fn dialog(&self) -> bool {
-        self.logout.is_some() || self.retry.is_some() || crate::monitors_ui::dialog_open(&self.monitors)
+        self.logout.is_some() || self.retry.is_some() || self.monitors.question_up()
     }
 
     /// Whether input is dropped before egui sees it.

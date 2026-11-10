@@ -714,7 +714,9 @@ impl App {
         // monitor mode while *Keep this arrangement?* is up) holds no frame:
         // paint the screen without the dialog first, so the freeze below
         // has it. No input reaches that pass.
-        if needs_backdrop(self.cfg.menu.dialog(), self.frozen, live.painted) {
+        // While the scale settles, egui lays the pass out with a guessed
+        // rect: neither that backdrop nor a freeze of it may stay up.
+        if needs_backdrop(self.cfg.menu.dialog(), self.frozen, live.painted, settling) {
             let mut under = input.clone();
             under.events.clear();
             let out = self.ctx.run_ui(under, |ui| {
@@ -734,10 +736,12 @@ impl App {
         live.egui.handle_platform_output(&live.window, out.platform_output);
 
         // The dialog dims the grid once, when it opens, and un-freezes it
-        // when it closes. Either way every pixel must be redrawn once.
+        // when it closes. Either way every pixel must be redrawn once. Not
+        // while the scale settles: that pass does not reach the screen, and
+        // the next one freezes a frame laid out at the right scale.
         let saving = self.cfg.menu.dialog();
         let mut force_full = false;
-        if saving != self.frozen {
+        if freeze_changes(saving, self.frozen, settling) {
             if saving {
                 live.canvas.freeze_dimmed(DIM_KEEP);
             } else {
@@ -852,9 +856,16 @@ impl App {
 }
 
 /// Whether the screen under a dialog must be painted before it is frozen:
-/// the dialog is up, nothing is frozen yet, and the canvas holds no frame.
-fn needs_backdrop(dialog: bool, frozen: bool, painted: bool) -> bool {
-    dialog && !frozen && !painted
+/// the dialog is up, nothing is frozen yet, the canvas holds no frame, and
+/// the scale has settled (else the pass is laid out with a guessed rect).
+fn needs_backdrop(dialog: bool, frozen: bool, painted: bool, settling: bool) -> bool {
+    dialog && !frozen && !painted && !settling
+}
+
+/// Whether the canvas freezes (or thaws) in this pass: the dialog opened
+/// (or closed), and the scale has settled.
+fn freeze_changes(dialog: bool, frozen: bool, settling: bool) -> bool {
+    dialog != frozen && !settling
 }
 
 /// The outputs the compositor reports; none when it cannot be asked.
@@ -1252,12 +1263,25 @@ mod tests {
     #[test]
     fn a_dialog_on_a_new_canvas_paints_its_backdrop_first() {
         // A replaced or resized window while the dialog is up.
-        assert!(needs_backdrop(true, false, false));
+        assert!(needs_backdrop(true, false, false, false));
         // The usual case: the frame under the dialog is on the canvas.
-        assert!(!needs_backdrop(true, false, true));
+        assert!(!needs_backdrop(true, false, true, false));
         // Frozen already, or no dialog: nothing to paint.
-        assert!(!needs_backdrop(true, true, false));
-        assert!(!needs_backdrop(false, false, false));
+        assert!(!needs_backdrop(true, true, false, false));
+        assert!(!needs_backdrop(false, false, false, false));
+        // A new scale still settles: wait for the pass laid out at it.
+        assert!(!needs_backdrop(true, false, false, true));
+    }
+
+    #[test]
+    fn the_freeze_waits_for_a_settled_scale() {
+        assert!(freeze_changes(true, false, false), "a dialog opens");
+        assert!(freeze_changes(false, true, false), "a dialog closes");
+        assert!(!freeze_changes(true, true, false));
+        assert!(!freeze_changes(false, false, false));
+        // Settling: the guessed layout is never frozen; the next pass is.
+        assert!(!freeze_changes(true, false, true));
+        assert!(!freeze_changes(false, true, true));
     }
 
     #[test]
