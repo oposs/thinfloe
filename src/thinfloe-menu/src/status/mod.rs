@@ -14,6 +14,7 @@ pub mod battery;
 pub mod clock;
 pub mod config;
 pub mod hardware;
+pub mod layout;
 pub mod network;
 pub mod network_info;
 pub mod render;
@@ -27,6 +28,35 @@ use std::time::{Duration, Instant};
 pub const COLUMNS: u8 = 4;
 /// At most this many rows.
 pub const ROWS: u8 = 3;
+
+/// The size of an element in cells: width 1..=4, height 1..=3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Size {
+    pub w: u8,
+    pub h: u8,
+}
+
+impl Size {
+    /// `WxH`, one digit each, inside the grid. No sign, no spaces.
+    pub fn parse(text: &str) -> Option<Size> {
+        let (w, h) = text.split_once('x')?;
+        let one = |s: &str| -> Option<u8> {
+            if s.len() == 1 && s.bytes().all(|b| b.is_ascii_digit()) {
+                s.parse().ok()
+            } else {
+                None
+            }
+        };
+        let (w, h) = (one(w)?, one(h)?);
+        ((1..=COLUMNS).contains(&w) && (1..=ROWS).contains(&h)).then_some(Size { w, h })
+    }
+}
+
+impl std::fmt::Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.w, self.h)
+    }
+}
 
 /// The cells an element covers: column and row of its top-left cell, then
 /// its width and height in cells.
