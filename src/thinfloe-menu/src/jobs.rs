@@ -897,10 +897,20 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
         return Err(format!("{rel} was written by hand"));
     }
     let marker = &k.marker;
+    let marker_rel = crate::owned::home_relative(marker);
     // An earlier Apply whose undo failed: its config.prev is the real old
-    // layout and must not be replaced. The next session undoes it.
-    if std::fs::symlink_metadata(marker).is_ok() {
-        return Err("An earlier monitor arrangement is not confirmed yet; nothing was changed.".to_string());
+    // layout and must not be replaced. The next session undoes it. A marker
+    // that cannot be checked may be one, too.
+    match std::fs::symlink_metadata(marker) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err("An earlier monitor arrangement is not confirmed yet; nothing was changed.".to_string());
+        }
+        Err(e) => {
+            return Err(format!(
+                "The undo marker {marker_rel} could not be checked: {e}; nothing was changed."
+            ));
+        }
     }
     let prev = k.prev();
     let kept = match (&old, prev_body) {
@@ -918,7 +928,7 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
         // No marker is there: it did not exist above, and the failed write
         // left none behind (the rename is its last step).
         let _ = remove_if_there(&prev);
-        return Err(format!("Could not write {}: {e}", marker.display()));
+        return Err(format!("Could not write {marker_rel}: {e}"));
     }
     crate::owned::write(&k.config, text)
         .map_err(|e| format!("Could not write {rel}: {e}"))
@@ -954,25 +964,33 @@ pub fn mon_keep(k: &Kanshi) -> Result<(), String> {
 
 fn remove_marker(k: &Kanshi) -> Result<(), String> {
     let m = &k.marker;
-    remove_if_there(m).map_err(|e| format!("The undo marker {} could not be removed: {e}", m.display()))
+    remove_if_there(m).map_err(|e| {
+        format!(
+            "The undo marker {} could not be removed: {e}",
+            crate::owned::home_relative(m)
+        )
+    })
 }
 
 /// Go back to the layout before the Apply: `config.prev` goes back over
-/// the config, or the config goes when there was none, and kanshi reads
-/// it again. The marker stays when the file could not be put back, so the
-/// next session tries.
+/// the config, and kanshi reads it again. Every Apply keeps a
+/// `config.prev`; without one nothing is changed and the marker stays, so
+/// the next session undoes the Apply. The marker also stays when the file
+/// could not be put back, so the next session tries.
 pub fn mon_revert(k: &Kanshi) -> Result<(), String> {
     let prev = k.prev();
+    let prev_rel = crate::owned::home_relative(&prev);
     let old = crate::owned::read_bytes(&prev)
-        .map_err(|e| format!("Could not read {}: {e}", crate::owned::home_relative(&prev)))?;
-    crate::owned::put_back(&k.config, old.as_deref())
+        .map_err(|e| format!("Could not read {prev_rel}: {e}"))?
+        .ok_or_else(|| format!("{prev_rel} is missing"))?;
+    crate::owned::put_back(&k.config, Some(&old))
         .map_err(|e| format!("{} could not be put back: {e}", crate::owned::home_relative(&k.config)))?;
     // The marker before prev: thinfloe-session reads marker `prev` without
     // config.prev as "remove the config", and would delete the layout just
     // put back if the menu died between the two.
     remove_marker(k)?;
     let _ = remove_if_there(&prev);
-    if old.is_some() { kanshi_reload(k) } else { Ok(()) }
+    kanshi_reload(k)
 }
 
 /// *Let the menu manage it*: the hand-written file goes to `config.by-hand`.
@@ -2040,6 +2058,42 @@ mod tests {
         assert!(mon_revert(&k).is_err());
         assert_eq!(read(&k.config), Some(old_layout()));
         assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_checked_stops_the_apply() {
+        // Not "no marker": an earlier config.prev may be the real old layout.
+        let d = dir("mon-marker-unknown");
+        let mut k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        fs::write(k.prev(), "the real old layout\n").unwrap();
+        // A file where the marker's directory should be: ENOTDIR, not ENOENT.
+        let file = d.join("not-a-dir");
+        fs::write(&file, "x").unwrap();
+        k.marker = file.join("thinfloe-layout-unconfirmed");
+        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
+        assert!(e.contains("could not be checked"), "{e}");
+        assert_eq!(read(&k.prev()).as_deref(), Some("the real old layout\n"));
+        assert_eq!(read(&k.config), Some(old_layout()));
+        assert!(!d.join("started").exists(), "kanshi was not asked");
+    }
+
+    #[test]
+    fn a_revert_without_prev_fails_and_keeps_the_marker() {
+        let d = dir("mon-revert-noprev");
+        let k = kanshi_home(&d, &recording(&d));
+        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        fs::write(&k.config, old_layout()).unwrap();
+        mon_apply(&k, "\nnew\n", None).unwrap();
+        let started = read(&d.join("started"));
+        fs::remove_file(k.prev()).unwrap();
+        let e = mon_revert(&k).unwrap_err();
+        assert!(e.contains("config.prev"), "{e}");
+        // Nothing changed: the next session's undo still sees the marker.
+        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
+        assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
+        assert_eq!(read(&d.join("started")), started, "kanshi was not asked");
     }
 
     #[test]
