@@ -73,7 +73,8 @@ pub fn criteria(head: &Head, all: &[Head]) -> String {
     if head.serial.is_empty() || clash { head.name.clone() } else { mine }
 }
 
-fn size(o: &OutputSet) -> (i32, i32) {
+/// The size `o` takes on the desktop: its mode, turned by its rotation.
+pub fn size(o: &OutputSet) -> (i32, i32) {
     let (w, h) = (o.mode.w as i32, o.mode.h as i32);
     match o.rotation {
         Rotation::R90 | Rotation::R270 => (h, w),
@@ -129,8 +130,8 @@ fn absolute(p: &Profile, i: usize, cache: &mut [Option<(i32, i32)>], depth: usiz
 }
 
 /// Positions without the overlap check, one per output (disabled: `None`),
-/// shifted so the smallest x and y are 0.
-fn place_all(p: &Profile) -> Result<Vec<Option<(i32, i32)>>, String> {
+/// shifted so the smallest x and y are 0. The Screen tab draws from it.
+pub fn place_all(p: &Profile) -> Result<Vec<Option<(i32, i32)>>, String> {
     let mut cache = vec![None; p.outputs.len()];
     let mut out = vec![None; p.outputs.len()];
     for (i, o) in p.outputs.iter().enumerate() {

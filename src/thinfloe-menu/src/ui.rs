@@ -591,6 +591,12 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         None => {}
     }
+    // The 15-second question comes before the retry question: it goes
+    // back on its own when nobody answers.
+    if crate::monitors_ui::dialog_open(&menu.monitors) {
+        return crate::monitors_ui::keep_dialog(ui, &menu.monitors, now)
+            .map(|e| UiEvent::Settings(SettingsEvent::Monitors(e)));
+    }
     if let Some(r) = &menu.retry {
         let mut chose = None;
         let text = match &r.message {
@@ -612,6 +618,18 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         });
         return chose.map(UiEvent::Retry);
     }
+    show_screen(ui, menu, icons, chrome, now)
+}
+
+/// The screen without a dialog: the grid, Settings or Upgrade, with the
+/// header, the log and the strip. A dialog freezes this, dimmed, behind it.
+pub fn show_screen(
+    ui: &mut Ui,
+    menu: &Menu,
+    icons: &[Option<Icon>],
+    chrome: &Chrome,
+    now: Instant,
+) -> Option<UiEvent> {
     let shown = menu.visible_tiles();
     let l = layout_with(ui.max_rect(), shown.len(), menu.folded.len(), small_log(menu));
     show_header(ui, chrome, l.header);
@@ -620,7 +638,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         .and_then(|r| show_strip(ui, menu, icons, r))
         .map(UiEvent::Unfold);
     if menu.screen == Screen::Settings {
-        let event = show_settings(ui, menu, icons, l.area);
+        let event = show_settings(ui, menu, icons, l.area, now);
         show_log(ui, &menu.log, l.log);
         return event.map(UiEvent::Settings).or(unfold);
     }
@@ -773,7 +791,7 @@ pub(crate) const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
 const ROW_ICON: f32 = 40.0;
 
 /// The Settings screen in `area`: the title, the tab bar, and the open tab.
-fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -> Option<SettingsEvent> {
+fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect, now: Instant) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
     // The panel is as wide as the tile group of the desktop, centred.
@@ -809,7 +827,7 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect) -
     s_ui.add_space(GAP);
     let body = match menu.settings_tab {
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
-        SettingsTab::Screen => screen_tab(&mut s_ui, menu),
+        SettingsTab::Screen => screen_tab(&mut s_ui, menu, width, now),
         SettingsTab::Network => {
             crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
         }
@@ -879,9 +897,46 @@ fn packages_tab(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], width: f32) ->
     event
 }
 
-/// The Screen tab: when the screen turns off, in one band. The select is
-/// disabled while the session profile or a file written by hand decides.
-fn screen_tab(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
+/// The Screen tab: when the screen turns off, and below it the monitors.
+/// Apply follows the bands, as on the Network tab; pinned to the foot of
+/// the panel only when the bands scroll.
+fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {
+    let rect = Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
+    let (apply, edit) = page_with_footer(
+        ui,
+        "screen",
+        rect,
+        GAP,
+        |ui| crate::monitors_ui::monitors_footer(ui, &menu.monitors),
+        |ui| {
+            // The bands stand TILE_GAP apart, as on the Network tab; inside
+            // them the spacing stays as it was.
+            let between = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = TILE_GAP;
+            let band_w = ui.available_width().min(width);
+            let idle = ui
+                .scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = between;
+                    idle_band(ui, menu)
+                })
+                .inner;
+            let monitors = ui
+                .scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = between;
+                    crate::monitors_ui::monitors_band(ui, &menu.monitors, now, band_w)
+                })
+                .inner;
+            // The footer's gap belongs to the page.
+            ui.add_space(GAP);
+            idle.or(monitors.map(SettingsEvent::Monitors))
+        },
+    );
+    edit.or(apply.map(SettingsEvent::Monitors))
+}
+
+/// When the screen turns off, in one band. The select is disabled while
+/// the session profile or a file written by hand decides.
+fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let tab = &menu.screen_tab;
     let mut event = None;
@@ -2460,11 +2515,30 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
-                    crate::settings::SettingsTab::Screen => ((1280.0, 720.0), &["Turn the screen off after"]),
+                    crate::settings::SettingsTab::Screen => {
+                        menu.monitors = two_monitors();
+                        (
+                            (1920.0, 1080.0),
+                            &[
+                                "Turn the screen off after",
+                                "Monitors",
+                                "DP-1",
+                                "Resolution",
+                                "Show the menu here",
+                                "Apply",
+                            ],
+                        )
+                    }
                 };
                 (format!("{tab:?}"), menu, size, wants)
             })
             .collect();
+        cases.push((
+            "keep dialog".into(),
+            monitor_settings(asking()),
+            (1920.0, 1080.0),
+            &["Keep this arrangement?", "Keep", "Go back"],
+        ));
         cases.push((
             "add dialog".into(),
             network_settings(add_dialog_open()),
@@ -4175,25 +4249,39 @@ mod tests {
             egui::TextureOptions::LINEAR,
         );
         let version = include_str!("../../../RELEASE").trim().to_string();
-        for frame in 0..12 {
-            let mut input = input.clone();
-            input.time = Some(frame as f64 * 0.1);
-            let mut out = ctx.run_ui(input, |ui| {
-                let chrome = Chrome {
-                    header: crate::header::Header {
-                        host: "thinfloe-a1b2c3".into(),
-                        version: Some(version.clone()),
-                    },
-                    clock: "Thu 30 Oct 14:05".into(),
-                    logo: Some(logo.clone()),
-                };
-                show(ui, menu, &icons, &chrome, Instant::now());
-            });
-            textures.apply_set(&out.textures_delta);
-            out.textures_delta.clear();
-            let prims = ctx.tessellate(out.shapes, s);
-            canvas.restore_background(canvas.bounds());
-            canvas.draw(&prims, &textures, s, canvas.bounds());
+        let chrome = Chrome {
+            header: crate::header::Header {
+                host: "thinfloe-a1b2c3".into(),
+                version: Some(version),
+            },
+            clock: "Thu 30 Oct 14:05".into(),
+            logo: Some(logo),
+        };
+        // As the app: a dialog stands on the screen under it, frozen and
+        // dimmed.
+        let passes: &[bool] = if menu.dialog() { &[false, true] } else { &[true] };
+        let mut frame = 0;
+        for &with_dialog in passes {
+            if with_dialog && passes.len() > 1 {
+                canvas.freeze_dimmed(crate::app::DIM_KEEP);
+            }
+            for _ in 0..12 {
+                let mut input = input.clone();
+                input.time = Some(frame as f64 * 0.1);
+                frame += 1;
+                let mut out = ctx.run_ui(input, |ui| {
+                    if with_dialog {
+                        show(ui, menu, &icons, &chrome, Instant::now());
+                    } else {
+                        show_screen(ui, menu, &icons, &chrome, Instant::now());
+                    }
+                });
+                textures.apply_set(&out.textures_delta);
+                out.textures_delta.clear();
+                let prims = ctx.tessellate(out.shapes, s);
+                canvas.restore_background(canvas.bounds());
+                canvas.draw(&prims, &textures, s, canvas.bounds());
+            }
         }
         let mut ppm = format!("P6\n{} {}\n255\n", px.0, px.1).into_bytes();
         for px in &canvas.pixels {
@@ -4457,5 +4545,315 @@ mod tests {
         dialog.ending = Action::Reboot;
         dialog.logout = Some(Logout::WaitAddons);
         shot(&dialog, "dialog-writing-1080.ppm", (1920, 1080), 1.0);
+    }
+
+    // ---- The monitors of the Screen tab ----
+
+    use crate::monitors::{MonEvent, MonTab};
+
+    /// A monitor without a serial, so its criteria are its name, with its
+    /// own size as the current mode and 1280x720 at 59.94 Hz besides.
+    fn mon_head(name: &str, model: &str, x: i32, w: u32, h: u32) -> crate::heads::Head {
+        use crate::heads::{Mode, Rotation};
+        crate::heads::Head {
+            name: name.into(),
+            make: "Dell".into(),
+            model: model.into(),
+            serial: String::new(),
+            phys_mm: (600, 340),
+            enabled: true,
+            modes: vec![
+                Mode {
+                    w,
+                    h,
+                    refresh_mhz: 60_000,
+                    preferred: true,
+                },
+                Mode {
+                    w: 1280,
+                    h: 720,
+                    refresh_mhz: 59_940,
+                    preferred: false,
+                },
+            ],
+            current: Some(0),
+            pos: (x, 0),
+            rotation: Rotation::Normal,
+        }
+    }
+
+    fn mon_heads() -> Vec<crate::heads::Head> {
+        vec![
+            mon_head("HDMI-A-1", "P2419H", 0, 1920, 1080),
+            mon_head("DP-1", "U2720Q", 1920, 2560, 1440),
+        ]
+    }
+
+    /// HDMI-A-1 (1920x1080) with DP-1 (2560x1440) right of it, no file yet;
+    /// HDMI-A-1 is selected.
+    fn two_monitors() -> MonTab {
+        let mut mon = MonTab::default();
+        mon.heads_changed(mon_heads());
+        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        mon
+    }
+
+    fn monitor_settings(mon: MonTab) -> Menu {
+        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        menu.monitors = mon;
+        menu
+    }
+
+    fn mon_ev(e: MonEvent) -> Option<UiEvent> {
+        Some(UiEvent::Settings(SettingsEvent::Monitors(e)))
+    }
+
+    fn mon_shapes(menu: &Menu) -> Vec<egui::epaint::ClippedShape> {
+        settings_shapes(menu, 1920.0, 1080.0)
+    }
+
+    fn mon_texts(menu: &Menu) -> Vec<String> {
+        all_texts(&mon_shapes(menu))
+    }
+
+    fn mon_clicks(menu: &Menu, labels: &[&str]) -> Vec<Option<UiEvent>> {
+        let (events, drawn) = click_labels_at(menu, labels, (1920.0, 1080.0));
+        assert!(drawn.iter().all(|d| *d), "{labels:?} drawn: {drawn:?}");
+        events
+    }
+
+    /// The smallest rect around the first `label` drawn: its monitor box.
+    fn box_around(shapes: &[egui::epaint::ClippedShape], label: &str) -> Rect {
+        let at = text_rects(shapes)
+            .into_iter()
+            .find(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("{label} not in {:?}", all_texts(shapes)))
+            .1
+            .center();
+        shapes
+            .iter()
+            .flat_map(|c| flat_rects(&c.shape))
+            .map(|r| r.rect)
+            .filter(|r| r.contains(at))
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap()
+    }
+
+    /// The control on the row of `label`, right of it: the leftmost shape
+    /// there that is no wider than a tick box.
+    fn tick_right_of(shapes: &[egui::epaint::ClippedShape], label: &str) -> Rect {
+        let l = text_rects(shapes)
+            .into_iter()
+            .find(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("{label} not in {:?}", all_texts(shapes)))
+            .1;
+        shapes
+            .iter()
+            .filter(|c| !matches!(c.shape, egui::Shape::Text(_)))
+            .map(|c| c.shape.visual_bounding_rect())
+            .filter(|r| r.left() > l.right() && r.width() < 30.0 && r.top() < l.bottom() && l.top() < r.bottom())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .unwrap_or_else(|| panic!("no tick box right of {label}"))
+    }
+
+    #[test]
+    fn monitor_boxes_have_the_monitors_proportions() {
+        let shapes = mon_shapes(&monitor_settings(two_monitors()));
+        let small = box_around(&shapes, "HDMI-A-1");
+        let big = box_around(&shapes, "DP-1");
+        // Each box is drawn BOX_GAP smaller than its place, so they never touch.
+        let gap = crate::monitors_ui::BOX_GAP;
+        let wide = (big.width() + gap) / (small.width() + gap);
+        let tall = (big.height() + gap) / (small.height() + gap);
+        assert!((wide - 4.0 / 3.0).abs() < 0.01, "width ratio {wide}: {small:?} {big:?}");
+        assert!((tall - 4.0 / 3.0).abs() < 0.01, "height ratio {tall}: {small:?} {big:?}");
+        assert!(big.left() >= small.right(), "DP-1 is right of HDMI-A-1: {small:?} {big:?}");
+        assert!((big.top() - small.top()).abs() < 0.5, "aligned at the top: {small:?} {big:?}");
+        let texts = all_texts(&shapes);
+        for want in ["Monitors", "P2419H", "U2720Q", "On", "Resolution", "Rotation", "Position", "Apply"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        assert!(has(&texts, "1920 × 1080 @ 60 Hz"), "{texts:?}");
+    }
+
+    #[test]
+    fn a_click_on_a_monitor_box_selects_it() {
+        let menu = monitor_settings(two_monitors());
+        assert_eq!(mon_clicks(&menu, &["DP-1"]), [mon_ev(MonEvent::Select("DP-1".into()))]);
+    }
+
+    #[test]
+    fn the_menu_monitor_cannot_be_switched_off() {
+        let now = Instant::now();
+        let mut mon = two_monitors();
+        mon.event(MonEvent::MenuHere, now);
+        let menu = monitor_settings(mon.clone());
+        let shapes = mon_shapes(&menu);
+        // The box of the menu monitor says so.
+        let menu_word = text_rects(&shapes)
+            .into_iter()
+            .find(|(t, _)| t == "Menu")
+            .expect("the Menu mark")
+            .1;
+        assert!(box_around(&shapes, "HDMI-A-1").contains(menu_word.center()));
+        let tick = tick_right_of(&shapes, "On");
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, click_at(tick.center())).1, None);
+        // The other monitor can go off.
+        mon.event(MonEvent::Select("DP-1".into()), now);
+        let menu = monitor_settings(mon);
+        let tick = tick_right_of(&mon_shapes(&menu), "On");
+        assert_eq!(
+            upgrade_frame(&menu, 1920.0, 1080.0, click_at(tick.center())).1,
+            mon_ev(MonEvent::Enabled(false))
+        );
+    }
+
+    #[test]
+    fn show_the_menu_here_and_apply_report_their_clicks() {
+        let menu = monitor_settings(two_monitors());
+        assert_eq!(mon_clicks(&menu, &["Show the menu here"]), [mon_ev(MonEvent::MenuHere)]);
+        assert_eq!(mon_clicks(&menu, &["Apply"]), [mon_ev(MonEvent::Apply)]);
+    }
+
+    #[test]
+    fn apply_is_off_while_busy_or_with_every_monitor_off() {
+        let now = Instant::now();
+        // Keep pressed before the Apply job ended: the job runs, no question.
+        let mut mon = two_monitors();
+        mon.event(MonEvent::Apply, now);
+        mon.event(MonEvent::Keep, now);
+        assert!(mon.busy() && !crate::monitors_ui::dialog_open(&mon));
+        assert_eq!(mon_clicks(&monitor_settings(mon), &["Apply"]), [None]);
+        // Every monitor reported off: nothing to apply.
+        let mut mon = MonTab::default();
+        let mut heads = mon_heads();
+        for h in &mut heads {
+            h.enabled = false;
+        }
+        mon.heads_changed(heads);
+        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        assert!(mon.editable());
+        assert_eq!(mon_clicks(&monitor_settings(mon), &["Apply"]), [None]);
+    }
+
+    /// Two monitors, applied: *Keep this arrangement?* counts down.
+    fn asking() -> MonTab {
+        let mut mon = two_monitors();
+        mon.event(MonEvent::Apply, Instant::now());
+        mon
+    }
+
+    #[test]
+    fn the_keep_dialog_counts_down_and_answers() {
+        let menu = monitor_settings(asking());
+        assert!(menu.dialog(), "the question freezes and dims the screen behind it");
+        let texts = mon_texts(&menu);
+        for want in ["Keep this arrangement?", "Going back in 15 seconds.", "Keep", "Go back"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // Only the dialog is drawn: the tab under it takes no clicks.
+        assert!(!has(&texts, "Show the menu here"), "{texts:?}");
+        assert_eq!(mon_clicks(&menu, &["Keep"]), [mon_ev(MonEvent::Keep)]);
+        assert_eq!(mon_clicks(&menu, &["Go back"]), [mon_ev(MonEvent::GoBack)]);
+    }
+
+    #[test]
+    fn escape_goes_back() {
+        let escape = vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        let menu = monitor_settings(asking());
+        assert_eq!(
+            upgrade_frame(&menu, 1920.0, 1080.0, escape.clone()).1,
+            mon_ev(MonEvent::GoBack)
+        );
+        // Without the question, Escape does nothing on the tab.
+        let menu = monitor_settings(two_monitors());
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, escape).1, None);
+    }
+
+    #[test]
+    fn the_screen_tab_says_when_thinlinc_takes_the_arrangement() {
+        let note = "ThinLinc uses the new arrangement from its next start.";
+        let mut mon = two_monitors();
+        assert!(!has(&mon_texts(&monitor_settings(mon.clone())), note));
+        mon.set_thinlinc(true);
+        let texts = mon_texts(&monitor_settings(mon));
+        assert!(has(&texts, note), "{texts:?}");
+    }
+
+    #[test]
+    fn a_hand_written_kanshi_file_is_shown_with_the_take_over() {
+        let mut mon = MonTab::default();
+        mon.heads_changed(mon_heads());
+        mon.loaded(
+            Ok(Some("profile {\n  output * enable\n}\n".into())),
+            crate::owned::Owner::ByHand,
+        );
+        let menu = monitor_settings(mon);
+        let texts = mon_texts(&menu);
+        let line = "The monitor arrangement is set by hand in ~/.config/kanshi/config.";
+        assert!(has(&texts, line), "{texts:?}");
+        // The monitors are shown, but nothing is offered to change them.
+        assert!(has(&texts, "DP-1"), "{texts:?}");
+        for gone in ["Apply", "Show the menu here", "Resolution"] {
+            assert!(!has(&texts, gone), "{gone} in {texts:?}");
+        }
+        assert_eq!(
+            mon_clicks(&menu, &["Let the menu manage it"]),
+            [mon_ev(MonEvent::TakeOver)]
+        );
+    }
+
+    #[test]
+    fn monitor_errors_are_shown_in_warn() {
+        let now = Instant::now();
+        let refused = "An earlier monitor arrangement is not confirmed yet; nothing was changed.";
+        let mut not_applied = two_monitors();
+        not_applied.event(MonEvent::Apply, now);
+        not_applied.applied(Err(refused.into()));
+        let mut not_kept = asking();
+        not_kept.applied(Ok(()));
+        not_kept.event(MonEvent::Keep, now);
+        not_kept.kept(Err("disk full".into()));
+        for (mon, want) in [
+            (not_applied, format!("The arrangement was not applied: {refused}")),
+            (
+                not_kept,
+                "The arrangement could not be confirmed: disk full. It goes back at the next login.".to_string(),
+            ),
+        ] {
+            assert_eq!(mon.error(), Some(want.as_str()));
+            let shapes = mon_shapes(&monitor_settings(mon));
+            let color = shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == want => Some(t.galley.job.sections[0].format.color),
+                _ => None,
+            });
+            assert_eq!(color, Some(WARN), "{want} in {:?}", all_texts(&shapes));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn shot_screen_monitors() {
+        // DP-1 selected and carrying the menu.
+        let mut two = two_monitors();
+        two.event(MonEvent::Select("DP-1".into()), Instant::now());
+        two.event(MonEvent::MenuHere, Instant::now());
+        shot(&monitor_settings(two), "screen-monitors-two.ppm", (1920, 1080), 1.0);
+        let mut keep = asking();
+        keep.set_thinlinc(true);
+        shot(&monitor_settings(keep), "screen-monitors-keep.ppm", (1920, 1080), 1.0);
+        let mut hand = MonTab::default();
+        hand.heads_changed(mon_heads());
+        hand.loaded(
+            Ok(Some("profile {\n  output * enable\n}\n".into())),
+            crate::owned::Owner::ByHand,
+        );
+        shot(&monitor_settings(hand), "screen-monitors-hand.ppm", (1920, 1080), 1.0);
     }
 }

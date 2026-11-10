@@ -536,6 +536,14 @@ impl MonTab {
         Some(left.div_ceil(1000) as u32)
     }
 
+    /// *Keep this arrangement?* is up: the same phases `countdown` counts.
+    pub fn question_up(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Applying { answer: None, .. } | Phase::Asking { .. }
+        )
+    }
+
     /// How long the loop may sleep before the countdown shows another
     /// number or ends.
     pub fn next_wake(&self, now: Instant) -> Option<Duration> {

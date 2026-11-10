@@ -301,6 +301,7 @@ mod tests {
             ("settings.rs", include_str!("settings.rs")),
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
             ("network_ui.rs", include_str!("network_ui.rs")),
+            ("monitors_ui.rs", include_str!("monitors_ui.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
             let hits = style_literal_lines(name, code);

@@ -34,7 +34,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowId};
 
 /// How much of the grid's brightness survives behind the logout dialog.
-const DIM_KEEP: u32 = 90;
+pub(crate) const DIM_KEEP: u32 = 90;
 /// The shortest time between two wake-ups for program output: a program
 /// that floods its output costs at most ten frames a second.
 const OUTPUT_PACE: Duration = Duration::from_millis(100);
@@ -113,6 +113,9 @@ struct Live {
     outputs: Vec<OutputInfo>,
     /// Whether a frame reached the screen.
     presented: bool,
+    /// Whether the canvas holds a whole frame. A new canvas (a new window,
+    /// a resize) holds none, so there is nothing to freeze under a dialog.
+    painted: bool,
 }
 
 pub struct App {
@@ -706,6 +709,25 @@ impl App {
         // egui takes a new zoom factor at the start of the next pass and
         // lays that pass out with a guessed screen rect.
         let settling = settling(self.ctx.zoom_factor(), live.scale);
+        // A dialog freezes the frame under it, dimmed. A new canvas (the
+        // window was replaced to move the menu, or resized by a new
+        // monitor mode while *Keep this arrangement?* is up) holds no frame:
+        // paint the screen without the dialog first, so the freeze below
+        // has it. No input reaches that pass.
+        if needs_backdrop(self.cfg.menu.dialog(), self.frozen, live.painted) {
+            let mut under = input.clone();
+            under.events.clear();
+            let out = self.ctx.run_ui(under, |ui| {
+                ui::show_screen(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
+            });
+            live.textures.apply_set(&out.textures_delta);
+            let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+            let all = live.canvas.bounds();
+            live.canvas.restore_background(all);
+            live.canvas.draw(&prims, &live.textures, out.pixels_per_point, all);
+            live.textures.apply_free(&out.textures_delta);
+            live.painted = true;
+        }
         let out = self.ctx.run_ui(input, |ui| {
             event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
@@ -752,6 +774,9 @@ impl App {
             let t0 = Instant::now();
             live.canvas.restore_background(rect);
             live.canvas.draw(&prims, &live.textures, ppp, rect);
+            if rect == live.canvas.bounds() {
+                live.painted = true;
+            }
             match present(&mut live.surface, &live.canvas) {
                 Ok(()) => live.presented = true,
                 Err(e) => eprintln!("thinfloe-menu: present failed: {e}"),
@@ -826,6 +851,12 @@ impl App {
     }
 }
 
+/// Whether the screen under a dialog must be painted before it is frozen:
+/// the dialog is up, nothing is frozen yet, and the canvas holds no frame.
+fn needs_backdrop(dialog: bool, frozen: bool, painted: bool) -> bool {
+    dialog && !frozen && !painted
+}
+
 /// The outputs the compositor reports; none when it cannot be asked.
 fn read_outputs(debug: bool) -> Vec<OutputInfo> {
     match crate::outputs::read() {
@@ -898,6 +929,7 @@ impl App {
             started: Instant::now(),
             outputs: read_outputs(self.cfg.debug),
             presented: false,
+            painted: false,
         })
     }
 
@@ -1113,6 +1145,7 @@ impl ApplicationHandler<Wake> for App {
                     }
                     let bg = crate::brand::theme().palette().background;
                     live.canvas = Canvas::new(size.width as usize, size.height as usize, bg);
+                    live.painted = false;
                     self.frozen = false;
                     live.tracker.reset();
                 }
@@ -1215,6 +1248,17 @@ mod tests {
     use crate::testdir::TestDir;
     use crate::upgrade_proto::Msg;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_dialog_on_a_new_canvas_paints_its_backdrop_first() {
+        // A replaced or resized window while the dialog is up.
+        assert!(needs_backdrop(true, false, false));
+        // The usual case: the frame under the dialog is on the canvas.
+        assert!(!needs_backdrop(true, false, true));
+        // Frozen already, or no dialog: nothing to paint.
+        assert!(!needs_backdrop(true, true, false));
+        assert!(!needs_backdrop(false, false, false));
+    }
 
     #[test]
     fn a_keep_job_that_panics_does_not_report_success() {
