@@ -375,6 +375,7 @@ if [[ "$cover_seen" == "thinfloe-menu: covered thinfloe-menu: uncovered " ]]; th
     echo "ok   - the menu sees a fullscreen window cover it, and its end uncover it"
 else
     echo "FAIL - covered/uncovered lines were '$cover_seen'"
+    echo "       (the network graph's 1 s frames need a default route in the container)"
     echo "$cover_out"
     fail=1
 fi

@@ -692,6 +692,13 @@ fn wake_flow(at: Option<Instant>) -> ControlFlow {
     at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
 
+/// Read the status layout file into `menu` and start and rest the samplers
+/// for it, with the cover and height of the last frame.
+fn reload_status(menu: &mut Menu, samplers: &mut Samplers, file: &std::path::Path, covered: bool, height: f32) {
+    menu.set_status_layout(crate::status::read_layout(file));
+    samplers.sync(&menu.status, covered, height);
+}
+
 /// Whether the hardware sampler reads: not while a window covers the menu,
 /// and only when an element that draws from it has cells on this screen. On a
 /// short screen no hardware element has a size, so it rests there too.
@@ -758,10 +765,13 @@ impl App {
 
     /// Read the status layout file again: the person or the menu changed it.
     fn refresh_status(&mut self) {
-        self.cfg
-            .menu
-            .set_status_layout(crate::status::read_layout(&self.cfg.status_file));
-        self.sync_samplers();
+        reload_status(
+            &mut self.cfg.menu,
+            &mut self.samplers,
+            &self.cfg.status_file,
+            self.covered,
+            self.height,
+        );
     }
 
     /// Read the battery file again.
@@ -1792,7 +1802,11 @@ esac"#;
         );
         // Only cpu is ticked, on a short screen, where it has no size: it
         // still needs its data, but nothing is read for it.
-        s.sync(&crate::status::Area::shipped(), false, ui::SHORT_SCREEN_H - 1.0);
+        let cpu_only = area(
+            b"-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n\
+              cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+        );
+        s.sync(&cpu_only, false, ui::SHORT_SCREEN_H - 1.0);
         assert_eq!(hws.get(), 1);
         assert!(!s.hardware_on.load(Ordering::Relaxed));
     }
@@ -1839,6 +1853,32 @@ esac"#;
         assert_eq!(is_status(&w.tick()), 1);
         menu.set_status_layout(crate::status::read_layout(&file));
         assert!(menu.status.needs(crate::status::Source::Network));
+    }
+
+    #[test]
+    fn a_re_read_layout_rests_the_sampler_it_no_longer_needs() {
+        let d = TestDir::new("app", "status-resync");
+        let file = d.join("status");
+        let mut menu = Menu::new(
+            crate::tiles::Grid {
+                tiles: Vec::new(),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        let mut s = Samplers::new(Box::new(|_| Arc::default()), Box::new(|_| Arc::default()));
+        let tall = ui::SHORT_SCREEN_H;
+        // What `Wake::Status` runs.
+        let refresh = |menu: &mut Menu, s: &mut Samplers| reload_status(menu, s, &file, false, tall);
+        refresh(&mut menu, &mut s);
+        assert!(s.network.is_some() && s.network_on.load(Ordering::Relaxed));
+        std::fs::write(&file, "-network 2x2\n-network-info 1x2\n").unwrap();
+        refresh(&mut menu, &mut s);
+        assert!(!s.network_on.load(Ordering::Relaxed), "unticked: it rests");
+        assert!(s.hardware_on.load(Ordering::Relaxed), "the rest still reads");
+        std::fs::write(&file, "network 2x2\n").unwrap();
+        refresh(&mut menu, &mut s);
+        assert!(s.network_on.load(Ordering::Relaxed));
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub const EVERY: Duration = Duration::from_secs(1);
 /// A sample this soon after the last one is not taken: the rate of a few
 /// milliseconds says nothing.
 const MIN_STEP: Duration = Duration::from_millis(200);
+/// Two readings further apart than this have a rest between them: no rate
+/// spans it.
+const GAP: Duration = Duration::from_secs(3);
 /// The most any of the read files may hold.
 const MAX_BYTES: u64 = 64 * 1024;
 /// DNS servers kept, and the longest one.
@@ -377,7 +380,9 @@ impl Series {
     /// Take a reading made at `now`. A rate needs two readings of one
     /// interface; a new interface (the default route moved) or a counter
     /// that went back (the interface was reset or replaced) starts the
-    /// graph again instead of drawing a spike.
+    /// graph again instead of drawing a spike, and so does a reading more
+    /// than `GAP` after the last (the sampler rested), whose bytes still
+    /// count in the total.
     pub fn push(&mut self, now: Instant, r: Reading) {
         let iface = r.info.iface.clone();
         self.info = r.info;
@@ -394,8 +399,17 @@ impl Series {
                     return;
                 }
                 let (drx, dtx) = (rx - lrx, tx - ltx);
-                let secs = dt.as_secs_f64();
-                self.add(drx as f64 * 8.0 / secs, dtx as f64 * 8.0 / secs);
+                if dt > GAP {
+                    // The sampler rested (a window covered the menu): one
+                    // rate over the rest would show its average as now, and
+                    // the samples before it are no longer the last minutes.
+                    // The graph starts again; the bytes still count.
+                    self.rx.clear();
+                    self.tx.clear();
+                } else {
+                    let secs = dt.as_secs_f64();
+                    self.add(drx as f64 * 8.0 / secs, dtx as f64 * 8.0 / secs);
+                }
                 self.total.0 = self.total.0.saturating_add(drx);
                 self.total.1 = self.total.1.saturating_add(dtx);
             }
@@ -491,7 +505,8 @@ pub fn flipped(was: &mut bool, now: bool) -> bool {
 /// A sampler thread for the menu. It reads only while `on` is set (the app
 /// clears it while no ticked element needs it or a window covers the menu),
 /// outside the lock, so a frame never waits for the files. After a rest the
-/// first rate spans the whole rest. It calls `wake` only when
+/// graph starts again (`Series::push`), and the session total keeps the bytes
+/// of the rest. It calls `wake` only when
 /// `Snapshot::visible` changes: a hidden element asks for no frames, so it
 /// would appear only with the next minute's. While it shows, the element's
 /// one-second refresh asks for the frames.
@@ -831,6 +846,31 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5))
             .expect("on: it reads and appears");
         assert!(series.lock().unwrap().snapshot().visible());
+    }
+
+    #[test]
+    fn a_gap_after_a_rest_restarts_the_graph_and_keeps_the_total() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut s = Series::default();
+        s.push(at(0), rd("eth0", 1000, 100));
+        s.push(at(1000), rd("eth0", 2000, 200));
+        s.push(at(2000), rd("eth0", 3000, 300));
+        assert_eq!(s.snapshot().rx.len(), 2);
+        // An hour of rest: no rate spans it, the old graph is gone, the
+        // bytes of the rest still count.
+        s.push(at(3_602_000), rd("eth0", 1_000_000, 50_000));
+        let snap = s.snapshot();
+        assert!(snap.rx.is_empty() && snap.tx.is_empty(), "{snap:?}");
+        assert_eq!(snap.total, (999_000, 49_900));
+        assert_eq!(snap.current(), (0.0, 0.0));
+        // The next second draws again, from the reading after the rest.
+        s.push(at(3_603_000), rd("eth0", 1_001_000, 50_100));
+        assert_eq!(s.snapshot().rx, [8000.0]);
+        assert_eq!(s.snapshot().total, (1_000_000, 50_000));
+        // A late sample within the gap is still a rate.
+        s.push(at(3_605_500), rd("eth0", 1_003_500, 50_100));
+        assert_eq!(s.snapshot().rx, [8000.0, 8000.0]);
     }
 
     #[test]
