@@ -938,6 +938,102 @@ else
     fail=1
 fi
 rm -rf "$REL_TMP"
+# Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
+# which the menu's status area reads (no ThinLinc). The service also runs
+# once at boot (multi-user.target, in parallel with the menu), the timer
+# repeats it every 5 min, the watch service reads a device when it connects,
+# and no unit may order itself before anything (see CLAUDE.md, the
+# hook-order constraint).
+present "battery tmpfiles"           'usr/lib/tmpfiles\.d/thinfloe-peripherals\.conf$'
+if grep -qE 'etc/systemd/system/timers\.target\.wants/thinfloe-peripheral-battery\.timer$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.timer is enabled"
+else
+    echo "FAIL - thinfloe-peripheral-battery.timer is not enabled; the battery file would never be written"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/multi-user\.target\.wants/thinfloe-peripheral-battery\.service$' "$LIST"; then
+    echo "ok   - thinfloe-peripheral-battery.service is enabled in multi-user.target"
+else
+    echo "FAIL - thinfloe-peripheral-battery.service is not enabled; the status area would stay empty until the first timer firing"
+    fail=1
+fi
+if grep -qE 'etc/systemd/system/[^/]*\.wants/thinfloe-peripheral-battery-watch\.service$' "$LIST"; then
+    echo "FAIL - thinfloe-peripheral-battery-watch.service is enabled; a machine with no Logitech device would run it"
+    fail=1
+else
+    echo "ok   - thinfloe-peripheral-battery-watch.service is not enabled; the udev rule starts it"
+fi
+if grep -qE 'etc/udev/rules\.d/90-thinfloe-peripheral-battery\.rules$' "$LIST"; then
+    echo "ok   - the udev rule that starts the battery watcher is in the image"
+else
+    echo "FAIL - the udev rule is missing; a device that connects after boot would wait for the timer"
+    fail=1
+fi
+PB="$DPKG_TMP/pb"
+if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
+        etc/systemd/system/thinfloe-peripheral-battery.service \
+        etc/systemd/system/thinfloe-peripheral-battery-watch.service \
+        etc/systemd/system/thinfloe-peripheral-battery.timer \
+        usr/lib/tmpfiles.d/thinfloe-peripherals.conf \
+        usr/libexec/thinfloe/peripheral-battery >/dev/null 2>&1 &&
+   [[ -f "$PB/etc/systemd/system/thinfloe-peripheral-battery.timer" ]]; then
+    PBU="$PB/etc/systemd/system"
+    if [[ -x "$PB/usr/libexec/thinfloe/peripheral-battery" ]]; then
+        echo "ok   - the battery helper is executable"
+    else
+        echo "FAIL - /usr/libexec/thinfloe/peripheral-battery is missing or not executable"
+        fail=1
+    fi
+    if ! grep -q '^OnBootSec' "$PBU/thinfloe-peripheral-battery.timer" &&
+       grep -qx 'OnUnitActiveSec=5min' "$PBU/thinfloe-peripheral-battery.timer" &&
+       ! grep -q '^RandomizedDelaySec' "$PBU/thinfloe-peripheral-battery.timer"; then
+        echo "ok   - the battery timer repeats every 5 min and has no OnBootSec"
+    else
+        echo "FAIL - the battery timer has an OnBootSec, lacks OnUnitActiveSec=5min or has a random delay"
+        fail=1
+    fi
+    if grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null &&
+       grep -qx 'WantedBy=multi-user.target' "$PBU/thinfloe-peripheral-battery.service"; then
+        echo "ok   - the battery service runs the helper and is wanted by multi-user.target"
+    else
+        echo "FAIL - the battery service is missing, runs something else, or lacks WantedBy=multi-user.target"
+        fail=1
+    fi
+    if grep -qx 'TimeoutStartSec=60' "$PBU/thinfloe-peripheral-battery.service" 2>/dev/null; then
+        echo "ok   - the battery service ends a hung run after 60 s"
+    else
+        echo "FAIL - the battery service lacks TimeoutStartSec=60 (a hung run would hold the helper's lock for ever)"
+        fail=1
+    fi
+    PBW="$PBU/thinfloe-peripheral-battery-watch.service"
+    if grep -qx 'Type=simple' "$PBW" 2>/dev/null &&
+       grep -qx 'ExecStart=/usr/libexec/thinfloe/peripheral-battery watch' "$PBW" &&
+       grep -qx 'Restart=on-failure' "$PBW" &&
+       grep -qx 'RestartSec=5' "$PBW" &&
+       ! grep -q '^WantedBy=' "$PBW"; then
+        echo "ok   - the battery watch service runs the watcher, restarts on failure and has no WantedBy="
+    else
+        echo "FAIL - the battery watch service is missing, runs something else, does not restart or has a WantedBy="
+        fail=1
+    fi
+    if grep -q '^Before=' "$PBU/thinfloe-peripheral-battery.timer" \
+            "$PBU/thinfloe-peripheral-battery.service" "$PBW" 2>/dev/null; then
+        echo "FAIL - a battery unit declares Before= (ordering cycle risk)"
+        fail=1
+    else
+        echo "ok   - the battery units declare no Before="
+    fi
+    if grep -qx 'd /run/thinfloe/peripherals 0755 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf" &&
+       grep -qx 'd /run/thinfloe/peripherals-state 0700 root root' "$PB/usr/lib/tmpfiles.d/thinfloe-peripherals.conf"; then
+        echo "ok   - the battery directory is 0755, the state directory 0700"
+    else
+        echo "FAIL - the battery directories are missing or have the wrong mode"
+        fail=1
+    fi
+else
+    echo "FAIL - cannot extract the battery units from $SQSH"
+    fail=1
+fi
 
 if [[ $fail -ne 0 ]]; then
     echo ""

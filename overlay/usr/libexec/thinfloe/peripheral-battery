@@ -1,0 +1,884 @@
+#!/usr/bin/env python3
+"""
+peripheral-battery - write the battery charge of keyboards and mice
+
+Writes $TF_BATTERY_DIR/battery (default /run/thinfloe/peripherals/battery),
+one line per device, sorted by name (devices of one name in a fixed order):
+
+    name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind
+
+percent is 0..100 or "-"; state is discharging, charging, full, low,
+critical, unknown or "not reachable"; kind is keyboard, mouse, numpad,
+presenter, trackball, touchpad or unknown. A device that does not answer
+keeps its last reading, the time it was taken and its kind. The temporary file, the name
+cache, the lock and "readings" live in $TF_BATTERY_STATE (default
+/run/thinfloe/peripherals-state). "readings" is the file above with each
+line's identity in front (HID_PHYS/slot, or the name for a power_supply
+entry): two devices can share a name, so the last reading of a device and
+the slot of a line are looked up there.
+
+Two sources:
+- Logitech receivers the kernel does not drive (the Logi Bolt receiver
+  046d:c548 is left to hid-generic), asked over HID++ on their hidraw node.
+  Needs root.
+- /sys/class/power_supply entries with scope Device (Bluetooth devices,
+  receivers the kernel drives).
+
+Run once at boot by thinfloe-peripheral-battery.service and every 5
+minutes by its timer. Every per-device failure is
+logged and skipped; exit 1 only when the file could not be written.
+
+The status area of the menu reads the file. A run holds
+$TF_BATTERY_STATE/lock, so the timer and the watcher below take turns.
+
+"peripheral-battery watch" (thinfloe-peripheral-battery-watch.service) stays
+running and listens on every HID++ node for the events a Bolt device sends
+by itself when it connects: WIRELESS DEVICE STATUS (0x1D4B) event 0 with
+status 1 (reconnection) and UNIFIED BATTERY (0x1004) event 0. On one it runs
+the reading above, after DEBOUNCE seconds, unless the device has a value
+with a percent, not "not reachable", younger than HOLD_OFF seconds. It
+sends nothing on a node except the root feature's getFeature for those two
+features, under the lock: once per paired device, or up to LOOKUP_TRIES
+times, LOOKUP_RETRY apart, for one that does not answer. Any other argument
+is a usage error (exit 2).
+"""
+
+import fcntl
+import os
+import select
+import sys
+import time
+import unicodedata
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+REQUEST_TIMEOUT = 2.0   # an idle keyboard answered after 850 ms
+RUN_BUDGET = 15.0
+LOCK_WAIT = 30.0        # how long a run waits for another one
+LOCK_POLL = 0.1
+DEBOUNCE = 2.0          # events within this time give one reading
+HOLD_OFF = 300          # a successful value this young is not read again
+RESCAN = 5.0            # how often the watcher looks for HID++ nodes
+LOOKUP_RETRY = 30.0     # a slot whose features did not answer is asked again after
+LOOKUP_TRIES = 4        # then its events wait for the timer's reading
+MAX_HELD = 16           # events kept per slot while its features are unknown
+WIRELESS_STATUS = 0x1D4B
+UNIFIED_BATTERY = 0x1004
+SWID = 0x0A
+MAX_NAME = 64
+
+monotonic = time.monotonic
+
+# Drivers that already give the kernel the battery (power_supply).
+KERNEL_DRIVERS = {"logitech-djreceiver", "logitech-djdevice", "logitech-hidpp-device"}
+
+
+class Reading(NamedTuple):
+    name: str
+    percent: Optional[int]
+    state: str
+    read_epoch: int
+    kind: str = "unknown"
+    ident: str = ""     # keeps devices of one name apart; empty: the name does
+
+
+def reading_key(r: Reading) -> str:
+    return r.ident or r.name
+
+
+def slot_ident(phys: str, slot: int) -> str:
+    return f"{phys}/{slot}"
+
+
+def in_order(readings) -> List[Reading]:
+    """By name, then by identity, never by value: the menu numbers devices
+    in file order, so Keyboard 1 must stay the same keyboard."""
+    return sorted(readings, key=lambda r: (r.name, r.ident))
+
+
+# The low nibble of the first byte of the receiver's pairing info (register
+# b5/50+n), as Solaar numbers it for Bolt. 1 and 2 measured on 2026-11-03.
+RECEIVER_KINDS = {1: "keyboard", 2: "mouse", 3: "numpad", 4: "presenter",
+                  8: "trackball", 9: "touchpad"}
+KINDS = set(RECEIVER_KINDS.values()) | {"unknown"}
+
+
+def kind_of(byte: int) -> str:
+    return RECEIVER_KINDS.get(byte & 0x0F, "unknown")
+
+
+def log(what: str, why: str) -> None:
+    print(f"thinfloe: battery: {what}: {why}", file=sys.stderr)
+
+
+def sanitise(name: str) -> str:
+    name = name.replace("\0", "")
+    # Control and format characters (bidi overrides) and Unicode line or
+    # paragraph separators: a name must stay one line for every reader.
+    name = "".join("?" if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c
+                   for c in name)
+    name = name.strip()[:MAX_NAME]
+    return name or "unknown device"
+
+
+# --- HID++ over hidraw ------------------------------------------------------
+
+class HidrawTransport:
+    def __init__(self, node: Path):
+        self.fd = os.open(str(node), os.O_RDWR)
+
+    def write(self, data: bytes) -> None:
+        os.write(self.fd, data)
+
+    def read(self, timeout: float) -> Optional[bytes]:
+        if not select.select([self.fd], [], [], max(timeout, 0))[0]:
+            return None
+        return os.read(self.fd, 64)
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def open_transport(node: Path):
+    return HidrawTransport(node)
+
+
+def _exchange(t, msg: bytes, match, deadline: float) -> Optional[bytes]:
+    """Send msg, return the data of the first reply match() accepts, False
+    on an error reply, None when the request timeout or the deadline passes.
+    match(rep) returns data, False for an error reply, None for unrelated."""
+    # A reply that came after its request timed out would match the next
+    # request of the same kind (same slot, feature and SWID): drop it.
+    for _ in range(32):
+        if t.read(0) is None:
+            break
+    t.write(msg)
+    stop = min(monotonic() + REQUEST_TIMEOUT, deadline)
+    while True:
+        left = stop - monotonic()
+        if left <= 0:
+            return None
+        rep = t.read(left)
+        if rep is None:
+            return None
+        got = match(rep)
+        if got is not None:
+            return got
+
+
+def _feature_call(t, slot: int, feat: int, func: int, params: bytes, deadline: float) -> Optional[bytes]:
+    fsw = (func << 4) | SWID
+    msg = bytes([0x11, slot, feat, fsw]) + params
+
+    def match(rep):
+        if len(rep) < 5 or rep[1] != slot:
+            return None
+        if rep[2] == feat and rep[3] == fsw:
+            return rep[4:]
+        if rep[2] == 0xFF and rep[3] == feat and rep[4] == fsw:
+            return False
+        if rep[0] == 0x10 and rep[2] == 0x8F and rep[3] == feat and rep[4] == fsw:
+            return False
+        return None
+    return _exchange(t, msg.ljust(20, b"\0"), match, deadline)
+
+
+_REFUSED = object()
+
+
+def _receiver_register(t, sub: int, param: int, deadline: float) -> Optional[bytes]:
+    """The register's data; False when the receiver says no device is there
+    (error 0x08, unknown device); None when it did not answer in time or gave
+    any other error, neither of which says anything about the slot."""
+    msg = bytes([0x10, 0xFF, 0x83, 0xB5, sub, param, 0x00])
+
+    def match(rep):
+        if len(rep) < 5 or rep[1] != 0xFF:
+            return None
+        if rep[2] == 0x83 and rep[3] == 0xB5 and rep[4] == sub:
+            return rep[5:]
+        if rep[2] == 0x8F and rep[3] == 0x83 and rep[4] == 0xB5:
+            return False if rep[5:6] == b"\x08" else _REFUSED
+        return None
+    got = _exchange(t, msg, match, deadline)
+    return None if got is _REFUSED else got
+
+
+def _receiver_name(t, slot: int, deadline: float) -> Optional[str]:
+    """The pairing name; None when the receiver did not give all of it: part
+    of a name, or a made-up one, would replace the whole one in the cache."""
+    first = _receiver_register(t, 0x60 + slot, 1, deadline)
+    if first is None or first is False:
+        return None
+    if len(first) < 2:
+        return f"device {slot}"
+    length = first[1]
+    name = bytes(first[2:])
+    chunk = 2
+    while len(name) < length and chunk <= 4:
+        more = _receiver_register(t, 0x60 + slot, chunk, deadline)
+        if more is None or more is False:
+            return None
+        if len(more) < 2:
+            break
+        name += bytes(more[1:])
+        chunk += 1
+    return sanitise(name[:length].decode("utf-8", "replace"))
+
+
+def _feature_index(t, slot: int, fid: int, deadline: float) -> Optional[int]:
+    """The feature's index, 0 when the device lacks it, None when the device
+    did not answer."""
+    r = _feature_call(t, slot, 0x00, 0, bytes([fid >> 8, fid & 0xFF]), deadline)
+    return r[0] if r else None
+
+
+def _device_name(t, slot: int, deadline: float) -> Optional[str]:
+    """The device's full name; None when it has none or did not give all of
+    it: part of a name would replace the whole one in the cache."""
+    idx = _feature_index(t, slot, 0x0005, deadline)
+    if not idx:
+        return None
+    r = _feature_call(t, slot, idx, 0, b"", deadline)
+    if not r:
+        return None
+    length = r[0]
+    name = b""
+    for _ in range(8):
+        if len(name) >= length:
+            break
+        part = _feature_call(t, slot, idx, 1, bytes([len(name)]), deadline)
+        if not part:
+            return None
+        name += bytes(part[: length - len(name)])
+    return sanitise(name.decode("utf-8", "replace")) if name else None
+
+
+UB_CHARGING = {1: "charging", 2: "charging", 3: "full"}
+BS_STATUS = {0: "discharging", 1: "charging", 2: "charging", 3: "full"}
+
+
+def _battery(t, slot: int, deadline: float) -> Optional[Tuple[Optional[int], str]]:
+    """(percent, state), or None when the device stopped answering."""
+    idx = _feature_index(t, slot, 0x1004, deadline)
+    if idx is None:
+        return None
+    if idx:
+        r = _feature_call(t, slot, idx, 1, b"", deadline)
+        if not r or len(r) < 3:
+            return None
+        soc, level, charging = r[0], r[1], r[2]
+        if charging == 0:
+            state = "critical" if level & 1 else "low" if level & 2 else "discharging"
+        else:
+            state = UB_CHARGING.get(charging, "unknown")
+        # soc 0 is "not reported": a device without state of charge sends
+        # only the level bitmap.
+        return (soc if 0 < soc <= 100 else None), state
+    idx = _feature_index(t, slot, 0x1000, deadline)
+    if idx is None:
+        return None
+    if idx:
+        r = _feature_call(t, slot, idx, 0, b"", deadline)
+        if not r or len(r) < 3:
+            return None
+        # level 0 is "unknown".
+        return (r[0] if 0 < r[0] <= 100 else None), BS_STATUS.get(r[2], "unknown")
+    idx = _feature_index(t, slot, 0x1001, deadline)
+    if idx is None:
+        return None
+    if idx:
+        r = _feature_call(t, slot, idx, 0, b"", deadline)
+        return None if not r else (None, "unknown")
+    return None, "unknown"
+
+
+def read_receiver(t, now: int, deadline: Optional[float] = None
+                  ) -> Tuple[List[Tuple[int, str, Reading]], List[Tuple[int, Optional[str], str]]]:
+    """Read every paired slot of one receiver. Returns (slot, receiver_name,
+    reading) for devices that answered and (slot, receiver_name, kind) for
+    paired slots that did not. Pairing and kind come from the receiver's
+    register b5/50+n, never from the ping: an empty slot answers the ping
+    with an error too. Error 0x08 (unknown device) on that register is an
+    empty slot; any other error, or no reply in time (the run's budget
+    included), says nothing about the slot, which comes back with
+    receiver_name None, as does one whose pairing name did not arrive."""
+    if deadline is None:
+        deadline = monotonic() + RUN_BUDGET
+    paired = []
+    got, unreachable = [], []
+    for slot in range(1, 7):
+        info = _receiver_register(t, 0x50 + slot, 0, deadline)
+        if info is False:
+            continue
+        if info is None:
+            unreachable.append((slot, None, "unknown"))
+            continue
+        kind = kind_of(info[0]) if info else "unknown"
+        rname = _receiver_name(t, slot, deadline)
+        if rname is None:
+            unreachable.append((slot, None, kind))
+            continue
+        paired.append((slot, rname, kind))
+    for slot, rname, kind in paired:
+        if monotonic() >= deadline or not _feature_call(t, slot, 0x00, 1, b"\0\0\x5a", deadline):
+            unreachable.append((slot, rname, kind))
+            continue
+        name = _device_name(t, slot, deadline) or rname
+        bat = _battery(t, slot, deadline)
+        if bat is None:
+            unreachable.append((slot, rname, kind))
+            continue
+        got.append((slot, rname, Reading(name, bat[0], bat[1], now, kind)))
+    return got, unreachable
+
+
+def _is_number(text: str) -> bool:
+    """Digits int() takes: "\u00b2".isdigit() is true, and int() refuses
+    thousands of digits."""
+    return text.isascii() and text.isdigit() and len(text) <= 18
+
+
+def read_uevent(path: Path) -> Dict[str, str]:
+    """The keys of a sysfs uevent file. Names in it come from the device: they
+    may be any bytes and may hold Unicode line separators, so it is decoded
+    with replacement and split on newlines only."""
+    text = path.read_bytes().decode("utf-8", "replace")
+    return dict(line.split("=", 1) for line in text.split("\n") if "=" in line)
+
+
+def find_hidpp_nodes(sysfs: Path, dev: Path) -> List[Tuple[Path, str]]:
+    """(device node, HID_PHYS) of every Logitech HID++ interface whose
+    driver does not give the kernel the battery already."""
+    nodes = []
+    for d in sorted((sysfs / "class" / "hidraw").glob("hidraw*")):
+        try:
+            uevent = read_uevent(d / "device" / "uevent")
+            desc = (d / "device" / "report_descriptor").read_bytes()
+            driver = os.path.basename(os.readlink(d / "device" / "driver"))
+        except OSError:
+            continue
+        parts = uevent.get("HID_ID", "").upper().split(":")
+        if len(parts) != 3 or parts[1] != "0000046D" or driver in KERNEL_DRIVERS:
+            continue
+        if b"\x06\x00\xff" in desc and b"\x85\x11" in desc:
+            nodes.append((dev / d.name, uevent.get("HID_PHYS", d.name)))
+    return nodes
+
+
+# --- power_supply -----------------------------------------------------------
+
+def kind_from_name(name: str) -> str:
+    """power_supply has no kind; a name that says it is the only hint."""
+    low = name.lower()
+    if "keyboard" in low:
+        return "keyboard"
+    if "mouse" in low:
+        return "mouse"
+    return "unknown"
+
+
+PS_STATUS = {"discharging": "discharging", "not charging": "discharging",
+             "charging": "charging", "full": "full"}
+
+
+def read_power_supply(sysfs: Path, now: int) -> List[Reading]:
+    """An entry's sysfs name changes when it reconnects, so a device is known
+    by its name, and by its place among those of that name."""
+    out = []
+    seen: Dict[str, int] = {}
+    for d in sorted((sysfs / "class" / "power_supply").glob("*")):
+        try:
+            kv = read_uevent(d / "uevent")
+        except OSError:
+            continue
+        if kv.get("POWER_SUPPLY_SCOPE") != "Device":
+            continue
+        name = kv.get("POWER_SUPPLY_MODEL_NAME") or kv.get("POWER_SUPPLY_NAME") or d.name
+        cap = kv.get("POWER_SUPPLY_CAPACITY", "")
+        # 0 is no percent, as on HID++: a driver reports it before it knows.
+        percent = int(cap) if _is_number(cap) and 0 < int(cap) <= 100 else None
+        state = PS_STATUS.get(kv.get("POWER_SUPPLY_STATUS", "").lower(), "unknown")
+        name = sanitise(name)
+        seen[name] = seen.get(name, 0) + 1
+        ident = "" if seen[name] == 1 else f"{name}#{seen[name]}"
+        out.append(Reading(name, percent, state, now, kind_from_name(name), ident))
+    return out
+
+
+# --- file -------------------------------------------------------------------
+
+def format_lines(readings: List[Reading]) -> str:
+    return "".join(f"{r.name}\t{'-' if r.percent is None else r.percent}\t{r.state}\t{r.read_epoch}"
+                   f"\t{r.kind}\n"
+                   for r in in_order(readings))
+
+
+def parse_lines(text: str) -> List[Reading]:
+    """Five fields, or four from a file written before the kind existed."""
+    out = []
+    for line in text.split("\n"):
+        f = line.split("\t")
+        if len(f) not in (4, 5) or not _is_number(f[3]) or not (f[1] == "-" or _is_number(f[1])):
+            continue
+        kind = f[4] if len(f) == 5 and f[4] in KINDS else "unknown"
+        out.append(Reading(f[0], None if f[1] == "-" else int(f[1]), f[2], int(f[3]), kind))
+    return in_order(out)
+
+
+def _read_state(path: Path) -> str:
+    """A state file, or nothing when it is missing or not text. A corrupt one
+    must not stop a run, and the run writes it anew."""
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+    except ValueError:
+        log(str(path), "corrupt, ignored")
+        return ""
+
+
+def load_readings(path: Path) -> List[Reading]:
+    """$TF_BATTERY_STATE/readings: identity, then a line of the battery file."""
+    out = []
+    for line in _read_state(path).split("\n"):
+        ident, _, rest = line.partition("\t")
+        out += [r._replace(ident=ident) for r in parse_lines(rest)]
+    return out
+
+
+def merge(new: List[Reading], previous: List[Reading], unreachable: List[Tuple[str, str, str]],
+          now: int) -> List[Reading]:
+    """New readings win; an unreachable device (name, kind, identity; an empty
+    identity is the name) keeps its previous percent and time, or gets "-"
+    when it was never read, and the previous kind when its own is unknown.
+    Another name under the identity is a device paired anew: it has no
+    previous reading. Anything else is dropped."""
+    result = {reading_key(r): r for r in new}
+    prev = {reading_key(r): r for r in previous}
+    for name, kind, ident in unreachable:
+        key = ident or name
+        if key in result:
+            continue
+        p = prev.get(key)
+        if p and p.name != name:
+            p = None
+        if kind == "unknown" and p:
+            kind = p.kind
+        result[key] = (p._replace(state="not reachable", kind=kind, ident=ident) if p
+                       else Reading(name, None, "not reachable", now, kind, ident))
+    return in_order(result.values())
+
+
+NameCache = Dict[Tuple[str, int], Tuple[str, str, str]]
+
+
+def resolve_name(cache: NameCache, phys: str, slot: int, receiver_name: str,
+                 kind: str = "unknown") -> Tuple[Optional[str], str]:
+    """(full name, kind) of a paired slot that did not answer: the cached
+    ones while the slot holds the same device, the pairing kind first.
+    receiver_name None: the receiver did not say, so the cached ones, and a
+    name of None when there are none."""
+    entry = cache.get((phys, slot))
+    if entry and receiver_name in (None, entry[0]):
+        return entry[1], kind if kind != "unknown" else entry[2]
+    return receiver_name, kind
+
+
+def load_names(path: Path) -> NameCache:
+    cache = {}
+    for line in _read_state(path).splitlines():
+        f = line.split("\t")
+        if len(f) in (4, 5) and _is_number(f[1]):
+            kind = f[4] if len(f) == 5 and f[4] in KINDS else "unknown"
+            cache[(f[0], int(f[1]))] = (f[2], f[3], kind)
+    return cache
+
+
+def _write_atomic(state: Path, target: Path, text: str, mode: int) -> None:
+    tmp = state / f".{target.name}.new"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _take_lock(state: Path) -> Optional[int]:
+    """The locked fd of $TF_BATTERY_STATE/lock, waiting up to LOCK_WAIT for
+    another run; None (logged) when it cannot be had. Closing the fd frees
+    it."""
+    lockpath = state / "lock"
+    try:
+        lockfd = os.open(str(lockpath),
+                         os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        log(str(lockpath), e.strerror or str(e))
+        return None
+    give_up = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lockfd
+        except BlockingIOError:
+            if time.monotonic() >= give_up:
+                os.close(lockfd)
+                print("thinfloe: battery: lock busy", file=sys.stderr)
+                return None
+            time.sleep(LOCK_POLL)
+        except OSError as e:
+            os.close(lockfd)
+            log(str(lockpath), e.strerror or str(e))
+            return None
+
+
+def _paths() -> Tuple[Path, Path, Path, Path]:
+    return (Path(os.environ.get("TF_SYSFS", "/sys")),
+            Path(os.environ.get("TF_DEV", "/dev")),
+            Path(os.environ.get("TF_BATTERY_DIR", "/run/thinfloe/peripherals")),
+            Path(os.environ.get("TF_BATTERY_STATE", "/run/thinfloe/peripherals-state")))
+
+
+def read_batteries() -> int:
+    sysfs, dev, outdir, state = _paths()
+    lockfd = _take_lock(state)
+    if lockfd is None:
+        return 1
+    try:
+        return _read_locked(sysfs, dev, outdir, state)
+    finally:
+        os.close(lockfd)
+
+
+def _read_locked(sysfs: Path, dev: Path, outdir: Path, state: Path) -> int:
+    now = int(time.time())
+    deadline = monotonic() + RUN_BUDGET
+    cache = load_names(state / "names")
+    previous = load_readings(state / "readings")
+    known = {reading_key(r): r for r in previous}
+
+    new = read_power_supply(sysfs, now)
+    # A power_supply device that was seen this boot and is gone now (a
+    # Bluetooth mouse switched off) keeps its last reading as not reachable.
+    ps_seen = set(_read_state(state / "power-supply").split("\n")) - {""}
+    ps_now = {reading_key(r) for r in new}
+    unreachable = [(known[i].name if i in known else i, "unknown", i) for i in sorted(ps_seen - ps_now)]
+    for node, phys in find_hidpp_nodes(sysfs, dev):
+        t = None
+        try:
+            t = open_transport(node)
+            got, gone = read_receiver(t, now, deadline)
+        except Exception as e:  # noqa: BLE001 - device data is untrusted
+            log(str(node), (e.strerror if isinstance(e, OSError) else None) or f"{type(e).__name__}: {e}")
+            # What the node held last time stays, as not reachable.
+            got, gone = [], [(s, None, "unknown") for p, s in cache if p == phys]
+        finally:
+            if t is not None and hasattr(t, "close"):
+                try:
+                    t.close()
+                except OSError:
+                    pass
+        for slot, rname, reading in got:
+            # The receiver's name means the device did not say its own.
+            if reading.name == rname:
+                reading = reading._replace(name=resolve_name(cache, phys, slot, rname)[0])
+            cache[(phys, slot)] = (rname, reading.name, reading.kind)
+            new.append(reading._replace(ident=slot_ident(phys, slot)))
+        for slot, rname, kind in gone:
+            name, kind = resolve_name(cache, phys, slot, rname, kind)
+            if name is None:
+                log(f"{node} slot {slot}", "the receiver did not answer")
+                continue
+            if rname is not None:
+                cache[(phys, slot)] = (rname, name, kind)
+            unreachable.append((name, kind, slot_ident(phys, slot)))
+        # A slot the receiver now calls empty holds nothing a later failure
+        # of this node should bring back.
+        still = {slot for slot, _, _ in got} | {slot for slot, _, _ in gone}
+        for key in [k for k in cache if k[0] == phys and k[1] not in still]:
+            del cache[key]
+
+    try:
+        merged = merge(new, previous, unreachable, now)
+        _write_atomic(state, outdir / "battery", format_lines(merged), 0o644)
+    except Exception as e:  # noqa: BLE001 - anything here means no file
+        log(str(outdir / "battery"), str(e))
+        return 1
+    try:
+        _write_atomic(state, state / "readings",
+                      "".join(f"{reading_key(r)}\t{format_lines([r])}" for r in merged), 0o600)
+    except OSError as e:
+        log(str(state / "readings"), e.strerror or str(e))
+    try:
+        _write_atomic(state, state / "power-supply",
+                      "".join(f"{n}\n" for n in sorted(ps_seen | ps_now)), 0o600)
+    except OSError as e:
+        log(str(state / "power-supply"), e.strerror or str(e))
+    try:
+        _write_atomic(state, state / "names",
+                      "".join(f"{p}\t{s}\t{r}\t{n}\t{k}\n" for (p, s), (r, n, k) in sorted(cache.items())),
+                      0o600)
+    except OSError as e:
+        log(str(state / "names"), e.strerror or str(e))
+    return 0
+
+
+# --- watcher ----------------------------------------------------------------
+
+def event_head(rep: bytes) -> Optional[Tuple[int, int]]:
+    """(slot, feature index) of a report a device sent by itself: a long
+    HID++ 2.0 report from slot 1..6 with function 0 and software id 0
+    (replies to requests carry SWID, never 0), not the root feature and not
+    an error report."""
+    if len(rep) < 5 or rep[0] != 0x11 or not 1 <= rep[1] <= 6:
+        return None
+    if rep[3] != 0x00 or rep[2] in (0x00, 0xFF):
+        return None
+    return rep[1], rep[2]
+
+
+def is_connect_event(rep: bytes, ws: Optional[int], ub: Optional[int]) -> bool:
+    """A reconnection (0x1D4B status 1) or a battery report (0x1004), given
+    the device's indices of those features."""
+    head = event_head(rep)
+    if head is None:
+        return False
+    idx = head[1]
+    if ws is not None and idx == ws:
+        return rep[4] == 0x01
+    return ub is not None and idx == ub
+
+
+class Listener:
+    """A HID++ node opened read-only: the watcher only takes the reports
+    the kernel hands every reader of the node."""
+
+    def __init__(self, node: Path):
+        self.fd = os.open(str(node), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def read(self) -> bytes:
+        data = os.read(self.fd, 64)
+        if not data:
+            raise OSError(19, "node gone")
+        return data
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def open_listener(node: Path):
+    return Listener(node)
+
+
+def wait_readable(listeners, timeout: float):
+    return select.select(listeners, [], [], max(timeout, 0))[0]
+
+
+def _lookup_indices(node: Path, slot: int) -> Optional[Tuple[Optional[int], Optional[int]]]:
+    """The device's indices of 0x1D4B and 0x1004 (None for an absent
+    feature), asked under the reader's lock; None when it did not answer."""
+    state = _paths()[3]
+    lockfd = _take_lock(state)
+    if lockfd is None:
+        return None
+    t = None
+    try:
+        t = open_transport(node)
+        deadline = monotonic() + 2 * REQUEST_TIMEOUT + 1
+        got = []
+        for fid in (WIRELESS_STATUS, UNIFIED_BATTERY):
+            r = _feature_call(t, slot, 0x00, 0, bytes([fid >> 8, fid & 0xFF]), deadline)
+            if not r:
+                return None
+            got.append(r[0] or None)
+        return got[0], got[1]
+    finally:
+        if t is not None and hasattr(t, "close"):
+            try:
+                t.close()
+            except OSError:
+                pass
+        os.close(lockfd)
+
+
+class Watcher:
+    def __init__(self, read=None, wait=None):
+        self.read = read            # None: read_batteries, looked up at call time
+        self.wait = wait or wait_readable
+        self.nodes = {}             # node -> (listener, HID_PHYS)
+        self.indices = {}           # (HID_PHYS, slot) -> (0x1D4B index, 0x1004 index)
+        self.index_owner = {}       # (HID_PHYS, slot) -> pairing name those indices belong to
+        self.lookup_failed = {}     # (HID_PHYS, slot) -> monotonic time of the next try
+        self.held = {}              # (HID_PHYS, slot) -> [node, reports, lookups tried]
+        self.pending = set()        # (HID_PHYS, slot) waiting for the debounce
+        self.due = None
+        self.next_scan = monotonic()
+
+    def rescan(self) -> None:
+        sysfs, dev, _, _ = _paths()
+        found = dict(find_hidpp_nodes(sysfs, dev))
+        for node in [n for n in self.nodes if n not in found]:
+            self._drop(node, None)
+        for node, phys in found.items():
+            if node in self.nodes:
+                continue
+            try:
+                self.nodes[node] = (open_listener(node), phys)
+            except OSError as e:
+                log(str(node), e.strerror or str(e))
+        self._forget_repaired()
+
+    def _forget_repaired(self) -> None:
+        """A slot whose pairing name changed in the reader's name cache holds
+        another device, with other feature indices: ask for them again."""
+        if not self.indices:
+            return
+        names = load_names(_paths()[3] / "names")
+        for key in list(self.indices):
+            if key not in names:
+                continue
+            owner = self.index_owner.setdefault(key, names[key][0])
+            if owner != names[key][0]:
+                del self.indices[key]
+                del self.index_owner[key]
+
+    def _drop(self, node: Path, why: Optional[str]) -> None:
+        listener, phys = self.nodes.pop(node)
+        if why:
+            log(str(node), why)
+        try:
+            listener.close()
+        except OSError:
+            pass
+        for cache in (self.indices, self.index_owner, self.lookup_failed, self.held):
+            for key in [k for k in cache if k[0] == phys]:
+                del cache[key]
+
+    def on_report(self, node: Path, phys: str, rep: bytes) -> None:
+        head = event_head(rep)
+        if head is None:
+            return
+        key = (phys, head[0])
+        if key in self.indices:
+            self._classify(key, rep)
+            return
+        # Only the indices tell a connect from any other event, so the report
+        # waits for them; a device that does not answer now may do so soon.
+        held = self.held.setdefault(key, [node, [], 0])
+        if len(held[1]) < MAX_HELD:
+            held[1].append(rep)
+        self._lookup(key)
+
+    def _classify(self, key: Tuple[str, int], rep: bytes) -> None:
+        if is_connect_event(rep, *self.indices[key]):
+            self.pending.add(key)
+            if self.due is None:
+                self.due = monotonic() + DEBOUNCE
+
+    def _lookup(self, key: Tuple[str, int]) -> None:
+        """Ask for a held slot's feature indices, if its time has come, and
+        then judge the reports it holds. After LOOKUP_TRIES without an answer
+        they are given up: the timer reads the device within 5 minutes."""
+        if monotonic() < self.lookup_failed.get(key, 0):
+            return
+        held = self.held[key]
+        try:
+            got = _lookup_indices(held[0], key[1])
+        except Exception as e:  # noqa: BLE001 - device data is untrusted
+            log(str(held[0]), (e.strerror if isinstance(e, OSError) else None) or f"{type(e).__name__}: {e}")
+            got = None
+        if got is None:
+            held[2] += 1
+            self.lookup_failed[key] = monotonic() + LOOKUP_RETRY
+            if held[2] >= LOOKUP_TRIES:
+                del self.held[key]
+                log(f"{key[0]} slot {key[1]}", f"no answer to the feature lookup, {LOOKUP_TRIES} times")
+            return
+        del self.held[key]
+        self.lookup_failed.pop(key, None)
+        self.indices[key] = got
+        for rep in held[1]:
+            self._classify(key, rep)
+
+    def held_off(self, key: Tuple[str, int]) -> bool:
+        ident = slot_ident(*key)
+        now = time.time()
+        return any(r.ident == ident and r.percent is not None and r.state != "not reachable"
+                   and 0 <= now - r.read_epoch < HOLD_OFF
+                   for r in load_readings(_paths()[3] / "readings"))
+
+    def fire(self) -> None:
+        keys, self.pending, self.due = sorted(self.pending), set(), None
+        wanted = [k for k in keys if not self.held_off(k)]
+        if not wanted:
+            return
+        log("connected", ", ".join(f"{p} slot {s}" for p, s in wanted) + ", reading")
+        (self.read or read_batteries)()
+
+    def step(self) -> None:
+        if monotonic() >= self.next_scan:
+            self.rescan()
+            self.next_scan = monotonic() + RESCAN
+        until = min([self.next_scan]
+                    + ([] if self.due is None else [self.due])
+                    + [self.lookup_failed[k] for k in self.held if k in self.lookup_failed])
+        by_listener = {lst: node for node, (lst, _) in self.nodes.items()}
+        for lst in self.wait(list(by_listener), until - monotonic()):
+            node = by_listener[lst]
+            if node not in self.nodes:
+                continue
+            phys = self.nodes[node][1]
+            try:
+                rep = lst.read()
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                self._drop(node, e.strerror or str(e))
+                continue
+            try:
+                self.on_report(node, phys, rep)
+            except Exception as e:  # noqa: BLE001 - device data is untrusted
+                log(str(node), f"{type(e).__name__}: {e}")
+        for key in list(self.held):
+            try:
+                self._lookup(key)
+            except Exception as e:  # noqa: BLE001 - device data is untrusted
+                log(str(key[0]), f"{type(e).__name__}: {e}")
+        if self.due is not None and monotonic() >= self.due:
+            try:
+                self.fire()
+            except Exception as e:  # noqa: BLE001 - the watcher must keep running
+                log("reading", f"{type(e).__name__}: {e}")
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.step()
+            except Exception as e:  # noqa: BLE001 - the watcher must keep running
+                log("watch", f"{type(e).__name__}: {e}")
+                time.sleep(1)
+
+
+def watch() -> int:
+    Watcher().run()
+    return 0
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    argv = list(argv)
+    if not argv:
+        return read_batteries()
+    if argv == ["watch"]:
+        return watch()
+    print("usage: peripheral-battery [watch]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
