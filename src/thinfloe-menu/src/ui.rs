@@ -1723,9 +1723,10 @@ mod tests {
         let t0 = Instant::now();
         let menu = status_menu(vec![kdev("K", battery::DeviceKind::Keyboard, 80, "discharging")], t0);
         let shapes = status_frame_on(&new_ctx(), &menu, t0, (1920.0, 1080.0));
-        // The network elements have nothing to show here, but plan their rows.
-        assert_eq!(menu.status.planned_rows(false), 2);
-        let l = layout(screen(1920.0, 1080.0), menu.visible_tiles().len(), 0, 1, 2);
+        // The network and hardware elements have nothing to show here, but
+        // plan their rows.
+        assert_eq!(menu.status.planned_rows(false), 3);
+        let l = layout(screen(1920.0, 1080.0), menu.visible_tiles().len(), 0, 1, 3);
         let battery = cell_rect(&l, 0, 0, 1, 1);
         let clock = cell_rect(&l, 1, 0, 1, 1);
         let keyboard = text_rect(&shapes, "Keyboard").expect("the battery line");
@@ -1744,7 +1745,7 @@ mod tests {
         let full = (1920.0, 1080.0);
         let a = status_frame_on(&new_ctx(), &without_device, t0, full);
         let b = status_frame_on(&new_ctx(), &without_area, t0, full);
-        let l = layout(screen(full.0, full.1), without_device.visible_tiles().len(), 0, 1, 2);
+        let l = layout(screen(full.0, full.1), without_device.visible_tiles().len(), 0, 1, 3);
         assert!(text_rect(&a, "Keyboard").is_none());
         let time = text_rect(&a, "Time").expect("the clock");
         assert!(cell_rect(&l, 0, 0, 1, 1).contains_rect(time), "{time:?}");
@@ -1879,17 +1880,119 @@ mod tests {
         assert!(calm > Duration::from_millis(2500), "nothing pages: no wake: {calm:?}");
     }
 
+    /// The backgrounds the status elements draw: one card-coloured rectangle
+    /// each, between the tiles and the log.
+    fn element_rects(shapes: &[egui::epaint::ClippedShape], l: &Layout) -> Vec<Rect> {
+        let card = crate::brand::theme().palette().card;
+        let st = l.status.expect("an area");
+        let mut out: Vec<Rect> = Vec::new();
+        for c in shapes {
+            if let egui::Shape::Rect(r) = &c.shape
+                && r.fill == card
+                && r.rect.min.y >= st.top() - 1.0
+                && r.rect.max.y <= st.bottom() + 1.0
+                && !out.contains(&r.rect)
+            {
+                out.push(r.rect);
+            }
+        }
+        out
+    }
+
+    /// Whether an element's background lies on `cells` of the area in layout `l`.
+    fn drawn_on(got: &[Rect], l: &Layout, cells: &str) -> bool {
+        let want = cells.split(',').map(|n| n.parse::<u8>().unwrap()).collect::<Vec<_>>();
+        let want = cell_rect(l, want[0], want[1], want[2], want[3]);
+        got.iter()
+            .any(|r| (r.min - want.min).length() < 1.0 && (r.size() - want.size()).length() < 1.0)
+    }
+
+    #[test]
+    fn the_hardware_elements_stand_where_the_owner_put_them_and_are_gone_on_a_short_screen() {
+        let t0 = Instant::now();
+        let mut menu = net_menu(five(), t0);
+        menu.set_hardware(crate::status::hardware::sample());
+        let full = (1920.0, 1080.0);
+        let n = menu.visible_tiles().len();
+        let l = layout(screen(full.0, full.1), n, 0, 3, 3);
+        assert_eq!(menu.status.rows(&menu.status_sources(), false), 3);
+        let all = status_frame_on(&new_ctx(), &menu, t0, full);
+        let got = element_rects(&all, &l);
+        assert_eq!(got.len(), 8, "{got:?}");
+        for cells in [
+            "0,0,1,1", "1,0,2,2", "3,0,1,2", "0,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1", "3,2,1,1",
+        ] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        // Their text is inside their cells.
+        for (name, cells) in [("CPU load", (0, 2)), ("RAM", (1, 2)), ("Fan", (2, 2)), ("GPU", (0, 1))] {
+            let r = text_rect(&all, name).unwrap_or_else(|| panic!("{name}"));
+            let cell = cell_rect(&l, cells.0, cells.1, 1, 1);
+            assert!(cell.contains_rect(r), "{name} {r:?} in {cell:?}");
+        }
+        // No battery: the elements close up in first-fit order, the tiles do
+        // not move.
+        let mut no_battery = net_menu(Vec::new(), t0);
+        no_battery.set_hardware(crate::status::hardware::sample());
+        let shapes = status_frame_on(&new_ctx(), &no_battery, t0, full);
+        let got = element_rects(&shapes, &l);
+        assert_eq!(got.len(), 7, "{got:?}");
+        for cells in [
+            "0,0,2,2", "2,0,1,2", "3,0,1,1", "3,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1",
+        ] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert!(!drawn_on(&got, &l, "3,2,1,1"), "{got:?}");
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // No network: the rest closes up into two rows, tiles unmoved.
+        let mut no_net = status_menu(five(), t0);
+        no_net.set_hardware(crate::status::hardware::sample());
+        let shapes = status_frame_on(&new_ctx(), &no_net, t0, full);
+        let got = element_rects(&shapes, &l);
+        assert_eq!(got.len(), 6, "{got:?}");
+        for cells in ["0,0,1,1", "1,0,1,1", "2,0,1,1", "3,0,1,1", "0,1,1,1", "1,1,1,1"] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // A VM: one row, in the top row of the same place, tiles unmoved.
+        let mut vm = status_menu(Vec::new(), t0);
+        vm.set_hardware(crate::hardware::Snapshot {
+            temps: vec![],
+            ..crate::status::hardware::sample()
+        });
+        assert_eq!(vm.status.rows(&vm.status_sources(), false), 1, "no blank row");
+        let shapes = status_frame_on(&new_ctx(), &vm, t0, full);
+        let got = element_rects(&shapes, &l);
+        assert_eq!(got.len(), 4, "{got:?}");
+        for cells in ["0,0,1,1", "1,0,1,1", "2,0,1,1", "3,0,1,1"] {
+            assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
+        }
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // Nothing yet from the sampler: the same place again.
+        let shapes = status_frame_on(&new_ctx(), &net_menu(five(), t0), t0, full);
+        assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
+        // A short screen: battery and the 3 x 1 graph, nothing else.
+        let small = (1280.0, 720.0);
+        let l = layout(screen(small.0, small.1), n, 0, 1, 1);
+        let got = element_rects(&status_frame_on(&new_ctx(), &menu, t0, small), &l);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(menu.status.rows(&menu.status_sources(), true), 1);
+        assert!(drawn_on(&got, &l, "1,0,3,1"), "{got:?}");
+    }
+
     #[test]
     fn the_shipped_status_area_covers_no_tile_on_any_screen() {
         let t0 = Instant::now();
-        let menu = net_menu(five(), t0);
+        let mut menu = net_menu(five(), t0);
+        menu.set_hardware(crate::status::hardware::sample());
         let n = menu.visible_tiles().len();
         for (w, h, _) in SHIPPED_SCREENS {
             let short = short_screen(h);
             // Short: one row, the battery and the graph at 3 x 1. Otherwise
-            // the graph is 2 x 2 and the list stands right of it.
+            // the graph is 2 x 2, the list stands right of it and the
+            // hardware elements fill the third row.
             let planned = menu.status.planned_rows(short);
-            assert_eq!(planned, if short { 1 } else { 2 }, "{w}x{h}");
+            assert_eq!(planned, if short { 1 } else { 3 }, "{w}x{h}");
             assert_eq!(menu.status.rows(&menu.status_sources(), short), planned, "{w}x{h}");
             let l = layout(screen(w, h), n, 0, planned, planned);
             let st = l.status.unwrap();
@@ -1906,6 +2009,13 @@ mod tests {
             assert_eq!(text_rect(&shapes, "Time").is_some(), !short, "{w}x{h}");
             if let Some(r) = text_rect(&shapes, "Gateway") {
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
+            }
+            // The hardware elements only where the screen is not short.
+            for name in ["CPU load", "RAM", "Fan", "GPU"] {
+                assert_eq!(text_rect(&shapes, name).is_some(), !short, "{w}x{h}: {name}");
+                if let Some(r) = text_rect(&shapes, name) {
+                    assert!(st.contains_rect(r), "{w}x{h}: {name} {r:?} in {st:?}");
+                }
             }
         }
     }
@@ -5536,18 +5646,40 @@ mod tests {
             label: "since 14:02".into(),
             base: (1_000_000_000, 600_000),
         };
+        let hardware = crate::status::hardware::sample();
+        let crowded = crate::hardware::Snapshot {
+            fans: vec![12000, 1800, 900, 600],
+            maker: Some("Gigabyte Technology".into()),
+            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
+            ..crate::status::hardware::sample()
+        };
         let data = Data {
             battery: &devices,
             battery_since: Some(Instant::now()),
             network: Some(&net),
             network_since: Some(&since),
-            ..Data::EMPTY
+            hardware: Some(&hardware),
         };
         for e in ELEMENTS {
             for size in e.sizes() {
                 for h in [TILE_H, TILE_H_MIN] {
                     shot_element(&format!("{}-{size}-{h}", e.id()), *e, *size, h, &data);
                 }
+            }
+        }
+        let busy = Data {
+            hardware: Some(&crowded),
+            ..data
+        };
+        for size in crate::status::Element::sizes(&crate::status::hardware::System) {
+            for h in [TILE_H, TILE_H_MIN] {
+                shot_element(
+                    &format!("system-crowded-{size}-{h}"),
+                    &crate::status::hardware::System,
+                    *size,
+                    h,
+                    &busy,
+                );
             }
         }
     }

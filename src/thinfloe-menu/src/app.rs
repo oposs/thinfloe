@@ -624,10 +624,10 @@ fn wake_flow(at: Option<Instant>) -> ControlFlow {
 }
 
 /// Whether the hardware sampler reads: not while a window covers the menu,
-/// not on a short screen, where no hardware element is shown, and only when a
-/// shown element draws from it.
+/// and only when an element that draws from it has cells on this screen. On a
+/// short screen no hardware element has a size, so it rests there too.
 fn hardware_wanted(status: &crate::status::Area, covered: bool, height: f32) -> bool {
-    !covered && !ui::short_screen(height) && status.needs(crate::status::Source::Hardware)
+    !covered && status.places(crate::status::Source::Hardware, ui::short_screen(height))
 }
 
 impl App {
@@ -1619,16 +1619,31 @@ esac"#;
     }
 
     #[test]
-    fn the_hardware_sampler_rests_when_covered_on_a_short_screen_and_without_a_tile() {
-        // No hardware element is listed yet: nothing asks for the sampler.
+    fn the_hardware_sampler_rests_when_covered_on_a_short_screen_and_without_a_placed_element() {
         let shipped = crate::status::Area::shipped();
-        assert!(
-            !hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H),
-            "no hardware element"
-        );
-        assert!(!hardware_wanted(&shipped, true, ui::SHORT_SCREEN_H), "covered");
+        let tall = ui::SHORT_SCREEN_H;
+        assert!(hardware_wanted(&shipped, false, tall), "hardware elements have cells");
+        assert!(!hardware_wanted(&shipped, true, tall), "covered");
+        assert!(!hardware_wanted(&shipped, false, tall - 1.0), "short: no hardware size");
         let none = crate::status::Area::default();
-        assert!(!hardware_wanted(&none, false, ui::SHORT_SCREEN_H), "no element");
+        assert!(!hardware_wanted(&none, false, tall), "no element");
+        // Hardware elements hidden: the rest of the list does not ask.
+        let hidden = crate::status::layout::parse(
+            b"-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            &crate::status::offered,
+        );
+        let mut layout = hidden;
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        let hidden = crate::status::Area { layout };
+        assert!(!hardware_wanted(&hidden, false, tall), "all four hidden");
+        // One shown is enough.
+        let mut layout =
+            crate::status::layout::parse(b"-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n", &crate::status::offered);
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        assert!(
+            hardware_wanted(&crate::status::Area { layout }, false, tall),
+            "system shown"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@
 
 pub mod battery;
 pub mod clock;
+pub mod hardware;
 pub mod layout;
 pub mod network;
 pub mod network_info;
@@ -189,6 +190,10 @@ pub static ELEMENTS: &[&dyn Element] = &[
     &battery::Battery,
     &network::Network,
     &network_info::NetworkInfo,
+    &hardware::Temperatures,
+    &hardware::Cpu,
+    &hardware::Memory,
+    &hardware::System,
     &clock::Clock,
 ];
 
@@ -286,6 +291,15 @@ impl Area {
     /// yet: its source must run to find out.
     pub fn needs(&self, source: Source) -> bool {
         self.chosen().any(|(e, _)| e.sources().contains(&source))
+    }
+
+    /// Some shown choice that draws from `source` gets cells on this screen,
+    /// whether or not it has anything yet. One left out for want of room, or
+    /// without a size for a short screen, does not count.
+    pub fn places(&self, source: Source, short: bool) -> bool {
+        Self::packed(self.chosen().collect(), short)
+            .iter()
+            .any(|(e, _, _)| e.sources().contains(&source))
     }
 }
 
@@ -495,7 +509,19 @@ mod tests {
     #[test]
     fn the_default_list_is_every_element_in_order() {
         let ids: Vec<String> = Area::shipped().layout.choices.into_iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["battery", "network", "network-info", "clock"]);
+        assert_eq!(
+            ids,
+            [
+                "battery",
+                "network",
+                "network-info",
+                "temperatures",
+                "cpu",
+                "memory",
+                "system",
+                "clock"
+            ]
+        );
     }
 
     fn area(text: &str) -> Area {
@@ -534,7 +560,7 @@ mod tests {
         // planned rows are those with everything shown.
         assert_eq!(ids(&a.shown(&Data::EMPTY, false)), [("clock", cells(0, 0, 1, 1))]);
         assert_eq!(a.rows(&Data::EMPTY, false), 1);
-        assert_eq!(a.planned_rows(false), 2);
+        assert_eq!(a.planned_rows(false), 3);
         // A network with a route brings the graph and the list in, and the
         // clock goes down to the second row.
         let net = crate::status::network::sample(10);
@@ -554,12 +580,14 @@ mod tests {
         );
         assert_eq!(a.rows(&with_net, false), 2);
         // A hidden element takes no part, planned or drawn.
-        let hidden = area("-battery 1x1\n-network 2x2\n-network-info 1x2\n-clock 1x1\n");
+        let hidden = area(
+            "-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+        );
         assert_eq!(hidden.planned_rows(false), 0);
         assert_eq!(hidden.rows(&with, false), 0);
         assert!(!hidden.needs(Source::Battery) && !hidden.needs(Source::Network));
         assert!(a.needs(Source::Battery) && a.needs(Source::Network));
-        assert!(!a.needs(Source::Hardware));
+        assert!(a.needs(Source::Hardware), "the hardware elements are in the list too");
         // An empty area: nothing.
         assert_eq!(Area::default().planned_rows(false), 0);
     }
@@ -644,5 +672,59 @@ mod tests {
         // The clock wakes within the minute.
         let both = Area::shipped().wake(&Data::EMPTY, Pos2::ZERO, cell, 3.0, at, false);
         assert!(both.is_some_and(|d| d <= Duration::from_secs(60)), "{both:?}");
+    }
+
+    #[test]
+    fn the_default_list_built_from_the_elements_packs_to_the_pr6_layout() {
+        let ids: Vec<&str> = ELEMENTS.iter().map(|e| e.id()).collect();
+        assert_eq!(
+            ids,
+            [
+                "battery",
+                "network",
+                "network-info",
+                "temperatures",
+                "cpu",
+                "memory",
+                "system",
+                "clock"
+            ]
+        );
+        let sizes: Vec<Size> = ELEMENTS.iter().filter_map(|e| e.sizes().first().copied()).collect();
+        let shorts: Vec<Option<Size>> = ELEMENTS.iter().map(|e| e.short_size()).collect();
+        let got: Vec<(u8, u8, u8, u8)> = layout::pack(&sizes, false, &shorts)
+            .iter()
+            .map(|c| {
+                let c = c.expect("every element has a place");
+                (c.col, c.row, c.w, c.h)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, 0, 1, 1),
+                (1, 0, 2, 2),
+                (3, 0, 1, 2),
+                (0, 1, 1, 1),
+                (0, 2, 1, 1),
+                (1, 2, 1, 1),
+                (2, 2, 1, 1),
+                (3, 2, 1, 1)
+            ]
+        );
+        assert_eq!(Area::shipped().planned_rows(false), 3);
+    }
+
+    #[test]
+    fn a_source_is_placed_only_where_an_element_of_it_gets_cells() {
+        let shipped = Area::shipped();
+        assert!(shipped.places(Source::Hardware, false));
+        // On a short screen the hardware elements have no size.
+        assert!(!shipped.places(Source::Hardware, true));
+        assert!(shipped.places(Source::Network, true), "the graph has a short size");
+        let hidden = area("-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n");
+        assert!(!hidden.places(Source::Hardware, false));
+        assert!(!hidden.needs(Source::Hardware));
+        assert!(!Area::default().places(Source::Hardware, false));
     }
 }

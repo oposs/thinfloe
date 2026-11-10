@@ -353,6 +353,7 @@ mod tests {
             ("status/mod.rs", include_str!("status/mod.rs")),
             ("status/battery.rs", include_str!("status/battery.rs")),
             ("status/clock.rs", include_str!("status/clock.rs")),
+            ("status/hardware.rs", include_str!("status/hardware.rs")),
             ("status/network.rs", include_str!("status/network.rs")),
             ("status/network_info.rs", include_str!("status/network_info.rs")),
             ("status/layout.rs", include_str!("status/layout.rs")),

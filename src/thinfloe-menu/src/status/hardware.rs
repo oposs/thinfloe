@@ -1,29 +1,23 @@
-//! The hardware elements (`Type=hardware`), one sampler and four tiles, chosen
-//! by `Show=` in the file: `temperatures`, `cpu` (load and clock), `memory` (RAM
-//! and zram) and `system` (fans, uptime and the machine's model). One
-//! line per value, the label in Geo on the left, the value in Hack on the right;
-//! a value the machine does not provide drops out, and a tile left with nothing
-//! is not shown. Nothing pages: sensors that do not fit the temperature tile
-//! drop the least important first. A hot temperature has its line in the warning
+//! The hardware elements, one sampler and four elements: `temperatures`,
+//! `cpu` (load and clock), `memory` (RAM and zram) and `system` (fans, uptime
+//! and the machine's model). One line per value, the label in Geo on the
+//! left, the value in the monospace font on the right; a value the machine
+//! does not provide drops out, and an element left with nothing is not shown.
+//! Nothing pages: sensors that do not fit the temperature element drop the
+//! least important first. A hot temperature has its line in the warning
 //! colour, a critical one in the alert colour. The data is a
 //! `hardware::Snapshot` the menu copies from the sampler thread.
 
-use super::style::{self, Anchor, Face, hex, mono_width};
-use super::{Element, Kind, Room, Sources};
-use crate::desktop::Entry;
-use crate::hardware::{Heat, Snapshot, Temp, Usage};
-use egui::Color32;
+use super::battery::{cut, per_page};
+use super::{Data, Element, Size, Source, background, cell_height, sizes_for};
+use crate::brand::role;
+use crate::hardware::{self, Heat, Snapshot, Temp, Usage};
+use egui::{Color32, FontId, Rect, pos2};
+use shadcn_egui::Theme;
 use std::cmp::Reverse;
-use std::fmt::Write;
 use std::time::{Duration, Instant};
 
-pub const KIND: Kind = Kind {
-    name: "hardware",
-    options: &["Show"],
-    build,
-};
-
-/// What a hardware tile shows.
+/// What an element shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Show {
     Temperatures,
@@ -34,42 +28,39 @@ pub enum Show {
 
 impl Show {
     pub const ALL: [Show; 4] = [Show::Temperatures, Show::Cpu, Show::Memory, Show::System];
-
-    fn parse(text: &str) -> Option<Show> {
-        match text {
-            "temperatures" => Some(Show::Temperatures),
-            "cpu" => Some(Show::Cpu),
-            "memory" => Some(Show::Memory),
-            "system" => Some(Show::System),
-            _ => None,
-        }
-    }
 }
 
-fn build(entry: &Entry) -> Result<Box<dyn Element>, String> {
-    let show = entry.get("Show").ok_or("no Show")?;
-    let show =
-        Show::parse(show).ok_or_else(|| format!("Show must be temperatures, cpu, memory or system, not '{show}'"))?;
-    Ok(Box::new(Hardware { show }))
+pub struct Temperatures;
+pub struct Cpu;
+pub struct Memory;
+pub struct System;
+
+/// A colour by what it says; the theme gives the colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    Warn,
+    Alert,
 }
 
-pub struct Hardware {
-    pub show: Show,
-}
-
-/// One line: a label and, unless the label stands alone, a value.
+/// One line: a label and its value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
     pub label: String,
-    pub value: Option<String>,
-    pub colour: Color32,
+    pub value: String,
+    pub tone: Tone,
 }
 
-pub(super) fn line(label: impl Into<String>, value: impl Into<String>) -> Line {
+/// Names come from the machine: a control character would break a line.
+fn clean(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+fn line(label: impl AsRef<str>, value: impl AsRef<str>) -> Line {
     Line {
-        label: label.into(),
-        value: Some(value.into()),
-        colour: style::foreground(),
+        label: clean(label.as_ref()),
+        value: clean(value.as_ref()),
+        tone: Tone::Normal,
     }
 }
 
@@ -106,11 +97,19 @@ pub fn uptime(secs: u64) -> String {
     }
 }
 
-fn heat_colour(heat: Heat) -> Color32 {
+fn heat_tone(heat: Heat) -> Tone {
     match heat {
-        Heat::Normal => style::foreground(),
-        Heat::Hot => style::WARN,
-        Heat::Critical => style::ALERT,
+        Heat::Normal => Tone::Normal,
+        Heat::Hot => Tone::Warn,
+        Heat::Critical => Tone::Alert,
+    }
+}
+
+fn colour(t: &Theme, tone: Tone) -> Color32 {
+    match tone {
+        Tone::Normal => t.palette().foreground,
+        Tone::Warn => t.role(role::WARN),
+        Tone::Alert => t.role(role::ALERT),
     }
 }
 
@@ -134,9 +133,8 @@ fn temperatures(snap: &Snapshot, per: usize) -> Vec<Line> {
     kept.sort_unstable();
     kept.into_iter()
         .map(|i| Line {
-            label: order[i].label.clone(),
-            value: Some(format!("{:.0} °C", order[i].celsius)),
-            colour: heat_colour(order[i].heat),
+            tone: heat_tone(order[i].heat),
+            ..line(&order[i].label, format!("{:.0} °C", order[i].celsius))
         })
         .collect()
 }
@@ -152,7 +150,7 @@ fn fan_value(speeds: &[u32]) -> String {
 
 /// The label and value of the machine's line: its model, or its maker on a
 /// machine that names no model. Both on one line did not fit the 220 points of
-/// the tile: `Gigabyte Technology GB-BXi3-5010` was cut at the padding.
+/// a cell: `Gigabyte Technology GB-BXi3-5010` was cut at the padding.
 fn machine(snap: &Snapshot) -> Option<(&'static str, String)> {
     match (&snap.model, &snap.maker) {
         (Some(model), _) => Some((MODEL, model.clone())),
@@ -161,9 +159,9 @@ fn machine(snap: &Snapshot) -> Option<(&'static str, String)> {
     }
 }
 
-/// The lines of a tile in a room of `per` lines; empty when the machine has
-/// none of its values. Only the temperatures can be more than the three lines
-/// that fit the smallest cell.
+/// The lines of an element in a room of `per` lines; empty when the machine
+/// has none of its values. Only the temperatures can be more than the three
+/// lines that fit the smallest cell.
 pub fn lines(snap: &Snapshot, show: Show, per: usize) -> Vec<Line> {
     match show {
         Show::Temperatures => temperatures(snap, per),
@@ -190,101 +188,147 @@ pub fn lines(snap: &Snapshot, show: Show, per: usize) -> Vec<Line> {
     }
 }
 
-/// The lines of a tile in `room`: `lines`, with the fans of the system tile cut
-/// to as many as fit beside their label with the unit still showing, and a long
-/// model cut at its end, because a value grows left from the padding and would
-/// run over its label. The first fans stay; a single fan always stays, and a
-/// long fan line never reaches the label.
-pub fn lines_in(snap: &Snapshot, show: Show, per: usize, room: Room) -> Vec<Line> {
+/// How wide text is: a label in Geo and a value in the monospace font.
+pub struct Measure<'a> {
+    pub label: &'a dyn Fn(&str) -> f32,
+    pub value: &'a dyn Fn(&str) -> f32,
+}
+
+/// The lines of an element in `per` lines with `free` points between the
+/// paddings, less the gap between label and value: `lines`, with the fans of
+/// the system element cut to as many as fit beside their label with the unit
+/// still showing, and a long model cut at its end, because a value is
+/// right-aligned and would run over its label. The first fans stay; a single
+/// fan always stays.
+pub fn lines_in(snap: &Snapshot, show: Show, per: usize, free: f32, w: &Measure) -> Vec<Line> {
     if show != Show::System {
         return lines(snap, show, per);
     }
-    let st = room.style();
-    let free = room.size.x - 2.0 * st.pad_x - st.gap;
     let fits = |n: usize| {
-        let value = fan_value(&snap.fans[..n]);
         let label = if n == 1 { "Fan" } else { "Fans" };
-        style::label_width(label, st.title) + mono_width(&value, st.value) <= free
+        (w.label)(label) + (w.value)(&fan_value(&snap.fans[..n])) <= free
     };
     let n = (1..=snap.fans.len())
         .rev()
         .find(|&n| fits(n))
         .unwrap_or(snap.fans.len().min(1));
-    let cut = Snapshot {
+    let cut_fans = Snapshot {
         fans: snap.fans[..n].to_vec(),
         ..snap.clone()
     };
-    let mut out = lines(&cut, show, per);
+    let mut out = lines(&cut_fans, show, per);
+    let em = (w.value)("M").max(0.01);
     for l in out.iter_mut().filter(|l| l.label == MODEL || l.label == MAKER) {
-        let room_left = free - style::label_width(&l.label, st.title);
-        let chars = (room_left / mono_width("M", st.value)).max(0.0) as usize;
-        if let Some(v) = &mut l.value {
-            *v = v.chars().take(chars).collect();
-        }
+        let chars = ((free - (w.label)(&l.label)) / em).max(0.0) as usize;
+        l.value = l.value.chars().take(chars).collect();
     }
     out
 }
 
-/// The SVG of `lines` in `room`: the same box and line placing as the
-/// battery. A label is clipped where its value starts, or at the padding.
-pub fn svg(lines: &[Line], room: Room) -> String {
-    let st = room.style();
-    let (w, h) = (room.size.x, room.size.y);
-    let top = (h - lines.len() as f32 * st.row) / 2.0;
-    let right = w - st.pad_x;
-    let mut s = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\
-         <rect width=\"{w}\" height=\"{h}\" fill=\"{}\"/>",
-        hex(style::BACKGROUND)
-    );
+fn show_in(snap: &Snapshot, show: Show) -> bool {
+    !lines(snap, show, 1).is_empty()
+}
+
+/// Draw the lines of `show` in `rect` of `size` cells, centred: the label
+/// at the left padding, cut where its value starts, the value right-aligned
+/// at the right padding.
+fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, show: Show) {
+    let t = Theme::current(ui.ctx());
+    let p = ui.painter();
+    let m = sizes_for(cell_height(rect, size));
+    let label_font = crate::brand::geo(m.label);
+    let value_font = FontId::monospace(m.value);
+    let width = |text: &str, font: &FontId| {
+        p.layout_no_wrap(text.to_string(), font.clone(), Color32::TRANSPARENT)
+            .size()
+            .x
+    };
+    let (label_w, value_w) = (|s: &str| width(s, &label_font), |s: &str| width(s, &value_font));
+    let measure = Measure {
+        label: &label_w,
+        value: &value_w,
+    };
+    let (left, right) = (rect.left() + m.pad_x, rect.right() - m.pad_x);
+    let lines = lines_in(snap, show, per_page(rect.height(), &m), right - left - m.gap, &measure);
+    let top = rect.top() + (rect.height() - lines.len() as f32 * m.row) / 2.0;
     for (i, l) in lines.iter().enumerate() {
-        let y = style::baseline(top + i as f32 * st.row, st.row, st.title);
-        let clip_right = match &l.value {
-            Some(v) => right - mono_width(v, st.value) - st.gap,
-            None => right,
-        };
-        let _ = write!(
-            s,
-            "<clipPath id=\"l{i}\"><rect width=\"{}\" height=\"{h}\"/></clipPath><g clip-path=\"url(#l{i})\">",
-            clip_right.max(0.0)
-        );
-        style::text(
-            &mut s,
-            st.pad_x,
-            y,
-            Face::Label,
-            st.title,
-            l.colour,
-            Anchor::Start,
-            &l.label,
-        );
-        s.push_str("</g>");
-        if let Some(v) = &l.value {
-            style::text(&mut s, right, y, Face::Value, st.value, l.colour, Anchor::End, v);
+        let mid = top + (i as f32 + 0.5) * m.row;
+        let c = colour(&t, l.tone);
+        let v = cut(p, &l.value, value_font.clone(), c, right - left);
+        let x = right - v.size().x;
+        let label = cut(p, &l.label, label_font.clone(), c, x - m.gap - left);
+        if v.size().x <= right - left + 0.01 {
+            p.galley(pos2(x, mid - v.size().y / 2.0), v, c);
         }
-    }
-    s.push_str("</svg>");
-    s
-}
-
-impl Element for Hardware {
-    fn visible(&self, data: &Sources) -> bool {
-        data.hardware.is_some_and(|snap| !lines(snap, self.show, 1).is_empty())
-    }
-
-    fn svg(&self, data: &Sources, room: Room, _now: Instant) -> String {
-        let Some(snap) = data.hardware else {
-            return String::new();
-        };
-        let per = super::battery::per_page(room.size.y, &room.style());
-        svg(&lines_in(snap, self.show, per, room), room)
-    }
-
-    /// Only a new reading changes the picture.
-    fn next_change(&self, _data: &Sources, _room: Room, _now: Instant) -> Option<Duration> {
-        None
+        p.galley(pos2(left, mid - label.size().y / 2.0), label, c);
     }
 }
+
+/// The part of `Element` the four share.
+fn draw(ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, show: Show) {
+    background(ui, rect);
+    if let Some(snap) = data.hardware {
+        paint(ui, rect, size, snap, show);
+    }
+}
+
+macro_rules! element {
+    ($ty:ty, $show:expr, $id:literal, $name:literal, $sizes:expr) => {
+        impl Element for $ty {
+            fn id(&self) -> &'static str {
+                $id
+            }
+
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn sizes(&self) -> &'static [Size] {
+                $sizes
+            }
+
+            fn short_size(&self) -> Option<Size> {
+                None
+            }
+
+            fn sources(&self) -> &'static [Source] {
+                &[Source::Hardware]
+            }
+
+            fn has_content(&self, data: &Data) -> bool {
+                data.hardware.is_some_and(|snap| show_in(snap, $show))
+            }
+
+            fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, _now: Instant) {
+                draw(ui, rect, size, data, $show);
+            }
+
+            /// Only a new reading changes the picture.
+            fn next_change(&self, _data: &Data, _rect: Rect, _now: Instant) -> Option<Duration> {
+                None
+            }
+
+            fn refresh(&self) -> Option<Duration> {
+                Some(hardware::EVERY)
+            }
+        }
+    };
+}
+
+const ONE: Size = Size { w: 1, h: 1 };
+const TALL: Size = Size { w: 1, h: 2 };
+const WIDE: Size = Size { w: 2, h: 1 };
+
+element!(
+    Temperatures,
+    Show::Temperatures,
+    "temperatures",
+    "Temperatures",
+    &[ONE, TALL]
+);
+element!(Cpu, Show::Cpu, "cpu", "CPU", &[ONE]);
+element!(Memory, Show::Memory, "memory", "Memory", &[ONE]);
+element!(System, Show::System, "system", "Fans, uptime, model", &[ONE, WIDE]);
 
 /// A machine as the owner might have one: for the tests and the pictures.
 #[cfg(test)]
@@ -322,60 +366,144 @@ pub fn sample() -> Snapshot {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{self, CELL_HEIGHTS, flatten, rect_of, shapes, text_boxes, texts};
     use super::*;
-    use crate::status::Cells;
-    use crate::status::render::{self, GEO_FAMILY, MONO_FAMILY};
-    use crate::status::style::{LARGE, Style};
-    use crate::ui::{TILE_GAP, TILE_H, TILE_H_MIN};
-    use egui::vec2;
+    use crate::brand::STATUS_CELL_LARGE_H;
+    use egui::{FontFamily, Shape};
 
-    fn room(h: f32) -> Room {
-        Cells::parse("0,1,1,1").unwrap().room(vec2(220.0, h), TILE_GAP)
-    }
+    const FOUR: usize = 4;
+    const THREE: usize = 3;
 
-    /// The room of a tile as shipped, at cells `h` high.
-    fn room_of(show: Show, h: f32) -> Room {
-        let cells = if show == Show::System { "2,2,1,1" } else { "0,1,1,1" };
-        Cells::parse(cells).unwrap().room(vec2(220.0, h), TILE_GAP)
-    }
-
-    fn sources(snap: &Snapshot) -> Sources<'_> {
-        Sources {
-            battery: &[],
-            battery_since: None,
-            network: None,
-            network_since: None,
+    fn data(snap: &Snapshot) -> Data<'_> {
+        Data {
             hardware: Some(snap),
+            ..Data::EMPTY
+        }
+    }
+
+    fn element_of(show: Show) -> &'static dyn Element {
+        match show {
+            Show::Temperatures => &Temperatures,
+            Show::Cpu => &Cpu,
+            Show::Memory => &Memory,
+            Show::System => &System,
         }
     }
 
     fn flat(lines: &[Line]) -> Vec<String> {
-        lines
-            .iter()
-            .map(|l| match &l.value {
-                Some(v) => format!("{} {v}", l.label),
-                None => l.label.clone(),
-            })
-            .collect()
+        lines.iter().map(|l| format!("{} {}", l.label, l.value)).collect()
     }
 
     fn text(snap: &Snapshot, show: Show, per: usize) -> Vec<String> {
         flat(&lines(snap, show, per))
     }
 
-    const FOUR: usize = 4;
-    const THREE: usize = 3;
+    fn theme() -> Theme {
+        crate::brand::theme()
+    }
 
-    #[test]
-    fn a_cell_holds_four_lines_at_76_and_three_at_64() {
-        let per = |h: f32| super::super::battery::per_page(h, &Style::for_cell(h));
-        assert_eq!(per(TILE_H), FOUR);
-        assert_eq!(per(TILE_H_MIN), THREE);
-        assert_eq!(per(70.0), THREE);
+    /// Twelve sensors, eight fans and a model of 60 characters.
+    fn crowded() -> Snapshot {
+        Snapshot {
+            temps: (0..12)
+                .map(|i| Temp {
+                    label: if i == 0 {
+                        "CPU".into()
+                    } else {
+                        format!("Sensor number {i}")
+                    },
+                    celsius: 40.0 + i as f32 * 5.0,
+                    heat: [Heat::Normal, Heat::Hot, Heat::Critical][i % 3],
+                })
+                .collect(),
+            fans: vec![11111, 2222, 3333, 4444, 5555, 6666, 7777, 8888],
+            model: Some("M".repeat(60)),
+            ..sample()
+        }
+    }
+
+    /// Text widths of the real fonts at the sizes of a cell `h` high.
+    fn widths(h: f32, f: impl FnOnce(&Measure) -> Vec<Line>) -> Vec<Line> {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let m = sizes_for(h);
+        let mut out = Vec::new();
+        let mut f = Some(f);
+        for _ in 0..3 {
+            let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let p = ui.painter();
+                let w = |s: &str, font: FontId| p.layout_no_wrap(s.to_string(), font, Color32::TRANSPARENT).size().x;
+                let (l, v) = (
+                    |s: &str| w(s, crate::brand::geo(m.label)),
+                    |s: &str| w(s, FontId::monospace(m.value)),
+                );
+                if let Some(f) = f.take() {
+                    out = f(&Measure { label: &l, value: &v });
+                }
+            });
+            o.textures_delta.clear();
+        }
+        out
     }
 
     #[test]
-    fn each_tile_shows_its_own_values() {
+    fn temperatures_draws_inside_its_rect_at_every_size() {
+        for snap in [sample(), crowded(), Snapshot::default()] {
+            testing::assert_inside(&Temperatures, &data(&snap), Instant::now());
+        }
+    }
+
+    #[test]
+    fn cpu_draws_inside_its_rect_at_every_size() {
+        for snap in [sample(), crowded()] {
+            testing::assert_inside(&Cpu, &data(&snap), Instant::now());
+        }
+    }
+
+    #[test]
+    fn memory_draws_inside_its_rect_at_every_size() {
+        for snap in [sample(), crowded()] {
+            testing::assert_inside(&Memory, &data(&snap), Instant::now());
+        }
+    }
+
+    #[test]
+    fn system_draws_inside_its_rect_at_every_size() {
+        let hostile = Snapshot {
+            model: Some("A&B\x01<x>\n\u{202e}".repeat(5)),
+            ..crowded()
+        };
+        for snap in [sample(), crowded(), hostile] {
+            testing::assert_inside(&System, &data(&snap), Instant::now());
+        }
+    }
+
+    #[test]
+    fn the_elements_are_what_the_spec_says() {
+        let size = |w, h| Size { w, h };
+        let want: [(Show, &str, &str, &[Size]); 4] = [
+            (
+                Show::Temperatures,
+                "temperatures",
+                "Temperatures",
+                &[size(1, 1), size(1, 2)],
+            ),
+            (Show::Cpu, "cpu", "CPU", &[size(1, 1)]),
+            (Show::Memory, "memory", "Memory", &[size(1, 1)]),
+            (Show::System, "system", "Fans, uptime, model", &[size(1, 1), size(2, 1)]),
+        ];
+        for (show, id, name, sizes) in want {
+            let e = element_of(show);
+            assert_eq!((e.id(), e.name(), e.sizes()), (id, name, sizes));
+            assert_eq!(e.short_size(), None, "{id}");
+            assert_eq!(e.sources(), &[Source::Hardware], "{id}");
+            assert_eq!(e.refresh(), Some(Duration::from_secs(5)), "{id}");
+            assert!(crate::status::ELEMENTS.iter().any(|x| x.id() == id), "{id} is listed");
+        }
+    }
+
+    #[test]
+    fn each_element_shows_its_own_values() {
         let s = sample();
         assert_eq!(
             text(&s, Show::Temperatures, FOUR),
@@ -406,7 +534,6 @@ mod tests {
                 .collect(),
             ..Snapshot::default()
         };
-        // All normal: the sensor order decides.
         assert_eq!(
             text(&calm, Show::Temperatures, FOUR),
             ["CPU 40 °C", "GPU 40 °C", "Disk 40 °C", "RAM 40 °C"]
@@ -416,7 +543,6 @@ mod tests {
             ["CPU 40 °C", "GPU 40 °C", "Disk 40 °C"]
         );
         assert_eq!(text(&calm, Show::Temperatures, 1), ["CPU 40 °C"]);
-        // A hot sensor is not the one dropped, and keeps its place in the order.
         let hot = Snapshot {
             temps: vec![
                 t("CPU", 40.0, Heat::Normal),
@@ -435,15 +561,12 @@ mod tests {
             text(&hot, Show::Temperatures, FOUR),
             ["CPU 40 °C", "GPU 40 °C", "WiFi 81 °C", "Board 99 °C"]
         );
-        // The CPU stays even when all the others are hot, and with one line.
         assert_eq!(text(&hot, Show::Temperatures, 1), ["CPU 40 °C"]);
-        // A CPU sensor found later in the list still comes first.
         let late = Snapshot {
             temps: vec![t("Disk", 40.0, Heat::Normal), t("CPU", 40.0, Heat::Normal)],
             ..Snapshot::default()
         };
         assert_eq!(text(&late, Show::Temperatures, FOUR), ["CPU 40 °C", "Disk 40 °C"]);
-        // No CPU sensor: the hottest wins the only line.
         let none = Snapshot {
             temps: vec![t("Disk", 40.0, Heat::Normal), t("WiFi", 81.0, Heat::Hot)],
             ..Snapshot::default()
@@ -452,8 +575,25 @@ mod tests {
     }
 
     #[test]
-    fn what_a_machine_lacks_drops_out_and_a_tile_with_nothing_shows_nothing() {
-        // A VM: a clock, memory, uptime and a name; no sensor at all.
+    fn the_temperature_element_drops_sensors_it_has_no_line_for() {
+        // 12 sensors in one cell: the lines drawn are the kept ones, CPU first.
+        let snap = crowded();
+        let size = Size { w: 1, h: 1 };
+        for h in CELL_HEIGHTS {
+            let rect = rect_of(size, h);
+            let drawn = text_boxes(&shapes(&Temperatures, rect, size, &data(&snap), Instant::now()));
+            let labels: Vec<&str> = drawn
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .filter(|t| t.starts_with("CPU") || t.starts_with("Sensor"))
+                .collect();
+            assert!(!labels.is_empty() && labels.len() < 12, "{h}: {labels:?}");
+            assert_eq!(labels[0], "CPU", "{h}");
+        }
+    }
+
+    #[test]
+    fn what_a_machine_lacks_drops_out_and_an_element_with_nothing_shows_nothing() {
         let vm = Snapshot {
             temps: vec![],
             load: None,
@@ -473,20 +613,38 @@ mod tests {
             ..Snapshot::default()
         };
         assert_eq!(text(&bare, Show::System, FOUR), ["Up 0 m"]);
-        let tile = |show| Hardware { show };
         for show in [Show::Temperatures, Show::Cpu, Show::Memory] {
-            assert!(!tile(show).visible(&sources(&bare)), "{show:?}");
+            assert!(!element_of(show).has_content(&data(&bare)), "{show:?}");
         }
-        assert!(tile(Show::System).visible(&sources(&bare)));
+        assert!(element_of(Show::System).has_content(&data(&bare)));
         // No placeholder text anywhere.
-        let s = tile(Show::Cpu).svg(&sources(&vm), room(TILE_H), Instant::now());
-        for gone in ["load", "°C", "–", "n/a", "zram", "Fan"] {
-            assert!(!s.contains(gone), "{gone} in {s}");
+        let size = Size { w: 1, h: 1 };
+        let drawn = texts(&shapes(
+            &Cpu,
+            rect_of(size, STATUS_CELL_LARGE_H),
+            size,
+            &data(&vm),
+            Instant::now(),
+        ));
+        for (t, _) in &drawn {
+            for gone in ["load", "°C", "–", "n/a", "zram", "Fan"] {
+                assert!(!t.contains(gone), "{gone} in {t}");
+            }
         }
     }
 
     #[test]
-    fn the_system_tile_has_one_line_for_the_fans_and_one_for_the_machine() {
+    fn has_content_needs_a_sampler_and_a_value() {
+        for show in Show::ALL {
+            let e = element_of(show);
+            assert!(e.has_content(&data(&sample())), "{show:?}");
+            assert!(!e.has_content(&data(&Snapshot::default())), "{show:?}");
+            assert!(!e.has_content(&Data::EMPTY), "no sampler: nothing");
+        }
+    }
+
+    #[test]
+    fn the_system_element_has_one_line_for_the_fans_and_one_for_the_machine() {
         let many = Snapshot {
             fans: vec![12000, 1800, 900, 600],
             maker: Some("Gigabyte Technology".into()),
@@ -502,18 +660,11 @@ mod tests {
             ]
         );
         let same = Snapshot {
-            fans: vec![],
-            uptime: None,
             maker: Some("QEMU".into()),
             model: Some("QEMU".into()),
             ..Snapshot::default()
         };
         assert_eq!(text(&same, Show::System, THREE), ["Model QEMU"]);
-        let only = Snapshot {
-            model: Some("X1".into()),
-            ..Snapshot::default()
-        };
-        assert_eq!(text(&only, Show::System, THREE), ["Model X1"]);
         let only_maker = Snapshot {
             maker: Some("Acme".into()),
             ..Snapshot::default()
@@ -523,13 +674,28 @@ mod tests {
 
     #[test]
     fn hot_and_critical_lines_use_the_warning_colours() {
-        let l = lines(&sample(), Show::Temperatures, FOUR);
-        let colour = |name: &str| l.iter().find(|l| l.label == name).unwrap().colour;
-        assert_eq!(colour("CPU"), style::foreground());
-        assert_eq!(colour("WiFi"), style::WARN);
-        assert_eq!(colour("GPU"), style::ALERT);
-        let s = svg(&l, room(TILE_H));
-        assert!(s.contains(&hex(style::ALERT)) && s.contains(&hex(style::WARN)), "{s}");
+        let t = theme();
+        let (fg, warn, alert) = (t.palette().foreground, t.role(role::WARN), t.role(role::ALERT));
+        assert_ne!(warn, alert);
+        let size = Size { w: 1, h: 2 };
+        let drawn = text_boxes(&shapes(
+            &Temperatures,
+            rect_of(size, STATUS_CELL_LARGE_H),
+            size,
+            &data(&sample()),
+            Instant::now(),
+        ));
+        let colour = |name: &str| {
+            drawn
+                .iter()
+                .find(|(s, _, _)| s == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .2
+        };
+        assert_eq!(colour("CPU"), fg);
+        assert_eq!(colour("52 °C"), fg);
+        assert_eq!((colour("WiFi"), colour("71 °C")), (warn, warn));
+        assert_eq!((colour("GPU"), colour("97 °C")), (alert, alert));
     }
 
     #[test]
@@ -563,172 +729,43 @@ mod tests {
     fn nothing_turns_a_page() {
         let t0 = Instant::now();
         let snap = sample();
-        let d = sources(&snap);
+        let later = t0 + Duration::from_secs(600);
         for show in Show::ALL {
-            let e = Hardware { show };
-            let r = room_of(show, TILE_H);
-            assert_eq!(e.next_change(&d, r, t0), None, "{show:?}");
-            let later = t0 + Duration::from_secs(600);
-            assert_eq!(e.svg(&d, r, t0), e.svg(&d, r, later), "{show:?}");
+            let e = element_of(show);
+            let size = e.sizes()[0];
+            let r = rect_of(size, STATUS_CELL_LARGE_H);
+            assert_eq!(e.next_change(&data(&snap), r, t0), None, "{show:?}");
+            let a = texts(&shapes(e, r, size, &data(&snap), t0));
+            let b = texts(&shapes(e, r, size, &data(&snap), later));
+            assert_eq!(a, b, "{show:?}");
         }
     }
 
     #[test]
-    fn shown_only_with_something_to_show() {
-        let now = Instant::now();
-        let none = Sources {
-            battery: &[],
-            battery_since: None,
-            network: None,
-            network_since: None,
-            hardware: None,
-        };
-        for show in Show::ALL {
-            let e = Hardware { show };
-            assert!(e.visible(&sources(&sample())), "{show:?}");
-            assert!(!e.visible(&sources(&Snapshot::default())), "{show:?}");
-            assert!(!e.visible(&none), "no sampler: nothing");
-            assert_eq!(e.svg(&none, room(TILE_H), now), "");
-        }
-    }
-
-    #[test]
-    fn show_comes_from_the_file() {
-        let b = |text: &str| {
-            let e = crate::desktop::parse_group(&format!("[G]\n{text}\n"), "[G]").unwrap();
-            build(&e).map(|_| ())
-        };
-        for good in ["temperatures", "cpu", "memory", "system"] {
-            assert_eq!(b(&format!("Show={good}")), Ok(()));
-        }
-        assert_eq!(b("Other=1"), Err("no Show".to_string()));
-        assert_eq!(
-            b("Show=fans"),
-            Err("Show must be temperatures, cpu, memory or system, not 'fans'".to_string())
-        );
-    }
-
-    #[test]
-    fn names_from_the_system_are_escaped_and_a_control_character_blanks_nothing() {
-        let odd = Snapshot {
-            temps: vec![Temp {
-                label: "<b>&\"'".into(),
-                celsius: 40.0,
-                heat: Heat::Normal,
-            }],
-            model: Some("A&B\x01<x>".into()),
-            ..Snapshot::default()
-        };
-        let s = svg(&lines(&odd, Show::Temperatures, FOUR), room(TILE_H));
-        assert!(s.contains("&lt;b&gt;&amp;&quot;&apos;"), "{s}");
-        render::render(&s, [220, 76]).expect("renders");
-        let s = svg(&lines(&odd, Show::System, FOUR), room(TILE_H));
-        assert!(s.contains("A&amp;B?&lt;x&gt;"), "{s}");
-        render::render(&s, [220, 76]).expect("renders");
-    }
-
-    /// The ink of every text, with the real fonts. Clips are not taken into
-    /// account: a clipped label counts at its full width.
-    fn ink(svg: &str) -> Vec<(String, resvg::usvg::Rect)> {
-        let opt = resvg::usvg::Options {
-            fontdb: render::fonts(),
-            font_family: render::SANS_FAMILY.into(),
-            ..Default::default()
-        };
-        let tree = resvg::usvg::Tree::from_str(svg, &opt).unwrap();
-        let doc = resvg::usvg::roxmltree::Document::parse(svg).unwrap();
-        let bodies: Vec<String> = doc
-            .descendants()
-            .filter(|n| n.has_tag_name("text"))
-            .map(|n| n.text().unwrap_or("").to_string())
-            .collect();
-        fn walk(g: &resvg::usvg::Group, out: &mut Vec<resvg::usvg::Rect>) {
-            for n in g.children() {
-                match n {
-                    resvg::usvg::Node::Group(c) => walk(c, out),
-                    resvg::usvg::Node::Text(t) => out.push(t.flattened().abs_bounding_box()),
-                    _ => {}
-                }
-            }
-        }
-        let mut boxes = Vec::new();
-        walk(tree.root(), &mut boxes);
-        assert_eq!(boxes.len(), bodies.len());
-        bodies.into_iter().zip(boxes).collect()
-    }
-
-    /// Every ink box lies inside the room and none touches another.
-    fn assert_clean(b: &[(String, resvg::usvg::Rect)], r: Room, what: &str) {
-        for (i, (ta, a)) in b.iter().enumerate() {
-            assert!(
-                a.left() >= 0.0 && a.top() >= 0.0 && a.right() <= r.size.x && a.bottom() <= r.size.y,
-                "{what}: {ta} {a:?}"
-            );
-            for (tb, c) in &b[i + 1..] {
-                let hit = a.left() < c.right() && c.left() < a.right() && a.top() < c.bottom() && c.top() < a.bottom();
-                assert!(!hit, "{what}: {ta} {a:?} overlaps {tb} {c:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn no_text_overlaps_another_or_leaves_the_element_with_the_real_fonts() {
-        let busy = Snapshot {
-            fans: vec![12000, 1800, 900, 600],
-            ..sample()
-        };
-        for snap in [sample(), busy] {
-            for show in Show::ALL {
-                for h in [TILE_H, TILE_H_MIN, 70.0] {
-                    let r = room_of(show, h);
-                    let e = Hardware { show };
-                    let s = e.svg(&sources(&snap), r, Instant::now());
-                    let b = ink(&s);
-                    assert!(!b.is_empty(), "{show:?} at {h}");
-                    assert_clean(&b, r, &format!("{show:?} at {h}"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_system_tile_is_one_cell_wide_and_keeps_the_fans_that_fit_with_their_unit() {
+    fn the_fans_that_fit_stay_with_their_unit_and_never_reach_the_label() {
         let mut kept = Vec::new();
         for n in 1..=6usize {
             let snap = Snapshot {
                 fans: [12000, 1800, 900, 600, 450, 300][..n].to_vec(),
                 ..sample()
             };
-            for h in [TILE_H, TILE_H_MIN] {
-                let r = room_of(Show::System, h);
-                assert_eq!(r.size.x, 220.0, "one cell wide");
-                let s = Hardware { show: Show::System }.svg(&sources(&snap), r, Instant::now());
-                let b = ink(&s);
-                assert_clean(&b, r, &format!("{n} fans at {h}"));
-                let fans = b
+            for h in CELL_HEIGHTS {
+                let size = Size { w: 1, h: 1 };
+                let rect = rect_of(size, h);
+                let m = sizes_for(h);
+                let boxes = text_boxes(&shapes(&System, rect, size, &data(&snap), Instant::now()));
+                let fan = boxes
                     .iter()
-                    .map(|(t, _)| t.as_str())
-                    .find(|t| *t == "rpm" || t.ends_with("rpm"));
-                let right = b.iter().map(|(_, a)| a.right()).fold(0.0, f32::max);
-                assert!(
-                    right <= r.size.x - room_of(Show::System, h).style().pad_x + 0.5,
-                    "{n} fans at {h}: {right}"
-                );
-                assert!(fans.is_some(), "the unit stays: {n} fans at {h}: {s}");
-                let shown = s.matches("rpm").count();
-                assert_eq!(shown, 1, "{n} fans at {h}");
-                if h == TILE_H {
-                    kept.push(
-                        b.iter()
-                            .filter(|(t, _)| t.ends_with("rpm"))
-                            .map(|(t, _)| t.split(' ').count() - 1)
-                            .sum::<usize>(),
-                    );
+                    .find(|(t, _, _)| t.ends_with("rpm"))
+                    .unwrap_or_else(|| panic!("the unit stays: {n} fans at {h}"));
+                assert!(fan.1.right() <= rect.right() - m.pad_x + 0.5, "{n} fans at {h}");
+                let label = boxes.iter().find(|(t, _, _)| t.starts_with("Fan")).unwrap();
+                assert!(label.1.right() < fan.1.left(), "{n} fans at {h}: label meets value");
+                if h == STATUS_CELL_LARGE_H {
+                    kept.push(fan.0.split(' ').count() - 1);
                 }
             }
         }
-        // One fan in full, never fewer than one, never more than were there, and
-        // the count only grows with the fans.
         assert_eq!(kept[0], 1);
         assert!(kept.windows(2).all(|w| w[0] <= w[1] && w[1] <= w[0] + 1), "{kept:?}");
         assert!(*kept.last().unwrap() >= 2, "two short speeds fit one cell: {kept:?}");
@@ -740,20 +777,29 @@ mod tests {
             fans: vec![1111, 2222, 3333, 4444, 5555, 6666, 7777, 8888],
             ..sample()
         };
-        let r = room_of(Show::System, TILE_H);
-        let st = r.style();
-        let free = r.size.x - 2.0 * st.pad_x - st.gap;
-        let width = |n: usize| style::label_width("Fans", st.title) + mono_width(&fan_value(&snap.fans[..n]), st.value);
-        let got = lines_in(&snap, Show::System, 3, r);
+        let m = sizes_for(STATUS_CELL_LARGE_H);
+        let free = 220.0 - 2.0 * m.pad_x - m.gap;
+        let got = widths(STATUS_CELL_LARGE_H, |w| lines_in(&snap, Show::System, 3, free, w));
         let value = got
             .iter()
-            .find_map(|l| l.value.clone().filter(|v| v.ends_with("rpm")))
-            .expect("a fan line");
+            .find(|l| l.value.ends_with("rpm"))
+            .expect("a fan line")
+            .value
+            .clone();
         let n = value.split(' ').count() - 1;
         assert!(n >= 2 && n < snap.fans.len(), "this test needs a cut: {value}");
         assert_eq!(value, fan_value(&snap.fans[..n]), "the first fans, in order");
-        assert!(width(n) <= free, "{n} fans do not fit");
-        assert!(width(n + 1) > free, "{} fans would have fit too", n + 1);
+        let over = widths(STATUS_CELL_LARGE_H, |w| {
+            vec![line(
+                "x",
+                format!("{}", (w.label)("Fans") + (w.value)(&fan_value(&snap.fans[..n + 1]))),
+            )]
+        });
+        assert!(
+            over[0].value.parse::<f32>().unwrap() > free,
+            "{} fans would have fit too",
+            n + 1
+        );
     }
 
     #[test]
@@ -766,85 +812,95 @@ mod tests {
             model: Some("GB-BXi3-5010 Some Long Board Name".into()),
             ..sample()
         };
-        for h in [TILE_H, TILE_H_MIN] {
-            let r = room_of(Show::System, h);
-            let st = r.style();
-            let got = lines_in(&short, Show::System, 3, r);
-            assert_eq!(got[0].label, "Model");
-            assert_eq!(got[0].value.as_deref(), Some("NUC8i3BEK"));
-            let got = lines_in(&long, Show::System, 3, r);
+        for h in CELL_HEIGHTS {
+            let m = sizes_for(h);
+            let free = 220.0 - 2.0 * m.pad_x - m.gap;
+            let got = widths(h, |w| lines_in(&short, Show::System, 3, free, w));
+            assert_eq!((got[0].label.as_str(), got[0].value.as_str()), ("Model", "NUC8i3BEK"));
+            let got = widths(h, |w| lines_in(&long, Show::System, 3, free, w));
             let model = got.iter().find(|l| l.label == "Model").unwrap();
-            let v = model.value.as_deref().unwrap();
-            assert!(v.starts_with("GB-BXi3") && v.len() < 33, "{v}");
-            let free = r.size.x - 2.0 * st.pad_x - st.gap;
             assert!(
-                style::label_width("Model", st.title) + mono_width(v, st.value) <= free,
-                "{v} at {h}"
+                model.value.starts_with("GB-BXi3") && model.value.len() < 33,
+                "{}",
+                model.value
             );
-            let s = Hardware { show: Show::System }.svg(&sources(&long), r, Instant::now());
-            assert_clean(&ink(&s), r, &format!("a long model at {h}"));
+            let size = Size { w: 1, h: 1 };
+            let rect = rect_of(size, h);
+            let boxes = text_boxes(&shapes(&System, rect, size, &data(&long), Instant::now()));
+            let label = boxes.iter().find(|(t, _, _)| t == "Model").unwrap();
+            let value = boxes.iter().find(|(t, _, _)| t.starts_with("GB-")).unwrap();
+            assert!(label.1.right() < value.1.left(), "at {h}");
+            assert!(value.1.right() <= rect.right() - m.pad_x + 0.5, "at {h}");
         }
     }
 
-    #[test]
-    fn a_long_machine_name_is_cut_at_the_padding_in_the_one_cell_system_tile() {
-        let snap = Snapshot {
-            maker: Some("Gigabyte Technology".into()),
-            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
-            ..sample()
-        };
-        for h in [TILE_H, TILE_H_MIN] {
-            let r = room_of(Show::System, h);
-            let st = r.style();
-            let s = Hardware { show: Show::System }.svg(&sources(&snap), r, Instant::now());
-            let img = render::render(&s, [r.size.x as usize, r.size.y as usize]).unwrap();
-            let w = r.size.x as usize;
-            let from = (w as f32 - st.pad_x).ceil() as usize + 1;
-            let last = img.pixels.len() / w;
-            let blank = (from..w).all(|x| (0..last).all(|y| img.pixels[y * w + x] == style::BACKGROUND));
-            assert!(blank, "ink right of the padding at {h}");
-            let inked = (0..w).any(|x| (0..last).any(|y| img.pixels[y * w + x] != style::BACKGROUND));
-            assert!(inked);
-        }
+    /// Wider than any 40 glyphs of the label font could be cut to.
+    fn m_value_em(h: f32) -> f32 {
+        sizes_for(h).label
     }
 
     #[test]
     fn a_long_sensor_name_is_cut_before_its_value() {
-        let r = room(TILE_H);
-        let long = vec![Line {
-            label: "W".repeat(40),
-            value: Some("100 °C".into()),
-            colour: style::foreground(),
-        }];
-        let s = svg(&long, r);
-        let img = render::render(&s, [220, 76]).unwrap();
-        let gap_from = 220.0 - LARGE.pad_x - mono_width("100 °C", LARGE.value) - LARGE.gap;
-        // Blank in the gap between the cut name and the value.
-        let blank = (gap_from.ceil() as usize + 1..(gap_from + LARGE.gap).floor() as usize)
-            .all(|x| (0..76).all(|y| img.pixels[y * 220 + x] == style::BACKGROUND));
-        assert!(blank, "{s}");
+        let snap = Snapshot {
+            temps: vec![Temp {
+                label: "W".repeat(40),
+                celsius: 100.0,
+                heat: Heat::Normal,
+            }],
+            ..Snapshot::default()
+        };
+        let size = Size { w: 1, h: 1 };
+        for h in CELL_HEIGHTS {
+            let rect = rect_of(size, h);
+            let boxes = text_boxes(&shapes(&Temperatures, rect, size, &data(&snap), Instant::now()));
+            let value = boxes.iter().find(|(t, _, _)| t == "100 °C").expect("the value stays");
+            let label = boxes
+                .iter()
+                .find(|(t, _, _)| t.starts_with('W'))
+                .expect("the name stays");
+            assert!(label.1.width() < 40.0 * m_value_em(h), "cut");
+            assert!(label.1.right() < value.1.left(), "at {h}");
+        }
     }
 
     #[test]
-    fn labels_in_geo_values_in_hack_and_the_degree_sign_has_a_glyph() {
-        let r = room(TILE_H);
-        let s = svg(&lines(&sample(), Show::Temperatures, FOUR), r);
-        let doc = resvg::usvg::roxmltree::Document::parse(&s).unwrap();
-        for n in doc.descendants().filter(|n| n.has_tag_name("text")) {
-            let want = if n.attribute("text-anchor") == Some("end") {
-                MONO_FAMILY
-            } else {
-                GEO_FAMILY
-            };
-            assert_eq!(n.attribute("font-family"), Some(want), "{:?}", n.text());
+    fn labels_in_geo_values_in_the_monospace_font() {
+        let size = Size { w: 1, h: 2 };
+        let s = shapes(
+            &Temperatures,
+            rect_of(size, STATUS_CELL_LARGE_H),
+            size,
+            &data(&sample()),
+            Instant::now(),
+        );
+        let mut seen = 0;
+        for sh in flatten(&s) {
+            if let Shape::Text(t) = sh {
+                let family = t.galley.job.sections[0].format.font_id.family.clone();
+                let text = t.galley.text();
+                let want = if text.ends_with("°C") {
+                    FontFamily::Monospace
+                } else {
+                    crate::brand::geo(10.0).family
+                };
+                assert_eq!(family, want, "{text}");
+                seen += 1;
+            }
         }
-        let glyph = |c: char| {
-            let svg = format!(
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">\
-                 <text x=\"2\" y=\"15\" font-family=\"{MONO_FAMILY}\" font-size=\"14\" fill=\"#fff\">{c}</text></svg>"
-            );
-            render::render(&svg, [20, 20]).unwrap().pixels
-        };
-        assert_ne!(glyph('°'), glyph('\u{e000}'));
+        assert_eq!(seen, 10, "five labels and five values");
+    }
+
+    #[test]
+    fn the_degree_sign_has_a_glyph_in_the_monospace_font() {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut ok = false;
+        for _ in 0..3 {
+            let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ok = ui.fonts_mut(|f| f.has_glyph(&FontId::monospace(14.0), '°'));
+            });
+            o.textures_delta.clear();
+        }
+        assert!(ok);
     }
 }
