@@ -158,6 +158,8 @@ pub enum JobResult {
     MonKept(Result<(), String>),
     MonReverted(Result<(), String>),
     MonTakenOver(Result<(), String>),
+    /// The status layout file was written or removed.
+    StatusSaved(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +202,8 @@ pub struct Paths {
     pub homes: netfiles::Homes,
     /// The monitor layout file and the kanshi that applies it.
     pub kanshi: Kanshi,
+    /// The status layout file.
+    pub status_file: PathBuf,
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
@@ -774,12 +778,19 @@ impl Kanshi {
 
 /// Write `bytes` to `path` through a new file beside it and a rename.
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_via(path, ".tmp", bytes)
+}
+
+/// Write `bytes` to `path` through `<path><suffix>` and a rename, making the
+/// directory when it is missing. A stray file or link at the temporary name
+/// goes first; `create_new` never follows one that appears in between.
+fn write_via(path: &Path, suffix: &str, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(suffix);
     let tmp = PathBuf::from(tmp);
     match std::fs::remove_file(&tmp) {
         Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
@@ -795,6 +806,16 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+/// Write the status layout file through `<file>.new` and a rename, or with
+/// `None` remove it.
+pub fn status_save(path: &Path, text: Option<&str>) -> Result<(), String> {
+    let r = match text {
+        Some(t) => write_via(path, ".new", t.as_bytes()),
+        None => remove_if_there(path),
+    };
+    r.map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn remove_if_there(path: &Path) -> std::io::Result<()> {
@@ -1064,6 +1085,7 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1074,6 +1096,7 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1084,6 +1107,7 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1311,6 +1335,7 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1322,6 +1347,7 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -1495,6 +1521,7 @@ mod tests {
             network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
@@ -1812,6 +1839,31 @@ mod tests {
 
     fn read(p: &Path) -> Option<String> {
         fs::read_to_string(p).ok()
+    }
+
+    #[test]
+    fn status_save_writes_through_a_new_file_and_none_removes_it() {
+        let d = dir("status-save");
+        // ~/.config/thinfloe/ is made when it is missing.
+        let file = d.join("config/thinfloe/status");
+        status_save(&file, Some("clock 1x1\n")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "clock 1x1\n");
+        let new = d.join("config/thinfloe/status.new");
+        assert!(!new.exists(), "the new file is renamed over the old one");
+        // A stray link where the new file goes is replaced, not followed.
+        let target = d.join("target");
+        fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, &new).unwrap();
+        status_save(&file, Some("-clock 1x1\n")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "-clock 1x1\n");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        status_save(&file, None).unwrap();
+        assert!(!file.exists());
+        // Removing what is not there is no failure.
+        status_save(&file, None).unwrap();
+        // A directory in the way is.
+        fs::create_dir_all(&file).unwrap();
+        assert!(status_save(&file, Some("x\n")).is_err());
     }
 
     #[test]

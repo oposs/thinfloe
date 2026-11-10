@@ -94,7 +94,11 @@ pub fn local_time_at(epoch: i64) -> String {
 /// minutes) would show a DHCP zone that arrives after the menu started, so
 /// the zone is looked up on every call: one `readlink`.
 pub fn local_hms(epoch: i64) -> (i8, i8, i8) {
-    let zone = current_zone(std::path::Path::new("/etc/localtime"));
+    hms_in(epoch, &current_zone(std::path::Path::new("/etc/localtime")))
+}
+
+/// Hour, minute and second at `epoch` seconds in `zone`.
+pub fn hms_in(epoch: i64, zone: &jiff::tz::TimeZone) -> (i8, i8, i8) {
     match jiff::Timestamp::from_second(epoch) {
         Ok(ts) => {
             let t = zone.to_datetime(ts).time();

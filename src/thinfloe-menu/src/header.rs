@@ -46,8 +46,13 @@ fn read_version(file: &Path) -> Option<String> {
 
 /// `HH:MM` in local time, in the zone the machine has now.
 pub fn clock_text(now: SystemTime) -> String {
+    clock_text_in(now, &crate::log::current_zone(std::path::Path::new("/etc/localtime")))
+}
+
+/// `clock_text` in `zone`, for a caller that looked the zone up already.
+pub fn clock_text_in(now: SystemTime, zone: &jiff::tz::TimeZone) -> String {
     let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
-    let (h, m, _) = crate::log::local_hms(secs);
+    let (h, m, _) = crate::log::hms_in(secs, zone);
     format!("{h:02}:{m:02}")
 }
 
@@ -71,6 +76,14 @@ pub fn header_text(h: &Header, clock: &str) -> String {
 mod tests {
     use super::*;
     use crate::testdir::TestDir;
+
+    #[test]
+    fn the_header_clock_reads_the_zone_it_is_given() {
+        let at = UNIX_EPOCH + Duration::from_secs(12 * 3600 + 30);
+        let kolkata = jiff::tz::db().get("Asia/Kolkata").unwrap();
+        assert_eq!(clock_text_in(at, &jiff::tz::TimeZone::UTC), "12:00");
+        assert_eq!(clock_text_in(at, &kolkata), "17:30");
+    }
 
     #[test]
     fn the_header_leaves_out_an_unknown_version() {

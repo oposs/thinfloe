@@ -1,7 +1,8 @@
 //! The clock element: the time and the date in the machine's zone, a label
 //! in Geo on the left and the value in the body font on the right. It always
-//! has something to show. The zone is looked up on every picture, so a DHCP
-//! zone that arrives after the menu started shows at the next minute.
+//! has something to show. Time and zone come from `Data`: the app reads
+//! the clock and looks the zone up once per frame, so a DHCP zone that
+//! arrives after the menu started shows at the next minute.
 
 use super::{Data, Element, Size, Source, background, sizes_for};
 use crate::header::until_next_minute;
@@ -9,8 +10,7 @@ use egui::{FontId, Rect, pos2};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use shadcn_egui::Theme;
-use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 pub struct Clock;
 
@@ -78,15 +78,17 @@ impl Element for Clock {
         true
     }
 
-    fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, _data: &Data, _now: Instant) {
+    fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, _now: Instant) {
         background(ui, rect);
-        let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
-        let zone = crate::log::current_zone(Path::new("/etc/localtime"));
-        paint(ui, rect, size, &lines_at(epoch, &zone), crate::ui::TILE_GAP);
+        let Some(wall) = data.wall else { return };
+        let epoch = wall.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+        let utc = TimeZone::UTC;
+        let zone = data.zone.unwrap_or(&utc);
+        paint(ui, rect, size, &lines_at(epoch, zone), crate::ui::TILE_GAP);
     }
 
-    fn next_change(&self, _data: &Data, _rect: Rect, _now: Instant) -> Option<Duration> {
-        Some(until_next_minute(SystemTime::now()))
+    fn next_change(&self, data: &Data, _rect: Rect, _now: Instant) -> Option<Duration> {
+        data.wall.map(until_next_minute)
     }
 
     fn refresh(&self) -> Option<Duration> {
@@ -98,6 +100,7 @@ impl Element for Clock {
 mod tests {
     use super::super::testing::{self, rect_of, shapes, texts};
     use super::*;
+    use std::time::SystemTime;
 
     fn pair(label: &'static str, value: &str) -> (&'static str, String) {
         (label, value.to_string())
@@ -153,8 +156,13 @@ mod tests {
         let now = Instant::now();
         let one = Size { w: 1, h: 1 };
         let rect = rect_of(one, 76.0);
-        assert!(Clock.has_content(&Data::EMPTY));
-        let got: Vec<String> = texts(&shapes(&Clock, rect, one, &Data::EMPTY, now))
+        let wall = SystemTime::now();
+        let data = Data {
+            wall: Some(wall),
+            ..Data::EMPTY
+        };
+        assert!(Clock.has_content(&data));
+        let got: Vec<String> = texts(&shapes(&Clock, rect, one, &data, now))
             .into_iter()
             .map(|(s, _)| s)
             .collect();
@@ -162,9 +170,45 @@ mod tests {
             got.contains(&"Time".to_string()) && got.contains(&"Date".to_string()),
             "{got:?}"
         );
-        let next = Clock.next_change(&Data::EMPTY, rect, now).unwrap();
+        let next = Clock.next_change(&data, rect, now).unwrap();
         assert!(next <= Duration::from_millis(60_020), "{next:?}");
         assert_eq!(Clock.refresh(), None);
         assert_eq!(Clock.short_size(), None);
+    }
+
+    #[test]
+    fn the_clock_draws_the_time_and_zone_it_is_given() {
+        let now = Instant::now();
+        let one = Size { w: 1, h: 1 };
+        let rect = rect_of(one, 76.0);
+        let kolkata = jiff::tz::db().get("Asia/Kolkata").unwrap();
+        let wall = UNIX_EPOCH + Duration::from_secs(12 * 3600 + 30);
+        let at = |zone| Data {
+            wall: Some(wall),
+            zone,
+            ..Data::EMPTY
+        };
+        let drawn = |data: &Data| -> Vec<String> {
+            texts(&shapes(&Clock, rect, one, data, now))
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect()
+        };
+        let utc = drawn(&at(None));
+        assert!(utc.contains(&"12:00".to_string()), "no zone is UTC: {utc:?}");
+        assert!(utc.contains(&"Thu 1 Jan 1970".to_string()), "{utc:?}");
+        let ist = drawn(&at(Some(&kolkata)));
+        assert!(ist.contains(&"17:30".to_string()), "{ist:?}");
+        // The same inputs draw the same picture.
+        assert_eq!(drawn(&at(Some(&kolkata))), ist);
+        // 30 s into the minute: the next picture in 30 s and a little.
+        assert_eq!(
+            Clock.next_change(&at(None), rect, now),
+            Some(Duration::from_millis(30_020))
+        );
+        // Without a time there is nothing to tell and nothing to wait for.
+        let none: Vec<String> = drawn(&Data::EMPTY);
+        assert!(none.is_empty(), "{none:?}");
+        assert_eq!(Clock.next_change(&Data::EMPTY, rect, now), None);
     }
 }

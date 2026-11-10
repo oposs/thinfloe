@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -487,17 +488,23 @@ pub fn flipped(was: &mut bool, now: bool) -> bool {
     std::mem::replace(was, now) != now
 }
 
-/// A sampler thread for the menu. It samples whether or not the menu is on
-/// screen, so the graph is whole when it shows again. It calls `wake` only when
+/// A sampler thread for the menu. It reads only while `on` is set (the app
+/// clears it while no ticked element needs it or a window covers the menu),
+/// outside the lock, so a frame never waits for the files. After a rest the
+/// first rate spans the whole rest. It calls `wake` only when
 /// `Snapshot::visible` changes: a hidden element asks for no frames, so it
 /// would appear only with the next minute's. While it shows, the element's
-/// `Refresh=1` asks for the frames.
-pub fn spawn(roots: Roots, wake: impl Fn() + Send + 'static) -> Arc<Mutex<Series>> {
+/// one-second refresh asks for the frames.
+pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static) -> Arc<Mutex<Series>> {
     let series = Arc::new(Mutex::new(Series::default()));
     let shared = series.clone();
     std::thread::spawn(move || {
         let mut visible = false;
         loop {
+            if !on.load(Ordering::Relaxed) {
+                std::thread::sleep(EVERY);
+                continue;
+            }
             // Read outside the lock, so a frame never waits for the files.
             let r = reading(&roots, &addresses());
             let now_visible = r.info.visible();
@@ -794,12 +801,36 @@ mod tests {
         let d = TestDir::new("network", "wake");
         let roots = machine(&d);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _series = spawn(roots, move || {
+        let _series = spawn(roots, Arc::new(AtomicBool::new(true)), move || {
             let _ = tx.send(());
         });
         rx.recv_timeout(Duration::from_secs(5)).expect("a wake when it appears");
         let again = rx.recv_timeout(EVERY + Duration::from_millis(300));
         assert!(again.is_err(), "the next sample changes nothing");
+    }
+
+    #[test]
+    fn the_sampler_reads_nothing_while_off() {
+        let d = TestDir::new("network", "off");
+        let roots = machine(&d);
+        let on = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let series = spawn(roots, on.clone(), move || {
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(EVERY + Duration::from_millis(300)).is_err(),
+            "off: no wake"
+        );
+        assert_eq!(
+            series.lock().unwrap().snapshot(),
+            Snapshot::default(),
+            "off: nothing read"
+        );
+        on.store(true, Ordering::Relaxed);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("on: it reads and appears");
+        assert!(series.lock().unwrap().snapshot().visible());
     }
 
     #[test]

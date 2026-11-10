@@ -61,6 +61,8 @@ pub enum Wake {
     Network,
     /// The hardware element appeared or went.
     Hardware,
+    /// The status layout file changed.
+    Status,
 }
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -78,6 +80,8 @@ pub struct Config {
     pub addon_last_check: PathBuf,
     /// The file the battery reader writes.
     pub battery_file: PathBuf,
+    /// The status layout file, watched for changes.
+    pub status_file: PathBuf,
     /// Where the network element's sampler reads /sys, /proc, /run, /etc.
     pub network_roots: crate::netstat::Roots,
     /// Where the hardware element's sampler reads /sys and /proc.
@@ -163,13 +167,61 @@ pub struct App {
     output_file: Option<PathBuf>,
     /// The output the menu asked labwc-scale for, and the wait for it.
     menu_move: MenuMove,
-    /// The network sampler, running only when a network element is set up.
+    /// The samplers of the status area, started when first needed.
+    samplers: Samplers,
+    /// Whether a window covered the menu, and its height in points, at the
+    /// last frame: what `sync_samplers` decides from.
+    covered: bool,
+    height: f32,
+}
+
+/// Starts a sampler thread with its `on` flag and returns its shared copy.
+type Spawn<T> = Box<dyn FnMut(Arc<AtomicBool>) -> Arc<Mutex<T>>>;
+
+/// The samplers of the status area. Each starts the first time a ticked
+/// element draws from it (placed or not: an element without content must
+/// still get data to gain some) and is never started again; afterwards its
+/// `on` flag says whether it reads. A resting sampler reads nothing.
+struct Samplers {
     network: Option<Arc<Mutex<crate::netstat::Series>>>,
-    /// The hardware sampler, running only when a hardware element is set up.
+    /// The network sampler reads while a ticked element needs it and no
+    /// window covers the menu.
+    network_on: Arc<AtomicBool>,
     hardware: Option<Arc<Mutex<crate::hardware::Snapshot>>>,
-    /// Whether the hardware sampler reads: not while a window covers the menu
-    /// or on a short screen, where the element is not drawn.
+    /// The hardware sampler reads as `hardware_wanted` says.
     hardware_on: Arc<AtomicBool>,
+    spawn_network: Spawn<crate::netstat::Series>,
+    spawn_hardware: Spawn<crate::hardware::Snapshot>,
+}
+
+impl Samplers {
+    fn new(spawn_network: Spawn<crate::netstat::Series>, spawn_hardware: Spawn<crate::hardware::Snapshot>) -> Samplers {
+        Samplers {
+            network: None,
+            network_on: Arc::new(AtomicBool::new(false)),
+            hardware: None,
+            hardware_on: Arc::new(AtomicBool::new(false)),
+            spawn_network,
+            spawn_hardware,
+        }
+    }
+
+    /// Start what `area` needs for the first time and set the flags, for a
+    /// menu `covered` or not and `height` points high.
+    fn sync(&mut self, area: &crate::status::Area, covered: bool, height: f32) {
+        use crate::status::Source;
+        let network = area.needs(Source::Network);
+        // The flags first, so a new thread's first look finds them set.
+        self.network_on.store(network && !covered, Ordering::Relaxed);
+        self.hardware_on
+            .store(hardware_wanted(area, covered, height), Ordering::Relaxed);
+        if network && self.network.is_none() {
+            self.network = Some((self.spawn_network)(self.network_on.clone()));
+        }
+        if area.needs(Source::Hardware) && self.hardware.is_none() {
+            self.hardware = Some((self.spawn_hardware)(self.hardware_on.clone()));
+        }
+    }
 }
 
 /// Run the menu until it exits. Returns the exit status for thinfloe-session.
@@ -236,25 +288,29 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     if heads.is_some() {
         let _ = event_loop.create_proxy().send_event(Wake::Heads);
     }
-    let needs = |source| cfg.menu.status.needs(source);
-    let hardware_on = Arc::new(AtomicBool::new(true));
-    let hardware = needs(crate::status::Source::Hardware).then(|| {
-        let waker = event_loop.create_proxy();
-        crate::hardware::spawn(cfg.hardware_roots.clone(), hardware_on.clone(), move || {
-            let _ = waker.send_event(Wake::Hardware);
-        })
-    });
-    let network = needs(crate::status::Source::Network).then(|| {
-        let waker = event_loop.create_proxy();
-        crate::netstat::spawn(cfg.network_roots.clone(), move || {
-            // The loop is gone only when the menu is exiting.
-            let _ = waker.send_event(Wake::Network);
-        })
-    });
+    let samplers = {
+        let (net_waker, hw_waker) = (event_loop.create_proxy(), event_loop.create_proxy());
+        let (net_roots, hw_roots) = (cfg.network_roots.clone(), cfg.hardware_roots.clone());
+        Samplers::new(
+            Box::new(move |on| {
+                let waker = net_waker.clone();
+                crate::netstat::spawn(net_roots.clone(), on, move || {
+                    // The loop is gone only when the menu is exiting.
+                    let _ = waker.send_event(Wake::Network);
+                })
+            }),
+            Box::new(move |on| {
+                let waker = hw_waker.clone();
+                crate::hardware::spawn(hw_roots.clone(), on, move || {
+                    let _ = waker.send_event(Wake::Hardware);
+                })
+            }),
+        )
+    };
     let mut app = App {
-        network,
-        hardware,
-        hardware_on,
+        samplers,
+        covered: false,
+        height: ui::SHORT_SCREEN_H,
         windows,
         folded_seen: Vec::new(),
         heads,
@@ -271,6 +327,9 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         output_file: menu_move::output_file_path(),
         menu_move: MenuMove::default(),
     };
+    // Before the first frame, so a sampler the layout needs has a reading
+    // by the time the area shows. The first frame corrects the height.
+    app.sync_samplers();
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.exit
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
@@ -282,9 +341,12 @@ struct Watch {
     addon_log: PathBuf,
     upgrade_status: PathBuf,
     battery_file: PathBuf,
+    status_file: PathBuf,
     addons: addons::Watcher,
     release: release::Watcher,
     battery: battery::Watcher,
+    /// A stamp watcher like the battery file's.
+    status: battery::Watcher,
 }
 
 impl Watch {
@@ -294,11 +356,13 @@ impl Watch {
             addon_log: cfg.addon_log.clone(),
             upgrade_status: cfg.upgrade_status.clone(),
             battery_file: cfg.battery_file.clone(),
+            status_file: cfg.status_file.clone(),
             // The first tick reads the files whatever they hold, so a change
             // between the menu's first read and now is not lost.
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            status: battery::Watcher::default(),
         }
     }
 
@@ -314,13 +378,16 @@ impl Watch {
         if self.battery.tick(&self.battery_file) {
             wakes.push(Wake::Battery);
         }
+        if self.status.tick(&self.status_file) {
+            wakes.push(Wake::Status);
+        }
         wakes
     }
 }
 
-/// A thread that looks at the add-on files, the release status and the
-/// battery file once a second and wakes the loop only when one of them
-/// changed: the loop sleeps in between.
+/// A thread that looks at the add-on files, the release status, the battery
+/// file and the status layout once a second and wakes the loop only when one
+/// of them changed: the loop sleeps in between.
 fn watch_files(cfg: &Config, shown: &Arc<AtomicBool>, waker: EventLoopProxy<Wake>) {
     let shown = shown.clone();
     let mut watch = Watch::new(cfg);
@@ -404,6 +471,7 @@ fn panic_result(job: &Job) -> JobResult {
         Job::MonKeep => JobResult::MonKept(Err(e)),
         Job::MonRevert => JobResult::MonReverted(Err(e)),
         Job::MonTakeOver => JobResult::MonTakenOver(Err(e)),
+        Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
     }
 }
 
@@ -504,6 +572,7 @@ fn job_result(
         Job::MonKeep => JobResult::MonKept(jobs::mon_keep(&paths.kanshi)),
         Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
         Job::MonTakeOver => JobResult::MonTakenOver(jobs::mon_take_over(&paths.kanshi)),
+        Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.status_file, text.as_deref())),
     }
 }
 
@@ -680,6 +749,21 @@ impl App {
         live.window.request_redraw();
     }
 
+    /// Start and rest the samplers for the layout and the cover as they are
+    /// now. Called after every layout change and on every frame, which is
+    /// where a cover change is seen.
+    fn sync_samplers(&mut self) {
+        self.samplers.sync(&self.cfg.menu.status, self.covered, self.height);
+    }
+
+    /// Read the status layout file again: the person or the menu changed it.
+    fn refresh_status(&mut self) {
+        self.cfg
+            .menu
+            .set_status_layout(crate::status::read_layout(&self.cfg.status_file));
+        self.sync_samplers();
+    }
+
     /// Read the battery file again.
     fn refresh_battery(&mut self) {
         self.cfg
@@ -755,6 +839,7 @@ impl App {
             network_cmd: self.cfg.paths.network_cmd.clone(),
             homes: self.cfg.paths.homes.clone(),
             kanshi: self.cfg.paths.kanshi.clone(),
+            status_file: self.cfg.paths.status_file.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -804,23 +889,35 @@ impl App {
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
         let mut event = None;
+        // One reading of the wall clock and one look at the zone per frame,
+        // for the header, the clock element and the network total's label.
         let wall = std::time::SystemTime::now();
+        let zone = crate::log::current_zone(std::path::Path::new("/etc/localtime"));
         live.chrome.wall = Some(wall);
-        live.chrome.clock = crate::header::clock_text(wall);
+        live.chrome.clock = crate::header::clock_text_in(wall, &zone);
         live.chrome.covered = covered;
+        self.cfg.menu.set_clock(wall, zone);
         // The sampler's latest copy, taken under its lock for as long as a
         // copy of 600 numbers takes.
-        if let Some(snap) = self.network.as_ref().and_then(|n| n.lock().ok().map(|s| s.snapshot())) {
-            self.cfg.menu.set_network(snap, now, std::time::SystemTime::now());
+        let samplers = &self.samplers;
+        if let Some(snap) = samplers
+            .network
+            .as_ref()
+            .and_then(|n| n.lock().ok().map(|s| s.snapshot()))
+        {
+            self.cfg.menu.set_network(snap, now, wall);
         }
-        if let Some(snap) = self.hardware.as_ref().and_then(|h| h.lock().ok().map(|s| s.clone())) {
+        if let Some(snap) = samplers
+            .hardware
+            .as_ref()
+            .and_then(|h| h.lock().ok().map(|s| s.clone()))
+        {
             self.cfg.menu.set_hardware(snap);
         }
-        let height = live.window.inner_size().height as f32 / self.ctx.pixels_per_point();
-        self.hardware_on.store(
-            hardware_wanted(&self.cfg.menu.status, covered, height),
-            Ordering::Relaxed,
-        );
+        self.covered = covered;
+        self.height = live.window.inner_size().height as f32 / self.ctx.pixels_per_point();
+        // `sync_samplers`, with the fields apart: `live` is borrowed.
+        self.samplers.sync(&self.cfg.menu.status, self.covered, self.height);
         // egui takes a new zoom factor at the start of the next pass and
         // lays that pass out with a guessed screen rect.
         let settling = settling(self.ctx.zoom_factor(), live.scale);
@@ -1244,6 +1341,7 @@ impl ApplicationHandler<Wake> for App {
             Wake::Addons => self.refresh_addons(),
             Wake::Release => self.refresh_release(),
             Wake::Battery => self.refresh_battery(),
+            Wake::Status => self.refresh_status(),
             Wake::Windows => self.windows_changed(),
             Wake::Heads => {
                 if let Some(heads) = self.heads.as_ref() {
@@ -1416,6 +1514,7 @@ mod tests {
             network_cmd: jobs::default_network_cmd(),
             homes: crate::netfiles::Homes::from_env(),
             kanshi: jobs::Kanshi::from_env(),
+            status_file: PathBuf::from("/nonexistent/status"),
         }
     }
 
@@ -1588,9 +1687,11 @@ esac"#;
             addon_log: d.join("addon-log"),
             upgrade_status: release.clone(),
             battery_file: d.join("battery"),
+            status_file: d.join("status"),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            status: battery::Watcher::default(),
         };
         let is_release = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Release)).count();
         // The first look reads both, whatever the files hold.
@@ -1619,6 +1720,140 @@ esac"#;
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Network, false), None);
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Packages, true), None);
         assert_eq!(network_wake(Screen::Grid, SettingsTab::Network, true), None);
+    }
+
+    fn area(text: &[u8]) -> crate::status::Area {
+        let mut layout = crate::status::layout::parse(text, &crate::status::offered);
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        crate::status::Area { layout }
+    }
+
+    #[test]
+    fn samplers_start_once_and_rest_when_unticked() {
+        use std::cell::Cell;
+        let (nets, hws) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let (n, h) = (nets.clone(), hws.clone());
+        let mut s = Samplers::new(
+            Box::new(move |_| {
+                n.set(n.get() + 1);
+                Arc::default()
+            }),
+            Box::new(move |_| {
+                h.set(h.get() + 1);
+                Arc::default()
+            }),
+        );
+        let on = |s: &Samplers| {
+            (
+                s.network_on.load(Ordering::Relaxed),
+                s.hardware_on.load(Ordering::Relaxed),
+            )
+        };
+        let tall = ui::SHORT_SCREEN_H;
+        let none = area(
+            b"-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n\
+              -cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+        );
+        s.sync(&none, false, tall);
+        assert_eq!((nets.get(), hws.get()), (0, 0), "nothing ticked: nothing starts");
+        assert_eq!(on(&s), (false, false));
+        let shipped = crate::status::Area::shipped();
+        s.sync(&shipped, false, tall);
+        assert_eq!((nets.get(), hws.get()), (1, 1));
+        assert_eq!(on(&s), (true, true));
+        // Unticked: both rest, and stay started.
+        s.sync(&none, false, tall);
+        assert_eq!(on(&s), (false, false));
+        // Ticked again: the same threads read again, none is started anew.
+        s.sync(&shipped, false, tall);
+        assert_eq!((nets.get(), hws.get()), (1, 1));
+        assert_eq!(on(&s), (true, true));
+        // Covered: both rest.
+        s.sync(&shipped, true, tall);
+        assert_eq!(on(&s), (false, false));
+        // A short screen places no hardware element: the network reads, the
+        // hardware rests.
+        s.sync(&shipped, false, tall - 1.0);
+        assert_eq!(on(&s), (true, false));
+        assert_eq!((nets.get(), hws.get()), (1, 1));
+    }
+
+    #[test]
+    fn a_sampler_starts_for_a_ticked_element_that_has_no_cells() {
+        use std::cell::Cell;
+        let hws = Rc::new(Cell::new(0));
+        let h = hws.clone();
+        let mut s = Samplers::new(
+            Box::new(|_| Arc::default()),
+            Box::new(move |_| {
+                h.set(h.get() + 1);
+                Arc::default()
+            }),
+        );
+        // Only cpu is ticked, on a short screen, where it has no size: it
+        // still needs its data, but nothing is read for it.
+        s.sync(&crate::status::Area::shipped(), false, ui::SHORT_SCREEN_H - 1.0);
+        assert_eq!(hws.get(), 1);
+        assert!(!s.hardware_on.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_changed_layout_file_is_read_again() {
+        let d = TestDir::new("app", "status-wake");
+        let file = d.join("status");
+        let mut w = Watch {
+            addon_status: d.join("addon-status"),
+            addon_log: d.join("addon-log"),
+            upgrade_status: d.join("upgrade-status"),
+            battery_file: d.join("battery"),
+            status_file: file.clone(),
+            addons: addons::Watcher::default(),
+            release: release::Watcher::default(),
+            battery: battery::Watcher::default(),
+            status: battery::Watcher::default(),
+        };
+        let is_status = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Status)).count();
+        // The first look reads it, also when there is none.
+        assert_eq!(is_status(&w.tick()), 1);
+        assert_eq!(is_status(&w.tick()), 0);
+        let mut menu = Menu::new(
+            crate::tiles::Grid {
+                tiles: Vec::new(),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        menu.set_status_layout(crate::status::read_layout(&file));
+        assert!(
+            menu.status.needs(crate::status::Source::Network),
+            "no file: the default"
+        );
+        std::fs::write(&file, "-network 2x2\n-network-info 1x2\n").unwrap();
+        assert_eq!(is_status(&w.tick()), 1);
+        assert_eq!(is_status(&w.tick()), 0);
+        menu.set_status_layout(crate::status::read_layout(&file));
+        assert!(!menu.status.needs(crate::status::Source::Network));
+        assert!(menu.status.needs(crate::status::Source::Hardware), "the rest appended");
+        // Removed: the default again.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(is_status(&w.tick()), 1);
+        menu.set_status_layout(crate::status::read_layout(&file));
+        assert!(menu.status.needs(crate::status::Source::Network));
+    }
+
+    #[test]
+    fn a_layout_file_that_cannot_be_read_gives_the_default() {
+        let d = TestDir::new("app", "status-unreadable");
+        // A directory where the file should be.
+        let l = crate::status::read_layout(&d);
+        assert!(l.refused && l.notes.len() == 1, "{l:?}");
+        assert_eq!(l.choices, crate::status::Area::shipped().layout.choices);
+        // A huge file is refused without being read whole.
+        let big = d.join("big");
+        std::fs::write(&big, vec![b'#'; 1 << 20]).unwrap();
+        let l = crate::status::read_layout(&big);
+        assert!(l.refused, "{l:?}");
+        assert_eq!(l.notes, ["status layout file ignored: it is over 4 KiB"]);
     }
 
     #[test]

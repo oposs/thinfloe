@@ -25,7 +25,8 @@ pub mod network_info;
 
 use crate::brand::{self, StatusSizes};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 /// The grid has the tile grid's column count.
 pub const COLUMNS: u8 = 4;
@@ -150,6 +151,12 @@ pub struct Data<'a> {
     /// The hardware sampler's last copy; `None` while no hardware element
     /// samples.
     pub hardware: Option<&'a crate::hardware::Snapshot>,
+    /// The frame's time on the wall clock, read once per frame by the app;
+    /// `None`: not known, and the clock shows nothing.
+    pub wall: Option<SystemTime>,
+    /// The machine's time zone, looked up once per frame by the app; `None`:
+    /// UTC.
+    pub zone: Option<&'a jiff::tz::TimeZone>,
 }
 
 impl Data<'_> {
@@ -160,6 +167,8 @@ impl Data<'_> {
         network: None,
         network_since: None,
         hardware: None,
+        wall: None,
+        zone: None,
     };
 }
 
@@ -213,6 +222,29 @@ pub fn descriptors() -> Vec<layout::Descriptor> {
         .iter()
         .filter_map(|e| e.sizes().first().map(|s| (e.id(), *s)))
         .collect()
+}
+
+/// Where the layout file lives below the home.
+pub const FILE: &str = ".config/thinfloe/status";
+
+/// Read the layout file and add the elements it does not name. A missing
+/// file is the default list; one that cannot be read, or that `layout::parse`
+/// refuses, is the default list with one note, and `refused` set. At most
+/// one byte past the limit is read, so a huge file costs nothing.
+pub fn read_layout(path: &Path) -> layout::Layout {
+    use std::io::Read;
+    let read = std::fs::File::open(path).and_then(|f| {
+        let mut bytes = Vec::new();
+        f.take(layout::MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+    let mut l = match read {
+        Ok(bytes) => layout::parse(&bytes, &offered),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => layout::Layout::default(),
+        Err(e) => layout::refuse(&format!("it cannot be read: {e}")),
+    };
+    layout::complete(&mut l, &descriptors());
+    l
 }
 
 /// The status area: the user's choice of elements, sizes and order.
@@ -670,7 +702,11 @@ mod tests {
         // A battery that fits does not page: no wake from it.
         assert_eq!(battery_only.wake(&Data::EMPTY, Pos2::ZERO, cell, 3.0, at, false), None);
         // The clock wakes within the minute.
-        let both = Area::shipped().wake(&Data::EMPTY, Pos2::ZERO, cell, 3.0, at, false);
+        let timed = Data {
+            wall: Some(SystemTime::now()),
+            ..Data::EMPTY
+        };
+        let both = Area::shipped().wake(&timed, Pos2::ZERO, cell, 3.0, at, false);
         assert!(both.is_some_and(|d| d <= Duration::from_secs(60)), "{both:?}");
     }
 

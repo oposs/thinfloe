@@ -56,6 +56,17 @@ pub fn screen_path() -> PathBuf {
     home.join(screentab::SCREEN_FILE)
 }
 
+/// `$HOME/.config/thinfloe/status`; `TF_STATUS_FILE` moves it for tests.
+fn status_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("TF_STATUS_FILE") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
+    home.join(status::FILE)
+}
+
 /// The idle time the session profile sets, as thinfloe-session exports it.
 fn idle_rc() -> Option<u32> {
     screentab::rc_idle(
@@ -117,6 +128,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
         network_cmd: network_cmd(),
         homes: thinfloe_menu::netfiles::Homes::from_env(),
         kanshi: jobs::Kanshi::from_env(),
+        status_file: status_path(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
@@ -136,7 +148,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screentab::load(&screen_path(), idle_rc());
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
-    menu.set_status(status::Area::shipped());
+    menu.set_status_layout(status::read_layout(&paths.status_file));
     (menu, paths, IconRoots::system())
 }
 
@@ -157,14 +169,37 @@ fn check_line(t: &tiles::Tile, state: &str, icon_text: &str) -> String {
     line
 }
 
+/// What `--check` says about the status layout: the file, then each line
+/// that was skipped or changed. A layout problem does not fail the check:
+/// the menu runs with the shipped layout.
+fn status_lines(path: &Path, layout: &status::layout::Layout) -> Vec<String> {
+    let missing = !layout.refused && std::fs::symlink_metadata(path).is_err();
+    let mut lines = vec![if missing {
+        format!("layout file {} (missing: the shipped layout)", path.display())
+    } else {
+        format!("layout file {}", path.display())
+    }];
+    for note in &layout.notes {
+        lines.push(if layout.refused {
+            format!("{note}; the shipped layout is used")
+        } else {
+            note.clone()
+        });
+    }
+    lines
+}
+
 /// `thinfloe-menu --check`: print every tile and how its icon draws, and fail
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
 fn check() -> ExitCode {
-    let (menu, _, roots) = build_menu(settings::RetryMarker::memory());
+    let (menu, paths, roots) = build_menu(settings::RetryMarker::memory());
     let mut bad = false;
     for line in &menu.banner {
         println!("banner: {line}");
+    }
+    for line in status_lines(&paths.status_file, &menu.status.layout) {
+        println!("status: {line}");
     }
     let icons = ui::render_icons(&menu.tiles, &roots, ui::render_side(1.0));
     for (t, icon) in menu.tiles.iter().zip(icons) {
@@ -263,6 +298,7 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         battery_file: battery_file(),
+        status_file: status_path(),
         network_roots: thinfloe_menu::netstat::Roots::system(),
         hardware_roots: thinfloe_menu::hardware::Roots::system(),
         program_path: program_path(),

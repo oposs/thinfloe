@@ -324,16 +324,16 @@ fi
 # the other 3840x2160; a fullscreen foot covers the menu. The scale must stay.
 # The same run proves the signal the menu takes "covered" from, in both
 # directions: it looks for no monitor at the start of a frame and once a second
-# while covered. An element of its own with Refresh=1 gives it a frame a second
-# to notice the cover in, whether or not the container has a network.
+# while covered. A layout file that shows only the network graph, which is
+# drawn again every second, gives it a frame a second to notice the cover in;
+# podman's default network gives the container the route the graph needs.
 COVER_CONTAINER_NAME="thinfloe-runtime-test-cover-$$"
 
 COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0
 wlr-randr --output HEADLESS-2 --pos 0,0
-mkdir -p /tmp/cover-status
-printf "[Status Element]\nType=battery\nCell=0,0\nRefresh=1\n" >/tmp/cover-status/10-tick.conf
-printf "Test\t50\tok\t1\tkeyboard\n" >/tmp/cover-battery
-TF_STATUS_DIR=/tmp/cover-status TF_BATTERY_FILE=/tmp/cover-battery TF_MENU_DEBUG=1 \
+printf "%s\n" "-battery 1x1" "network 2x2" "-network-info 1x2" "-temperatures 1x1" \
+    "-cpu 1x1" "-memory 1x1" "-system 1x1" "-clock 1x1" >/tmp/cover-status
+TF_STATUS_FILE=/tmp/cover-status TF_MENU_DEBUG=1 \
     timeout 12 thinfloe-menu >/dev/null 2>/tmp/cover-menu.log &
 sleep 3
 echo "scale-before=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"

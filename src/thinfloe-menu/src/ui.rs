@@ -1634,8 +1634,10 @@ mod tests {
         let mut m = Menu::new(shipped_grid(), false);
         // A USB boot, where the Upgrade tile shows too: all shipped tiles.
         m.set_usb_boot(true);
-        m.set_status(crate::status::Area::shipped());
+        m.set_status_layout(crate::status::Area::shipped().layout);
         m.set_battery(devices, t0);
+        // The app sets the frame's time before every frame.
+        m.set_clock(std::time::SystemTime::now(), jiff::tz::TimeZone::UTC);
         m
     }
 
@@ -1776,7 +1778,7 @@ mod tests {
         let mut menu = status_menu(five(), t0);
         let layout_text = "-battery 1x1\nclock 1x1\n";
         let parsed = crate::status::layout::parse(layout_text.as_bytes(), &crate::status::offered);
-        menu.set_status(crate::status::Area { layout: parsed });
+        menu.set_status_layout(parsed);
         let short = short_screen(720.0);
         assert!(short);
         assert_eq!(menu.status.planned_rows(short), 0);
@@ -1799,7 +1801,7 @@ mod tests {
             b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
             &crate::status::offered,
         );
-        menu.set_status(crate::status::Area { layout: parsed });
+        menu.set_status_layout(parsed);
         let n = menu.visible_tiles().len();
         // A screen that is not short: the graph two rows high, the list beside it.
         assert_eq!(menu.status.planned_rows(false), 2);
@@ -1837,7 +1839,7 @@ mod tests {
             b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
             &crate::status::offered,
         );
-        menu.set_status(crate::status::Area { layout: parsed });
+        menu.set_status_layout(parsed);
         let settled = |covered| {
             let ctx = new_ctx();
             let mut delay = Duration::ZERO;
@@ -1862,7 +1864,7 @@ mod tests {
         // The battery alone, so the clock's minute does not ask too.
         let mut menu = status_menu(five(), t0);
         let parsed = crate::status::layout::parse(b"battery 1x1\n-clock 1x1\n", &crate::status::offered);
-        menu.set_status(crate::status::Area { layout: parsed });
+        menu.set_status_layout(parsed);
         let at = t0 + Duration::from_millis(1500);
         // The fonts land in the first frames, which ask for the next at once.
         let settled = |menu: &Menu, covered| {
@@ -2038,7 +2040,7 @@ mod tests {
             let mut m = Menu::new(grid, false);
             // A USB boot, where the Upgrade tile shows too.
             m.set_usb_boot(true);
-            m.set_status(crate::status::Area::shipped());
+            m.set_status_layout(crate::status::Area::shipped().layout);
             m
         };
         let mut menu = nine();
@@ -5665,6 +5667,8 @@ mod tests {
             network: Some(&net),
             network_since: Some(&since),
             hardware: Some(&hardware),
+            wall: Some(std::time::SystemTime::now()),
+            zone: None,
         };
         for e in ELEMENTS {
             for size in e.sizes() {

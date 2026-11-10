@@ -8,7 +8,7 @@
 use super::{COLUMNS, Cells, ROWS, Size};
 use std::collections::HashSet;
 
-const MAX_BYTES: usize = 4096;
+pub const MAX_BYTES: usize = 4096;
 const MAX_LINES: usize = 64;
 const HEADER: &str = "# thinfloe status area, written by the menu";
 
@@ -34,7 +34,8 @@ pub struct Layout {
     pub refused: bool,
 }
 
-fn refuse(why: &str) -> Layout {
+/// A refused file: no choices, one note saying `why`.
+pub fn refuse(why: &str) -> Layout {
     Layout {
         choices: Vec::new(),
         notes: vec![format!("status layout file ignored: {why}")],

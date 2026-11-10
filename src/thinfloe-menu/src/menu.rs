@@ -172,6 +172,9 @@ pub enum Job {
     MonRevert,
     /// Move a hand-written kanshi config aside.
     MonTakeOver,
+    /// Write the status layout file with this text; `None` removes it, and
+    /// the default list counts again.
+    StatusSave(Option<String>),
 }
 
 /// What fills the space above the log.
@@ -246,6 +249,13 @@ pub struct Menu {
     pub netstat_since: crate::netstat::Since,
     /// The hardware sampler's last copy, set by the app before each frame.
     pub hardware: Option<crate::hardware::Snapshot>,
+    /// The frame's time on the wall clock and the machine's zone, set by the
+    /// app before each frame, for the clock element.
+    wall: Option<std::time::SystemTime>,
+    zone: jiff::tz::TimeZone,
+    /// Why the last write of the status layout failed; `None` after one
+    /// that worked.
+    pub status_error: Option<String>,
     /// `Snapshot::total` at each running session program's first copy, so
     /// that when the oldest ends, the next one's total starts where its own
     /// label says.
@@ -310,6 +320,9 @@ impl Menu {
             netstat: None,
             netstat_since: crate::netstat::Since::default(),
             hardware: None,
+            wall: None,
+            zone: jiff::tz::TimeZone::UTC,
+            status_error: None,
             network_bases: Vec::new(),
             deferred_save: false,
             last_check: None,
@@ -550,15 +563,37 @@ impl Menu {
             .collect()
     }
 
-    /// Take the status layout; each line of its file that was skipped or
-    /// changed opens the log as a warning and is printed by `--check`, like
-    /// the tile banner.
-    pub fn set_status(&mut self, area: crate::status::Area) {
-        for note in &area.layout.notes {
-            self.log.note(Kind::Warn, note.clone());
-            self.banner.push(note.clone());
+    /// Take the status layout, as read from its file (at the start and on
+    /// every change). Each line of the file that was skipped or changed
+    /// opens the log as a warning, once: the same file read again (the
+    /// menu's own write fires the watch too) logs nothing new. Nothing is
+    /// written here, so a refused file stays as it is until the person
+    /// changes something.
+    pub fn set_status_layout(&mut self, layout: crate::status::layout::Layout) {
+        for note in &layout.notes {
+            if !self.status.layout.notes.contains(note) {
+                self.log.note(Kind::Warn, note.clone());
+            }
         }
-        self.status = area;
+        self.status = crate::status::Area { layout };
+    }
+
+    /// Write the layout as it stands: every element, shown or hidden, and
+    /// the lines of unknown ids. From here on the file is the menu's.
+    pub fn save_status(&mut self) -> Option<Effect> {
+        // The notes stay: the re-read of this write repeats those about
+        // unknown ids, which must not open the log again.
+        let layout = &mut self.status.layout;
+        layout.refused = false;
+        Some(Effect::Start(Job::StatusSave(Some(crate::status::layout::to_text(
+            layout,
+        )))))
+    }
+
+    /// The frame's time and the machine's zone, for the clock element.
+    pub fn set_clock(&mut self, wall: std::time::SystemTime, zone: jiff::tz::TimeZone) {
+        self.wall = Some(wall);
+        self.zone = zone;
     }
 
     /// What the status elements draw from.
@@ -569,6 +604,8 @@ impl Menu {
             network: self.netstat.as_ref(),
             network_since: Some(&self.netstat_since),
             hardware: self.hardware.as_ref(),
+            wall: self.wall,
+            zone: Some(&self.zone),
         }
     }
 
@@ -1144,6 +1181,14 @@ impl Menu {
                     ),
                 }
                 self.monitors.reverted(r).map(Menu::mon_request)
+            }
+            JobResult::StatusSaved(r) => {
+                if let Err(e) = &r {
+                    self.log
+                        .note(Kind::Warn, format!("The status layout could not be saved: {e}."));
+                }
+                self.status_error = r.err();
+                None
             }
             JobResult::MonTakenOver(r) => {
                 let ok = r.is_ok();
@@ -3606,14 +3651,54 @@ mod tests {
     }
 
     #[test]
-    fn skipped_status_lines_open_the_log_and_reach_check() {
+    fn skipped_status_lines_open_the_log_once() {
         let mut m = Menu::new(grid(), false);
         let layout = crate::status::layout::parse(b"clock 1x1 1x1\n", &crate::status::offered);
         let note = "status line 1 skipped: expected '<id> <w>x<h>', got 'clock 1x1 1x1'";
         assert_eq!(layout.notes, [note]);
-        m.set_status(crate::status::Area { layout });
+        m.set_status_layout(layout.clone());
         assert_eq!(log(&m).last().unwrap(), &warn(note));
-        assert_eq!(m.banner, [note]);
+        let lines = log(&m).len();
+        // The same file read again (the menu's own write, a touch) says
+        // nothing new.
+        m.set_status_layout(layout);
+        assert_eq!(log(&m).len(), lines);
+        assert!(m.banner.is_empty(), "--check names the layout notes itself");
+    }
+
+    #[test]
+    fn a_refused_file_is_not_rewritten_until_a_change() {
+        let mut m = Menu::new(grid(), false);
+        let mut layout = crate::status::layout::parse(&[0xff, b'\n'], &crate::status::offered);
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        assert!(layout.refused);
+        m.set_status_layout(layout);
+        assert!(m.status.layout.refused);
+        assert_eq!(m.status.layout.choices, crate::status::Area::shipped().layout.choices);
+        let now = Instant::now();
+        for _ in 0..3 {
+            let e = m.tick(now);
+            assert!(!matches!(e, Some(Effect::Start(Job::StatusSave(_)))), "{e:?}");
+        }
+        // A change writes the whole list, and the file counts as the menu's.
+        let text = crate::status::layout::to_text(&m.status.layout);
+        assert_eq!(m.save_status(), Some(Effect::Start(Job::StatusSave(Some(text)))));
+        assert!(!m.status.layout.refused);
+    }
+
+    #[test]
+    fn a_failed_status_write_is_logged_and_kept_for_the_tab() {
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        let r = m.finished(JobResult::StatusSaved(Err("disk full".into())), now);
+        assert_eq!(r, None);
+        assert_eq!(
+            log(&m).last().unwrap(),
+            &warn("The status layout could not be saved: disk full.")
+        );
+        assert_eq!(m.status_error.as_deref(), Some("disk full"));
+        m.finished(JobResult::StatusSaved(Ok(())), now);
+        assert_eq!(m.status_error, None);
     }
 
     #[test]
