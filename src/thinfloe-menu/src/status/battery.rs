@@ -55,7 +55,7 @@ fn colour(t: &Theme, tone: Tone) -> Color32 {
 }
 
 /// `text` on one line, cut after the last glyph that ends within `width`.
-fn cut(p: &Painter, text: &str, font: FontId, colour: Color32, width: f32) -> Arc<Galley> {
+pub(super) fn cut(p: &Painter, text: &str, font: FontId, colour: Color32, width: f32) -> Arc<Galley> {
     let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(font, colour));
     job.wrap = TextWrapping {
         max_width: width.max(0.0),

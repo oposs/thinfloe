@@ -120,6 +120,8 @@ pub struct StatusSizes {
     pub label: f32,
     /// A number or value in the body font.
     pub value: f32,
+    /// Axis ticks, a unit caption and a legend, in the monospace font.
+    pub axis: f32,
     /// One line.
     pub row: f32,
     /// Left and right of the content, and above and below it.
@@ -134,6 +136,7 @@ pub const STATUS_CELL_LARGE_H: f32 = 76.0;
 pub const STATUS_LARGE: StatusSizes = StatusSizes {
     label: 15.0,
     value: 12.0,
+    axis: 10.0,
     row: 16.0,
     pad_x: 12.0,
     pad_y: 6.0,
@@ -145,6 +148,7 @@ pub const STATUS_CELL_SMALL_H: f32 = 64.0;
 pub const STATUS_SMALL: StatusSizes = StatusSizes {
     label: 13.0,
     value: 11.0,
+    axis: 9.0,
     row: 14.0,
     pad_x: 10.0,
     pad_y: 5.0,
@@ -349,6 +353,8 @@ mod tests {
             ("status/mod.rs", include_str!("status/mod.rs")),
             ("status/battery.rs", include_str!("status/battery.rs")),
             ("status/clock.rs", include_str!("status/clock.rs")),
+            ("status/network.rs", include_str!("status/network.rs")),
+            ("status/network_info.rs", include_str!("status/network_info.rs")),
             ("status/layout.rs", include_str!("status/layout.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();

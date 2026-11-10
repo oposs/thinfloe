@@ -19,6 +19,8 @@
 pub mod battery;
 pub mod clock;
 pub mod layout;
+pub mod network;
+pub mod network_info;
 
 use crate::brand::{self, StatusSizes};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
@@ -107,11 +109,18 @@ pub fn sizes_for(cell_h: f32) -> StatusSizes {
     StatusSizes {
         label: mix(small.label, large.label),
         value: mix(small.value, large.value),
+        axis: mix(small.axis, large.axis),
         row: mix(small.row, large.row),
         pad_x: mix(small.pad_x, large.pad_x),
         pad_y: mix(small.pad_y, large.pad_y),
         gap: mix(small.gap, large.gap),
     }
+}
+
+/// The height of one cell of an element `rect` of `size` cells: the gaps
+/// between its rows are not part of any cell.
+pub fn cell_height(rect: Rect, size: Size) -> f32 {
+    (rect.height() - f32::from(size.h - 1) * crate::ui::TILE_GAP) / f32::from(size.h)
 }
 
 /// The data an element draws from, shared by several elements.
@@ -176,7 +185,12 @@ pub trait Element: Sync {
 }
 
 /// Every element there is, in the default order. One line per element.
-pub static ELEMENTS: &[&dyn Element] = &[&battery::Battery, &clock::Clock];
+pub static ELEMENTS: &[&dyn Element] = &[
+    &battery::Battery,
+    &network::Network,
+    &network_info::NetworkInfo,
+    &clock::Clock,
+];
 
 pub fn element(id: &str) -> Option<&'static dyn Element> {
     ELEMENTS.iter().copied().find(|e| e.id() == id)
@@ -339,6 +353,69 @@ pub(crate) mod testing {
         out
     }
 
+    fn flat<'a>(shapes: &'a [egui::Shape], out: &mut Vec<&'a egui::Shape>) {
+        for s in shapes {
+            match s {
+                egui::Shape::Vec(v) => flat(v, out),
+                other => out.push(other),
+            }
+        }
+    }
+
+    /// The shapes with `Shape::Vec` groups opened, in drawing order.
+    pub fn flatten(shapes: &[egui::Shape]) -> Vec<&egui::Shape> {
+        let mut out = Vec::new();
+        flat(shapes, &mut out);
+        out
+    }
+
+    /// Every polyline (`Shape::line`): its points, width and colour.
+    pub fn paths(shapes: &[egui::Shape]) -> Vec<(Vec<Pos2>, f32, egui::Color32)> {
+        flatten(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) => match p.stroke.color {
+                    egui::epaint::ColorMode::Solid(c) => Some((p.points.clone(), p.stroke.width, c)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every line segment: its end points and stroke.
+    pub fn segments(shapes: &[egui::Shape]) -> Vec<([Pos2; 2], egui::Stroke)> {
+        flatten(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points, stroke } => Some((*points, *stroke)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every filled rectangle: its rectangle and fill.
+    pub fn rects(shapes: &[egui::Shape]) -> Vec<(Rect, egui::Color32)> {
+        flatten(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) => Some((r.rect, r.fill)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every text: its string, where its ink lies and its colour.
+    pub fn text_boxes(shapes: &[egui::Shape]) -> Vec<(String, Rect, egui::Color32)> {
+        flatten(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some((t.galley.text().to_string(), s.visual_bounding_rect(), t.fallback_color)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every shape `e` draws at each size it offers, at both cell heights,
     /// lies inside its rectangle.
     pub fn assert_inside(e: &dyn Element, data: &Data, now: Instant) {
@@ -418,7 +495,7 @@ mod tests {
     #[test]
     fn the_default_list_is_every_element_in_order() {
         let ids: Vec<String> = Area::shipped().layout.choices.into_iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["battery", "clock"]);
+        assert_eq!(ids, ["battery", "network", "network-info", "clock"]);
     }
 
     fn area(text: &str) -> Area {
@@ -453,17 +530,36 @@ mod tests {
             ids(&a.shown(&with, false)),
             [("battery", cells(0, 0, 1, 1)), ("clock", cells(1, 0, 1, 1))]
         );
-        // No device: the clock moves into the first cell.
+        // No device and no network: the clock moves into the first cell. The
+        // planned rows are those with everything shown.
         assert_eq!(ids(&a.shown(&Data::EMPTY, false)), [("clock", cells(0, 0, 1, 1))]);
         assert_eq!(a.rows(&Data::EMPTY, false), 1);
-        assert_eq!(a.planned_rows(false), 1);
+        assert_eq!(a.planned_rows(false), 2);
+        // A network with a route brings the graph and the list in, and the
+        // clock goes down to the second row.
+        let net = crate::status::network::sample(10);
+        let with_net = Data {
+            battery: &devices,
+            network: Some(&net),
+            ..Data::EMPTY
+        };
+        assert_eq!(
+            ids(&a.shown(&with_net, false)),
+            [
+                ("battery", cells(0, 0, 1, 1)),
+                ("network", cells(1, 0, 2, 2)),
+                ("network-info", cells(3, 0, 1, 2)),
+                ("clock", cells(0, 1, 1, 1)),
+            ]
+        );
+        assert_eq!(a.rows(&with_net, false), 2);
         // A hidden element takes no part, planned or drawn.
-        let hidden = area("-battery 1x1\n-clock 1x1\n");
+        let hidden = area("-battery 1x1\n-network 2x2\n-network-info 1x2\n-clock 1x1\n");
         assert_eq!(hidden.planned_rows(false), 0);
         assert_eq!(hidden.rows(&with, false), 0);
-        assert!(!hidden.needs(Source::Battery));
-        assert!(a.needs(Source::Battery));
-        assert!(!a.needs(Source::Network) && !a.needs(Source::Hardware));
+        assert!(!hidden.needs(Source::Battery) && !hidden.needs(Source::Network));
+        assert!(a.needs(Source::Battery) && a.needs(Source::Network));
+        assert!(!a.needs(Source::Hardware));
         // An empty area: nothing.
         assert_eq!(Area::default().planned_rows(false), 0);
     }
@@ -493,9 +589,33 @@ mod tests {
         // The battery's short size is 1x1; the clock has none.
         assert_eq!(ids(&a.shown(&with, true)), [("battery", cells(0, 0, 1, 1))]);
         assert_eq!(a.planned_rows(true), 1);
-        let clock_only = area("-battery 1x1\nclock 1x1\n");
+        let clock_only = area("-battery 1x1\n-network 2x2\n-network-info 1x2\nclock 1x1\n");
         assert_eq!(clock_only.planned_rows(true), 0);
         assert_eq!(clock_only.rows(&with, true), 0);
+    }
+
+    #[test]
+    fn a_short_screen_gives_the_chosen_network_its_short_size_and_leaves_the_list_out() {
+        let net = crate::status::network::sample(10);
+        let with = Data {
+            network: Some(&net),
+            ..Data::EMPTY
+        };
+        let a = area("network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n");
+        assert_eq!(
+            ids(&a.shown(&with, false)),
+            [("network", cells(0, 0, 2, 2)), ("network-info", cells(2, 0, 1, 2))]
+        );
+        // The graph takes its short size, 3x1; the list has none.
+        let short = a.shown(&with, true);
+        assert_eq!(ids(&short), [("network", cells(0, 0, 3, 1))]);
+        assert_eq!(short[0].1, Size { w: 3, h: 1 });
+        assert_eq!(a.planned_rows(true), 1);
+        assert_eq!(a.rows(&with, true), 1);
+        // The list alone has nowhere to go on a short screen.
+        let list = area("-network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n");
+        assert_eq!(list.planned_rows(true), 0);
+        assert_eq!(list.rows(&with, true), 0);
     }
 
     #[test]

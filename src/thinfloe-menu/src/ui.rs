@@ -1635,6 +1635,14 @@ mod tests {
         m
     }
 
+    /// `status_menu` with a network that has a route: the graph and the list
+    /// have something to show.
+    fn net_menu(devices: Vec<battery::Device>, t0: Instant) -> Menu {
+        let mut m = status_menu(devices, t0);
+        m.set_network(crate::status::network::sample(120), t0, std::time::SystemTime::now());
+        m
+    }
+
     /// The shapes of one 1280 x 720 frame, `at` the frame's time, and the
     /// repaint delay egui was asked for.
     fn status_frame(
@@ -1715,7 +1723,9 @@ mod tests {
         let t0 = Instant::now();
         let menu = status_menu(vec![kdev("K", battery::DeviceKind::Keyboard, 80, "discharging")], t0);
         let shapes = status_frame_on(&new_ctx(), &menu, t0, (1920.0, 1080.0));
-        let l = layout(screen(1920.0, 1080.0), menu.visible_tiles().len(), 0, 1, 1);
+        // The network elements have nothing to show here, but plan their rows.
+        assert_eq!(menu.status.planned_rows(false), 2);
+        let l = layout(screen(1920.0, 1080.0), menu.visible_tiles().len(), 0, 1, 2);
         let battery = cell_rect(&l, 0, 0, 1, 1);
         let clock = cell_rect(&l, 1, 0, 1, 1);
         let keyboard = text_rect(&shapes, "Keyboard").expect("the battery line");
@@ -1734,7 +1744,7 @@ mod tests {
         let full = (1920.0, 1080.0);
         let a = status_frame_on(&new_ctx(), &without_device, t0, full);
         let b = status_frame_on(&new_ctx(), &without_area, t0, full);
-        let l = layout(screen(full.0, full.1), without_device.visible_tiles().len(), 0, 1, 1);
+        let l = layout(screen(full.0, full.1), without_device.visible_tiles().len(), 0, 1, 2);
         assert!(text_rect(&a, "Keyboard").is_none());
         let time = text_rect(&a, "Time").expect("the clock");
         assert!(cell_rect(&l, 0, 0, 1, 1).contains_rect(time), "{time:?}");
@@ -1770,6 +1780,77 @@ mod tests {
     }
 
     #[test]
+    fn a_short_screen_gives_a_chosen_two_by_two_graph_its_short_size_and_drops_the_list() {
+        let t0 = Instant::now();
+        let mut menu = net_menu(Vec::new(), t0);
+        let parsed = crate::status::layout::parse(
+            b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
+            &crate::status::offered,
+        );
+        menu.set_status(crate::status::Area { layout: parsed });
+        let n = menu.visible_tiles().len();
+        // A screen that is not short: the graph two rows high, the list beside it.
+        assert_eq!(menu.status.planned_rows(false), 2);
+        let full = (1920.0, 1080.0);
+        let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
+        assert!(text_rect(&shapes, "-5m").is_some() && text_rect(&shapes, "Gateway").is_some());
+        // A short one: one row, the graph alone at 3 x 1 (the unit inside its
+        // plot, no time axis), and the list, which has no short size, left out.
+        let short = short_screen(720.0);
+        assert!(short);
+        assert_eq!(menu.status.planned_rows(short), 1);
+        assert_eq!(menu.status.rows(&menu.status_sources(), short), 1);
+        let l = layout(screen(1280.0, 720.0), n, 0, 1, 1);
+        let shapes = status_frame(&new_ctx(), &menu, t0, false).0;
+        let graph = cell_rect(&l, 0, 0, 3, 1);
+        let unit = text_rect(&shapes, "bit/s").expect("the graph is drawn");
+        assert!(graph.contains_rect(unit), "{unit:?} in {graph:?}");
+        assert!(text_rect(&shapes, "-5m").is_none(), "no time axis in one row");
+        assert!(text_rect(&shapes, "Gateway").is_none() && text_rect(&shapes, "Down").is_none());
+        // Where the cell after the graph would be, nothing is drawn.
+        let after = cell_rect(&l, 3, 0, 1, 1);
+        assert!(
+            shapes.iter().all(
+                |c| !after.contains_rect(c.shape.visual_bounding_rect()) || matches!(c.shape, egui::Shape::Rect(_))
+            )
+        );
+    }
+
+    #[test]
+    fn the_network_elements_ask_for_a_frame_a_second_only_while_shown() {
+        // `show` always asks for the next minute, and that wins in the last
+        // second of one: start past the boundary when it is close.
+        let left = until_next_minute(std::time::SystemTime::now());
+        if left < Duration::from_secs(5) {
+            std::thread::sleep(left);
+        }
+        let t0 = Instant::now();
+        // No battery device and no clock: only the network elements ask.
+        let mut menu = net_menu(Vec::new(), t0);
+        let parsed = crate::status::layout::parse(
+            b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
+            &crate::status::offered,
+        );
+        menu.set_status(crate::status::Area { layout: parsed });
+        let settled = |covered| {
+            let ctx = new_ctx();
+            let mut delay = Duration::ZERO;
+            for _ in 0..8 {
+                delay = status_frame(&ctx, &menu, t0, covered).1;
+            }
+            delay
+        };
+        let shown = settled(false);
+        // egui counts from the frame's start, a little before the request.
+        assert!(
+            shown <= Duration::from_secs(1) && shown > Duration::from_millis(900),
+            "{shown:?}"
+        );
+        let covered = settled(true);
+        assert!(covered > Duration::from_secs(1), "{covered:?}");
+    }
+
+    #[test]
     fn a_page_turn_is_asked_for_only_while_the_menu_is_shown() {
         let t0 = Instant::now();
         // The battery alone, so the clock's minute does not ask too.
@@ -1801,30 +1882,31 @@ mod tests {
     #[test]
     fn the_shipped_status_area_covers_no_tile_on_any_screen() {
         let t0 = Instant::now();
-        let menu = status_menu(five(), t0);
+        let menu = net_menu(five(), t0);
         let n = menu.visible_tiles().len();
         for (w, h, _) in SHIPPED_SCREENS {
             let short = short_screen(h);
+            // Short: one row, the battery and the graph at 3 x 1. Otherwise
+            // the graph is 2 x 2 and the list stands right of it.
             let planned = menu.status.planned_rows(short);
-            assert_eq!(planned, 1, "{w}x{h}: battery and clock, or the battery alone");
-            let l = layout(
-                screen(w, h),
-                n,
-                0,
-                menu.status.rows(&menu.status_sources(), short),
-                planned,
-            );
+            assert_eq!(planned, if short { 1 } else { 2 }, "{w}x{h}");
+            assert_eq!(menu.status.rows(&menu.status_sources(), short), planned, "{w}x{h}");
+            let l = layout(screen(w, h), n, 0, planned, planned);
             let st = l.status.unwrap();
             assert!(l.grid.bottom() + STATUS_GAP <= st.top() + 0.01, "{w}x{h}: {l:?}");
             assert!(l.grid.bottom() <= l.tiles.bottom() + 0.01, "{w}x{h}: no tile covered");
             assert!(st.bottom() <= l.log.top() - GAP + 0.01, "{w}x{h}: {st:?}");
             let shapes = status_frame_on(&new_ctx(), &menu, t0, (w, h));
-            for name in ["Dev A", "Dev D"] {
+            for name in ["Dev A", "Dev D", "bit/s"] {
                 let r = text_rect(&shapes, name).unwrap_or_else(|| panic!("{w}x{h}: {name}"));
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
             }
-            // The clock only where the screen is not short.
+            // The list and the clock only where the screen is not short.
+            assert_eq!(text_rect(&shapes, "Gateway").is_some(), !short, "{w}x{h}");
             assert_eq!(text_rect(&shapes, "Time").is_some(), !short, "{w}x{h}");
+            if let Some(r) = text_rect(&shapes, "Gateway") {
+                assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
+            }
         }
     }
 
@@ -4847,10 +4929,30 @@ mod tests {
         );
         shot(&bat, "desktop-1080-battery.ppm", (1920, 1080), 1.0);
         shot(&bat, "desktop-4k-battery.ppm", (3840, 2160), 2.0);
-        shot(&bat, "desktop-1080-status.ppm", (1920, 1080), 1.0);
-        shot(&bat, "desktop-1366x768-status.ppm", (1366, 768), 1.0);
-        shot(&bat, "desktop-1280x720-status.ppm", (1280, 720), 1.0);
-        let no_battery = status_menu(Vec::new(), Instant::now());
+        let mut net = status_menu(
+            vec![
+                kdev("MX Mechanical", battery::DeviceKind::Keyboard, 100, "discharging"),
+                kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 95, "charging"),
+                dev("Pen", 7, "discharging"),
+            ],
+            Instant::now(),
+        );
+        net.set_network(
+            crate::status::network::sample(300),
+            Instant::now(),
+            std::time::SystemTime::now(),
+        );
+        shot(&net, "desktop-1080-status.ppm", (1920, 1080), 1.0);
+        shot(&net, "desktop-4k-status.ppm", (3840, 2160), 2.0);
+        shot(&net, "desktop-1366x768-status.ppm", (1366, 768), 1.0);
+        shot(&net, "desktop-1280x720-status.ppm", (1280, 720), 1.0);
+        shot(&net, "desktop-1440x900-status.ppm", (1440, 900), 1.0);
+        let mut no_battery = status_menu(Vec::new(), Instant::now());
+        no_battery.set_network(
+            crate::status::network::sample(300),
+            Instant::now(),
+            std::time::SystemTime::now(),
+        );
         shot(&no_battery, "desktop-1080-no-battery.ppm", (1920, 1080), 1.0);
         let (mut menu, _) = four_addons();
         let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
@@ -5428,9 +5530,17 @@ mod tests {
             kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 60, "charging"),
             dev("Pen", 7, "discharging"),
         ];
+        let net = crate::status::network::sample(300);
+        let since = crate::netstat::Since {
+            job: Some(1),
+            label: "since 14:02".into(),
+            base: (1_000_000_000, 600_000),
+        };
         let data = Data {
             battery: &devices,
             battery_since: Some(Instant::now()),
+            network: Some(&net),
+            network_since: Some(&since),
             ..Data::EMPTY
         };
         for e in ELEMENTS {
