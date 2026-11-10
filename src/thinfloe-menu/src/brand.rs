@@ -12,28 +12,23 @@ use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 // The palette. UI code reads these through the theme: the six that are
 // shadcn roles as `Theme::palette()` (ICE primary and ring, BG background,
 // TILE card, TILE_HOVER accent, LINE border, MUTED muted_foreground), the
-// other four as the app colours in `role`. The status area draws SVG, not egui
-// widgets, and takes the colours marked `pub(crate)` directly.
+// other five as the app colours in `role`.
 
 /// Ice blue, the accent.
-pub(crate) const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
+const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
 const BG: Color32 = Color32::from_rgb(0x05, 0x07, 0x0a);
-pub(crate) const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
+const TILE: Color32 = Color32::from_rgb(0x0d, 0x12, 0x18);
 const TILE_ACTIVE: Color32 = Color32::from_rgb(0x10, 0x1b, 0x26);
 const TILE_HOVER: Color32 = Color32::from_rgb(0x13, 0x1c, 0x26);
 const LINE: Color32 = Color32::from_rgb(0x15, 0x1b, 0x22);
-pub(crate) const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
+const MUTED: Color32 = Color32::from_rgb(0x7d, 0x89, 0x96);
 /// The grey of timestamps.
 const TIME: Color32 = Color32::from_rgb(0x5d, 0x69, 0x76);
 /// A warning amber, for reasons drawn on a disabled tile.
-pub(crate) const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
-pub(crate) const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
+const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
+const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
 /// A battery about to run out.
-pub(crate) const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
-/// The light grid lines of a status element's graph, a step above `TILE`.
-pub(crate) const GRID: Color32 = Color32::from_rgb(0x1c, 0x25, 0x30);
-/// The axes of a status element's graph.
-pub(crate) const AXIS: Color32 = Color32::from_rgb(0x3a, 0x46, 0x54);
+const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
 
 /// The palette's values, for tests that look for a colour in drawn shapes.
 #[cfg(test)]
@@ -60,6 +55,8 @@ pub mod role {
     pub const WARN: Role = Role::custom("tf-warn");
     /// Good news: installed, saved.
     pub const GOOD: Role = Role::custom("tf-good");
+    /// Alarm: a battery about to run out.
+    pub const ALERT: Role = Role::custom("tf-alert");
 }
 
 /// The 16 basic terminal colours, picked to read on the dark log
@@ -115,6 +112,45 @@ pub const DIALOG_TITLE_PT: f32 = 24.0;
 /// A block heading on the Upgrade screen (Release, Target, ...).
 pub const SECTION_PT: f32 = 18.0;
 
+/// The text and spacing of a status element, in points, for one cell
+/// height (`status::sizes_for` interpolates between the two sets).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatusSizes {
+    /// A label in Geo (a battery's kind, "Time").
+    pub label: f32,
+    /// A number or value in the body font.
+    pub value: f32,
+    /// One line.
+    pub row: f32,
+    /// Left and right of the content, and above and below it.
+    pub pad_x: f32,
+    pub pad_y: f32,
+    /// Between two columns (label and value, symbol and percent).
+    pub gap: f32,
+}
+
+/// The cell height of the full tile (`ui::TILE_H`) and its sizes.
+pub const STATUS_CELL_LARGE_H: f32 = 76.0;
+pub const STATUS_LARGE: StatusSizes = StatusSizes {
+    label: 15.0,
+    value: 12.0,
+    row: 16.0,
+    pad_x: 12.0,
+    pad_y: 6.0,
+    gap: 6.0,
+};
+
+/// The smallest cell height (`ui::TILE_H_MIN`) and its sizes.
+pub const STATUS_CELL_SMALL_H: f32 = 64.0;
+pub const STATUS_SMALL: StatusSizes = StatusSizes {
+    label: 13.0,
+    value: 11.0,
+    row: 14.0,
+    pad_x: 10.0,
+    pad_y: 5.0,
+    gap: 5.0,
+};
+
 /// The label column of a form row on the Settings screen's Screen tab
 /// (points): "Turn the screen off after" and a gap.
 pub const FORM_LABEL_W: f32 = 240.0;
@@ -134,8 +170,6 @@ pub const UPGRADE_TWO_COLUMNS_W: f32 = 720.0;
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";
-/// Geo itself, for egui and for the status area's SVG text.
-pub static GEO_TTF: &[u8] = include_bytes!("../assets/Geo-Oblique.ttf");
 
 pub fn geo(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(GEO.into()))
@@ -184,6 +218,7 @@ pub fn theme() -> shadcn_egui::Theme {
         .color(role::TIME, TIME, TIME)
         .color(role::WARN, WARN, WARN)
         .color(role::GOOD, GOOD, GOOD)
+        .color(role::ALERT, RED, RED)
         .variant(CHOICE_ROW, ItemVariant::Outline, |r, _| {
             r.item.bg.set(Paint::Role(Role::Card, 1.0));
             r.item.bg.on(State::HOVER, Paint::Role(Role::Accent, 1.0));
@@ -205,7 +240,7 @@ pub fn apply(ctx: &Context) {
 /// row next to vertical stems spread over two, so the bars of "e", "a" and
 /// "B" looked too thin.
 fn geo_data() -> FontData {
-    let mut data = FontData::from_static(GEO_TTF);
+    let mut data = FontData::from_static(include_bytes!("../assets/Geo-Oblique.ttf"));
     data.tweak.hinting = Some(false);
     data
 }
@@ -311,6 +346,10 @@ mod tests {
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
             ("network_ui.rs", include_str!("network_ui.rs")),
             ("monitors_ui.rs", include_str!("monitors_ui.rs")),
+            ("status/mod.rs", include_str!("status/mod.rs")),
+            ("status/battery.rs", include_str!("status/battery.rs")),
+            ("status/clock.rs", include_str!("status/clock.rs")),
+            ("status/layout.rs", include_str!("status/layout.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
             let hits = style_literal_lines(name, code);
@@ -365,8 +404,8 @@ mod tests {
             assert_eq!((p.accent, p.border, p.muted_foreground), (TILE_HOVER, LINE, MUTED));
         }
         assert_eq!(t.radius, 0.0);
-        let app = [role::TILE_ACTIVE, role::TIME, role::WARN, role::GOOD].map(|r| t.role(r));
-        assert_eq!(app, [TILE_ACTIVE, TIME, WARN, GOOD]);
+        let app = [role::TILE_ACTIVE, role::TIME, role::WARN, role::GOOD, role::ALERT].map(|r| t.role(r));
+        assert_eq!(app, [TILE_ACTIVE, TIME, WARN, GOOD, RED]);
     }
 
     /// Runs `n` empty passes: fonts land one pass after `apply`.

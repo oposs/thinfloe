@@ -236,20 +236,15 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     if heads.is_some() {
         let _ = event_loop.create_proxy().send_event(Wake::Heads);
     }
-    let has_kind = |names: &[&str]| cfg.menu.status.elements.iter().any(|p| names.contains(&p.kind));
+    let needs = |source| cfg.menu.status.needs(source);
     let hardware_on = Arc::new(AtomicBool::new(true));
-    let hardware = has_kind(&[crate::status::hardware::KIND.name]).then(|| {
+    let hardware = needs(crate::status::Source::Hardware).then(|| {
         let waker = event_loop.create_proxy();
         crate::hardware::spawn(cfg.hardware_roots.clone(), hardware_on.clone(), move || {
             let _ = waker.send_event(Wake::Hardware);
         })
     });
-    // The graph and the list draw from one sampler.
-    let network = has_kind(&[
-        crate::status::network::KIND.name,
-        crate::status::network_info::KIND.name,
-    ])
-    .then(|| {
+    let network = needs(crate::status::Source::Network).then(|| {
         let waker = event_loop.create_proxy();
         crate::netstat::spawn(cfg.network_roots.clone(), move || {
             // The loop is gone only when the menu is exiting.
@@ -628,10 +623,11 @@ fn wake_flow(at: Option<Instant>) -> ControlFlow {
     at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
 
-/// Whether the hardware sampler reads: not while a window covers the menu, and
-/// only when a hardware tile has a place on a screen `height` points tall.
+/// Whether the hardware sampler reads: not while a window covers the menu,
+/// not on a short screen, where no hardware element is shown, and only when a
+/// shown element draws from it.
 fn hardware_wanted(status: &crate::status::Area, covered: bool, height: f32) -> bool {
-    !covered && status.has_on(crate::status::hardware::KIND.name, ui::short_screen(height))
+    !covered && !ui::short_screen(height) && status.needs(crate::status::Source::Hardware)
 }
 
 impl App {
@@ -888,18 +884,8 @@ impl App {
         }
         let prims = self.ctx.tessellate(out.shapes, ppp);
         let tracked = live.tracker.damage(&prims, ppp);
-        // A status element's new picture damages its own cell only; any
-        // other upload (the font atlas) everything.
-        let set: Vec<egui::TextureId> = out.textures_delta.set.keys().copied().collect();
-        let own = |id| {
-            self.ctx
-                .tex_manager()
-                .read()
-                .meta(id)
-                .is_some_and(|m| m.name.starts_with(ui::STATUS_TEXTURE))
-        };
-        let textures = crate::damage::texture_damage(&set, own, &prims, ppp);
-        if let Some(rect) = crate::damage::frame_damage(force_full, tracked, textures, live.canvas.bounds()) {
+        let uploaded = !out.textures_delta.set.is_empty();
+        if let Some(rect) = crate::damage::frame_damage(force_full, uploaded, tracked, live.canvas.bounds()) {
             let t0 = Instant::now();
             live.canvas.restore_background(rect);
             live.canvas.draw(&prims, &live.textures, ppp, rect);
@@ -1634,16 +1620,15 @@ esac"#;
 
     #[test]
     fn the_hardware_sampler_rests_when_covered_on_a_short_screen_and_without_a_tile() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/status");
-        let shipped = crate::status::config::load(&dir);
-        assert!(hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H));
-        assert!(!hardware_wanted(&shipped, true, ui::SHORT_SCREEN_H), "covered");
+        // No hardware element is listed yet: nothing asks for the sampler.
+        let shipped = crate::status::Area::shipped();
         assert!(
-            !hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H - 0.5),
-            "short screen"
+            !hardware_wanted(&shipped, false, ui::SHORT_SCREEN_H),
+            "no hardware element"
         );
+        assert!(!hardware_wanted(&shipped, true, ui::SHORT_SCREEN_H), "covered");
         let none = crate::status::Area::default();
-        assert!(!hardware_wanted(&none, false, ui::SHORT_SCREEN_H), "no hardware tile");
+        assert!(!hardware_wanted(&none, false, ui::SHORT_SCREEN_H), "no element");
     }
 
     #[test]

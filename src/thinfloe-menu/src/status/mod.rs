@@ -1,26 +1,26 @@
 //! The status area below the tiles: a grid of the tiles' cell size, four
-//! columns and up to three rows, holding elements. Each element covers a
-//! rectangle of cells, comes from a file of its own (see `config`), is drawn
-//! as an SVG it builds itself and rendered in-process with resvg (`render`),
-//! and says when its picture next changes on its own. An element moves up
-//! until a shown element above it in its columns or the top stops it, so no
-//! row stays blank: only the rows the shown elements then use are drawn. With
+//! columns and up to three rows, holding elements. Each element draws itself
+//! with egui into the rectangle of the cells it covers, with colours from the
+//! theme and sizes from `brand.rs`; `layout::pack` places the elements the
+//! user chose, in their order, first fit. Only the rows used are drawn; with
 //! nothing to show the area is gone.
 //!
-//! A new element type is one module with an `Element` and a `Kind`, listed
-//! in `KINDS`, plus a file in `/etc/thinfloe/status/`.
+//! To add an element:
+//!
+//! 1. Write a module here with a unit struct that implements `Element`. Its
+//!    `draw` must be pure (same data and time, same picture) and stay inside
+//!    its rectangle; the test `<id>_draws_inside_its_rect_at_every_size` beside
+//!    it proves that for every size it offers.
+//! 2. List it in `ELEMENTS`. That order is the default order of the area.
+//! 3. If it needs data the menu does not sample yet, add a `Source`, a field
+//!    of `Data`, and the sampler in `app.rs`, which runs only while
+//!    `Area::needs` says so.
 
 pub mod battery;
 pub mod clock;
-pub mod config;
-pub mod hardware;
 pub mod layout;
-pub mod network;
-pub mod network_info;
-pub mod render;
-pub mod style;
 
-use crate::desktop::Entry;
+use crate::brand::{self, StatusSizes};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 use std::time::{Duration, Instant};
 
@@ -69,35 +69,6 @@ pub struct Cells {
 }
 
 impl Cells {
-    /// `column,row,width,height`, inside the 4 x 3 grid, at least 1 x 1.
-    pub fn parse(text: &str) -> Result<Cells, String> {
-        let bad = || format!("Cells must be column,row,width,height, not '{text}'");
-        let parts: Vec<&str> = text.split(',').map(str::trim).collect();
-        if parts.len() != 4 {
-            return Err(bad());
-        }
-        let mut n = [0u8; 4];
-        for (slot, p) in n.iter_mut().zip(&parts) {
-            if p.is_empty() || p.len() > 2 || !p.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(bad());
-            }
-            *slot = p.parse().map_err(|_| bad())?;
-        }
-        let c = Cells {
-            col: n[0],
-            row: n[1],
-            w: n[2],
-            h: n[3],
-        };
-        if c.w == 0 || c.h == 0 {
-            return Err(format!("Cells {text} cover no cell"));
-        }
-        if c.col as u16 + c.w as u16 > COLUMNS as u16 || c.row as u16 + c.h as u16 > ROWS as u16 {
-            return Err(format!("Cells {text} reach outside the {COLUMNS} x {ROWS} grid"));
-        }
-        Ok(c)
-    }
-
     pub fn overlaps(&self, o: &Cells) -> bool {
         self.col < o.col + o.w && o.col < self.col + self.w && self.row < o.row + o.h && o.row < self.row + self.h
     }
@@ -105,6 +76,10 @@ impl Cells {
     /// The rows down to the element's last one.
     pub fn bottom(&self) -> usize {
         (self.row + self.h) as usize
+    }
+
+    pub fn size(&self) -> Size {
+        Size { w: self.w, h: self.h }
     }
 
     /// Where the element goes in an area whose top-left cell starts at
@@ -117,52 +92,42 @@ impl Cells {
             vec2(span(self.w, cell.x), span(self.h, cell.y)),
         )
     }
+}
 
-    /// The room an element of these cells gets, cells `cell` large and
-    /// `gap` apart.
-    pub fn room(&self, cell: Vec2, gap: f32) -> Room {
-        Room {
-            size: self.rect(Pos2::ZERO, cell, gap).size(),
-            cell,
-        }
+/// The sizes of text and spacing for cells `cell_h` points high: the set
+/// for the full tile height, the set for the smallest, and in between a
+/// value interpolated and rounded to half a point. A 2 x 1 element uses the
+/// same sizes as a 1 x 1 one beside it.
+pub fn sizes_for(cell_h: f32) -> StatusSizes {
+    let (small, large) = (brand::STATUS_SMALL, brand::STATUS_LARGE);
+    let (lo, hi) = (brand::STATUS_CELL_SMALL_H, brand::STATUS_CELL_LARGE_H);
+    let h = if cell_h.is_finite() { cell_h } else { hi };
+    let k = (h.clamp(lo, hi) - lo) / (hi - lo);
+    let mix = |a: f32, b: f32| ((a + (b - a) * k) * 2.0).round() / 2.0;
+    StatusSizes {
+        label: mix(small.label, large.label),
+        value: mix(small.value, large.value),
+        row: mix(small.row, large.row),
+        pad_x: mix(small.pad_x, large.pad_x),
+        pad_y: mix(small.pad_y, large.pad_y),
+        gap: mix(small.gap, large.gap),
     }
 }
 
-/// What an element is drawn into: its rectangle's size and the size of
-/// one cell, both in points. The cell height picks the sizes of text and
-/// spacing (`style::Style::for_cell`), so a 3 x 2 element uses the same
-/// sizes as a 1 x 1 one beside it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Room {
-    pub size: Vec2,
-    pub cell: Vec2,
-}
-
-impl Room {
-    /// The sizes for this room's cells.
-    pub fn style(&self) -> style::Style {
-        style::Style::for_cell(self.cell.y)
-    }
-
-    /// One cell `cell` large: the room of a 1 x 1 element.
-    #[cfg(test)]
-    pub fn one(cell: Vec2) -> Room {
-        Room { size: cell, cell }
-    }
-}
-
-/// When an element is drawn again besides the changes it reports itself.
+/// The data an element draws from, shared by several elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refresh {
-    /// When its data source changes (the battery file, say).
-    Change,
-    /// Every so often (a traffic graph, every second).
-    Every(Duration),
+pub enum Source {
+    /// The battery file of keyboards and mice.
+    Battery,
+    /// The network sampler.
+    Network,
+    /// The hardware sampler.
+    Hardware,
 }
 
 /// What the elements draw from: the menu's data sources, read by the app.
 #[derive(Debug, Clone, Copy)]
-pub struct Sources<'a> {
+pub struct Data<'a> {
     pub battery: &'a [crate::battery::Device],
     /// When `battery` was set.
     pub battery_since: Option<Instant>,
@@ -177,148 +142,221 @@ pub struct Sources<'a> {
     pub hardware: Option<&'a crate::hardware::Snapshot>,
 }
 
-/// One element type's drawing. `room.size` is the element's rectangle in
-/// points; the SVG is drawn into exactly that.
-pub trait Element {
-    /// Whether it has anything to show; an area of elements that have
-    /// nothing is not drawn.
-    fn visible(&self, data: &Sources) -> bool;
-    /// The picture now, as SVG text. The same text means the same picture,
-    /// so the menu renders it again only when the text changes.
-    fn svg(&self, data: &Sources, room: Room, now: Instant) -> String;
-    /// How long until the picture changes on its own (a page turns); `None`
-    /// when only new data changes it.
-    fn next_change(&self, data: &Sources, room: Room, now: Instant) -> Option<Duration>;
+impl Data<'_> {
+    /// No source has anything.
+    pub const EMPTY: Data<'static> = Data {
+        battery: &[],
+        battery_since: None,
+        network: None,
+        network_since: None,
+        hardware: None,
+    };
 }
 
-/// An element type: its name in the `Type=` key, the further keys its file
-/// may set, and how to make one from the file.
-pub struct Kind {
-    pub name: &'static str,
-    pub options: &'static [&'static str],
-    pub build: fn(&Entry) -> Result<Box<dyn Element>, String>,
+/// One kind of status element.
+pub trait Element: Sync {
+    /// Its name in the layout file.
+    fn id(&self) -> &'static str;
+    /// Its name in Settings.
+    fn name(&self) -> &'static str;
+    /// The sizes it draws well; the first is its default.
+    fn sizes(&self) -> &'static [Size];
+    /// Its one-row size on a short screen; `None`: it is not shown there.
+    fn short_size(&self) -> Option<Size>;
+    fn sources(&self) -> &'static [Source];
+    /// Whether it has anything to show; one that has not takes no cells.
+    fn has_content(&self, data: &Data) -> bool;
+    /// Draw into `rect`, which covers `size` cells, and nowhere else.
+    fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, now: Instant);
+    /// How long until its picture changes on its own (a page turns, the
+    /// minute changes); `None` when only new data changes it.
+    fn next_change(&self, data: &Data, rect: Rect, now: Instant) -> Option<Duration>;
+    /// How often it is drawn again besides; `None`: when its data changes.
+    fn refresh(&self) -> Option<Duration>;
 }
 
-/// Every element type there is. One line per type.
-pub const KINDS: &[Kind] = &[
-    battery::KIND,
-    network::KIND,
-    network_info::KIND,
-    hardware::KIND,
-    clock::KIND,
-];
+/// Every element there is, in the default order. One line per element.
+pub static ELEMENTS: &[&dyn Element] = &[&battery::Battery, &clock::Clock];
 
-pub fn kind(name: &str) -> Option<&'static Kind> {
-    KINDS.iter().find(|k| k.name == name)
+pub fn element(id: &str) -> Option<&'static dyn Element> {
+    ELEMENTS.iter().copied().find(|e| e.id() == id)
 }
 
-/// Each of `cells` moved up until a cell above it in one of its columns, or
-/// the top of the area, stops it, the highest first. Rectangles that did not
-/// overlap still do not, and none moves down.
-fn moved_up(cells: &[Cells]) -> Vec<Cells> {
-    let mut order: Vec<usize> = (0..cells.len()).collect();
-    order.sort_by_key(|&i| cells[i].row);
-    let mut out = cells.to_vec();
-    for (done, &i) in order.iter().enumerate() {
-        let c = cells[i];
-        let top = order[..done]
-            .iter()
-            .map(|&j| out[j])
-            .filter(|o| o.col < c.col + c.w && c.col < o.col + o.w)
-            .map(|o| o.bottom())
-            .max()
-            .unwrap_or(0);
-        out[i].row = c.row.min(top as u8);
-    }
-    out
+/// The sizes element `id` offers, for `layout::parse`.
+pub fn offered(id: &str) -> Option<&'static [Size]> {
+    element(id).map(|e| e.sizes())
 }
 
-/// An element from its file: the file name names it.
-pub struct Placed {
-    pub name: String,
-    pub kind: &'static str,
-    pub cells: Cells,
-    /// Its cells on a short screen (`ShortSize=`), `cells` without that key;
-    /// `None` (`ShortSize=none`): it is not on a short screen at all.
-    pub short: Option<Cells>,
-    pub refresh: Refresh,
-    pub element: Box<dyn Element>,
+/// Every element with its default size, for `layout::default_layout` and
+/// `layout::complete`.
+pub fn descriptors() -> Vec<layout::Descriptor> {
+    ELEMENTS
+        .iter()
+        .filter_map(|e| e.sizes().first().map(|s| (e.id(), *s)))
+        .collect()
 }
 
-impl Placed {
-    /// The cells it covers on a short screen, or on any other; `None`: it
-    /// takes no part there, no row, no picture and no wake.
-    pub fn cells_on(&self, short: bool) -> Option<Cells> {
-        if short { self.short } else { Some(self.cells) }
-    }
-}
-
-/// The elements in file-name order, none overlapping, and what was
-/// refused and why.
-#[derive(Default)]
+/// The status area: the user's choice of elements, sizes and order.
+#[derive(Debug, Clone, Default)]
 pub struct Area {
-    pub elements: Vec<Placed>,
-    pub notes: Vec<String>,
-    /// A file or the directory was refused (`--check` fails on it). A
-    /// missing directory is not refused: it means no elements.
-    pub shipped_refused: bool,
+    pub layout: layout::Layout,
 }
 
 impl Area {
-    /// The elements with something to show on this screen, in file-name
-    /// order, with the cells they take: their own, moved up (`moved_up`).
-    pub fn shown<'a>(&'a self, data: &'a Sources, short: bool) -> impl Iterator<Item = (&'a Placed, Cells)> + 'a {
-        let shown: Vec<(&Placed, Cells)> = self
-            .elements
+    /// The shipped layout: every element, shown, at its default size.
+    pub fn shipped() -> Area {
+        let mut layout = layout::parse(b"", &offered);
+        layout::complete(&mut layout, &descriptors());
+        Area { layout }
+    }
+
+    /// The shown choices this image knows, in order, with their size.
+    fn chosen(&self) -> impl Iterator<Item = (&'static dyn Element, Size)> + '_ {
+        self.layout
+            .choices
             .iter()
-            .filter_map(|p| p.cells_on(short).map(|c| (p, c)))
-            .filter(|(p, _)| p.element.visible(data))
-            .collect();
-        let cells: Vec<Cells> = shown.iter().map(|(_, c)| *c).collect();
-        let moved = moved_up(&cells);
-        shown.into_iter().map(|(p, _)| p).zip(moved)
+            .filter(|c| c.shown && c.known)
+            .filter_map(|c| element(&c.id).map(|e| (e, c.size)))
     }
 
-    /// An element of this kind takes part on this screen, whether or not it
-    /// has anything to show yet: its data source must run to find out.
-    pub fn has_on(&self, kind: &str, short: bool) -> bool {
-        self.elements
-            .iter()
-            .any(|p| p.kind == kind && p.cells_on(short).is_some())
+    fn packed(items: Vec<(&'static dyn Element, Size)>, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
+        let sizes: Vec<Size> = items.iter().map(|(_, s)| *s).collect();
+        let shorts: Vec<Option<Size>> = items.iter().map(|(e, _)| e.short_size()).collect();
+        let cells = layout::pack(&sizes, short, &shorts);
+        items
+            .into_iter()
+            .zip(cells)
+            .filter_map(|((e, _), c)| c.map(|c| (e, c.size(), c)))
+            .collect()
     }
 
-    /// The rows the shown elements use; 0 hides the area.
-    pub fn rows(&self, data: &Sources, short: bool) -> usize {
-        self.shown(data, short).map(|(_, c)| c.bottom()).max().unwrap_or(0)
+    /// The elements drawn now: the shown choices with something to show,
+    /// packed, each with the size and cells it takes on this screen.
+    pub fn shown(&self, data: &Data, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
+        let items = self.chosen().filter(|(e, _)| e.has_content(data)).collect();
+        Self::packed(items, short)
     }
 
-    /// The rows the elements take on this screen when all show, whatever they
-    /// have to show now: the tiles and the top of the area are placed by this,
-    /// so they stay where they are when an element appears or goes (the
-    /// elements inside the area close up). 0: no element at all.
+    /// The rows the shown choices take when all have something to show: the
+    /// tiles and the top of the area are placed by this, so they stay where
+    /// they are when an element appears or goes. 0: no area.
     pub fn planned_rows(&self, short: bool) -> usize {
-        self.elements
+        Self::packed(self.chosen().collect(), short)
             .iter()
-            .filter_map(|p| p.cells_on(short))
-            .map(|c| c.bottom())
+            .map(|(_, _, c)| c.bottom())
             .max()
             .unwrap_or(0)
     }
 
-    /// The soonest a shown element wants a frame: its refresh interval or
-    /// its own next change. `None`: only new data redraws the area.
-    pub fn wake(&self, data: &Sources, cell: Vec2, gap: f32, now: Instant, short: bool) -> Option<Duration> {
+    /// The rows the elements drawn now use; 0 hides the area.
+    pub fn rows(&self, data: &Data, short: bool) -> usize {
         self.shown(data, short)
-            .flat_map(|(p, cells)| {
-                let room = cells.room(cell, gap);
-                let every = match p.refresh {
-                    Refresh::Every(d) => Some(d),
-                    Refresh::Change => None,
-                };
-                [every, p.element.next_change(data, room, now)]
-            })
+            .iter()
+            .map(|(_, _, c)| c.bottom())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The soonest an element drawn now wants a frame, in an area whose
+    /// top-left cell is at `origin`: its refresh interval or its own next
+    /// change. `None`: only new data redraws the area.
+    pub fn wake(&self, data: &Data, origin: Pos2, cell: Vec2, gap: f32, now: Instant, short: bool) -> Option<Duration> {
+        self.shown(data, short)
+            .into_iter()
+            .flat_map(|(e, _, c)| [e.refresh(), e.next_change(data, c.rect(origin, cell, gap), now)])
             .flatten()
             .min()
+    }
+
+    /// Some shown choice draws from `source`, whether or not it has anything
+    /// yet: its source must run to find out.
+    pub fn needs(&self, source: Source) -> bool {
+        self.chosen().any(|(e, _)| e.sources().contains(&source))
+    }
+}
+
+/// Fill `rect` with the tiles' colour, as every element's background.
+pub fn background(ui: &egui::Ui, rect: Rect) {
+    let card = shadcn_egui::Theme::current(ui.ctx()).palette().card;
+    ui.painter().rect_filled(rect, 0.0, card);
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! Draw one element headless and collect what it drew.
+    use super::*;
+
+    /// A 1 x 1 cell of the full tile height, and of the smallest.
+    pub const CELL_HEIGHTS: [f32; 2] = [brand::STATUS_CELL_LARGE_H, brand::STATUS_CELL_SMALL_H];
+    pub const CELL_W: f32 = 220.0;
+    pub const GAP: f32 = 3.0;
+
+    /// The rectangle of an element of `size` at the top left of an area at
+    /// (40, 30), cells `cell_h` high.
+    pub fn rect_of(size: Size, cell_h: f32) -> Rect {
+        Cells {
+            col: 0,
+            row: 0,
+            w: size.w,
+            h: size.h,
+        }
+        .rect(pos2(40.0, 30.0), vec2(CELL_W, cell_h), GAP)
+    }
+
+    /// The shapes `e` draws into `rect` in one frame, the fonts settled.
+    pub fn shapes(e: &dyn Element, rect: Rect, size: Size, data: &Data, now: Instant) -> Vec<egui::Shape> {
+        let ctx = egui::Context::default();
+        brand::apply(&ctx);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 600.0))),
+            ..Default::default()
+        };
+        let mut out = None;
+        for _ in 0..3 {
+            let mut o = ctx.run_ui(input(), |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                child.set_clip_rect(rect);
+                e.draw(&mut child, rect, size, data, now);
+            });
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.map(|o| o.shapes.into_iter().map(|c| c.shape).collect())
+            .unwrap_or_default()
+    }
+
+    /// The text of every text shape, in order, with its colour.
+    pub fn texts(shapes: &[egui::Shape]) -> Vec<(String, egui::Color32)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Color32)>) {
+            match s {
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.fallback_color)),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(s, &mut out));
+        out
+    }
+
+    /// Every shape `e` draws at each size it offers, at both cell heights,
+    /// lies inside its rectangle.
+    pub fn assert_inside(e: &dyn Element, data: &Data, now: Instant) {
+        for &size in e.sizes() {
+            for h in CELL_HEIGHTS {
+                let rect = rect_of(size, h);
+                let shapes = shapes(e, rect, size, data, now);
+                assert!(!shapes.is_empty(), "{} {size} at {h}: draws nothing", e.id());
+                for s in &shapes {
+                    let b = s.visual_bounding_rect();
+                    assert!(
+                        rect.expand(0.01).contains_rect(b),
+                        "{} {size} at {h}: {b:?} outside {rect:?}: {s:?}",
+                        e.id()
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -328,38 +366,6 @@ mod tests {
 
     fn cells(col: u8, row: u8, w: u8, h: u8) -> Cells {
         Cells { col, row, w, h }
-    }
-
-    #[test]
-    fn cells_parse_inside_the_grid_only() {
-        assert_eq!(Cells::parse("0,0,1,1"), Ok(cells(0, 0, 1, 1)));
-        assert_eq!(Cells::parse(" 1, 2 ,3,1 "), Ok(cells(1, 2, 3, 1)));
-        assert_eq!(Cells::parse("0,0,4,3"), Ok(cells(0, 0, 4, 3)));
-        for bad in [
-            "",
-            "0,0,1",
-            "0,0,1,1,1",
-            "a,0,1,1",
-            "-1,0,1,1",
-            "0,0,1,+1",
-            "0,0,100,1",
-            "0;0;1;1",
-        ] {
-            assert_eq!(
-                Cells::parse(bad),
-                Err(format!("Cells must be column,row,width,height, not '{bad}'"))
-            );
-        }
-        assert_eq!(Cells::parse("0,0,0,1"), Err("Cells 0,0,0,1 cover no cell".into()));
-        assert_eq!(
-            Cells::parse("3,0,2,1"),
-            Err("Cells 3,0,2,1 reach outside the 4 x 3 grid".into())
-        );
-        assert_eq!(
-            Cells::parse("0,2,1,2"),
-            Err("Cells 0,2,1,2 reach outside the 4 x 3 grid".into())
-        );
-        assert!(Cells::parse("99,99,99,99").is_err());
     }
 
     #[test]
@@ -382,304 +388,141 @@ mod tests {
         // At a smaller cell (the scaled-down or squeezed grid) it follows.
         let r = cells(3, 2, 1, 1).rect(pos2(0.0, 0.0), vec2(100.0, 64.0), 3.0);
         assert_eq!(r.max, pos2(4.0 * 100.0 + 9.0, 3.0 * 64.0 + 6.0));
-        // Its room: that size, and the cell it was cut from.
-        let room = cells(1, 0, 3, 2).room(cell, 3.0);
-        assert_eq!(room.size, vec2(666.0, 155.0));
-        assert_eq!(room.cell, cell);
-        assert_eq!(room.style(), style::LARGE);
-        assert_eq!(cells(0, 0, 1, 1).room(vec2(220.0, 64.0), 3.0).style(), style::SMALL);
-        assert_eq!(Room::one(cell), cells(0, 0, 1, 1).room(cell, 3.0));
-    }
-
-    struct Fixed {
-        shows: bool,
-        next: Option<Duration>,
-    }
-
-    impl Element for Fixed {
-        fn visible(&self, _: &Sources) -> bool {
-            self.shows
-        }
-        fn svg(&self, _: &Sources, _: Room, _: Instant) -> String {
-            String::new()
-        }
-        fn next_change(&self, _: &Sources, _: Room, _: Instant) -> Option<Duration> {
-            self.next
-        }
-    }
-
-    fn placed(name: &str, c: Cells, refresh: Refresh, shows: bool, next: Option<Duration>) -> Placed {
-        Placed {
-            name: name.into(),
-            kind: "fixed",
-            cells: c,
-            short: Some(c),
-            refresh,
-            element: Box::new(Fixed { shows, next }),
-        }
-    }
-
-    const DATA: Sources = Sources {
-        battery: &[],
-        battery_since: None,
-        network: None,
-        network_since: None,
-        hardware: None,
-    };
-
-    #[test]
-    fn an_element_is_on_a_screen_by_its_own_form() {
-        let mut area = Area::default();
-        assert!(!area.has_on("fixed", false), "no such element");
-        let mut p = placed("a", cells(0, 0, 1, 1), Refresh::Change, false, None);
-        p.short = None;
-        area.elements.push(p);
-        assert!(area.has_on("fixed", false));
-        assert!(!area.has_on("fixed", true), "ShortSize=none");
-        assert!(!area.has_on("other", false));
-        area.elements[0].short = Some(cells(0, 0, 1, 1));
-        assert!(area.has_on("fixed", true), "it has a short form");
     }
 
     #[test]
-    fn a_short_screen_counts_the_short_form_of_an_element() {
-        let mut area = Area::default();
-        let mut p = placed("a", cells(1, 0, 3, 2), Refresh::Change, true, None);
-        p.short = Some(cells(1, 0, 3, 1));
-        area.elements.push(p);
-        assert_eq!(area.rows(&DATA, false), 2);
-        assert_eq!(area.rows(&DATA, true), 1);
-        assert_eq!(area.elements[0].cells_on(true), Some(cells(1, 0, 3, 1)));
-        assert_eq!(area.elements[0].cells_on(false), Some(cells(1, 0, 3, 2)));
+    fn the_sizes_follow_the_cell_height() {
+        assert_eq!(sizes_for(76.0), brand::STATUS_LARGE);
+        assert_eq!(sizes_for(64.0), brand::STATUS_SMALL);
+        assert_eq!(sizes_for(200.0), brand::STATUS_LARGE);
+        assert_eq!(sizes_for(f32::NAN), brand::STATUS_LARGE);
+        let mid = sizes_for(70.0);
+        assert!(mid.label > brand::STATUS_SMALL.label && mid.label < brand::STATUS_LARGE.label);
+        assert_eq!(mid.label * 2.0, (mid.label * 2.0).round(), "half points");
     }
 
     #[test]
-    fn an_element_without_a_short_form_takes_no_part_on_a_short_screen() {
-        let s = Duration::from_secs;
-        let now = Instant::now();
+    fn every_element_has_a_unique_id_and_offers_a_size() {
+        let mut ids: Vec<_> = ELEMENTS.iter().map(|e| e.id()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), ELEMENTS.len());
+        for e in ELEMENTS {
+            assert!(!e.sizes().is_empty(), "{}", e.id());
+            assert!(e.short_size().is_none_or(|s| s.h == 1), "{}", e.id());
+            assert!(element(e.id()).is_some());
+        }
+        assert!(element("radio").is_none());
+    }
+
+    #[test]
+    fn the_default_list_is_every_element_in_order() {
+        let ids: Vec<String> = Area::shipped().layout.choices.into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["battery", "clock"]);
+    }
+
+    fn area(text: &str) -> Area {
+        let mut layout = layout::parse(text.as_bytes(), &offered);
+        layout::complete(&mut layout, &descriptors());
+        Area { layout }
+    }
+
+    fn device() -> Vec<crate::battery::Device> {
+        vec![crate::battery::Device {
+            name: "K".into(),
+            percent: Some(50),
+            state: "discharging".into(),
+            read_epoch: 1,
+            kind: crate::battery::DeviceKind::Keyboard,
+        }]
+    }
+
+    fn ids(v: &[(&'static dyn Element, Size, Cells)]) -> Vec<(&'static str, Cells)> {
+        v.iter().map(|(e, _, c)| (e.id(), *c)).collect()
+    }
+
+    #[test]
+    fn an_element_without_content_takes_no_cells_but_keeps_its_planned_row() {
+        let a = Area::shipped();
+        let devices = device();
+        let with = Data {
+            battery: &devices,
+            ..Data::EMPTY
+        };
+        assert_eq!(
+            ids(&a.shown(&with, false)),
+            [("battery", cells(0, 0, 1, 1)), ("clock", cells(1, 0, 1, 1))]
+        );
+        // No device: the clock moves into the first cell.
+        assert_eq!(ids(&a.shown(&Data::EMPTY, false)), [("clock", cells(0, 0, 1, 1))]);
+        assert_eq!(a.rows(&Data::EMPTY, false), 1);
+        assert_eq!(a.planned_rows(false), 1);
+        // A hidden element takes no part, planned or drawn.
+        let hidden = area("-battery 1x1\n-clock 1x1\n");
+        assert_eq!(hidden.planned_rows(false), 0);
+        assert_eq!(hidden.rows(&with, false), 0);
+        assert!(!hidden.needs(Source::Battery));
+        assert!(a.needs(Source::Battery));
+        assert!(!a.needs(Source::Network) && !a.needs(Source::Hardware));
+        // An empty area: nothing.
+        assert_eq!(Area::default().planned_rows(false), 0);
+    }
+
+    #[test]
+    fn the_order_and_sizes_of_the_layout_are_kept() {
+        let devices = device();
+        let with = Data {
+            battery: &devices,
+            ..Data::EMPTY
+        };
+        let a = area("clock 1x1\nbattery 2x1\n");
+        assert_eq!(
+            ids(&a.shown(&with, false)),
+            [("clock", cells(0, 0, 1, 1)), ("battery", cells(1, 0, 2, 1))]
+        );
+    }
+
+    #[test]
+    fn a_short_screen_takes_each_short_size_or_leaves_the_element_out() {
+        let devices = device();
+        let with = Data {
+            battery: &devices,
+            ..Data::EMPTY
+        };
+        let a = area("battery 2x1\nclock 1x1\n");
+        // The battery's short size is 1x1; the clock has none.
+        assert_eq!(ids(&a.shown(&with, true)), [("battery", cells(0, 0, 1, 1))]);
+        assert_eq!(a.planned_rows(true), 1);
+        let clock_only = area("-battery 1x1\nclock 1x1\n");
+        assert_eq!(clock_only.planned_rows(true), 0);
+        assert_eq!(clock_only.rows(&with, true), 0);
+    }
+
+    #[test]
+    fn the_soonest_element_drawn_sets_the_wake() {
+        let t0 = Instant::now();
+        let devices: Vec<_> = (0..6)
+            .map(|i| crate::battery::Device {
+                name: format!("D{i}"),
+                ..device()[0].clone()
+            })
+            .collect();
+        let paging = Data {
+            battery: &devices,
+            battery_since: Some(t0),
+            ..Data::EMPTY
+        };
+        let at = t0 + Duration::from_millis(1500);
         let cell = vec2(220.0, 76.0);
-        let mut area = Area::default();
-        area.elements
-            .push(placed("a", cells(0, 0, 1, 1), Refresh::Change, true, Some(s(9))));
-        let mut gone = placed("b", cells(0, 1, 1, 1), Refresh::Every(s(5)), true, Some(s(2)));
-        gone.short = None;
-        area.elements.push(gone);
-        assert_eq!(area.elements[1].cells_on(true), None);
-        assert_eq!(area.elements[1].cells_on(false), Some(cells(0, 1, 1, 1)));
-        // Not counted: its row is not there.
-        assert_eq!(area.rows(&DATA, true), 1);
-        assert_eq!(area.rows(&DATA, false), 2);
-        // Not painted.
-        let names = |short| {
-            area.shown(&DATA, short)
-                .map(|(p, _)| p.name.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(names(true), ["a"]);
-        assert_eq!(names(false), ["a", "b"]);
-        // No wake of its own.
-        assert_eq!(area.wake(&DATA, cell, 3.0, now, true), Some(s(9)));
-        assert_eq!(area.wake(&DATA, cell, 3.0, now, false), Some(s(2)));
-    }
-
-    #[test]
-    fn rows_are_those_the_shown_elements_use() {
-        let mut area = Area::default();
-        assert_eq!(area.rows(&DATA, false), 0, "no element: no area");
-        area.elements
-            .push(placed("a", cells(0, 0, 1, 1), Refresh::Change, true, None));
-        assert_eq!(area.rows(&DATA, false), 1);
-        area.elements
-            .push(placed("b", cells(1, 0, 3, 3), Refresh::Change, false, None));
-        assert_eq!(area.rows(&DATA, false), 1, "a hidden element takes no row");
-        area.elements
-            .push(placed("c", cells(0, 1, 2, 1), Refresh::Change, true, None));
-        assert_eq!(area.rows(&DATA, false), 2);
-        let empty = Area {
-            elements: vec![placed("a", cells(0, 0, 1, 1), Refresh::Change, false, None)],
-            ..Area::default()
-        };
-        assert_eq!(empty.rows(&DATA, false), 0, "nothing to show: no area");
-    }
-
-    /// The shipped layout at 900 points and above, with which elements show.
-    fn shipped(battery: bool, network: bool, temperatures: bool, cpu: bool, memory: bool, system: bool) -> Area {
-        Area {
-            elements: vec![
-                placed("10-battery", cells(0, 0, 1, 1), Refresh::Change, battery, None),
-                placed("20-network", cells(1, 0, 2, 2), Refresh::Change, network, None),
-                placed("25-info", cells(3, 0, 1, 2), Refresh::Change, network, None),
-                placed(
-                    "30-temperatures",
-                    cells(0, 1, 1, 1),
-                    Refresh::Change,
-                    temperatures,
-                    None,
-                ),
-                placed("31-cpu", cells(0, 2, 1, 1), Refresh::Change, cpu, None),
-                placed("32-memory", cells(1, 2, 1, 1), Refresh::Change, memory, None),
-                placed("33-system", cells(2, 2, 1, 1), Refresh::Change, system, None),
-                placed("40-clock", cells(3, 2, 1, 1), Refresh::Change, true, None),
-            ],
-            ..Area::default()
-        }
-    }
-
-    fn where_is(area: &Area, name: &str) -> Option<Cells> {
-        area.shown(&DATA, false).find(|(p, _)| p.name == name).map(|(_, c)| c)
-    }
-
-    #[test]
-    fn an_element_with_nothing_shown_above_it_moves_up() {
-        // All there: the cells of the files.
-        let all = shipped(true, true, true, true, true, true);
-        assert_eq!(where_is(&all, "30-temperatures"), Some(cells(0, 1, 1, 1)));
-        assert_eq!(where_is(&all, "31-cpu"), Some(cells(0, 2, 1, 1)));
-        assert_eq!(where_is(&all, "32-memory"), Some(cells(1, 2, 1, 1)));
-        assert_eq!(where_is(&all, "33-system"), Some(cells(2, 2, 1, 1)));
-        assert_eq!(where_is(&all, "40-clock"), Some(cells(3, 2, 1, 1)));
-        assert_eq!(all.rows(&DATA, false), 3);
-        // No battery: its column closes up; the network elements and what is
-        // under them stay.
-        let no_battery = shipped(false, true, true, true, true, true);
-        assert_eq!(where_is(&no_battery, "30-temperatures"), Some(cells(0, 0, 1, 1)));
-        assert_eq!(where_is(&no_battery, "31-cpu"), Some(cells(0, 1, 1, 1)));
-        assert_eq!(where_is(&no_battery, "20-network"), Some(cells(1, 0, 2, 2)));
-        assert_eq!(where_is(&no_battery, "25-info"), Some(cells(3, 0, 1, 2)));
-        assert_eq!(where_is(&no_battery, "32-memory"), Some(cells(1, 2, 1, 1)));
-        assert_eq!(where_is(&no_battery, "33-system"), Some(cells(2, 2, 1, 1)));
-        assert_eq!(no_battery.rows(&DATA, false), 3);
-        // No network: memory and system stand in the top row.
-        let no_network = shipped(true, false, true, true, true, true);
-        assert_eq!(where_is(&no_network, "32-memory"), Some(cells(1, 0, 1, 1)));
-        assert_eq!(where_is(&no_network, "33-system"), Some(cells(2, 0, 1, 1)));
-        assert_eq!(where_is(&no_network, "40-clock"), Some(cells(3, 0, 1, 1)));
-        assert_eq!(where_is(&no_network, "31-cpu"), Some(cells(0, 2, 1, 1)));
-        assert_eq!(no_network.rows(&DATA, false), 3);
-        // No battery, no network, no sensor (a VM): one row, none blank above.
-        let vm = shipped(false, false, false, true, true, true);
-        assert_eq!(where_is(&vm, "31-cpu"), Some(cells(0, 0, 1, 1)));
-        assert_eq!(where_is(&vm, "32-memory"), Some(cells(1, 0, 1, 1)));
-        assert_eq!(where_is(&vm, "33-system"), Some(cells(2, 0, 1, 1)));
-        assert_eq!(vm.rows(&DATA, false), 1);
-        // A hardware tile with nothing leaves no row of its own; the clock
-        // under the list keeps the third.
-        let network_only = shipped(false, true, false, false, false, false);
-        assert_eq!(where_is(&network_only, "40-clock"), Some(cells(3, 2, 1, 1)));
-        assert_eq!(network_only.rows(&DATA, false), 3);
-        // Something above it in another column does not hold it.
-        let mut beside = Area::default();
-        beside
-            .elements
-            .push(placed("a", cells(1, 0, 1, 1), Refresh::Change, true, None));
-        beside
-            .elements
-            .push(placed("b", cells(0, 1, 1, 1), Refresh::Change, true, None));
-        assert_eq!(where_is(&beside, "b"), Some(cells(0, 0, 1, 1)));
-        assert_eq!(beside.rows(&DATA, false), 1);
-    }
-
-    #[test]
-    fn no_shown_combination_leaves_a_blank_row_or_an_overlap() {
-        for bits in 0..64u8 {
-            let on = |n: u8| bits & (1 << n) != 0;
-            let area = shipped(on(0), on(1), on(2), on(3), on(4), on(5));
-            let got: Vec<Cells> = area.shown(&DATA, false).map(|(_, c)| c).collect();
-            for (i, a) in got.iter().enumerate() {
-                assert!(got[i + 1..].iter().all(|b| !a.overlaps(b)), "{bits:#b}: {got:?}");
-            }
-            for row in 0..area.rows(&DATA, false) as u8 {
-                assert!(
-                    got.iter().any(|c| c.row <= row && (row as usize) < c.bottom()),
-                    "{bits:#b}: row {row} blank in {got:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_wide_element_stops_at_the_lowest_element_above_any_of_its_columns() {
-        let area = Area {
-            elements: vec![
-                placed("gone", cells(0, 0, 1, 1), Refresh::Change, false, None),
-                placed("a", cells(1, 0, 1, 2), Refresh::Change, true, None),
-                placed("b", cells(0, 1, 1, 1), Refresh::Change, true, None),
-                placed("c", cells(0, 2, 2, 1), Refresh::Change, true, None),
-            ],
-            ..Area::default()
-        };
-        assert_eq!(where_is(&area, "b"), Some(cells(0, 0, 1, 1)));
-        assert_eq!(where_is(&area, "c"), Some(cells(0, 2, 2, 1)), "a reaches down to row 1");
-        assert_eq!(area.rows(&DATA, false), 3);
-        // A column of three with the top one gone closes up.
-        let column = Area {
-            elements: vec![
-                placed("gone", cells(0, 0, 1, 1), Refresh::Change, false, None),
-                placed("b", cells(0, 1, 1, 1), Refresh::Change, true, None),
-                placed("c", cells(0, 2, 1, 1), Refresh::Change, true, None),
-            ],
-            ..Area::default()
-        };
-        assert_eq!(where_is(&column, "c"), Some(cells(0, 1, 1, 1)));
-        assert_eq!(column.rows(&DATA, false), 2);
-    }
-
-    #[test]
-    fn planned_rows_count_every_element_on_this_screen_shown_or_not() {
-        assert_eq!(Area::default().planned_rows(false), 0, "no element");
-        let mut area = Area {
-            elements: vec![
-                placed("a", cells(0, 0, 1, 1), Refresh::Change, false, None),
-                placed("b", cells(1, 0, 2, 2), Refresh::Change, false, None),
-            ],
-            ..Area::default()
-        };
-        area.elements[1].short = Some(cells(1, 0, 3, 1));
-        assert_eq!(area.planned_rows(false), 2, "nothing shows and it still counts");
-        assert_eq!(area.planned_rows(true), 1, "the short form");
-        let mut low = placed("c", cells(0, 2, 1, 1), Refresh::Change, true, None);
-        low.short = None;
-        area.elements.push(low);
-        assert_eq!(area.planned_rows(false), 3);
-        assert_eq!(area.planned_rows(true), 1, "ShortSize=none takes no row");
-        for p in &mut area.elements {
-            p.short = None;
-        }
-        assert_eq!(area.planned_rows(true), 0, "none on a short screen");
-    }
-
-    #[test]
-    fn the_soonest_shown_element_sets_the_wake() {
-        let now = Instant::now();
-        let cell = vec2(220.0, 76.0);
-        let s = Duration::from_secs;
-        let area = Area {
-            elements: vec![
-                placed("a", cells(0, 0, 1, 1), Refresh::Change, true, Some(s(4))),
-                placed("b", cells(1, 0, 2, 1), Refresh::Every(s(1)), false, None),
-                placed("c", cells(3, 0, 1, 1), Refresh::Every(s(3)), true, None),
-            ],
-            ..Area::default()
-        };
-        assert_eq!(area.wake(&DATA, cell, 3.0, now, false), Some(s(3)));
-        let calm = Area {
-            elements: vec![placed("a", cells(0, 0, 1, 1), Refresh::Change, true, None)],
-            ..Area::default()
-        };
-        assert_eq!(calm.wake(&DATA, cell, 3.0, now, false), None);
-    }
-
-    #[test]
-    fn every_kind_has_a_unique_name() {
-        let mut names: Vec<_> = KINDS.iter().map(|k| k.name).collect();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), KINDS.len());
-        assert!(kind("battery").is_some());
-        assert!(kind("network").is_some());
-        assert!(kind("network-info").is_some());
-        assert!(kind("hardware").is_some());
-        assert!(kind("clock").is_some());
-        assert!(kind("radio").is_none());
+        let battery_only = area("battery 1x1\n-clock 1x1\n");
+        assert_eq!(
+            battery_only.wake(&paging, Pos2::ZERO, cell, 3.0, at, false),
+            Some(Duration::from_millis(2500))
+        );
+        // A battery that fits does not page: no wake from it.
+        assert_eq!(battery_only.wake(&Data::EMPTY, Pos2::ZERO, cell, 3.0, at, false), None);
+        // The clock wakes within the minute.
+        let both = Area::shipped().wake(&Data::EMPTY, Pos2::ZERO, cell, 3.0, at, false);
+        assert!(both.is_some_and(|d| d <= Duration::from_secs(60)), "{both:?}");
     }
 }

@@ -910,41 +910,9 @@ else
     echo "$check_out"
     fail=1
 fi
-# The status area's battery element ships as its own file and --check
-# (which fails on a refused shipped status file) lists it top left.
-present "battery status element" 'etc/thinfloe/status/10-battery\.conf$'
-if grep -qx 'status 10-battery.conf: battery at 0,0 size 1x1' <<<"$check_out"; then
-    echo "ok   - the battery status element is at cell 0,0, 1x1"
-else
-    echo "FAIL - thinfloe-menu --check does not list the battery status element at 0,0 1x1:"
-    echo "$check_out"
-    fail=1
-fi
-# Graph, list and four hardware tiles ship beside it: the graph two cells by two
-# and one row on a short screen, the list and the hardware only on a tall one.
-present "network status element" 'etc/thinfloe/status/20-network\.conf$'
-present "network list status element" 'etc/thinfloe/status/25-network-info\.conf$'
-present "temperatures status element" 'etc/thinfloe/status/30-temperatures\.conf$'
-present "CPU status element" 'etc/thinfloe/status/31-cpu\.conf$'
-present "memory status element" 'etc/thinfloe/status/32-memory\.conf$'
-present "system status element" 'etc/thinfloe/status/33-system\.conf$'
-present "clock status element" 'etc/thinfloe/status/40-clock\.conf$'
-for want in \
-    'status 20-network.conf: network at 1,0 size 2x2 short 3x1' \
-    'status 25-network-info.conf: network-info at 3,0 size 1x2 short none' \
-    'status 30-temperatures.conf: hardware at 0,1 size 1x1 short none' \
-    'status 31-cpu.conf: hardware at 0,2 size 1x1 short none' \
-    'status 32-memory.conf: hardware at 1,2 size 1x1 short none' \
-    'status 33-system.conf: hardware at 2,2 size 1x1 short none' \
-    'status 40-clock.conf: clock at 3,2 size 1x1 short none'; do
-    if grep -qxF "$want" <<<"$check_out"; then
-        echo "ok   - --check lists: $want"
-    else
-        echo "FAIL - thinfloe-menu --check does not list: $want"
-        echo "$check_out"
-        fail=1
-    fi
-done
+# The status area's elements are built into the menu; no element files ship
+# (PR #6 had one per element in /etc/thinfloe/status/).
+absent  "status element files" 'etc/thinfloe/status/'
 
 # Audio devices start at full level, so the remote client sets the loudness.
 # WirePlumber's own default for outputs is 0.064 (about -24 dB). Ask the

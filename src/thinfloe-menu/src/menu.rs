@@ -238,7 +238,7 @@ pub struct Menu {
     /// When `battery` was set: the status area's battery pages count from
     /// here, so a new reading starts at the first page.
     pub battery_since: Option<Instant>,
-    /// The status area's elements, from their files.
+    /// The status area: which elements show, at which size, in which order.
     pub status: crate::status::Area,
     /// The network sampler's last copy, set by the app before each frame.
     pub netstat: Option<crate::netstat::Snapshot>,
@@ -550,10 +550,11 @@ impl Menu {
             .collect()
     }
 
-    /// Take the status elements; what was refused opens the log as a
-    /// warning and is printed by `--check`, like the tile banner.
+    /// Take the status layout; each line of its file that was skipped or
+    /// changed opens the log as a warning and is printed by `--check`, like
+    /// the tile banner.
     pub fn set_status(&mut self, area: crate::status::Area) {
-        for note in &area.notes {
+        for note in &area.layout.notes {
             self.log.note(Kind::Warn, note.clone());
             self.banner.push(note.clone());
         }
@@ -561,8 +562,8 @@ impl Menu {
     }
 
     /// What the status elements draw from.
-    pub fn status_sources(&self) -> crate::status::Sources<'_> {
-        crate::status::Sources {
+    pub fn status_sources(&self) -> crate::status::Data<'_> {
+        crate::status::Data {
             battery: &self.battery,
             battery_since: self.battery_since,
             network: self.netstat.as_ref(),
@@ -3605,18 +3606,14 @@ mod tests {
     }
 
     #[test]
-    fn refused_status_files_open_the_log_and_reach_check() {
+    fn skipped_status_lines_open_the_log_and_reach_check() {
         let mut m = Menu::new(grid(), false);
-        let area = crate::status::Area {
-            notes: vec!["Status element S/x.conf refused: no Type.".into()],
-            ..Default::default()
-        };
-        m.set_status(area);
-        assert_eq!(
-            log(&m).last().unwrap(),
-            &warn("Status element S/x.conf refused: no Type.")
-        );
-        assert_eq!(m.banner, ["Status element S/x.conf refused: no Type."]);
+        let layout = crate::status::layout::parse(b"clock 1x1 1x1\n", &crate::status::offered);
+        let note = "status line 1 skipped: expected '<id> <w>x<h>', got 'clock 1x1 1x1'";
+        assert_eq!(layout.notes, [note]);
+        m.set_status(crate::status::Area { layout });
+        assert_eq!(log(&m).last().unwrap(), &warn(note));
+        assert_eq!(m.banner, [note]);
     }
 
     #[test]

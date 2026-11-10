@@ -90,39 +90,11 @@ impl Tracker {
     }
 }
 
-/// The pixels a frame's texture uploads damage. A texture `own` says is
-/// a status element's damages only the meshes that draw it: an element
-/// rendered again (a page turn, a graph's next second) redraws its cell
-/// and nothing else. Any other upload (the font atlas) can change any
-/// text, so it damages everything: `None`.
-pub fn texture_damage(
-    set: &[egui::TextureId],
-    own: impl Fn(egui::TextureId) -> bool,
-    prims: &[ClippedPrimitive],
-    ppp: f32,
-) -> Option<IRect> {
-    if set.iter().any(|id| !own(*id)) {
-        return None;
-    }
-    Some(
-        prims
-            .iter()
-            .filter(|p| matches!(&p.primitive, Primitive::Mesh(m) if set.contains(&m.texture_id)))
-            .fold(IRect::EMPTY, |acc, p| acc.union(&bounds(p, ppp))),
-    )
-}
-
-/// What a frame redraws, `None` for nothing. `tracked` is `Tracker::damage`,
-/// `textures` is `texture_damage`, `all` the whole canvas. A forced frame (the
-/// dialog opened or closed, a new scale) and an upload that is no status
-/// element's draw everything.
-pub fn frame_damage(force_full: bool, tracked: Option<IRect>, textures: Option<IRect>, all: IRect) -> Option<IRect> {
-    match textures {
-        _ if force_full => Some(all),
-        None => Some(all),
-        Some(r) if !r.is_empty() => Some(tracked.map_or(r, |d| d.union(&r))),
-        Some(_) => tracked,
-    }
+/// What a frame redraws, `None` for nothing: everything when it is forced
+/// (the dialog opened or closed, a new scale) or a texture was uploaded (the
+/// font atlas can change any text), else what `Tracker::damage` found.
+pub fn frame_damage(force_full: bool, uploaded: bool, tracked: Option<IRect>, all: IRect) -> Option<IRect> {
+    if force_full || uploaded { Some(all) } else { tracked }
 }
 
 #[cfg(test)]
@@ -205,61 +177,11 @@ mod tests {
     fn a_frame_redraws_what_changed_or_everything() {
         let r = |x0, x1| IRect { x0, y0: 0, x1, y1: 10 };
         let all = r(0, 100);
-        // A forced frame (the dialog, a new scale) draws all, whatever else.
-        assert_eq!(frame_damage(true, None, Some(IRect::EMPTY), all), Some(all));
-        assert_eq!(frame_damage(true, Some(r(1, 2)), Some(r(3, 4)), all), Some(all));
-        // An upload that is no status element's draws all.
-        assert_eq!(frame_damage(false, None, None, all), Some(all));
-        assert_eq!(frame_damage(false, Some(r(1, 2)), None, all), Some(all));
-        // A status picture adds its own cell to what changed.
-        assert_eq!(frame_damage(false, None, Some(r(20, 30)), all), Some(r(20, 30)));
-        assert_eq!(frame_damage(false, Some(r(1, 2)), Some(r(20, 30)), all), Some(r(1, 30)));
-        // No upload: what changed, or nothing at all, so no raster and no
-        // present.
-        assert_eq!(
-            frame_damage(false, Some(r(1, 2)), Some(IRect::EMPTY), all),
-            Some(r(1, 2))
-        );
-        assert_eq!(frame_damage(false, None, Some(IRect::EMPTY), all), None);
-    }
-
-    fn textured(x: f32, id: u64) -> ClippedPrimitive {
-        let mut m = Mesh::with_texture(egui::TextureId::User(id));
-        m.add_rect_with_uv(
-            Rect::from_min_max(pos2(x, 0.0), pos2(x + 10.0, 10.0)),
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-        ClippedPrimitive {
-            clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0)),
-            primitive: Primitive::Mesh(m),
-        }
-    }
-
-    #[test]
-    fn a_status_texture_damages_only_its_meshes() {
-        let prims = [quad(0.0, Color32::RED), textured(20.0, 7), textured(50.0, 8)];
-        let own = |id| matches!(id, egui::TextureId::User(7 | 8));
-        let one = texture_damage(&[egui::TextureId::User(7)], own, &prims, 1.0).unwrap();
-        assert_eq!(
-            one,
-            IRect::from_points(Rect::from_min_max(pos2(20.0, 0.0), pos2(30.0, 10.0)), 1.0)
-        );
-        let both = texture_damage(&[egui::TextureId::User(7), egui::TextureId::User(8)], own, &prims, 2.0).unwrap();
-        assert_eq!(
-            both,
-            IRect::from_points(Rect::from_min_max(pos2(20.0, 0.0), pos2(60.0, 10.0)), 2.0)
-        );
-        // The font atlas or any other texture: everything.
-        assert_eq!(
-            texture_damage(
-                &[egui::TextureId::User(7), egui::TextureId::default()],
-                own,
-                &prims,
-                1.0
-            ),
-            None
-        );
-        assert_eq!(texture_damage(&[], own, &prims, 1.0), Some(IRect::EMPTY));
+        assert_eq!(frame_damage(true, false, None, all), Some(all));
+        assert_eq!(frame_damage(true, false, Some(r(1, 2)), all), Some(all));
+        assert_eq!(frame_damage(false, true, Some(r(1, 2)), all), Some(all));
+        assert_eq!(frame_damage(false, false, Some(r(1, 2)), all), Some(r(1, 2)));
+        // Nothing changed: no raster and no present.
+        assert_eq!(frame_damage(false, false, None, all), None);
     }
 }

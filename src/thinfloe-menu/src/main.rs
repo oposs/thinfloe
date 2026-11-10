@@ -136,10 +136,7 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screentab::load(&screen_path(), idle_rc());
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
-    menu.set_status(status::config::load(&env_path(
-        "TF_STATUS_DIR",
-        status::config::SHIPPED_DIR,
-    )));
+    menu.set_status(status::Area::shipped());
     (menu, paths, IconRoots::system())
 }
 
@@ -187,11 +184,6 @@ fn check() -> ExitCode {
             bad = true;
         }
     }
-    for p in &menu.status.elements {
-        println!("{}", status::config::check_line(p));
-    }
-    // A refused shipped status file is a defect of the image.
-    bad |= menu.status.shipped_refused;
     if bad { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
