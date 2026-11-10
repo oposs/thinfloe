@@ -498,9 +498,11 @@ Its findings and the answers, all my calls unless marked:
    check, 6.
 8. **Revert survives a menu crash.** Before Apply the menu keeps the old
    kanshi config as `config.prev` and writes an *unconfirmed* marker
-   (`$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed`). A confirmed layout
+   (`~/.config/kanshi/thinfloe-layout-unconfirmed`). A confirmed layout
    removes both. When `thinfloe-session` starts and finds the marker, it
-   puts `config.prev` back before kanshi starts. **Netboot:** the
+   puts `config.prev` back before kanshi starts. The marker sits next to
+   the config so that a home save taken during the 15 s window carries it,
+   and the next boot reverts. **Netboot:** the
    *Fixed address* choice for the wired network is not offered on a
    netbooted machine, because a wrong value cuts it off from the server
    that holds its system and its home.

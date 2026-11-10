@@ -22,12 +22,15 @@
 # confirms it within 15 s; the menu leaves the marker below while it waits.
 # Finding it here means the session ended in that window: put the old layout
 # back BEFORE kanshi starts, so kanshi never applies the unconfirmed one.
+# The marker sits next to the config, in the home, and not in the runtime dir:
+# a home save taken inside the window then carries marker, config and
+# config.prev together, and the next boot still goes back.
 #   prev   restore config.prev over config
 #   none   there was no config before: remove config
 #   other  unknown content: leave the config alone
 kanshi_dir=$HOME/.config/kanshi
-layout_marker=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed}
-if [ -n "$layout_marker" ] && [ -e "$layout_marker" ]; then
+layout_marker=$kanshi_dir/thinfloe-layout-unconfirmed
+if [ -e "$layout_marker" ]; then
     read -r layout_undo <"$layout_marker" 2>/dev/null || true
     case "$layout_undo" in
         prev)

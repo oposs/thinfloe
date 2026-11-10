@@ -89,7 +89,7 @@ run_session() {
     printf '#!/bin/sh\n%s\n' "$1" >"$WORK/bin/menu"
     chmod 755 "$WORK/bin/menu"
     env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" \
-        XDG_RUNTIME_DIR="$WORK" \
+        XDG_RUNTIME_DIR="${SESSION_XDG-$WORK}" TF_SESSION_STATUS="$WORK/thinfloe-session.status" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
         TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
         sh "$SESSION" >/dev/null 2>"$WORK/session.err"
@@ -646,7 +646,7 @@ fi
 # stays alive, so "not started" is an absent file and "once" is one line.
 # ---------------------------------------------------------------------------
 KDIR="$WORK/home/.config/kanshi"
-MARKER="$WORK/thinfloe-layout-unconfirmed"
+MARKER="$KDIR/thinfloe-layout-unconfirmed"
 cat >"$WORK/bin/kanshi" <<STUB
 #!/bin/sh
 echo "\$*" >>"$WORK/kanshi.argv"
@@ -774,6 +774,20 @@ else
         ok "unconfirmed layout: prev without config.prev removes the config and says so"
     else
         bad "prev without config.prev: config=$([[ -e $KDIR/config ]] && echo kept || echo gone) err='$(cat "$WORK/session.err")'"
+    fi
+    kanshi_reset
+
+    # The marker sits in the home: the undo needs no runtime dir.
+    mkdir -p "$KDIR"
+    echo new >"$KDIR/config"
+    echo old >"$KDIR/config.prev"
+    echo prev >"$MARKER"
+    SESSION_XDG= run_session "$KMENU"
+    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == old && ! -e "$KDIR/config.prev" && ! -e "$MARKER" &&
+          "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
+        ok "unconfirmed layout is undone with XDG_RUNTIME_DIR empty (marker in the home)"
+    else
+        bad "undo without runtime dir: config='$(cat "$KDIR/config" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
     fi
     kanshi_reset
 fi

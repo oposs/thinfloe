@@ -732,10 +732,10 @@ fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> 
 pub struct Kanshi {
     /// `~/.config/kanshi/config`.
     pub config: PathBuf,
-    /// `$XDG_RUNTIME_DIR/thinfloe-layout-unconfirmed`; thinfloe-session
-    /// undoes the layout when it finds it. `None` without a runtime dir:
-    /// then no Apply is made.
-    pub marker: Option<PathBuf>,
+    /// `~/.config/kanshi/thinfloe-layout-unconfirmed`; thinfloe-session
+    /// undoes the layout when it finds it. It sits next to the config so a
+    /// home save taken while the layout is unconfirmed carries it too.
+    pub marker: PathBuf,
     /// kanshi, when none runs; `-c <config>` follows.
     pub cmd: Vec<String>,
     /// Where running processes are looked for: `/proc`.
@@ -751,9 +751,7 @@ impl Kanshi {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
-        let marker = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|d| !d.is_empty())
-            .map(|d| PathBuf::from(d).join("thinfloe-layout-unconfirmed"));
+        let marker = home.join(".config/kanshi/thinfloe-layout-unconfirmed");
         let cmd = match std::env::var("TF_KANSHI") {
             Ok(v) if !v.trim().is_empty() => vec![v],
             _ => vec!["kanshi".to_string()],
@@ -898,10 +896,7 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
     if crate::owned::owner(old_text.as_deref()) == crate::owned::Owner::ByHand {
         return Err(format!("{rel} was written by hand"));
     }
-    // Ruling 15: no crash guard, no Apply.
-    let Some(marker) = &k.marker else {
-        return Err("There is no XDG_RUNTIME_DIR for the undo marker; nothing was changed.".to_string());
-    };
+    let marker = &k.marker;
     // An earlier Apply whose undo failed: its config.prev is the real old
     // layout and must not be replaced. The next session undoes it.
     if std::fs::symlink_metadata(marker).is_ok() {
@@ -958,10 +953,8 @@ pub fn mon_keep(k: &Kanshi) -> Result<(), String> {
 }
 
 fn remove_marker(k: &Kanshi) -> Result<(), String> {
-    match &k.marker {
-        Some(m) => remove_if_there(m).map_err(|e| format!("The undo marker {} could not be removed: {e}", m.display())),
-        None => Ok(()),
-    }
+    let m = &k.marker;
+    remove_if_there(m).map_err(|e| format!("The undo marker {} could not be removed: {e}", m.display()))
 }
 
 /// Go back to the layout before the Apply: `config.prev` goes back over
@@ -1776,7 +1769,7 @@ mod tests {
         fs::create_dir_all(d.join("proc")).unwrap();
         Kanshi {
             config: d.join("home/.config/kanshi/config"),
-            marker: Some(d.join("run/thinfloe-layout-unconfirmed")),
+            marker: d.join("home/.config/kanshi/thinfloe-layout-unconfirmed"),
             cmd: ["/bin/sh", "-c", start, "sh"].map(String::from).to_vec(),
             proc_dir: d.join("proc"),
         }
@@ -1788,7 +1781,7 @@ mod tests {
         let log = d.join("started");
         format!(
             "{{ echo \"args $*\"; echo \"marker $(cat {m} 2>/dev/null)\"; echo \"prev $(tail -n 1 {p} 2>/dev/null)\"; echo \"config $(tail -n 1 {c} 2>/dev/null)\"; }} >> {log}",
-            m = d.join("run/thinfloe-layout-unconfirmed").display(),
+            m = d.join("home/.config/kanshi/thinfloe-layout-unconfirmed").display(),
             p = d.join("home/.config/kanshi/config.prev").display(),
             c = d.join("home/.config/kanshi/config").display(),
             log = log.display()
@@ -1812,7 +1805,7 @@ mod tests {
         assert_eq!(mon_apply(&k, "\nnew\n", None), Ok(()));
         assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
         assert_eq!(read(&k.prev()), Some(old_layout()));
-        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
+        assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
         // kanshi was started on the config, with marker and prev in place.
         let want = format!("args -c {}\nmarker prev\nprev old\nconfig new\n", k.config.display());
         assert_eq!(read(&d.join("started")), Some(want));
@@ -1824,7 +1817,7 @@ mod tests {
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(k.prev(), "stale").unwrap();
         assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
-        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
+        assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
         assert_eq!(read(&k.prev()), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
         assert!(
             read(&d.join("started"))
@@ -1836,7 +1829,7 @@ mod tests {
         let d = dir("mon-apply-unknown");
         let k = kanshi_home(&d, &recording(&d));
         assert!(mon_apply(&k, "\nnew\n", None).is_err());
-        assert!(!k.config.exists() && !k.prev().exists() && !k.marker.as_ref().unwrap().exists());
+        assert!(!k.config.exists() && !k.prev().exists() && !k.marker.exists());
         assert!(!d.join("started").exists());
     }
 
@@ -1897,14 +1890,14 @@ mod tests {
         assert!(e.contains("stopped at once"), "{e}");
         assert_eq!(read(&k.config), Some(old_layout()));
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
 
         // No file before: none after.
         fs::remove_file(&k.config).unwrap();
         assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
         assert!(!k.prev().exists());
         assert!(!k.config.exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
 
         // A file written by hand is not touched, and kanshi not started.
         let k = kanshi_home(&d, &recording(&d));
@@ -1913,26 +1906,8 @@ mod tests {
         assert!(e.contains("written by hand"), "{e}");
         assert_eq!(read(&k.config).as_deref(), Some("profile {\n\toutput * enable\n}\n"));
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
         assert!(!d.join("started").exists());
-    }
-
-    #[test]
-    fn mon_apply_without_a_runtime_dir_changes_nothing() {
-        let d = dir("mon-no-xdg");
-        let mut k = kanshi_home(&d, &recording(&d));
-        k.marker = None;
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
-        assert!(e.contains("XDG_RUNTIME_DIR"), "{e}");
-        assert_eq!(read(&k.config), Some(old_layout()));
-        assert!(!k.prev().exists());
-        assert!(!d.join("started").exists());
-        // Nor without a file.
-        fs::remove_file(&k.config).unwrap();
-        assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
-        assert!(!k.config.exists() && !k.prev().exists());
     }
 
     #[test]
@@ -1945,7 +1920,7 @@ mod tests {
         assert_eq!(mon_revert(&k), Ok(()));
         assert_eq!(read(&k.config), Some(old_layout()));
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
         // kanshi read the old file again.
         let log = read(&d.join("started")).unwrap();
         assert!(log.ends_with("marker \nprev \nconfig old\n"), "{log}");
@@ -1957,7 +1932,7 @@ mod tests {
         assert_eq!(mon_revert(&k), Ok(()));
         assert_eq!(read(&k.config), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
         let log = read(&d.join("started")).unwrap();
         assert!(log.ends_with("marker \nprev \nconfig onscreen\n"), "{log}");
 
@@ -1966,7 +1941,7 @@ mod tests {
         fs::write(&k.config, "by hand\n").unwrap();
         assert!(mon_revert(&k).is_err());
         assert_eq!(read(&k.config).as_deref(), Some("by hand\n"));
-        assert!(k.marker.as_ref().unwrap().exists());
+        assert!(k.marker.exists());
     }
 
     #[test]
@@ -2026,7 +2001,7 @@ mod tests {
         assert_eq!(mon_keep(&k), Ok(()));
         assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
     }
 
     #[test]
@@ -2036,7 +2011,7 @@ mod tests {
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
         mon_apply(&k, "\nnew\n", None).unwrap();
-        block(k.marker.as_ref().unwrap());
+        block(&k.marker);
         let e = mon_keep(&k).unwrap_err();
         assert!(e.contains("undo marker"), "{e}");
         // prev stays with the marker, so the next session's undo works.
@@ -2061,7 +2036,7 @@ mod tests {
         fs::write(&k.config, old_layout()).unwrap();
         mon_apply(&k, "\nnew\n", None).unwrap();
         // The marker cannot be removed: the revert stops there.
-        block(k.marker.as_ref().unwrap());
+        block(&k.marker);
         assert!(mon_revert(&k).is_err());
         assert_eq!(read(&k.config), Some(old_layout()));
         assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
@@ -2072,7 +2047,7 @@ mod tests {
         // The fake kanshi blocks the marker, then fails: the undo cannot
         // remove the marker, so prev must stay for the session's undo.
         let d = dir("mon-undo-order");
-        let m = d.join("run/thinfloe-layout-unconfirmed");
+        let m = d.join("home/.config/kanshi/thinfloe-layout-unconfirmed");
         let start = format!("rm -f {m}; mkdir -p {m}; touch {m}/x; exit 3", m = m.display());
         let k = kanshi_home(&d, &start);
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
@@ -2094,8 +2069,8 @@ mod tests {
         )
         .unwrap();
         fs::write(k.prev(), old_layout()).unwrap();
-        fs::create_dir_all(k.marker.as_ref().unwrap().parent().unwrap()).unwrap();
-        fs::write(k.marker.as_ref().unwrap(), "prev\n").unwrap();
+        fs::create_dir_all(k.marker.parent().unwrap()).unwrap();
+        fs::write(&k.marker, "prev\n").unwrap();
         let e = mon_apply(&k, "\nnewer\n", None).unwrap_err();
         assert!(e.contains("not confirmed"), "{e}");
         assert_eq!(read(&k.prev()), Some(old_layout()), "the real old layout is kept");
@@ -2109,8 +2084,8 @@ mod tests {
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        // The marker's directory is a file.
-        fs::write(d.join("run"), "not a dir").unwrap();
+        // The marker's temp file cannot be made: a directory is in its way.
+        fs::create_dir_all(d.join("home/.config/kanshi/thinfloe-layout-unconfirmed.tmp")).unwrap();
         assert!(mon_apply(&k, "\nnew\n", None).unwrap_err().contains("Could not write"));
         assert_eq!(read(&k.config), Some(old_layout()));
         assert!(!k.prev().exists());
@@ -2134,7 +2109,7 @@ mod tests {
         assert!(e.contains("Could not write"), "{e}");
         assert!(!k.config.exists());
         assert!(!k.prev().exists());
-        assert!(!k.marker.as_ref().unwrap().exists());
+        assert!(!k.marker.exists());
         assert!(!d.join("started").exists());
         // With an old file the put-back fails the same way: marker and
         // prev stay, so the next session undoes it.
@@ -2143,7 +2118,7 @@ mod tests {
         assert!(e.contains("could not be put back"), "{e}");
         assert_eq!(read(&k.config), Some(old_layout()));
         assert_eq!(read(&k.prev()), Some(old_layout()));
-        assert_eq!(read(k.marker.as_ref().unwrap()).as_deref(), Some("prev\n"));
+        assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
     }
 
     #[test]
