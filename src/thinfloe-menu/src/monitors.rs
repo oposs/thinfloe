@@ -101,6 +101,9 @@ pub struct MonTab {
     error: Option<String>,
     phase: Phase,
     thinlinc: bool,
+    /// Connector name of the monitor the menu window is on now, as the
+    /// window reports it; `None` while it is not known.
+    menu_now: Option<String>,
 }
 
 impl Default for MonTab {
@@ -117,6 +120,7 @@ impl Default for MonTab {
             error: None,
             phase: Phase::Start,
             thinlinc: false,
+            menu_now: None,
         }
     }
 }
@@ -152,6 +156,12 @@ impl MonTab {
             self.rebuild();
         }
         None
+    }
+
+    /// The menu window is on the monitor with this connector name now;
+    /// `None` when the window does not know.
+    pub fn menu_is_on(&mut self, connector: Option<&str>) {
+        self.menu_now = connector.map(String::from);
     }
 
     /// The file was read: `text` is its content, `None` when missing.
@@ -586,7 +596,9 @@ impl MonTab {
     }
 
     /// The selected monitor may be switched off: it is on, it does not
-    /// carry the menu, and another one stays on.
+    /// carry the menu, and another one stays on. The menu monitor is the
+    /// choice in the tab, else the monitor the menu window is on now.
+    /// Without a choice and with that monitor not known, none may go off.
     pub fn off_allowed(&self) -> bool {
         let (Some(sel), Some(d)) = (self.selected.as_deref(), self.draft.as_ref()) else {
             return false;
@@ -594,8 +606,24 @@ impl MonTab {
         if !self.editable() {
             return false;
         }
+        let menu = match d.menu_output.as_deref() {
+            Some(c) => Some(c),
+            None => self.menu_now_criteria(),
+        };
+        let Some(menu) = menu else { return false };
         let on = d.outputs.iter().filter(|o| o.enabled).count();
-        self.output(sel).is_some_and(|o| o.enabled) && d.menu_output.as_deref() != Some(sel) && on > 1
+        self.output(sel).is_some_and(|o| o.enabled) && menu != sel && on > 1
+    }
+
+    /// Criteria of the connected monitor the menu window is on now.
+    fn menu_now_criteria(&self) -> Option<&str> {
+        let name = self.menu_now.as_deref()?;
+        self.draft
+            .as_ref()?
+            .outputs
+            .iter()
+            .map(|o| o.criteria.as_str())
+            .find(|c| self.head_named(c).is_some_and(|h| h.name == name))
     }
 
     /// Criteria of the monitor the arrangement in the tab puts the menu on.
@@ -752,19 +780,49 @@ mod tests {
         ev(&mut t, MonEvent::Enabled(false), now);
         assert!(!output(&t, "DP-1").enabled);
 
-        // The last monitor that is on, without a menu choice.
+        // Without a menu choice, the monitor the menu is on now carries it.
         let mut t = tab(two(), None);
         assert_eq!(t.menu_choice(), None);
+        t.menu_is_on(Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
+        assert!(!t.off_allowed());
+        assert_eq!(ev(&mut t, MonEvent::Enabled(false), now), None);
+        assert!(output(&t, "DP-1").enabled);
+        // The last monitor that is on.
+        t.menu_is_on(Some("DP-2"));
         assert!(t.off_allowed());
         ev(&mut t, MonEvent::Enabled(false), now);
         assert!(!output(&t, "DP-1").enabled);
+        t.menu_is_on(Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
         assert!(!t.off_allowed());
         ev(&mut t, MonEvent::Enabled(false), now);
         assert!(output(&t, "DP-2").enabled);
         // An off monitor is not "switched off" again.
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
+        assert!(!t.off_allowed());
+
+        // A choice wins over the monitor the menu is on now.
+        let mut t = tab(two(), Some(file(&[saved_two()])));
+        t.menu_is_on(Some("DP-1"));
+        ev(&mut t, MonEvent::Select("DP-1".into()), now);
+        assert!(t.off_allowed());
+    }
+
+    #[test]
+    fn without_a_choice_an_unknown_menu_monitor_keeps_every_monitor_on() {
+        let now = Instant::now();
+        let mut t = tab(two(), None);
+        for c in ["DP-1", "DP-2"] {
+            ev(&mut t, MonEvent::Select(c.into()), now);
+            assert!(!t.off_allowed(), "{c}");
+        }
+        // A connector that is not connected is no better.
+        t.menu_is_on(Some("HDMI-A-1"));
+        assert!(!t.off_allowed());
+        t.menu_is_on(Some("DP-1"));
+        assert!(t.off_allowed(), "DP-2 is selected");
+        t.menu_is_on(None);
         assert!(!t.off_allowed());
     }
 

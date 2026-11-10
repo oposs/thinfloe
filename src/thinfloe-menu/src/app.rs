@@ -561,6 +561,9 @@ impl App {
         let (s, chosen) = pick_scale(&live.outputs, name.as_deref(), px, live.window.inner_size().width);
         let chosen = chosen.cloned();
         live.monitor = name;
+        // Without a menu monitor chosen, this one carries the menu and
+        // stays on in the Screen tab.
+        self.cfg.menu.monitors.menu_is_on(live.monitor.as_deref());
         if !force && (s - live.scale).abs() < f32::EPSILON {
             return;
         }
