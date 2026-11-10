@@ -294,8 +294,24 @@ This pattern excludes editor backup files (*~) and properly applies overlay perm
   home archive and wins. `test-session-packages.sh` asks the image's
   WirePlumber for both values. **Not verified on hardware.**
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
-- **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. This is where display layout goes: **`wlr-randr` replaces `xrandr`** (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake. It must run before `tlclient`, because the client reads the monitor layout once at startup.
+- **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc` — the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. The normal way to arrange monitors is Settings → Screen (see "Monitor arrangement" below). For a layout the tab cannot express, **`wlr-randr` replaces `xrandr`** here (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake; a `kanshi` started here makes the session start no second one. It must run before `tlclient`, because the client reads the monitor layout once at startup.
   It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
+
+  **Monitor arrangement** (Settings → Screen). The menu reads the monitors
+  through `zwlr_output_manager_v1` and never sets them. It writes
+  `~/.config/kanshi/config` (an owned file with a header line; a hand-written
+  one is shown read-only until "Let the menu manage it", which keeps it as
+  `config.by-hand`) and reloads kanshi with SIGHUP. `thinfloe-session` starts
+  `kanshi -c ~/.config/kanshi/config` when that file is readable and no kanshi
+  of this user runs (found through `/proc/<pid>/comm`). Before that it undoes
+  an unconfirmed layout: the marker `~/.config/kanshi/thinfloe-layout-unconfirmed`
+  (in the home so that a home save carries it) holds `prev`, which restores
+  `config.prev`, or `none`, which removes `config`. The monitor for the menu
+  goes through `$XDG_RUNTIME_DIR/thinfloe-menu-output`: the menu writes the
+  output name there (empty means no choice), `labwc-scale` writes a
+  `MoveToOutput` window rule into the composed `rc.xml`, runs
+  `labwc --reconfigure` and confirms in `thinfloe-menu-output.applied`, and the
+  menu then replaces its window to move.
 
 - **Per-machine user environment:** `overlay/home/tfuser/.thinfloe-environment` — variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-thinfloe-session.sh` after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
 
