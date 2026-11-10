@@ -143,7 +143,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     xfonts-base \
     fonts-dejavu-core \
     xcursor-themes \
-    dialog \
     pipewire \
     pipewire-pulse \
     pipewire-alsa \

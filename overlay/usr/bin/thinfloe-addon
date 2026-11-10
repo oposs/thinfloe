@@ -699,7 +699,7 @@ def _apt_session(src: Source):
 
 def _check_apt(src: Source) -> Found:
     seen = [src.url]
-    with _apt_session(src) as (opts, env, tmp):
+    with _apt_session(src) as (opts, env, _):
         r = _apt_run(["apt-cache"] + opts + ["policy", src.package], env)
         candidate = None
         for l in r.stdout.decode("utf-8", "replace").splitlines():
