@@ -40,9 +40,10 @@ pub enum MonRequest {
     Load,
     /// Write `text` as the file's body and let kanshi apply it.
     /// `menu_output` is the connector name the arrangement puts the menu on.
-    /// `prev` is the body of a file for the layout on screen now, sent when
-    /// there is no file: the revert puts it back, so going back works on
-    /// the first Apply too.
+    /// `prev` is the body of a file for the layout on screen now, always
+    /// sent: the job keeps it when there is no file (the file may have gone
+    /// while the menu runs), and the revert puts it back, so going back
+    /// works on the first Apply too.
     Apply {
         text: String,
         menu_output: Option<String>,
@@ -444,8 +445,7 @@ impl MonTab {
             None => profiles.push(draft.clone()),
         }
         let text = format!("\n{}", kanshi::render(&profiles));
-        let prev =
-            (self.owner == Owner::Missing).then(|| format!("\n{}", kanshi::render(&[kanshi::from_heads(&self.heads)])));
+        let prev = Some(format!("\n{}", kanshi::render(&[kanshi::from_heads(&self.heads)])));
         self.pending = Some(profiles);
         self.error = None;
         self.phase = Phase::Applying {
@@ -871,7 +871,7 @@ mod tests {
             Some(MonRequest::Apply {
                 text,
                 menu_output: Some("DP-2".into()),
-                prev: None,
+                prev: Some(format!("\n{}", kanshi::render(&[kanshi::from_heads(&two())]))),
             })
         );
         assert_eq!(t.countdown(now), Some(15));
@@ -882,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_file_apply_sends_the_layout_on_screen_to_go_back_to() {
+    fn apply_always_sends_the_layout_on_screen_to_go_back_to() {
         let now = Instant::now();
         let mut t = tab(two(), None);
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
@@ -891,15 +891,22 @@ mod tests {
             panic!("no Apply")
         };
         let on_screen = format!("\n{}", kanshi::render(&[kanshi::from_heads(&two())]));
-        assert_eq!(prev, Some(on_screen));
-        // Once kept, the file is the menu's: the next Apply needs none.
+        assert_eq!(prev, Some(on_screen.clone()));
+        // Once kept, the file is the menu's, and the job uses it. The file
+        // may still go while the menu runs: the layout on screen goes along.
         assert_eq!(t.applied(Ok(())), None);
         assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
         assert!(t.kept(Ok(())));
         let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
             panic!("no Apply")
         };
-        assert_eq!(prev, None);
+        assert_eq!(prev, Some(on_screen.clone()));
+        // Also with a file loaded at start.
+        let mut t = tab(two(), Some(file(&[saved_two()])));
+        let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
+            panic!("no Apply")
+        };
+        assert_eq!(prev, Some(on_screen));
     }
 
     #[test]

@@ -1820,7 +1820,9 @@ mod tests {
         let k = kanshi_home(&d, &recording(&d));
         fs::create_dir_all(k.config.parent().unwrap()).unwrap();
         fs::write(&k.config, old_layout()).unwrap();
-        assert_eq!(mon_apply(&k, "\nnew\n", None), Ok(()));
+        // The layout on screen the menu always sends is not used: the file
+        // is the old layout.
+        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
         assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
         assert_eq!(read(&k.prev()), Some(old_layout()));
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));

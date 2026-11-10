@@ -160,7 +160,7 @@ pub enum Job {
     MonApply {
         text: String,
         menu_output: Option<String>,
-        /// Kept as `config.prev` when there is no file yet.
+        /// Kept as `config.prev` when there is no file.
         prev: Option<String>,
     },
     /// The new layout is confirmed.
