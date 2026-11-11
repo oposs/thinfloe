@@ -3938,7 +3938,7 @@ mod tests {
         let now = Instant::now();
         assert!(written(m.status_event(StatusEvent::Shown("clock".into(), false))).is_some());
         // Two more clicks while the first write runs: nothing starts yet,
-        // and a two writes never run at once.
+        // and two writes never run at once.
         assert_eq!(m.status_event(StatusEvent::Shown("cpu".into(), false)), None);
         assert_eq!(m.status_event(StatusEvent::Shown("memory".into(), false)), None);
         // The re-read of the first write does not take back the clicks.
