@@ -109,7 +109,9 @@ Shipped elements:
   shown, at its default size. The packing places it only where room is
   left.
 - Each note opens the menu's log as a warning once; the same file read
-  again logs nothing new. `thinfloe-menu --check` prints `status: layout file
+  again logs nothing new, nor does the menu's rewrite of a hand-edited file,
+  which moves the lines (notes are compared without their line number,
+  `layout::note_key`). `thinfloe-menu --check` prints `status: layout file
   <path>` (with `(missing: the shipped layout)` when there is none) and each
   note; a layout problem never fails `--check`.
 - Read at start and when the menu's once-a-second file watch sees it

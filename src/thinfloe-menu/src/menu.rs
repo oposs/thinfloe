@@ -584,8 +584,12 @@ impl Menu {
         if self.status_writing {
             return;
         }
+        use crate::status::layout::note_key;
+        // Keyed without the line number: the menu's rewrite of a hand-edited
+        // file renumbers the lines.
+        let seen: Vec<String> = self.status.layout.notes.iter().map(|n| note_key(n)).collect();
         for note in &layout.notes {
-            if !self.status.layout.notes.contains(note) {
+            if !seen.contains(&note_key(note)) {
                 self.log.note(Kind::Warn, note.clone());
             }
         }
@@ -596,7 +600,9 @@ impl Menu {
     /// the lines of unknown ids. From here on the file is the menu's.
     pub fn save_status(&mut self) -> Option<Effect> {
         // The notes stay: the re-read of this write repeats those about
-        // unknown ids, which must not open the log again.
+        // unknown ids, at the line numbers of the rewritten file, and
+        // `set_status_layout` compares them without the number, so they do
+        // not open the log again.
         let layout = &mut self.status.layout;
         layout.refused = false;
         let text = crate::status::layout::to_text(layout);
@@ -3709,6 +3715,30 @@ mod tests {
         m.set_status_layout(layout);
         assert_eq!(log(&m).len(), lines);
         assert!(m.banner.is_empty(), "--check names the layout notes itself");
+    }
+
+    #[test]
+    fn the_menus_rewrite_of_a_hand_edited_file_logs_its_notes_no_second_time() {
+        let mut m = Menu::new(grid(), false);
+        let parse = |t: &[u8]| {
+            let mut l = crate::status::layout::parse(t, &crate::status::offered);
+            crate::status::layout::complete(&mut l, &crate::status::descriptors());
+            l
+        };
+        let hand = parse(b"# mine\n\nups 2x1\n");
+        assert_eq!(hand.notes, ["status line 3: unknown element 'ups' kept but not shown"]);
+        m.set_status_layout(hand);
+        let lines = log(&m).len();
+        let Some(Effect::Start(Job::StatusSave(Some(text)))) = m.status_event(StatusEvent::Shown("clock".into(), false))
+        else {
+            panic!("a change writes the file");
+        };
+        m.finished(JobResult::StatusSaved(Ok(())), Instant::now());
+        // The rewrite puts the line elsewhere; it is the same note.
+        let again = parse(text.as_bytes());
+        assert_eq!(again.notes, ["status line 2: unknown element 'ups' kept but not shown"]);
+        m.set_status_layout(again);
+        assert_eq!(log(&m).len(), lines, "{:?}", log(&m));
     }
 
     #[test]

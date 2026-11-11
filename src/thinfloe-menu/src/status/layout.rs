@@ -114,6 +114,15 @@ pub fn parse(text: &[u8], known: &dyn Fn(&str) -> Option<&'static [Size]>) -> La
     out
 }
 
+/// A note without its line number, for telling one note from another: the
+/// menu's rewrite of a hand-edited file moves the lines, not what they say.
+pub fn note_key(note: &str) -> String {
+    match note.strip_prefix("status line ") {
+        Some(rest) => format!("status line #{}", rest.trim_start_matches(|c: char| c.is_ascii_digit())),
+        None => note.to_string(),
+    }
+}
+
 fn choice_of((id, size): &Descriptor) -> Choice {
     Choice {
         id: (*id).into(),
@@ -289,6 +298,13 @@ mod tests {
             })
         );
         assert_eq!(r[2], None);
+    }
+
+    #[test]
+    fn a_note_key_leaves_out_the_line_number() {
+        assert_eq!(note_key("status line 12: '9' x"), "status line #: '9' x");
+        assert_eq!(note_key("status line 3 skipped: y"), "status line # skipped: y");
+        assert_eq!(note_key("status layout file ignored: z"), "status layout file ignored: z");
     }
 
     #[test]
