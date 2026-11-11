@@ -660,12 +660,27 @@ STUB
 # A pgrep that finds nothing: the already-running check must not need it.
 printf '#!/bin/sh\nexit 1\n' >"$WORK/bin/pgrep"
 chmod 755 "$WORK/bin/kanshi" "$WORK/bin/pgrep"
+# The session looks for a kanshi of this user anywhere in /proc, so a stub
+# still dying from the case before, or one of another run of this test on
+# the same machine, makes it start none. kanshi_reset therefore waits until
+# its stubs are gone, and the kanshi cases hold a per-user lock that other
+# runs of this test take too.
 kanshi_reset() {
-    local p
+    local p n=0
     for p in $(cat "$WORK/kanshi.pid" 2>/dev/null); do kill "$p" 2>/dev/null; done
+    while pgrep -u "$(id -u)" -x kanshi >/dev/null && [[ $n -lt 40 ]]; do
+        sleep 0.05
+        n=$((n + 1))
+    done
+    if pgrep -u "$(id -u)" -x kanshi >/dev/null; then
+        bad "a kanshi of this user still runs, the next kanshi case would not start one: $(pgrep -u "$(id -u)" -x kanshi | tr '\n' ' ')"
+    fi
     rm -rf "$KDIR" "$MARKER" "$WORK/kanshi.argv" "$WORK/kanshi.pid" "$WORK/kanshi.seen" "$WORK/home/.thinfloe-sessionrc"
 }
-kanshi_reset
+exec {kanshi_lock}>"${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/thinfloe-test-kanshi.lock"
+if ! flock -w 120 "$kanshi_lock"; then
+    bad "kanshi cases: another run of this test held the kanshi lock for 120 s"
+fi
 if pgrep -u "$(id -u)" -x kanshi >/dev/null; then
     echo "skip - kanshi cases: a kanshi of this user is already running"
 else
@@ -787,7 +802,7 @@ else
           "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
         ok "unconfirmed layout is undone with XDG_RUNTIME_DIR empty (marker in the home)"
     else
-        bad "undo without runtime dir: config='$(cat "$KDIR/config" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
+        bad "undo without runtime dir: config='$(cat "$KDIR/config" 2>/dev/null)' prev=$([[ -e $KDIR/config.prev ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)' argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
     fi
     kanshi_reset
 fi
