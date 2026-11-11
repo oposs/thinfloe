@@ -24,6 +24,7 @@
 - The status area shows the battery of keyboards and mice, Logi Bolt and Bluetooth devices included, one line per device such as `Keyboard 95 %`, red below 10 %. A device is read at boot and every 5 minutes, and a Logi Bolt device also when it connects; one that does not answer shows `–` in a muted colour.
 - The status area shows a graph of received and sent traffic over the last 5 minutes and, beside it, the rates, link, address, gateway, DNS servers and VPN state. On a low screen such as 1280 x 720 only the graph shows, in one row.
 - The status area shows temperatures, CPU load and clock, memory, fans, uptime and the machine's model in four tiles (the system tile is one cell wide: fans that do not fit beside their label are left out); a hot temperature changes colour, and sensors that do not fit leave out the least important, never the CPU. They are left out on a low screen such as 1280 x 720.
+- Settings has a Status tab: tick, size and order the parts of the status area, with a preview of the area as the main screen shows it. Each change is saved at once to `~/.config/thinfloe/status`, a part that gets no place says "no room" or "nothing to show on this machine", and "Reset to default" removes the file.
 
 ### Changed
 

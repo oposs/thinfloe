@@ -33,6 +33,8 @@ pub mod screentab;
 pub mod settings;
 pub mod speed;
 pub mod status;
+pub mod statustab;
+pub mod statustab_ui;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;

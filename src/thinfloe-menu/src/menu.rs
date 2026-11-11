@@ -29,6 +29,7 @@ use crate::netfiles;
 use crate::network::{NetRequest, NetTab};
 use crate::screentab::{self, IdleSource, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
+use crate::statustab::StatusEvent;
 use crate::tiles::{Action, Grid, Origin, Tile};
 use crate::upgrade::{Request, Upgrade, UpgradeEvent};
 use std::time::{Duration, Instant};
@@ -256,6 +257,12 @@ pub struct Menu {
     /// Why the last write of the status layout failed; `None` after one
     /// that worked.
     pub status_error: Option<String>,
+    /// A write of the status layout file runs. Writes run one at a time,
+    /// and while one runs the file's re-read does not replace the layout.
+    status_writing: bool,
+    /// The write to start when the running one ends: the newest text, or
+    /// `Some(None)` to remove the file.
+    status_next: Option<Option<String>>,
     /// `Snapshot::total` at each running session program's first copy, so
     /// that when the oldest ends, the next one's total starts where its own
     /// label says.
@@ -323,6 +330,8 @@ impl Menu {
             wall: None,
             zone: jiff::tz::TimeZone::UTC,
             status_error: None,
+            status_writing: false,
+            status_next: None,
             network_bases: Vec::new(),
             deferred_save: false,
             last_check: None,
@@ -570,6 +579,11 @@ impl Menu {
     /// written here, so a refused file stays as it is until the person
     /// changes something.
     pub fn set_status_layout(&mut self, layout: crate::status::layout::Layout) {
+        // A re-read while the Status tab writes would show an older file
+        // than what is on screen, and a click then would build on it.
+        if self.status_writing {
+            return;
+        }
         for note in &layout.notes {
             if !self.status.layout.notes.contains(note) {
                 self.log.note(Kind::Warn, note.clone());
@@ -585,9 +599,32 @@ impl Menu {
         // unknown ids, which must not open the log again.
         let layout = &mut self.status.layout;
         layout.refused = false;
-        Some(Effect::Start(Job::StatusSave(Some(crate::status::layout::to_text(
-            layout,
-        )))))
+        let text = crate::status::layout::to_text(layout);
+        self.write_status(Some(text))
+    }
+
+    /// Start a write of the status file, or keep it for when the running
+    /// one ends; a later one replaces it.
+    fn write_status(&mut self, text: Option<String>) -> Option<Effect> {
+        if self.status_writing {
+            self.status_next = Some(text);
+            return None;
+        }
+        self.status_writing = true;
+        Some(Effect::Start(Job::StatusSave(text)))
+    }
+
+    /// A change on the Status tab: taken at once and written. `Reset`
+    /// removes the file, so the shipped list counts again.
+    pub fn status_event(&mut self, event: StatusEvent) -> Option<Effect> {
+        if event == StatusEvent::Reset {
+            self.status = crate::status::Area::shipped();
+            return self.write_status(None);
+        }
+        if !crate::statustab::apply(&mut self.status.layout, &event) {
+            return None;
+        }
+        self.save_status()
     }
 
     /// The frame's time and the machine's zone, for the clock element.
@@ -702,6 +739,7 @@ impl Menu {
                 return Some(self.net_request(r));
             }
             SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
+            SettingsEvent::Status(e) => return self.status_event(e),
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
             // offers, and the next boot would install that unattended.
@@ -1188,7 +1226,9 @@ impl Menu {
                         .note(Kind::Warn, format!("The status layout could not be saved: {e}."));
                 }
                 self.status_error = r.err();
-                None
+                self.status_writing = false;
+                let next = self.status_next.take()?;
+                self.write_status(next)
             }
             JobResult::MonTakenOver(r) => {
                 let ok = r.is_ok();
@@ -2753,7 +2793,12 @@ mod tests {
     fn settings_has_three_tabs() {
         assert_eq!(
             SettingsTab::ALL,
-            [SettingsTab::Packages, SettingsTab::Network, SettingsTab::Screen]
+            [
+                SettingsTab::Packages,
+                SettingsTab::Network,
+                SettingsTab::Screen,
+                SettingsTab::Status
+            ]
         );
         assert_eq!(SettingsTab::Network.label(), "Network");
     }
@@ -3795,5 +3840,95 @@ mod tests {
         let t1 = t0 + std::time::Duration::from_secs(7);
         m.set_battery(Vec::new(), t1);
         assert_eq!(m.status_sources().battery_since, Some(t1));
+    }
+
+    fn status_settings() -> Menu {
+        let mut m = Menu::new(grid(), false);
+        m.set_status_layout(crate::status::read_layout(std::path::Path::new("/nonexistent/status")));
+        m.screen = Screen::Settings;
+        m.settings_tab = SettingsTab::Status;
+        m
+    }
+
+    fn written(e: Option<Effect>) -> Option<Option<String>> {
+        match e {
+            Some(Effect::Start(Job::StatusSave(t))) => Some(t),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_status_change_is_written_at_once_with_every_element() {
+        let mut m = status_settings();
+        let e = m.settings(SettingsEvent::Status(StatusEvent::Shown("clock".into(), false)));
+        let text = written(e).expect("a write").expect("a file");
+        assert!(text.lines().any(|l| l == "-clock 1x1"), "{text}");
+        assert_eq!(
+            text.lines().filter(|l| !l.starts_with('#')).count(),
+            crate::status::ELEMENTS.len()
+        );
+        assert!(!m.status.layout.choices.iter().find(|c| c.id == "clock").unwrap().shown);
+        // Nothing changed, nothing written.
+        m.finished(JobResult::StatusSaved(Ok(())), Instant::now());
+        assert_eq!(m.status_event(StatusEvent::Up("battery".into())), None);
+        // Not from another screen.
+        m.screen = Screen::Grid;
+        assert_eq!(m.settings(SettingsEvent::Status(StatusEvent::Reset)), None);
+    }
+
+    #[test]
+    fn reset_removes_the_file_and_shows_the_default_list() {
+        let mut m = status_settings();
+        let layout = crate::status::layout::parse(b"-clock 1x1\nups 2x1\nbattery 2x1\n", &crate::status::offered);
+        m.set_status_layout(layout);
+        assert_eq!(written(m.status_event(StatusEvent::Reset)), Some(None));
+        assert_eq!(m.status.layout.choices, crate::status::Area::shipped().layout.choices);
+        assert!(!m.status.layout.refused);
+    }
+
+    #[test]
+    fn a_failed_status_save_shows_its_error_and_keeps_what_is_on_screen() {
+        let mut m = status_settings();
+        assert!(written(m.status_event(StatusEvent::Down("battery".into()))).is_some());
+        let order: Vec<String> = m.status.layout.choices.iter().map(|c| c.id.clone()).collect();
+        m.finished(JobResult::StatusSaved(Err("disk full".into())), Instant::now());
+        assert_eq!(m.status_error.as_deref(), Some("disk full"));
+        let now: Vec<String> = m.status.layout.choices.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(now, order);
+        assert_eq!(order[..2], ["network", "battery"]);
+        // The next change tries again, and its success clears the error.
+        assert!(written(m.status_event(StatusEvent::Up("battery".into()))).is_some());
+        m.finished(JobResult::StatusSaved(Ok(())), Instant::now());
+        assert_eq!(m.status_error, None);
+    }
+
+    #[test]
+    fn a_change_while_a_status_write_runs_follows_it_and_the_last_one_wins() {
+        let mut m = status_settings();
+        let now = Instant::now();
+        assert!(written(m.status_event(StatusEvent::Shown("clock".into(), false))).is_some());
+        // Two more clicks while the first write runs: nothing starts yet,
+        // and a two writes never run at once.
+        assert_eq!(m.status_event(StatusEvent::Shown("cpu".into(), false)), None);
+        assert_eq!(m.status_event(StatusEvent::Shown("memory".into(), false)), None);
+        // The re-read of the first write does not take back the clicks.
+        let first = crate::status::layout::parse(b"-clock 1x1\n", &crate::status::offered);
+        m.set_status_layout(first);
+        assert!(!m.status.layout.choices.iter().find(|c| c.id == "memory").unwrap().shown);
+        let text = written(m.finished(JobResult::StatusSaved(Ok(())), now))
+            .unwrap()
+            .unwrap();
+        for line in ["-clock 1x1", "-cpu 1x1", "-memory 1x1"] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
+        assert_eq!(m.finished(JobResult::StatusSaved(Ok(())), now), None);
+        // A reset behind a running write removes the file after it.
+        assert!(written(m.status_event(StatusEvent::Shown("clock".into(), true))).is_some());
+        assert_eq!(m.status_event(StatusEvent::Reset), None);
+        assert_eq!(written(m.finished(JobResult::StatusSaved(Ok(())), now)), Some(None));
+        // With no write running the file is read again.
+        m.finished(JobResult::StatusSaved(Ok(())), now);
+        m.set_status_layout(crate::status::layout::parse(b"-clock 1x1\n", &crate::status::offered));
+        assert!(!m.status.layout.choices[0].shown);
     }
 }

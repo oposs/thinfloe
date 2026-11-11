@@ -704,7 +704,12 @@ pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Ch
         .and_then(|r| show_strip(ui, menu, icons, r))
         .map(UiEvent::Unfold);
     if menu.screen == Screen::Settings {
-        let event = show_settings(ui, menu, icons, l.area, now);
+        let preview = crate::statustab_ui::PreviewPlace {
+            cell: l.tile,
+            short,
+            covered: chrome.covered,
+        };
+        let event = show_settings(ui, menu, icons, l.area, preview, now);
         show_log(ui, &menu.log, l.log);
         return event.map(UiEvent::Settings).or(unfold);
     }
@@ -770,16 +775,16 @@ pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Ch
 /// Where the status elements go: the top-left cell, the cell size, and
 /// whether the screen is short.
 #[derive(Clone, Copy)]
-struct StatusPlace {
-    origin: egui::Pos2,
-    cell: Vec2,
-    short: bool,
+pub(crate) struct StatusPlace {
+    pub(crate) origin: egui::Pos2,
+    pub(crate) cell: Vec2,
+    pub(crate) short: bool,
 }
 
 /// Draw each shown status element in `place`, each in a child `Ui` clipped
 /// to its own cells, and ask for a frame when one changes on its own, unless
 /// the menu is covered.
-fn paint_status(
+pub(crate) fn paint_status(
     ui: &mut Ui,
     area: &crate::status::Area,
     data: &crate::status::Data,
@@ -898,7 +903,14 @@ pub(crate) const ROW_MARGIN_X: f32 = (ROW_LEFT + ROW_RIGHT) as f32;
 const ROW_ICON: f32 = 40.0;
 
 /// The Settings screen in `area`: the title, the tab bar, and the open tab.
-fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect, now: Instant) -> Option<SettingsEvent> {
+fn show_settings(
+    ui: &mut Ui,
+    menu: &Menu,
+    icons: &[Option<Icon>],
+    area: Rect,
+    preview: crate::statustab_ui::PreviewPlace,
+    now: Instant,
+) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
     // The panel is as wide as the tile group of the desktop, centred.
@@ -937,6 +949,9 @@ fn show_settings(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], area: Rect, n
         SettingsTab::Screen => screen_tab(&mut s_ui, menu, width, now),
         SettingsTab::Network => {
             crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
+        }
+        SettingsTab::Status => {
+            crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
     };
     event.or(body)
@@ -3194,6 +3209,13 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
+                    crate::settings::SettingsTab::Status => {
+                        menu.set_status_layout(crate::status::Area::shipped().layout);
+                        (
+                            (1920.0, 1080.0),
+                            &["Clock", "Up", "Down", "1x1", "Reset to default", "Preview"],
+                        )
+                    }
                     crate::settings::SettingsTab::Screen => {
                         menu.monitors = two_monitors();
                         (
@@ -3243,6 +3265,313 @@ mod tests {
                 assert_eq!(r.corner_radius, egui::CornerRadius::ZERO, "{tab}: rounded {:?}", r.rect);
             }
         }
+    }
+
+    /// The Settings screen on its Status tab, with the shipped layout, two
+    /// devices and a network: the battery, the graph, the list and the clock
+    /// have something to show, the hardware tiles have not.
+    fn status_tab_menu() -> Menu {
+        let t0 = Instant::now();
+        let mut m = net_menu(
+            vec![
+                kdev("MX Mechanical", battery::DeviceKind::Keyboard, 100, "discharging"),
+                kdev("MX Anywhere 3S", battery::DeviceKind::Mouse, 95, "charging"),
+            ],
+            t0,
+        );
+        m.set_clock(fixed_wall(), jiff::tz::TimeZone::UTC);
+        m.screen = Screen::Settings;
+        m.settings_tab = crate::settings::SettingsTab::Status;
+        m
+    }
+
+    /// Settled frames of `menu` on a screen of `size`; then, per step, a
+    /// click where the step points in the texts of the frame before (no
+    /// click when it finds nothing), and the event that click reported.
+    #[allow(clippy::type_complexity)]
+    fn status_clicks(
+        menu: &Menu,
+        size: (f32, f32),
+        steps: &[&dyn Fn(&[(String, Rect)]) -> Option<egui::Pos2>],
+    ) -> Vec<Option<UiEvent>> {
+        let ctx = new_ctx();
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let chrome = Chrome {
+            wall: Some(fixed_wall()),
+            ..Chrome::default()
+        };
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(size.0, size.1)),
+                events,
+                time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut ev = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                ev = show(ui, menu, &icons, &chrome, Instant::now());
+            });
+            out.textures_delta.clear();
+            (text_rects(&out.shapes), ev)
+        };
+        let mut texts = vec![];
+        for _ in 0..4 {
+            texts = frame(vec![]).0;
+        }
+        let mut events = vec![];
+        for step in steps {
+            let at = step(&texts);
+            let (t, ev) = frame(at.map(click_at).unwrap_or_default());
+            events.push(ev);
+            texts = t;
+            for _ in 0..3 {
+                texts = frame(vec![]).0;
+            }
+        }
+        events
+    }
+
+    /// The centre of `label` in the row whose element is named `name`.
+    fn in_row(texts: &[(String, Rect)], name: &str, label: &str) -> Option<egui::Pos2> {
+        let row = texts.iter().find(|(t, _)| t == name)?.1;
+        texts
+            .iter()
+            .filter(|(t, r)| t == label && (r.center().y - row.center().y).abs() < 20.0)
+            .map(|(_, r)| r.center())
+            .next()
+    }
+
+    /// The tick box of the row named `name`: left of the name.
+    fn tick_of(texts: &[(String, Rect)], name: &str) -> Option<egui::Pos2> {
+        let row = texts.iter().find(|(t, _)| t == name)?.1;
+        Some(pos2(row.left() - 16.0, row.center().y))
+    }
+
+    #[test]
+    fn the_status_tab_has_a_row_per_element_with_tick_size_and_two_buttons() {
+        let menu = status_tab_menu();
+        // A screen tall enough that no row scrolls away.
+        let shapes = settings_shapes(&menu, 1920.0, 2000.0);
+        // The list: what stands above the preview (whose network list has an
+        // `Up` row of its own).
+        let all = text_rects(&shapes);
+        assert_eq!(all.iter().filter(|(t, _)| t == "Reset to default").count(), 1);
+        let heading = all.iter().find(|(t, _)| t == "Preview").expect("a preview heading").1;
+        let texts: Vec<(String, Rect)> = all.into_iter().filter(|(_, r)| r.top() < heading.top()).collect();
+        let count = |want: &str| texts.iter().filter(|(t, _)| t == want).count();
+        for e in crate::status::ELEMENTS {
+            assert_eq!(count(e.name()), 1, "{} in {texts:?}", e.name());
+            let size = e.sizes()[0].to_string();
+            assert!(
+                in_row(&texts, e.name(), &size).is_some(),
+                "{}: no size select",
+                e.name()
+            );
+            assert!(in_row(&texts, e.name(), "Up").is_some(), "{}: no Up", e.name());
+            assert!(in_row(&texts, e.name(), "Down").is_some(), "{}: no Down", e.name());
+            assert!(tick_of(&texts, e.name()).is_some());
+        }
+        assert_eq!(count("Up"), crate::status::ELEMENTS.len());
+        assert_eq!(count("Down"), crate::status::ELEMENTS.len());
+        // The rows are in the order of the file.
+        let ys: Vec<f32> = crate::status::ELEMENTS
+            .iter()
+            .map(|e| texts.iter().find(|(t, _)| t == e.name()).unwrap().1.top())
+            .collect();
+        assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
+        assert!(heading.top() > *ys.last().unwrap(), "the preview stands below the list");
+    }
+
+    #[test]
+    fn the_status_tab_reports_its_clicks() {
+        use crate::statustab::StatusEvent;
+        let menu = status_tab_menu();
+        let s = |e| Some(UiEvent::Settings(SettingsEvent::Status(e)));
+        let size = (1920.0, 2000.0);
+        let events = status_clicks(
+            &menu,
+            size,
+            &[
+                &|t| in_row(t, "Network traffic", "Up"),
+                &|t| in_row(t, "Clock", "Down"),
+                &|t| tick_of(t, "Clock"),
+                // The select shows the size; its list offers the others.
+                &|t| in_row(t, "Keyboard and mouse batteries", "1x1"),
+                &|t| t.iter().find(|(s, _)| s == "2x1").map(|(_, r)| r.center()),
+                &|t| t.iter().find(|(s, _)| s == "Reset to default").map(|(_, r)| r.center()),
+            ],
+        );
+        assert_eq!(
+            events,
+            [
+                s(StatusEvent::Up("network".into())),
+                // The bottom row's Down is off: no event.
+                None,
+                s(StatusEvent::Shown("clock".into(), false)),
+                None,
+                s(StatusEvent::Size("battery".into(), crate::status::Size { w: 2, h: 1 })),
+                s(StatusEvent::Reset),
+            ]
+        );
+        // The top row's Up is off too.
+        let top = status_clicks(&menu, size, &[&|t| in_row(t, "Keyboard and mouse batteries", "Up")]);
+        assert_eq!(top, [None]);
+    }
+
+    #[test]
+    fn the_size_select_offers_only_the_sizes_of_its_element() {
+        let menu = status_tab_menu();
+        for e in crate::status::ELEMENTS {
+            // The size texts with the element's list closed, then open: the
+            // list adds one entry per size offered.
+            let closed = std::cell::RefCell::new(Vec::new());
+            let open = std::cell::RefCell::new(Vec::new());
+            let sizes = |t: &[(String, Rect)]| -> Vec<String> {
+                t.iter()
+                    .filter(|(s, _)| crate::status::Size::parse(s).is_some())
+                    .map(|(s, _)| s.clone())
+                    .collect()
+            };
+            let current = e.sizes()[0].to_string();
+            status_clicks(
+                &menu,
+                (1920.0, 2000.0),
+                &[
+                    &|t| {
+                        *closed.borrow_mut() = sizes(t);
+                        in_row(t, e.name(), &current)
+                    },
+                    &|t| {
+                        *open.borrow_mut() = sizes(t);
+                        None
+                    },
+                ],
+            );
+            let mut added = open.into_inner();
+            for c in closed.into_inner() {
+                if let Some(i) = added.iter().position(|a| *a == c) {
+                    added.remove(i);
+                }
+            }
+            added.sort();
+            let mut want: Vec<String> = e.sizes().iter().map(|s| s.to_string()).collect();
+            want.sort();
+            // A single size has nothing to choose: its select does not open.
+            if want.len() == 1 {
+                want.clear();
+            }
+            assert_eq!(added, want, "{}", e.id());
+        }
+    }
+
+    /// The element backgrounds in `region`, relative to the first one's
+    /// top-left corner of the whole set.
+    fn relative_cards(shapes: &[egui::epaint::ClippedShape], region: Rect) -> Vec<Rect> {
+        let card = crate::brand::theme().palette().card;
+        let mut out: Vec<Rect> = Vec::new();
+        for c in shapes {
+            if let egui::Shape::Rect(r) = &c.shape
+                && r.fill == card
+                && region.contains_rect(r.rect)
+                && !out.contains(&r.rect)
+            {
+                out.push(r.rect);
+            }
+        }
+        let min = out.iter().fold(pos2(f32::INFINITY, f32::INFINITY), |m, r| m.min(r.min));
+        let mut rel: Vec<Rect> = out.iter().map(|r| r.translate(-min.to_vec2())).collect();
+        rel.sort_by(|a, b| (a.min.y, a.min.x).partial_cmp(&(b.min.y, b.min.x)).unwrap());
+        rel
+    }
+
+    #[test]
+    fn the_preview_is_the_main_screens_status_area() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0)] {
+            let mut menu = status_tab_menu();
+            let preview = settings_shapes(&menu, w, h);
+            let heading = text_rect(&preview, "Preview").expect("a preview heading");
+            let log = layout(screen(w, h), 0, 0, 0, 0).log;
+            let below = Rect::from_min_max(pos2(0.0, heading.bottom()), pos2(w, log.top()));
+            let got = relative_cards(&preview, below);
+            menu.screen = Screen::Grid;
+            let main = settings_shapes(&menu, w, h);
+            let short = short_screen(h);
+            let sources = menu.status_sources();
+            let n = menu.visible_tiles().len();
+            let l = layout(
+                screen(w, h),
+                n,
+                0,
+                menu.status.rows(&sources, short),
+                menu.status.planned_rows(short),
+            );
+            let want = relative_cards(&main, l.status.unwrap().expand(1.0));
+            assert!(!want.is_empty());
+            assert_eq!(got.len(), want.len(), "{w}x{h}: {got:?} vs {want:?}");
+            for (g, m) in got.iter().zip(&want) {
+                assert!(
+                    (g.min - m.min).length() < 0.5 && (g.size() - m.size()).length() < 0.5,
+                    "{w}x{h}: {g:?} vs {m:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_status_tab_fits_without_sideways_scrolling() {
+        let menu = status_tab_menu();
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0)] {
+            let shapes = settings_shapes(&menu, w, h);
+            let panel_w = GROUP_W.min(w - 2.0 * GAP);
+            let (left, right) = ((w - panel_w) / 2.0, (w + panel_w) / 2.0);
+            let log = layout(screen(w, h), 0, 0, 0, 0).log;
+            for c in &shapes {
+                let b = c.shape.visual_bounding_rect();
+                if !b.is_positive() || c.clip_rect.intersect(b).area() <= 0.0 {
+                    continue;
+                }
+                let seen = c.clip_rect.intersect(b);
+                // The log and the header span the screen; the tab lies in the panel.
+                if seen.top() < HEADER_H || seen.top() >= log.top() - 0.5 {
+                    continue;
+                }
+                assert!(
+                    seen.left() >= left - 1.0 && seen.right() <= right + 1.0,
+                    "{w}x{h}: {seen:?} outside {left}..{right}: {:?}",
+                    c.shape
+                );
+            }
+            // Reset and the preview stay on screen, above the log.
+            let texts = text_rects(&shapes);
+            for want in ["Reset to default", "Preview"] {
+                let r = texts.iter().find(|(t, _)| t == want).map(|(_, r)| *r);
+                assert!(r.is_some_and(|r| r.bottom() < log.top()), "{w}x{h}: {want} {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_says_why_its_element_is_not_drawn_and_a_failed_save_shows_in_warn() {
+        let mut menu = status_tab_menu();
+        menu.set_battery(Vec::new(), Instant::now());
+        menu.status_error = Some("disk full".into());
+        let shapes = settings_shapes(&menu, 1920.0, 2000.0);
+        let texts = text_rects(&shapes);
+        let note = in_row(
+            &texts,
+            "Keyboard and mouse batteries",
+            "nothing to show on this machine",
+        );
+        assert!(note.is_some(), "{texts:?}");
+        assert!(in_row(&texts, "Clock", "nothing to show on this machine").is_none());
+        let colour = |want: &str| {
+            shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text().contains(want) => Some(t.galley.job.sections[0].format.color),
+                _ => None,
+            })
+        };
+        assert_eq!(colour("nothing to show"), Some(MUTED));
+        assert_eq!(colour("disk full"), Some(WARN));
     }
 
     /// Every rect in `shape`, also those nested in a `Shape::Vec`.
@@ -5162,6 +5491,10 @@ mod tests {
             }));
             shot(&m, "settings-network-error-1080.ppm", one, 1.0);
         }
+        // The Status tab: the shipped layout, two devices and a network.
+        let status = status_tab_menu();
+        shot(&status, "settings-status-1080.ppm", (1920, 1080), 1.0);
+        shot(&status, "settings-status-1280x720.ppm", (1280, 720), 1.0);
         let mut newer = Menu::new(shipped_grid(), false);
         newer.set_usb_boot(true);
         newer.set_installed(Some("4.0.0".into()));

@@ -31,6 +31,8 @@ pub enum SettingsEvent {
     Network(NetEvent),
     /// Something on the monitor part of the Screen tab.
     Monitors(crate::monitors::MonEvent),
+    /// Something on the Status tab.
+    Status(crate::statustab::StatusEvent),
 }
 
 /// The tabs of the Settings screen.
@@ -39,16 +41,23 @@ pub enum SettingsTab {
     Packages,
     Network,
     Screen,
+    Status,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 3] = [SettingsTab::Packages, SettingsTab::Network, SettingsTab::Screen];
+    pub const ALL: [SettingsTab; 4] = [
+        SettingsTab::Packages,
+        SettingsTab::Network,
+        SettingsTab::Screen,
+        SettingsTab::Status,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             SettingsTab::Packages => "Packages",
             SettingsTab::Network => "Network",
             SettingsTab::Screen => "Screen",
+            SettingsTab::Status => "Status",
         }
     }
 }
