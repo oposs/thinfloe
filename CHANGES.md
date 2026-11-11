@@ -61,6 +61,7 @@
 
 ### Fixed
 
+- A named pipe put in place of a tile file, an icon or a status file while the menu reads it no longer hangs the menu, which left the screen black at login.
 - Screen blanking that stops because its helper exited is restarted after 5 seconds; before, the screen no longer blanked for the rest of the session.
 - Sound from ThinLinc and OxuLnk played quietly, because the speakers and headphones started at 40 % on every boot and the machine has no volume control. Outputs and microphones now start at 100 %, so the remote desktop sets the loudness. A volume set by hand with `wpctl` or `pactl` is kept.
 - With two monitors, window title bars grew while a fullscreen program such as OxuLnk or ThinLinc covered the menu, and shrank back only when the menu happened to redraw, for example when a window was moved. The title bars and the menu now keep their size.
