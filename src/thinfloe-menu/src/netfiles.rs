@@ -321,10 +321,12 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
         && wifis.is_some_and(|h| h.len() == 1);
     for (dev, def) in wifis.into_iter().flatten() {
         let def = def.as_hash();
-        let (dns, dns_ok) = def.map_or((Vec::new(), true), |d| {
-            dhcp_dns(d, get(d, "dhcp4").and_then(flag) == Some(true))
-        });
-        ok &= dns_ok;
+        let dhcp = def.is_some_and(|d| get(d, "dhcp4").and_then(flag) == Some(true));
+        let (dns, dns_ok) = def.map_or((Vec::new(), true), |d| dhcp_dns(d, dhcp));
+        // `render_wifi` writes `dhcp4: true` and `optional: true`: a
+        // definition without DHCP, or one boot waits for, is not the
+        // menu's (as Ruling 25 for `optional` on the wired one).
+        ok &= dns_ok && dhcp && def.is_some_and(|d| get(d, "optional").is_none_or(|o| flag(o) == Some(true)));
         if wifis.is_some_and(|h| h.len() == 1) {
             f.device = text_of(dev);
             f.dns = dns;
@@ -1911,6 +1913,40 @@ exit 0
         assert_eq!(
             take_over(&f.h, "wired"),
             Err("~/ethernet.yaml has settings the menu cannot keep".into())
+        );
+        assert_eq!(f.snapshot(), before);
+    }
+
+    /// The menu writes `dhcp4: true` and `optional: true` on its WiFi
+    /// definition, so a take-over keeps only a definition that has DHCP
+    /// and is not marked as required for boot.
+    #[test]
+    fn wifi_take_over_needs_dhcp_and_optional() {
+        assert!(parse_wifi(Some(HAND_WIFI)).manageable);
+        let yes = HAND_WIFI.replace("dhcp4: true", "dhcp4: yes");
+        assert!(parse_wifi(Some(&yes)).manageable, "{yes}");
+        let opt = HAND_WIFI.replace("dhcp4: true", "dhcp4: true\n      optional: true");
+        assert!(parse_wifi(Some(&opt)).manageable, "{opt}");
+        for other in [
+            HAND_WIFI.replace("      dhcp4: true\n", ""),
+            HAND_WIFI.replace("dhcp4: true", "dhcp4: false"),
+            HAND_WIFI.replace("dhcp4: true", "dhcp4: maybe"),
+            HAND_WIFI.replace("dhcp4: true", "dhcp4: true\n      optional: false"),
+            HAND_WIFI.replace("dhcp4: true", "dhcp4: true\n      optional: sometimes"),
+        ] {
+            let w = parse_wifi(Some(&other));
+            assert!(!w.manageable, "{other}");
+            // Still shown, without the passwords.
+            assert_eq!(w.networks.len(), 3, "{other}");
+            assert!(w.networks.iter().all(|n| n.password.is_none()), "{other}");
+        }
+        // And take-over refuses it, leaving the file alone.
+        let f = Fixture::new("take-wifi-static", &["wlp58s0"]);
+        f.put(WIFI_FILE, &HAND_WIFI.replace("      dhcp4: true\n", ""));
+        let before = f.snapshot();
+        assert_eq!(
+            take_over(&f.h, "wifi"),
+            Err("~/wifi.yaml has settings the menu cannot keep".into())
         );
         assert_eq!(f.snapshot(), before);
     }

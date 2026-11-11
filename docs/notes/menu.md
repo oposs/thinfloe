@@ -165,7 +165,11 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
 
   The parser keeps a file manageable only with `dhcp4-overrides` exactly
   `{use-dns: false}` beside a non-empty `nameservers` on a `dhcp4: true`
-  definition, or with neither key. On 1080p a full tab scrolls; every
+  definition, or with neither key. The menu writes its WiFi definition
+  with `dhcp4: true` and `optional: true`, so a `~/wifi.yaml` is manageable
+  only when `dhcp4` is a flag that is true and `optional` is missing or
+  true (as `optional` on the wired `eth`); a take-over would otherwise turn
+  DHCP on, or stop boot waiting for the device. On 1080p a full tab scrolls; every
   control scrolls into reach above the pinned Apply. Guards: the `netfiles`
   and `network` tests, `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
