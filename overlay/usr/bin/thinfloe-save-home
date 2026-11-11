@@ -145,7 +145,7 @@ fi
 
 # Capture the live SSH host keys into the home directory so they travel with
 # the archive. This is the ONLY place they are persisted - see
-# /usr/bin/thinfloe-ssh-hostkeys and CLAUDE.md.
+# /usr/bin/thinfloe-ssh-hostkeys and docs/notes/boot-flow.md.
 sudo /usr/bin/thinfloe-ssh-hostkeys --stage || true
 
 # Leave out every file over 10 MB, and name it.

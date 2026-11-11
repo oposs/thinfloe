@@ -95,7 +95,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     # already exported. Pointing -C straight at /etc/thinfloe/labwc therefore
     # let the system file's value win back over the user's for any key
     # present in both - LABWC_FULLSCREEN_SPAN_OUTPUTS and the XKB_DEFAULT_*/
-    # XCURSOR_* keys included. See CLAUDE.md's ".thinfloe-environment" section
+    # XCURSOR_* keys included. See docs/notes/session.md (".thinfloe-environment")
     # for the full writeup.
     #
     # thinfloe-compose-labwc-config builds a config directory whose merged

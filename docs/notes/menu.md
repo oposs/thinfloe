@@ -54,7 +54,9 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   needs 192 MiB. Before
   rendering, the child still refuses an SVG that nests deeper than 64
   elements, has more than 10000, declares entities or uses filters (one
-  `feTurbulence` ran for over a minute). Limits and guards are in
+  `feTurbulence` ran for over a minute). usvg's `<image>` resolvers are off
+  (`svg_options` in `icons.rs`): the default ones read any path and decode
+  `data:` of any size. Limits and guards are in
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
 
@@ -130,6 +132,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
 
 - The grid is on one monitor. The span patch covers Xwayland windows only.
 - The status area is not seen while a fullscreen window covers the menu.
+  Program output still wakes the covered loop and every wake requests a
+  redraw (`user_event` in `app.rs`), so a fullscreen client that writes a
+  line a second keeps a 1 s render going behind the cover.
 - Clicking a tile is not covered by the headless runtime test, which has no
   input devices. The end-of-session dialogs and their buttons (Stay / Stop
   them and restart, Stay / Restart anyway, and the same for Power off and

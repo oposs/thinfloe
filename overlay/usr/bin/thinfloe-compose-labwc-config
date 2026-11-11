@@ -12,7 +12,7 @@
 # considers - the XDG list is skipped entirely). So any key present in both
 # the system file and the user's file was silently reset to the system
 # value the moment labwc started, regardless of what the shell had already
-# exported. See CLAUDE.md's ".thinfloe-environment" section for the full
+# exported. See docs/notes/session.md (".thinfloe-environment") for the full
 # writeup and test/runtime/test-labwc-runtime.sh for the assertion that a
 # LATER duplicate assignment in that file is what wins - the assumption
 # this script's ordering depends on.

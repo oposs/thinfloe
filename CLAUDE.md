@@ -77,6 +77,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - `~/.thinfloe-environment` is sourced before labwc (startup variables: keyboard, cursor, `TZ=`, `LABWC_FULLSCREEN_SPAN_OUTPUTS`); `~/.thinfloe-sessionrc` inside the session (commands that need a compositor: `wlr-randr`, `kanshi`, `TF_IDLE_TIMEOUT`).
 - labwc runs with `-C` on a directory composed by `thinfloe-compose-labwc-config` (system files symlinked, `environment` = system defaults then the user's file). Pointing `-C` at `/etc/thinfloe/labwc` again makes labwc reset user keys to the system values. Guards: `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`. Story: [docs/notes/session.md](docs/notes/session.md).
 - `thinfloe-save-home` takes the home from `getent passwd tfuser`, never `$HOME` (`sudo` sets `HOME=/root`), and every read under `/run/thinfloe/state` ends in `|| true` (`set -e`). On USB it writes only to the ESP mounted at `/run/thinfloe/storage/efi` (tested with `mountpoint -q`), atomically; the netboot upload uses `curl -f`. Exit codes 0 to 5 are a contract. Guard: `test-save-home.sh`.
+- The remote-access password hash (`~/.thinfloe-password`) and the SSH host keys (`~/.thinfloe-ssh-host-keys`) ride the home archive in the clear: on the FAT ESP, or POSTed over plain HTTP on netboot. Accepted; see [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
 - A fresh install's home copy always leaves out `~/.thinfloe-ssh-host-keys`, `~/.dbrrg-ssh-host-keys` and `~/wg0.conf` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
 - Reboot and power off from the session need `sudo systemctl ...`: the image has no polkit.
 - Screen blanking uses `swayidle` and `wlopm`, never `wlr-randr --off`, which changes the monitor layout. No lock screen: tfuser has no password.
@@ -88,8 +89,10 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - User icons render in a child process (`thinfloe-menu --render-icon`) under rlimits and a kill timer; never render a user icon in-process. Limits in `icons.rs`.
 - `X-TF-Action=settings` and `=upgrade` are honoured only in shipped tile files; a user file rewording a shipped tile may change `Name`, `Comment` and `Icon` only, and cannot set `X-TF-Multiple` or `X-TF-Source-*`.
 - The menu sends a running `thinfloe-upgrade write` SIGTERM, never SIGKILL (SIGKILL reaches only sudo and the lock stays held). Jobs run in their own process group.
+- A fullscreen window that leaves winit no monitor for the menu is not a move: the last known monitor counts (`seen_monitor` in `app.rs`). Taken as a move, it gave the largest mode's scale and the title bars grew (2026-10-30). See [docs/notes/menu.md](docs/notes/menu.md).
 - The scale file `$XDG_RUNTIME_DIR/thinfloe-scale` is written atomically (one number and a newline); `labwc-scale` and `thinfloe-terminal` read it.
 - Status area: an element is one module in `status/` plus a line in `status::ELEMENTS`; `draw` is pure and stays in its rect. The layout file `~/.config/thinfloe/status` is written only by the menu. Notes: [docs/notes/status-area.md](docs/notes/status-area.md).
+- The battery file `/run/thinfloe/peripherals/battery` is a contract between the root reader and the menu: one line per device, `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind`; the menu still reads a 4-field line (kind unknown). See [docs/notes/peripheral-battery.md](docs/notes/peripheral-battery.md).
 
 ### Boot screen
 
@@ -102,7 +105,14 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - An add-on source is fetched automatically only when every URL is `https:` or it is APT with a key (`auto_allowed`).
 - Add-on ids: `ID_RE` in the tool and `valid_id` in the menu apply one rule; `test/unit/addon-ids.tsv` pins both.
 - A post-install hook path never comes from a tile or the home, only from `/usr/libexec/thinfloe/addon-hooks/<id>`.
+- Every store on the ESP renames the payload before its meta, and `_drop_slot` and `remove` delete the metas before the payloads; `finish_promote`'s recovery after a power loss mid-promote depends on that order. See [docs/notes/add-ons.md](docs/notes/add-ons.md).
 - Details: [docs/notes/add-ons.md](docs/notes/add-ons.md).
+
+### Upgrade and netboot
+
+- `thinfloe-upgrade` takes `esp.lock` only on an upgrade of the boot stick and only in two short places of the `switch` step (removing `tl.old/` and a stale `tl.new/`; the final `sync` and the boot label). The copy into `tl.new/` runs unlocked, because a save gives up waiting after 30 s and then writes unlocked. See [docs/notes/add-ons.md](docs/notes/add-ons.md) (Locks).
+- Every child process of `thinfloe-upgrade` runs in a session of its own (`SPAWN`), because the menu signals the tool's whole process group. See [docs/notes/esp-and-upgrade.md](docs/notes/esp-and-upgrade.md).
+- Netboot: the boot MAC comes from the interface holding the default route and is read back from `/run/thinfloe/state/boot-mac` by restore and save, so both agree; `parse-thinfloe.sh` sets `rd.neednet=1` for an http ramroot; `dracut-network` must stay installed (it ships the `systemd-networkd` and `url-lib` dracut modules). See [docs/notes/network-boot.md](docs/notes/network-boot.md).
 
 ## Standing Constraints
 
@@ -281,7 +291,9 @@ that runs `login -f tfuser` (agetty crashed plymouthd at 4K), with
 `TTYReset=no`, `TTYVHangup=no`, `TTYVTDisallocate=no`. The session hands the
 display over through `sudo -n plymouth-step`; `plymouth-quit.service` is
 masked and `thinfloe-plymouth-fallback.timer` ends Plymouth after 300 s. i915
-and its firmware are in the initrd. Guards: `test-session-packages.sh`,
+and its firmware are in the initrd. `plymouth.use-simpledrm` stays on the
+command line, else machines with amdgpu, nouveau or radeon (left out of the
+initrd) show no boot picture. Guards: `test-session-packages.sh`,
 `test-session-lifecycle.sh`, `test-plymouth-step.sh`, `test_addon.py`.
 [Story](docs/notes/history-of-constraints.md#tty1-does-not-wait-for-plymouth-the-session-ends-it).
 
