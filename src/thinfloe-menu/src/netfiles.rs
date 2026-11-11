@@ -963,7 +963,11 @@ fn check_set(h: &Homes, wifi: Option<&str>, wired: &str) -> Result<(), String> {
 pub fn machine_dns(wired: &WiredFile, netboot: bool) -> Option<&[Ipv4Addr]> {
     match wired.state {
         _ if netboot => None,
-        FileState::Menu => Some(wired.wired.dns()),
+        // A menu file edited into a form the menu cannot keep reads only
+        // in part (a second address as DHCP, servers added to DHCP's as
+        // a replacement): it counts as by hand here.
+        FileState::Menu if wired.manageable => Some(wired.wired.dns()),
+        FileState::Menu => None,
         FileState::Missing | FileState::Template => Some(&[]),
         FileState::Hand => None,
     }
@@ -988,7 +992,7 @@ fn wifi_with_dns(now: &WifiFile, dns: &[Ipv4Addr]) -> Result<Option<String>, Str
 
 /// The networks of ~/wifi.yaml pass the input checks; else the first that
 /// fails, named.
-fn check_saved(networks: &[Net]) -> Result<(), String> {
+pub fn check_saved(networks: &[Net]) -> Result<(), String> {
     for n in networks {
         check_net(n).map_err(|e| format!("~/{WIFI_FILE}, {}: {e}", n.ssid))?;
     }
@@ -2298,6 +2302,38 @@ exit 0
         };
         save(&f.h, &c, false).unwrap();
         assert_eq!(parse_wifi(f.text(WIFI_FILE).as_deref()).dns, dns2());
+    }
+
+    /// A menu ~/ethernet.yaml edited by hand into a form the menu cannot
+    /// keep gives WiFi no servers: ~/wifi.yaml keeps its own.
+    #[test]
+    fn wifi_keeps_its_dns_beside_a_menu_wired_file_the_menu_cannot_keep() {
+        let menu = render_wired(SHIPPED_WIRED, &fixed()).unwrap().unwrap();
+        let two_addresses = menu.replace("- 192.168.1.10/24", "- 192.168.1.10/24\n          - 10.0.0.5/8");
+        let additive = format!(
+            "{HEADER}\n{}            nameservers:\n                addresses: [8.8.8.8]\n",
+            body(SHIPPED_WIRED)
+        );
+        for (tag, wired) in [("dns-unkept-two", &two_addresses), ("dns-unkept-add", &additive)] {
+            let w = parse_wired(Some(wired));
+            assert_eq!((w.state, w.manageable), (FileState::Menu, false), "{wired}");
+            assert_eq!(machine_dns(&w, false), None);
+            let f = Fixture::new(tag, &["wlp58s0"]);
+            f.put(WIRED_FILE, wired);
+            f.put(
+                WIFI_FILE,
+                &render_wifi(Some("wlp58s0"), &[net("home", None, false)], &dns2()),
+            );
+            let nets = vec![net("lab", None, false)];
+            let c = Change {
+                wifi: Some(nets.clone()),
+                wired: None,
+            };
+            save(&f.h, &c, false).unwrap();
+            let w = parse_wifi(f.text(WIFI_FILE).as_deref());
+            assert_eq!((w.networks, w.dns), (nets, dns2()));
+            assert_eq!(f.text(WIRED_FILE).as_deref(), Some(wired.as_str()));
+        }
     }
 
     #[test]

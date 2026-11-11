@@ -681,7 +681,8 @@ impl NetTab {
     /// The menu's ~/wifi.yaml, which it can rewrite, carries other DNS
     /// servers than the wired setting gives it (after a take-over, or
     /// servers set before WiFi got them): Apply brings it back in step.
-    /// Not on netboot, nor beside a ~/ethernet.yaml by hand.
+    /// Not on netboot, nor beside a ~/ethernet.yaml by hand or one the
+    /// menu cannot keep (see `netfiles::machine_dns`).
     pub fn wifi_dns_out_of_step(&self) -> bool {
         let (Some(w), Some(e)) = (&self.wifi, &self.wired) else {
             return false;
@@ -690,6 +691,9 @@ impl NetTab {
             && w.manageable
             && !w.networks.is_empty()
             && netfiles::machine_dns(e, self.netboot).is_some_and(|d| d != w.dns.as_slice())
+            // A rewrite that would refuse a saved network fails every
+            // time; Apply is not lit for it.
+            && netfiles::check_saved(&w.networks).is_ok()
     }
 }
 
@@ -965,9 +969,24 @@ mod tests {
         let mut hand = menu_wifi(vec![]);
         hand.state = FileState::Hand;
         assert!(!load(false, hand, wired(FileState::Menu, fixed_dns.clone())).dirty());
-        let mut empty = menu_wifi(one);
+        let mut empty = menu_wifi(one.clone());
         empty.networks.clear();
         assert!(!load(false, empty, wired(FileState::Missing, Wired::dhcp())).dirty());
+        // A menu ~/ethernet.yaml the menu cannot keep (a second address
+        // reads as DHCP, added servers as DHCP with servers) is not a
+        // source: no Apply that would delete it or turn it into DHCP.
+        for parsed in [Wired::dhcp(), Wired::Dhcp { dns: one.clone() }] {
+            let mut unkept = wired(FileState::Menu, parsed);
+            unkept.manageable = false;
+            let mut t = load(false, menu_wifi(vec!["9.9.9.9".parse().unwrap()]), unkept);
+            assert!(!t.dirty());
+            assert_eq!(t.event(NetEvent::Apply, false), None);
+        }
+        // A saved network the checks refuse: the rewrite would fail, so
+        // Apply is not lit for it.
+        let mut short = menu_wifi(vec![]);
+        short.networks = vec![net("Home", Some("short12"))];
+        assert!(!load(false, short, wired(FileState::Menu, fixed_dns.clone())).dirty());
     }
 
     #[test]

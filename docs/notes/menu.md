@@ -144,8 +144,11 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   The servers come from a `~/ethernet.yaml` the menu owns (missing: none).
   Beside one by hand or one that cannot be read, the row is greyed with that
   file's servers and "Set by hand in ~/ethernet.yaml.", and `~/wifi.yaml`
-  keeps the servers it has. A menu `~/wifi.yaml` that the menu can keep,
-  with networks, whose servers differ from the wired ones (after a
+  keeps the servers it has. A menu `~/ethernet.yaml` edited by hand into a
+  form the menu cannot keep (a second address, servers added to DHCP's)
+  counts the same for WiFi; only an edit in the form changes it. A menu
+  `~/wifi.yaml` that the menu can keep, with networks that all pass the
+  input checks, whose servers differ from the wired ones (after a
   take-over, or servers set before WiFi got them) makes the tab dirty, and
   Apply writes the saved wired setting again to bring both in step; the
   band then says "WiFi uses other DNS servers. Apply sets the ones above." A

@@ -4220,6 +4220,16 @@ mod tests {
             "Used for wired and WiFi. Empty: the servers DHCP sends.",
             "WiFi keeps the DNS servers set in ~/wifi.yaml.",
         ];
+        // Before any scrolling something is out of reach: the tab does not
+        // fit, so the scrolling below is what the test checks.
+        let in_reach = |texts: &[(String, Rect)], want: &str| {
+            let apply = find(texts, "Apply").expect("Apply");
+            find(texts, want).is_some_and(|r| r.top() > top && r.bottom() < apply.top())
+        };
+        assert!(
+            !wanted.iter().all(|w| in_reach(&texts, w)),
+            "the whole tab fits on 1080p: {texts:?}"
+        );
         let mut seen = [false; 6];
         let mut clicked = None;
         for _ in 0..80 {
