@@ -228,19 +228,18 @@ pub fn descriptors() -> Vec<layout::Descriptor> {
 pub const FILE: &str = ".config/thinfloe/status";
 
 /// Read the layout file and add the elements it does not name. A missing
-/// file is the default list; one that cannot be read, or that `layout::parse`
-/// refuses, is the default list with one note, and `refused` set. At most
-/// one byte past the limit is read, so a huge file costs nothing.
+/// file is the default list; one that cannot be read, is not a regular file
+/// (a FIFO would block the menu), or that `layout::parse` refuses, is the
+/// default list with one note, and `refused` set. At most one byte past the
+/// limit is read, so a huge file costs nothing.
 pub fn read_layout(path: &Path) -> layout::Layout {
-    use std::io::Read;
-    let read = std::fs::File::open(path).and_then(|f| {
-        let mut bytes = Vec::new();
-        f.take(layout::MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-        Ok(bytes)
-    });
-    let mut l = match read {
+    let max = layout::MAX_BYTES as u64;
+    let mut l = match crate::bounded::read_bounded(path, max, true) {
         Ok(bytes) => layout::parse(&bytes, &offered),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => layout::Layout::default(),
+        Err(_) if std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
+            layout::Layout::default()
+        }
+        Err(e) if e == crate::bounded::too_large(max) => layout::refuse("it is over 4 KiB"),
         Err(e) => layout::refuse(&format!("it cannot be read: {e}")),
     };
     layout::complete(&mut l, &descriptors());

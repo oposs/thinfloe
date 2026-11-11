@@ -95,6 +95,11 @@ Shipped elements:
 - Over 4 KiB, over 64 lines or not UTF-8: the shipped list, one note, and
   the file stays as it is until the user changes something in the Status
   tab. Reading stops one byte past 4 KiB.
+- Not a regular file (a FIFO, a device, a directory; a symlink counts by
+  its target), or unreadable: the same, with the note "it cannot be read".
+  The file is read through `bounded::read_bounded`, which looks at the type
+  before it opens anything: opening a FIFO blocked the menu's main thread,
+  at start, on every watch wake and in `--check`.
 - A line that is not `<id> <w>x<h>`: skipped, one note. A second line for an
   id: skipped, one note.
 - An unknown id (a newer image wrote the file): kept, not drawn, written

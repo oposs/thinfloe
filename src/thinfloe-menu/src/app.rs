@@ -1897,6 +1897,28 @@ esac"#;
     }
 
     #[test]
+    fn a_fifo_in_place_of_the_layout_file_is_refused_without_blocking() {
+        let d = TestDir::new("app", "status-fifo");
+        let fifo = d.join("status");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::status::read_layout(&path));
+        });
+        let Ok(l) = rx.recv_timeout(Duration::from_secs(5)) else {
+            // Unblock the reader so the test process can end.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("read_layout blocked on a FIFO");
+        };
+        assert!(l.refused, "{l:?}");
+        assert_eq!(l.notes, ["status layout file ignored: it cannot be read: not a regular file"]);
+        assert_eq!(l.choices, crate::status::Area::shipped().layout.choices);
+    }
+
+    #[test]
     fn the_hardware_sampler_rests_when_covered_on_a_short_screen_and_without_a_placed_element() {
         let shipped = crate::status::Area::shipped();
         let tall = ui::SHORT_SCREEN_H;

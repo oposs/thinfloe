@@ -45,7 +45,8 @@ pub fn read_text(path: &Path, max_bytes: u64) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-fn too_large(max_bytes: u64) -> String {
+/// The error `read_bounded` gives for a file over `max_bytes`.
+pub fn too_large(max_bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     if max_bytes < MIB {
         format!("larger than {} KiB", max_bytes / 1024)
