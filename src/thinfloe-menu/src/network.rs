@@ -24,8 +24,9 @@ pub enum NetEvent {
     WiredText {
         address: String,
         gateway: String,
-        dns: String,
     },
+    /// The DNS servers field, for wired and WiFi in every wired mode.
+    DnsText(String),
     /// Forget the saved network of this name.
     Forget(String),
     OpenAdd,
@@ -55,23 +56,18 @@ pub enum NetRequest {
     TakeOver(&'static str),
 }
 
-/// The wired part as the form shows it: the select and the three texts.
+/// The wired part as the form shows it: the select and the two texts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WiredForm {
     pub fixed: bool,
     pub address: String,
     pub gateway: String,
-    pub dns: String,
 }
 
 impl WiredForm {
     fn of(w: &Wired) -> WiredForm {
-        let dns = w.dns().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
         match w {
-            Wired::Dhcp { .. } => WiredForm {
-                dns,
-                ..WiredForm::default()
-            },
+            Wired::Dhcp { .. } => WiredForm::default(),
             Wired::Static {
                 address,
                 prefix,
@@ -81,33 +77,32 @@ impl WiredForm {
                 fixed: true,
                 address: format!("{address}/{prefix}"),
                 gateway: gateway.map(|g| g.to_string()).unwrap_or_default(),
-                dns,
             },
         }
     }
 
-    /// Two forms ask for the same: DHCP ignores the address and the
-    /// gateway, not the DNS servers.
+    /// Two forms ask for the same: DHCP ignores the texts.
     fn same(&self, other: &WiredForm) -> bool {
-        self.fixed == other.fixed
-            && if self.fixed {
-                self == other
-            } else {
-                self.dns == other.dns
-            }
+        self.fixed == other.fixed && (!self.fixed || self == other)
     }
 
-    /// On netboot DHCP keeps the servers it gives: the tab shows no DNS
-    /// row there, and ~/ethernet.yaml is not installed.
-    fn wired(&self, netboot: bool) -> Result<Wired, String> {
+    /// The setting with the DNS servers field `dns`. On netboot DHCP keeps
+    /// the servers it gives: the tab has no DNS row there, and
+    /// ~/ethernet.yaml is not installed.
+    fn wired(&self, dns: &str, netboot: bool) -> Result<Wired, String> {
         if self.fixed {
-            nettab::parse_wired_form(&self.address, &self.gateway, &self.dns)
+            nettab::parse_wired_form(&self.address, &self.gateway, dns)
         } else if netboot {
             Ok(Wired::dhcp())
         } else {
-            nettab::parse_dns(&self.dns).map(|dns| Wired::Dhcp { dns })
+            nettab::parse_dns(dns).map(|dns| Wired::Dhcp { dns })
         }
     }
+}
+
+/// The DNS servers as the field shows them.
+fn dns_text(w: &Wired) -> String {
+    w.dns().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// The add dialog.
@@ -161,6 +156,7 @@ pub struct NetTab {
     /// `None`: unchanged.
     draft_wifi: Option<Vec<Net>>,
     draft_wired: Option<WiredForm>,
+    draft_dns: Option<String>,
     add: Option<AddView>,
     confirm: bool,
     error: Option<String>,
@@ -187,6 +183,7 @@ impl NetTab {
             status_error: None,
             draft_wifi: None,
             draft_wired: None,
+            draft_dns: None,
             add: None,
             confirm: false,
             error: None,
@@ -227,6 +224,14 @@ impl NetTab {
         self.draft_wired.as_ref().is_some_and(|d| !d.same(&self.saved_form()))
     }
 
+    fn saved_dns(&self) -> String {
+        self.wired.as_ref().map(|w| dns_text(&w.wired)).unwrap_or_default()
+    }
+
+    fn dns_changed(&self) -> bool {
+        self.draft_dns.as_ref().is_some_and(|d| *d != self.saved_dns())
+    }
+
     /// One click or text change. While an Apply or a take-over runs, and
     /// before the files are read, nothing is changed.
     pub fn event(&mut self, e: NetEvent, remote: bool) -> Option<NetRequest> {
@@ -243,7 +248,7 @@ impl NetTab {
                 self.draft_wired = Some(form);
                 None
             }
-            NetEvent::WiredText { address, gateway, dns } => {
+            NetEvent::WiredText { address, gateway } => {
                 // Netboot has no address fields to type in.
                 if !self.wired_editable() || self.netboot {
                     return None;
@@ -253,8 +258,15 @@ impl NetTab {
                     fixed,
                     address,
                     gateway,
-                    dns,
                 });
+                None
+            }
+            NetEvent::DnsText(dns) => {
+                // The servers live in ~/ethernet.yaml; netboot has no row.
+                if !self.wired_editable() || self.netboot {
+                    return None;
+                }
+                self.draft_dns = Some(dns);
                 None
             }
             NetEvent::Forget(ssid) => {
@@ -397,9 +409,14 @@ impl NetTab {
     }
 
     fn change(&self) -> Result<Change, String> {
-        let wired = match &self.draft_wired {
-            Some(form) if self.wired_changed() => Some(form.wired(self.netboot)?),
-            _ => None,
+        let wired = if self.wired_changed() || self.dns_changed() {
+            Some(self.wired_form().wired(&self.dns_text(), self.netboot)?)
+        } else if self.wifi_dns_out_of_step() {
+            // Nothing typed, but WiFi has other servers: the saved wired
+            // setting goes out again and carries them to ~/wifi.yaml.
+            self.wired.as_ref().map(|w| w.wired.clone())
+        } else {
+            None
         };
         // A swapped adapter: the same list goes out, under the new name.
         let adapter = self.adapter_changed();
@@ -452,6 +469,7 @@ impl NetTab {
         }
         if wired.state == FileState::Hand {
             self.draft_wired = None;
+            self.draft_dns = None;
         }
         self.wifi = Some(wifi);
         self.wired = Some(wired);
@@ -513,6 +531,7 @@ impl NetTab {
             Ok(()) => {
                 self.draft_wifi = None;
                 self.draft_wired = None;
+                self.draft_dns = None;
                 self.load_due = true;
                 true
             }
@@ -547,7 +566,11 @@ impl NetTab {
 
     /// Apply has something to do.
     pub fn dirty(&self) -> bool {
-        self.wifi_changed() || self.wired_changed() || self.adapter_changed()
+        self.wifi_changed()
+            || self.wired_changed()
+            || self.dns_changed()
+            || self.adapter_changed()
+            || self.wifi_dns_out_of_step()
     }
 
     pub fn applying(&self) -> bool {
@@ -577,9 +600,10 @@ impl NetTab {
         if self.applying {
             return false;
         }
-        let dropped = self.wifi_changed() || self.wired_changed();
+        let dropped = self.wifi_changed() || self.wired_changed() || self.dns_changed();
         self.draft_wifi = None;
         self.draft_wired = None;
+        self.draft_dns = None;
         self.add = None;
         self.confirm = false;
         self.error = None;
@@ -641,12 +665,31 @@ impl NetTab {
         self.draft_wired.clone().unwrap_or_else(|| self.saved_form())
     }
 
+    /// The DNS servers field with the draft's change.
+    pub fn dns_text(&self) -> String {
+        self.draft_dns.clone().unwrap_or_else(|| self.saved_dns())
+    }
+
     /// The menu's WiFi file names an adapter this machine does not have
     /// (plan call 4): Apply writes the current one.
     pub fn adapter_changed(&self) -> bool {
         self.wifi
             .as_ref()
             .is_some_and(|w| nettab::adapter_changed(w, &self.devices))
+    }
+
+    /// The menu's ~/wifi.yaml, which it can rewrite, carries other DNS
+    /// servers than the wired setting gives it (after a take-over, or
+    /// servers set before WiFi got them): Apply brings it back in step.
+    /// Not on netboot, nor beside a ~/ethernet.yaml by hand.
+    pub fn wifi_dns_out_of_step(&self) -> bool {
+        let (Some(w), Some(e)) = (&self.wifi, &self.wired) else {
+            return false;
+        };
+        w.state == FileState::Menu
+            && w.manageable
+            && !w.networks.is_empty()
+            && netfiles::machine_dns(e, self.netboot).is_some_and(|d| d != w.dns.as_slice())
     }
 }
 
@@ -713,11 +756,10 @@ mod tests {
         t
     }
 
-    fn fixed(address: &str, gateway: &str, dns: &str) -> NetEvent {
+    fn fixed(address: &str, gateway: &str) -> NetEvent {
         NetEvent::WiredText {
             address: address.into(),
             gateway: gateway.into(),
-            dns: dns.into(),
         }
     }
 
@@ -743,7 +785,8 @@ mod tests {
     fn with_fixed_draft() -> NetTab {
         let mut t = tab();
         assert_eq!(t.event(NetEvent::WiredMode(true), false), None);
-        assert_eq!(t.event(fixed("192.168.1.10/24", "192.168.1.1", "1.1.1.1"), false), None);
+        assert_eq!(t.event(fixed("192.168.1.10/24", "192.168.1.1"), false), None);
+        assert_eq!(t.event(NetEvent::DnsText("1.1.1.1".into()), false), None);
         t
     }
 
@@ -802,7 +845,7 @@ mod tests {
         assert_eq!(t.event(NetEvent::Apply, false), None);
         // Back to what is saved is not a change: DHCP ignores the texts.
         t.event(NetEvent::WiredMode(true), false);
-        t.event(fixed("10.0.0.2/8", "", ""), false);
+        t.event(fixed("10.0.0.2/8", ""), false);
         t.event(NetEvent::WiredMode(false), false);
         assert!(!t.dirty());
         // Forgetting sends the WiFi list only.
@@ -818,11 +861,7 @@ mod tests {
 
     #[test]
     fn dhcp_takes_dns_servers() {
-        let dns = |s: &str| NetEvent::WiredText {
-            address: String::new(),
-            gateway: String::new(),
-            dns: s.into(),
-        };
+        let dns = |s: &str| NetEvent::DnsText(s.into());
         let mut t = tab();
         assert_eq!(t.event(dns("9.9.9.9 1.1.1.1"), false), None);
         assert!(!t.wired_form().fixed);
@@ -857,7 +896,7 @@ mod tests {
             wired(FileState::Menu, saved),
             Vec::new(),
         );
-        assert_eq!(t.wired_form().dns, "1.1.1.1, 9.9.9.9");
+        assert_eq!(t.dns_text(), "1.1.1.1, 9.9.9.9");
         t.event(dns(""), false);
         assert_eq!(
             t.event(NetEvent::Apply, false),
@@ -878,6 +917,57 @@ mod tests {
                 })
             }))
         );
+    }
+
+    /// A menu ~/wifi.yaml whose servers differ from the wired ones (after a
+    /// take-over, or a fixed address with servers from before WiFi got
+    /// them): Apply brings the files back in step.
+    #[test]
+    fn wifi_dns_out_of_step_marks_the_tab_dirty() {
+        let one: Vec<std::net::Ipv4Addr> = vec!["1.1.1.1".parse().unwrap()];
+        let fixed_dns = nettab::parse_wired_form("192.168.1.10/24", "", "1.1.1.1").unwrap();
+        let load = |netboot: bool, w: WifiFile, e: WiredFile| {
+            let mut t = NetTab::new(netboot);
+            t.loaded(w, e, vec!["wlp1".to_string()]);
+            t
+        };
+        let menu_wifi = |dns: Vec<std::net::Ipv4Addr>| {
+            let mut w = wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]);
+            w.dns = dns;
+            w
+        };
+        let mut t = load(false, menu_wifi(vec![]), wired(FileState::Menu, fixed_dns.clone()));
+        assert!(t.dirty());
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(fixed_dns.clone())
+            }))
+        );
+        // No ~/ethernet.yaml: WiFi loses its servers.
+        let mut t = load(false, menu_wifi(one.clone()), wired(FileState::Missing, Wired::dhcp()));
+        assert!(t.dirty());
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(Wired::dhcp())
+            }))
+        );
+        // In step, or nothing the menu brings in step.
+        assert!(!load(false, menu_wifi(one.clone()), wired(FileState::Menu, fixed_dns.clone())).dirty());
+        assert!(!load(true, menu_wifi(vec![]), wired(FileState::Menu, fixed_dns.clone())).dirty());
+        assert!(!load(false, menu_wifi(vec![]), wired(FileState::Hand, fixed_dns.clone())).dirty());
+        let mut unkept = menu_wifi(vec![]);
+        unkept.manageable = false;
+        assert!(!load(false, unkept, wired(FileState::Menu, fixed_dns.clone())).dirty());
+        let mut hand = menu_wifi(vec![]);
+        hand.state = FileState::Hand;
+        assert!(!load(false, hand, wired(FileState::Menu, fixed_dns.clone())).dirty());
+        let mut empty = menu_wifi(one);
+        empty.networks.clear();
+        assert!(!load(false, empty, wired(FileState::Missing, Wired::dhcp())).dirty());
     }
 
     #[test]
@@ -924,7 +1014,7 @@ mod tests {
     fn invalid_wired_text_blocks_apply() {
         let mut t = tab();
         t.event(NetEvent::WiredMode(true), false);
-        t.event(fixed("192.168.1.10", "", ""), false);
+        t.event(fixed("192.168.1.10", ""), false);
         assert!(t.dirty());
         assert_eq!(t.event(NetEvent::Apply, false), None);
         assert_eq!(t.error(), Some("Address: use the form 192.168.1.10/24"));
@@ -932,10 +1022,10 @@ mod tests {
         // Also with a remote session: no question for a draft that fails.
         assert_eq!(t.event(NetEvent::Apply, true), None);
         assert!(!t.confirm_open());
-        t.event(fixed("192.168.1.10/24", "10.0.0.1", ""), false);
+        t.event(fixed("192.168.1.10/24", "10.0.0.1"), false);
         assert_eq!(t.event(NetEvent::Apply, false), None);
         assert_eq!(t.error(), Some("Gateway: not in the network of the address"));
-        t.event(fixed("192.168.1.10/24", "", ""), false);
+        t.event(fixed("192.168.1.10/24", ""), false);
         assert!(t.event(NetEvent::Apply, false).is_some());
         assert_eq!(t.error(), None);
     }
@@ -1174,7 +1264,7 @@ mod tests {
             vec!["wlp1".to_string()],
         );
         t.event(NetEvent::WiredMode(true), false);
-        t.event(fixed("192.168.1.10/24", "", ""), false);
+        t.event(fixed("192.168.1.10/24", ""), false);
         t.event(NetEvent::Forget("Home".into()), false);
         assert_eq!(t.event(NetEvent::OpenAdd, false), None);
         assert!(t.add_view().is_none());
@@ -1219,7 +1309,7 @@ mod tests {
         );
         assert_eq!(t.event(NetEvent::WiredMode(true), false), None);
         assert!(!t.wired_form().fixed);
-        t.event(fixed("192.168.1.10/24", "", ""), false);
+        t.event(fixed("192.168.1.10/24", ""), false);
         assert!(!t.dirty());
         assert_eq!(t.event(NetEvent::Apply, false), None);
         // A fixed address left in the home from a stick boot: no text
@@ -1231,7 +1321,7 @@ mod tests {
             wired(FileState::Menu, kept),
             Vec::new(),
         );
-        t.event(fixed("10.0.0.2/8", "", ""), false);
+        t.event(fixed("10.0.0.2/8", ""), false);
         assert!(!t.dirty());
         t.event(NetEvent::WiredMode(false), false);
         assert_eq!(
@@ -1253,7 +1343,7 @@ mod tests {
         let before = t.wired_form();
         for e in [
             NetEvent::WiredMode(false),
-            fixed("10.0.0.2/8", "", ""),
+            fixed("10.0.0.2/8", ""),
             NetEvent::Forget("Home".into()),
             NetEvent::OpenAdd,
             NetEvent::Apply,

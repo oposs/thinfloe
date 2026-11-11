@@ -3799,7 +3799,8 @@ mod tests {
                 state: wifi.0,
                 device: Some("wlp1".into()),
                 networks: wifi.1,
-                dns: Vec::new(),
+                // In step with the wired servers, as the menu writes it.
+                dns: wired.1.dns().to_vec(),
                 manageable: wifi.2,
                 error: None,
             },
@@ -3895,10 +3896,11 @@ mod tests {
         menu
     }
 
-    /// The Network tab is drawn on a 1080p screen, where it fits; on a
-    /// smaller one it scrolls.
+    /// The Network tab is drawn on a screen tall enough that every band
+    /// fits; on 1080p and smaller ones it can scroll (see
+    /// `every_network_control_scrolls_into_reach`).
     fn net_texts(menu: &Menu) -> Vec<String> {
-        text_rects(&settings_shapes(menu, 1920.0, 1080.0))
+        text_rects(&settings_shapes(menu, 1920.0, 1600.0))
             .into_iter()
             .map(|(t, _)| t)
             .collect()
@@ -4073,6 +4075,138 @@ mod tests {
         assert!(!has(&texts, "Let the menu manage it"), "{texts:?}");
     }
 
+    /// The DNS servers have a section of their own, below WiFi, in every
+    /// wired mode; the wired band keeps the address alone.
+    #[test]
+    fn the_dns_section_stands_on_its_own() {
+        use crate::netfiles::{FileState, Wired};
+        use crate::network::NetEvent;
+        let rect = |texts: &[(String, Rect)], want: &str| texts.iter().find(|(t, _)| t == want).map(|(_, r)| *r);
+        let shapes = |net| text_rects(&settings_shapes(&network_settings(net), 1920.0, 1080.0));
+        for wired in [Wired::dhcp(), fixed_wired()] {
+            let texts = shapes(net_tab(
+                false,
+                (FileState::Menu, vec![], true),
+                (FileState::Menu, wired),
+            ));
+            let heading = rect(&texts, "DNS").expect("DNS heading");
+            let row = rect(&texts, "DNS servers").expect("DNS row");
+            let wifi = rect(&texts, "WiFi networks").unwrap();
+            assert!(wifi.top() < heading.top() && heading.top() < row.top(), "{texts:?}");
+            assert!(rect(&texts, DNS_NOTE).is_some(), "{texts:?}");
+        }
+        // The row reports its own event.
+        let net = net_tab(false, (FileState::Menu, vec![], true), (FileState::Menu, Wired::dhcp()));
+        let mut menu = network_settings(net);
+        menu.network.event(NetEvent::DnsText("8.8.8.8".into()), false);
+        assert!(menu.network.dirty());
+        assert!(has(&net_texts(&menu), "8.8.8.8"));
+        // A hand ~/ethernet.yaml: its servers, greyed, and why.
+        let hand = Wired::Dhcp {
+            dns: vec!["8.8.4.4".parse().unwrap()],
+        };
+        let texts = net_texts(&network_settings(net_tab(
+            false,
+            (FileState::Menu, vec![], true),
+            (FileState::Hand, hand),
+        )));
+        for want in ["DNS servers", "8.8.4.4", "Set by hand in ~/ethernet.yaml."] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // Netboot: the line alone.
+        let texts = net_texts(&network_settings(net_tab(
+            true,
+            (FileState::Menu, vec![], true),
+            (FileState::Menu, Wired::dhcp()),
+        )));
+        assert!(has(&texts, "DNS"), "{texts:?}");
+        assert!(has(
+            &texts,
+            "A netbooted machine always uses the DNS servers DHCP sends."
+        ));
+        assert!(!has(&texts, "DNS servers") && !has(&texts, DNS_NOTE), "{texts:?}");
+    }
+
+    const DNS_NOTE: &str = "Used for wired and WiFi. Empty: the servers DHCP sends.";
+
+    /// On 1080p the bands of a full Network tab outgrow the panel: a
+    /// hand ~/wifi.yaml beside a fixed address, both take-over buttons and
+    /// the DNS section. Every control scrolls into reach above the pinned
+    /// Apply, and a click there lands.
+    #[test]
+    fn every_network_control_scrolls_into_reach() {
+        use crate::netfiles::FileState;
+        use crate::network::NetEvent;
+        let menu = network_settings(net_tab(
+            false,
+            (FileState::Hand, vec![saved_net("Home", None, false)], true),
+            (FileState::Menu, fixed_wired()),
+        ));
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1920.0, 1080.0)),
+                events,
+                // Wheel scrolling is smoothed over time.
+                time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut ev = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                ev = show(ui, &menu, &[None], &Chrome::default(), Instant::now());
+            });
+            out.textures_delta.clear();
+            (text_rects(&out.shapes), ev)
+        };
+        let find = |texts: &[(String, Rect)], want: &str| texts.iter().find(|(t, _)| t == want).map(|(_, r)| *r);
+        let mut texts = vec![];
+        for _ in 0..3 {
+            texts = frame(vec![]).0;
+        }
+        let over = find(&texts, "Wired").expect("the Wired band").center();
+        let top = find(&texts, "Network").expect("the tab bar").bottom();
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+            source: egui::MouseWheelSource::Wheel,
+        };
+        let wanted = [
+            "Fixed address",
+            "Gateway",
+            "Let the menu manage it",
+            "DNS servers",
+            "Used for wired and WiFi. Empty: the servers DHCP sends.",
+            "WiFi keeps the DNS servers set in ~/wifi.yaml.",
+        ];
+        let mut seen = [false; 6];
+        let mut clicked = None;
+        for _ in 0..80 {
+            let apply = find(&texts, "Apply").expect("Apply");
+            for (i, want) in wanted.iter().enumerate() {
+                if let Some(r) = find(&texts, want)
+                    && r.top() > top
+                    && r.bottom() < apply.top()
+                {
+                    seen[i] = true;
+                    if *want == "Let the menu manage it" && clicked.is_none() {
+                        clicked = Some(frame(click_at(r.center())).1);
+                    }
+                }
+            }
+            texts = frame(vec![egui::Event::PointerMoved(over), wheel.clone()]).0;
+        }
+        assert_eq!(seen, [true; 6], "{wanted:?}");
+        assert_eq!(
+            clicked,
+            Some(Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::TakeOver(
+                "wifi"
+            )))))
+        );
+    }
+
     #[test]
     fn the_network_tab_shows_a_hand_wired_file_read_only() {
         use crate::netfiles::FileState;
@@ -4166,7 +4300,8 @@ mod tests {
     #[test]
     fn apply_follows_the_bands_on_a_tall_screen() {
         let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 2400.0);
-        let band = card_of(&shapes, "Add network");
+        // The DNS band is the last one.
+        let band = card_of(&shapes, "DNS servers");
         let apply = text_rects(&shapes)
             .into_iter()
             .rfind(|(t, _)| t == "Apply")

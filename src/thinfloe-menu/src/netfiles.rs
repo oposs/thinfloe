@@ -954,17 +954,45 @@ fn check_set(h: &Homes, wifi: Option<&str>, wired: &str) -> Result<(), String> {
     check_netplan(&h.netplan, &files)
 }
 
+/// The machine's DNS servers as ~/wifi.yaml is to carry them, when the
+/// menu sets them there: those of `wired`, a ~/ethernet.yaml the menu owns
+/// (missing: none). `None`: ~/wifi.yaml keeps its own, beside a wired file
+/// by hand or one that cannot be read (the menu does not take servers from
+/// a file it does not own), and on netboot, which installs no
+/// ~/ethernet.yaml.
+pub fn machine_dns(wired: &WiredFile, netboot: bool) -> Option<&[Ipv4Addr]> {
+    match wired.state {
+        _ if netboot => None,
+        FileState::Menu => Some(wired.wired.dns()),
+        FileState::Missing | FileState::Template => Some(&[]),
+        FileState::Hand => None,
+    }
+}
+
 /// The menu's WiFi file `now` again with the servers `dns`, when they
 /// differ from its own. A file by hand, the template and a file without
-/// networks (no definition to carry them) stay as they are.
+/// networks (no definition to carry them) stay as they are. A network the
+/// checks refuse would be dropped, so it stops the rewrite instead.
 fn wifi_with_dns(now: &WifiFile, dns: &[Ipv4Addr]) -> Result<Option<String>, String> {
     if now.state != FileState::Menu || now.networks.is_empty() || now.dns == dns {
         return Ok(None);
     }
     if !now.manageable {
-        return Err(format!("~/{WIFI_FILE} has settings the menu cannot keep"));
+        return Err(format!(
+            "~/{WIFI_FILE} has settings the menu cannot keep, so the DNS servers cannot be set for WiFi."
+        ));
     }
+    check_saved(&now.networks)?;
     Ok(Some(render_wifi(now.device.as_deref(), &now.networks, dns)))
+}
+
+/// The networks of ~/wifi.yaml pass the input checks; else the first that
+/// fails, named.
+fn check_saved(networks: &[Net]) -> Result<(), String> {
+    for n in networks {
+        check_net(n).map_err(|e| format!("~/{WIFI_FILE}, {}: {e}", n.ssid))?;
+    }
+    Ok(())
 }
 
 /// Write the changes of `c` to the home. Nothing is written unless every
@@ -991,14 +1019,18 @@ pub fn save(h: &Homes, c: &Change, netboot: bool) -> Result<(), String> {
     // copied into every ~/wifi.yaml the menu writes: systemd-resolved
     // queries the DNS servers of all links, so servers set on the wired
     // link alone would still leak queries to the WiFi link's DHCP servers.
-    // Netboot installs no ~/ethernet.yaml, so WiFi gets none there either.
-    let dns: &[Ipv4Addr] = match &c.wired {
-        _ if netboot => &[],
-        Some(w) => w.dns(),
-        None => now.wired.wired.dns(),
+    // `None` (netboot, a wired file the menu does not own): ~/wifi.yaml
+    // keeps the servers it has.
+    let dns: Option<&[Ipv4Addr]> = match &c.wired {
+        _ if netboot => None,
+        Some(w) => Some(w.dns()),
+        None => machine_dns(&now.wired, netboot),
     };
     let new_wifi = match &c.wifi {
-        None => wifi_with_dns(&now.wifi, dns)?,
+        None => match dns {
+            Some(dns) => wifi_with_dns(&now.wifi, dns)?,
+            None => None,
+        },
         Some(nets) => {
             for n in nets {
                 check_net(n)?;
@@ -1007,7 +1039,11 @@ pub fn save(h: &Homes, c: &Change, netboot: bool) -> Result<(), String> {
             if !nets.is_empty() && devices.is_empty() {
                 return Err("No WiFi adapter found".to_string());
             }
-            Some(render_wifi(devices.first().map(String::as_str), nets, dns))
+            Some(render_wifi(
+                devices.first().map(String::as_str),
+                nets,
+                dns.unwrap_or(&now.wifi.dns),
+            ))
         }
     };
     // Some(None): back to DHCP with its own servers, the default.
@@ -1052,9 +1088,7 @@ pub fn take_over(h: &Homes, which: &str) -> Result<(), String> {
     }
     let new = match which {
         "wifi" => {
-            for n in &now.wifi.networks {
-                check_net(n).map_err(|e| format!("~/{WIFI_FILE}, {}: {e}", n.ssid))?;
-            }
+            check_saved(&now.wifi.networks)?;
             Some(render_wifi(
                 now.wifi.device.as_deref(),
                 &now.wifi.networks,
@@ -2184,8 +2218,90 @@ exit 0
         assert_eq!(f.text(WIFI_FILE), Some(bare));
     }
 
+    /// A menu ~/wifi.yaml from an older menu with a network today's checks
+    /// refuse: password `short12`.
+    fn wifi_with_short_password() -> String {
+        format!(
+            "{HEADER}\nnetwork:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlp58s0:\n      dhcp4: true\n      optional: true\n      access-points:\n        home:\n          password: short12\n        cafe: {{}}\n"
+        )
+    }
+
     #[test]
-    fn save_puts_no_dns_into_wifi_on_netboot() {
+    fn a_dns_rewrite_never_drops_a_network() {
+        let f = Fixture::new("dns-drop", &["wlp58s0"]);
+        f.put(WIFI_FILE, &wifi_with_short_password());
+        let w = parse_wifi(f.text(WIFI_FILE).as_deref());
+        assert!(w.manageable && w.networks.len() == 2, "{w:?}");
+        let before = f.snapshot();
+        let c = Change {
+            wifi: None,
+            wired: Some(dhcp_dns()),
+        };
+        assert_eq!(
+            save(&f.h, &c, false),
+            Err("~/wifi.yaml, home: The password needs 8 to 63 characters.".into())
+        );
+        assert_eq!(f.snapshot(), before);
+    }
+
+    #[test]
+    fn a_dns_rewrite_of_a_file_the_menu_cannot_keep_says_why() {
+        let f = Fixture::new("dns-unkept", &["wlp58s0"]);
+        let unkept = format!(
+            "{HEADER}\nnetwork:\n  version: 2\n  wifis:\n    wlp58s0:\n      dhcp4: true\n      access-points:\n        home:\n          password: secret123\n          auth:\n            key-management: psk\n"
+        );
+        f.put(WIFI_FILE, &unkept);
+        let before = f.snapshot();
+        let c = Change {
+            wifi: None,
+            wired: Some(dhcp_dns()),
+        };
+        assert_eq!(
+            save(&f.h, &c, false),
+            Err("~/wifi.yaml has settings the menu cannot keep, so the DNS servers cannot be set for WiFi.".into())
+        );
+        assert_eq!(f.snapshot(), before);
+    }
+
+    /// Only a ~/ethernet.yaml the menu owns gives WiFi its servers; with
+    /// one by hand or one that cannot be read, ~/wifi.yaml keeps its own.
+    #[test]
+    fn wifi_keeps_its_dns_beside_a_wired_file_the_menu_does_not_own() {
+        let additive = format!("{SHIPPED_WIRED}            nameservers:\n                addresses: [8.8.8.8]\n");
+        for (tag, own) in [("dns-hand-keep", dns2()), ("dns-hand-none", vec![])] {
+            let f = Fixture::new(tag, &["wlp58s0"]);
+            f.put(WIRED_FILE, &additive);
+            f.put(
+                WIFI_FILE,
+                &render_wifi(Some("wlp58s0"), &[net("home", None, false)], &own),
+            );
+            let nets = vec![net("lab", None, false)];
+            let c = Change {
+                wifi: Some(nets.clone()),
+                wired: None,
+            };
+            save(&f.h, &c, false).unwrap();
+            let w = parse_wifi(f.text(WIFI_FILE).as_deref());
+            assert_eq!((w.networks, w.dns), (nets, own));
+            assert_eq!(f.text(WIRED_FILE).as_deref(), Some(additive.as_str()));
+        }
+        // Unreadable: a directory in its place.
+        let f = Fixture::new("dns-unreadable", &["wlp58s0"]);
+        fs::create_dir(f.home(WIRED_FILE)).unwrap();
+        f.put(
+            WIFI_FILE,
+            &render_wifi(Some("wlp58s0"), &[net("home", None, false)], &dns2()),
+        );
+        let c = Change {
+            wifi: Some(vec![net("lab", None, false)]),
+            wired: None,
+        };
+        save(&f.h, &c, false).unwrap();
+        assert_eq!(parse_wifi(f.text(WIFI_FILE).as_deref()).dns, dns2());
+    }
+
+    #[test]
+    fn save_keeps_the_wifi_dns_on_netboot() {
         let f = Fixture::new("dns-netboot", &["wlp58s0"]);
         let nets = vec![net("home", Some("secret123"), false)];
         // Left in the home from a stick boot.
@@ -2210,9 +2326,31 @@ exit 0
             true,
         )
         .unwrap();
+        // Nothing written, nothing removed.
         let w = parse_wifi(f.text(WIFI_FILE).as_deref());
         assert_eq!(w.networks, nets);
-        assert!(w.dns.is_empty(), "{w:?}");
+        assert_eq!(w.dns, dns2());
+        // Going back from a fixed address leaves them too.
+        f.put(WIRED_FILE, &render_wired(SHIPPED_WIRED, &fixed()).unwrap().unwrap());
+        let c = Change {
+            wifi: None,
+            wired: Some(Wired::dhcp()),
+        };
+        save(&f.h, &c, true).unwrap();
+        assert_eq!(parse_wifi(f.text(WIFI_FILE).as_deref()).dns, dns2());
+        let f = Fixture::new("dns-netboot-none", &["wlp58s0"]);
+        f.put(WIFI_FILE, &render_wifi(Some("wlp58s0"), &nets, &[]));
+        f.put(WIRED_FILE, &render_wired(SHIPPED_WIRED, &dhcp_dns()).unwrap().unwrap());
+        save(
+            &f.h,
+            &Change {
+                wifi: Some(nets.clone()),
+                wired: None,
+            },
+            true,
+        )
+        .unwrap();
+        assert!(parse_wifi(f.text(WIFI_FILE).as_deref()).dns.is_empty());
     }
 
     #[test]

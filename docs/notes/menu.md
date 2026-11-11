@@ -127,28 +127,43 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
 
 ## Network tab: DNS servers
 
-  **DNS servers** (Settings → Network, Wired) shows with Automatic (DHCP)
-  and with Fixed address. Empty means the servers DHCP gives (none for a
-  fixed address). Filled, up to three IPv4 addresses are one setting for the
-  whole machine: kept in `~/ethernet.yaml` and copied into the WiFi
-  definition of every `~/wifi.yaml` the menu writes, because
+  **DNS** (Settings → Network) is a band of its own below WiFi, with one
+  row, "DNS servers", in either wired mode; the Wired band keeps the
+  address mode, address and gateway. Empty means the servers DHCP gives
+  (none for a fixed address). Filled, up to three IPv4 addresses are one
+  setting for the whole machine: kept in `~/ethernet.yaml` and copied into
+  the WiFi definition of every `~/wifi.yaml` the menu writes, because
   systemd-resolved queries the DNS servers of all links, and servers set on
   the wired link alone would still send queries to the WiFi link's DHCP
   servers. With DHCP both files carry `dhcp4-overrides: {use-dns: false}`
   and `nameservers` (networkd: `UseDNS=false` and `DNS=` lines); address,
   gateway and search domains still come from DHCP. A fixed address keeps
   `dhcp4: false` with `nameservers`. DHCP without servers writes no
-  `~/ethernet.yaml`. The tab takes the servers from `~/ethernet.yaml` only:
-  servers in a menu `~/wifi.yaml` that `~/ethernet.yaml` lacks go at the
-  next write of `~/wifi.yaml`. A change of the servers alone rewrites both
-  files; a hand-written `~/wifi.yaml` keeps its own (the tab says so under
-  the row), as do the template and a file without networks, and a menu
-  `~/wifi.yaml` the menu cannot keep blocks the change ("~/wifi.yaml has
-  settings the menu cannot keep"). Netboot shows no row and writes no
-  servers into `~/wifi.yaml`, since `~/ethernet.yaml` is not installed there.
+  `~/ethernet.yaml`.
+
+  The servers come from a `~/ethernet.yaml` the menu owns (missing: none).
+  Beside one by hand or one that cannot be read, the row is greyed with that
+  file's servers and "Set by hand in ~/ethernet.yaml.", and `~/wifi.yaml`
+  keeps the servers it has. A menu `~/wifi.yaml` that the menu can keep,
+  with networks, whose servers differ from the wired ones (after a
+  take-over, or servers set before WiFi got them) makes the tab dirty, and
+  Apply writes the saved wired setting again to bring both in step. A
+  change of the servers alone rewrites both files; a hand-written
+  `~/wifi.yaml` keeps its own ("WiFi keeps the DNS servers set in
+  ~/wifi.yaml."), as do the template and a file without networks. A
+  rewrite for the servers never drops a network: a saved network that
+  today's checks refuse stops it with that network named, and a menu
+  `~/wifi.yaml` the menu cannot keep stops it with "~/wifi.yaml has
+  settings the menu cannot keep, so the DNS servers cannot be set for
+  WiFi." Netboot shows "A netbooted machine always uses the DNS servers
+  DHCP sends." instead of the row and leaves the servers in `~/wifi.yaml`
+  as they are, since `~/ethernet.yaml` is not installed there.
+
   The parser keeps a file manageable only with `dhcp4-overrides` exactly
   `{use-dns: false}` beside a non-empty `nameservers` on a `dhcp4: true`
-  definition, or with neither key. Guards: the `netfiles` tests,
+  definition, or with neither key. On 1080p a full tab scrolls; every
+  control scrolls into reach above the pinned Apply. Guards: the `netfiles`
+  and `network` tests, `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
 
 ## Known limits
