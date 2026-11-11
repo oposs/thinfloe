@@ -25,6 +25,10 @@ pub const TEMPLATE_MARKER: &str = "device name of your wifi card";
 /// mode 600). Its `eth` definition is the base of a fixed address.
 pub const DEFAULT_WIRED: &str = "/usr/share/thinfloe/netplan/ethernet.yaml";
 
+/// The DNS servers the form takes; a ~/ethernet.yaml with more is not the
+/// menu's to keep.
+pub const MAX_DNS: usize = 3;
+
 /// Network files are tiny; the same cap as `owned`.
 const MAX_BYTES: u64 = 64 * 1024;
 /// How long `netplan generate` may take before the check gives up.
@@ -561,6 +565,8 @@ pub fn parse_wired(text: Option<&str>) -> WiredFile {
             }
         }
     }
+    // The form refuses more servers, so every edit of such a file would fail.
+    ok &= f.wired.dns().len() <= MAX_DNS;
     f.manageable = ok;
     f
 }
@@ -2171,6 +2177,76 @@ exit 0
         );
         assert_ne!(t, fixed_text);
         assert!(!parse_wired(Some(&t)).manageable, "{t}");
+    }
+
+    /// The form takes up to three DNS servers, so a ~/ethernet.yaml with
+    /// more is not the menu's to keep: a hand file is not taken over, and a
+    /// menu file counts as by hand for WiFi.
+    #[test]
+    fn parse_wired_keeps_at_most_three_dns_servers() {
+        use crate::network::{NetEvent, NetRequest};
+        let servers = |n: u8| (1..=n).map(|i| Ipv4Addr::new(10, 0, 0, i)).collect::<Vec<_>>();
+        let static_with = |n: u8| Wired::Static {
+            address: Ipv4Addr::new(192, 168, 1, 10),
+            prefix: 24,
+            gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            dns: servers(n),
+        };
+        let dhcp_with = |n: u8| Wired::Dhcp { dns: servers(n) };
+        for w in [static_with(3), dhcp_with(3)] {
+            let t = render_wired(SHIPPED_WIRED, &w).unwrap().unwrap();
+            let f = parse_wired(Some(&t));
+            assert!(f.manageable, "{t}");
+            assert_eq!(f.wired, w);
+        }
+        for (tag, w) in [("static", static_with(4)), ("dhcp", dhcp_with(4))] {
+            let t = render_wired(SHIPPED_WIRED, &w).unwrap().unwrap();
+            let f = parse_wired(Some(&t));
+            assert_eq!(f.state, FileState::Menu);
+            assert!(!f.manageable, "{t}");
+            // Read as it is, so the DNS row shows all four.
+            assert_eq!(f.wired, w);
+            assert_eq!(machine_dns(&f, false), None);
+            // The tab: an address edit fails on the DNS row, which can be
+            // cut to three; WiFi is never out of step with such a file.
+            let mut tab = crate::network::NetTab::new(false);
+            let wifi = parse_wifi(Some(&render_wifi(
+                Some("wlp58s0"),
+                &[net("home", Some("secret123"), false)],
+                &[],
+            )));
+            tab.loaded(wifi, f, vec!["wlp58s0".to_string()]);
+            assert!(!tab.wifi_dns_out_of_step() && !tab.dirty(), "{t}");
+            assert_eq!(tab.event(NetEvent::WiredMode(true), false), None);
+            assert_eq!(
+                tab.event(
+                    NetEvent::WiredText {
+                        address: "192.168.1.20/24".into(),
+                        gateway: "192.168.1.1".into(),
+                    },
+                    false
+                ),
+                None
+            );
+            assert_eq!(tab.event(NetEvent::Apply, false), None);
+            assert_eq!(tab.error(), Some("DNS servers: up to three IPv4 addresses"));
+            assert_eq!(
+                tab.event(NetEvent::DnsText("10.0.0.1, 10.0.0.2, 10.0.0.3".into()), false),
+                None
+            );
+            assert!(matches!(tab.event(NetEvent::Apply, false), Some(NetRequest::Apply(_))));
+
+            // The same file by hand is not offered for take-over.
+            let f = Fixture::new(&format!("take-four-dns-{tag}"), &["wlp58s0"]);
+            f.put(WIRED_FILE, body(&t));
+            assert_eq!(load(&f.h).1.state, FileState::Hand);
+            let before = f.snapshot();
+            assert_eq!(
+                take_over(&f.h, "wired"),
+                Err("~/ethernet.yaml has settings the menu cannot keep".into())
+            );
+            assert_eq!(f.snapshot(), before);
+        }
     }
 
     #[test]

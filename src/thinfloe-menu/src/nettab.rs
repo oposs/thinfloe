@@ -287,7 +287,7 @@ pub fn parse_dns(dns: &str) -> Result<Vec<Ipv4Addr>, String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<Ipv4Addr>().map_err(|_| DNS_ERR))
         .collect::<Result<Vec<_>, _>>()?;
-    if servers.len() > 3 {
+    if servers.len() > netfiles::MAX_DNS {
         return Err(DNS_ERR.to_string());
     }
     Ok(servers)
