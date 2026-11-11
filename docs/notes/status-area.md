@@ -68,6 +68,15 @@ Shipped elements:
 - An element whose `has_content` is false (no battery device, no sensor, no
   network address) takes no cells, so the elements after it move up into
   its place.
+- The elements with content are packed into the planned rows only
+  (`Area::shown_where`, `pack`'s `max_rows`). First fit over fewer elements
+  can need more rows than over all of them (clock, battery, network 2x2,
+  network-info 2x1 with no battery: 2 planned, 3 needed), and an unreserved
+  row would cover the log. An element that would need one is left out
+  ("no room"). So an element gaining content mid-session (a Bolt keyboard
+  reconnecting) can push a later one out until it has none again.
+  `shown_rows_never_exceed_planned_rows_for_any_content` tries every
+  content subset of 302 layouts.
 - The default list packs to the layout of PR #6: battery 0,0; network 2x2
   at 1,0; network-info 1x2 at 3,0; temperatures 0,1; cpu 0,2; memory 1,2;
   system 2,2; clock 3,2 (`the_default_list_packs_to_the_pr6_layout`). On a

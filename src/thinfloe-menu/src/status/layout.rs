@@ -148,11 +148,11 @@ pub fn to_text(layout: &Layout) -> String {
     s
 }
 
-/// First fit, row by row. One result per item; `None` = left out. On a short
-/// screen there is one row and an item uses its entry of `short_sizes`
-/// (`None` there: left out).
-pub fn pack(items: &[Size], short: bool, short_sizes: &[Option<Size>]) -> Vec<Option<Cells>> {
-    let rows = if short { 1 } else { ROWS };
+/// First fit, row by row, in the top `max_rows` rows (at most `ROWS`). One
+/// result per item; `None` = left out. On a short screen there is one row and
+/// an item uses its entry of `short_sizes` (`None` there: left out).
+pub fn pack(items: &[Size], short: bool, short_sizes: &[Option<Size>], max_rows: usize) -> Vec<Option<Cells>> {
+    let rows = (if short { 1 } else { ROWS }).min(u8::try_from(max_rows).unwrap_or(ROWS));
     let mut used = [[false; COLUMNS as usize]; ROWS as usize];
     items
         .iter()
@@ -224,7 +224,7 @@ mod tests {
             sz(1, 1),
         ];
         assert_eq!(
-            cells(&pack(&items, false, &[])),
+            cells(&pack(&items, false, &[], ROWS as usize)),
             [
                 (0, 0, 1, 1),
                 (1, 0, 2, 2),
@@ -240,13 +240,13 @@ mod tests {
 
     #[test]
     fn packing_is_first_fit_row_by_row() {
-        let r = pack(&[sz(2, 1), sz(3, 1), sz(2, 1)], false, &[]);
+        let r = pack(&[sz(2, 1), sz(3, 1), sz(2, 1)], false, &[], ROWS as usize);
         assert_eq!(cells(&r), [(0, 0, 2, 1), (0, 1, 3, 1), (2, 0, 2, 1)]);
     }
 
     #[test]
     fn an_item_that_fits_nowhere_is_left_out() {
-        let r = pack(&[sz(4, 3), sz(1, 1)], false, &[]);
+        let r = pack(&[sz(4, 3), sz(1, 1)], false, &[], ROWS as usize);
         assert_eq!(
             r[0],
             Some(Cells {
@@ -260,9 +260,16 @@ mod tests {
     }
 
     #[test]
+    fn an_item_below_the_row_limit_is_left_out() {
+        let r = pack(&[sz(1, 1), sz(2, 2), sz(2, 1)], false, &[], 2);
+        assert_eq!(cells(&r), [(0, 0, 1, 1), (1, 0, 2, 2), (9, 9, 9, 9)]);
+        assert_eq!(cells(&pack(&[sz(1, 1)], false, &[], 0)), [(9, 9, 9, 9)]);
+    }
+
+    #[test]
     fn a_short_screen_has_one_row() {
         let shorts = [Some(sz(1, 1)), Some(sz(3, 1)), None];
-        let r = pack(&[sz(1, 1), sz(2, 2), sz(1, 2)], true, &shorts);
+        let r = pack(&[sz(1, 1), sz(2, 2), sz(1, 2)], true, &shorts, ROWS as usize);
         assert_eq!(
             r[0],
             Some(Cells {

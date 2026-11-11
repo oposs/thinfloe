@@ -1809,6 +1809,30 @@ mod tests {
     }
 
     #[test]
+    fn an_element_with_no_room_in_the_planned_rows_stays_out_and_off_the_log() {
+        // Found by the final review: with no battery the graph went to row 0
+        // and the list to a third row the layout never reserved.
+        let t0 = Instant::now();
+        let mut menu = net_menu(Vec::new(), t0);
+        let parsed = crate::status::layout::parse(
+            b"clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            &crate::status::offered,
+        );
+        menu.set_status_layout(parsed);
+        let src = menu.status_sources();
+        let planned = menu.status.planned_rows(false);
+        let rows = menu.status.rows(&src, false);
+        assert_eq!(planned, 2);
+        assert!(rows <= planned, "planned {planned}, shown {rows}");
+        let n = menu.visible_tiles().len();
+        for (w, h) in [(1920.0, 1080.0), (1440.0, 900.0), (1600.0, 1000.0)] {
+            let l = layout(screen(w, h), n, 0, rows, planned);
+            let status = l.status.expect("the area shows");
+            assert!(status.bottom() <= l.log.top(), "{w}x{h}: {status:?} over the log at {}", l.log.top());
+        }
+    }
+
+    #[test]
     fn a_short_screen_gives_a_chosen_two_by_two_graph_its_short_size_and_drops_the_list() {
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);

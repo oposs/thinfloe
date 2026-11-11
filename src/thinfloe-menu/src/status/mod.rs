@@ -270,10 +270,15 @@ impl Area {
             .filter_map(|c| element(&c.id).map(|e| (e, c.size)))
     }
 
-    fn packed(items: Vec<(&'static dyn Element, Size)>, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
+    /// Pack `items` into the top `max_rows` rows.
+    fn packed(
+        items: Vec<(&'static dyn Element, Size)>,
+        short: bool,
+        max_rows: usize,
+    ) -> Vec<(&'static dyn Element, Size, Cells)> {
         let sizes: Vec<Size> = items.iter().map(|(_, s)| *s).collect();
         let shorts: Vec<Option<Size>> = items.iter().map(|(e, _)| e.short_size()).collect();
-        let cells = layout::pack(&sizes, short, &shorts);
+        let cells = layout::pack(&sizes, short, &shorts, max_rows);
         items
             .into_iter()
             .zip(cells)
@@ -284,15 +289,30 @@ impl Area {
     /// The elements drawn now: the shown choices with something to show,
     /// packed, each with the size and cells it takes on this screen.
     pub fn shown(&self, data: &Data, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
-        let items = self.chosen().filter(|(e, _)| e.has_content(data)).collect();
-        Self::packed(items, short)
+        self.shown_where(&|e| e.has_content(data), short)
+    }
+
+    /// `shown`, with `has` saying which elements have something to show.
+    /// They are packed into the planned rows only: first fit over fewer
+    /// elements can need more rows than over all of them, and a row the
+    /// layout did not reserve would cover the log. An element that would need
+    /// one is left out, as one with no room.
+    fn shown_where(&self, has: &dyn Fn(&dyn Element) -> bool, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
+        let items = self.chosen().filter(|(e, _)| has(*e)).collect();
+        Self::packed(items, short, self.planned_rows(short))
+    }
+
+    /// The shown choices packed as if all had something to show: where each
+    /// goes in the planned rows, whatever the data.
+    pub fn planned(&self, short: bool) -> Vec<(&'static dyn Element, Size, Cells)> {
+        Self::packed(self.chosen().collect(), short, ROWS as usize)
     }
 
     /// The rows the shown choices take when all have something to show: the
     /// tiles and the top of the area are placed by this, so they stay where
     /// they are when an element appears or goes. 0: no area.
     pub fn planned_rows(&self, short: bool) -> usize {
-        Self::packed(self.chosen().collect(), short)
+        self.planned(short)
             .iter()
             .map(|(_, _, c)| c.bottom())
             .max()
@@ -329,7 +349,7 @@ impl Area {
     /// whether or not it has anything yet. One left out for want of room, or
     /// without a size for a short screen, does not count.
     pub fn places(&self, source: Source, short: bool) -> bool {
-        Self::packed(self.chosen().collect(), short)
+        self.planned(short)
             .iter()
             .any(|(e, _, _)| e.sources().contains(&source))
     }
@@ -728,7 +748,7 @@ mod tests {
         );
         let sizes: Vec<Size> = ELEMENTS.iter().filter_map(|e| e.sizes().first().copied()).collect();
         let shorts: Vec<Option<Size>> = ELEMENTS.iter().map(|e| e.short_size()).collect();
-        let got: Vec<(u8, u8, u8, u8)> = layout::pack(&sizes, false, &shorts)
+        let got: Vec<(u8, u8, u8, u8)> = layout::pack(&sizes, false, &shorts, ROWS as usize)
             .iter()
             .map(|c| {
                 let c = c.expect("every element has a place");
@@ -762,5 +782,64 @@ mod tests {
         assert!(!hidden.places(Source::Hardware, false));
         assert!(!hidden.needs(Source::Hardware));
         assert!(!Area::default().places(Source::Hardware, false));
+    }
+
+    /// Layouts to try: the shipped one, the one the final review found, and
+    /// a fixed pseudo-random spread of orders, sizes and ticks.
+    fn sample_layouts() -> Vec<Area> {
+        let mut out = vec![
+            Area::shipped(),
+            area("clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n"),
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..300 {
+            let mut ids: Vec<&'static dyn Element> = ELEMENTS.to_vec();
+            for i in (1..ids.len()).rev() {
+                ids.swap(i, next(i + 1));
+            }
+            let text: String = ids
+                .iter()
+                .map(|e| {
+                    let s = e.sizes()[next(e.sizes().len())];
+                    let tick = if next(4) == 0 { "-" } else { "" };
+                    format!("{tick}{} {s}\n", e.id())
+                })
+                .collect();
+            out.push(area(&text));
+        }
+        out
+    }
+
+    #[test]
+    fn shown_rows_never_exceed_planned_rows_for_any_content() {
+        let n = ELEMENTS.len();
+        for a in sample_layouts() {
+            for short in [false, true] {
+                let planned = a.planned_rows(short);
+                for mask in 0u32..(1 << n) {
+                    let has = |e: &dyn Element| {
+                        let i = ELEMENTS.iter().position(|x| x.id() == e.id()).unwrap();
+                        mask & (1 << i) != 0
+                    };
+                    let rows = a
+                        .shown_where(&has, short)
+                        .iter()
+                        .map(|(_, _, c)| c.bottom())
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        rows <= planned,
+                        "planned {planned}, shown {rows}, short {short}, mask {mask:#b}, layout\n{}",
+                        layout::to_text(&a.layout)
+                    );
+                }
+            }
+        }
     }
 }
