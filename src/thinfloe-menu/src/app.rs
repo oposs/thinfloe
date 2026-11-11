@@ -1944,7 +1944,10 @@ esac"#;
             panic!("read_layout blocked on a FIFO");
         };
         assert!(l.refused, "{l:?}");
-        assert_eq!(l.notes, ["status layout file ignored: it cannot be read: not a regular file"]);
+        assert_eq!(
+            l.notes,
+            ["status layout file ignored: it cannot be read: not a regular file"]
+        );
         assert_eq!(l.choices, crate::status::Area::shipped().layout.choices);
     }
 

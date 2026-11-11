@@ -304,7 +304,10 @@ mod tests {
     fn a_note_key_leaves_out_the_line_number() {
         assert_eq!(note_key("status line 12: '9' x"), "status line #: '9' x");
         assert_eq!(note_key("status line 3 skipped: y"), "status line # skipped: y");
-        assert_eq!(note_key("status layout file ignored: z"), "status layout file ignored: z");
+        assert_eq!(
+            note_key("status layout file ignored: z"),
+            "status layout file ignored: z"
+        );
     }
 
     #[test]

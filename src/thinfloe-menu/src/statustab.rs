@@ -360,7 +360,11 @@ mod tests {
         // that is no reason to say "nothing to show".
         for id in ["network-info", "temperatures", "cpu", "memory", "system", "clock"] {
             assert_eq!(note(&rows(&a, &data, false), id), None, "{id} tall");
-            assert_eq!(note(&rows(&a, &data, true), id), Some(Note::OffShortScreen), "{id} short");
+            assert_eq!(
+                note(&rows(&a, &data, true), id),
+                Some(Note::OffShortScreen),
+                "{id} short"
+            );
         }
         assert_eq!(note(&rows(&a, &data, true), "network"), None);
         assert_eq!(note(&rows(&a, &data, true), "battery"), None);
@@ -387,7 +391,15 @@ mod tests {
             ..Data::EMPTY
         };
         let tall = rows(&a, &read, false);
-        for id in ["battery", "network", "network-info", "temperatures", "cpu", "memory", "system"] {
+        for id in [
+            "battery",
+            "network",
+            "network-info",
+            "temperatures",
+            "cpu",
+            "memory",
+            "system",
+        ] {
             assert_eq!(note(&tall, id), Some(Note::Nothing), "{id}");
         }
         assert_eq!(note(&tall, "clock"), None);

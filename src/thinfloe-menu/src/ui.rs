@@ -1828,7 +1828,11 @@ mod tests {
         for (w, h) in [(1920.0, 1080.0), (1440.0, 900.0), (1600.0, 1000.0)] {
             let l = layout(screen(w, h), n, 0, rows, planned);
             let status = l.status.expect("the area shows");
-            assert!(status.bottom() <= l.log.top(), "{w}x{h}: {status:?} over the log at {}", l.log.top());
+            assert!(
+                status.bottom() <= l.log.top(),
+                "{w}x{h}: {status:?} over the log at {}",
+                l.log.top()
+            );
         }
     }
 

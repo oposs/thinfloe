@@ -799,7 +799,9 @@ mod tests {
     fn sample_layouts() -> Vec<Area> {
         let mut out = vec![
             Area::shipped(),
-            area("clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n"),
+            area(
+                "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            ),
         ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
         let mut next = move |n: usize| {

@@ -3729,7 +3729,8 @@ mod tests {
         assert_eq!(hand.notes, ["status line 3: unknown element 'ups' kept but not shown"]);
         m.set_status_layout(hand);
         let lines = log(&m).len();
-        let Some(Effect::Start(Job::StatusSave(Some(text)))) = m.status_event(StatusEvent::Shown("clock".into(), false))
+        let Some(Effect::Start(Job::StatusSave(Some(text)))) =
+            m.status_event(StatusEvent::Shown("clock".into(), false))
         else {
             panic!("a change writes the file");
         };
