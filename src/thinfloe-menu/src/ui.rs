@@ -4129,6 +4129,45 @@ mod tests {
 
     const DNS_NOTE: &str = "Used for wired and WiFi. Empty: the servers DHCP sends.";
 
+    /// WiFi with other servers than the wired setting: the DNS band says
+    /// why Apply is on.
+    #[test]
+    fn the_dns_section_says_when_wifi_is_out_of_step() {
+        use crate::netfiles::{FileState, Net, WifiFile, WiredFile};
+        const OUT: &str = "WiFi uses other DNS servers. Apply sets the ones above.";
+        let tab = |wifi_dns: Vec<std::net::Ipv4Addr>| {
+            let mut net = crate::network::NetTab::new(false);
+            net.loaded(
+                WifiFile {
+                    state: FileState::Menu,
+                    device: Some("wlp1".into()),
+                    networks: vec![Net {
+                        ssid: "Home".into(),
+                        hidden: false,
+                        password: None,
+                    }],
+                    dns: wifi_dns,
+                    manageable: true,
+                    error: None,
+                },
+                WiredFile {
+                    state: FileState::Menu,
+                    wired: fixed_wired(),
+                    manageable: true,
+                    error: None,
+                },
+                vec!["wlp1".into()],
+            );
+            net
+        };
+        let net = tab(vec![]);
+        assert!(net.dirty());
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, OUT), "{texts:?}");
+        let texts = net_texts(&network_settings(tab(fixed_wired().dns().to_vec())));
+        assert!(!has(&texts, OUT), "{texts:?}");
+    }
+
     /// On 1080p the bands of a full Network tab outgrow the panel: a
     /// hand ~/wifi.yaml beside a fixed address, both take-over buttons and
     /// the DNS section. Every control scrolls into reach above the pinned

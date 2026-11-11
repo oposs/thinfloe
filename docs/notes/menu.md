@@ -147,7 +147,8 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   keeps the servers it has. A menu `~/wifi.yaml` that the menu can keep,
   with networks, whose servers differ from the wired ones (after a
   take-over, or servers set before WiFi got them) makes the tab dirty, and
-  Apply writes the saved wired setting again to bring both in step. A
+  Apply writes the saved wired setting again to bring both in step; the
+  band then says "WiFi uses other DNS servers. Apply sets the ones above." A
   change of the servers alone rewrites both files; a hand-written
   `~/wifi.yaml` keeps its own ("WiFi keeps the DNS servers set in
   ~/wifi.yaml."), as do the template and a file without networks. A

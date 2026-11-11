@@ -263,6 +263,10 @@ fn dns(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     if !editable {
         line(ui, "Set by hand in ~/ethernet.yaml.");
     }
+    // Why Apply is on when nothing was typed.
+    if net.wifi_dns_out_of_step() {
+        line(ui, "WiFi uses other DNS servers. Apply sets the ones above.");
+    }
     // The menu writes the servers into ~/wifi.yaml too, never into one
     // written by hand.
     if net.wifi_file().is_some_and(|w| w.state == FileState::Hand) {
