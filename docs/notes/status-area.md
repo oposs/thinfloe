@@ -131,7 +131,8 @@ Shipped elements:
   ticked element (`Area::planned`) gives it no cells, or it has content and
   the row limit of the shown packing leaves it out; "nothing to show on this
   machine" only when its sources have read at least once
-  (`Data::has_read`: the battery file was read, the sampler made a copy).
+  (`Data::has_read`: the battery file was read, the sampler took a
+  reading; `Samplers::copies` passes no copy before the first one).
   An element whose source has not read yet gets no note, so the hardware
   elements on a short screen, where the sampler rests, never say "nothing".
 - Every change writes the file at once, with no Apply. A failed write shows

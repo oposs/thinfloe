@@ -702,9 +702,10 @@ impl Gated {
 /// A sampler thread for the menu. It reads only while `on` is set (the app
 /// clears it while the element cannot be seen), outside the lock, so a frame
 /// never waits for a sensor. It calls `wake` only when `Snapshot::any` changes:
-/// a hidden element asks for no frames, and `Refresh=` draws a shown one.
-pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static) -> Arc<Mutex<Snapshot>> {
-    let shared = Arc::new(Mutex::new(Snapshot::default()));
+/// a hidden element asks for no frames, and the elements' refresh interval
+/// draws a shown one. The copy is `None` until the first reading.
+pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static) -> Arc<Mutex<Option<Snapshot>>> {
+    let shared = Arc::new(Mutex::new(None));
     let out = shared.clone();
     std::thread::spawn(move || {
         let mut gated = Gated {
@@ -716,7 +717,7 @@ pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static
             if let Some(snap) = gated.poll(on.load(Ordering::Relaxed), Instant::now()) {
                 let has = snap.any();
                 match shared.lock() {
-                    Ok(mut s) => *s = snap,
+                    Ok(mut s) => *s = Some(snap),
                     Err(_) => return,
                 }
                 if crate::netstat::flipped(&mut had, has) {
@@ -1377,10 +1378,10 @@ mod tests {
             counted.fetch_add(1, Ordering::Relaxed);
         });
         std::thread::sleep(Duration::from_millis(200));
-        assert!(!shared.lock().unwrap().any(), "off: nothing read");
+        assert!(shared.lock().unwrap().is_none(), "off: nothing read");
         on.store(true, Ordering::Relaxed);
         let start = Instant::now();
-        while !shared.lock().unwrap().any() {
+        while !shared.lock().unwrap().as_ref().is_some_and(Snapshot::any) {
             assert!(start.elapsed() < Duration::from_secs(10), "no reading");
             std::thread::sleep(Duration::from_millis(50));
         }

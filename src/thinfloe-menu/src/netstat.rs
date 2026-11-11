@@ -374,9 +374,16 @@ pub struct Series {
     /// followed: never smaller than before.
     total: (u64, u64),
     info: Info,
+    /// A reading was taken: the element's data is known, if empty.
+    read: bool,
 }
 
 impl Series {
+    /// Whether a reading was taken yet.
+    pub fn has_read(&self) -> bool {
+        self.read
+    }
+
     /// Take a reading made at `now`. A rate needs two readings of one
     /// interface; a new interface (the default route moved) or a counter
     /// that went back (the interface was reset or replaced) starts the
@@ -384,6 +391,7 @@ impl Series {
     /// than `GAP` after the last (the sampler rested), whose bytes still
     /// count in the total.
     pub fn push(&mut self, now: Instant, r: Reading) {
+        self.read = true;
         let iface = r.info.iface.clone();
         self.info = r.info;
         let (Some(iface), Some((rx, tx))) = (iface, r.counters) else {

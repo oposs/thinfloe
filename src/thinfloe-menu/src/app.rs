@@ -187,15 +187,18 @@ struct Samplers {
     /// The network sampler reads while a ticked element needs it and no
     /// window covers the menu.
     network_on: Arc<AtomicBool>,
-    hardware: Option<Arc<Mutex<crate::hardware::Snapshot>>>,
+    hardware: Option<Arc<Mutex<Option<crate::hardware::Snapshot>>>>,
     /// The hardware sampler reads as `hardware_wanted` says.
     hardware_on: Arc<AtomicBool>,
     spawn_network: Spawn<crate::netstat::Series>,
-    spawn_hardware: Spawn<crate::hardware::Snapshot>,
+    spawn_hardware: Spawn<Option<crate::hardware::Snapshot>>,
 }
 
 impl Samplers {
-    fn new(spawn_network: Spawn<crate::netstat::Series>, spawn_hardware: Spawn<crate::hardware::Snapshot>) -> Samplers {
+    fn new(
+        spawn_network: Spawn<crate::netstat::Series>,
+        spawn_hardware: Spawn<Option<crate::hardware::Snapshot>>,
+    ) -> Samplers {
         Samplers {
             network: None,
             network_on: Arc::new(AtomicBool::new(false)),
@@ -204,6 +207,21 @@ impl Samplers {
             spawn_network,
             spawn_hardware,
         }
+    }
+
+    /// The samplers' latest copies, taken under their locks for as long as
+    /// a copy of 600 numbers takes; `None` from a sampler that has not read
+    /// yet, so its elements wait rather than have nothing to show.
+    fn copies(&self) -> (Option<crate::netstat::Snapshot>, Option<crate::hardware::Snapshot>) {
+        let network = self
+            .network
+            .as_ref()
+            .and_then(|n| n.lock().ok().filter(|s| s.has_read()).map(|s| s.snapshot()));
+        let hardware = self
+            .hardware
+            .as_ref()
+            .and_then(|h| h.lock().ok().and_then(|s| s.clone()));
+        (network, hardware)
     }
 
     /// Start what `area` needs for the first time and set the flags, for a
@@ -909,19 +927,11 @@ impl App {
         self.cfg.menu.set_clock(wall, zone);
         // The sampler's latest copy, taken under its lock for as long as a
         // copy of 600 numbers takes.
-        let samplers = &self.samplers;
-        if let Some(snap) = samplers
-            .network
-            .as_ref()
-            .and_then(|n| n.lock().ok().map(|s| s.snapshot()))
-        {
+        let (network, hardware) = self.samplers.copies();
+        if let Some(snap) = network {
             self.cfg.menu.set_network(snap, now, wall);
         }
-        if let Some(snap) = samplers
-            .hardware
-            .as_ref()
-            .and_then(|h| h.lock().ok().map(|s| s.clone()))
-        {
+        if let Some(snap) = hardware {
             self.cfg.menu.set_hardware(snap);
         }
         self.covered = covered;
@@ -1786,6 +1796,26 @@ esac"#;
         s.sync(&shipped, false, tall - 1.0);
         assert_eq!(on(&s), (true, false));
         assert_eq!((nets.get(), hws.get()), (1, 1));
+    }
+
+    #[test]
+    fn a_sampler_gives_no_copy_before_its_first_reading() {
+        // Before the first reading the element has nothing yet, which the
+        // Status tab must not take for "nothing to show on this machine".
+        let net = Arc::new(Mutex::new(crate::netstat::Series::default()));
+        let hw: Arc<Mutex<_>> = Arc::default();
+        let (n, h) = (net.clone(), hw.clone());
+        let mut s = Samplers::new(Box::new(move |_| n.clone()), Box::new(move |_| h.clone()));
+        s.sync(&crate::status::Area::shipped(), false, ui::SHORT_SCREEN_H);
+        let (network, hardware) = s.copies();
+        assert!(network.is_none() && hardware.is_none(), "{network:?} {hardware:?}");
+        net.lock()
+            .unwrap()
+            .push(Instant::now(), crate::netstat::Reading::default());
+        *hw.lock().unwrap() = Some(crate::hardware::Snapshot::default());
+        let (network, hardware) = s.copies();
+        assert!(network.is_some(), "a reading, if empty, is a copy");
+        assert_eq!(hardware, Some(crate::hardware::Snapshot::default()));
     }
 
     #[test]
