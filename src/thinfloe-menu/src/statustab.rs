@@ -28,6 +28,8 @@ pub enum Note {
     NoRoom,
     /// It has nothing to show (no battery device, no sensor, no network).
     Nothing,
+    /// It has no size for a short screen.
+    OffShortScreen,
 }
 
 impl Note {
@@ -35,6 +37,7 @@ impl Note {
         match self {
             Note::NoRoom => "no room",
             Note::Nothing => "nothing to show on this machine",
+            Note::OffShortScreen => "not on a small screen",
         }
     }
 }
@@ -60,6 +63,7 @@ pub struct Row {
 /// (`short`), with the data the main screen draws from.
 pub fn rows(area: &Area, data: &Data, short: bool) -> Vec<Row> {
     let placed: Vec<&str> = area.shown(data, short).iter().map(|(e, _, _)| e.id()).collect();
+    let planned: Vec<&str> = area.planned(short).iter().map(|(e, _, _)| e.id()).collect();
     let listed: Vec<_> = area
         .layout
         .choices
@@ -72,12 +76,19 @@ pub fn rows(area: &Area, data: &Data, short: bool) -> Vec<Row> {
         .into_iter()
         .enumerate()
         .map(|(i, (c, e))| {
-            let note = if !c.shown {
+            // Placement first, from the packing that does not depend on the
+            // data; "nothing to show" only once its sources have read.
+            let read = e.sources().iter().all(|s| data.has_read(*s));
+            let note = if !c.shown || placed.contains(&e.id()) {
                 None
-            } else if !e.has_content(data) {
-                Some(Note::Nothing)
-            } else if !placed.contains(&e.id()) {
+            } else if short && e.short_size().is_none() {
+                Some(Note::OffShortScreen)
+            } else if e.has_content(data) || !planned.contains(&e.id()) {
+                // Left out by the planned packing, or by the row limit of
+                // the shown one (`Area::shown`).
                 Some(Note::NoRoom)
+            } else if read {
+                Some(Note::Nothing)
             } else {
                 None
             };
@@ -315,7 +326,11 @@ mod tests {
         assert_eq!(note(&full, "clock"), Some(Note::NoRoom));
         // Without a network the graph and the list say so, and their cells
         // go to the elements behind them.
-        let no_net = Data { network: None, ..data };
+        let none = crate::netstat::Snapshot::default();
+        let no_net = Data {
+            network: Some(&none),
+            ..data
+        };
         let rows_no_net = rows(&a, &no_net, false);
         assert_eq!(note(&rows_no_net, "network"), Some(Note::Nothing));
         assert_eq!(note(&rows_no_net, "network-info"), Some(Note::Nothing));
@@ -331,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn on_a_short_screen_an_element_without_a_short_size_has_no_room() {
+    fn on_a_short_screen_an_element_without_a_short_size_says_so() {
         let devices = device();
         let net = crate::status::network::sample(10);
         let data = Data {
@@ -341,8 +356,72 @@ mod tests {
         };
         let a = area("");
         let note = |rows: &[Row], id: &str| rows.iter().find(|r| r.id == id).unwrap().note;
-        assert_eq!(note(&rows(&a, &data, false), "network-info"), None);
-        assert_eq!(note(&rows(&a, &data, true), "network-info"), Some(Note::NoRoom));
+        // The hardware sampler rests on a short screen and has read nothing:
+        // that is no reason to say "nothing to show".
+        for id in ["network-info", "temperatures", "cpu", "memory", "system", "clock"] {
+            assert_eq!(note(&rows(&a, &data, false), id), None, "{id} tall");
+            assert_eq!(note(&rows(&a, &data, true), id), Some(Note::OffShortScreen), "{id} short");
+        }
         assert_eq!(note(&rows(&a, &data, true), "network"), None);
+        assert_eq!(note(&rows(&a, &data, true), "battery"), None);
+        assert_eq!(Note::OffShortScreen.text(), "not on a small screen");
+    }
+
+    #[test]
+    fn nothing_to_show_only_once_the_source_has_read() {
+        let a = area("");
+        let note = |rows: &[Row], id: &str| rows.iter().find(|r| r.id == id).unwrap().note;
+        // No source has read yet: no element says it has nothing.
+        for short in [false, true] {
+            for r in rows(&a, &Data::EMPTY, short) {
+                assert_ne!(r.note, Some(Note::Nothing), "{} short {short}", r.id);
+            }
+        }
+        // Every source read and found nothing.
+        let net = crate::netstat::Snapshot::default();
+        let hw = crate::hardware::Snapshot::default();
+        let read = Data {
+            battery_since: Some(std::time::Instant::now()),
+            network: Some(&net),
+            hardware: Some(&hw),
+            ..Data::EMPTY
+        };
+        let tall = rows(&a, &read, false);
+        for id in ["battery", "network", "network-info", "temperatures", "cpu", "memory", "system"] {
+            assert_eq!(note(&tall, id), Some(Note::Nothing), "{id}");
+        }
+        assert_eq!(note(&tall, "clock"), None);
+        let short = rows(&a, &read, true);
+        assert_eq!(note(&short, "battery"), Some(Note::Nothing));
+        assert_eq!(note(&short, "network"), Some(Note::Nothing));
+        assert_eq!(note(&short, "temperatures"), Some(Note::OffShortScreen));
+    }
+
+    #[test]
+    fn no_room_comes_from_the_planned_packing_and_the_row_limit() {
+        let note = |rows: &[Row], id: &str| rows.iter().find(|r| r.id == id).unwrap().note;
+        // The planned packing gives system no cell; with no hardware read
+        // yet it still says "no room", not nothing.
+        let crowded = area(
+            "battery 2x1\nnetwork 2x2\nnetwork-info 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\nsystem 2x1\nclock 1x1\n",
+        );
+        assert_eq!(note(&rows(&crowded, &Data::EMPTY, false), "system"), Some(Note::NoRoom));
+        // The final review's layout: with the battery read and empty, the
+        // list would need a third row, which was never reserved.
+        let a = area(
+            "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+        );
+        let net = crate::status::network::sample(10);
+        let data = Data {
+            battery_since: Some(std::time::Instant::now()),
+            network: Some(&net),
+            wall: Some(std::time::UNIX_EPOCH),
+            ..Data::EMPTY
+        };
+        let r = rows(&a, &data, false);
+        assert_eq!(note(&r, "battery"), Some(Note::Nothing));
+        assert_eq!(note(&r, "network"), None);
+        assert_eq!(note(&r, "network-info"), Some(Note::NoRoom));
+        assert_eq!(note(&r, "clock"), None);
     }
 }

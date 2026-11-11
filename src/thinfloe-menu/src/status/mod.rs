@@ -160,6 +160,17 @@ pub struct Data<'a> {
 }
 
 impl Data<'_> {
+    /// `source` has been read at least once: the battery file was read, the
+    /// sampler has made a copy. Only then does an element without content
+    /// have nothing to show, rather than nothing yet.
+    pub fn has_read(&self, source: Source) -> bool {
+        match source {
+            Source::Battery => self.battery_since.is_some(),
+            Source::Network => self.network.is_some(),
+            Source::Hardware => self.hardware.is_some(),
+        }
+    }
+
     /// No source has anything.
     pub const EMPTY: Data<'static> = Data {
         battery: &[],

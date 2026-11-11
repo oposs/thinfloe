@@ -123,8 +123,15 @@ Shipped elements:
 - `SettingsTab::Status`, after Screen. One row per element this image knows,
   in the file's order: a tick box, a size select offering only the
   element's `sizes()`, and Up and Down buttons. Unknown ids get no row.
-- A ticked element the packing leaves out shows a muted note: "no room" or
-  "nothing to show on this machine".
+- A ticked element that is not drawn shows a muted note (`statustab::rows`),
+  decided in this order: "not on a small screen" when the screen is short
+  and the element has no short size; "no room" when the packing of every
+  ticked element (`Area::planned`) gives it no cells, or it has content and
+  the row limit of the shown packing leaves it out; "nothing to show on this
+  machine" only when its sources have read at least once
+  (`Data::has_read`: the battery file was read, the sampler made a copy).
+  An element whose source has not read yet gets no note, so the hardware
+  elements on a short screen, where the sampler rests, never say "nothing".
 - Every change writes the file at once, with no Apply. A failed write shows
   in the tab in the warning colour and in the log, and the screen keeps the
   change.
