@@ -270,6 +270,17 @@ pub fn parse_wired_form(address: &str, gateway: &str, dns: &str) -> Result<Wired
             Some(gw)
         }
     };
+    Ok(Wired::Static {
+        address: ip,
+        prefix,
+        gateway,
+        dns: parse_dns(dns)?,
+    })
+}
+
+/// The DNS servers field, for a fixed address and for DHCP alike: up to
+/// three IPv4 addresses, apart by commas or spaces. Empty: none.
+pub fn parse_dns(dns: &str) -> Result<Vec<Ipv4Addr>, String> {
     const DNS_ERR: &str = "DNS servers: up to three IPv4 addresses";
     let servers = dns
         .split(|c: char| c == ',' || c.is_whitespace())
@@ -279,12 +290,7 @@ pub fn parse_wired_form(address: &str, gateway: &str, dns: &str) -> Result<Wired
     if servers.len() > 3 {
         return Err(DNS_ERR.to_string());
     }
-    Ok(Wired::Static {
-        address: ip,
-        prefix,
-        gateway,
-        dns: servers,
-    })
+    Ok(servers)
 }
 
 // ---- Text ----
@@ -604,6 +610,7 @@ mod tests {
             state,
             device: device.map(String::from),
             networks: Vec::new(),
+            dns: Vec::new(),
             manageable: true,
             error: None,
         }

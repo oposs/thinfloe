@@ -500,6 +500,7 @@ fn net_failed(job: &Job, e: String) -> JobResult {
         state: netfiles::FileState::Hand,
         device: None,
         networks: Vec::new(),
+        dns: Vec::new(),
         manageable: false,
         error: Some(e.clone()),
     };
@@ -508,7 +509,7 @@ fn net_failed(job: &Job, e: String) -> JobResult {
             wifi(),
             netfiles::WiredFile {
                 state: netfiles::FileState::Hand,
-                wired: netfiles::Wired::Dhcp,
+                wired: netfiles::Wired::dhcp(),
                 manageable: false,
                 error: Some(e.clone()),
             },

@@ -125,6 +125,32 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `labwc --reconfigure` and confirms in `thinfloe-menu-output.applied`, and the
   menu then replaces its window to move.
 
+## Network tab: DNS servers
+
+  **DNS servers** (Settings → Network, Wired) shows with Automatic (DHCP)
+  and with Fixed address. Empty means the servers DHCP gives (none for a
+  fixed address). Filled, up to three IPv4 addresses are one setting for the
+  whole machine: kept in `~/ethernet.yaml` and copied into the WiFi
+  definition of every `~/wifi.yaml` the menu writes, because
+  systemd-resolved queries the DNS servers of all links, and servers set on
+  the wired link alone would still send queries to the WiFi link's DHCP
+  servers. With DHCP both files carry `dhcp4-overrides: {use-dns: false}`
+  and `nameservers` (networkd: `UseDNS=false` and `DNS=` lines); address,
+  gateway and search domains still come from DHCP. A fixed address keeps
+  `dhcp4: false` with `nameservers`. DHCP without servers writes no
+  `~/ethernet.yaml`. The tab takes the servers from `~/ethernet.yaml` only:
+  servers in a menu `~/wifi.yaml` that `~/ethernet.yaml` lacks go at the
+  next write of `~/wifi.yaml`. A change of the servers alone rewrites both
+  files; a hand-written `~/wifi.yaml` keeps its own (the tab says so under
+  the row), as do the template and a file without networks, and a menu
+  `~/wifi.yaml` the menu cannot keep blocks the change ("~/wifi.yaml has
+  settings the menu cannot keep"). Netboot shows no row and writes no
+  servers into `~/wifi.yaml`, since `~/ethernet.yaml` is not installed there.
+  The parser keeps a file manageable only with `dhcp4-overrides` exactly
+  `{use-dns: false}` beside a non-empty `nameservers` on a `dhcp4: true`
+  definition, or with neither key. Guards: the `netfiles` tests,
+  `test/integration/test-network-netplan.sh`.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are

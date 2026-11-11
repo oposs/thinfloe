@@ -66,32 +66,46 @@ pub struct WiredForm {
 
 impl WiredForm {
     fn of(w: &Wired) -> WiredForm {
+        let dns = w.dns().iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
         match w {
-            Wired::Dhcp => WiredForm::default(),
+            Wired::Dhcp { .. } => WiredForm {
+                dns,
+                ..WiredForm::default()
+            },
             Wired::Static {
                 address,
                 prefix,
                 gateway,
-                dns,
+                ..
             } => WiredForm {
                 fixed: true,
                 address: format!("{address}/{prefix}"),
                 gateway: gateway.map(|g| g.to_string()).unwrap_or_default(),
-                dns: dns.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
+                dns,
             },
         }
     }
 
-    /// Two forms ask for the same: DHCP ignores the texts.
+    /// Two forms ask for the same: DHCP ignores the address and the
+    /// gateway, not the DNS servers.
     fn same(&self, other: &WiredForm) -> bool {
-        self.fixed == other.fixed && (!self.fixed || self == other)
+        self.fixed == other.fixed
+            && if self.fixed {
+                self == other
+            } else {
+                self.dns == other.dns
+            }
     }
 
-    fn wired(&self) -> Result<Wired, String> {
+    /// On netboot DHCP keeps the servers it gives: the tab shows no DNS
+    /// row there, and ~/ethernet.yaml is not installed.
+    fn wired(&self, netboot: bool) -> Result<Wired, String> {
         if self.fixed {
             nettab::parse_wired_form(&self.address, &self.gateway, &self.dns)
+        } else if netboot {
+            Ok(Wired::dhcp())
         } else {
-            Ok(Wired::Dhcp)
+            nettab::parse_dns(&self.dns).map(|dns| Wired::Dhcp { dns })
         }
     }
 }
@@ -384,7 +398,7 @@ impl NetTab {
 
     fn change(&self) -> Result<Change, String> {
         let wired = match &self.draft_wired {
-            Some(form) if self.wired_changed() => Some(form.wired()?),
+            Some(form) if self.wired_changed() => Some(form.wired(self.netboot)?),
             _ => None,
         };
         // A swapped adapter: the same list goes out, under the new name.
@@ -672,6 +686,7 @@ mod tests {
             state,
             device: device.map(String::from),
             networks,
+            dns: Vec::new(),
             manageable: true,
             error: None,
         }
@@ -692,7 +707,7 @@ mod tests {
         let mut t = NetTab::new(false);
         t.loaded(
             wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
-            wired(FileState::Menu, Wired::Dhcp),
+            wired(FileState::Menu, Wired::dhcp()),
             vec!["wlp1".to_string()],
         );
         t
@@ -756,7 +771,7 @@ mod tests {
         // Loaded once; not again on its own.
         t.loaded(
             wifi(FileState::Missing, None, Vec::new()),
-            wired(FileState::Missing, Wired::Dhcp),
+            wired(FileState::Missing, Wired::dhcp()),
             Vec::new(),
         );
         t.status_done(Ok(Vec::new()));
@@ -797,6 +812,91 @@ mod tests {
             Some(NetRequest::Apply(Change {
                 wifi: Some(Vec::new()),
                 wired: None
+            }))
+        );
+    }
+
+    #[test]
+    fn dhcp_takes_dns_servers() {
+        let dns = |s: &str| NetEvent::WiredText {
+            address: String::new(),
+            gateway: String::new(),
+            dns: s.into(),
+        };
+        let mut t = tab();
+        assert_eq!(t.event(dns("9.9.9.9 1.1.1.1"), false), None);
+        assert!(!t.wired_form().fixed);
+        assert!(t.dirty(), "the servers alone are a change");
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(Wired::Dhcp {
+                    dns: vec!["9.9.9.9".parse().unwrap(), "1.1.1.1".parse().unwrap()]
+                })
+            }))
+        );
+        // Bad servers: the same message as for a fixed address.
+        let mut t = tab();
+        t.event(dns("1.1.1.1, nope"), false);
+        assert_eq!(t.event(NetEvent::Apply, false), None);
+        assert_eq!(t.error(), Some("DNS servers: up to three IPv4 addresses"));
+        t.event(dns("1.1.1.1 2.2.2.2 3.3.3.3 4.4.4.4"), false);
+        assert_eq!(t.event(NetEvent::Apply, false), None);
+        assert_eq!(t.error(), Some("DNS servers: up to three IPv4 addresses"));
+        // Emptied again: nothing to do.
+        t.event(dns(""), false);
+        assert!(!t.dirty());
+        // The saved servers are shown, and clearing them is a change.
+        let mut t = NetTab::new(false);
+        let saved = Wired::Dhcp {
+            dns: vec!["1.1.1.1".parse().unwrap(), "9.9.9.9".parse().unwrap()],
+        };
+        t.loaded(
+            wifi(FileState::Missing, None, Vec::new()),
+            wired(FileState::Menu, saved),
+            Vec::new(),
+        );
+        assert_eq!(t.wired_form().dns, "1.1.1.1, 9.9.9.9");
+        t.event(dns(""), false);
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(Wired::dhcp())
+            }))
+        );
+        // A fixed address keeps its servers when it goes back to DHCP.
+        let mut t = with_fixed_draft();
+        t.event(NetEvent::WiredMode(false), false);
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(Wired::Dhcp {
+                    dns: vec!["1.1.1.1".parse().unwrap()]
+                })
+            }))
+        );
+    }
+
+    #[test]
+    fn netboot_sends_no_dns_servers() {
+        // A fixed address with servers left from a stick boot: back to
+        // DHCP drops them, since there is no row to show them.
+        let mut t = NetTab::new(true);
+        let kept = nettab::parse_wired_form("192.168.1.10/24", "", "1.1.1.1").unwrap();
+        t.loaded(
+            wifi(FileState::Missing, None, Vec::new()),
+            wired(FileState::Menu, kept),
+            Vec::new(),
+        );
+        t.event(NetEvent::WiredMode(false), false);
+        assert_eq!(
+            t.event(NetEvent::Apply, false),
+            Some(NetRequest::Apply(Change {
+                wifi: None,
+                wired: Some(Wired::dhcp())
             }))
         );
     }
@@ -851,7 +951,7 @@ mod tests {
                 Some("wlp1"),
                 vec![net("Old", Some("short")), net("B", None)],
             ),
-            wired(FileState::Menu, Wired::Dhcp),
+            wired(FileState::Menu, Wired::dhcp()),
             vec!["wlp1".to_string()],
         );
         t.event(NetEvent::Forget("B".into()), false);
@@ -1070,7 +1170,7 @@ mod tests {
         let mut t = NetTab::new(false);
         t.loaded(
             wifi(FileState::Hand, Some("wlp1"), vec![net("Home", None)]),
-            wired(FileState::Hand, Wired::Dhcp),
+            wired(FileState::Hand, Wired::dhcp()),
             vec!["wlp1".to_string()],
         );
         t.event(NetEvent::WiredMode(true), false);
@@ -1103,7 +1203,7 @@ mod tests {
         assert_eq!(m.event(NetEvent::TakeOver("other"), false), None);
         // Nor a hand file the menu cannot manage.
         let mut n = NetTab::new(false);
-        let mut w = wired(FileState::Hand, Wired::Dhcp);
+        let mut w = wired(FileState::Hand, Wired::dhcp());
         w.manageable = false;
         n.loaded(wifi(FileState::Missing, None, Vec::new()), w, Vec::new());
         assert_eq!(n.event(NetEvent::TakeOver("wired"), false), None);
@@ -1114,7 +1214,7 @@ mod tests {
         let mut t = NetTab::new(true);
         t.loaded(
             wifi(FileState::Missing, None, Vec::new()),
-            wired(FileState::Missing, Wired::Dhcp),
+            wired(FileState::Missing, Wired::dhcp()),
             Vec::new(),
         );
         assert_eq!(t.event(NetEvent::WiredMode(true), false), None);
@@ -1138,7 +1238,7 @@ mod tests {
             t.event(NetEvent::Apply, false),
             Some(NetRequest::Apply(Change {
                 wifi: None,
-                wired: Some(Wired::Dhcp)
+                wired: Some(Wired::dhcp())
             }))
         );
     }
@@ -1200,7 +1300,7 @@ mod tests {
         assert_eq!(t.poll(now, true), Some(NetRequest::Load));
         t.loaded(
             wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
-            wired(FileState::Menu, Wired::Dhcp),
+            wired(FileState::Menu, Wired::dhcp()),
             vec!["wlp1".to_string()],
         );
         t.event(NetEvent::Apply, false);
@@ -1213,7 +1313,7 @@ mod tests {
         assert_eq!(t.error(), Some("x"));
         t.loaded(
             wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
-            wired(FileState::Menu, Wired::Dhcp),
+            wired(FileState::Menu, Wired::dhcp()),
             vec!["wlp1".to_string()],
         );
         assert!(t.dirty(), "the draft outlives the reload");
@@ -1232,7 +1332,7 @@ mod tests {
         let saved = vec![net("Home", Some("secret123"))];
         t.loaded(
             wifi(FileState::Menu, Some("wlp2s0"), saved.clone()),
-            wired(FileState::Menu, Wired::Dhcp),
+            wired(FileState::Menu, Wired::dhcp()),
             vec!["wlp58s0".to_string()],
         );
         assert!(t.adapter_changed());

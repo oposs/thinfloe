@@ -28,7 +28,7 @@ if ! (cd "$REPO/src/thinfloe-menu" \
     echo "FAILED - network files and netplan"
     exit 1
 fi
-for f in wifi-two wifi-odd wifi-bare ethernet-static; do
+for f in wifi-two wifi-odd wifi-bare wifi-dns ethernet-static ethernet-dhcp-dns; do
     [[ -s "$FIXTURES/$f.yaml" ]] || bad "the menu did not write $f.yaml"
 done
 [[ $fail -eq 0 ]] || { echo "FAILED - network files and netplan"; exit 1; }
@@ -169,6 +169,28 @@ else
     bad "static wired keeps id eth"; cat "$R/out" "$net" 2>/dev/null
 fi
 
+# --- dhcp wired with DNS servers replaces those DHCP gives ---
+gen ethernet-dhcp-dns /fx/ethernet-dhcp-dns.yaml; rc=$?
+net=$R/run/systemd/network/10-netplan-eth.network
+if [[ $rc -eq 0 ]] && has_line "$net" DHCP=ipv4 && has_line "$net" DNS=1.1.1.1 \
+    && has_line "$net" DNS=9.9.9.9 && has_line "$net" UseDNS=false && has_line "$net" 'Name=en*' \
+    && ! grep -q '^Address=' "$net"; then
+    ok "dhcp wired with DNS servers replaces those DHCP gives"
+else
+    bad "dhcp wired with DNS servers replaces those DHCP gives"; cat "$R/out" "$net" 2>/dev/null
+fi
+
+# --- wifi with DNS servers replaces those DHCP gives ---
+gen wifi-dns /fx/wifi-dns.yaml; rc=$?
+net=$R/run/systemd/network/10-netplan-wlp58s0.network
+if [[ $rc -eq 0 ]] && has_line "$net" DHCP=ipv4 && has_line "$net" DNS=1.1.1.1 \
+    && has_line "$net" DNS=9.9.9.9 && has_line "$net" UseDNS=false \
+    && [[ -s $R/run/netplan/wpa-wlp58s0.conf ]]; then
+    ok "wifi with DNS servers replaces those DHCP gives"
+else
+    bad "wifi with DNS servers replaces those DHCP gives"; cat "$R/out" "$net" 2>/dev/null
+fi
+
 # --- dhcp default is the shipped file ---
 if cmp -s /usr/share/thinfloe/netplan/ethernet.yaml /etc/netplan/ethernet.yaml \
     && [[ $(stat -c %a /usr/share/thinfloe/netplan/ethernet.yaml) == 644 ]]; then
@@ -218,7 +240,7 @@ echo "$out"
 grep '^#' "$SCRATCH/inner.err"
 grep -v '^#' "$SCRATCH/inner.err" | head -20
 grep -q '^FAIL - ' <<<"$out" && fail=1
-[[ $(grep -cE '^(ok   - |FAIL - )' <<<"$out") -ge 9 ]] || { bad "fewer cases ran than expected"; }
+[[ $(grep -cE '^(ok   - |FAIL - )' <<<"$out") -ge 11 ]] || { bad "fewer cases ran than expected"; }
 
 [[ $fail -eq 0 ]] || { echo "FAILED - network files and netplan"; exit 1; }
 echo "PASSED - network files and netplan"

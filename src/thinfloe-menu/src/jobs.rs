@@ -688,14 +688,11 @@ pub fn network_apply(
 ) -> Result<(), ApplyFailed> {
     // Ruling 16: what the home held, so a failed apply can put it back.
     // `save` writes only menu, template and missing files, all readable.
-    let files = [
-        (netfiles::WIFI_FILE, change.wifi.is_some()),
-        (netfiles::WIRED_FILE, change.wired.is_some()),
-    ];
-    let before: Vec<(&str, Option<Vec<u8>>)> = files
+    // Both files, whatever the change names: a wired change rewrites
+    // ~/wifi.yaml too when the DNS servers change.
+    let before: Vec<(&str, Option<Vec<u8>>)> = [netfiles::WIFI_FILE, netfiles::WIRED_FILE]
         .iter()
-        .filter(|(_, touched)| *touched)
-        .filter_map(|(name, _)| {
+        .filter_map(|name| {
             crate::owned::read_bytes(&paths.homes.home.join(name))
                 .ok()
                 .map(|b| (*name, b))
@@ -1546,7 +1543,7 @@ mod tests {
         let p = net_paths(&d, "/bin/true", &tool);
         let change = netfiles::Change {
             wifi: None,
-            wired: Some(netfiles::Wired::Dhcp),
+            wired: Some(netfiles::Wired::dhcp()),
         };
         let feed = Arc::new(Feed::default());
         let spawned = std::cell::Cell::new(false);
@@ -1662,7 +1659,7 @@ mod tests {
         let before = home_bytes(&p);
         let change = netfiles::Change {
             wifi: None,
-            wired: Some(netfiles::Wired::Dhcp),
+            wired: Some(netfiles::Wired::dhcp()),
         };
         assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
         assert_eq!(home_bytes(&p), before);
@@ -1675,6 +1672,31 @@ mod tests {
         };
         assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
         assert!(home_bytes(&p).1.is_some());
+    }
+
+    /// A change of the DNS servers alone rewrites ~/wifi.yaml as well; a
+    /// failed apply puts that one back too.
+    #[test]
+    fn a_failed_dns_change_puts_the_wifi_file_back() {
+        let d = dir("net-put-back-dns");
+        let feed = Arc::new(Feed::default());
+        let p = net_home(&d, FAILS, None);
+        let nets = [netfiles::Net {
+            ssid: "home".into(),
+            hidden: false,
+            password: Some("secret123".into()),
+        }];
+        let wifi = netfiles::render_wifi(Some("wlp58s0"), &nets, &[]);
+        std::fs::write(p.homes.home.join("wifi.yaml"), wifi).unwrap();
+        let before = home_bytes(&p);
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(netfiles::Wired::Dhcp {
+                dns: vec!["1.1.1.1".parse().unwrap()],
+            }),
+        };
+        assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
+        assert_eq!(home_bytes(&p), before);
     }
 
     /// Ruling 16 for a save that fails halfway: ~/wifi.yaml is written,

@@ -3799,6 +3799,7 @@ mod tests {
                 state: wifi.0,
                 device: Some("wlp1".into()),
                 networks: wifi.1,
+                dns: Vec::new(),
                 manageable: wifi.2,
                 error: None,
             },
@@ -3833,12 +3834,13 @@ mod tests {
                 state: wifi,
                 device: (!devices.is_empty()).then(|| "wlp1".to_string()),
                 networks,
+                dns: Vec::new(),
                 manageable: true,
                 error: None,
             },
             crate::netfiles::WiredFile {
                 state: wired,
-                wired: crate::netfiles::Wired::Dhcp,
+                wired: crate::netfiles::Wired::dhcp(),
                 manageable: true,
                 error: None,
             },
@@ -3964,11 +3966,24 @@ mod tests {
         for want in ["192.168.1.10/24", "192.168.1.1", "1.1.1.1, 9.9.9.9"] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
         }
-        // DHCP: the select only.
-        let dhcp = || net_tab(false, (FileState::Menu, vec![], true), (FileState::Menu, Wired::Dhcp));
+        // DHCP: the select and the DNS servers, which replace those DHCP
+        // gives when filled.
+        let dhcp = || net_tab(false, (FileState::Menu, vec![], true), (FileState::Menu, Wired::dhcp()));
         let texts = net_texts(&network_settings(dhcp()));
         assert!(has(&texts, "Automatic (DHCP)"), "{texts:?}");
-        assert!(!has(&texts, "Gateway") && !has(&texts, "DNS servers"), "{texts:?}");
+        assert!(has(&texts, "DNS servers"), "{texts:?}");
+        assert!(!has(&texts, "Gateway"), "{texts:?}");
+        assert!(has(&texts, "1.1.1.1, 9.9.9.9"), "placeholder not in {texts:?}");
+        let saved = Wired::Dhcp {
+            dns: vec!["8.8.8.8".parse().unwrap()],
+        };
+        let texts = net_texts(&network_settings(net_tab(
+            false,
+            (FileState::Menu, vec![], true),
+            (FileState::Menu, saved),
+        )));
+        assert!(has(&texts, "8.8.8.8"), "{texts:?}");
+        assert!(!has(&texts, WIFI_KEEPS_DNS), "{texts:?}");
         // Switched to fixed with nothing typed: the placeholders.
         let mut fresh = dhcp();
         fresh.event(NetEvent::WiredMode(true), false);
@@ -3988,10 +4003,32 @@ mod tests {
         );
     }
 
+    const WIFI_KEEPS_DNS: &str = "WiFi keeps the DNS servers set in ~/wifi.yaml.";
+
+    #[test]
+    fn the_network_tab_says_a_hand_wifi_file_keeps_its_dns() {
+        use crate::netfiles::{FileState, Wired};
+        let net = net_tab(
+            false,
+            (FileState::Hand, vec![saved_net("Home", None, false)], true),
+            (FileState::Menu, Wired::dhcp()),
+        );
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, WIFI_KEEPS_DNS), "{texts:?}");
+        // Not on netboot, where there is no DNS row.
+        let net = net_tab(
+            true,
+            (FileState::Hand, vec![saved_net("Home", None, false)], true),
+            (FileState::Menu, Wired::dhcp()),
+        );
+        let texts = net_texts(&network_settings(net));
+        assert!(!has(&texts, WIFI_KEEPS_DNS), "{texts:?}");
+    }
+
     #[test]
     fn the_network_tab_hides_fixed_on_netboot() {
         use crate::netfiles::{FileState, Wired};
-        let net = net_tab(true, (FileState::Menu, vec![], true), (FileState::Menu, Wired::Dhcp));
+        let net = net_tab(true, (FileState::Menu, vec![], true), (FileState::Menu, Wired::dhcp()));
         let texts = net_texts(&network_settings(net));
         assert!(has(&texts, "A netbooted machine always uses DHCP."), "{texts:?}");
         for gone in ["Automatic (DHCP)", "Fixed address", "Gateway", "DNS servers"] {
@@ -4001,13 +4038,15 @@ mod tests {
 
     #[test]
     fn the_network_tab_shows_hand_wifi_read_only() {
-        use crate::netfiles::FileState;
+        use crate::netfiles::{FileState, Wired};
         use crate::network::NetEvent;
+        // Wired by DHCP: with a fixed address and the DNS note the bands
+        // scroll on 1080p, and the button would sit under Apply.
         let hand = |manageable| {
             net_tab(
                 false,
                 (FileState::Hand, vec![saved_net("Home", None, false)], manageable),
-                (FileState::Menu, fixed_wired()),
+                (FileState::Menu, Wired::dhcp()),
             )
         };
         let texts = net_texts(&network_settings(hand(true)));
@@ -4091,12 +4130,13 @@ mod tests {
                 state: crate::netfiles::FileState::Missing,
                 device: None,
                 networks: vec![],
+                dns: Vec::new(),
                 manageable: true,
                 error: None,
             },
             crate::netfiles::WiredFile {
                 state: crate::netfiles::FileState::Missing,
-                wired: crate::netfiles::Wired::Dhcp,
+                wired: crate::netfiles::Wired::dhcp(),
                 manageable: true,
                 error: None,
             },

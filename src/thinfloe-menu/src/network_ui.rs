@@ -168,7 +168,8 @@ fn connections(ui: &mut Ui, t: &Theme, net: &NetTab) {
     }
 }
 
-/// The wired address: the select and, for a fixed address, its fields.
+/// The wired address: the select, for a fixed address its fields, and the
+/// DNS servers in both modes.
 /// A file written by hand shows them greyed.
 fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     let Some(file) = net.wired_file() else {
@@ -188,34 +189,33 @@ fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
         if picked {
             *event = Some(NetEvent::WiredMode(idx == 1));
         }
-        if !form.fixed {
-            return;
-        }
         let mut typed = form.clone();
         let mut changed = false;
-        let rows: [(&str, &str, &'static str, &str, &mut String); 3] = [
-            (
+        let mut rows: Vec<(&str, &str, &'static str, &str, &mut String)> = Vec::new();
+        if form.fixed {
+            rows.push((
                 "Address",
                 &form.address,
                 "192.168.1.10/24",
                 "tf-net-address",
                 &mut typed.address,
-            ),
-            (
+            ));
+            rows.push((
                 "Gateway",
                 &form.gateway,
                 "192.168.1.1",
                 "tf-net-gateway",
                 &mut typed.gateway,
-            ),
-            (
-                "DNS servers",
-                &form.dns,
-                "1.1.1.1, 9.9.9.9",
-                "tf-net-dns",
-                &mut typed.dns,
-            ),
-        ];
+            ));
+        }
+        // In both modes: empty takes the servers DHCP gives.
+        rows.push((
+            "DNS servers",
+            &form.dns,
+            "1.1.1.1, 9.9.9.9",
+            "tf-net-dns",
+            &mut typed.dns,
+        ));
         for (label, value, hint, salt, slot) in rows {
             if let Some(text) = text_row(ui, t, label, value, hint, salt) {
                 *slot = text;
@@ -231,6 +231,15 @@ fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
         }
     });
     let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
+    // The menu writes the DNS servers into ~/wifi.yaml too, never into one
+    // written by hand.
+    if net.wifi_file().is_some_and(|w| w.state == FileState::Hand) {
+        note(
+            ui,
+            indent,
+            RichText::new("WiFi keeps the DNS servers set in ~/wifi.yaml.").color(t.palette().muted_foreground),
+        );
+    }
     if !editable {
         by_hand(
             ui,
