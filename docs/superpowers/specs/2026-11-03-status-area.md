@@ -1,3 +1,10 @@
+> **Superseded in part.** The design of 2026-11-10
+> ([2026-11-10-status-area-design.md](2026-11-10-status-area-design.md))
+> replaces the drawing (egui instead of SVG and resvg), the configuration (a
+> layout file in the home, chosen in the Settings Status tab, instead of
+> files in `/etc/thinfloe/status/`) and the elements described here. The
+> data side (battery reader, network and hardware samplers) still holds.
+
 # Status area below the tiles
 
 Owner, 2026-11-03, after the battery tile (PR #5) worked on hardware:
