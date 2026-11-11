@@ -169,7 +169,11 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   with `dhcp4: true` and `optional: true`, so a `~/wifi.yaml` is manageable
   only when `dhcp4` is a flag that is true and `optional` is missing or
   true (as `optional` on the wired `eth`); a take-over would otherwise turn
-  DHCP on, or stop boot waiting for the device. On 1080p a full tab scrolls; every
+  DHCP on, or stop boot waiting for the device. A `~/wifi.yaml` with no
+  `wifis` key (the file the menu writes with no adapter or no networks) is
+  manageable, with no device and no networks; a `wifis` key must hold
+  exactly one definition. A hand file without WiFi is so offered for
+  take-over, which writes the menu's file without WiFi. On 1080p a full tab scrolls; every
   control scrolls into reach above the pinned Apply. Guards: the `netfiles`
   and `network` tests, `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.

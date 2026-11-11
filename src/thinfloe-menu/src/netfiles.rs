@@ -315,10 +315,13 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
     let wifis = get_hash(network, "wifis");
     // Per network: its AP keys are all the menu's own (Ruling 22).
     let mut ap_ok = Vec::new();
+    // No `wifis` at all is the file `render_wifi` writes without a device
+    // or networks; a `wifis` key holds exactly one definition.
+    let no_wifi = network.is_some_and(|h| get(h, "wifis").is_none());
     let mut ok = docs.len() == 1
         && root.is_some_and(|h| keys_within(h, &["network"]))
         && network.is_some_and(|h| keys_within(h, &["version", "renderer", "wifis"]))
-        && wifis.is_some_and(|h| h.len() == 1);
+        && (no_wifi || wifis.is_some_and(|h| h.len() == 1));
     for (dev, def) in wifis.into_iter().flatten() {
         let def = def.as_hash();
         let dhcp = def.is_some_and(|d| get(d, "dhcp4").and_then(flag) == Some(true));
@@ -1949,6 +1952,54 @@ exit 0
             Err("~/wifi.yaml has settings the menu cannot keep".into())
         );
         assert_eq!(f.snapshot(), before);
+    }
+
+    /// A file without WiFi, as the menu writes it with no device or no
+    /// networks, is manageable; an empty or second `wifis` entry is not.
+    #[test]
+    fn a_file_without_wifi_is_manageable() {
+        for t in [
+            render_wifi(Some("wlp58s0"), &[], &[]),
+            render_wifi(None, &[net("home", Some("secret123"), false)], &[]),
+        ] {
+            let w = parse_wifi(Some(&t));
+            assert_eq!(w.state, FileState::Menu);
+            assert!(w.manageable, "{t}");
+            assert_eq!(
+                (&w.device, &w.networks, &w.dns, &w.error),
+                (&None, &vec![], &vec![], &None)
+            );
+            // Manageable, but with no network to carry DNS servers, it is
+            // never out of step with the wired ones.
+            let wired = parse_wired(render_wired(SHIPPED_WIRED, &fixed()).unwrap().as_deref());
+            let mut tab = crate::network::NetTab::new(false);
+            tab.loaded(w, wired, vec!["wlp58s0".to_string()]);
+            assert!(!tab.wifi_dns_out_of_step() && !tab.dirty(), "{t}");
+        }
+        let bare = "network:\n  version: 2\n  renderer: networkd\n";
+        let w = parse_wifi(Some(bare));
+        assert_eq!(w.state, FileState::Hand);
+        assert!(w.manageable);
+        for other in [
+            format!("{bare}  wifis: {{}}\n"),
+            format!("{bare}  wifis:\n"),
+            format!("{bare}  wifis: []\n"),
+            "network: {}\nother: 1\n".to_string(),
+            format!("{HAND_WIFI}    wlp3s0:\n      dhcp4: true\n      access-points:\n        x: {{}}\n"),
+        ] {
+            assert!(!parse_wifi(Some(&other)).manageable, "{other}");
+        }
+
+        // A hand file without WiFi is taken over as the menu's bare file.
+        let f = Fixture::new("take-bare", &["wlp58s0"]);
+        f.put(WIFI_FILE, bare);
+        take_over(&f.h, "wifi").unwrap();
+        assert_eq!(f.text("wifi.yaml.by-hand").as_deref(), Some(bare));
+        let t = f.text(WIFI_FILE).unwrap();
+        assert_eq!(t, render_wifi(None, &[], &[]));
+        assert!(f.recorded("names").contains(WIFI_FILE), "checked with netplan");
+        let w = parse_wifi(Some(&t));
+        assert_eq!((w.state, w.manageable), (FileState::Menu, true));
     }
 
     #[test]
