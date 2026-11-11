@@ -18,7 +18,8 @@ None of that is in the code any more.
   `ui::STATUS_GAP` (32 pt) apart. The placement uses `Area::planned_rows`,
   the rows the shown elements take when every one has content, so the tiles
   and the top of the area stay where they are when an element appears or
-  goes. Where the planned rows do not fit, the area is pinned `ui::GAP`
+  goes. The area never takes more rows than planned (see Placement). Where
+  the planned rows do not fit, the area is pinned `ui::GAP`
   (16 pt) above the log and only the tile grid scrolls, in the band above it
   (`ui::layout_with`). The cells take the tiles' height, 76 down to 64 pt.
 - A fullscreen window (the ThinLinc or OxuLnk client) covers the menu and so
