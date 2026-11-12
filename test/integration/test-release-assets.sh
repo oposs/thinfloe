@@ -104,6 +104,11 @@ else
     bad "a file one byte below 2 GiB was refused: $(tail -n1 "$WORK/run.out")"
 fi
 
+# A symlinked input would bypass the size check and land as a symlink.
+make_artifacts; truncate -s 2G "$WORK/big"
+rm "$ART/rootfs/ramroot.sqsh"; ln -s "$WORK/big" "$ART/rootfs/ramroot.sqsh"
+refuses "a symlinked input" "$ART/rootfs/ramroot.sqsh is a symlink" 4.3.0
+
 make_artifacts; mkdir -p "$OUT"; : >"$OUT/stale.txt"
 if ! run 4.3.0 && grep -qF 'stale.txt' "$WORK/run.out" \
         && [[ $(ls "$OUT") == stale.txt ]]; then
@@ -160,9 +165,10 @@ else
     bad "make release-assets failed: $(tail -n3 "$WORK/make.out")"
 fi
 fill_tree 4.2.0
+mkdir -p "$MTREE/artifacts/release"; : >"$MTREE/artifacts/release/stale.txt"
 if ! mk release-assets TF_VERSION=4.2.0-dev+abc >"$WORK/make.out" 2>&1 \
         && grep -qF 'release-assets needs TF_VERSION 4.2.0 (RELEASE)' "$WORK/make.out" \
-        && [[ ! -e $MTREE/artifacts/release ]]; then
+        && [[ $(find "$MTREE/artifacts/release" -mindepth 1 -printf "%f\n") == stale.txt ]]; then
     ok "make release-assets refuses a TF_VERSION that is not RELEASE"
 else
     bad "make release-assets did not refuse a dev TF_VERSION: $(tail -n1 "$WORK/make.out")"
