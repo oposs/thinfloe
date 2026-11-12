@@ -134,9 +134,12 @@ def keys(stem, c):
 # Ceilings from modinfo; None stands for an unexpanded macro.
 ceil = {}
 parsed = 0
+odd = []
 for n in names:
-    m = re.match(r"iwlwifi-(.+)-(c?)(\d+|[A-Z_]+)\.ucode$", n)
+    m = re.match(r"iwlwifi-(.+)-(c?)(\d+|[A-Z][A-Z0-9_]*)\.ucode$", n)
     if not m:
+        if n.startswith("iwlwifi-") and not n.endswith(".pnvm"):
+            odd.append(n)
         continue
     parsed += 1
     stem, c, api = m.groups()
@@ -146,6 +149,7 @@ for n in names:
         ceil[k] = None if v is None or old is None else max(old, v)
 report("modinfo names at least 20 Intel WiFi ucode files (%d)" % parsed,
        [] if parsed >= 20 else ["too-few"])
+report("every Intel WiFi firmware name in modinfo has a known form", odd)
 
 # The listing as path -> (type, link target).
 entries = {}

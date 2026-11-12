@@ -17,7 +17,7 @@ import re
 import sys
 
 FILE_RE = re.compile(r"^iwlwifi-(?P<stem>.+)-(?P<c>c?)(?P<api>\d+)\.ucode(\.zst)?$")
-NAME_RE = re.compile(r"^iwlwifi-(?P<stem>.+)-(?P<c>c?)(?P<api>\d+|[A-Z_]+)\.ucode$")
+NAME_RE = re.compile(r"^iwlwifi-(?P<stem>.+)-(?P<c>c?)(?P<api>\d+|[A-Z][A-Z0-9_]*)\.ucode$")
 
 # A modinfo changed beyond recognition must not prune blind.
 MIN_NAMES = 20
@@ -25,6 +25,15 @@ MIN_NAMES = 20
 
 class TooFewNames(ValueError):
     pass
+
+
+class UnknownName(ValueError):
+    """An iwlwifi name modinfo lists that is neither a ucode nor a pnvm
+    name of the known form: the rule cannot place it."""
+
+
+class NamedFileDropped(ValueError):
+    """The rule would drop a file that modinfo names exactly."""
 
 
 class Missing:
@@ -47,11 +56,15 @@ def radio(stem):
 
 
 def _parse(names):
+    """The ucode names in names; other iwlwifi names must be pnvm names."""
     out = []
     for n in names:
-        m = NAME_RE.match(n.strip())
+        n = n.strip()
+        m = NAME_RE.match(n)
         if m:
             out.append(m)
+        elif n.startswith("iwlwifi-") and not n.endswith(".pnvm"):
+            raise UnknownName(n)
     return out
 
 
@@ -114,6 +127,10 @@ def select(names, files):
             best = loadable[-1]
         keep.append(best)
         drop += [f for _, f in members if f != best]
+    named = {"iwlwifi-%s-%s%s.ucode" % (m["stem"], m["c"], m["api"]) for m in parsed}
+    for f in drop:
+        if f.removesuffix(".zst") in named:
+            raise NamedFileDropped(f)
     return sorted(keep), sorted(drop)
 
 
@@ -130,6 +147,12 @@ def main(argv):
         _, drop = select(names, files)
     except TooFewNames as e:
         sys.stderr.write("iwlwifi_keep: only %d firmware names from modinfo\n" % e.args[0])
+        return 2
+    except UnknownName as e:
+        sys.stderr.write("iwlwifi_keep: cannot parse modinfo firmware name %s\n" % e.args[0])
+        return 2
+    except NamedFileDropped as e:
+        sys.stderr.write("iwlwifi_keep: would drop %s, which modinfo names\n" % e.args[0])
         return 2
     for f in drop:
         print(f)

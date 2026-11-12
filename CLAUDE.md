@@ -154,9 +154,12 @@ Never sweep `/usr/lib/firmware` with `find`/`rm`; change the package list in
 the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
 The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, which keeps per
-Intel WiFi series the file the driver loads and removes `intel-ucode` after
-dracut (owner, 2026-11-12). Guards: `test-firmware.sh`, `test_iwlwifi_keep.py`
-and the build-time firmware-name check in `slim-rootfs.sh`.
+Intel WiFi series the file the driver loads (owner, 2026-11-12); removing
+`intel-ucode` after dracut is planned as the next cut there. Guards of the
+iwlwifi cut: `test_iwlwifi_keep.py`, `test-firmware.sh` and the selector's
+refusal to drop a file that `modinfo` names. The build-time firmware-name
+check in `slim-rootfs.sh` guards against losing firmware outside the
+intended drops, and the build fails on any dangling firmware link.
 [Story](docs/notes/history-of-constraints.md#firmware-is-selected-by-package-never-by-cleanup).
 
 ### The WiFi core stack must come from the kernel, never from a backport

@@ -58,6 +58,10 @@ preconditions() {
     done <<<"$names" >"$FW_BEFORE"
     [[ -s $FW_BEFORE ]] || die "no module names firmware that exists under $FW"
     : >"$DROPPED"
+    # The packages ship no dangling firmware link; a cut must not add one.
+    local links
+    links=$(find "$FW" -xtype l) || die "find over $FW failed"
+    [[ -z $links ]] || die "dangling firmware symlinks before any cut:"$'\n'"$links"
 }
 
 # Rebuild the module index for the final file names and fail on any depmod
@@ -162,7 +166,7 @@ decompress_modules() {
 prune_iwlwifi() {
     local names=/thinfloe-slim/iwlwifi-names
     local dir=$FW/intel/iwlwifi
-    local drop links out n m
+    local drop out n m
     module_firmware "/usr/lib/modules/$KVER/kernel/drivers/net/wireless/intel" >"$names" \
         || die "modinfo failed on the Intel WiFi modules"
     drop=$(mktemp)
@@ -172,17 +176,29 @@ prune_iwlwifi() {
     (cd "$dir" && xargs -d '\n' -r rm -f -- <"$drop") \
         || { rm -f "$drop"; die "removing iwlwifi files failed"; }
     sed -e 's#^#intel/iwlwifi/#' -e 's/\.zst$//' "$drop" >>"$DROPPED"
+    sed -i "s#^#$dir/#" "$drop"
+    m=$(remove_links_to "$drop") || { rm -f "$drop"; exit 1; }
     rm -f "$drop"
+    echo "slim-rootfs: removed $n iwlwifi files, $m firmware symlinks to them" >&2
+}
+
+# Remove the links under $FW whose target is one of the files listed in $1
+# (absolute paths, already deleted), record them in DROPPED and print their
+# count. Any other dangling link fails the build: preconditions saw none.
+remove_links_to() {
+    local gone=$1 links link target count=0
     links=$(find "$FW" -xtype l) || die "find over $FW failed"
-    m=0
-    if [[ -n $links ]]; then
-        m=$(wc -l <<<"$links")
-        xargs -d '\n' rm -f -- <<<"$links" || die "removing dangling firmware symlinks failed"
-        sed -e "s#^$FW/##" -e 's/\.zst$//' <<<"$links" >>"$DROPPED"
-    fi
+    while IFS= read -r link; do
+        [[ -n $link ]] || continue
+        target=$(readlink -m -- "$link")
+        grep -qxF -- "$target" "$gone" || continue
+        rm -f -- "$link" || die "removing firmware symlink $link failed"
+        sed -e "s#^$FW/##" -e 's/\.zst$//' <<<"$link" >>"$DROPPED"
+        count=$((count + 1))
+    done <<<"$links"
     links=$(find "$FW" -xtype l) || die "find over $FW failed"
-    [[ -z $links ]] || die "dangling firmware symlinks remain:"$'\n'"$links"
-    echo "slim-rootfs: removed $n iwlwifi files, $m dangling firmware symlinks" >&2
+    [[ -z $links ]] || die "dangling firmware symlinks after the cut:"$'\n'"$links"
+    echo "$count"
 }
 
 prune_amdgpu() {
