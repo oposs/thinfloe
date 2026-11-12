@@ -59,21 +59,29 @@ Three places, in this build order:
 
 1. `containers/ubuntu/Dockerfile`, dracut `RUN`: `O2` and `O5` change the
    dracut flags.
-2. `containers/ubuntu/Dockerfile`, a new `RUN` directly after dracut, which
-   runs `containers/ubuntu/slim/slim-rootfs.sh`: `O4`, `S1`, `O1`, `O3`,
+2. `containers/ubuntu/Dockerfile`, a new `RUN` that is the last `RUN` of
+   the file, after the cleanup `RUN` (`apt-get clean`, `apt-get autoremove`),
+   and runs `containers/ubuntu/slim/slim-rootfs.sh`: `O4`, `S1`, `O1`, `O3`,
    `S2`, `S3`, in that order, with their build-time guards.
 3. `scripts/export-rootfs.sh`, the `mksquashfs -e` list: `S4`.
 
-### Why a separate step after dracut (*architect*)
+### Why a separate step, and why last (*architect*)
 
 `S1`, `O3` and `O4` must not reach the initrd: dracut copies modules as it
 finds them, so uncompressed modules before dracut would grow the initrd
 (the reason `S1` is "after dracut" in the scope), and the early microcode
-archive is built from `/usr/lib/firmware/intel-ucode`. One step right after
-the dracut `RUN` makes the order visible in one place, and keeps the initrd
-defined by the dracut flags alone. Nothing after it may call dracut; the
-Dockerfile comment says so and the step refuses to run when
-`/boot/initrd.img-<kver>` is missing.
+archive is built from `/usr/lib/firmware/intel-ucode`. One step after the
+dracut `RUN` makes the order visible in one place, and keeps the initrd
+defined by the dracut flags alone.
+
+It is the last `RUN`, after the cleanup `RUN`, and not directly after
+dracut: any `dpkg` run after the slim step (the cleanup's `apt-get
+autoremove` included) can fire the `update-initramfs` trigger, which would
+run dracut again with its default flags on the slimmed tree, without
+`--no-hostonly`, the omit lists or the thinfloe module, and with uncompressed
+modules and no `intel-ucode`. Nothing after the slim step may run `dpkg`,
+`apt-get` or dracut; the Dockerfile comment says so and the step refuses to
+run when `/boot/initrd.img-<kver>` is missing.
 
 The step lives in the Dockerfile and not in `export-rootfs.sh` for two
 reasons: the container image that `make test` inspects
@@ -117,17 +125,22 @@ means the figure from the size audit.
 - Saving: about 25 MB (audit).
 - Guards:
   - Build: `depmod -e` warnings after the cuts must equal the snapshot from
-    step 0 (any new "needs unknown symbol" line fails the build). No
-    `.ko.zst` may remain.
+    step 0 (any new "needs unknown symbol" line fails the build). Both lists
+    are compared with `.ko.zst` rewritten to `.ko`, since the snapshot names
+    the compressed files. No `.ko.zst` may remain.
   - `make test` (`test-image-slim.sh`): no `*.ko.zst` under
     `usr/lib/modules/` in the squashfs; every path in the squashfs's
     `modules.dep` (left and right of the colon) exists in the squashfs.
     `test-wifi-stack.sh` keeps working unchanged (its patterns match `.ko`).
   - `make test` (`test-initramfs-drivers.sh`): the initrd holds `.ko.zst`
     and no plain `.ko`, which fails if `S1` ever moves before dracut.
-  - Boot: `scripts/check-boot-smoke.sh` gains `unwant` lines for
-    `Unknown symbol` and `modprobe: FATAL`, so every `qemu-smoke*` target
-    fails on a module that does not load after switch-root.
+  - Boot: `scripts/check-boot-smoke.sh` gains an `unwant` line for
+    `Unknown symbol`, a kernel message, so a `qemu-smoke*` target fails when
+    the kernel refuses a module after switch-root. This check is weak: udev
+    loads modules through libkmod, which logs no `modprobe: FATAL` line for
+    a missing module, so a module that is gone fails silently at boot. The
+    real guards are the `depmod -e` comparison and the `modules.dep` check
+    above.
 
 ### S2: no locale sources
 
@@ -201,9 +214,15 @@ Rule (*architect*):
 - A file name `iwlwifi-<stem>-<c?><N>.ucode[.zst]` belongs to the *series*
   (`stem`, `c` or nothing). The *family* of a series is the first dash token
   of the stem (`so`, `Qu`, `QuZ`, `bz`, `8265`), with the same `c` marker.
-- The *ceiling* of a family is the highest numeric API that `modinfo` names
-  for that family and marker. A family whose `modinfo` entry is a macro has
-  an unresolved ceiling.
+  The *radio* of a stem with four or more tokens is its second to last token
+  (`jf` in `so-a0-jf-b0` and in `9000-pu-b0-jf-b0`, `gf4` in `so-a0-gf4-a0`).
+- The *ceiling* of a series is the highest numeric API that `modinfo` names
+  for the same family, radio and marker; when `modinfo` names no entry for
+  that radio, the highest it names for the family and marker. An entry that
+  is a macro makes that ceiling unresolved. The radio comes first because
+  ceilings differ by radio within one family: `modinfo` names
+  `so-a0-jf-b0-77` but `so-a0-gf-a0-100`, so a family ceiling of 100 would
+  let a future `so-a0-jf-b0-83` displace the `-77` the driver loads.
 - Per series: resolved ceiling: keep the one file with the highest `N` at or
   below it, drop the others. Unresolved ceiling: keep every file. Family not
   named by `modinfo` at all: keep the highest `N`. A series with no file at
@@ -230,15 +249,18 @@ Guards:
   the audit's `iwlmax.txt` and the 4.2.0-era file list): the cases in the
   plan, among them `so-a0-gf-a0-89` kept and `-86` dropped, `sc-a0-wh-b0-c101`
   kept and `-c102` dropped, every `bz-b0-fm-c0-c10x` kept, `3945-2` and
-  `4965-2` kept, every `.pnvm` kept, too few names refused.
+  `4965-2` kept, every `.pnvm` kept, a synthetic `so-a0-jf-b0-83` dropped in
+  favour of `-77`, too few names refused. The 4.2.0-era totals (111 dropped,
+  63 kept) are the same with and without the radio ceiling.
 - Build: no dangling symlink under `/usr/lib/firmware` after the prune (the
   4.2.0-era squashfs has none among its 355 firmware links). The
   firmware-name guard (step 4): every firmware name from the step 0
   snapshot that a module still in the tree names must still exist.
 - `make test` (`test-firmware.sh`), checked against the squashfs with its own
   parser and the host's `modinfo` on `iwlwifi.ko` extracted from the
-  squashfs: at most one `.ucode` per series whose family ceiling is resolved;
-  none above its family ceiling; no dangling firmware symlink; at least one
+  squashfs: at most one `.ucode` per series whose ceiling is resolved;
+  none above its ceiling, with the same radio-then-family ceiling as the
+  rule; no dangling firmware symlink; at least one
   ucode for each of the chips in the field or likely there: `7265D`, `8265`,
   `9260-th-b0-jf-b0`, `cc-a0`, `Qu-c0-hr-b0`, `QuZ-a0-hr-b0`, `so-a0-gf-a0`
   (with its `.pnvm`), `ty-a0-gf-a0`, `ma-b0-gf-a0`, `bz-b0-fm-c0`,
@@ -259,20 +281,25 @@ running system keeps all of them; only the initrd loses them.
   plus the libraries only those modules use, as measured in the 2026-11-11
   initrd):
   - Server NICs: `mlx4_core mlx4_en mlx5_core mlx5_dpll ice i40e qed qede
-    bnx2x bnxt_en cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls libcxgb sfc
-    sfc_falcon sfc_siena nfp`.
+    bnx2x bnxt_en cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls chcr libcxgb sfc
+    sfc_falcon sfc_siena nfp`. `chcr` (Chelsio crypto) needs `cxgb4`.
   - FC and SAS HBAs: `lpfc qla2xxx bfa efct fnic csiostor qedf bnx2fc fcoe
     libfcoe libfc mptfc mptsas mpt3sas mpi3mr pm80xx isci mvsas aic94xx
     libsas megaraid_sas smartpqi hpsa esas2r`.
-  - InfiniBand: `ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp`.
+  - InfiniBand: `ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp
+    rnbd_client`. `rnbd_client` (block device over RDMA) needs every other
+    module of this group.
   - Network file systems: `cifs cifs_md4 ksmbd ceph libceph rbd kafs rxrpc
-    sunrpc grace nfs_acl ubifs`. `rbd` is the Ceph block device and needs
+    sunrpc grace nfs_acl`. `rbd` is the Ceph block device and needs
     `libceph`; `nfs_acl` needs `sunrpc`, `grace` serves only NFS.
+  - Not omitted: `ubifs`. It is a flash file system, not a network file
+    system, so it is outside the owner's categories (*architect*); it stays
+    in the initrd.
   - Kept on purpose: `mlxfw` (needed by `mlxsw_core`), the SCSI transport
     classes (`scsi_transport_fc` is needed by `hv_storvsc`), `cnic`, every
     desktop NIC (`e1000 e1000e igb igc r8169 atlantic tg3`). `virtio_net`,
     `squashfs`, `loop`, `ext4` and `vfat` are built into this kernel.
-- Saving: 12.4 MB of these modules in the 2026-11-11 initrd (audit: 13 MB);
+- Saving: 11.7 MB of these modules in the 2026-11-11 initrd (audit: 13 MB);
   they are `.zst` files, so the compressed initrd shrinks by about as much.
 - Guards (`make test`, new `test-initramfs-drivers.sh`):
   - None of the omitted modules is in the initrd.
@@ -294,10 +321,14 @@ running system keeps all of them; only the initrd loses them.
   2026-11-11 initrd) from that directory. The kernel applies microcode only
   from the early archive at boot; nothing reads the directory after
   switch-root.
-- Saving: about 14 MB (audit; 21.4 MB uncompressed).
+- Saving: about 14 MB (audit), possibly more: the files are 21.4 MB
+  uncompressed and microcode compresses poorly.
 - Guards:
-  - Build: before the removal, `cpio -it < /boot/initrd.img-$KVER` lists
-    `kernel/x86/microcode/GenuineIntel.bin`; otherwise the build fails.
+  - Build: before the removal,
+    `3cpio --list /boot/initrd.img-$KVER >"$tmp" && grep -qx kernel/x86/microcode/GenuineIntel.bin "$tmp"`
+    succeeds; otherwise the build fails. The image has `3cpio`, not `cpio`.
+    The list goes to a file first: `grep -q` in a pipe can end the lister
+    with SIGPIPE, which `pipefail` reports as a failure.
   - `make test` (`test-firmware.sh`): the check "Intel CPU microcode" in the
     squashfs becomes "no `intel-ucode` in the squashfs" plus
     "`kernel/x86/microcode/GenuineIntel.bin` in the initrd, over 1 MB".
@@ -312,17 +343,24 @@ running system keeps all of them; only the initrd loses them.
   `kernel/drivers/media/{dvb-frontends,tuners,radio,dvb-core}/` and
   `kernel/drivers/media/usb/{dvb-usb,dvb-usb-v2}/`. Cut set = the seed plus
   every module under `kernel/drivers/media/` or `kernel/drivers/staging/media/`
-  that depends, directly or through others (`modules.dep`), on a seed module
-  (TV capture cards such as `cx88`, `saa7134`, `em28xx`, `ttpci`). Any module
-  a kept module depends on is put back, so nothing outside the media tree
-  loses a dependency: `snd-fm801` and `snd-es1968` (sound cards with an FM
-  tuner) keep `tea575x` from `drivers/media/radio/`.
+  that depends, directly or through others (`modules.dep`), on a seed module:
+  the DVB parts of capture drivers (`cx88-dvb`, `saa7134-dvb`, `em28xx-dvb`)
+  and DVB-only cards (`ttpci`, `ddbridge`, `mantis`). The cores and analog
+  parts (`cx88xx`, `cx8800`, `saa7134`, `em28xx`, `em28xx-v4l`) do not depend
+  on a seed module and stay. Any module a kept module depends on is put back,
+  so nothing outside the media tree loses a dependency: `snd-fm801` and
+  `snd-es1968` (sound cards with an FM tuner) keep `tea575x` from
+  `drivers/media/radio/`.
+- Effect on analog capture: those drivers attach their tuner chips through
+  `dvb_attach`/`symbol_request`, which `modules.dep` does not record. The
+  analog capture drivers stay, but lose their tuners without an error at
+  build time. That is within scope: TV tuners are what `O4` removes.
 - Kept (*owner*): `uvcvideo`, InfiniBand, comedi, IIO, staging, CAN and DSA,
   MTD, server NICs and HBAs, WiFi drivers without firmware, `amdgpu`,
   `radeon`, `nouveau`. The rule touches none of them.
-- Saving: 6.0 MB measured (262 modules as `.ko.zst`, of which 218 in the seed
-  directories). The audit's 45 MB covered the broader list before the
-  owner's keep exceptions; see "Expected result".
+- Saving: 6.0 MB measured: 218 modules in the seed directories, 260 after
+  the closure, 1 put back (`tea575x`), 259 removed. The audit's 45 MB covered
+  the broader list before the owner's keep exceptions; see "Expected result".
 - Guards:
   - Build: the `depmod -e` comparison of `S1`.
   - `make test` (`test-image-slim.sh`): no module under the seed
@@ -336,9 +374,9 @@ running system keeps all of them; only the initrd loses them.
 - Why 19 (*owner*): zstd decompresses at the same speed at every level. Not
   `--ultra -22`: its 128 MiB window costs memory in the kernel's initramfs
   decompressor; level 19 uses an 8 MiB window.
-- Saving: 8 to 13 MB (audit). Most of the initrd is `.ko.zst` and firmware
-  that do not compress again, and the early microcode archive is never
-  compressed.
+- Saving: likely 4 to 7 MB (review estimate; audit: 8 to 13). Most of the
+  initrd is `.ko.zst` and firmware that do not compress again, and the early
+  microcode archive is never compressed.
 - Guards: the size budget (below) and every `qemu-smoke*` target, which
   unpack the initrd.
 
@@ -351,16 +389,17 @@ running system keeps all of them; only the initrd loses them.
 | S3 | 1 | audit |
 | S4 | 0 | measured |
 | O1 | 55 to 61 | measured |
-| O2 | 12 | measured |
-| O3 | 14 | audit |
+| O2 | 11.7 | measured |
+| O3 | 14 or more | audit |
 | O4 | 6 | measured |
-| O5 | 8 to 13 | audit |
-| Total | 125 to 136 | |
+| O5 | 4 to 7 | review estimate |
+| Total | 121 to 131 | |
 
-611 MB minus that is about 475 to 485 MB. The target of about 460 MB
+611 MB minus that is about 480 to 490 MB. The target of about 460 MB
 assumed 45 MB for `O4`; with the owner's keep exceptions `O4` measures
-6 MB, while `O1` measures about 20 MB more than the audit's 40. The approved
-cuts therefore end about 20 MB above the target. This design does not add a
+6 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
+gives less than the audit expected. The approved cuts therefore end about
+20 to 30 MB above the target. This design does not add a
 cut to close the gap; the measured result goes to the owner with the final
 task.
 
@@ -414,7 +453,7 @@ task.
 - `docs/notes/history-of-constraints.md`: the same exception, with the date
   and the owner's decision.
 - `CLAUDE.md`, "Build": `SLIM_FILES` joins the list of prerequisites; nothing
-  after `slim-rootfs.sh` may call dracut; `scripts/export-rootfs.sh` is a
+  after `slim-rootfs.sh` may run `dpkg`, `apt-get` or dracut; `scripts/export-rootfs.sh` is a
   prerequisite of the rootfs artifacts.
 - The Dockerfile comment "Never re-introduce a find/rm sweep over
   /usr/lib/firmware" names the exception.
@@ -455,7 +494,7 @@ Under `[Unreleased]` in `CHANGES.md`:
    with every kernel. The rule keeps the highest file of any family
    `modinfo` does not name, the build fails below 20 parsed names, and
    `test_iwlwifi_keep.py` pins the behaviour on the 4.2.0-era data.
-3. **The target is missed by about 20 MB** (see "Expected result"). Only the
+3. **The target is missed by about 20 to 30 MB** (see "Expected result"). Only the
    owner can change the scope.
 4. **An add-on package that triggers `systemd-hwdb update` or `locale-gen`**
    at boot. The `udev` trigger fires only for a package that installs into
@@ -467,6 +506,8 @@ Under `[Unreleased]` in `CHANGES.md`:
    does: ThinFloe boots from a USB stick or over HTTP. The running system
    keeps every driver.
 6. **Conflicts with the release-flow plan.** Task 4 of that plan also edits
-   the prerequisites of `$(KERNEL) $(INITRD) $(SQUASHFS)` (`.version-kind`)
-   and `scripts/export-rootfs.sh`. Whichever lands second merges both
-   prerequisite lists.
+   the prerequisites of `.ubuntu-container` (removes `RELEASE`) and of
+   `$(KERNEL) $(INITRD) $(SQUASHFS)` (adds `.version-kind`), changes
+   `scripts/export-rootfs.sh` (the version export, and a new version write)
+   and `test-container-inputs.sh`, and adds `TF_VERSION`. Whichever lands
+   second merges both; Task 2 of this plan has the step.
