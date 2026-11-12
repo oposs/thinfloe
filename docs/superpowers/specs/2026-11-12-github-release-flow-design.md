@@ -280,24 +280,35 @@ can build, inspect and install the same image.
     `Cargo.toml`) is the builder's call; if it can, `dependabot` gets
     `{"cargo": ["/src/thinfloe-menu"]}`, otherwise cargo stays in
     `ci-local.yml` and dependabot watches GitHub Actions only.
-17. *Architect.* The proposed split, to be confirmed by Phase 0:
+17. *Architect.* Revised 2026-11-12 after the Phase 0 spike; the numbers
+    are in `docs/release-ci.md`. The split:
     - `ci.yml`, on every pull request, every push to `main` and on the
-      release branch: `make test-unit` (Python tests and `cargo test`), and
-      the container and rootfs build followed by `make test`. The Standing
-      Constraints are guarded in `make test`; a pull request that breaks one
-      must not turn `ci-passed` green.
-    - `release-build.yml`, on the release branch only: `make image` with the
-      release version, then the QEMU smoke tests on exactly the bytes it
-      uploads (`qemu-smoke`, `-netboot`, `-upgrade`, `-write`, `-grow`,
-      `-two-sticks`, `-addons`, `-timezone`, `-timezone-netboot`), then the
-      six assets as `release-asset-*` artifacts. A release whose smoke test
-      fails never gets a pull request.
+      release branch, through `ci-local.yml` in two jobs:
+      - `unit`: `make test-unit` (Python tests and `cargo test`).
+      - `image`: the container and rootfs build followed by `make test`,
+        then `make image` (a dev version), the nine QEMU smoke tests
+        (`qemu-smoke`, `-netboot`, `-upgrade`, `-write`, `-grow`,
+        `-two-sticks`, `-addons`, `-timezone`, `-timezone-netboot`) and
+        `make test-runtime`, in one job so the rootfs is built once.
 
-    The image and the smoke tests take long and need `/dev/kvm`; per pull
-    request they would multiply the cost. repo-infra D28 guarantees they run
-    on the release commit before the merge, which is where a broken image
-    must be stopped. `make test-runtime` needs network and a compositor; it
-    joins `ci.yml` if Phase 0 shows it runs on the runner.
+      The Standing Constraints are guarded in `make test`; a pull request
+      that breaks one, or breaks a boot, must not turn `ci-passed` green.
+    - `release-build.yml`, on the release branch only: `make image` with the
+      release version, then the nine smoke tests on exactly the bytes it
+      uploads, then the six assets as `release-asset-*` artifacts. A release
+      whose smoke test fails never gets a pull request. No cache.
+
+    The first version of this decision kept the image and the smoke tests
+    out of `ci.yml` because they take long and need `/dev/kvm`. On the
+    hosted runner the spike measured both away: `/dev/kvm` works after one
+    udev rule, and the image plus all nine smoke tests add under 7 minutes
+    to a run that spends 8 minutes on the rootfs for `make test` anyway
+    (about 25 minutes in all, on minutes that cost nothing on a public
+    repository). A broken boot now fails its own pull request instead of
+    the next release. `make test-runtime` passed on the runner, so it joins
+    `ci.yml` as the first version foresaw. repo-infra D28 still makes the
+    release build run the smoke tests on the release commit before the
+    merge, on the bytes that ship.
 18. *Architect.* No step uses a stored secret. The release flow needs only
     `GITHUB_TOKEN`.
 
@@ -362,8 +373,9 @@ public repository must never run fork pull requests).
 
 ### Also the builder's call
 
-- How `ci-local.yml` and `release-build-local.yml` split into jobs, and how
-  the six assets reach the upload (one job, or artifacts between jobs).
+- How the six assets reach the upload in `release-build-local.yml` (one
+  job, or artifacts between jobs). The jobs of `ci-local.yml` are settled
+  by decision 17.
 - Where the dev version is written (decision 6).
 - The exceptions in `.github/repo-infra.json`. Rules that cannot apply to a
   bootable image get an exception with that reason: `linux-packages`,
