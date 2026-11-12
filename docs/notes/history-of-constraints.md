@@ -75,6 +75,18 @@ Never add a `find`/`rm -rf` sweep over `/usr/lib/firmware`. To change the
 firmware set, change the package list. `test/integration/test-firmware.sh`
 guards this - run via `make test`.
 
+The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, the last step
+of the image build (owner, 2026-11-12). It keeps, per Intel WiFi series, only
+the ucode file the driver loads (the rule is in
+`containers/ubuntu/slim/iwlwifi_keep.py`) and removes the compat symlinks
+that pointed at the dropped files; it removes `intel-ucode` after dracut has
+built the early microcode archive. Each cut has its own guards:
+`test/unit/test_iwlwifi_keep.py`, the Intel WiFi checks in `test-firmware.sh`
+(at most one ucode per series, none above the driver's maximum, no dangling
+firmware symlink, a ucode for every chip in the field), and a build-time
+check that every firmware file a module still asks for is still there. See
+O1 and O3 in `docs/superpowers/specs/2026-11-12-image-size-design.md`.
+
 ## The WiFi core stack must come from the kernel, never from a backport
 
 `containers/ubuntu/Dockerfile` installs `linux-image-generic` and **not**

@@ -6,7 +6,8 @@
 # dracut. Nothing it calls may run dpkg, apt-get or dracut: a dpkg run can
 # fire the update-initramfs trigger, which rebuilds the initrd with default
 # flags from the slimmed tree. Never add a find/rm sweep over
-# /usr/lib/firmware; the only firmware cuts are the ones named below.
+# /usr/lib/firmware; the only firmware cuts are the ones named below
+# (prune_iwlwifi, prune_amdgpu, drop_intel_ucode), each guarded.
 
 set -euo pipefail
 
@@ -17,6 +18,18 @@ die() {
 
 KVER=""
 DEPMOD_BEFORE=/thinfloe-slim/depmod-before
+# Firmware names some module asks for and the tree has, before any cut.
+FW_BEFORE=/thinfloe-slim/fw-before
+# Firmware removed on purpose: one path per line, relative to
+# /usr/lib/firmware and without .zst (the form modinfo names). Every prune
+# function appends what it removed; check_firmware_names skips these names.
+DROPPED=/thinfloe-slim/dropped
+FW=/usr/lib/firmware
+
+# Every firmware name that the modules under $1 list in modinfo, sorted.
+module_firmware() {
+    find "$1" -name '*.ko*' -print0 | xargs -0 -r modinfo -F firmware | sort -u
+}
 
 # Exactly one kernel, and the initrd that dracut built for it.
 preconditions() {
@@ -34,6 +47,17 @@ preconditions() {
     # What depmod already complains about, so run_depmod can tell new problems
     # from old ones. The names still end in .ko.zst here.
     depmod -n -e -F "/boot/System.map-$KVER" "$KVER" 2>&1 >/dev/null | sort >"$DEPMOD_BEFORE"
+    # The firmware the untouched tree serves, for check_firmware_names.
+    local names name
+    names=$(module_firmware "/usr/lib/modules/$KVER") \
+        || die "modinfo failed while listing module firmware"
+    while IFS= read -r name; do
+        if [[ -n $name && ( -e $FW/$name || -e $FW/$name.zst ) ]]; then
+            echo "$name"
+        fi
+    done <<<"$names" >"$FW_BEFORE"
+    [[ -s $FW_BEFORE ]] || die "no module names firmware that exists under $FW"
+    : >"$DROPPED"
 }
 
 # Rebuild the module index for the final file names and fail on any depmod
@@ -132,16 +156,60 @@ decompress_modules() {
     run_depmod
 }
 
+# O1: per Intel WiFi series keep only the ucode the driver loads.
+# iwlwifi_keep.py holds the rule; the compat symlinks in $FW whose target
+# went are removed with it.
 prune_iwlwifi() {
-    : # Task 6
+    local names=/thinfloe-slim/iwlwifi-names
+    local dir=$FW/intel/iwlwifi
+    local drop links out n m
+    module_firmware "/usr/lib/modules/$KVER/kernel/drivers/net/wireless/intel" >"$names" \
+        || die "modinfo failed on the Intel WiFi modules"
+    drop=$(mktemp)
+    out=$(python3 -I /thinfloe-slim/iwlwifi_keep.py "$names" "$dir" 2>&1 >"$drop") \
+        || { rm -f "$drop"; die "iwlwifi selection failed: $out"; }
+    n=$(wc -l <"$drop")
+    (cd "$dir" && xargs -d '\n' -r rm -f -- <"$drop") \
+        || { rm -f "$drop"; die "removing iwlwifi files failed"; }
+    sed -e 's#^#intel/iwlwifi/#' -e 's/\.zst$//' "$drop" >>"$DROPPED"
+    rm -f "$drop"
+    links=$(find "$FW" -xtype l) || die "find over $FW failed"
+    m=0
+    if [[ -n $links ]]; then
+        m=$(wc -l <<<"$links")
+        xargs -d '\n' rm -f -- <<<"$links" || die "removing dangling firmware symlinks failed"
+        sed -e "s#^$FW/##" -e 's/\.zst$//' <<<"$links" >>"$DROPPED"
+    fi
+    links=$(find "$FW" -xtype l) || die "find over $FW failed"
+    [[ -z $links ]] || die "dangling firmware symlinks remain:"$'\n'"$links"
+    echo "slim-rootfs: removed $n iwlwifi files, $m dangling firmware symlinks" >&2
 }
 
 prune_amdgpu() {
     : # Task 9
 }
 
+# Every firmware file that a module still in the tree asks for, that the
+# untouched tree had and that no prune dropped on purpose, must still exist.
 check_firmware_names() {
-    : # Task 6
+    local now want name mod f
+    now=$(module_firmware "/usr/lib/modules/$KVER") \
+        || die "modinfo failed while listing module firmware"
+    want=$(comm -12 <(printf '%s\n' "$now") "$FW_BEFORE" | comm -23 - <(sort -u "$DROPPED")) \
+        || die "cannot compare firmware names"
+    while IFS= read -r name; do
+        [[ -n $name ]] || continue
+        [[ -e $FW/$name || -e $FW/$name.zst ]] && continue
+        mod=unknown
+        while IFS= read -r -d '' f; do
+            if modinfo -F firmware "$f" | grep -qxF -- "$name"; then
+                mod=${f#/usr/lib/modules/"$KVER"/}
+                break
+            fi
+        done < <(find "/usr/lib/modules/$KVER" -name '*.ko*' -print0)
+        die "firmware $name was removed but $mod still asks for it"
+    done <<<"$want"
+    echo "slim-rootfs: $(grep -c . <<<"$want" || true) module firmware names checked" >&2
 }
 
 drop_intel_ucode() {

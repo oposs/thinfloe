@@ -447,9 +447,11 @@ RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     --compress "zstd -3 -T4" \
     --kver $KERNEL_VERSION
 
-# Cleanup. Firmware content is determined by package selection alone -
-# see the linux-firmware-minimal + per-vendor packages above. Never
-# re-introduce a find/rm sweep over /usr/lib/firmware.
+# Cleanup. Firmware content is determined by package selection - see the
+# linux-firmware-minimal + per-vendor packages above. Never re-introduce a
+# find/rm sweep over /usr/lib/firmware. The one exception is the slim step
+# below: it keeps per Intel WiFi series the file the driver loads and removes
+# intel-ucode after dracut, each with its own guard.
 RUN rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
     apt-get -qqy clean && apt-get -qqy autoremove
 
