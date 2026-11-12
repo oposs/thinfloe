@@ -110,6 +110,31 @@ class SelectTest(unittest.TestCase):
         self.assertIn("iwlwifi-so-a0-jf-b0-77.ucode.zst", keep)
         self.assertIn("iwlwifi-so-a0-jf-b0-83.ucode.zst", drop)
 
+    def test_digit_macro_unresolves_ceiling(self):
+        names = NAMES + ["iwlwifi-sc2-a0-wh-a0-cIWL_SC2_UCODE_CORE_MAX.ucode"]
+        self.assertIsNone(iwlwifi_keep.ceilings(names)[("sc2", "c")])
+        files = FILES + [
+            "iwlwifi-sc2-a0-wh-a0-c101.ucode.zst",
+            "iwlwifi-sc2-a0-wh-a0-c102.ucode.zst",
+        ]
+        keep, _ = iwlwifi_keep.select(names, files)
+        self.assertIn("iwlwifi-sc2-a0-wh-a0-c101.ucode.zst", keep)
+        self.assertIn("iwlwifi-sc2-a0-wh-a0-c102.ucode.zst", keep)
+
+    def test_unparsed_ucode_name_refused(self):
+        for odd in ("iwlwifi-sc-a0-wh-b0-c1x.ucode", "iwlwifi-sc-a0-fw.bin"):
+            with self.assertRaises(iwlwifi_keep.UnknownName):
+                iwlwifi_keep.select(NAMES + [odd], FILES)
+
+    def test_named_file_never_dropped(self):
+        # modinfo names ma-b0-hr-b0-89 exactly; the hr radio ceiling (100,
+        # from ma-a0-hr-b0-100) would pick a -100 file over it.
+        names = [n for n in NAMES if n != "iwlwifi-ma-b0-hr-b0-100.ucode"]
+        names.append("iwlwifi-ma-b0-hr-b0-89.ucode")
+        files = FILES + ["iwlwifi-ma-b0-hr-b0-100.ucode.zst"]
+        with self.assertRaises(iwlwifi_keep.NamedFileDropped):
+            iwlwifi_keep.select(names, files)
+
     def test_fixture_totals(self):
         self.assertEqual(len(FILES), 174)
         self.assertEqual(len(self.drop), 111)

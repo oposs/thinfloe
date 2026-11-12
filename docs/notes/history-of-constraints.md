@@ -79,13 +79,17 @@ The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, the last step
 of the image build (owner, 2026-11-12). It keeps, per Intel WiFi series, only
 the ucode file the driver loads (the rule is in
 `containers/ubuntu/slim/iwlwifi_keep.py`) and removes the compat symlinks
-that pointed at the dropped files; it removes `intel-ucode` after dracut has
-built the early microcode archive. Each cut has its own guards:
-`test/unit/test_iwlwifi_keep.py`, the Intel WiFi checks in `test-firmware.sh`
-(at most one ucode per series, none above the driver's maximum, no dangling
-firmware symlink, a ucode for every chip in the field), and a build-time
-check that every firmware file a module still asks for is still there. See
-O1 and O3 in `docs/superpowers/specs/2026-11-12-image-size-design.md`.
+that pointed at the dropped files. Removing `intel-ucode` after dracut has
+built the early microcode archive is planned as the next cut there (O3).
+The iwlwifi cut is guarded by `test/unit/test_iwlwifi_keep.py`, the Intel
+WiFi checks in `test-firmware.sh` (at most one ucode per series, none above
+the driver's maximum, no dangling firmware symlink, a ucode for every chip
+in the field), and the selector itself, which stops the build rather than
+drop a file that `modinfo` names. Two build-time checks in `slim-rootfs.sh`
+cover what the cuts must not touch: every firmware file a module still asks
+for must still exist unless a cut dropped it on purpose, and no firmware
+link may dangle, before or after the cuts. See O1 and O3 in
+`docs/superpowers/specs/2026-11-12-image-size-design.md`.
 
 ## The WiFi core stack must come from the kernel, never from a backport
 
