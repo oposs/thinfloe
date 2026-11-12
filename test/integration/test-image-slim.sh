@@ -131,6 +131,31 @@ else
     fi
 fi
 
+# DVB, TV tuner and radio modules, radeon and nouveau (O4). Names carry .ko
+# here because the modules are decompressed (S1).
+absent_except() {
+    local desc="$1" pattern="$2" except="$3" hit
+    hit=$(grep -E -- "$pattern" "$LIST" | grep -vE -- "$except" | head -1 || true)
+    if [[ -z $hit ]]; then
+        echo "ok   - $desc"
+    else
+        echo "FAIL - $desc (found: $hit)"
+        fail=1
+    fi
+}
+MODS='^squashfs-root/usr/lib/modules/[^/]+/kernel/'
+absent_except "no DVB, tuner or radio modules" \
+    "${MODS}drivers/media/(dvb-frontends|tuners|radio|dvb-core|usb/dvb-usb|usb/dvb-usb-v2)/.*\\.ko\$" \
+    '/tea575x\.ko$'
+absent "no cx88-dvb"                  "${MODS}.*/cx88-dvb\\.ko\$"
+absent "no saa7134-dvb"               "${MODS}.*/saa7134-dvb\\.ko\$"
+absent "no em28xx-dvb"                "${MODS}.*/em28xx-dvb\\.ko\$"
+absent "no radeon or nouveau modules" "${MODS}drivers/gpu/drm/(radeon|nouveau)/"
+for m in cx88xx cx8800 saa7134 em28xx em28xx-v4l uvcvideo ib_core comedi \
+    industrialio can dsa_core mtd mlx5_core amdgpu iwlwifi snd-fm801 tea575x; do
+    check "module $m kept" "${MODS}.*/$m\\.ko\$"
+done
+
 if [[ $fail -eq 0 ]]; then
     echo "PASSED"
 else

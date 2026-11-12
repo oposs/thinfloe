@@ -49,8 +49,75 @@ run_depmod() {
     [[ -z $new ]] || die "depmod reports new problems:"$'\n'"$new"
 }
 
+# O4: remove DVB, TV tuner and radio modules, and radeon and nouveau. The
+# set is read from modules.dep before anything changes (names still end in
+# .ko.zst): the seed directories, plus every media module that depends on
+# the set, minus every module a module outside the set depends on.
 trim_media_modules() {
-    : # Task 5
+    local dep=/usr/lib/modules/$KVER/modules.dep
+    local list out n m
+    list=$(mktemp)
+    out=$(python3 -I - "$dep" 2>&1 >"$list" <<'PYEOF'
+import sys
+
+SEEDS = (
+    "kernel/drivers/media/dvb-frontends/",
+    "kernel/drivers/media/tuners/",
+    "kernel/drivers/media/radio/",
+    "kernel/drivers/media/dvb-core/",
+    "kernel/drivers/media/usb/dvb-usb/",
+    "kernel/drivers/media/usb/dvb-usb-v2/",
+)
+MEDIA = ("kernel/drivers/media/", "kernel/drivers/staging/media/")
+GPU = ("kernel/drivers/gpu/drm/radeon/", "kernel/drivers/gpu/drm/nouveau/")
+
+deps = {}
+with open(sys.argv[1]) as f:
+    for line in f:
+        name, _, rest = line.rstrip("\n").partition(":")
+        if name:
+            deps[name] = rest.split()
+
+seed = {m for m in deps if m.startswith(SEEDS)}
+cut = set(seed)
+changed = True
+while changed:
+    changed = False
+    for m, d in deps.items():
+        if m not in cut and m.startswith(MEDIA) and any(x in cut for x in d):
+            cut.add(m)
+            changed = True
+closure_size = len(cut)
+# Put back what a module outside the set needs.
+changed = True
+while changed:
+    changed = False
+    for m, d in deps.items():
+        if m not in cut:
+            for x in d:
+                if x in cut:
+                    cut.discard(x)
+                    changed = True
+gpu = {m for m in deps if m.startswith(GPU)}
+for m, d in deps.items():
+    if m not in gpu and any(x in gpu for x in d):
+        sys.exit("slim-rootfs: %s depends on a radeon or nouveau module" % m)
+media = sorted(cut - gpu)
+for m in media + sorted(gpu):
+    print(m)
+sys.stderr.write("%d %d %d %d\n" % (len(seed), closure_size, len(media), len(gpu)))
+PYEOF
+    ) || { rm -f "$list"; die "cannot compute the media module set: $out"; }
+    # out holds "<seed> <closure> <media> <gpu>"
+    read -r _ _ n m <<<"$out"
+    if [[ -z ${n:-} || $n -lt 100 ]]; then
+        rm -f "$list"
+        die "only ${n:-0} media modules to remove, expected more than 100"
+    fi
+    (cd "/usr/lib/modules/$KVER" && xargs -d '\n' -r rm -f -- <"$list") \
+        || { rm -f "$list"; die "removing media modules failed"; }
+    rm -f "$list"
+    echo "slim-rootfs: removed $n media modules, $m radeon and nouveau modules" >&2
 }
 
 # The squashfs compresses better as a whole than the zstd files inside it.
