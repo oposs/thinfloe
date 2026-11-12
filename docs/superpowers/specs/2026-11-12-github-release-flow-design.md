@@ -44,8 +44,10 @@ can build, inspect and install the same image.
 
 ## Non-goals
 
-- Netboot from GitHub (*owner*). The Upgrade tile stays hidden on netboot,
-  and netboot machines keep updating as today.
+- Netboot updates (*owner*, 2026-11-12). There are no netboot machines at
+  present; updating them is later work that needs a server part. The Upgrade
+  tile stays hidden on netboot. Freezing tobi.oetiker.ch and retiring
+  `publish.sh` affect no netboot machine.
 - A 3.x maintenance line, pre-releases, release channels, or signed images.
   The checksum file guards against damaged downloads, not against a
   compromised GitHub account.
@@ -139,11 +141,21 @@ can build, inspect and install the same image.
      since nobody can now tell which entry shipped in which of them.
    - An annotated tag `v4.2.0` on `db60ef6` ("build: release 4.2.0").
    - A published GitHub release `v4.2.0`, so the publish workflow reads
-     "v4.2.0 is released - nothing to do" instead of failing. It carries the
-     4.2.0 files from tobi.oetiker.ch under the asset names below, plus a
-     `SHA256SUMS` made from them, and no `release-build.json`. That makes
-     `latest/download/` answer from the first day, which the builder's tests
-     against the real GitHub need.
+     "v4.2.0 is released - nothing to do" instead of failing. It holds only
+     `version` (`4.2.0`) and `SHA256SUMS` with the one line for `version`, and
+     no `release-build.json` (*owner*, 2026-11-12). It carries no images: the
+     4.2.0 images still contain the site's `tlclient.conf`, and decision 14
+     keeps that out of anything public. `latest/download/<image>` answers 404
+     until 4.3.0, which harms nobody, since no machine reads GitHub before the
+     bridge. The first images on GitHub come with 4.3.0.
+   - Order (*architect*): the tag and the release come first in the rollout,
+     before Phase 0, so its curl tests have a real release to read. This is
+     safe with repo-infra. While `CHANGES.md` has no released section and no
+     publish workflow exists, nothing reads the tag: `ri-release-prepare` only
+     runs once `release-pr.yml` is on `main`, and `apply`/`check` look for a
+     tag only for a version `CHANGES.md` names. When the roll to
+     `## 4.2.0` later lands with the callers, the tag and the release already
+     match it, and the first publish run finds the release done.
 
 ### Release assets
 
@@ -213,8 +225,7 @@ can build, inspect and install the same image.
    server directories stay usable for tests.
 10. *Architect.* The custom-URL option in `thinfloe-upgrade` and on the
     Upgrade screen stays, for testing.
-11. *Owner.* The Upgrade tile stays hidden on netboot; netboot machines keep
-    updating as today.
+11. *Owner.* The Upgrade tile stays hidden on netboot (see Non-goals).
 
 ### Bridge from tobi.oetiker.ch
 
@@ -250,14 +261,15 @@ can build, inspect and install the same image.
       screen.
     - What stays: the OxuLnk tile's add-on source
       `https://gitea.oetiker.ch/api/packages/oposs/debian` is the owner's
-      public package server, which any user may install from;
+      public package server, which any user may install from. It answers
+      without login (HTTP 200 for `repository.key` and
+      `dists/resolute/Release`, checked by the coordinator on 2026-11-12);
       `tobi.oetiker.ch` in `thinfloe-upgrade` disappears with decision 7; the
       `LABEL network` entry in `configs/syslinux.cfg` with
       `http://192.168.1.100/boot/ramroot.sqsh` is a placeholder example.
     - *Builder:* search again (host names, addresses, domains, user names,
       keys) over `overlay/`, `configs/`, `containers/`, `brand/` and the
-      default home, and confirm `gitea.oetiker.ch` answers the add-on source
-      without login from outside the owner's network.
+      default home.
 
 ### CI and release build
 
@@ -300,7 +312,8 @@ can build, inspect and install the same image.
   now carry none, because `latest/download/<name>` needs a fixed name
   (decision 5).
 - **Baseline tag.** `v3.0.0` at `4e9ca9c` is replaced by `v4.2.0` at
-  `db60ef6` with a GitHub release and a rolled `CHANGES.md` (decision 4).
+  `db60ef6` with a GitHub release that holds only `version` and
+  `SHA256SUMS`, and a rolled `CHANGES.md` (decision 4).
 - **Version split.** The old design split the Makefile's `VERSION` into an
   image tag and the release version. Commit `8677396` already introduced
   `RELEASE`; `VERSION := 3.0.0` stays as the container tag, which keeps
@@ -333,10 +346,13 @@ down:
   needed), and that each smoke test passes within its timeout;
 - wall time of the container build, `make test`, `make image` and each smoke
   test, cold and with whatever cache works (`actions/cache`, a registry);
-- against the real `v4.2.0` release: that `curl -fsSL` follows the redirects
-  of `latest/download/version`, that the range request of `image_size`
-  (`-r 0-17`) and the `HEAD` request (`curl -sSfIL`) used for sizes and
-  progress work on the redirected asset URL, and what to do where they do not.
+- against the baseline release (rollout step 1), on both
+  `releases/download/v4.2.0/version` and `releases/latest/download/version`:
+  that `curl -fsSL` follows the redirects, and that the `HEAD` request
+  (`curl -sSfIL`) and the range request of `image_size` (`-r 0-17`) work on
+  the redirected asset URL; what to do where they do not. The baseline holds
+  no image, so the range request on a large asset is checked again on the
+  4.3.0 release before rollout step 10 (same redirect path, larger file).
 
 From the numbers, confirm or change the split of decision 17 and say why.
 If a hosted runner cannot build or smoke-test the image (disk, KVM or the
@@ -366,23 +382,24 @@ Each step lands before the next starts. Steps marked *owner* change the live
 repository or a server; the builder prepares them, the owner confirms each
 one at the time it is done.
 
-1. **Phase 0 spike** (above). Its result may stop the rollout at an owner
-   decision.
-2. **Site-specific content out** (decision 15). An ordinary pull request with
+1. *Owner:* **baseline v4.2.0** (decision 4). Push the annotated tag `v4.2.0`
+   on `db60ef6` and create the published release `v4.2.0` with `version` and
+   `SHA256SUMS` only. Nothing in the repository reads it yet; it must exist
+   before the `CHANGES.md` roll of step 6 reaches `main`, or the first publish
+   run fails and blocks every later dispatch.
+2. **Phase 0 spike** (above), with its curl tests against the baseline. Its
+   result may stop the rollout at an owner decision.
+3. **Site-specific content out** (decision 15). An ordinary pull request with
    a `CHANGES.md` entry; `main` is not protected yet.
-3. **Dev version** (decision 6) and **download from GitHub** (decisions 7 to
+4. **Dev version** (decision 6) and **download from GitHub** (decisions 7 to
    10). One pull request or two, each with `CHANGES.md` entries. They change
    what the image does, but nothing ships until step 9.
-4. *Owner:* **baseline v4.2.0** (decision 4). Push the annotated tag `v4.2.0`
-   on `db60ef6` and create the published release `v4.2.0` with the six files.
-   This must exist before the `CHANGES.md` roll of step 6 reaches `main`, or
-   the first publish run fails and blocks every later dispatch.
 5. *Owner:* **`no-changelog-label`** (`repo_infra apply --item no-changelog-label`).
 6. **Onboarding pull request**, opened with the `no-changelog` label at
    creation: the five callers, `ci-local.yml`, `release-build-local.yml`,
    `.github/repo-infra.json`, `dependabot` (`repo_infra apply --item
    dependabot`), and the `CHANGES.md` roll to `## 4.2.0 - 2026-11-11` (keeping
-   under `[Unreleased]` any entry steps 2 and 3 added). `repo_infra check`
+   under `[Unreleased]` any entry steps 3 and 4 added). `repo_infra check`
    exits 0 apart from the administration items. After the merge, the publish
    run on `main` must read "v4.2.0 is released - nothing to do" and `ci-passed`
    must be green on the merge commit.
@@ -406,9 +423,4 @@ one at the time it is done.
 
 ## Questions for the owner
 
-- **How do the netboot machines get a new image today?** If the boot server
-  takes its files from tobi.oetiker.ch/dbrrg, freezing that server at the
-  bridge (decision 12) also freezes netboot. Then either the boot server
-  fetches from the GitHub release (a script to build) or the owner copies
-  each release there by hand.
 - **Runner**, only if Phase 0 fails: larger hosted runner or self-hosted.
