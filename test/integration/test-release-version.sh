@@ -242,72 +242,87 @@ else
     bad "switching to a release version left the dev rootfs standing"
 fi
 
-# publish.sh in a scratch tree, with rsync replaced by a recorder. It
-# publishes releases only: a dev version is refused like any other non-X.Y.Z.
-printf '4.0.0\n' >"$WORK/good"; printf '4.0\n' >"$WORK/short"
-printf '4.0.0\n4.0.1\n' >"$WORK/two"; printf 'v4.0.0\n' >"$WORK/prefix"
-printf '4.0.0-dev+85034f2\n' >"$WORK/dev"
-TREE="$WORK/tree"
-mkdir -p "$TREE/scripts" "$TREE/artifacts/rootfs" "$TREE/artifacts/images" "$WORK/bin"
-cp "$REPO/scripts/publish.sh" "$TREE/scripts/"
-for f in rootfs/vmlinuz rootfs/initrd.img rootfs/ramroot.sqsh \
-         images/thinfloe-usb.img.zst images/thinfloe-usb.img.zst.sha256; do
-    : >"$TREE/artifacts/$f"
-done
+# publish.sh mirrors one downloaded GitHub release directory, with rsync
+# replaced by a recorder. The six assets go up unchanged; three more files
+# are generated for the old sticks.
+ASSETS=(vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst version SHA256SUMS)
+printf '4.0\n' >"$WORK/short"; printf '4.0.0\n4.0.1\n' >"$WORK/two"
+printf 'v4.0.0\n' >"$WORK/prefix"; printf '4.0.0-dev+85034f2\n' >"$WORK/dev"
+REL="$WORK/release"
+mkdir -p "$WORK/bin"
 cat >"$WORK/bin/rsync" <<STUB
 #!/bin/bash
 printf '%s\n' "\$@" >"$WORK/rsync.args"
 STUB
 chmod +x "$WORK/bin/rsync"
-publish() {
+make_release() {
+    local f
+    rm -rf "$REL"; mkdir -p "$REL"
+    for f in vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst; do
+        printf 'content of %s\n' "$f" >"$REL/$f"
+    done
+    printf '4.0.0\n' >"$REL/version"
+    (cd "$REL" && sha256sum vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst version >SHA256SUMS)
+}
+publish() {  # publish [dir...]: run publish.sh with the recorder
     rm -f "$WORK/rsync.args"
-    PATH="$WORK/bin:$PATH" bash "$TREE/scripts/publish.sh" >/dev/null 2>&1
+    PATH="$WORK/bin:$PATH" bash "$REPO/scripts/publish.sh" "$@" >"$WORK/publish.out" 2>&1
+}
+refuses() {  # refuses <label> [dir...]
+    local label=$1; shift
+    if ! publish "$@" && [[ ! -f "$WORK/rsync.args" ]]; then
+        ok "publish.sh refuses $label"
+    else
+        bad "publish.sh published $label"
+    fi
 }
 
-rm -f "$TREE/artifacts/rootfs/version"
-if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
-    ok "publish.sh refuses without artifacts/rootfs/version"
-else
-    bad "publish.sh published without a version file"
-fi
-for f in short two prefix dev; do
-    cp "$WORK/$f" "$TREE/artifacts/rootfs/version"
-    if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
-        ok "publish.sh refuses a version file that is $f"
-    else
-        bad "publish.sh published a version file that is $f"
-    fi
+make_release
+refuses "without a release directory"
+refuses "a directory that does not exist" "$WORK/nowhere"
+for f in "${ASSETS[@]}"; do
+    make_release; rm "$REL/$f"
+    refuses "a release without $f" "$REL"
 done
-# A version file newer than the image is from a later build than it.
-cp "$WORK/good" "$TREE/artifacts/rootfs/version"
-touch -d '2030-01-01' "$TREE/artifacts/rootfs/version"
-touch -d '2029-01-01' "$TREE/artifacts/images/thinfloe-usb.img.zst"
-if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
-    ok "publish.sh refuses a version file newer than the image"
+make_release; printf 'tampered\n' >>"$REL/ramroot.sqsh"
+refuses "a release that fails sha256sum -c" "$REL"
+for f in short two prefix dev; do
+    make_release; cp "$WORK/$f" "$REL/version"
+    (cd "$REL" && sha256sum vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst version >SHA256SUMS)
+    refuses "a version file that is $f" "$REL"
+done
+
+check() { if [[ $1 == 1 ]]; then ok "$2"; else bad "$2"; fi; }
+make_release
+if publish "$REL"; then
+    args=$(cat "$WORK/rsync.args")
+    all=1
+    for f in "${ASSETS[@]}"; do
+        grep -qx "$REL/$f" <<<"$args" || all=0
+    done
+    check "$all" "publish.sh uploads the six assets"
+    extra=1
+    for f in thinfloe-usb.img.zst.sha256 dbrrg-usb.img.zst dbrrg-usb.img.zst.sha256; do
+        grep -qE "/$f\$" <<<"$args" || extra=0
+    done
+    check "$extra" "publish.sh uploads the three generated files"
+    hl=0; grep -qE '^-[a-zA-Z]*H' <<<"$args" && hl=1
+    check "$hl" "rsync keeps hard links (-H)"
+    tg=0; [[ $(tail -n1 "$WORK/rsync.args") == "oetiker@web-volki-01-adm:public_html/dbrrg/" ]] && tg=1
+    check "$tg" "target is oetiker@web-volki-01-adm:public_html/dbrrg/"
+    good=1
+    while read -r s; do
+        [[ -f $s ]] || { good=0; continue; }
+        (cd "$(dirname "$s")" && sha256sum -c "$(basename "$s")" >/dev/null 2>&1) || good=0
+    done < <(grep -E '/(thinfloe|dbrrg)-usb.img.zst.sha256$' <<<"$args")
+    check "$good" "the generated checksums verify their images"
+    d=$(grep -E '/dbrrg-usb.img.zst$' <<<"$args")
+    lk=0; [[ $d -ef $REL/thinfloe-usb.img.zst ]] && lk=1
+    check "$lk" "dbrrg-usb.img.zst is a hard link of the image"
+    n=$(find "$REL" -mindepth 1 -maxdepth 1 | wc -l)
+    check "$(( n == 7 ))" "the release directory gains only its work directory"
 else
-    bad "publish.sh published a version file newer than the image"
-fi
-refusal=$(PATH="$WORK/bin:$PATH" bash "$TREE/scripts/publish.sh" 2>&1 >/dev/null)
-if grep -q "touch .*thinfloe-usb.img.zst" <<<"$refusal"; then
-    ok "the refusal says how to fix a copy that reordered the times"
-else
-    bad "the refusal does not name 'touch artifacts/images/thinfloe-usb.img.zst'"
-fi
-# A missing image is refused by the file check, not waved through.
-mv "$TREE/artifacts/images/thinfloe-usb.img.zst" "$WORK/zst"
-touch -d '2028-01-01' "$TREE/artifacts/rootfs/version"
-if ! publish && [[ ! -f "$WORK/rsync.args" ]]; then
-    ok "publish.sh refuses without thinfloe-usb.img.zst"
-else
-    bad "publish.sh published without thinfloe-usb.img.zst"
-fi
-mv "$WORK/zst" "$TREE/artifacts/images/thinfloe-usb.img.zst"
-touch -d '2029-01-01' "$TREE/artifacts/images/thinfloe-usb.img.zst"
-touch -d '2028-01-01' "$TREE/artifacts/rootfs/version"
-if publish && grep -qx "$TREE/artifacts/rootfs/version" "$WORK/rsync.args"; then
-    ok "publish.sh uploads the version file"
-else
-    bad "publish.sh does not upload artifacts/rootfs/version"
+    bad "publish.sh failed on a valid release: $(cat "$WORK/publish.out")"
 fi
 
 exit $fail
