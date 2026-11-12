@@ -70,6 +70,8 @@ SQSH_OUTPUT="${ARTIFACT_DIR}/ramroot.sqsh"
 # /etc/hosts and /etc/resolv.conf are replaced on every boot by
 # un-dockerize.service, and the initramfs writes /etc/hostname from the
 # machine-id; before this, every machine shipped the build container's ID.
+# scripts is excluded because the Makefile bind-mounts ./scripts at /scripts
+# for this export; 4.2.0 shipped /scripts/publish.sh and the smoke scripts.
 mksquashfs / "$SQSH_OUTPUT" \
     -comp "$SQUASHFS_COMP" \
     -Xcompression-level "$SQUASHFS_COMP_LEVEL" \
@@ -77,7 +79,7 @@ mksquashfs / "$SQSH_OUTPUT" \
     -processors "$BUILD_JOBS" \
     -noappend \
     -no-progress \
-    -e boot tmp var/tmp artifacts proc sys dev run \
+    -e boot tmp var/tmp artifacts proc sys dev run scripts \
        etc/hostname etc/resolv.conf || die "mksquashfs failed"
 
 log_success "SquashFS created: $(format_bytes $(stat -c%s "$SQSH_OUTPUT"))"

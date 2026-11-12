@@ -146,6 +146,33 @@ else
     bad "a __pycache__ under overlay/ makes the image rebuild"
 fi
 
+# The export step reads scripts/export-rootfs.sh and scripts/lib/common.sh
+# from the bind mount; a change to either must re-export the artifacts.
+mkdir -p "$TREE/scripts/lib"
+: >"$TREE/scripts/export-rootfs.sh"; : >"$TREE/scripts/lib/common.sh"
+export_state() {
+    touch -d '2020-01-01' "$TREE/scripts/export-rootfs.sh" "$TREE/scripts/lib/common.sh"
+    reset
+    : >"$TREE/artifacts/rootfs/ramroot.sqsh"
+    touch -d '2022-01-01' "$TREE/artifacts/rootfs/ramroot.sqsh"
+}
+rootfs_state() {
+    if make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" artifacts/rootfs/ramroot.sqsh >/dev/null 2>&1; then
+        echo up-to-date
+    else
+        echo rebuild
+    fi
+}
+for src in scripts/export-rootfs.sh scripts/lib/common.sh; do
+    export_state
+    touch "$TREE/$src"
+    if [[ $(rootfs_state) == rebuild ]]; then
+        ok "a changed $src re-exports the rootfs"
+    else
+        bad "a changed $src left the exported rootfs standing"
+    fi
+done
+
 # The build context: .dockerignore is an allow-list, and a COPY of a file it
 # leaves out fails the build ("no items matching glob", RELEASE, 2026-11-07).
 # A FROM-scratch probe runs every COPY/ADD from the repository (not --from)
