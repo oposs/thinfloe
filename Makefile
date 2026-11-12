@@ -492,6 +492,7 @@ test: test-unit rootfs
 	@test/integration/test-usb-image-deps.sh
 	@test/integration/test-container-inputs.sh
 	@test/integration/test-release-version.sh
+	@test/integration/test-public-content.sh
 	@test/integration/test-format-bytes.sh
 	@test/integration/test-plymouth-step.sh
 	@test/integration/test-make-clean.sh
