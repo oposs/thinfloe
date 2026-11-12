@@ -16,6 +16,7 @@ die() {
 }
 
 KVER=""
+DEPMOD_BEFORE=/thinfloe-slim/depmod-before
 
 # Exactly one kernel, and the initrd that dracut built for it.
 preconditions() {
@@ -30,14 +31,36 @@ preconditions() {
     KVER=${dirs[0]}
     [[ -f /boot/initrd.img-$KVER ]] || die "run after dracut: no /boot/initrd.img-$KVER"
     [[ -f /boot/System.map-$KVER ]] || die "run after dracut: no /boot/System.map-$KVER"
+    # What depmod already complains about, so run_depmod can tell new problems
+    # from old ones. The names still end in .ko.zst here.
+    depmod -n -e -F "/boot/System.map-$KVER" "$KVER" 2>&1 >/dev/null | sort >"$DEPMOD_BEFORE"
+}
+
+# Rebuild the module index for the final file names and fail on any depmod
+# complaint the snapshot from preconditions does not hold.
+run_depmod() {
+    local after new
+    after=$(mktemp)
+    depmod -a -e -F "/boot/System.map-$KVER" "$KVER" 2>&1 | sort >"$after"
+    new=$(comm -13 <(sed 's/\.ko\.zst/.ko/g' "$DEPMOD_BEFORE" | sort) \
+        <(sed 's/\.ko\.zst/.ko/g' "$after" | sort))
+    rm -f "$after"
+    [[ -z $new ]] || die "depmod reports new problems:"$'\n'"$new"
 }
 
 trim_media_modules() {
     : # Task 5
 }
 
+# The squashfs compresses better as a whole than the zstd files inside it.
+# The initrd keeps its compressed copies, which dracut already made.
 decompress_modules() {
-    : # Task 4
+    find "/usr/lib/modules/$KVER" -name '*.ko.zst' -print0 \
+        | xargs -0 -r -P 4 -n 200 zstd -d -q --rm
+    if [[ -n $(find "/usr/lib/modules/$KVER" -name '*.ko.zst' -print -quit) ]]; then
+        die "compressed modules remain after zstd -d"
+    fi
+    run_depmod
 }
 
 prune_iwlwifi() {

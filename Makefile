@@ -522,6 +522,7 @@ test: test-unit rootfs
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@test/integration/test-squashfs-format.sh
 	@test/integration/test-image-slim.sh
+	@test/integration/test-initramfs-drivers.sh
 	@test/integration/test-image-size.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-labwc-scale.sh

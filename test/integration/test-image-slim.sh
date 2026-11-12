@@ -22,9 +22,10 @@ if ! command -v unsquashfs >/dev/null 2>&1; then
     exit 1
 fi
 
-LIST=$(mktemp)
-LLS=$(mktemp)
-trap 'rm -f "$LIST" "$LLS"' EXIT
+WORK=$(mktemp -d)
+trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+LIST="$WORK/list.txt"
+LLS="$WORK/lls.txt"
 
 if ! unsquashfs -l "$SQSH" >"$LIST" 2>/dev/null; then
     echo "FAIL: cannot list $SQSH" >&2
@@ -80,6 +81,40 @@ if grep -qE 'squashfs-root/etc/systemd/system/systemd-hwdb-update\.service -> /d
 else
     echo "FAIL - systemd-hwdb-update.service is not masked"
     fail=1
+fi
+
+# Kernel modules are stored uncompressed (S1): the squashfs compresses them
+# better than zstd inside it, and depmod must index the final names.
+absent "modules stored uncompressed"  '^squashfs-root/usr/lib/modules/.*\.ko\.zst$'
+
+# modules.dep names only files that exist: every path, left and right of the
+# colon, must be in the squashfs.
+KVER=$(sed -nE 's|^.*/usr/lib/modules/([^/]+)/modules\.dep$|\1|p' "$LIST" | head -1)
+if [[ -z $KVER ]]; then
+    echo "FAIL - modules.dep names only files that exist (no modules.dep in $SQSH)"
+    fail=1
+else
+    printf 'usr/lib/modules/%s/modules.dep\n' "$KVER" >"$WORK/want.txt"
+    if ! unsquashfs -n -d "$WORK/x" -ef "$WORK/want.txt" "$SQSH" >/dev/null 2>&1 \
+        || [[ ! -s $WORK/x/usr/lib/modules/$KVER/modules.dep ]]; then
+        echo "FAIL - modules.dep names only files that exist (cannot extract modules.dep)"
+        fail=1
+    else
+        missing=$(awk -v base="squashfs-root/usr/lib/modules/$KVER/" '
+            NR == FNR { have[$0] = 1; next }
+            {
+                n = split($0, parts, /: ?| /)
+                for (i = 1; i <= n; i++)
+                    if (parts[i] != "" && !((base parts[i]) in have))
+                        print parts[i]
+            }' "$LIST" "$WORK/x/usr/lib/modules/$KVER/modules.dep" | sort -u | head -3)
+        if [[ -z $missing ]]; then
+            echo "ok   - modules.dep names only files that exist"
+        else
+            echo "FAIL - modules.dep names files that are not in the squashfs: $(tr '\n' ' ' <<<"$missing")"
+            fail=1
+        fi
+    fi
 fi
 
 if [[ $fail -eq 0 ]]; then
