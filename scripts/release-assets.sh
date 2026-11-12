@@ -39,6 +39,11 @@ for s in "${SOURCES[@]}"; do
         echo "ERROR: Missing file: $ART/${s#*:}" >&2
         exit 1
     fi
+    # stat and ln would act on the link itself: no size check, a link in the release.
+    if [[ -L "$ART/${s#*:}" ]]; then
+        echo "ERROR: $ART/${s#*:} is a symlink; a release needs the files themselves" >&2
+        exit 1
+    fi
 done
 
 # One line, equal to the version: the same text the image carries.
