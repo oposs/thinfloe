@@ -36,6 +36,8 @@ def load_upgrade_image():
 
 
 ui = load_upgrade_image()
+# Most fixtures replace it; the pinned-tag case needs the real lookup.
+REAL_EXPECTED_DOWNLOAD_SHA256 = ui.expected_download_sha256
 MIB = 1024 * 1024
 # Never the real /run/thinfloe/upgrade.lock.
 _LOCK_DIR = tempfile.TemporaryDirectory()
@@ -453,6 +455,144 @@ class TestExpectedDownloadSha(unittest.TestCase):
             self.put(text)
             self.assertIsNone(self.get(), text)
 
+    def sums(self, text):
+        (self.dir / "SHA256SUMS").write_text(text)
+
+    def test_sha256sums_line(self):
+        self.sums("cd" * 32 + "  vmlinuz\n" + self.HEX.upper()
+                  + " *thinfloe-usb.img.zst\n")
+        self.assertEqual(self.get(), self.HEX)
+        self.assertEqual(self.get("vmlinuz"), "cd" * 32)
+
+    def test_sha256sums_missing_name_is_none(self):
+        self.sums("cd" * 32 + "  vmlinuz\n")
+        self.assertIsNone(self.get())
+
+    def test_sha256sums_wins_over_single_file(self):
+        self.sums(self.HEX + "  thinfloe-usb.img.zst\n")
+        self.put("cd" * 32 + "  thinfloe-usb.img.zst\n")
+        self.assertEqual(self.get(), self.HEX)
+
+    def test_pinned_source_does_not_fall_back(self):
+        pinned = self.dir / "download" / "v4.3.0"
+        pinned.mkdir(parents=True)
+        (pinned / "thinfloe-usb.img.zst.sha256").write_text(
+            self.HEX + "  thinfloe-usb.img.zst\n")
+        with mock.patch.object(ui, "RELEASE_DOWNLOAD", self.base + "/download"):
+            self.assertIsNone(ui.expected_download_sha256(
+                self.base + "/download/v4.3.0", "thinfloe-usb.img.zst"))
+        # The same directory as a custom source still uses the old file.
+        self.assertEqual(ui.expected_download_sha256(
+            self.base + "/download/v4.3.0", "thinfloe-usb.img.zst"), self.HEX)
+
+
+class TestParseSha256sums(unittest.TestCase):
+    HEX = "ab" * 32
+
+    def test_listed_twice_is_none(self):
+        text = f"{self.HEX}  f\n{self.HEX}  f\n"
+        self.assertIsNone(ui.parse_sha256sums(text, "f"))
+
+    def test_malformed_line_is_none(self):
+        for line in ("zz" * 32 + "  f", "ab" * 31 + "  f", self.HEX + " f",
+                     self.HEX + "  f extra", self.HEX + "\tf"):
+            self.assertIsNone(ui.parse_sha256sums(line + "\n", "f"), line)
+
+    def test_other_lines_do_not_matter(self):
+        text = f"garbage\n{self.HEX}  f\n{'cd' * 32}  g\n"
+        self.assertEqual(ui.parse_sha256sums(text, "f"), self.HEX)
+
+
+class TestPinSource(unittest.TestCase):
+    def test_default_is_pinned_to_the_version_read(self):
+        with mock.patch.object(ui, "_fetch_version",
+                               return_value=("4.3.0", "")) as fv:
+            got = ui.pin_source(ui.DEFAULT_URL)
+        fv.assert_called_once_with(ui.DEFAULT_URL)
+        self.assertEqual(got, ui.RELEASE_DOWNLOAD + "/v4.3.0")
+        self.assertTrue(got.endswith("/download/v4.3.0"))
+        self.assertTrue(ui.checksum_required(got))
+
+    def test_custom_source_unchanged(self):
+        with mock.patch.object(ui, "_fetch_version",
+                               side_effect=AssertionError("version read")):
+            self.assertEqual(ui.pin_source("https://h/p"), "https://h/p")
+        self.assertFalse(ui.checksum_required("https://h/p"))
+
+    def test_unreadable_version_fails(self):
+        with mock.patch.object(ui, "_fetch_version",
+                               return_value=("", "no version file at the source")):
+            with self.assertRaises(ui.WriteFailed) as cm:
+                ui.pin_source(ui.DEFAULT_URL)
+        self.assertEqual(cm.exception.reason, "the newest release could not be "
+                         "read: no version file at the source")
+
+    def test_the_names_are_githubs(self):
+        self.assertEqual(ui.DEFAULT_URL,
+                         "https://github.com/oposs/thinfloe/releases/latest/download")
+        self.assertEqual(ui.RELEASE_DOWNLOAD,
+                         "https://github.com/oposs/thinfloe/releases/download")
+        self.assertEqual(ui.CHECKSUM_ASSET, "SHA256SUMS")
+
+
+class TestRedirects(unittest.TestCase):
+    """GitHub answers latest/download/<name> with a chain of redirects."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        cls._tmp = tempfile.TemporaryDirectory()
+        raw = Path(cls._tmp.name) / "raw.img"
+        raw.write_bytes(b"\0" * MIB)
+        zst = Path(cls._tmp.name) / "i.zst"
+        subprocess.run(["zstd", "-q", str(raw), "-o", str(zst)], check=True)
+        files = {"version": b"4.3.0\n", "thinfloe-usb.img.zst": zst.read_bytes()}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                path = self.path
+                for src, dst in (("/latest/download/", "/hop/"),
+                                 ("/hop/", "/download/v4.3.0/")):
+                    if path.startswith(src):
+                        self.send_response(302)
+                        self.send_header("Location", dst + path[len(src):])
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                name = path[len("/download/v4.3.0/"):]
+                if not path.startswith("/download/v4.3.0/") or name not in files:
+                    self.send_error(404)
+                    return
+                body = files[name]
+                rng = self.headers.get("Range")
+                if rng:
+                    first, last = rng.split("=", 1)[1].split("-")
+                    body = body[int(first):int(last) + 1]
+                    self.send_response(206)
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cls.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}/latest/download"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls._tmp.cleanup()
+
+    def test_follows_redirect_chain(self):
+        self.assertEqual(ui._fetch_version(self.base), ("4.3.0", ""))
+        self.assertEqual(ui.image_size(self.base + "/thinfloe-usb.img.zst"), MIB)
+
 
 class TestRemovableFlag(unittest.TestCase):
     def test_string_zero_is_not_removable(self):
@@ -506,6 +646,11 @@ class TestBatchRefusals(unittest.TestCase):
         self.addCleanup(self.upgrade.stop)
         self.saved_progress = ui.PROGRESS
         self.addCleanup(setattr, ui, "PROGRESS", self.saved_progress)
+        # A write from the default source reads the newest version first.
+        self.version = mock.patch.object(ui, "_fetch_version",
+                                         return_value=("4.3.0", ""))
+        self.m_version = self.version.start()
+        self.addCleanup(self.version.stop)
 
     def _enum(self, include_internal=False, examine=True):
         out = [self.mk("/dev/sdb", mounted=False, thinfloe=True),
@@ -616,9 +761,30 @@ class TestBatchRefusals(unittest.TestCase):
         drive, args, progress = self.m_fresh.call_args.args
         self.assertEqual(drive.device, "/dev/sdb")
         self.assertTrue(args.verify)
-        self.assertEqual(args.source, ui.DEFAULT_URL)
+        self.assertEqual(args.source, ui.RELEASE_DOWNLOAD + "/v4.3.0")
         self.assertTrue(ui.PROGRESS.batch)
         self.assertIs(progress, ui.PROGRESS)
+
+    def test_default_write_is_pinned_before_the_size_check(self):
+        self.run_write("/dev/sdb", "fresh")
+        self.m_version.assert_called_once_with(ui.DEFAULT_URL)
+        ui.image_size.assert_called_with(
+            ui.RELEASE_DOWNLOAD + "/v4.3.0/thinfloe-usb.img.zst")
+
+    def test_unreadable_version_fails_the_write(self):
+        self.m_version.return_value = ("", "no version file at the source")
+        for mode in ("fresh", "upgrade"):
+            rc, out = self.run_write("/dev/sdb", mode)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("@result failed the newest release could not be read: "
+                          "no version file at the source", out)
+        self.m_fresh.assert_not_called()
+        self.m_upgrade.assert_not_called()
+
+    def test_custom_source_reads_no_version(self):
+        self.run_write("/dev/sdb", "upgrade", None, "--source", "https://h/p")
+        self.m_version.assert_not_called()
+        self.assertEqual(self.m_upgrade.call_args.args[1].source, "https://h/p")
 
     def test_unknown_mode_is_argparse_error(self):
         rc, out = self.run_write("/dev/sdb", "bogus", "x")
@@ -758,9 +924,9 @@ class TestFreshInstall(unittest.TestCase):
         return ui.WriteResult(written=MIB, image_sha256=self.SHA,
                               download_sha256="cd" * 32)
 
-    def run_fresh(self, copy_home=False, verify=False):
+    def run_fresh(self, copy_home=False, verify=False, source="http://x"):
         import types
-        args = types.SimpleNamespace(source="http://x", copy_home=copy_home,
+        args = types.SimpleNamespace(source=source, copy_home=copy_home,
                                      verify=verify, device=self.dev, expect_id=None)
         out, err = io.StringIO(), io.StringIO()
         prog = ui.Progress(out, True, 0)
@@ -920,6 +1086,48 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual(rc, 130)
         self.assertIn("@result failed cancelled", out)
         self.assertNotWiped()
+
+    def test_required_checksum_missing_fails_before_write(self):
+        before = Path(self.dev).read_bytes()
+        self.patches["expected_download_sha256"].return_value = None
+        rc, out = self.run_fresh(source=ui.RELEASE_DOWNLOAD + "/v4.3.0")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.lines(out, "@result"), [
+            "@result failed the release has no checksum for thinfloe-usb.img.zst"])
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
+    def test_write_uses_pinned_tag_for_every_file(self):
+        pinned = ui.RELEASE_DOWNLOAD + "/v4.3.0"
+        urls = []
+        real_run = subprocess.run
+
+        def run(argv, *a, **kw):
+            if argv[0] != "curl":
+                return real_run(argv, *a, **kw)
+            urls.append(argv[-1])
+            if argv[-1].endswith("/SHA256SUMS"):
+                body = ("cd" * 32 + "  thinfloe-usb.img.zst\n").encode()
+                return subprocess.CompletedProcess(argv, 0, body, b"")
+            return subprocess.CompletedProcess(argv, 22, b"", b"")
+        ident = ui.drive_identity(self.drive)
+        with mock.patch.object(ui.subprocess, "run", side_effect=run), \
+             mock.patch.object(ui, "expected_download_sha256",
+                               REAL_EXPECTED_DOWNLOAD_SHA256), \
+             mock.patch.object(ui, "_fetch_version", return_value=("4.3.0", "")), \
+             mock.patch.object(ui, "ensure_root"), \
+             mock.patch.object(ui, "enumerate_drives", return_value=[self.drive]), \
+             mock.patch.object(ui, "fd_identity", return_value=ident), \
+             mock.patch.object(ui, "PROGRESS", ui.PROGRESS):
+            rc, out = _run_batch(["write", "--device", self.dev, "--mode", "fresh",
+                                  "--expect-id", ident])
+        self.assertEqual(rc, 0, out)
+        urls += [c.args[0] for c in self.patches["stream_image"].call_args_list]
+        urls += [c.args[0] for c in self.patches["image_size"].call_args_list]
+        self.assertIn(pinned + "/SHA256SUMS", urls)
+        self.assertIn(pinned + "/thinfloe-usb.img.zst", urls)
+        for url in urls:
+            self.assertTrue(url.startswith(pinned + "/"), url)
 
 
 class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
@@ -1988,10 +2196,11 @@ class TestExclusiveOpen(TestFreshInstall):
         m.start()
         self.addCleanup(m.stop)
 
-    def run_fresh(self, copy_home=False, verify=False, expect=None):
+    def run_fresh(self, copy_home=False, verify=False, expect=None,
+                  source="http://x"):
         import types
         args = types.SimpleNamespace(
-            source="http://x", copy_home=copy_home, verify=verify, device=self.dev,
+            source=source, copy_home=copy_home, verify=verify, device=self.dev,
             expect_id=expect or ui.drive_identity(self.drive))
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
@@ -2085,7 +2294,8 @@ class TestSourceCheck(TestBatchRefusals):
             ui.expected_download_sha256("file://" + t, "f")
             ui.download_file(url, str(Path(t) / "g"))
         curls = [a for a in argvs if a[0] == "curl"]
-        self.assertEqual(len(curls), 4)
+        # expected_download_sha256 asks for SHA256SUMS, then for f.sha256.
+        self.assertEqual(len(curls), 5)
         for a in curls:
             self.assertEqual(a[-2], "--", a)
 
@@ -2373,6 +2583,24 @@ class TestInteractiveLock(unittest.TestCase):
         self.operation = "upgrade"
         self.assertEqual(self.run_main(), 0)
         self.check()
+
+    def test_the_default_source_is_pinned_after_the_choice(self):
+        self.operation = "upgrade"
+        ui.select_source.side_effect = None
+        ui.select_source.return_value = ui.DEFAULT_URL
+        with mock.patch.object(ui, "_fetch_version", return_value=("4.3.0", "")):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(ui.do_ab_upgrade.call_args.args[1],
+                         ui.RELEASE_DOWNLOAD + "/v4.3.0")
+
+    def test_an_unreadable_version_stops_before_the_drive_scan(self):
+        ui.select_source.side_effect = None
+        ui.select_source.return_value = ui.DEFAULT_URL
+        with mock.patch.object(ui, "_fetch_version",
+                               return_value=("", "no version file at the source")):
+            with self.assertRaises(SystemExit):
+                self.run_main()
+        self.assertNotIn("scan", [n for n, _ in self.seen])
 
     def test_a_drive_changed_during_the_prompts_is_not_written(self):
         self.later = [ui.DriveInfo(**{**self.drive.__dict__, "fingerprint": "00" * 8})]

@@ -12,6 +12,7 @@ needs no privileges and the archive's contents are the assertion.
 
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import io
 import os
@@ -1415,6 +1416,68 @@ class TestAbUpgradeSpace(TestAbUpgradeBootDefault):
             ui.do_ab_upgrade(self.drive(True), "http://example.invalid")
         self.assertIn("'current'", out.getvalue())
         self.assertNotIn("'previous'", out.getvalue())
+
+
+class TestAbUpgradePinned(TestAbUpgradeBootDefault):
+    """A write from the default source takes every file from one tag and
+    refuses a release that has no checksum for one of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.pinned = ui.RELEASE_DOWNLOAD + "/v4.3.0"
+        self.fw = Path(tempfile.mkdtemp(prefix="thinfloe-fw-"))
+        self.addCleanup(shutil.rmtree, self.fw, ignore_errors=True)
+        for f in ui.FIRMWARE_FILES:
+            (self.fw / f).write_text("new " + f)
+        self.cfg_before = [c.read_bytes() for c in (
+            self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg")]
+
+    def download(self, base_url, work_dir, progress):
+        self.bases.append(base_url)
+        return str(self.fw)
+
+    def lookup(self, base_url, name):
+        self.bases.append(base_url)
+        return hashlib.sha256((self.fw / name).read_bytes()).hexdigest()
+
+    def test_required_checksum_missing_fails_before_write(self):
+        self.bases = []
+        progress = ui.Progress(io.StringIO(), True, 0)
+        with mock.patch.object(ui, "download_firmware", side_effect=self.download), \
+             mock.patch.object(ui, "expected_download_sha256", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(ui.WriteFailed) as cm:
+                ui.do_ab_upgrade(self.drive(True), self.pinned, progress)
+        self.assertEqual(cm.exception.reason,
+                         "the release has no checksum for vmlinuz")
+        self.assertFalse((self.esp / "tl.new").exists())
+        self.assertEqual([c.read_bytes() for c in (
+            self.esp / "syslinux.cfg", self.esp / "efi" / "boot" / "syslinux.cfg")],
+            self.cfg_before)
+
+    def test_write_uses_pinned_tag_for_every_file(self):
+        self.bases = []
+        drive = self.drive(True)
+        out = io.StringIO()
+        with mock.patch.object(ui, "download_firmware", side_effect=self.download), \
+             mock.patch.object(ui, "expected_download_sha256", side_effect=self.lookup), \
+             mock.patch.object(ui, "_fetch_version", return_value=("4.3.0", "")) as fv, \
+             mock.patch.object(ui, "ensure_root"), \
+             mock.patch.object(ui, "enumerate_drives", return_value=[drive]), \
+             mock.patch.object(ui, "free_bytes", return_value=1 << 30), \
+             mock.patch.object(ui, "save_home_before_finish", return_value=0), \
+             mock.patch.object(ui, "PROGRESS", ui.PROGRESS), \
+             contextlib.redirect_stdout(out), \
+             contextlib.redirect_stderr(io.StringIO()):
+            rc = ui.batch_main(["write", "--device", "/dev/sdz", "--mode", "upgrade",
+                                "--expect-id", ui.drive_identity(drive)])
+        self.assertEqual(rc, 0, out.getvalue())
+        fv.assert_called_once_with(ui.DEFAULT_URL)
+        # One download and one checksum lookup per firmware file.
+        self.assertEqual(self.bases, [self.pinned] * (1 + len(ui.FIRMWARE_FILES)))
+        for f in ui.FIRMWARE_FILES:
+            self.assertEqual((self.esp / "tl.new" / f).read_text(), "new " + f)
 
 
 class TestZstdContentSize(unittest.TestCase):
