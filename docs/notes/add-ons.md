@@ -6,8 +6,8 @@ them in the menu's Settings screen, and the root tool
 docstring lists the commands) fetches, stores and installs them. The image
 carries only the libraries they need (see
 [Standing Constraints](history-of-constraints.md#add-on-runtime-libraries-are-listed-by-name-in-the-dockerfile)).
-`overlay/home/tfuser/.thinlinc/tlclient.conf` still ships in the default
-home; removing it is later work.
+The default home carries no ThinLinc settings: ThinLinc starts with its own
+defaults, and upgraded sticks keep the settings in their saved home.
 
 - **What an add-on is.** A tile file (`.desktop`) with `X-TF-Source-*` keys,
   in `/etc/thinfloe/menu/` or `~/.config/thinfloe/menu/`. Its id is the file
