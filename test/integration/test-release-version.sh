@@ -268,28 +268,31 @@ publish() {  # publish [dir...]: run publish.sh with the recorder
     rm -f "$WORK/rsync.args"
     PATH="$WORK/bin:$PATH" bash "$REPO/scripts/publish.sh" "$@" >"$WORK/publish.out" 2>&1
 }
-refuses() {  # refuses <label> [dir...]
-    local label=$1; shift
-    if ! publish "$@" && [[ ! -f "$WORK/rsync.args" ]]; then
+refuses() {  # refuses <label> <error text> [dir...]
+    local label=$1 text=$2; shift 2
+    if ! publish "$@" && [[ ! -f "$WORK/rsync.args" ]] \
+        && grep -qF -- "$text" "$WORK/publish.out"; then
         ok "publish.sh refuses $label"
     else
-        bad "publish.sh published $label"
+        bad "publish.sh did not refuse $label with '$text'"
     fi
 }
 
 make_release
-refuses "without a release directory"
-refuses "a directory that does not exist" "$WORK/nowhere"
+refuses "without a release directory" "Usage:"
+refuses "a directory that does not exist" "Usage:" "$WORK/nowhere"
 for f in "${ASSETS[@]}"; do
     make_release; rm "$REL/$f"
-    refuses "a release without $f" "$REL"
+    refuses "a release without $f" "Missing file: $REL/$f" "$REL"
 done
 make_release; printf 'tampered\n' >>"$REL/ramroot.sqsh"
-refuses "a release that fails sha256sum -c" "$REL"
+refuses "a release that fails sha256sum -c" "sha256sum -c SHA256SUMS failed in $REL" "$REL"
+make_release; grep -v ' ramroot.sqsh$' "$REL/SHA256SUMS" >"$WORK/sums"; cp "$WORK/sums" "$REL/SHA256SUMS"
+refuses "a SHA256SUMS without a ramroot.sqsh line" "$REL/SHA256SUMS has not exactly one line for ramroot.sqsh" "$REL"
 for f in short two prefix dev; do
     make_release; cp "$WORK/$f" "$REL/version"
     (cd "$REL" && sha256sum vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst version >SHA256SUMS)
-    refuses "a version file that is $f" "$REL"
+    refuses "a version file that is $f" "$REL/version is not one line X.Y.Z" "$REL"
 done
 
 check() { if [[ $1 == 1 ]]; then ok "$2"; else bad "$2"; fi; }
