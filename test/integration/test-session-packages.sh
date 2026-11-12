@@ -933,15 +933,18 @@ else
     fail=1
 fi
 
-# The release number: RELEASE of the checkout, written at build time.
+# The version: RELEASE of the checkout, or RELEASE-dev+<sha>[.dirty] for a
+# local build, written at export into the rootfs and artifacts/rootfs/version.
 REL_TMP=$(mktemp -d)
-want=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
+rel=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
+exported=$(cat "$(dirname "$SQSH")/version" 2>/dev/null)
 if unsquashfs -no-xattrs -q -d "$REL_TMP/x" "$SQSH" etc/thinfloe/version >/dev/null 2>&1 \
-        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] \
-        && [[ "$(cat "$REL_TMP/x/etc/thinfloe/version")" == "$want" ]] && [[ -n "$want" ]]; then
-    echo "ok   - /etc/thinfloe/version is RELEASE ($want)"
+        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] && [[ -n "$rel" ]] \
+        && [[ "$(cat "$REL_TMP/x/etc/thinfloe/version")" == "$exported" ]] \
+        && [[ "$exported" == "$rel" || "$exported" == "$rel"-dev+* ]]; then
+    echo "ok   - /etc/thinfloe/version is artifacts/rootfs/version, of RELEASE ($exported)"
 else
-    echo "FAIL - /etc/thinfloe/version does not match RELEASE ('$want')"
+    echo "FAIL - /etc/thinfloe/version is not artifacts/rootfs/version ('$exported') of RELEASE ('$rel')"
     fail=1
 fi
 rm -rf "$REL_TMP"

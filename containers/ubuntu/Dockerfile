@@ -288,13 +288,6 @@ RUN tar cf - --exclude="*~" --exclude="__pycache__" -C /__overlay . | tar xf - &
     && install -D -m 644 /etc/netplan/ethernet.yaml /usr/share/thinfloe/netplan/ethernet.yaml
 RUN chown -R tfuser:tfuser /home/tfuser
 
-# The release number from RELEASE in the repository: one line X.Y.Z. The menu
-# shows it in its header and thinfloe-upgrade compares it with the newest one.
-# Anything else fails the build.
-COPY RELEASE /RELEASE.in
-RUN { [ "$(wc -l </RELEASE.in)" = 1 ] && grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' /RELEASE.in; } \
-        || { echo "RELEASE must be one line X.Y.Z" >&2; exit 1; } \
-    && install -m 644 /RELEASE.in /etc/thinfloe/version && rm /RELEASE.in
 # The account was called tluser until 4.0; saved files and local notes may
 # still name /home/tluser.
 RUN ln -s tfuser /home/tluser

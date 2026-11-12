@@ -29,6 +29,7 @@
 
 ### Changed
 
+- The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed files), and such an image is offered the current release as an upgrade.
 - A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
 - The menu's tiles keep their shape and look the same size on every screen. A 4K screen that reports its size no longer gets stretched tiles (one that reports none or an implausible size still gets double size), and a small, dense laptop screen shrinks the menu to fit.
 - Each row in Settings shows one status line, with its button at the right edge. Long text in a row is cut with "…" and the button stays visible.
