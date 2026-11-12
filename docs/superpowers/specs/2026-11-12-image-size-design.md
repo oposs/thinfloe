@@ -1,7 +1,9 @@
 # ThinFloe image size reduction
 
-Date: 2026-11-12. Status: scope approved by the owner 2026-11-12; this design
-is for review.
+Date: 2026-11-12. Status: approved by the owner 2026-11-12: the design and
+the plan, a size budget of about 495 MB (final measured size plus 2 %), and
+the removal of `radeon` and `nouveau` as part of `O4`. The AMD test machine
+for the hardware check is not yet named.
 
 Step 9 (R9) of `docs/superpowers/specs/2026-11-12-github-release-flow-design.md`
 and Task 14 of `docs/superpowers/plans/2026-11-12-github-release-flow.md`. The
@@ -42,9 +44,7 @@ Added by the owner on 2026-11-12, after the review (option B). It adds size:
   AMD GPU firmware, and `amdgpu` fails on them.
 
 Not in scope (*owner*): camera firmware, VA-API drivers, python3 (netplan
-needs it), any change to `radeon` and `nouveau` (they stay as they are; a
-question about them is open with the owner), firmware for AMD graphics
-cards. Unpacked firmware in the squashfs measured larger and is not
+needs it), firmware for AMD graphics cards. Unpacked firmware in the squashfs measured larger and is not
 proposed.
 
 ## Constraints
@@ -348,7 +348,7 @@ running system keeps all of them; only the initrd loses them.
     shows the early update or the current revision. QEMU cannot show it: a
     guest does not load microcode.
 
-### O4: no DVB, TV tuner or radio modules
+### O4: no DVB, TV tuner or radio modules, no `radeon` or `nouveau`
 
 - Where: `slim-rootfs.sh` step 1.
 - Rule (*architect*): seed = every module under
@@ -367,17 +367,28 @@ running system keeps all of them; only the initrd loses them.
   `dvb_attach`/`symbol_request`, which `modules.dep` does not record. The
   analog capture drivers stay, but lose their tuners without an error at
   build time. That is within scope: TV tuners are what `O4` removes.
+- Also removed (*owner*, 2026-11-12): every module under
+  `kernel/drivers/gpu/drm/radeon/` and `kernel/drivers/gpu/drm/nouveau/`
+  (`radeon`, `nouveau`, and the encoder modules `ch7006` and `sil164` in the
+  nouveau directory). Neither driver works without firmware, and the image
+  ships none for them: `A1` removes the package's `radeon/` firmware
+  directory, and no NVIDIA firmware is installed. No other module in
+  `modules.dep` of 7.0.0-43 depends on any of these four, so nothing is put
+  back. The `--omit-drivers` entries for them in the initrd stay.
 - Kept (*owner*): `uvcvideo`, InfiniBand, comedi, IIO, staging, CAN and DSA,
-  MTD, server NICs and HBAs, WiFi drivers without firmware, `amdgpu`,
-  `radeon`, `nouveau`. The rule touches none of them.
-- Saving: 6.0 MB measured: 218 modules in the seed directories, 260 after
-  the closure, 1 put back (`tea575x`), 259 removed. The audit's 45 MB covered
-  the broader list before the owner's keep exceptions; see "Expected result".
+  MTD, server NICs and HBAs, WiFi drivers without firmware, `amdgpu` (for
+  `A1`). The rule touches none of them.
+- Saving: 6.0 MB measured for the media part: 218 modules in the seed
+  directories, 260 after the closure, 1 put back (`tea575x`), 259 removed;
+  2.0 MB for `radeon` and `nouveau` (4 modules, as `.ko.zst`); 8.0 MB in all.
+  The audit's 45 MB covered the broader list before the owner's keep
+  exceptions; see "Expected result".
 - Guards:
   - Build: the `depmod -e` comparison of `S1`.
   - `make test` (`test-image-slim.sh`): no module under the seed
-    directories except `tea575x`; present: `uvcvideo`, `ib_core`, `comedi`, `industrialio`,
-    `can`, `dsa_core`, `mtd`, `mlx5_core`, `amdgpu`, `radeon`, `nouveau`,
+    directories except `tea575x`; no module under `gpu/drm/radeon/` or
+    `gpu/drm/nouveau/`; present: `uvcvideo`, `ib_core`, `comedi`,
+    `industrialio`, `can`, `dsa_core`, `mtd`, `mlx5_core`, `amdgpu`,
     `iwlwifi`, `snd-fm801`.
 
 ### O5: initrd at zstd level 19
@@ -526,15 +537,15 @@ Guards:
 | O1 | 55 to 61 | measured |
 | O2 | 11.7 | measured |
 | O3 | 14 or more | audit |
-| O4 | 6 | measured |
+| O4 | 8 | measured |
 | O5 | 4 to 7 | review estimate |
 | A1 | about -8 (adds) | measured |
-| Total | 113 to 123 | |
+| Total | 115 to 125 | |
 
-611 MB minus that is about 488 to 498 MB; without `A1` it would be 480 to
-490 MB. The target of about 460 MB
+611 MB minus that is about 486 to 496 MB; without `A1` it would be 478 to
+488 MB. The owner accepted a budget of about 495 MB. The target of about 460 MB
 assumed 45 MB for `O4`; with the owner's keep exceptions `O4` measures
-6 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
+8 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
 gives less than the audit expected, and `A1` adds about 8 MB. The approved
 work therefore ends about 30 to 40 MB above the target. This design does not add a
 cut to close the gap; the measured result goes to the owner with the final
@@ -615,7 +626,8 @@ Under `[Unreleased]` in `CHANGES.md`:
 
 - An upgrade or a netboot now downloads about N MB instead of 611 MB. The
   running system keeps Intel WiFi firmware only in the version its driver
-  loads, and has no drivers for DVB, TV tuner and radio cards and no CPU
+  loads, and has no drivers for DVB, TV tuner and radio cards, none for
+  older AMD (`radeon`) and NVIDIA (`nouveau`) graphics, and no CPU
   microcode files, which are applied from `initrd.img` at boot as before.
   During boot, before the system is loaded, drivers for data-centre network
   cards, Fibre Channel and SAS storage controllers, InfiniBand and network
