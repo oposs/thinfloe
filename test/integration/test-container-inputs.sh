@@ -41,10 +41,12 @@ STUB
 chmod +x "$RUNTIME"
 
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/src/thinfloe-menu/src" \
-    "$TREE/overlay/etc/x.d" "$TREE/brand" "$TREE/artifacts/rootfs"
+mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/src/thinfloe-menu/src" \
+    "$TREE/overlay/etc/x.d" "$TREE/brand" "$TREE/artifacts/rootfs" "$TREE/scripts/lib"
 cp "$REPO/Makefile" "$TREE/Makefile"
 inputs=(RELEASE containers/ubuntu/Dockerfile src/thinfloe-menu/src/main.rs
+        containers/ubuntu/slim/slim-rootfs.sh containers/ubuntu/slim/gone.sh
+        scripts/export-rootfs.sh scripts/lib/common.sh
         overlay/etc/keep overlay/etc/x.d/gone.conf brand/keep.svg brand/gone.svg)
 
 # Prints "up-to-date" when make would not rebuild the stamp, "rebuild"
@@ -54,17 +56,26 @@ reset() {
     mkdir -p "$TREE/overlay/etc/x.d" "$TREE/brand"
     for f in "${inputs[@]}"; do : >"$TREE/$f"; done
     echo 4.2.0 >"$TREE/RELEASE"
-    (cd "$TREE" && find RELEASE containers src overlay brand -exec touch -d '2020-01-01' {} +)
+    (cd "$TREE" && find RELEASE containers src overlay brand scripts -exec touch -d '2020-01-01' {} +)
     echo sha256:aaaa >"$TREE/.ubuntu-container"
     touch -d '2021-01-01' "$TREE/.ubuntu-container"
 }
-state() {
-    if env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.2.0-dev+abc .ubuntu-container >/dev/null 2>&1; then
-        echo up-to-date
-    else
-        echo rebuild
-    fi
+# make -q exits 0 (up to date), 1 (would rebuild) or 2 (make itself failed).
+# Exit 2 must not count as "rebuild", or a broken Makefile makes every
+# rebuild case pass without testing anything. The Makefile needs a version:
+# a dev build of RELEASE unless $2 names another.
+make_state() {
+    local rc
+    env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+        TF_VERSION="${2:-4.2.0-dev+abc}" "$1" >/dev/null 2>&1
+    rc=$?
+    case $rc in
+        0) echo up-to-date ;;
+        1) echo rebuild ;;
+        *) echo "error($rc)" ;;
+    esac
 }
+state() { make_state .ubuntu-container; }
 
 reset
 if [[ $(state) == up-to-date ]]; then
@@ -97,6 +108,22 @@ else
     bad "deleting a brand file left the image standing"
 fi
 
+reset
+touch "$TREE/containers/ubuntu/slim/slim-rootfs.sh"
+if [[ $(state) == rebuild ]]; then
+    ok "a changed slim script rebuilds the container"
+else
+    bad "a changed slim script left the container standing"
+fi
+
+reset
+rm "$TREE/containers/ubuntu/slim/gone.sh"
+if [[ $(state) == rebuild ]]; then
+    ok "a deleted slim file rebuilds the container"
+else
+    bad "a deleted slim file left the container standing"
+fi
+
 # The version is written at export, not into the image: a new RELEASE (or a
 # new commit) does not rebuild the container, a new kind of version
 # (.version-kind, release or dev) exports the rootfs again.
@@ -108,14 +135,7 @@ else
     bad "a changed RELEASE rebuilds the image"
 fi
 
-rootfs_state() {
-    if env -u MAKEFLAGS -u MAKELEVEL make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
-            TF_VERSION="$1" artifacts/rootfs/ramroot.sqsh >/dev/null 2>&1; then
-        echo up-to-date
-    else
-        echo re-export
-    fi
-}
+rootfs_state() { make_state artifacts/rootfs/ramroot.sqsh "${1:-}"; }
 reset
 printf '4.2.0\n' >"$TREE/RELEASE"
 printf '4.2.0-dev\n' >"$TREE/artifacts/rootfs/.version-kind"
@@ -129,7 +149,7 @@ if [[ $(rootfs_state 4.2.0-dev+abc) == up-to-date ]]; then
 else
     bad "the rootfs is exported again although .version-kind did not change"
 fi
-if [[ $(rootfs_state 4.2.0) == re-export ]]; then
+if [[ $(rootfs_state 4.2.0) == rebuild ]]; then
     ok "a changed .version-kind exports the rootfs again"
 else
     bad "a changed .version-kind left the rootfs with the old version"
@@ -148,21 +168,23 @@ fi
 
 # The export step reads scripts/export-rootfs.sh and scripts/lib/common.sh
 # from the bind mount; a change to either must re-export the artifacts.
-mkdir -p "$TREE/scripts/lib"
-: >"$TREE/scripts/export-rootfs.sh"; : >"$TREE/scripts/lib/common.sh"
 export_state() {
     touch -d '2020-01-01' "$TREE/scripts/export-rootfs.sh" "$TREE/scripts/lib/common.sh"
     reset
+    # The version stamp of a dev build, older than the export: the Makefile
+    # rewrites it at parse time when the kind differs, and a fresh mtime
+    # would make every case below re-export.
+    printf '4.2.0-dev\n' >"$TREE/artifacts/rootfs/.version-kind"
+    touch -d '2021-01-01' "$TREE/artifacts/rootfs/.version-kind"
     : >"$TREE/artifacts/rootfs/ramroot.sqsh"
     touch -d '2022-01-01' "$TREE/artifacts/rootfs/ramroot.sqsh"
 }
-rootfs_state() {
-    if make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" artifacts/rootfs/ramroot.sqsh >/dev/null 2>&1; then
-        echo up-to-date
-    else
-        echo rebuild
-    fi
-}
+export_state
+if [[ $(rootfs_state) == up-to-date ]]; then
+    ok "an exported rootfs newer than all its inputs is not exported again"
+else
+    bad "the rootfs is re-exported although no input changed (or make failed: $(rootfs_state))"
+fi
 for src in scripts/export-rootfs.sh scripts/lib/common.sh; do
     export_state
     touch "$TREE/$src"

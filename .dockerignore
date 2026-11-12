@@ -3,5 +3,6 @@
 !overlay
 !brand
 !containers/ubuntu/patches
+!containers/ubuntu/slim
 !src/thinfloe-menu
 src/thinfloe-menu/target
