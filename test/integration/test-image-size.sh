@@ -1,0 +1,151 @@
+#!/bin/bash
+# Image size report and budget check.
+#
+# Prints the size of vmlinuz, initrd.img and ramroot.sqsh (MB = 10^6 bytes),
+# the uncompressed size of the trees the size reduction work cuts, and the
+# three budgets. With a baseline directory it prints the delta of every
+# number against the same numbers computed from the baseline files.
+#
+# Usage: test/integration/test-image-size.sh [rootfs-dir [baseline-dir]]
+
+set -uo pipefail
+
+# Budgets in bytes: the Task 1 baseline plus 2 %, rounded up to a whole MB.
+# Task 10 of the image size plan lowers them to the final sizes.
+MAX_SQSH=504000000
+MAX_INITRD=102000000
+MAX_SUM=624000000
+
+DIR="${1:-artifacts/rootfs}"
+BASE="${2:-}"
+
+for d in "$DIR" ${BASE:+"$BASE"}; do
+    for f in vmlinuz initrd.img ramroot.sqsh; do
+        if [[ ! -f "$d/$f" ]]; then
+            echo "FAIL: $d/$f not found - run 'make rootfs' first" >&2
+            exit 1
+        fi
+    done
+done
+
+for tool in unsquashfs lsinitramfs; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "FAIL: $tool not installed (apt install squashfs-tools initramfs-tools-core)" >&2
+        exit 1
+    fi
+done
+
+WORK=$(mktemp -d)
+trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+SQ_PATHS=(
+    usr/lib/modules/
+    usr/lib/firmware/
+    usr/lib/firmware/intel/iwlwifi/
+    usr/lib/firmware/intel-ucode/
+    usr/share/i18n/
+    usr/lib/udev/hwdb.d/
+    scripts/
+)
+
+# measure <dir> <outfile>: writes "<label>\t<bytes>" lines.
+measure() {
+    local dir="$1" out="$2" f p
+    : >"$out"
+    for f in vmlinuz initrd.img ramroot.sqsh; do
+        printf '%s\t%s\n' "$f" "$(stat -c %s "$dir/$f")" >>"$out"
+    done
+    unsquashfs -lls "$dir/ramroot.sqsh" 2>/dev/null >"$WORK/sq.lst" \
+        || { echo "FAIL: cannot list $dir/ramroot.sqsh" >&2; exit 1; }
+    for p in "${SQ_PATHS[@]}"; do
+        # Regular files only: field 1 starts with "-", field 3 is the size,
+        # field 6 and later is the path (prefixed "squashfs-root/").
+        awk -v p="squashfs-root/$p" '
+            substr($1,1,1) == "-" {
+                path = $0
+                sub(/^([^ ]+ +){5}/, "", path)
+                if (index(path, p) == 1) s += $3
+            }
+            END { printf "squashfs %s\t%d\n", substr(p, 15), s }' \
+            "$WORK/sq.lst" >>"$out"
+    done
+    lsinitramfs -l "$dir/initrd.img" 2>/dev/null >"$WORK/ird.lst" \
+        || { echo "FAIL: cannot list $dir/initrd.img" >&2; exit 1; }
+    awk '
+        substr($1,1,1) == "-" {
+            path = $0
+            sub(/^([^ ]+ +){5}/, "", path)
+            if (path ~ /\.ko(\.|$)/) ko += $5
+            if (path ~ /kernel\/x86\/microcode\//) uc += $5
+        }
+        END {
+            printf "initrd *.ko*\t%d\n", ko
+            printf "initrd kernel/x86/microcode/\t%d\n", uc
+        }' "$WORK/ird.lst" >>"$out"
+}
+
+measure "$DIR" "$WORK/now.tsv"
+[[ -n "$BASE" ]] && measure "$BASE" "$WORK/base.tsv"
+
+mb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1000000 }'; }
+dmb() { awk -v b="$1" 'BEGIN { printf "%+.1f", b / 1000000 }'; }
+get() { awk -F'\t' -v k="$2" '$1 == k { print $2 }' "$1"; }
+
+report() {
+    local label="$1" now base
+    now=$(get "$WORK/now.tsv" "$label")
+    if [[ -n "$BASE" ]]; then
+        base=$(get "$WORK/base.tsv" "$label")
+        printf '%-40s %10s MB  (delta %s MB)\n' "$label" "$(mb "$now")" "$(dmb $((now - base)))"
+    else
+        printf '%-40s %10s MB\n' "$label" "$(mb "$now")"
+    fi
+}
+
+VMLINUZ=$(get "$WORK/now.tsv" vmlinuz)
+INITRD=$(get "$WORK/now.tsv" initrd.img)
+SQSH=$(get "$WORK/now.tsv" ramroot.sqsh)
+SUM=$((VMLINUZ + INITRD + SQSH))
+
+echo "== Image files =="
+report vmlinuz
+report initrd.img
+report ramroot.sqsh
+if [[ -n "$BASE" ]]; then
+    BSUM=$(( $(get "$WORK/base.tsv" vmlinuz) + $(get "$WORK/base.tsv" initrd.img) + $(get "$WORK/base.tsv" ramroot.sqsh) ))
+    printf '%-40s %10s MB  (delta %s MB)\n' sum "$(mb "$SUM")" "$(dmb $((SUM - BSUM)))"
+else
+    printf '%-40s %10s MB\n' sum "$(mb "$SUM")"
+fi
+echo ""
+echo "== Uncompressed contents =="
+for p in "${SQ_PATHS[@]}"; do report "squashfs $p"; done
+report "initrd *.ko*"
+report "initrd kernel/x86/microcode/"
+echo ""
+echo "Sizes: vmlinuz $(mb "$VMLINUZ") MB, initrd.img $(mb "$INITRD") MB, ramroot.sqsh $(mb "$SQSH") MB, sum $(mb "$SUM") MB"
+echo ""
+
+fail=0
+budget() {
+    local desc="$1" val="$2" max="$3"
+    if [[ $val -le $max ]]; then
+        echo "ok   - $desc $(mb "$val") MB <= $(mb "$max") MB"
+    else
+        echo "FAIL - $desc $(mb "$val") MB > $(mb "$max") MB"
+        fail=1
+    fi
+}
+budget "ramroot.sqsh budget" "$SQSH" "$MAX_SQSH"
+budget "initrd.img budget" "$INITRD" "$MAX_INITRD"
+budget "sum budget" "$SUM" "$MAX_SUM"
+
+if [[ $fail -ne 0 ]]; then
+    echo ""
+    echo "FAILED - image exceeds its size budget"
+    exit 1
+fi
+
+echo ""
+echo "PASSED - image within its size budget"
+exit 0
