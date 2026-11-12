@@ -35,6 +35,13 @@ VERSION_KIND := $(RELEASE_VERSION)-dev
 else
 $(error TF_VERSION $(TF_VERSION) is neither RELEASE ($(RELEASE_VERSION)) nor a dev version $(RELEASE_VERSION)-dev+<sha>[.dirty]; outside a git checkout pass TF_VERSION=$(RELEASE_VERSION))
 endif
+# A release is collected only from a build of RELEASE itself; this stops
+# before any prerequisite is built.
+ifneq ($(filter release-assets,$(MAKECMDGOALS)),)
+ifneq ($(TF_VERSION),$(RELEASE_VERSION))
+$(error release-assets needs TF_VERSION $(RELEASE_VERSION) (RELEASE), not $(TF_VERSION))
+endif
+endif
 # The rootfs is exported again when the kind of version changes (a release
 # or a dev build, and of which RELEASE), not for every commit: the stamp is
 # rewritten only when its content differs. A dev version so names the
@@ -72,7 +79,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -85,6 +92,7 @@ help:
 	@echo "  rootfs            - Build kernel, initrd, squashfs"
 	@echo "  ipxe              - Build iPXE network boot loaders"
 	@echo "  image             - Build bootable USB image"
+	@echo "  release-assets    - Collect the GitHub release assets (TF_VERSION=X.Y.Z)"
 	@echo "  qemu-test         - Test boot image in QEMU (EFI)"
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
@@ -251,6 +259,12 @@ $(USB_CHECKSUM): $(USB_IMAGE_COMPRESSED)
 image: $(USB_IMAGE_COMPRESSED) $(USB_CHECKSUM)
 	@echo ""
 	@echo "To write to USB: zstd -d < $(USB_IMAGE_COMPRESSED) | dd of=/dev/sdX bs=1M status=progress conv=fsync"
+
+# The six assets of a GitHub release, hard-linked into $(ARTIFACT_DIR)/release.
+# Needs a build of RELEASE: make release-assets TF_VERSION=X.Y.Z
+release-assets: $(KERNEL) $(INITRD) $(SQUASHFS) $(USB_IMAGE_COMPRESSED)
+	rm -rf $(ARTIFACT_DIR)/release
+	scripts/release-assets.sh $(ARTIFACT_DIR) $(ARTIFACT_DIR)/release $(TF_VERSION)
 
 # Test upgrade with qcow2 drives
 QCOW2_BOOT_IMAGE := $(IMAGE_DIR)/$(PROJECT_NAME)-boot.qcow2
@@ -520,6 +534,7 @@ test: test-unit rootfs
 	@test/integration/test-usb-image-deps.sh
 	@test/integration/test-container-inputs.sh
 	@test/integration/test-release-version.sh
+	@test/integration/test-release-assets.sh
 	@test/integration/test-public-content.sh
 	@test/integration/test-format-bytes.sh
 	@test/integration/test-plymouth-step.sh
