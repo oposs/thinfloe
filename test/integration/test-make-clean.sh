@@ -33,6 +33,7 @@ setup() {
     rm -rf "$TREE" "$SHARED"
     mkdir -p "$TREE" "$SHARED/rootfs"
     cp "$REPO/Makefile" "$TREE/Makefile"
+    echo 4.2.0 >"$TREE/RELEASE"
     : >"$SHARED/rootfs/ramroot.sqsh"
     if [[ "$1" == link ]]; then
         ln -s "$SHARED" "$TREE/artifacts"
@@ -44,7 +45,7 @@ setup() {
 }
 
 run_clean() {
-    make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" clean "$@" >"$WORK/out" 2>&1
+    make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.2.0-dev+abc clean "$@" >"$WORK/out" 2>&1
     echo $?
 }
 

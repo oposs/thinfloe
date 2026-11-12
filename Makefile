@@ -17,18 +17,23 @@ IMAGE_DIR := $(ARTIFACT_DIR)/images
 
 # The version the rootfs carries in /etc/thinfloe/version. RELEASE holds the
 # current release X.Y.Z and is set by the release pull request; a local build
-# is X.Y.Z-dev+<short sha>, with .dirty when the tree differs from HEAD, so
-# it sorts below the release and is offered it. `make ... TF_VERSION=X.Y.Z`
-# builds the release itself. export-rootfs.sh checks the exact form.
-RELEASE_VERSION := $(shell cat RELEASE 2>/dev/null)
-TF_VERSION ?= $(RELEASE_VERSION)-dev+$(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo .dirty)
+# is X.Y.Z-dev+<short sha>, with .dirty when the tree differs from HEAD
+# (changed or untracked files that .gitignore does not cover), so it sorts
+# below the release and is offered it. `make ... TF_VERSION=X.Y.Z` builds
+# the release itself. Both are checked here, before anything is built, in
+# the same form export-rootfs.sh checks.
+ifneq ($(shell [ -f RELEASE ] && [ "$$(wc -l <RELEASE)" = 1 ] && grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' RELEASE && echo ok),ok)
+$(error RELEASE must be one line X.Y.Z, found: '$(shell cat RELEASE 2>/dev/null)')
+endif
+RELEASE_VERSION := $(shell cat RELEASE)
+TF_VERSION ?= $(RELEASE_VERSION)-dev+$(shell git rev-parse --short HEAD 2>/dev/null)$(shell git rev-parse -q --verify HEAD >/dev/null 2>&1 && [ -z "$$(git status --porcelain 2>/dev/null)" ] || echo .dirty)
 override TF_VERSION := $(TF_VERSION)
 ifeq ($(TF_VERSION),$(RELEASE_VERSION))
 VERSION_KIND := $(RELEASE_VERSION)
-else ifeq ($(patsubst $(RELEASE_VERSION)-dev+%,,$(TF_VERSION)),)
+else ifeq ($(shell printf '%s\n' '$(TF_VERSION)' | grep -qxE '$(subst .,\.,$(RELEASE_VERSION))-dev\+[0-9a-f]+(\.dirty)?' && echo ok),ok)
 VERSION_KIND := $(RELEASE_VERSION)-dev
 else
-$(error TF_VERSION $(TF_VERSION) is neither RELEASE ($(RELEASE_VERSION)) nor a dev version)
+$(error TF_VERSION $(TF_VERSION) is neither RELEASE ($(RELEASE_VERSION)) nor a dev version $(RELEASE_VERSION)-dev+<sha>[.dirty]; outside a git checkout pass TF_VERSION=$(RELEASE_VERSION))
 endif
 # The rootfs is exported again when the kind of version changes (a release
 # or a dev build, and of which RELEASE), not for every commit: the stamp is
@@ -177,7 +182,7 @@ $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) | $(ROO
 		-e SQUASHFS_COMP=$(SQUASHFS_COMP) \
 		-e SQUASHFS_COMP_LEVEL=$(SQUASHFS_COMP_LEVEL) \
 		-e VERSION=$(VERSION) \
-		-e TF_VERSION=$(TF_VERSION) \
+		-e 'TF_VERSION=$(TF_VERSION)' \
 		-e BUILD_ID=$(BUILD_ID) \
 		-e BUILD_JOBS=$(BUILD_JOBS) \
 		$(UBUNTU_IMAGE) \
@@ -494,7 +499,7 @@ test-unit:
 test: test-unit rootfs
 	@test/integration/test-firmware.sh
 	@test/integration/test-wifi-stack.sh
-	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-session-packages.sh
+	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@test/integration/test-squashfs-format.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-labwc-scale.sh

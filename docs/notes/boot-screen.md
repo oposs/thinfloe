@@ -41,11 +41,14 @@ This note covers the look of the menu and the boot screen: palette, fonts, shadc
   `virtio-gpu`, which is also left out of the initrd). `DeviceScale=1` in
   `overlay/etc/plymouth/plymouthd.conf` keeps Plymouth from guessing scale 2
   on 4K and doubling the whole screen; the same test guards both. The host name reaches it through
-  `plymouth display-message` in `tf_write_hostname`. The version shows in the header, from
-  `/etc/thinfloe/version`, which the build writes from `RELEASE` in the
-  repository root (one line `X.Y.Z`, else the build fails; a prerequisite
-  of `.ubuntu-container`). `test/integration/test-release-version.sh`
-  guards the chain, `test-session-packages.sh` the file in the image.
+  `plymouth display-message` in `tf_write_hostname`. The boot screen shows
+  no version; the menu header does, from `/etc/thinfloe/version`, which
+  `scripts/export-rootfs.sh` writes from `TF_VERSION` when it exports the
+  rootfs: `RELEASE` (one line `X.Y.Z`) for a release, `X.Y.Z-dev+<sha>`
+  (`.dirty` for a changed tree) for a local build. The Makefile refuses any
+  other value, and a malformed `RELEASE`, before it builds anything.
+  `test/integration/test-release-version.sh` guards the chain,
+  `test-session-packages.sh` the file in the rootfs.
   Above the host name a step line says what the machine does, in English.
   It arrives through `plymouth update --status`: a text that starts with
   `tf:` is shown as it is, anything else is a systemd unit id, which a table

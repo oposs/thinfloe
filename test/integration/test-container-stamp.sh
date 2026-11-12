@@ -62,7 +62,7 @@ STAMP="$TREE/.ubuntu-container"
 run_make() {
     : >"$WORK/runtime.log"
     TF_TEST_RUNTIME_LOG="$WORK/runtime.log" TF_TEST_IMAGE_ID="$1" \
-        make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" .ubuntu-container \
+        make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.0.0-dev+abc .ubuntu-container \
         >"$WORK/make.out" 2>&1
     if grep -q '^podman build ' "$WORK/runtime.log"; then
         echo built

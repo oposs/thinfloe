@@ -66,7 +66,7 @@ else
     bad "the export does not check the version before mksquashfs"
 fi
 # shellcheck disable=SC2016
-if grep -q -- '-e TF_VERSION=$(TF_VERSION)' "$REPO/Makefile"; then
+if grep -qF -- "-e 'TF_VERSION=\$(TF_VERSION)'" "$REPO/Makefile"; then
     ok "the Makefile passes TF_VERSION to the export"
 else
     bad "the Makefile does not pass TF_VERSION to the export"
@@ -78,6 +78,13 @@ mkdir -p "$MTREE/containers/ubuntu/patches" "$MTREE/artifacts/rootfs"
 cp "$REPO/Makefile" "$MTREE/Makefile"
 printf '4.2.0\n' >"$MTREE/RELEASE"
 : >"$MTREE/containers/ubuntu/Dockerfile"
+mkdir -p "$MTREE/overlay/etc"
+: >"$MTREE/overlay/etc/keep"
+cp "$REPO/.gitignore" "$MTREE/.gitignore"
+# A git checkout, so the default TF_VERSION names a real commit.
+g() { git -C "$MTREE" -c user.name=test -c user.email=test@example.invalid \
+          -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
+g init -q && g add -A && g commit -q -m fixture
 cat >"$WORK/podman" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
@@ -103,12 +110,96 @@ if mk -n help TF_VERSION=4.2.0 >/dev/null 2>&1 \
 else
     bad "the Makefile refuses TF_VERSION 4.2.0 or 4.2.0-dev+abc"
 fi
+# The Makefile's default TF_VERSION, or its error text.
 # shellcheck disable=SC2016
-if [[ $(mk -s --no-print-directory -f Makefile -f - print-tf <<<'print-tf: ; @echo $(TF_VERSION)' 2>/dev/null) \
-        =~ ^4\.2\.0-dev\+ ]]; then
-    ok "without TF_VERSION the build is a dev version of RELEASE"
+default_tf() { mk -s --no-print-directory -f Makefile -f - print-tf <<<'print-tf: ; @echo $(TF_VERSION)' 2>&1; }
+sha=$(g rev-parse --short HEAD)
+tf=$(default_tf)
+if [[ $tf == "4.2.0-dev+$sha" ]] && export_check "$tf"; then
+    ok "without TF_VERSION a clean checkout builds 4.2.0-dev+<sha>, which the export accepts"
 else
-    bad "without TF_VERSION the build is not 4.2.0-dev+<sha>"
+    bad "without TF_VERSION a clean checkout builds '$tf', not 4.2.0-dev+$sha"
+fi
+printf 'x\n' >>"$MTREE/overlay/etc/keep"
+tf=$(default_tf)
+if [[ $tf == "4.2.0-dev+$sha.dirty" ]] && export_check "$tf"; then
+    ok "a changed tracked file makes the version .dirty"
+else
+    bad "a changed tracked file gives '$tf', not 4.2.0-dev+$sha.dirty"
+fi
+g checkout -q -- overlay/etc/keep
+: >"$MTREE/overlay/etc/new"
+tf=$(default_tf)
+if [[ $tf == "4.2.0-dev+$sha.dirty" ]]; then
+    ok "an untracked file makes the version .dirty"
+else
+    bad "an untracked file gives '$tf', not 4.2.0-dev+$sha.dirty"
+fi
+rm -f "$MTREE/overlay/etc/new"
+# Outside a git checkout there is no sha: the Makefile refuses at once,
+# before any container is built, and says what to do.
+NOGIT="$WORK/nogit"
+mkdir -p "$NOGIT"
+cp "$MTREE/Makefile" "$MTREE/RELEASE" "$NOGIT/"
+if ! out=$(GIT_CEILING_DIRECTORIES="$WORK" env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION \
+            make -C "$NOGIT" CONTAINER_RUNTIME="$WORK/podman" -n image 2>&1) \
+        && grep -qF 'nor a dev version 4.2.0-dev+<sha>[.dirty]' <<<"$out" \
+        && grep -qF 'TF_VERSION=4.2.0' <<<"$out"; then
+    ok "outside a git checkout the Makefile refuses the default version at once"
+else
+    bad "outside a git checkout make -n image did not refuse clearly: $(tail -n1 <<<"$out")"
+fi
+for v in 4.2.0-dev+ 4.2.0-dev+.dirty 4.2.0-dev+XYZ 4.2.0-dev+abc.dirtyx; do
+    if ! mk -n help TF_VERSION="$v" >/dev/null 2>&1; then
+        ok "the Makefile refuses TF_VERSION $v"
+    else
+        bad "the Makefile accepts TF_VERSION $v"
+    fi
+done
+# RELEASE must be one line X.Y.Z, else the build stops with a clear message.
+RTREE="$WORK/rtree"
+mkdir -p "$RTREE"
+cp "$MTREE/Makefile" "$RTREE/"
+for r in $'4.2.0\n4.2.1' '4.2.0 4.2.1' 4.2 ''; do
+    printf '%s\n' "$r" >"$RTREE/RELEASE"
+    if ! out=$(env -u MAKEFLAGS -u MAKELEVEL make -C "$RTREE" -n help TF_VERSION=4.2.0 2>&1) \
+            && grep -qF 'RELEASE must be one line X.Y.Z' <<<"$out"; then
+        ok "the Makefile refuses RELEASE '${r//$'\n'/\\n}'"
+    else
+        bad "the Makefile does not refuse RELEASE '${r//$'\n'/\\n}' clearly: $(tail -n1 <<<"$out")"
+    fi
+done
+
+# The session-packages check of the version in the rootfs: in a release run
+# (TF_VERSION is RELEASE) only RELEASE itself passes, else also a dev build.
+SP="$REPO/test/integration/test-session-packages.sh"
+spcheck=$(sed -n '/^version_ok() {/,/^}/p' "$SP")
+sp_ok() { bash -c "$spcheck"$'\n''version_ok "$@"' _ "$@" >/dev/null 2>&1; }
+if [[ -z "$spcheck" ]]; then
+    bad "test-session-packages.sh has no version_ok check"
+else
+    if ! sp_ok 4.2.0-dev+abc 4.2.0 4.2.0 && ! sp_ok 4.2.0-dev+abc.dirty 4.2.0 4.2.0; then
+        ok "a release run refuses a dev rootfs"
+    else
+        bad "a release run accepts a dev rootfs"
+    fi
+    if sp_ok 4.2.0 4.2.0 4.2.0 && sp_ok 4.2.0-dev+abc 4.2.0 4.2.0-dev+def \
+            && sp_ok 4.2.0-dev+abc.dirty 4.2.0 ""; then
+        ok "a release run accepts RELEASE, a dev run a dev rootfs"
+    else
+        bad "version_ok refuses a matching rootfs version"
+    fi
+    if ! sp_ok 4.1.0-dev+abc 4.2.0 "" && ! sp_ok 4.2.0 "" ""; then
+        ok "version_ok refuses another release's dev build and an empty RELEASE"
+    else
+        bad "version_ok accepts another release's dev build or an empty RELEASE"
+    fi
+fi
+# shellcheck disable=SC2016
+if grep -qE "TF_VERSION='?\\$\(TF_VERSION\)'? .*test/integration/test-session-packages\.sh" "$REPO/Makefile"; then
+    ok "make test passes TF_VERSION to test-session-packages.sh"
+else
+    bad "make test does not pass TF_VERSION to test-session-packages.sh"
 fi
 
 rm -f "$KIND"
@@ -134,7 +225,7 @@ fi
 
 # switching to a release version re-exports the rootfs
 printf '4.2.0-dev\n' >"$KIND"
-(cd "$MTREE" && find RELEASE containers -exec touch -d '2020-01-01' {} +)
+(cd "$MTREE" && find RELEASE containers overlay -exec touch -d '2020-01-01' {} +)
 echo sha256:aaaa >"$MTREE/.ubuntu-container"
 touch -d '2021-01-01' "$MTREE/.ubuntu-container" "$KIND"
 for f in vmlinuz initrd.img ramroot.sqsh; do

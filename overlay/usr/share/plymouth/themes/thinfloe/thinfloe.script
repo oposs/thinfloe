@@ -7,8 +7,8 @@
 #
 # The host name arrives with "plymouth display-message", which
 # tf_write_hostname (90thinfloe/thinfloe-lib.sh) calls once the name is known.
-# Until then the foot line is empty. The version is not shown (nothing writes
-# /etc/thinfloe/version yet).
+# Until then the foot line is empty. The version is not shown here; the menu
+# header shows it, from /etc/thinfloe/version.
 #
 # Above the host name a step line says what the machine is doing. It arrives
 # through "plymouth update --status": ThinFloe's own steps as "tf:<text>",
