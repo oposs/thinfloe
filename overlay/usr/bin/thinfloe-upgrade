@@ -33,7 +33,14 @@ of its own and cancels it with SIGTERM to that group:
                    [--source URL] [--copy-home] [--verify] [--allow-internal]
       --expect-id ID and --expect-id=ID both work: an id never starts
       with "-".
-      --source takes http:// and https:// only.
+      --source takes http:// and https:// only. The default source is
+      https://github.com/oposs/thinfloe/releases/latest/download; a write
+      from it reads <source>/version once and takes every file from
+      https://github.com/oposs/thinfloe/releases/download/v<version>,
+      checked against that release's SHA256SUMS: a file without a line
+      there fails the job before the stick is changed. Any other source is
+      used as given; its files are checked against SHA256SUMS, else
+      <name>.sha256, else logged as not checked.
       stdout carries @step <id> <text>, @progress <done> <total|->,
       @done <id> and at most one @result ok|failed [<reason>].
       Exit 0 done, 1 failed, 2 refused or misuse (nothing was written),
@@ -86,7 +93,13 @@ from typing import List, Optional, Tuple
 
 # ============ Constants ============
 
-DEFAULT_URL = "https://tobi.oetiker.ch/dbrrg"
+# The newest release. A write reads its version here once and then takes
+# every file from RELEASE_DOWNLOAD/v<version> (pin_source), so a release
+# published during the download cannot mix two releases on one stick.
+DEFAULT_URL = "https://github.com/oposs/thinfloe/releases/latest/download"
+RELEASE_DOWNLOAD = "https://github.com/oposs/thinfloe/releases/download"
+# sha256sum lines for every file of a release; required from a pinned tag.
+CHECKSUM_ASSET = "SHA256SUMS"
 # The release's version: one line X.Y.Z at <source>/version.
 VERSION_ASSET = "version"
 VERSION_RE = r"[0-9A-Za-z][0-9A-Za-z.+-]{0,31}"
@@ -816,6 +829,21 @@ def select_source() -> Optional[str]:
     return None
 
 
+def pin_source(source: str) -> str:
+    """The release directory a write takes all its files from.
+
+    For DEFAULT_URL: the tag of the version read there now, so every file
+    comes from one release. Any other source is used as given. Raises
+    WriteFailed when the version cannot be read.
+    """
+    if source != DEFAULT_URL:
+        return source
+    version, error = _fetch_version(source)
+    if not version:
+        raise WriteFailed(f"the newest release could not be read: {error}")
+    return f"{RELEASE_DOWNLOAD}/v{version}"
+
+
 # ============ Firmware Download ============
 
 def _content_length(url: str) -> Optional[int]:
@@ -1191,24 +1219,59 @@ def verify_device(device: str, length: int, expected_sha256: str,
         os.close(fd)
 
 
-def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
-    """The published SHA-256 of <base_url>/<name>, or None.
+def checksum_required(base_url: str) -> bool:
+    """True for a pinned release tag: its SHA256SUMS must name every file."""
+    return base_url.startswith(RELEASE_DOWNLOAD + "/v")
 
-    Reads <name>.sha256 in sha256sum format. None when the file is missing
-    or malformed. The single place to change if the checksums move into one
-    file.
+
+def parse_sha256sums(text: str, name: str) -> Optional[str]:
+    """The lower-case hash on the line naming `name`, or None.
+
+    sha256sum lines: 64 hex digits, a space, then a space (text) or `*`
+    (binary) and the name. None when no well-formed line names it, or when
+    two do: a file listed twice says nothing certain.
     """
+    found = []
+    for line in text.splitlines():
+        m = re.fullmatch(r"([0-9A-Fa-f]{64}) [ *](.+)", line)
+        if m and m.group(2) == name:
+            found.append(m.group(1).lower())
+    return found[0] if len(found) == 1 else None
+
+
+def _fetch_small(url: str) -> Optional[str]:
+    """The text at url, None when it cannot be fetched."""
     try:
         r = subprocess.run(
             ["curl", "-fsSL", "--speed-limit", "1", "--speed-time", "60",
-             "--", f"{base_url}/{name}.sha256"],
+             "--", url],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120,
             **SPAWN)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
         return None
-    fields = r.stdout.decode("utf-8", "replace").split()
+    return r.stdout.decode("utf-8", "replace")
+
+
+def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
+    """The published SHA-256 of <base_url>/<name>, or None.
+
+    Reads SHA256SUMS first. A custom source that lacks it, or lacks the
+    line, falls back to <name>.sha256 (old server directories); a pinned
+    release tag never does, so there None means the release has no checksum.
+    """
+    text = _fetch_small(f"{base_url}/{CHECKSUM_ASSET}")
+    if text is not None:
+        found = parse_sha256sums(text, name)
+        if found is not None:
+            return found
+    if checksum_required(base_url):
+        return None
+    text = _fetch_small(f"{base_url}/{name}.sha256")
+    if text is None:
+        return None
+    fields = text.split()
     if len(fields) != 2 or not SHA256_RE.fullmatch(fields[0]):
         return None
     if fields[1].lstrip("*") != name:
@@ -1662,6 +1725,8 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
         progress.step("check", "Checking the files")
         for filename in FIRMWARE_FILES:
             expected = expected_download_sha256(base_url, filename)
+            if expected is None and checksum_required(base_url):
+                raise WriteFailed(f"the release has no checksum for {filename}")
             if expected is None:
                 log(f"checksum not checked: {filename}.sha256 not found")
             elif expected != _file_sha256(os.path.join(firmware_dir, filename)):
@@ -2161,14 +2226,19 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
     image_url = f"{base_url}/{image_name}"
     stick_good = False
     try:
+        progress.step("write", "Downloading and writing")
+        # Before the first byte reaches the stick: a release without its
+        # checksum is refused while the stick is still as it was.
+        expected = expected_download_sha256(base_url, image_name)
+        if expected is None and checksum_required(base_url):
+            outcome.reason = f"the release has no checksum for {image_name}"
+            return outcome
+        if expected is None:
+            log(f"checksum not checked: {image_name}.sha256 not found")
         try:
-            progress.step("write", "Downloading and writing")
             result = stream_image(image_url, device, image_size(image_url), progress,
                                   fd=fd)
-            expected = expected_download_sha256(base_url, image_name)
-            if expected is None:
-                log(f"checksum not checked: {image_name}.sha256 not found")
-            elif expected != result.download_sha256:
+            if expected is not None and expected != result.download_sha256:
                 raise WriteFailed("the download was damaged; write the stick again")
             progress.done("write")
             if verify:
@@ -2752,6 +2822,11 @@ def _batch_run(args) -> int:
     if not _take_lock(WRITE_LOCK_WAIT):
         PROGRESS.result(False, "another write is running; try again when it has finished")
         return 2
+    try:
+        args.source = pin_source(args.source)
+    except WriteFailed as e:
+        PROGRESS.result(False, e.reason)
+        return 1
     drives = enumerate_drives(include_internal=args.allow_internal)
     drive = next((d for d in drives if d.device == args.device), None)
     reason = _write_refusal(args, drive)
@@ -2813,6 +2888,10 @@ def main() -> int:
 
         # Ensure URL doesn't end with /
         base_url = base_url.rstrip("/")
+        try:
+            base_url = pin_source(base_url)
+        except WriteFailed as e:
+            die(e.reason)
 
         # Step 2: Enumerate drives
         include_internal = False
