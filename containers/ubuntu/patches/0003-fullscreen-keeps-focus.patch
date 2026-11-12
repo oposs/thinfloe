@@ -1,0 +1,110 @@
+Description: a fullscreen window on top keeps the keyboard focus
+ labwc focuses every view that becomes visible. thinfloe-menu, the desktop,
+ is always-on-bottom and replaces its window whenever its monitor changes,
+ for example when a monitor wakes from power save. The new menu window then
+ took the keyboard focus from the fullscreen ThinLinc session that still
+ covered it: keys went to the hidden menu, where Tab and Enter could reach
+ the Restart tile.
+ .
+ A view that becomes visible is no longer focused when it is
+ always-on-bottom and the topmost view of the workspace is fullscreen and
+ holds the focus. Such a view can never be raised above the fullscreen
+ view, so the focus stays with the window the user sees. Any other new view
+ is focused as before, and a click still focuses the always-on-bottom view.
+ .
+ For this test to see the view's place in the stack, the first-map window
+ rules (here ToggleAlwaysOnBottom) now run before the view becomes visible
+ and is focused. Before, a new view was raised and focused first and only
+ then sent to the bottom.
+ .
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2026-11-12
+---
+diff --git a/include/labwc.h b/include/labwc.h
+index d497ed1..7e6d822 100644
+--- a/include/labwc.h
++++ b/include/labwc.h
+@@ -378,6 +378,16 @@ void desktop_update_top_layer_visibility(struct server *server);
+  */
+ void desktop_focus_topmost_view(struct server *server);
+ 
++/**
++ * desktop_fullscreen_keeps_focus() - whether a newly shown view must leave
++ * the keyboard focus where it is: the view is always-on-bottom, so it can
++ * never be raised above the topmost view, and that topmost view is
++ * fullscreen and focused. Without this, a desktop window that maps again
++ * (e.g. after a monitor wakes from power save) takes the keyboard from a
++ * fullscreen window that still covers it.
++ */
++bool desktop_fullscreen_keeps_focus(struct view *view);
++
+ void seat_init(struct server *server);
+ void seat_finish(struct server *server);
+ void seat_reconfigure(struct server *server);
+diff --git a/src/desktop.c b/src/desktop.c
+index abff9c1..e5343c8 100644
+--- a/src/desktop.c
++++ b/src/desktop.c
+@@ -167,6 +167,18 @@ desktop_focus_topmost_view(struct server *server)
+ 	}
+ }
+ 
++bool
++desktop_fullscreen_keeps_focus(struct view *view)
++{
++	if (!view_is_always_on_bottom(view)) {
++		return false;
++	}
++	struct server *server = view->server;
++	struct view *top = desktop_topmost_focusable_view(server);
++	return top && top != view && top->fullscreen
++		&& top == server->active_view;
++}
++
+ void
+ desktop_focus_output(struct output *output)
+ {
+diff --git a/src/view-impl-common.c b/src/view-impl-common.c
+index e5e1087..ada562c 100644
+--- a/src/view-impl-common.c
++++ b/src/view-impl-common.c
+@@ -9,12 +9,19 @@
+ void
+ view_impl_map(struct view *view)
+ {
+-	view_update_visibility(view);
+-
++	/*
++	 * thinfloe: apply the first-map rules before the view becomes visible
++	 * and is focused, so that a rule such as ToggleAlwaysOnBottom is in
++	 * effect when desktop_fullscreen_keeps_focus() looks at the view.
++	 * Before, the new view was raised and focused first and only then
++	 * sent to the bottom, so it took the focus from a fullscreen view.
++	 */
+ 	if (!view->been_mapped) {
+ 		window_rules_apply(view, LAB_WINDOW_RULE_EVENT_ON_FIRST_MAP);
+ 	}
+ 
++	view_update_visibility(view);
++
+ 	/*
+ 	 * Create foreign-toplevel handle, respecting skipTaskbar rules.
+ 	 * Also exclude unfocusable views (popups, floating toolbars,
+diff --git a/src/view.c b/src/view.c
+index c29ba3c..3232daf 100644
+--- a/src/view.c
++++ b/src/view.c
+@@ -2454,7 +2454,9 @@ view_update_visibility(struct view *view)
+ 	struct server *server = view->server;
+ 
+ 	if (visible) {
+-		desktop_focus_view(view, /*raise*/ true);
++		if (!desktop_fullscreen_keeps_focus(view)) {
++			desktop_focus_view(view, /*raise*/ true);
++		}
+ 	} else {
+ 		/*
+ 		 * When exiting an xwayland application with multiple

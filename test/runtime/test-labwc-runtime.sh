@@ -5,7 +5,8 @@
 # labwc's environment-file parser lets a later duplicate assignment win
 # (the assumption thinfloe-compose-labwc-config's merge depends on).
 # Finally asserts that thinfloe-menu, a native Wayland client, maps at the full
-# output size, rasterises on the CPU and keeps running.
+# output size, rasterises on the CPU and keeps running, and that a fullscreen
+# window keeps the keyboard focus when the menu replaces its window behind it.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -625,6 +626,65 @@ if [[ -n "$MM_WARN_AT" ]] && awk -v t="$MM_WARN_AT" 'BEGIN { exit !(t >= 3 && t 
 else
     echo "FAIL - unanswered move: warning at '$MM_WARN_AT', configures after it $MM_CONF_AFTER_WARN, configures '$MM_CONFIGURES', output file '$MM_OUTPUT_FILE', applied '$MM_APPLIED', $MM_REPLACES window replacements"
     echo "$MM_RESULT"
+    fail=1
+fi
+
+# A fullscreen window on top keeps the keyboard when the menu opens a window
+# behind it. The menu replaces its window whenever its monitor changes, e.g.
+# when a monitor wakes from power save; labwc gives every new window the
+# focus, so the keys went to the hidden menu instead of the ThinLinc session
+# (containers/ubuntu/patches/0003-fullscreen-keeps-focus.patch). The menu
+# starts, foot opens on top of it, and 3 s later the unanswered
+# TF_MENU_DEBUG_MOVE replaces the menu window. In the windowed control run
+# the new menu window still takes the focus, as before.
+run_focus_case() {
+    local mode="$1" name="thinfloe-runtime-test-focus-$$-$1" script out rc
+    # shellcheck disable=SC2016 # expands inside the container
+    script='export TF_MENU_DEBUG=1 TF_MENU_DEBUG_MOVE=HEADLESS-1 TF_MENU_OUTPUT_FILE=/tmp/xdg/test-menu-output
+timeout 9 thinfloe-menu >/tmp/menu.log 2>&1 &
+sleep 1
+if [ "$FC_MODE" = fullscreen ]; then foot -F sleep 20 & else foot sleep 20 & fi
+sleep 1.5
+wlrctl toplevel find app_id:foot state:active && echo before=active || echo before=inactive
+sleep 4
+wlrctl toplevel find app_id:foot state:active && echo after=active || echo after=inactive
+echo "replaced=$(grep -c "window replaced" /tmp/menu.log)"
+wait'
+    # shellcheck disable=SC2016 # expands inside the container
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e FC_MODE="$mode" \
+        -e FC_SCRIPT="$script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$FC_SCRIPT" >/tmp/fc.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/fc.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during focus test)"
+        echo "$out" | grep -E '^(before|after|replaced)='
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    FC_RESULT=$(echo "$out" | grep -E '^(before|after|replaced)=' | tr '\n' ' ')
+}
+
+run_focus_case fullscreen
+if [[ "$FC_RESULT" == "before=active after=active replaced=1 " ]]; then
+    echo "ok   - a fullscreen window keeps the keyboard when the menu replaces its window behind it"
+else
+    echo "FAIL - fullscreen foot lost the focus to the menu window: $FC_RESULT"
+    fail=1
+fi
+
+run_focus_case windowed
+if [[ "$FC_RESULT" == "before=active after=inactive replaced=1 " ]]; then
+    echo "ok   - beside a window that is not fullscreen, the new menu window takes the focus"
+else
+    echo "FAIL - windowed control run: $FC_RESULT (expected foot to lose the focus to the new menu window)"
     fail=1
 fi
 

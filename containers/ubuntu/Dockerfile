@@ -1,7 +1,9 @@
 # Local labwc rebuild.
 #
 # Ubuntu's labwc 0.9.3 clamps fullscreen windows to a single output and does
-# not implement zwp_xwayland_keyboard_grab_manager_v1. Both are patched here;
+# not implement zwp_xwayland_keyboard_grab_manager_v1. Both are patched here,
+# and so is the focus a new always-on-bottom window takes from a fullscreen
+# one (0003-fullscreen-keeps-focus.patch);
 # see docs/superpowers/specs/2026-07-27-labwc-multimonitor-fullscreen-design.md.
 #
 # Patches live in containers/ubuntu/patches/ and are appended to the source

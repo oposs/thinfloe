@@ -62,6 +62,7 @@
 
 ### Fixed
 
+- After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
 - A named pipe put in place of a tile file, an icon or a status file while the menu reads it no longer hangs the menu, which left the screen black at login.
 - Screen blanking that stops because its helper exited is restarted after 5 seconds; before, the screen no longer blanked for the rest of the session.
 - Sound from ThinLinc and OxuLnk played quietly, because the speakers and headphones started at 40 % on every boot and the machine has no volume control. Outputs and microphones now start at 100 %, so the remote desktop sets the loudness. A volume set by hand with `wpctl` or `pactl` is kept.
