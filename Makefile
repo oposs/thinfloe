@@ -157,6 +157,12 @@ PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 MENU_FILES := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
 MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type d -print 2>/dev/null)
 
+# The slim step is copied into the ubuntu container and run as its last RUN.
+# Like PATCH_FILES, its files and their directory are prerequisites of
+# .ubuntu-container: the files catch an edit, the directory catches a
+# deleted file.
+SLIM_FILES := $(wildcard containers/ubuntu/slim/*)
+
 # Each container stamp holds the ID of the image its build produced, and is
 # removed at parse time unless the tag still names exactly that image.
 #
@@ -173,7 +179,7 @@ $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
-.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(SLIM_FILES) containers/ubuntu/slim $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \

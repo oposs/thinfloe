@@ -43,14 +43,14 @@ chmod +x "$RUNTIME"
 # Just enough of a checkout for the .ubuntu-container rule: its inputs, all
 # older than the stamp, so only the stamp's content can make it stale.
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/artifacts/rootfs" \
+mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/artifacts/rootfs" \
     "$TREE/src/thinfloe-menu/src"
 cp "$REPO/Makefile" "$TREE/Makefile"
 : >"$TREE/containers/ubuntu/Dockerfile"
 : >"$TREE/src/thinfloe-menu/src/main.rs"
 echo 4.0.0 >"$TREE/RELEASE"
 touch -d '2020-01-01' "$TREE/RELEASE" "$TREE/containers/ubuntu/Dockerfile" \
-    "$TREE/containers/ubuntu/patches" \
+    "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" \
     "$TREE/src/thinfloe-menu/src/main.rs" "$TREE/src/thinfloe-menu/src" "$TREE/src/thinfloe-menu"
 
 STAMP="$TREE/.ubuntu-container"

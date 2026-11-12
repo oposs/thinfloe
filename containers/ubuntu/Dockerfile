@@ -437,6 +437,9 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 #
 # i915 is not in --omit-drivers: 90thinfloe installs it with its firmware, so
 # Intel graphics binds in the initrd and Plymouth keeps the boot picture.
+#
+# The slim step at the end of this file (containers/ubuntu/slim/) depends on
+# this initrd and checks that it exists.
 RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     dracut --force --no-hostonly --add "thinfloe plymouth systemd-networkd systemd-resolved" \
     --omit "drm dash crypt dmraid multipath iscsi nfs nbd fcoe fcoe-uefi biosdevname dmsquash-live dmsquash-live-ntfs" \
@@ -449,3 +452,10 @@ RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
 # re-introduce a find/rm sweep over /usr/lib/firmware.
 RUN rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
     apt-get -qqy clean && apt-get -qqy autoremove
+
+# Slim step (docs/superpowers/specs/2026-11-12-image-size-design.md). This
+# must stay the LAST RUN of the file: nothing after it may run dpkg, apt-get
+# or dracut, because a dpkg run can fire the update-initramfs trigger, which
+# rebuilds the initrd with default flags from the slimmed tree.
+COPY containers/ubuntu/slim/ /thinfloe-slim/
+RUN /thinfloe-slim/slim-rootfs.sh && rm -rf /thinfloe-slim

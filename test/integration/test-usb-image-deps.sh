@@ -36,13 +36,13 @@ STUB
 chmod +x "$RUNTIME"
 
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/src/thinfloe-menu/src" \
+mkdir -p "$TREE/containers/image-builder" "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/src/thinfloe-menu/src" \
     "$TREE/artifacts/rootfs" "$TREE/artifacts/images" "$TREE/configs" "$TREE/scripts/lib"
 cp "$REPO/Makefile" "$TREE/Makefile"
 inputs=(RELEASE containers/ubuntu/Dockerfile containers/image-builder/Dockerfile src/thinfloe-menu/src/main.rs
-        configs/syslinux.cfg scripts/make-bootable-image.sh scripts/lib/common.sh)
+        configs/syslinux.cfg scripts/make-bootable-image.sh scripts/export-rootfs.sh scripts/lib/common.sh)
 for f in "${inputs[@]}"; do : >"$TREE/$f"; done
-(cd "$TREE" && touch -d '2020-01-01' "${inputs[@]}" containers/ubuntu/patches \
+(cd "$TREE" && touch -d '2020-01-01' "${inputs[@]}" containers/ubuntu/patches containers/ubuntu/slim \
     src/thinfloe-menu/src src/thinfloe-menu)
 echo sha256:aaaa >"$TREE/.ubuntu-container"
 echo sha256:aaaa >"$TREE/.image-builder-container"
@@ -58,14 +58,16 @@ USB="artifacts/images/thinfloe-usb.img"
 
 # Prints "up-to-date" when make would not rebuild the image, "rebuild" otherwise.
 state() {
-    local was=""
+    local was="" rc
     touch -d '2023-01-01' "$TREE/$USB"
     [[ -n "${1:-}" ]] && was=$(stat -c %Y "$TREE/$1") && touch -d '2024-01-01' "$TREE/$1"
-    if env -u MAKEFLAGS -u MAKELEVEL make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
-            TF_VERSION=4.2.0-dev+abc "$USB" >/dev/null 2>&1; then
+    env -u MAKEFLAGS -u MAKELEVEL make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+        TF_VERSION=4.2.0-dev+abc "$USB" >/dev/null 2>&1
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
         echo up-to-date
     else
-        echo rebuild
+        [[ $rc -eq 1 ]] && echo rebuild || echo "error($rc)"
     fi
     [[ -n "$was" ]] && touch -d "@$was" "$TREE/$1"
 }

@@ -23,10 +23,15 @@ if ! command -v unsquashfs >/dev/null 2>&1; then
 fi
 
 LIST=$(mktemp)
-trap 'rm -f "$LIST"' EXIT
+LLS=$(mktemp)
+trap 'rm -f "$LIST" "$LLS"' EXIT
 
 if ! unsquashfs -l "$SQSH" >"$LIST" 2>/dev/null; then
     echo "FAIL: cannot list $SQSH" >&2
+    exit 1
+fi
+if ! unsquashfs -lls "$SQSH" >"$LLS" 2>/dev/null; then
+    echo "FAIL: cannot list $SQSH (long format)" >&2
     exit 1
 fi
 
@@ -53,6 +58,29 @@ absent() {
 
 absent "no build scripts in /scripts" '^squashfs-root/scripts(/|$)'
 absent "no slim scripts"              '^squashfs-root/thinfloe-slim(/|$)'
+
+# Locale and hwdb sources (S2, S3): the compiled forms stay.
+absent "no locale sources"            '^squashfs-root/usr/share/i18n(/|$)'
+check  "locale archive"               '^squashfs-root/usr/lib/locale/locale-archive$'
+absent "no hwdb sources"              '^squashfs-root/usr/lib/udev/hwdb\.d(/|$)'
+
+# hwdb.bin must be present and real (more than 1000000 bytes). Field 3 of
+# "unsquashfs -lls" is the size for a regular file.
+hwdb_size=$(awk '$NF == "squashfs-root/usr/lib/udev/hwdb.bin" && $1 ~ /^-/ {print $3}' "$LLS" | head -1)
+if [[ -n $hwdb_size && $hwdb_size -gt 1000000 ]]; then
+    echo "ok   - hwdb.bin present ($hwdb_size bytes)"
+else
+    echo "FAIL - hwdb.bin missing or too small (size: ${hwdb_size:-none})"
+    fail=1
+fi
+
+# The unit stays masked, so nothing rebuilds hwdb.bin into the overlay at boot.
+if grep -qE 'squashfs-root/etc/systemd/system/systemd-hwdb-update\.service -> /dev/null$' "$LLS"; then
+    echo "ok   - systemd-hwdb-update.service is masked"
+else
+    echo "FAIL - systemd-hwdb-update.service is not masked"
+    fail=1
+fi
 
 if [[ $fail -eq 0 ]]; then
     echo "PASSED"
