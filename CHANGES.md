@@ -29,6 +29,7 @@
 
 ### Changed
 
+- A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
 - The menu's tiles keep their shape and look the same size on every screen. A 4K screen that reports its size no longer gets stretched tiles (one that reports none or an implausible size still gets double size), and a small, dense laptop screen shrinks the menu to fit.
 - Each row in Settings shows one status line, with its button at the right edge. Long text in a row is cut with "…" and the button stays visible.
 - A long add-on name in Settings is cut with "…", so the source address, the status line and the button stay visible.
