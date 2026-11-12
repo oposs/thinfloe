@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The three files an upgrade or a netboot downloads (`vmlinuz`, `initrd.img`, `ramroot.sqsh`) shrink from 611 MB to about 480 to 490 MB through the nine cuts the owner approved, each held by a guard.
+**Goal:** The three files an upgrade or a netboot downloads (`vmlinuz`, `initrd.img`, `ramroot.sqsh`) shrink from 611 MB to about 480 to 490 MB through the nine cuts the owner approved, each held by a guard, while AMD Ryzen mini PCs gain the APU graphics firmware `amdgpu` needs (`A1`, about 8 MB added).
 
 **Architecture:** dracut flags in `containers/ubuntu/Dockerfile` shape the initrd (`O2`, `O5`). A new Dockerfile `RUN`, the last of the file and after the cleanup `RUN`, executes `containers/ubuntu/slim/slim-rootfs.sh`, which trims the rootfs in a fixed order with build-time guards (`O4`, `S1`, `O1`, `O3`, `S2`, `S3`). `scripts/export-rootfs.sh` keeps `/scripts` out of the squashfs (`S4`). Artifact guards run in `make test`, a budget test holds the result.
 
@@ -17,7 +17,8 @@
 - Scope is fixed (*owner*): only `S1` to `S4` and `O1` to `O5`. No other cut. Camera firmware, VA-API drivers and python3 stay.
 - `i915` and its firmware stay in the initrd; `plymouth.use-simpledrm` stays in `configs/syslinux.cfg`; dracut keeps `--no-hostonly`.
 - The `slim-rootfs.sh` `RUN` is the last `RUN` of the Dockerfile. Nothing after it may run `dpkg`, `apt-get` or dracut: a `dpkg` run can fire the `update-initramfs` trigger, which reruns dracut with default flags on the slimmed tree.
-- The rule "no `find`/`rm` sweep over `/usr/lib/firmware`" stays, with exactly two exceptions in `slim-rootfs.sh`: the iwlwifi prune (`O1`) and `intel-ucode` (`O3`).
+- The rule "no `find`/`rm` sweep over `/usr/lib/firmware`" stays, with exactly three exceptions in `slim-rootfs.sh`: the iwlwifi prune (`O1`), the AMD graphics prune (`A1`) and `intel-ucode` (`O3`).
+- `radeon` and `nouveau` are not changed (*owner*, a question about them is open). `amdgpu` stays in `--omit-drivers`, out of the initrd.
 - MB = 10^6 bytes; sizes from `stat -c %s`.
 - Every task that changes the image ends its commit message with a line `Sizes: vmlinuz <a> MB, initrd.img <b> MB, ramroot.sqsh <c> MB, sum <d> MB (delta <e> MB)`, delta against the previous task's line (Task 1 against the baseline).
 - Integration tests follow the style of `test/integration/test-firmware.sh`: `ok   - …` and `FAIL - …` lines, `PASSED`/`FAILED` at the end, exit 1 on failure, a missing artifact fails with "run 'make rootfs' first". Scratch files under `mktemp -d`, with `chmod -R u+rwX` before `rm -rf` in the trap when `unsquashfs` extracted anything.
@@ -41,11 +42,11 @@
 - Modify: `Makefile` (`test:` target, add the line after `test-squashfs-format.sh`)
 
 **Interfaces:**
-- Produces: `test/integration/test-image-size.sh [rootfs-dir [baseline-dir]]`, default `artifacts/rootfs`. Budget variables at the top: `MAX_SQSH`, `MAX_INITRD`, `MAX_SUM` in bytes. Later tasks only run it; Task 9 tightens the budgets.
+- Produces: `test/integration/test-image-size.sh [rootfs-dir [baseline-dir]]`, default `artifacts/rootfs`. Budget variables at the top: `MAX_SQSH`, `MAX_INITRD`, `MAX_SUM` in bytes. Later tasks only run it; Task 10 tightens the budgets.
 
 - [ ] **Step 1: Write `test-image-size.sh`.** It prints `vmlinuz`, `initrd.img`, `ramroot.sqsh` and their sum in MB with one decimal; then the uncompressed bytes (from `unsquashfs -lls`) of `usr/lib/modules/`, `usr/lib/firmware/`, `usr/lib/firmware/intel/iwlwifi/`, `usr/lib/firmware/intel-ucode/`, `usr/share/i18n/`, `usr/lib/udev/hwdb.d/`, `scripts/`; and (from `lsinitramfs -l`) the bytes of `*.ko*` and of `kernel/x86/microcode/`. With a second argument it prints the delta of each number against the same numbers computed from that directory's files. It ends with `ok`/`FAIL` lines for the three budgets.
 - [ ] **Step 2: Build the baseline:** `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make rootfs VERSION=3.0.0-size BUILD_JOBS=4`, then `mkdir -p /scratch/oetiker/claude-tmp/thinfloe-tests/size-baseline && cp artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh,version} /scratch/oetiker/claude-tmp/thinfloe-tests/size-baseline/`.
-- [ ] **Step 3: Set the budgets** to the baseline sizes plus 2 %, rounded up to a whole MB, with a comment that Task 9 of this plan lowers them.
+- [ ] **Step 3: Set the budgets** to the baseline sizes plus 2 %, rounded up to a whole MB, with a comment that Task 10 of this plan lowers them.
 - [ ] **Step 4: Run** `test/integration/test-image-size.sh artifacts/rootfs /scratch/oetiker/claude-tmp/thinfloe-tests/size-baseline`. Expected: PASSED, every delta 0.
 - [ ] **Step 5: Commit** `test: image size report and budget` with the `Sizes:` line of the baseline.
 
@@ -76,7 +77,7 @@
 - Modify: `test/integration/test-container-inputs.sh`, `test/integration/test-image-slim.sh`
 
 **Interfaces:**
-- Produces: `slim-rootfs.sh` with `set -euo pipefail`, a `die()` that prints `slim-rootfs: <message>` to stderr and exits 1, the global `KVER`, and one function per cut called from `main` in the spec's order: `trim_media_modules` (Task 5), `decompress_modules` (Task 4), `prune_iwlwifi` (Task 6), `check_firmware_names` (Task 6), `drop_intel_ucode` (Task 7), `drop_i18n`, `drop_hwdb_sources`. Tasks 4 to 7 fill in their function; this task leaves them as empty functions with a one-line comment naming the task.
+- Produces: `slim-rootfs.sh` with `set -euo pipefail`, a `die()` that prints `slim-rootfs: <message>` to stderr and exits 1, the global `KVER`, and one function per cut called from `main` in the spec's order: `trim_media_modules` (Task 5), `decompress_modules` (Task 4), `prune_iwlwifi` (Task 6), `prune_amdgpu` (Task 9), `check_firmware_names` (Task 6), `drop_intel_ucode` (Task 7), `drop_i18n`, `drop_hwdb_sources`. Tasks 4 to 7 and 9 fill in their function; this task leaves them as empty functions with a one-line comment naming the task.
 - Produces: `main` step 0 (`preconditions`): exactly one directory in `/usr/lib/modules`, else `die "want one kernel in /usr/lib/modules, found: …"`; `/boot/initrd.img-$KVER` and `/boot/System.map-$KVER` exist, else `die "run after dracut: no /boot/initrd.img-$KVER"`.
 
 - [ ] **Step 1: Write the failing tests.** `test-image-slim.sh`: `absent "no locale sources" '^squashfs-root/usr/share/i18n(/|$)'`, `check "locale archive" '^squashfs-root/usr/lib/locale/locale-archive$'`, `absent "no hwdb sources" '^squashfs-root/usr/lib/udev/hwdb\.d(/|$)'`, `hwdb.bin` present and over 1000000 bytes (from `unsquashfs -lls`), `etc/systemd/system/systemd-hwdb-update.service -> /dev/null`. `test-container-inputs.sh`: a case "a changed slim script rebuilds the container" (touching `containers/ubuntu/slim/slim-rootfs.sh` makes `make -q .ubuntu-container` non-zero) and "a deleted slim file rebuilds the container" (removing a second file in that directory does too).
@@ -131,7 +132,7 @@
 
 **Interfaces:**
 - Produces in `iwlwifi_keep.py`: `ceilings(names: list[str]) -> dict[tuple, int | None]` with two kinds of key, (family, radio, `"c"` or `""`) and (family, `"c"` or `""`), `None` for a macro; `ceiling_for(stem: str, c: str, table) -> int | None | Missing` looks up the radio key first and falls back to the family key (radio = second to last dash token of a stem with four or more tokens, else none); `select(names: list[str], files: list[str]) -> tuple[list[str], list[str]]` returning (keep, drop) basenames; `class TooFewNames(ValueError)`, raised by `select` below 20 parsed names. CLI: `python3 iwlwifi_keep.py MODINFO_FILE FIRMWARE_DIR` prints the basenames to drop, one per line; exit 2 with `iwlwifi_keep: only <n> firmware names from modinfo` on `TooFewNames`.
-- Produces in `slim-rootfs.sh`: `FW_BEFORE`, written by `preconditions`: sorted unique firmware names from `modinfo -F firmware` over every module file, kept only when `/usr/lib/firmware/<name>` or `<name>.zst` exists.
+- Produces in `slim-rootfs.sh`: `FW_BEFORE`, written by `preconditions`: sorted unique firmware names from `modinfo -F firmware` over every module file, kept only when `/usr/lib/firmware/<name>` or `<name>.zst` exists. `DROPPED` (`/thinfloe-slim/dropped`): every prune function appends the paths it removed on purpose, relative to `/usr/lib/firmware` and without `.zst`; `check_firmware_names` skips those names. Task 9 appends the AMD drop list there.
 
 - [ ] **Step 1: Write the failing unit tests** in `test_iwlwifi_keep.py` (load the module with `importlib.util.spec_from_file_location` from `containers/ubuntu/slim/iwlwifi_keep.py`), on the fixtures:
   - `test_keeps_highest_under_ceiling`: keep has `iwlwifi-so-a0-gf-a0-89.ucode.zst`, drop has `iwlwifi-so-a0-gf-a0-86.ucode.zst`; keep has `iwlwifi-8265-36.ucode.zst`, drop has `iwlwifi-8265-34.ucode.zst`; keep has `iwlwifi-cc-a0-77.ucode.zst`, drop has `iwlwifi-cc-a0-74.ucode.zst`.
@@ -148,7 +149,7 @@
 - [ ] **Step 4: Run** the unit tests. Expected: PASS.
 - [ ] **Step 5: Write the failing integration checks** in `test-firmware.sh`: extract `iwlwifi.ko`, `iwlmvm.ko`, `iwldvm.ko`, `iwlmld.ko`, `iwl3945.ko`, `iwl4965.ko` from the squashfs with `unsquashfs -ef` (the host's `modinfo -F firmware <file>` reads them); with its own parsing (do not import `iwlwifi_keep.py`), check "at most one ucode per series with a known ceiling", "no ucode above its ceiling" (the same radio-then-family lookup as the rule, written again in the test), "no dangling symlink under usr/lib/firmware" (resolve every link from `unsquashfs -lls` against the listed paths), and one `check` each for a ucode of `7265D`, `8265`, `9260-th-b0-jf-b0`, `cc-a0`, `Qu-c0-hr-b0`, `QuZ-a0-hr-b0`, `so-a0-gf-a0` (plus `iwlwifi-so-a0-gf-a0.pnvm`), `ty-a0-gf-a0`, `ma-b0-gf-a0`, `bz-b0-fm-c0`, `gl-c0-fm-c0`.
 - [ ] **Step 6: Run** `test/integration/test-firmware.sh` on the Task 5 artifacts. Expected: FAIL on "at most one ucode per series".
-- [ ] **Step 7: Implement in `slim-rootfs.sh`.** `prune_iwlwifi`: `modinfo -F firmware` of every module under `/usr/lib/modules/$KVER/kernel/drivers/net/wireless/intel/` into `/thinfloe-slim/iwlwifi-names`, run `iwlwifi_keep.py` on it and `/usr/lib/firmware/intel/iwlwifi`, delete what it prints, then delete every symlink under `/usr/lib/firmware` that no longer resolves (`find -xtype l`), and `die` if any symlink there still dangles afterwards. Print `slim-rootfs: removed <n> iwlwifi files`. `check_firmware_names`: names from `modinfo -F firmware` over the modules now in the tree, intersected with `FW_BEFORE`; each must still exist as `/usr/lib/firmware/<name>` or `<name>.zst`, else `die "firmware <name> was removed but <module> still asks for it"` (find the module with one more `modinfo` loop only on failure).
+- [ ] **Step 7: Implement in `slim-rootfs.sh`.** `prune_iwlwifi`: `modinfo -F firmware` of every module under `/usr/lib/modules/$KVER/kernel/drivers/net/wireless/intel/` into `/thinfloe-slim/iwlwifi-names`, run `iwlwifi_keep.py` on it and `/usr/lib/firmware/intel/iwlwifi`, delete what it prints, then delete every symlink under `/usr/lib/firmware` that no longer resolves (`find -xtype l`), and `die` if any symlink there still dangles afterwards. Print `slim-rootfs: removed <n> iwlwifi files`. `check_firmware_names`: names from `modinfo -F firmware` over the modules now in the tree, intersected with `FW_BEFORE`, minus `DROPPED`; each must still exist as `/usr/lib/firmware/<name>` or `<name>.zst`, else `die "firmware <name> was removed but <module> still asks for it"` (find the module with one more `modinfo` loop only on failure).
 - [ ] **Step 8: Docs.** `CLAUDE.md` and `docs/notes/history-of-constraints.md`: the rule stays; the one exception is `containers/ubuntu/slim/slim-rootfs.sh`, which keeps per Intel WiFi series the file the driver loads and removes `intel-ucode` after dracut (owner, 2026-11-12); guards `test-firmware.sh`, `test_iwlwifi_keep.py` and the build-time firmware-name check. The Dockerfile comment names the same exception.
 - [ ] **Step 9: Run** `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make rootfs VERSION=3.0.0-size BUILD_JOBS=4`, then `test-firmware.sh`, `test-wifi-stack.sh`, `test-image-size.sh`, `make test-unit`. Expected: PASSED; the build log shows about 111 iwlwifi files removed; `ramroot.sqsh` 55 to 61 MB below Task 5.
 - [ ] **Step 10: Commit** `build: keep only the Intel WiFi firmware the driver loads` with the `Sizes:` line.
@@ -186,15 +187,44 @@
 - [ ] **Step 4: Run** `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make rootfs VERSION=3.0.0-size BUILD_JOBS=4`, then `test-initramfs-drivers.sh`, `test-initramfs-commands.sh`, `test-image-size.sh`, then `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make qemu-smoke qemu-smoke-netboot VERSION=3.0.0-size BUILD_JOBS=4`. Expected: PASSED; `initrd.img` about 15 to 19 MB below Task 7 (11.7 MB of omitted modules, 4 to 7 MB from level 19).
 - [ ] **Step 5: Commit** `build: leave server drivers out of the initrd and compress it at zstd 19` with the `Sizes:` line.
 
-### Task 9: Budget, changelog, full verification
+### Task 9: A1, AMD graphics firmware for APUs
 
 **Files:**
-- Modify: `test/integration/test-image-size.sh` (budgets), `CHANGES.md`, `CLAUDE.md` ("Build" rules)
+- Modify: `containers/ubuntu/Dockerfile` (package list: `linux-firmware-amd-graphics` after `linux-firmware-intel-graphics`; the cleanup comment on firmware)
+- Create: `containers/ubuntu/slim/amdgpu_keep.py`, `containers/ubuntu/slim/amdgpu-apu-ip.csv` (verbatim copy of `/scratch/oetiker/claude-tmp/thinfloe-tests/size-design/amd/src/apu-asic-info-table.csv`, which is `Documentation/gpu/amdgpu/apu-asic-info-table.csv` of torvalds/linux tag `v7.0`, with a first comment line naming that source and the date 2026-11-12, which the parser skips)
+- Create: `test/unit/test_amdgpu_keep.py`; fixtures in `test/unit/amdgpu-fixtures/`: `files.txt` (one line per entry of `amdgpu/` in the package: the name, and for a link ` -> <target>`; make it with `find /scratch/oetiker/claude-tmp/thinfloe-tests/size-design/amd/x/usr/lib/firmware/amdgpu -mindepth 1 -printf '%f\n'` for files and `-type l -printf '%f -> %l\n'` for links), `modinfo.txt` (copy of `/scratch/oetiker/claude-tmp/thinfloe-tests/size-design/amd/modinfo.txt`)
+- Modify: `containers/ubuntu/slim/slim-rootfs.sh` (`prune_amdgpu`), `test/integration/test-firmware.sh`, `test/integration/test-initramfs-drivers.sh`
+- Modify: `CLAUDE.md` and `docs/notes/history-of-constraints.md` (firmware rule: the AMD exception), `docs/notes/session.md` (one line: `amdgpu` binds after switch-root like any KMS driver other than `i915`, handled by `simpledrm` and `thinfloe-wait-kms`)
+
+**Interfaces:**
+- Consumes: `DROPPED`, `die`, `KVER` (Tasks 3 and 6).
+- Produces in `amdgpu_keep.py`: `apu_prefixes(csv_text: str) -> tuple[list[str], list[str]]` returning (IP prefixes such as `gc_11_5_0`, `dcn_3_5_0`, `psp_14_0_0`; two-part forms for patch level 0 as `dcn_3_5`), skipping the `CARRIZO/STONEY` row and `n/a`, MP0 mapped to `psp`; `select(csv_text: str, entries: dict[str, str | None]) -> tuple[list[str], list[str]]` with `entries` mapping each name in `amdgpu/` to its link target or `None`, returning (keep, drop); `class TooSmall(ValueError)` below 15 APU rows or 100 kept names. Constants: `CHIPS = ("raven", "raven2", "picasso", "renoir", "green_sardine", "yellow_carp", "vangogh")`, `APU_ONLY = ("vpe", "umsch_mm", "isp")`. CLI: `python3 amdgpu_keep.py CSV FIRMWARE_DIR` prints the names to drop; exit 2 with `amdgpu_keep: <reason>` on `TooSmall`.
+
+- [ ] **Step 1: Write the failing unit tests** in `test_amdgpu_keep.py` (load as in Task 6), on the fixtures and the CSV:
+  - `test_newer_apus_by_ip`: keep has `dcn_3_5_dmcub.bin.zst`, `dcn_3_6_dmcub.bin.zst`, `dcn_3_5_1_dmcub.bin.zst`, `gc_11_5_0_mes_2.bin.zst`, `psp_14_0_0_toc.bin.zst`, `gc_11_0_4_me.bin.zst`, `isp_4_1_1.bin.zst`, `vpe_6_1_0.bin.zst`, `umsch_mm_4_0_0.bin.zst`.
+  - `test_older_apus_by_chip`: keep has `raven_dmcu.bin.zst`, `picasso_vcn.bin.zst`, `renoir_dmcub.bin.zst`, `green_sardine_vcn.bin.zst`, `yellow_carp_dmcub.bin.zst`, `vangogh_toc.bin.zst`.
+  - `test_shared_file_kept_through_link`: keep has `vcn_4_0_2.bin.zst` and its target `vcn_4_0_0.bin.zst`.
+  - `test_dgpu_dropped`: drop has every `navi10_*`, `gc_11_0_0_*`, `psp_13_0_0_*`, `smu_13_0_0*`, `polaris10_*`, `carrizo_*` entry.
+  - `test_fixture_totals`: 178 kept, 489 dropped.
+  - `test_short_table_refused`: the CSV cut to its header and 5 rows raises `TooSmall`.
+- [ ] **Step 2: Run** `python3 -m unittest test.unit.test_amdgpu_keep -v`. Expected: FAIL, module not found.
+- [ ] **Step 3: Implement `amdgpu_keep.py`** with the spec's rule (section `A1`): keep by chip prefix (`<chip>_`, with `raven_` not matching `raven2_`), by IP prefix (`<prefix>` followed by `_` or the end; a two-part prefix only when followed by `_` and a letter), by APU-only block; then add link targets until nothing changes.
+- [ ] **Step 4: Run** the unit tests. Expected: PASS.
+- [ ] **Step 5: Write the failing integration checks.** `test-firmware.sh`: the pinned per-APU list of the spec (section `A1`, "Guards", the `test-firmware.sh` item) as `check` lines on `usr/lib/firmware/amdgpu/<name>.bin(.zst)?`, plus `absent` for `usr/lib/firmware/amdgpu/navi10_` and `usr/lib/firmware/radeon/`. `test-initramfs-drivers.sh`: `absent` for `amdgpu.ko` and `usr/lib/firmware/amdgpu/`.
+- [ ] **Step 6: Run** `test-firmware.sh` on the Task 8 artifacts. Expected: FAIL on the pinned AMD checks.
+- [ ] **Step 7: Implement.** Dockerfile: add `linux-firmware-amd-graphics`. `prune_amdgpu`: run `amdgpu_keep.py /thinfloe-slim/amdgpu-apu-ip.csv /usr/lib/firmware/amdgpu`, delete what it prints, `rm -rf /usr/lib/firmware/radeon`, append both to `DROPPED`, remove links under `/usr/lib/firmware` that no longer resolve and `die` if any remain; then every name `modinfo -F firmware` of `amdgpu.ko` lists that matches a kept prefix must exist (as `<name>` or `<name>.zst`), else `die "amdgpu firmware <name> missing after the APU prune"`. Print `slim-rootfs: kept <k>, removed <d> amdgpu files`. Docs as listed under **Files**; the Dockerfile cleanup comment names the AMD exception.
+- [ ] **Step 8: Run** `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make rootfs VERSION=3.0.0-size BUILD_JOBS=4`, then `test-firmware.sh`, `test-initramfs-drivers.sh`, `test-image-size.sh`, `make test-unit`. Expected: PASSED; the build log shows about 178 kept and 489 removed; `ramroot.sqsh` about 8 MB above Task 8, `initrd.img` unchanged.
+- [ ] **Step 9: Commit** `build: AMD graphics firmware for Ryzen APUs` with the `Sizes:` line.
+
+### Task 10: Budget, changelog, full verification
+
+**Files:**
+- Modify: `test/integration/test-image-size.sh` (budgets, set from the measurement with `A1` included), `CHANGES.md`, `CLAUDE.md` ("Build" rules)
 
 - [ ] **Step 1: Run** `test/integration/test-image-size.sh artifacts/rootfs /scratch/oetiker/claude-tmp/thinfloe-tests/size-baseline` and record the sum and every delta.
 - [ ] **Step 2: Lower the budgets** to the measured sizes plus 2 %, rounded up to a whole MB, with the date and the sum in a comment.
 - [ ] **Step 3: `CLAUDE.md`, "Build":** `SLIM_FILES` joins the list of `.ubuntu-container` prerequisites; the `containers/ubuntu/slim/slim-rootfs.sh` `RUN` stays the last in the Dockerfile and nothing after it may run `dpkg`, `apt-get` or dracut; `scripts/export-rootfs.sh` is a prerequisite of the rootfs artifacts; `test-image-size.sh` holds a size budget, and raising it needs a reason in the commit message.
-- [ ] **Step 4: `CHANGES.md`** under `[Unreleased]`, with `N` the measured sum rounded to a whole MB. Under `### Changed`, first in the section:
+- [ ] **Step 4: `CHANGES.md`** under `[Unreleased]`, with `N` the measured sum rounded to a whole MB. Under `### New`, first in the section: `ThinFloe now shows its picture on mini PCs with AMD Ryzen processors and their built-in Radeon graphics (Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.` Under `### Changed`, first in the section:
   - `An upgrade or a netboot now downloads about N MB instead of 611 MB. The running system keeps Intel WiFi firmware only in the version its driver loads, and has no drivers for DVB, TV tuner and radio cards and no CPU microcode files, which are applied from initrd.img at boot as before. During boot, before the system is loaded, drivers for data-centre network cards, Fibre Channel and SAS storage controllers, InfiniBand and network file systems (CIFS, Ceph, AFS, NFS) are no longer available.` (with `initrd.img` in a code span)
   - `` `locale-gen` and `systemd-hwdb update` no longer work on a running machine: the locale and hardware database sources are left out. The locales of `/etc/locale.gen` and the hardware database ship ready to use. ``
 
@@ -203,4 +233,5 @@
 - [ ] **Step 6: Run** `flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make image qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow VERSION=3.0.0-size BUILD_JOBS=4` (Bash `timeout: 600000`, rerun in parts if it does not fit). Expected: every target PASS.
 - [ ] **Step 7: Commit** `docs: image size budget and changelog` with the final `Sizes:` line and the total delta against the baseline.
 - [ ] **Step 8 (owner, on hardware):** boot the image on the NUC7 (Intel 8265) and the Alder Lake-P machine, from USB. Expected: the boot picture as before; WiFi associates; `journalctl -k | grep -E 'iwlwifi.*loaded firmware version|microcode'` shows the firmware version and the microcode line; `journalctl -b -p err` shows nothing new against 4.2.0.
-- [ ] **Step 9 (owner):** the measured sum against the target of about 460 MB (spec, "Expected result"). The controller reports the number; the owner decides whether it is enough before Task 15 of the release-flow plan.
+- [ ] **Step 8b (owner, on hardware, machine to be named by the owner):** boot the image from USB on an AMD Ryzen mini PC with integrated graphics. Expected: the boot picture on `simpledrm`, then the menu on `amdgpu` (no wait-kms failure screen); `journalctl -k | grep amdgpu` shows the driver initialised and no `failed to load firmware` or `Direct firmware load` line for `amdgpu/`.
+- [ ] **Step 9 (owner):** the measured sum (with the 8 MB of `A1`) against the target of about 460 MB (spec, "Expected result"). The controller reports the number; the owner decides whether it is enough before Task 15 of the release-flow plan.

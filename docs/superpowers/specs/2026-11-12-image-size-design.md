@@ -35,8 +35,16 @@ Approved cuts (*owner*, 2026-11-12). Nothing is added or dropped here.
 - `O4`: DVB, TV tuner and radio modules removed from the squashfs.
 - `O5`: initrd compressed with `zstd -19`.
 
+Added by the owner on 2026-11-12, after the review (option B). It adds size:
+
+- `A1`: AMD graphics firmware for APUs (integrated Radeon graphics of Ryzen
+  processors), so `amdgpu` binds on AMD mini PCs. Today the image ships no
+  AMD GPU firmware, and `amdgpu` fails on them.
+
 Not in scope (*owner*): camera firmware, VA-API drivers, python3 (netplan
-needs it). Unpacked firmware in the squashfs measured larger and is not
+needs it), any change to `radeon` and `nouveau` (they stay as they are; a
+question about them is open with the owner), firmware for AMD graphics
+cards. Unpacked firmware in the squashfs measured larger and is not
 proposed.
 
 ## Constraints
@@ -104,8 +112,12 @@ prerequisites of `.ubuntu-container`, like `PATCH_FILES`.
    that exist under `/usr/lib/firmware` (with or without `.zst`).
 1. `O4` first, while `modules.dep` still describes the shipped tree.
 2. `S1`, then one `depmod`, which also covers `O4`.
-3. `O1`, which reads `modinfo` of the iwlwifi modules.
-4. The firmware-name guard, now that modules and firmware are final.
+3. `O1`, which reads `modinfo` of the iwlwifi modules, then `A1`, which
+   prunes the AMD graphics firmware.
+4. The firmware-name guard, now that modules and firmware are final. It
+   skips the names that `O1` and `A1` dropped on purpose (they write their
+   drop lists to `/thinfloe-slim/dropped`): `amdgpu` names the firmware of
+   every AMD graphics card, and the dGPU files are meant to go.
 5. `O3`, `S2`, `S3`: independent removals with their own checks.
 
 ## The cuts
@@ -380,6 +392,99 @@ running system keeps all of them; only the initrd loses them.
 - Guards: the size budget (below) and every `qemu-smoke*` target, which
   unpack the initrd.
 
+### A1: AMD graphics firmware for APUs
+
+- Where: `containers/ubuntu/Dockerfile` installs `linux-firmware-amd-graphics`
+  in the package list next to `linux-firmware-intel-graphics` (in the build
+  image: `20260319.git217ca6e4-0ubuntu3.1`, 28.8 MB installed, files already
+  `.zst`). `slim-rootfs.sh` step 3 prunes it, with the selection in
+  `containers/ubuntu/slim/amdgpu_keep.py` and the APU table in
+  `containers/ubuntu/slim/amdgpu-apu-ip.csv`.
+- `amdgpu` stays in the squashfs and stays out of the initrd: it is in
+  `--omit-drivers` today and remains there. Plymouth runs on `simpledrm`
+  (`plymouth.use-simpledrm`), and `thinfloe-wait-kms.service` waits for a
+  KMS driver that binds after switch-root (`docs/notes/session.md`), so a
+  late `amdgpu` is handled as on a machine without `i915`. dracut installs
+  firmware only for modules it installs, so no AMD firmware reaches the
+  initrd either.
+- Which APUs (*owner*): Raven and Picasso, Renoir, Lucienne, Cezanne
+  (`green_sardine`), Barcelo, Rembrandt (`yellow_carp`), Mendocino, Phoenix,
+  Hawk Point, Strix, Krackan and newer. *Architect*: every APU row of the
+  table from Raven on, so also Raphael, Granite Ridge and Dragon Range (the
+  graphics in Ryzen 7000 and 9000 desktop processors), Van Gogh (Steam Deck),
+  Strix Halo and Gorgon Point. Carrizo and Stoney (2015, before Raven) and
+  the older APUs the `radeon` driver runs are left out; the `radeon/`
+  directory of the package is removed whole.
+
+Source of the rule: the kernel's own APU table,
+`Documentation/gpu/amdgpu/apu-asic-info-table.csv` at tag `v7.0` of
+torvalds/linux (fetched 2026-11-12; the image runs 7.0.0-43). Each row gives
+the DCN, GC, VCN, SDMA and MP0 (PSP) IP versions of one APU. amdgpu loads
+firmware in two naming schemes, which `modinfo -F firmware amdgpu` (692 names
+in 7.0.0-43) confirms:
+
+- Older APUs by chip name: `raven_*`, `raven2_*`, `picasso_*`, `renoir_*`,
+  `green_sardine_*`, `yellow_carp_*`, `vangogh_*`.
+- Newer APUs by IP version, found through IP discovery: `gc_X_Y_Z_*`,
+  `psp_X_Y_Z_*`, `dcn_X_Y_Z_*`, `vcn_X_Y_Z*`, `sdma_X_Y_Z`. A version with
+  patch level 0 may be named with two parts: DCN 3.5.0 loads
+  `dcn_3_5_dmcub`, DCN 3.6.0 loads `dcn_3_6_dmcub`.
+- IP blocks that only APUs have: `vpe_*`, `umsch_mm_*`, `isp_*`.
+
+Rule (*architect*):
+
+- Keep a file of `/usr/lib/firmware/amdgpu/` when its name starts with one of
+  the chip prefixes, or with an IP prefix from the table (`<block>_X_Y_Z`
+  followed by `_` or the end, or `<block>_X_Y` followed by `_` and a letter
+  when Z is 0; MP0 maps to `psp`), or with an APU-only block prefix.
+- Keep the target of every kept symlink, transitively. IP versions are
+  shared: `vcn_4_0_2` (Phoenix) is a link to `vcn_4_0_0`, the file of a
+  graphics card, and stays with it.
+- Drop everything else in `amdgpu/`, and `radeon/` whole. Remove symlinks
+  that dangle afterwards; none may remain.
+- The table must have at least 15 APU rows and the selection at least 100
+  files, else the build fails: a moved or reformatted table must not prune
+  blind.
+
+Measured on the package (`/scratch/oetiker/claude-tmp/thinfloe-tests/size-design/amd/`):
+the package holds 27.3 MB in `amdgpu/` (667 names, 122 of them links) and
+1.6 MB in `radeon/`; the rule keeps 178 names with 8.1 MB of files and drops
+489 names (19.1 MB) and `radeon/`. Every one of the 177 names that
+`modinfo` lists under a kept prefix is in the package. Since the files are
+`.zst`, the squashfs grows by about 8 MB; the whole package would have cost
+about 29 MB.
+
+Guards:
+
+- `make test-unit` (`test/unit/test_amdgpu_keep.py`, fixtures: the package's
+  name and link list and the `modinfo` list of 7.0.0-43, copied to
+  `test/unit/amdgpu-fixtures/`, plus the CSV): `dcn_3_5_dmcub`,
+  `dcn_3_6_dmcub`, `gc_11_5_0_mes_2`, `psp_14_0_0_toc`, `raven_dmcu`,
+  `green_sardine_vcn`, `vangogh_toc`, `isp_4_1_1` kept; `vcn_4_0_0` kept
+  through the link from `vcn_4_0_2`; `navi10_*`, `gc_11_0_0_*`,
+  `psp_13_0_0_*`, `smu_13_0_0`, `polaris10_*`, `carrizo_*` dropped; totals
+  178 kept, 489 dropped; a table with fewer than 15 rows refused.
+- Build: after the prune, every name `modinfo -F firmware amdgpu` lists
+  under a kept prefix exists; no dangling symlink under `/usr/lib/firmware`.
+- `make test` (`test-firmware.sh`), a pinned list written out in the test,
+  independent of the rule, one check per APU: Raven (`raven_dmcu`), Picasso
+  (`picasso_vcn`), Renoir (`renoir_dmcub`), Cezanne and Barcelo
+  (`green_sardine_dmcub`), Rembrandt (`yellow_carp_dmcub`), Raphael
+  (`gc_10_3_6_me`, `dcn_3_1_5_dmcub`), Mendocino (`gc_10_3_7_me`,
+  `dcn_3_1_6_dmcub`), Phoenix (`gc_11_0_1_mes_2`, `dcn_3_1_4_dmcub`,
+  `psp_13_0_4_toc`, `vcn_4_0_2`), Hawk Point (`gc_11_0_4_me`,
+  `psp_13_0_11_toc`), Strix (`gc_11_5_0_me`, `dcn_3_5_dmcub`,
+  `psp_14_0_0_toc`), Strix Halo (`gc_11_5_1_me`, `dcn_3_5_1_dmcub`),
+  Krackan (`gc_11_5_2_me`, `gc_11_5_3_me`, `dcn_3_6_dmcub`,
+  `psp_14_0_4_toc`, `psp_14_0_5_toc`); and no `navi10_` file, no
+  `usr/lib/firmware/radeon/`.
+- `make test` (`test-initramfs-drivers.sh`): no `amdgpu.ko` and no
+  `usr/lib/firmware/amdgpu/` in the initrd.
+- Hardware (owner, at the end): QEMU cannot run `amdgpu`. On a real AMD mini
+  PC (the owner names the machine), the menu appears, and
+  `journalctl -k | grep amdgpu` shows the driver initialised with no
+  `failed to load firmware` line.
+
 ## Expected result
 
 | Cut | Saving (MB) | Source |
@@ -393,13 +498,15 @@ running system keeps all of them; only the initrd loses them.
 | O3 | 14 or more | audit |
 | O4 | 6 | measured |
 | O5 | 4 to 7 | review estimate |
-| Total | 121 to 131 | |
+| A1 | about -8 (adds) | measured |
+| Total | 113 to 123 | |
 
-611 MB minus that is about 480 to 490 MB. The target of about 460 MB
+611 MB minus that is about 488 to 498 MB; without `A1` it would be 480 to
+490 MB. The target of about 460 MB
 assumed 45 MB for `O4`; with the owner's keep exceptions `O4` measures
 6 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
-gives less than the audit expected. The approved cuts therefore end about
-20 to 30 MB above the target. This design does not add a
+gives less than the audit expected, and `A1` adds about 8 MB. The approved
+work therefore ends about 30 to 40 MB above the target. This design does not add a
 cut to close the gap; the measured result goes to the owner with the final
 task.
 
@@ -441,15 +548,20 @@ task.
 - `make qemu-smoke-addons`: `dpkg` installs a package at boot on the slimmed
   tree (`S2`, `S3`).
 - Not covered by QEMU: Intel WiFi (`O1`), early microcode (`O3`), `i915` on
-  real hardware. These are the owner's hardware checks in the last task.
+  real hardware, `amdgpu` (`A1`). These are the owner's hardware checks in
+  the last task.
 
 ## Docs to change
 
 - `CLAUDE.md`, "Firmware is selected by package, never by cleanup": the rule
   stays, with one exception: `containers/ubuntu/slim/slim-rootfs.sh` prunes
-  Intel WiFi firmware to the file the driver loads, and removes
-  `intel-ucode` after dracut. Guards: `test-firmware.sh`,
-  `test_iwlwifi_keep.py`.
+  Intel WiFi firmware to the file the driver loads, keeps AMD graphics
+  firmware only for APUs, and removes `intel-ucode` after dracut. Guards:
+  `test-firmware.sh`, `test_iwlwifi_keep.py`, `test_amdgpu_keep.py`. The
+  package list names `linux-firmware-amd-graphics`, and the APU table in
+  `containers/ubuntu/slim/amdgpu-apu-ip.csv` is refreshed from the kernel's
+  `Documentation/gpu/amdgpu/apu-asic-info-table.csv` when the kernel
+  changes.
 - `docs/notes/history-of-constraints.md`: the same exception, with the date
   and the owner's decision.
 - `CLAUDE.md`, "Build": `SLIM_FILES` joins the list of prerequisites; nothing
@@ -461,6 +573,13 @@ task.
 ## Changelog
 
 Under `[Unreleased]` in `CHANGES.md`:
+
+`### New`:
+
+- ThinFloe now shows its picture on mini PCs with AMD Ryzen processors and
+  their built-in Radeon graphics (Ryzen 2000 series and newer, up to Ryzen
+  AI): the image carries the graphics firmware for these processors. AMD
+  graphics cards still get no firmware.
 
 `### Changed`:
 
@@ -494,7 +613,7 @@ Under `[Unreleased]` in `CHANGES.md`:
    with every kernel. The rule keeps the highest file of any family
    `modinfo` does not name, the build fails below 20 parsed names, and
    `test_iwlwifi_keep.py` pins the behaviour on the 4.2.0-era data.
-3. **The target is missed by about 20 to 30 MB** (see "Expected result"). Only the
+3. **The target is missed by about 30 to 40 MB**, of which 8 MB are `A1` (see "Expected result"). Only the
    owner can change the scope.
 4. **An add-on package that triggers `systemd-hwdb update` or `locale-gen`**
    at boot. The `udev` trigger fires only for a package that installs into
@@ -511,3 +630,9 @@ Under `[Unreleased]` in `CHANGES.md`:
    `scripts/export-rootfs.sh` (the version export, and a new version write)
    and `test-container-inputs.sh`, and adds `TF_VERSION`. Whichever lands
    second merges both; Task 2 of this plan has the step.
+7. **An APU the table does not list yet, or a kernel update that moves an
+   APU to new IP versions.** Its firmware would be dropped and `amdgpu`
+   would fail on it, with the screen left to `simpledrm`. The table is
+   copied from the kernel the image runs, and a kernel bump needs a fresh
+   copy; the pinned list in `test-firmware.sh` and the owner's hardware
+   check catch the known APUs only.
