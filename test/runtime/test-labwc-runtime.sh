@@ -688,4 +688,33 @@ else
     fail=1
 fi
 
+# Native Wayland remote desktop clients (OxuLnk) ask labwc to switch its
+# keybindings off for their window with zwp_keyboard_shortcuts_inhibit_v1
+# (containers/ubuntu/patches/0004-keyboard-shortcuts-inhibit.patch). As with
+# the Xwayland grab manager above, this rig has no client that creates an
+# inhibitor and no keyboard, so it only asserts that labwc advertises the
+# global to an ordinary client.
+INHIBIT_CONTAINER_NAME="thinfloe-runtime-test-inhibit-$$"
+inhibit_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$INHIBIT_CONTAINER_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=1 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           labwc -C /etc/thinfloe/labwc -S "sh -c \"WAYLAND_DEBUG=1 timeout 3 foot true\""' 2>&1)
+inhibit_rc=$?
+if [[ $inhibit_rc -eq 124 || $inhibit_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during inhibit test)"
+    podman rm -f "$INHIBIT_CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+if echo "$inhibit_out" | grep -Eq 'wl_registry[@#][0-9]+\.global\([0-9]+, "zwp_keyboard_shortcuts_inhibit_manager_v1"'; then
+    echo "ok   - labwc advertises the keyboard shortcuts inhibit manager"
+else
+    echo "FAIL - labwc does not advertise zwp_keyboard_shortcuts_inhibit_manager_v1"
+    echo "$inhibit_out" | grep -E 'wl_registry[@#][0-9]+\.global' | head -60
+    fail=1
+fi
+
 exit $fail

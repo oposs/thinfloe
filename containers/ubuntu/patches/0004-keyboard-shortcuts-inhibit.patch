@@ -1,0 +1,200 @@
+Description: implement zwp_keyboard_shortcuts_inhibit_manager_v1
+ Native Wayland remote desktop clients such as OxuLnk ask the compositor to
+ switch its keybindings off for their window. labwc 0.9.3 does not offer the
+ protocol, so OxuLnk logs "keyboard grab unavailable: compositor does not
+ support shortcut inhibition" and shows the grab as not working, although
+ the image ships zero keybindings and every key already reaches it.
+ .
+ Adds src/protocols/keyboard-shortcuts-inhibit.c on top of the wlroots
+ helper. Each inhibitor on a view's surface counts in a new per-view field,
+ keybinds_inhibitors, which view_inhibits_actions() treats like the
+ user-toggled inhibits_keybinds: keybindings are off while that view has the
+ focus, and ToggleKeybinds still works as a way out. An inhibitor is
+ activated once when it is created and never deactivated on a focus change,
+ because clients read 'inactive' as "the user withdrew it" and do not ask
+ again.
+ .
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2026-11-12
+---
+diff --git a/include/labwc.h b/include/labwc.h
+index 7e6d822..f4dfd8e 100644
+--- a/include/labwc.h
++++ b/include/labwc.h
+@@ -451,6 +451,7 @@ void server_start(struct server *server);
+ void server_finish(struct server *server);
+ 
+ void xwayland_keyboard_grab_manager_create(struct server *server);
++void keyboard_shortcuts_inhibit_create(struct server *server);
+ 
+ void create_constraint(struct wl_listener *listener, void *data);
+ void constrain_cursor(struct server *server, struct wlr_pointer_constraint_v1
+diff --git a/include/view.h b/include/view.h
+index e22f2f4..57a0224 100644
+--- a/include/view.h
++++ b/include/view.h
+@@ -194,6 +194,11 @@ struct view {
+ 	 * indicator - a grab must not clobber that state.
+ 	 */
+ 	bool keybinds_inhibited_by_grab;
++	/*
++	 * thinfloe: active zwp_keyboard_shortcuts_inhibitor_v1 objects for
++	 * this view. Like inhibits_keybinds, ToggleKeybinds still works.
++	 */
++	int keybinds_inhibitors;
+ 	xkb_layout_index_t keyboard_layout;
+ 
+ 	/* Pointer to an output owned struct region, may be NULL */
+diff --git a/src/protocols/keyboard-shortcuts-inhibit.c b/src/protocols/keyboard-shortcuts-inhibit.c
+new file mode 100644
+index 0000000..38a0936
+--- /dev/null
++++ b/src/protocols/keyboard-shortcuts-inhibit.c
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * thinfloe: zwp_keyboard_shortcuts_inhibit_manager_v1
++ *
++ * Native Wayland remote desktop clients (OxuLnk) ask the compositor to
++ * switch its keybindings off for their window, so that every key reaches
++ * the remote session. Without this global they report that the keyboard
++ * grab does not work.
++ *
++ * An inhibitor is activated once, when it is created, and stays active
++ * until the client destroys it. labwc only checks keybindings against the
++ * focused view (view_inhibits_actions()), so the inhibition already ends
++ * when the window loses the focus and returns with it. No 'inactive' event
++ * is sent on a focus change: clients read 'inactive' as "the user took the
++ * inhibition back" and do not ask again. ToggleKeybinds still works, as the
++ * protocol asks for a way out.
++ */
++#include <assert.h>
++#include <stdlib.h>
++#include <wayland-server-core.h>
++#include <wlr/types/wlr_compositor.h>
++#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
++#include <wlr/util/log.h>
++#include "common/mem.h"
++#include "labwc.h"
++#include "view.h"
++
++struct lab_shortcuts_inhibitor {
++	struct view *view;
++	struct wl_listener on_destroy;
++	struct wl_listener on_view_destroy;
++};
++
++static struct wl_listener on_new_inhibitor;
++static struct wl_listener on_manager_destroy;
++
++static void
++handle_view_destroy(struct wl_listener *listener, void *data)
++{
++	struct lab_shortcuts_inhibitor *inh =
++		wl_container_of(listener, inh, on_view_destroy);
++	wl_list_remove(&inh->on_view_destroy.link);
++	wl_list_init(&inh->on_view_destroy.link);
++	inh->view = NULL;
++}
++
++static void
++handle_inhibitor_destroy(struct wl_listener *listener, void *data)
++{
++	struct lab_shortcuts_inhibitor *inh =
++		wl_container_of(listener, inh, on_destroy);
++	if (inh->view) {
++		assert(inh->view->keybinds_inhibitors > 0);
++		inh->view->keybinds_inhibitors--;
++	}
++	wl_list_remove(&inh->on_view_destroy.link);
++	wl_list_remove(&inh->on_destroy.link);
++	free(inh);
++}
++
++static void
++handle_new_inhibitor(struct wl_listener *listener, void *data)
++{
++	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor = data;
++	struct wlr_surface *root =
++		wlr_surface_get_root_surface(inhibitor->surface);
++	struct view *view = root ? view_from_wlr_surface(root) : NULL;
++	if (!view) {
++		/* No window (e.g. a layer surface): nothing to inhibit for. */
++		return;
++	}
++
++	struct lab_shortcuts_inhibitor *inh = znew(*inh);
++	inh->view = view;
++	view->keybinds_inhibitors++;
++
++	inh->on_view_destroy.notify = handle_view_destroy;
++	wl_signal_add(&view->events.destroy, &inh->on_view_destroy);
++	inh->on_destroy.notify = handle_inhibitor_destroy;
++	wl_signal_add(&inhibitor->events.destroy, &inh->on_destroy);
++
++	wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
++}
++
++static void
++handle_manager_destroy(struct wl_listener *listener, void *data)
++{
++	wl_list_remove(&on_new_inhibitor.link);
++	wl_list_remove(&on_manager_destroy.link);
++}
++
++void
++keyboard_shortcuts_inhibit_create(struct server *server)
++{
++	assert(server);
++	struct wlr_keyboard_shortcuts_inhibit_manager_v1 *manager =
++		wlr_keyboard_shortcuts_inhibit_v1_create(server->wl_display);
++	if (!manager) {
++		wlr_log(WLR_ERROR, "cannot create the keyboard shortcuts inhibit manager");
++		return;
++	}
++	on_new_inhibitor.notify = handle_new_inhibitor;
++	wl_signal_add(&manager->events.new_inhibitor, &on_new_inhibitor);
++	on_manager_destroy.notify = handle_manager_destroy;
++	wl_signal_add(&manager->events.destroy, &on_manager_destroy);
++}
+diff --git a/src/protocols/meson.build b/src/protocols/meson.build
+index 4892739..fb0063a 100644
+--- a/src/protocols/meson.build
++++ b/src/protocols/meson.build
+@@ -1,6 +1,7 @@
+ labwc_sources += files(
+   'transaction-addon.c',
+   'xwayland-keyboard-grab.c',
++  'keyboard-shortcuts-inhibit.c',
+ )
+ 
+ subdir('cosmic_workspaces')
+diff --git a/src/server.c b/src/server.c
+index 674ee43..f1dff8d 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -720,6 +720,7 @@ server_init(struct server *server)
+ #if HAVE_XWAYLAND
+ 	xwayland_keyboard_grab_manager_create(server);
+ #endif
++	keyboard_shortcuts_inhibit_create(server);
+ 
+ 	server->tablet_manager = wlr_tablet_v2_create(server->wl_display);
+ 
+diff --git a/src/view.c b/src/view.c
+index 3232daf..8a5af69 100644
+--- a/src/view.c
++++ b/src/view.c
+@@ -2415,7 +2415,8 @@ view_inhibits_actions(struct view *view, struct wl_list *actions)
+ 	if (view->keybinds_inhibited_by_grab) {
+ 		return true;
+ 	}
+-	return view->inhibits_keybinds && !actions_contain_toggle_keybinds(actions);
++	return (view->inhibits_keybinds || view->keybinds_inhibitors > 0)
++		&& !actions_contain_toggle_keybinds(actions);
+ }
+ 
+ void
