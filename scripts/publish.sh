@@ -31,6 +31,16 @@ if ! (cd "$REL" && sha256sum -c SHA256SUMS >/dev/null); then
     exit 1
 fi
 
+# sha256sum -c checks only the files SHA256SUMS lists: an asset it omits
+# would go up unverified. Each of the five files needs exactly one line.
+for f in "${ASSETS[@]}"; do
+    [[ $f == SHA256SUMS ]] && continue
+    if [[ $(grep -cE "^[0-9a-f]{64} [ *]${f//./\\.}\$" "$REL/SHA256SUMS") != 1 ]]; then
+        echo "ERROR: $REL/SHA256SUMS has not exactly one line for $f" >&2
+        exit 1
+    fi
+done
+
 # The release number thinfloe-upgrade check reads: one line X.Y.Z.
 if [[ $(wc -l <"$REL/version") != 1 ]] || ! grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' "$REL/version"; then
     echo "ERROR: $REL/version is not one line X.Y.Z" >&2
