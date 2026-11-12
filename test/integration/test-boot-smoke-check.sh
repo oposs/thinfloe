@@ -75,6 +75,17 @@ else
     ok "full check fails a boot that never reached multi-user"
 fi
 
+# A module the kernel refuses to load. The check cannot see modules that are
+# missing; this one catches only a refused module.
+printf "$HOOKS_IN_ORDER"'Reached target multi-user.target\nfoo: Unknown symbol bar (err -2)\n' >"$WORK/unknown.log"
+if "$CHECK" "$WORK/unknown.log" >"$WORK/out" 2>&1; then
+    bad "full check passed a log with 'Unknown symbol'"
+elif grep -q 'FAIL - no module with unknown symbols' "$WORK/out"; then
+    ok "full check fails a log with 'Unknown symbol'"
+else
+    bad "unknown-symbol log failed for another reason: $(grep FAIL "$WORK/out")"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - boot smoke check"

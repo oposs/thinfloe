@@ -95,6 +95,8 @@ unwant "no i915 DMC firmware error"  'Failed to load DMC firmware'
 unwant "no GuC firmware error"       'GuC firmware.*fetch failed'
 unwant "GPU not wedged"              'declaring it wedged'
 unwant "no dracut emergency shell"   'Entering emergency mode|dracut: FATAL'
+# Catches only a module the kernel refuses to load, not one that is missing.
+unwant "no module with unknown symbols" 'Unknown symbol'
 unwant "no kernel panic"             'Kernel panic'
 unwant "no systemd ordering cycle"   'Found ordering cycle'
 unwant "no failed sysfs write in a hook" 'dracut-[a-z-]+\[[0-9]+\]: .*cannot create /sys/'
