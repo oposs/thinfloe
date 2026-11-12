@@ -402,9 +402,17 @@ running system keeps all of them; only the initrd loses them.
   `containers/ubuntu/slim/amdgpu-apu-ip.csv`.
 - `amdgpu` stays in the squashfs and stays out of the initrd: it is in
   `--omit-drivers` today and remains there. Plymouth runs on `simpledrm`
-  (`plymouth.use-simpledrm`), and `thinfloe-wait-kms.service` waits for a
-  KMS driver that binds after switch-root (`docs/notes/session.md`), so a
-  late `amdgpu` is handled as on a machine without `i915`. dracut installs
+  (`plymouth.use-simpledrm`) until `amdgpu` binds after switch-root and
+  replaces it, and `thinfloe-wait-kms.service` waits for that KMS driver
+  (`docs/notes/session.md`). When the firmware a card needs is missing:
+  amdgpu fails; the boot waits about 20 s, and then either the menu runs unaccelerated on simpledrm or, worst case, the failure screen appears after about 40 s. The outcome depends on where the load fails:
+  `amdgpu_device_init` removes `simpledrm` after `ip_early_init`; the gfx,
+  SDMA and PSP microcode load in early init, so a missing file there most
+  likely leaves `simpledrm` in place, while the display firmware (DMCUB)
+  loads in the display block's software init after `simpledrm` is gone, so
+  no `card0` remains, labwc fails and retries, and the failure screen
+  follows (`docs/notes/session.md`). `wait-kms` itself treats `simpledrm` or
+  no driver as "keep waiting" and gives up with exit 0 after 20 s. dracut installs
   firmware only for modules it installs, so no AMD firmware reaches the
   initrd either.
 - Which APUs (*owner*): Raven and Picasso, Renoir, Lucienne, Cezanne
@@ -445,6 +453,24 @@ Rule (*architect*):
 - The table must have at least 15 APU rows and the selection at least 100
   files, else the build fails: a moved or reformatted table must not prune
   blind.
+- New-APU guard (*architect*). Both kernel tables are copied into
+  `containers/ubuntu/slim/`: `amdgpu-apu-ip.csv` and `amdgpu-dgpu-ip.csv`
+  (`apu-asic-info-table.csv` and `dgpu-asic-info-table.csv`, torvalds/linux
+  `v7.0`). At build time every `gc`, `psp`, `dcn`, `vcn` and `sdma` version
+  that `modinfo -F firmware amdgpu` names is checked: a version that has
+  files in the installed package and is in neither table nor in the
+  explicit list `DGPU_EXTRAS` fails the build. `DGPU_EXTRAS` today:
+  `gc_9_4_4`, `gc_9_5_0`, `psp_13_0_12`, `psp_13_0_14`, `sdma_4_4_4`,
+  `sdma_4_4_5`, `vcn_5_0_1` (the MI300 to MI350 accelerators, missing from
+  the dGPU table). The build also fails when a `psp_X_Y_Z` has a `toc` file
+  but no `sos` file and is not kept: that is the APU pattern (an APU's PSP
+  boots from the BIOS, so the package ships no `sos` for it). A kernel
+  version check would not do: Ubuntu backports support for new APUs into
+  7.0.0-NN updates without changing the version's first two numbers.
+  `modinfo` of 7.0.0-43 already names `gc_11_5_4`, `sdma_6_1_4`,
+  `psp_15_0_0`, `psp_15_0_8` and `vcn_5_3_0` (probably the next APUs) with
+  no files in today's package, so the guard fires as soon as
+  linux-firmware ships them, and the tables are then refreshed.
 
 Measured on the package (`/scratch/oetiker/claude-tmp/thinfloe-tests/size-design/amd/`):
 the package holds 27.3 MB in `amdgpu/` (667 names, 122 of them links) and
@@ -463,7 +489,10 @@ Guards:
   `green_sardine_vcn`, `vangogh_toc`, `isp_4_1_1` kept; `vcn_4_0_0` kept
   through the link from `vcn_4_0_2`; `navi10_*`, `gc_11_0_0_*`,
   `psp_13_0_0_*`, `smu_13_0_0`, `polaris10_*`, `carrizo_*` dropped; totals
-  178 kept, 489 dropped; a table with fewer than 15 rows refused.
+  178 kept, 489 dropped; a table with fewer than 15 rows refused; the
+  new-APU guard refuses a fixture with a synthetic `gc_11_5_4_me.bin.zst`
+  and a fixture with a `psp` version that has `toc` but no `sos` and is not
+  kept.
 - Build: after the prune, every name `modinfo -F firmware amdgpu` lists
   under a kept prefix exists; no dangling symlink under `/usr/lib/firmware`.
 - `make test` (`test-firmware.sh`), a pinned list written out in the test,
@@ -474,7 +503,8 @@ Guards:
   `dcn_3_1_6_dmcub`), Phoenix (`gc_11_0_1_mes_2`, `dcn_3_1_4_dmcub`,
   `psp_13_0_4_toc`, `vcn_4_0_2`), Hawk Point (`gc_11_0_4_me`,
   `psp_13_0_11_toc`), Strix (`gc_11_5_0_me`, `dcn_3_5_dmcub`,
-  `psp_14_0_0_toc`), Strix Halo (`gc_11_5_1_me`, `dcn_3_5_1_dmcub`),
+  `psp_14_0_0_toc`), Strix Halo (`gc_11_5_1_me`, `dcn_3_5_1_dmcub`,
+  `vcn_4_0_6_1`),
   Krackan (`gc_11_5_2_me`, `gc_11_5_3_me`, `dcn_3_6_dmcub`,
   `psp_14_0_4_toc`, `psp_14_0_5_toc`); and no `navi10_` file, no
   `usr/lib/firmware/radeon/`.
@@ -631,8 +661,9 @@ Under `[Unreleased]` in `CHANGES.md`:
    and `test-container-inputs.sh`, and adds `TF_VERSION`. Whichever lands
    second merges both; Task 2 of this plan has the step.
 7. **An APU the table does not list yet, or a kernel update that moves an
-   APU to new IP versions.** Its firmware would be dropped and `amdgpu`
-   would fail on it, with the screen left to `simpledrm`. The table is
-   copied from the kernel the image runs, and a kernel bump needs a fresh
-   copy; the pinned list in `test-firmware.sh` and the owner's hardware
-   check catch the known APUs only.
+   APU to new IP versions.** Its firmware would be dropped: amdgpu fails; the boot waits about 20 s, and then either the menu runs unaccelerated on simpledrm or, worst case, the failure screen appears after about 40 s.
+   The new-APU guard fails the build when the installed package ships files
+   for an IP version neither table knows, or a `psp` with the APU pattern
+   that the rule does not keep; then both tables are refreshed from the
+   kernel. The pinned list in `test-firmware.sh` and the owner's hardware
+   check cover the known APUs.
