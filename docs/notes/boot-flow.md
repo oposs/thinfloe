@@ -59,7 +59,6 @@ The boot process involves several interconnected components:
 ## Key Configuration Files
 
 - **configs/syslinux.cfg** - Boot menu and kernel parameters. The `ramroot=` parameter determines boot source (local: `tl/ramroot.sqsh`, network: `http://server/path/ramroot.sqsh`)
-- **overlay/home/tfuser/.thinlinc/tlclient.conf** - ThinLinc client configuration
 - **overlay/home/tfuser/wifi.yaml** - WiFi configuration template for netplan
 - **overlay/usr/lib/dracut/modules.d/90thinfloe/** - Dracut module for boot process
 
