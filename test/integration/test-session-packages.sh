@@ -935,16 +935,27 @@ fi
 
 # The version: RELEASE of the checkout, or RELEASE-dev+<sha>[.dirty] for a
 # local build, written at export into the rootfs and artifacts/rootfs/version.
+# In a release run (TF_VERSION is RELEASE, as make test passes it) only
+# RELEASE itself passes: a dev rootfs left over from a local build must not.
+# $1 = exported version, $2 = RELEASE, $3 = TF_VERSION of the run (may be empty)
+version_ok() {
+    [[ -n "$2" ]] || return 1
+    if [[ "$3" == "$2" ]]; then
+        [[ "$1" == "$2" ]]
+    else
+        [[ "$1" == "$2" || "$1" =~ ^"$2"-dev\+[0-9a-f]+(\.dirty)?$ ]]
+    fi
+}
 REL_TMP=$(mktemp -d)
 rel=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
 exported=$(cat "$(dirname "$SQSH")/version" 2>/dev/null)
 if unsquashfs -no-xattrs -q -d "$REL_TMP/x" "$SQSH" etc/thinfloe/version >/dev/null 2>&1 \
-        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] && [[ -n "$rel" ]] \
+        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] \
         && [[ "$(cat "$REL_TMP/x/etc/thinfloe/version")" == "$exported" ]] \
-        && [[ "$exported" == "$rel" || "$exported" == "$rel"-dev+* ]]; then
+        && version_ok "$exported" "$rel" "${TF_VERSION:-}"; then
     echo "ok   - /etc/thinfloe/version is artifacts/rootfs/version, of RELEASE ($exported)"
 else
-    echo "FAIL - /etc/thinfloe/version is not artifacts/rootfs/version ('$exported') of RELEASE ('$rel')"
+    echo "FAIL - /etc/thinfloe/version is not artifacts/rootfs/version ('$exported') of RELEASE ('$rel'), run TF_VERSION '${TF_VERSION:-}'"
     fail=1
 fi
 rm -rf "$REL_TMP"

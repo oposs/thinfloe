@@ -5,4 +5,3 @@
 !containers/ubuntu/patches
 !src/thinfloe-menu
 src/thinfloe-menu/target
-!RELEASE

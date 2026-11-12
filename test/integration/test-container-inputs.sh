@@ -53,12 +53,13 @@ reset() {
     rm -rf "$TREE/overlay" "$TREE/brand"
     mkdir -p "$TREE/overlay/etc/x.d" "$TREE/brand"
     for f in "${inputs[@]}"; do : >"$TREE/$f"; done
+    echo 4.2.0 >"$TREE/RELEASE"
     (cd "$TREE" && find RELEASE containers src overlay brand -exec touch -d '2020-01-01' {} +)
     echo sha256:aaaa >"$TREE/.ubuntu-container"
     touch -d '2021-01-01' "$TREE/.ubuntu-container"
 }
 state() {
-    if env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" .ubuntu-container >/dev/null 2>&1; then
+    if env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.2.0-dev+abc .ubuntu-container >/dev/null 2>&1; then
         echo up-to-date
     else
         echo rebuild
