@@ -225,6 +225,11 @@ mod tests {
         assert!(newer("4.0.0-rc.1", "4.0.0-beta"));
         assert!(newer("4.0.0-rc.1.1", "4.0.0-rc.1"));
         assert!(!newer("4.0.0-dev+abc", "4.0.0"));
+        // A local build (X.Y.Z-dev+<sha>[.dirty]) is offered its release
+        // and every later one, and never offered back to a release.
+        assert!(newer("4.2.0", "4.2.0-dev+abc.dirty"));
+        assert!(newer("4.3.0", "4.2.0-dev+abc"));
+        assert!(!newer("4.2.0-dev+abc", "4.2.0"));
         assert!(!newer("4.0.0", "4.0.0"));
         assert!(!newer("4.0.0+a", "4.0.0+b"));
         assert!(!newer("4.1", "4.0.0"));

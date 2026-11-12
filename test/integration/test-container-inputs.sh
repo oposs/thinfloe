@@ -58,7 +58,7 @@ reset() {
     touch -d '2021-01-01' "$TREE/.ubuntu-container"
 }
 state() {
-    if make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" .ubuntu-container >/dev/null 2>&1; then
+    if env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" .ubuntu-container >/dev/null 2>&1; then
         echo up-to-date
     else
         echo rebuild
@@ -96,12 +96,42 @@ else
     bad "deleting a brand file left the image standing"
 fi
 
+# The version is written at export, not into the image: a new RELEASE (or a
+# new commit) does not rebuild the container, a new kind of version
+# (.version-kind, release or dev) exports the rootfs again.
 reset
 touch "$TREE/RELEASE"
-if [[ $(state) == rebuild ]]; then
-    ok "a new RELEASE rebuilds the image"
+if [[ $(state) == up-to-date ]]; then
+    ok "a new RELEASE does not rebuild the image"
 else
-    bad "a changed RELEASE left the image with the old /etc/thinfloe/version"
+    bad "a changed RELEASE rebuilds the image"
+fi
+
+rootfs_state() {
+    if env -u MAKEFLAGS -u MAKELEVEL make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+            TF_VERSION="$1" artifacts/rootfs/ramroot.sqsh >/dev/null 2>&1; then
+        echo up-to-date
+    else
+        echo re-export
+    fi
+}
+reset
+printf '4.2.0\n' >"$TREE/RELEASE"
+printf '4.2.0-dev\n' >"$TREE/artifacts/rootfs/.version-kind"
+touch -d '2020-01-01' "$TREE/RELEASE"
+touch -d '2021-01-01' "$TREE/artifacts/rootfs/.version-kind"
+for f in vmlinuz initrd.img ramroot.sqsh; do
+    : >"$TREE/artifacts/rootfs/$f"; touch -d '2022-01-01' "$TREE/artifacts/rootfs/$f"
+done
+if [[ $(rootfs_state 4.2.0-dev+abc) == up-to-date ]]; then
+    ok "an unchanged .version-kind does not export the rootfs again"
+else
+    bad "the rootfs is exported again although .version-kind did not change"
+fi
+if [[ $(rootfs_state 4.2.0) == re-export ]]; then
+    ok "a changed .version-kind exports the rootfs again"
+else
+    bad "a changed .version-kind left the rootfs with the old version"
 fi
 
 # Rewriting bytecode touches the pyc and its __pycache__, not overlay/usr/bin.

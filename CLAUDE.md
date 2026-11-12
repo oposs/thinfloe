@@ -32,10 +32,12 @@ Menu crate: `cargo test`, `cargo clippy` and `cargo fmt` in `src/thinfloe-menu`.
 again as `dbrrg-usb.img.zst` (a hard link under `artifacts/images/bridge/`)
 because the 3.x `upgrade-image` fetches only that name; `vmlinuz`,
 `initrd.img` and `ramroot.sqsh` keep their names. `version` (read by
-`thinfloe-upgrade check`) is `artifacts/rootfs/version`, copied from the
-image's `/etc/thinfloe/version`,
-which the build writes from `RELEASE` (one line `X.Y.Z`, else the build and
-the publish fail). Raise `RELEASE` before a release.
+`thinfloe-upgrade check`) is `artifacts/rootfs/version`, which
+`scripts/export-rootfs.sh` writes together with the rootfs's
+`/etc/thinfloe/version` from `TF_VERSION`. The release pull request sets
+`RELEASE` (one line `X.Y.Z`); local builds are `X.Y.Z-dev+<sha>` (`.dirty`
+for a changed tree); `make … TF_VERSION=X.Y.Z` reproduces a release. The
+publish refuses anything but `X.Y.Z`.
 
 ## Where code lives
 

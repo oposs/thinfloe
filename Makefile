@@ -15,6 +15,28 @@ ARTIFACT_DIR := artifacts
 ROOTFS_DIR := $(ARTIFACT_DIR)/rootfs
 IMAGE_DIR := $(ARTIFACT_DIR)/images
 
+# The version the rootfs carries in /etc/thinfloe/version. RELEASE holds the
+# current release X.Y.Z and is set by the release pull request; a local build
+# is X.Y.Z-dev+<short sha>, with .dirty when the tree differs from HEAD, so
+# it sorts below the release and is offered it. `make ... TF_VERSION=X.Y.Z`
+# builds the release itself. export-rootfs.sh checks the exact form.
+RELEASE_VERSION := $(shell cat RELEASE 2>/dev/null)
+TF_VERSION ?= $(RELEASE_VERSION)-dev+$(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo .dirty)
+override TF_VERSION := $(TF_VERSION)
+ifeq ($(TF_VERSION),$(RELEASE_VERSION))
+VERSION_KIND := $(RELEASE_VERSION)
+else ifeq ($(patsubst $(RELEASE_VERSION)-dev+%,,$(TF_VERSION)),)
+VERSION_KIND := $(RELEASE_VERSION)-dev
+else
+$(error TF_VERSION $(TF_VERSION) is neither RELEASE ($(RELEASE_VERSION)) nor a dev version)
+endif
+# The rootfs is exported again when the kind of version changes (a release
+# or a dev build, and of which RELEASE), not for every commit: the stamp is
+# rewritten only when its content differs. A dev version so names the
+# commit the rootfs was last exported from.
+VERSION_KIND_STAMP := $(ROOTFS_DIR)/.version-kind
+$(shell [ "$$(cat $(VERSION_KIND_STAMP) 2>/dev/null)" = "$(VERSION_KIND)" ] || { mkdir -p $(ROOTFS_DIR) && echo "$(VERSION_KIND)" >$(VERSION_KIND_STAMP); })
+
 # Container images
 UBUNTU_IMAGE := $(PROJECT_NAME)-ubuntu:$(VERSION)
 IMAGE_BUILDER := $(PROJECT_NAME)-image-builder:$(VERSION)
@@ -138,7 +160,7 @@ $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 
-.ubuntu-container: containers/ubuntu/Dockerfile RELEASE $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
@@ -147,7 +169,7 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 		.
 	$(call image_id,$(UBUNTU_IMAGE)) >$@
 
-$(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container | $(ROOTFS_DIR)
+$(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(PWD)/scripts:/scripts:ro \
@@ -155,6 +177,7 @@ $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container | $(ROOTFS_DIR)
 		-e SQUASHFS_COMP=$(SQUASHFS_COMP) \
 		-e SQUASHFS_COMP_LEVEL=$(SQUASHFS_COMP_LEVEL) \
 		-e VERSION=$(VERSION) \
+		-e TF_VERSION=$(TF_VERSION) \
 		-e BUILD_ID=$(BUILD_ID) \
 		-e BUILD_JOBS=$(BUILD_JOBS) \
 		$(UBUNTU_IMAGE) \

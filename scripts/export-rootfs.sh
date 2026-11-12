@@ -11,11 +11,23 @@ SQUASHFS_COMP_LEVEL="${SQUASHFS_COMP_LEVEL:-19}"
 VERSION="${VERSION:-dev}"
 BUILD_ID="${BUILD_ID:-unknown}"
 BUILD_JOBS="${BUILD_JOBS:-4}"
+TF_VERSION="${TF_VERSION:-}"
+
+# The version this rootfs carries, from the Makefile: the release X.Y.Z, or
+# X.Y.Z-dev+<short sha>[.dirty] for a local build. One line, nothing else.
+valid_version() {
+    [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\+[0-9a-f]+(\.dirty)?)?$ ]]
+}
 
 log_info "Rootfs Export"
 log_info "  Version:     $VERSION"
 log_info "  Build ID:    $BUILD_ID"
+log_info "  TF version:  $TF_VERSION"
 log_info "  Compression: ${SQUASHFS_COMP}:${SQUASHFS_COMP_LEVEL}"
+
+# Before anything is exported, so a wrong version leaves no new artifact.
+valid_version "$TF_VERSION" \
+    || die "TF_VERSION must be one line X.Y.Z or X.Y.Z-dev+<sha>[.dirty], got '$TF_VERSION'"
 
 ensure_dir "$ARTIFACT_DIR"
 
@@ -33,16 +45,20 @@ INITRD_SRC=$(find /boot -name 'initrd.img-*' -type f | sort | tail -1)
 cp "$INITRD_SRC" "${ARTIFACT_DIR}/initrd.img"
 log_success "Initramfs exported"
 
-# Export the release number, from the image, so it always matches it
-log_step "Exporting release number..."
-[[ -f /etc/thinfloe/version ]] || die "No /etc/thinfloe/version in the image"
-cp /etc/thinfloe/version "${ARTIFACT_DIR}/version"
-log_success "Release $(cat "${ARTIFACT_DIR}/version") exported"
-
 # Cleanup
 log_step "Cleaning up rootfs..."
 rm -rf /boot/* /.dockerenv /etc/machine-id /var/lib/dbus/machine-id /var/log/* /tmp/* /var/tmp/*
 log_success "Cleanup complete"
+
+# Write the version into the rootfs and next to it. This container is
+# thrown away after the export, so the image itself carries no version and a
+# new commit does not rebuild it.
+log_step "Writing version..."
+mkdir -p /etc/thinfloe
+printf '%s\n' "$TF_VERSION" >/etc/thinfloe/version
+chmod 644 /etc/thinfloe/version
+cp /etc/thinfloe/version "${ARTIFACT_DIR}/version"
+log_success "Version $TF_VERSION written"
 
 # Create squashfs
 log_step "Creating squashfs..."

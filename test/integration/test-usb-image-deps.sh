@@ -47,6 +47,11 @@ for f in "${inputs[@]}"; do : >"$TREE/$f"; done
 echo sha256:aaaa >"$TREE/.ubuntu-container"
 echo sha256:aaaa >"$TREE/.image-builder-container"
 touch -d '2021-01-01' "$TREE/.ubuntu-container" "$TREE/.image-builder-container"
+# A dev build of RELEASE whose rootfs was exported as one: the version stamp
+# matches, so it makes nothing stale.
+echo 4.2.0 >"$TREE/RELEASE"
+echo 4.2.0-dev >"$TREE/artifacts/rootfs/.version-kind"
+touch -d '2020-01-01' "$TREE/RELEASE" "$TREE/artifacts/rootfs/.version-kind"
 for f in vmlinuz initrd.img ramroot.sqsh; do : >"$TREE/artifacts/rootfs/$f"; done
 touch -d '2022-01-01' "$TREE"/artifacts/rootfs/*
 USB="artifacts/images/thinfloe-usb.img"
@@ -56,7 +61,8 @@ state() {
     local was=""
     touch -d '2023-01-01' "$TREE/$USB"
     [[ -n "${1:-}" ]] && was=$(stat -c %Y "$TREE/$1") && touch -d '2024-01-01' "$TREE/$1"
-    if make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" "$USB" >/dev/null 2>&1; then
+    if env -u MAKEFLAGS -u MAKELEVEL make -q -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+            TF_VERSION=4.2.0-dev+abc "$USB" >/dev/null 2>&1; then
         echo up-to-date
     else
         echo rebuild
