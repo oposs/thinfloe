@@ -182,7 +182,7 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 		.
 	$(call image_id,$(UBUNTU_IMAGE)) >$@
 
-$(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) | $(ROOTFS_DIR)
+$(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) scripts/export-rootfs.sh scripts/lib/common.sh | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(PWD)/scripts:/scripts:ro \
@@ -515,6 +515,7 @@ test: test-unit rootfs
 	@test/integration/test-wifi-stack.sh
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@test/integration/test-squashfs-format.sh
+	@test/integration/test-image-slim.sh
 	@test/integration/test-image-size.sh
 	@test/integration/test-labwc-config-merge.sh
 	@test/integration/test-labwc-scale.sh
