@@ -60,7 +60,9 @@ KVM: `/dev/kvm` exists as `crw-rw---- root kvm`, and `runner` is not in group
 ## Release downloads
 
 Probed against the baseline release v4.2.0, which holds `version` and
-`SHA256SUMS`:
+`SHA256SUMS`. The probes run first in the spike job, right after the
+diagnostics (commit dfb655b on `spike/runner`), so a job timeout during the
+build cannot lose them.
 
 | URL | `curl -fsSL` | `curl -sSfIL --max-time 60` | `curl -fsSL -r 0-17 --max-filesize 4096` |
 |---|---|---|---|
@@ -85,7 +87,7 @@ tests add under 7 minutes to a pull request run that already spends 8 minutes
 on the rootfs for `make test`. Hosted runner minutes on a public repository
 cost nothing.
 
-The split changes as follows:
+The split changes as follows (decision 17, revised 2026-11-12):
 
 - `ci.yml` (every pull request, every push to `main`, the release branch)
   runs two jobs through `ci-local.yml`:
