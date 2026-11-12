@@ -1,6 +1,6 @@
 # ThinFloe Part 5: GitHub releases
 
-Date: 2026-11-12. Status: decided, ready to plan.
+Date: 2026-11-12. Status: approved by the owner 2026-11-12.
 
 This document replaces §"Part 5: GitHub releases" of
 `docs/superpowers/specs/2026-10-21-thinfloe-design.md` and the version and
@@ -352,7 +352,7 @@ down:
   (`curl -sSfIL`) and the range request of `image_size` (`-r 0-17`) work on
   the redirected asset URL; what to do where they do not. The baseline holds
   no image, so the range request on a large asset is checked again on the
-  4.3.0 release before rollout step 10 (same redirect path, larger file).
+  4.3.0 release before rollout step 11 (same redirect path, larger file).
 
 From the numbers, confirm or change the split of decision 17 and say why.
 If a hosted runner cannot build or smoke-test the image (disk, KVM or the
@@ -393,7 +393,7 @@ one at the time it is done.
    a `CHANGES.md` entry; `main` is not protected yet.
 4. **Dev version** (decision 6) and **download from GitHub** (decisions 7 to
    10). One pull request or two, each with `CHANGES.md` entries. They change
-   what the image does, but nothing ships until step 9.
+   what the image does, but nothing ships until step 10.
 5. *Owner:* **`no-changelog-label`** (`repo_infra apply --item no-changelog-label`).
 6. **Onboarding pull request**, opened with the `no-changelog` label at
    creation: the five callers, `ci-local.yml`, `release-build-local.yml`,
@@ -408,16 +408,23 @@ one at the time it is done.
    change needs a pull request with `ci-passed` and `changelog-updated`.
 8. *Owner:* **`delete-merged-branches`** (`repo_infra apply --item
    delete-merged-branches`). `repo_infra check` now exits 0.
-9. *Owner:* **First release, the bridge.** Dispatch **Create release PR** with
+9. **Image size reduction** (*owner*, 2026-11-12). The first public images
+   carry nothing ThinFloe does not need. Today a release is 611 MB to
+   download for an upgrade (`ramroot.sqsh` 494 MB, `initrd.img` 100 MB,
+   `vmlinuz` 17 MB). The scope comes from a separate size audit that is still
+   running; this step gets its own design and plan once the audit is done.
+   Step 10 depends on it: the bridge is not dispatched before the size work
+   is on `main`.
+10. *Owner:* **First release, the bridge.** Dispatch **Create release PR** with
    `feature`. Check the draft: six assets, `version` reads `4.3.0`,
    `SHA256SUMS` matches. Merge. Then, on a stick with 4.2.0, point the Upgrade
    screen's custom source at the release's download address and upgrade, to
    prove the GitHub path end to end.
-10. *Owner:* **Bridge to tobi.oetiker.ch.** Download the 4.3.0 assets, run the
+11. *Owner:* **Bridge to tobi.oetiker.ch.** Download the 4.3.0 assets, run the
     adapted `scripts/publish.sh`. Check with a 4.x stick (or
     `make qemu-smoke-upgrade` against a local copy) that it is offered 4.3.0,
     upgrades, and its next check reads GitHub.
-11. **Retire `publish.sh`** (decision 13), through a pull request with a
+12. **Retire `publish.sh`** (decision 13), through a pull request with a
     `CHANGES.md` entry if anything user-visible changes, otherwise with the
     `no-changelog` label at creation.
 
