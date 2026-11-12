@@ -41,7 +41,8 @@ preconditions() {
 run_depmod() {
     local after new
     after=$(mktemp)
-    depmod -a -e -F "/boot/System.map-$KVER" "$KVER" 2>&1 | sort >"$after"
+    depmod -a -e -F "/boot/System.map-$KVER" "$KVER" >"$after" 2>&1 \
+        || die "depmod -a failed after decompressing modules"
     new=$(comm -13 <(sed 's/\.ko\.zst/.ko/g' "$DEPMOD_BEFORE" | sort) \
         <(sed 's/\.ko\.zst/.ko/g' "$after" | sort))
     rm -f "$after"
@@ -56,7 +57,8 @@ trim_media_modules() {
 # The initrd keeps its compressed copies, which dracut already made.
 decompress_modules() {
     find "/usr/lib/modules/$KVER" -name '*.ko.zst' -print0 \
-        | xargs -0 -r -P 4 -n 200 zstd -d -q --rm
+        | xargs -0 -r -P 4 -n 200 zstd -d -q --rm \
+        || die "zstd -d failed while decompressing modules"
     if [[ -n $(find "/usr/lib/modules/$KVER" -name '*.ko.zst' -print -quit) ]]; then
         die "compressed modules remain after zstd -d"
     fi

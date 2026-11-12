@@ -100,14 +100,28 @@ else
         echo "FAIL - modules.dep names only files that exist (cannot extract modules.dep)"
         fail=1
     else
-        missing=$(awk -v base="squashfs-root/usr/lib/modules/$KVER/" '
-            NR == FNR { have[$0] = 1; next }
-            {
-                n = split($0, parts, /: ?| /)
-                for (i = 1; i <= n; i++)
-                    if (parts[i] != "" && !((base parts[i]) in have))
-                        print parts[i]
-            }' "$LIST" "$WORK/x/usr/lib/modules/$KVER/modules.dep" | sort -u | head -3)
+        # Names in a modules.dep that the squashfs list does not hold.
+        missing_deps() {
+            awk -v base="squashfs-root/usr/lib/modules/$KVER/" '
+                NR == FNR { have[$0] = 1; next }
+                {
+                    n = split($0, parts, /: ?| /)
+                    for (i = 1; i <= n; i++)
+                        if (parts[i] != "" && !((base parts[i]) in have))
+                            print parts[i]
+                }' "$LIST" "$1" | sort -u | head -3
+        }
+        # Negative control: one bogus path on each side of the colon must show.
+        sed '1s|^|kernel/bogus/left.ko: kernel/bogus/right.ko\n|' \
+            "$WORK/x/usr/lib/modules/$KVER/modules.dep" >"$WORK/dep-bogus"
+        control=$(missing_deps "$WORK/dep-bogus")
+        if [[ $control == *kernel/bogus/left.ko* && $control == *kernel/bogus/right.ko* ]]; then
+            echo "ok   - modules.dep check reports a bogus path (control)"
+        else
+            echo "FAIL - modules.dep check misses a bogus path (control saw: ${control:-nothing})"
+            fail=1
+        fi
+        missing=$(missing_deps "$WORK/x/usr/lib/modules/$KVER/modules.dep")
         if [[ -z $missing ]]; then
             echo "ok   - modules.dep names only files that exist"
         else
