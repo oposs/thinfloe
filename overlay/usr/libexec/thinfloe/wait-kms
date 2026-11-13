@@ -51,8 +51,7 @@ while [ "$_wk_i" -lt "$_wk_max" ]; do
             *)
                 # A real driver is bound. Wait for udev to tag the device and
                 # apply its uaccess ACLs, or logind's TakeDevice still fails.
-                udevadm wait --timeout=5 "/dev/dri/${_wk_c##*/}"
-                if [ $? -ne 0 ]; then
+                if ! udevadm wait --timeout=5 "/dev/dri/${_wk_c##*/}"; then
                     echo "wait-kms: udev did not finish with /dev/dri/${_wk_c##*/}, continuing" >&2
                 fi
                 exit 0
