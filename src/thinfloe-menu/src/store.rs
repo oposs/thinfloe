@@ -55,11 +55,44 @@ pub fn test_shared(root: &std::path::Path) -> Shared {
     Arc::new(Mutex::new(open(dir, Inputs::default(), OpenMode::Session, 0).store))
 }
 
-/// What `stage` replaced, for `unstage`. `None` stands for a file that was
-/// absent or that could not be read; `unstage` removes what `stage` put in
-/// its place.
+/// What `stage` found in a file it replaced.
+#[derive(Debug)]
+pub enum Old {
+    Absent,
+    Bytes(Vec<u8>),
+    /// The read failed (a link, too big, no permission, an I/O error): the
+    /// bytes are not known, so `unstage` writes what the settings render.
+    Unreadable,
+}
+
+/// What `stage` replaced, for `unstage`.
+#[derive(Debug)]
 pub struct Staged {
-    pub old: Vec<(&'static str, Option<Vec<u8>>)>,
+    pub old: Vec<(&'static str, Old)>,
+}
+
+/// A refused `stage`. `restore`: the rollback of the files it had already
+/// written failed too, with the first file named; those files stay as the
+/// stage left them and the caller must treat the home as changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageError {
+    pub reason: String,
+    pub restore: Option<String>,
+}
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.restore {
+            Some(r) => write!(f, "{}; {r}", self.reason),
+            None => f.write_str(&self.reason),
+        }
+    }
+}
+
+impl From<String> for StageError {
+    fn from(reason: String) -> Self {
+        StageError { reason, restore: None }
+    }
 }
 
 fn read_config(dir: &ConfigDir) -> Result<Option<ThinfloeConfig>, String> {
@@ -209,25 +242,28 @@ impl ConfigStore {
 
     /// Write the files of `table` as `candidate` renders them; `config.toml`
     /// stays. `unstage` undoes it, `commit` makes it final.
-    pub fn stage(&self, table: Table, candidate: &ThinfloeConfig) -> Result<Staged, String> {
+    pub fn stage(&self, table: Table, candidate: &ThinfloeConfig) -> Result<Staged, StageError> {
         self.refuse_read_only()?;
         let files = self.render_table(table, candidate)?;
         let mut staged = Staged { old: Vec::new() };
         for (name, body) in files {
             let path = self.dir.generated_file(name);
-            // An old file that cannot be read (a link, too big, not a
-            // regular file) is no config of ours to keep: it is replaced,
-            // as `write_if_changed` does, and there are no bytes to put
-            // back. Refusing instead would block every network Apply for
-            // good, and the person could never fix the WiFi.
-            let old = atomic::read(&path, generated::MAX_BYTES).unwrap_or(None);
+            // An old file that cannot be read is replaced like any other
+            // (a link is replaced, never followed): refusing would block
+            // every network Apply for good. `unstage` puts back what the
+            // committed settings render, never nothing.
+            let old = match atomic::read(&path, generated::MAX_BYTES) {
+                Ok(Some(b)) => Old::Bytes(b),
+                Ok(None) => Old::Absent,
+                Err(_) => Old::Unreadable,
+            };
             staged.old.push((name, old));
             let step = generated::write_if_changed(&self.dir.generated(), name, body.as_deref())
                 .map(|_| ())
                 .map_err(|e| format!("generated/{name} could not be written: {e}"));
-            if let Err(e) = step {
-                let _ = self.unstage(staged);
-                return Err(e);
+            if let Err(reason) = step {
+                let restore = self.unstage(staged).err();
+                return Err(StageError { reason, restore });
             }
         }
         Ok(staged)
@@ -240,8 +276,13 @@ impl ConfigStore {
         for (name, old) in s.old {
             let path = self.dir.generated_file(name);
             let r = match old {
-                Some(b) => atomic::write(&path, &b, generated::mode_of(name)),
-                None => atomic::remove(&path),
+                Old::Bytes(b) => atomic::write(&path, &b, generated::mode_of(name)),
+                Old::Absent => atomic::remove(&path),
+                Old::Unreadable => match generated::render(&self.cfg, name, &self.inputs) {
+                    Ok(Some(body)) => atomic::write(&path, body.as_bytes(), generated::mode_of(name)),
+                    Ok(None) => atomic::remove(&path),
+                    Err(e) => Err(std::io::Error::other(e)),
+                },
             };
             if let Err(e) = r
                 && first.is_none()
@@ -553,5 +594,52 @@ mod tests {
         assert!(gen_text(&d, "environment").unwrap().contains("XKB_DEFAULT_LAYOUT=ch"));
         assert_eq!(o.store.cfg.keyboard.layout, "ch");
         assert!(o.store.cfg.network.networks.is_empty());
+    }
+
+    #[test]
+    fn a_rollback_that_fails_is_reported_with_the_file() {
+        let d = TestDir::new("store", "rollback-fails");
+        let mut o = open_session(&d);
+        o.store
+            .update(Table::Network, |c| c.network = one_net().network)
+            .unwrap();
+        let wifi_before = fs::read(cdir(&d).generated_file("wifi.yaml")).unwrap();
+        let g = cdir(&d).generated();
+        // The WiFi file renders as it is, so it is not written; its
+        // rollback needs the temporary file the directory blocks. The wired
+        // write fails on the directory in its place.
+        fs::create_dir_all(g.join("wifi.yaml.tmp/x")).unwrap();
+        fs::create_dir_all(g.join("ethernet.yaml/x")).unwrap();
+        let mut cand = one_net();
+        cand.network.kept_wired = Some("new wired\n".into());
+        let e = o.store.stage(Table::Network, &cand).unwrap_err();
+        assert!(e.reason.contains("ethernet.yaml"), "{e:?}");
+        let r = e.restore.as_deref().unwrap_or_default();
+        assert!(r.starts_with("generated/wifi.yaml could not be restored"), "{e:?}");
+        assert_eq!(fs::read(g.join("wifi.yaml")).unwrap(), wifi_before);
+    }
+
+    #[test]
+    fn an_unreadable_old_file_is_put_back_as_the_settings_render_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TestDir::new("store", "unreadable-put-back");
+        let mut o = open_session(&d);
+        o.store
+            .update(Table::Network, |c| c.network = one_net().network)
+            .unwrap();
+        let wifi = cdir(&d).generated_file("wifi.yaml");
+        let before = fs::read(&wifi).unwrap();
+        fs::set_permissions(&wifi, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&wifi).is_ok() {
+            return; // root reads anything: the case cannot be made
+        }
+        let mut cand = one_net();
+        cand.network.networks[0].ssid = "cafe".into();
+        let s = o.store.stage(Table::Network, &cand).unwrap();
+        assert!(gen_text(&d, "wifi.yaml").unwrap().contains("cafe"));
+        o.store.unstage(s).unwrap();
+        // Not removed: the committed settings still say "home".
+        assert_eq!(fs::read(&wifi).unwrap(), before);
+        assert_eq!(fs::metadata(&wifi).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }

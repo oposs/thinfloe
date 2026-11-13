@@ -1132,7 +1132,7 @@ pub fn take_over(cfg: &NetworkCfg, which: &str, h: &Homes, inputs: &Inputs) -> R
         cand.kept_wired = None;
         cand.set_wired(&wired_now.wired);
     }
-    check_candidate(&cand, false, h, inputs)?;
+    check_candidate(&cand, inputs.netboot, h, inputs)?;
     Ok(cand)
 }
 
@@ -1980,6 +1980,18 @@ exit 0
             take_over(&kept(Some(HAND_WIFI), None), "wifi", &f.h, &inputs(false)),
             Err("ERROR: x: bad".into())
         );
+    }
+
+    #[test]
+    fn take_over_checks_the_set_that_netboot_installs() {
+        let f = Fixture::new("take-netboot", &["wlp58s0"]);
+        let wired = format!("{SHIPPED_WIRED}# kept-marker\n");
+        let cfg = kept(Some(HAND_WIFI), Some(&wired));
+        take_over(&cfg, "wifi", &f.h, &inputs(false)).unwrap();
+        assert!(f.recorded("checked").contains("kept-marker"));
+        // Netboot installs no wired file: the default is what is checked.
+        take_over(&cfg, "wifi", &f.h, &inputs(true)).unwrap();
+        assert!(!f.recorded("checked").contains("kept-marker"));
     }
 
     #[test]

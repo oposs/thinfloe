@@ -728,7 +728,10 @@ pub fn network_apply(
         let mut candidate = s.cfg.clone();
         candidate.network = net.clone();
         s.stage(crate::generated::Table::Network, &candidate)
-            .map_err(ApplyFailed::new)?
+            .map_err(|e| ApplyFailed {
+                home_changed: e.restore.is_some(),
+                reason: e.to_string(),
+            })?
     };
     let result = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)
         .and_then(|text| nettab::parse_result(&text));
@@ -1012,7 +1015,7 @@ pub fn mon_apply(
     }
     let staged = match lock(store).stage(crate::generated::Table::Monitors, &candidate) {
         Ok(s) => s,
-        Err(e) => return Err(mon_undo(store, k, &old, e, None)),
+        Err(e) => return Err(mon_undo(store, k, &old, e.to_string(), None)),
     };
     kanshi_reload(k).map_err(|reason| mon_undo(store, k, &old, reason, Some(staged)))
 }
@@ -1985,6 +1988,73 @@ mod tests {
                 .unwrap()
                 .contains("home")
         );
+    }
+
+    /// The failure path of the same handshake: the keyboard change survives,
+    /// the generated network files and `[network]` are as they were.
+    #[test]
+    fn a_keyboard_change_during_an_apply_leaves_the_staged_files() {
+        let d = dir("net-apply-keyboard-fails");
+        let feed = Arc::new(Feed::default());
+        let (started, go) = (d.join("started"), d.join("go"));
+        let tool = format!(
+            r#"touch {}; while [ ! -e {} ]; do sleep 0.05; done; {FAILS}"#,
+            started.display(),
+            go.display()
+        );
+        let p = net_home(&d, &tool, home_net());
+        let before = generated_bytes(&p);
+        let net_before = lock(&p.config).cfg.network.clone();
+        let store = p.config.clone();
+        let (s2, g2) = (started.clone(), go.clone());
+        let helper = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !s2.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let staged_seen = std::fs::read(lock(&store).dir.generated_file("wifi.yaml")).unwrap();
+            let r = lock(&store).update(Table::Keyboard, |c| c.keyboard.layout = "ch".into());
+            std::fs::write(g2, "").unwrap();
+            (r, staged_seen)
+        });
+        let change = netfiles::Change {
+            wifi: Some(one_net("cafe")),
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        let (updated, staged_seen) = helper.join().unwrap();
+        assert!(updated.is_ok());
+        assert_eq!(r, ApplyFailed::new("x".into()));
+        assert!(
+            String::from_utf8(staged_seen).unwrap().contains("cafe"),
+            "the stage was in place"
+        );
+        assert_eq!(generated_bytes(&p), before);
+        let cfg = lock(&p.config).cfg.clone();
+        assert_eq!((cfg.keyboard.layout.as_str(), &cfg.network), ("ch", &net_before));
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk, cfg);
+    }
+
+    /// A rollback after a half-done stage that fails too names the file and
+    /// counts the home as changed.
+    #[test]
+    fn a_failed_rollback_after_a_half_done_stage_says_so() {
+        let d = dir("net-stage-rollback-fails");
+        let feed = Arc::new(Feed::default());
+        let p = net_home(&d, FAILS, home_net());
+        let g = lock(&p.config).dir.generated();
+        std::fs::create_dir_all(g.join("wifi.yaml.tmp/x")).unwrap();
+        std::fs::create_dir_all(g.join("ethernet.yaml/x")).unwrap();
+        // The WiFi file stays as rendered; the wired write meets the directory.
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.home_changed, "{r:?}");
+        assert!(r.reason.contains("ethernet.yaml"), "{r:?}");
+        assert!(r.reason.contains("generated/wifi.yaml could not be restored"), "{r:?}");
     }
 
     #[test]
