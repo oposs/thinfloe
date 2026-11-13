@@ -25,8 +25,8 @@ pub const TEMPLATE_MARKER: &str = "device name of your wifi card";
 /// mode 600). Its `eth` definition is the base of a fixed address.
 pub const DEFAULT_WIRED: &str = "/usr/share/thinfloe/netplan/ethernet.yaml";
 
-/// The DNS servers the form takes; a ~/ethernet.yaml with more is not the
-/// menu's to keep.
+/// The DNS servers the form takes; a ~/ethernet.yaml or ~/wifi.yaml with
+/// more is not the menu's to keep.
 pub const MAX_DNS: usize = 3;
 
 /// Network files are tiny; the same cap as `owned`.
@@ -292,6 +292,18 @@ fn flag(y: &Yaml) -> Option<bool> {
     }
 }
 
+/// The file says another netplan version than 2, or another renderer than
+/// the image's networkd. Rewritten by the menu it would say `version: 2`
+/// and `renderer: networkd` and so do something else; it counts as by hand
+/// even under the menu's header. netplan takes both as these when they are
+/// left out.
+fn foreign_format(network: Option<&Hash>) -> bool {
+    network.is_some_and(|n| {
+        get(n, "version").is_some_and(|v| text_of(v).as_deref() != Some("2"))
+            || get(n, "renderer").is_some_and(|r| text_of(r).as_deref() != Some("networkd"))
+    })
+}
+
 // ---- WiFi ----
 
 pub fn parse_wifi(text: Option<&str>) -> WifiFile {
@@ -322,7 +334,11 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
     // No `wifis` at all is the file `render_wifi` writes without a device
     // or networks; a `wifis` key holds exactly one definition.
     let no_wifi = network.is_some_and(|h| get(h, "wifis").is_none());
-    let mut ok = docs.len() == 1
+    if foreign_format(network) {
+        f.state = FileState::Hand;
+    }
+    let mut ok = !foreign_format(network)
+        && docs.len() == 1
         && root.is_some_and(|h| keys_within(h, &["network"]))
         && network.is_some_and(|h| keys_within(h, &["version", "renderer", "wifis"]))
         && (no_wifi || wifis.is_some_and(|h| h.len() == 1));
@@ -333,6 +349,8 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
         // `render_wifi` writes `dhcp4: true` and `optional: true`: a
         // definition without DHCP, or one boot waits for, is not the
         // menu's (as Ruling 25 for `optional` on the wired one).
+        // As on the wired file: the form takes at most MAX_DNS servers.
+        ok &= dns.len() <= MAX_DNS;
         ok &= dns_ok && dhcp && def.is_some_and(|d| get(d, "optional").is_none_or(|o| flag(o) == Some(true)));
         if wifis.is_some_and(|h| h.len() == 1) {
             f.device = text_of(dev);
@@ -510,7 +528,11 @@ pub fn parse_wired(text: Option<&str>) -> WiredFile {
     let network = get_hash(root, "network");
     let ethernets = get_hash(network, "ethernets");
     let eth = get_hash(ethernets, "eth");
-    let mut ok = docs.len() == 1
+    if foreign_format(network) {
+        f.state = FileState::Hand;
+    }
+    let mut ok = !foreign_format(network)
+        && docs.len() == 1
         && root.is_some_and(|h| keys_within(h, &["network"]))
         && network.is_some_and(|h| keys_within(h, &["version", "renderer", "ethernets"]))
         && ethernets.is_some_and(|h| h.len() == 1)
@@ -1128,7 +1150,7 @@ pub fn take_over(h: &Homes, which: &str) -> Result<(), String> {
         // The hand file goes back, unless something took its place.
         let aside = owned::aside(&path);
         let back = match fs::symlink_metadata(&path) {
-            Err(m) if m.kind() == io::ErrorKind::NotFound => fs::rename(&aside, &path),
+            Err(m) if m.kind() == io::ErrorKind::NotFound => owned::rename_noreplace(&aside, &path),
             _ => Err(io::Error::other("the place is taken")),
         };
         return Err(match back {
@@ -2609,5 +2631,86 @@ exit 0
         fs::write(dir.join("ethernet-dhcp-dns.yaml"), text).unwrap();
         let text = render_wifi(Some("wlp58s0"), &[net("home", Some("secret123"), false)], &dns2());
         fs::write(dir.join("wifi-dns.yaml"), text).unwrap();
+    }
+
+    #[test]
+    fn another_version_or_renderer_is_by_hand() {
+        let wifi_body = "  wifis:\n    wlp58s0:\n      dhcp4: true\n      optional: true\n      access-points:\n        home:\n          password: \"secret123\"\n";
+        let wired_body =
+            "  ethernets:\n    eth:\n      match:\n        name: 'en*'\n      dhcp4: true\n      optional: true\n";
+        let heads = [
+            "  version: 3\n  renderer: networkd\n",
+            "  version: 2\n  renderer: NetworkManager\n",
+            "  renderer: NetworkManager\n",
+        ];
+        for head in heads {
+            for header in ["", HEADER] {
+                let wifi = format!("{header}\nnetwork:\n{head}{wifi_body}");
+                let w = parse_wifi(Some(&wifi));
+                assert_eq!(w.state, FileState::Hand, "{wifi}");
+                assert!(!w.manageable, "{wifi}");
+                assert_eq!(w.networks.len(), 1, "{wifi}");
+                let wired = format!("{header}\nnetwork:\n{head}{wired_body}");
+                let e = parse_wired(Some(&wired));
+                assert_eq!(e.state, FileState::Hand, "{wired}");
+                assert!(!e.manageable, "{wired}");
+            }
+        }
+        // netplan's defaults, written or left out, are the menu's.
+        for head in ["  version: 2\n  renderer: networkd\n", "  version: 2\n", ""] {
+            let wifi = format!("network:\n{head}{wifi_body}");
+            assert!(parse_wifi(Some(&wifi)).manageable, "{wifi}");
+            let wired = format!("network:\n{head}{wired_body}");
+            assert!(parse_wired(Some(&wired)).manageable, "{wired}");
+        }
+
+        // A menu header on such a file does not make it the menu's to rewrite.
+        let f = Fixture::new("foreign", &["wlp58s0"]);
+        f.put(WIFI_FILE, &format!("{HEADER}\nnetwork:\n{}{wifi_body}", heads[1]));
+        f.put(WIRED_FILE, &format!("{HEADER}\nnetwork:\n{}{wired_body}", heads[0]));
+        let before = f.snapshot();
+        let wifi = Change {
+            wifi: Some(vec![net("cafe", None, false)]),
+            wired: None,
+        };
+        assert_eq!(save(&f.h, &wifi, false), Err("~/wifi.yaml is set by hand".into()));
+        let wired = Change {
+            wifi: None,
+            wired: Some(fixed()),
+        };
+        assert_eq!(save(&f.h, &wired, false), Err("~/ethernet.yaml is set by hand".into()));
+        assert!(take_over(&f.h, "wifi").is_err());
+        assert!(take_over(&f.h, "wired").is_err());
+        assert_eq!(f.snapshot(), before);
+    }
+
+    #[test]
+    fn parse_wifi_keeps_at_most_three_dns_servers() {
+        let servers = |n: u8| (1..=n).map(|i| Ipv4Addr::new(10, 0, 0, i)).collect::<Vec<_>>();
+        let nets = [net("home", Some("secret123"), false)];
+        let t = render_wifi(Some("wlp58s0"), &nets, &servers(3));
+        let f = parse_wifi(Some(&t));
+        assert!(f.manageable, "{t}");
+        assert_eq!(f.dns, servers(3));
+        let t = render_wifi(Some("wlp58s0"), &nets, &servers(4));
+        let f = parse_wifi(Some(&t));
+        assert_eq!(f.state, FileState::Menu);
+        assert!(!f.manageable, "{t}");
+        // Read as it is, and the menu's own password stays.
+        assert_eq!(f.dns, servers(4));
+        assert_eq!(f.networks, nets);
+        // A DNS change cannot carry four servers over.
+        assert!(wifi_with_dns(&f, &servers(1)).is_err());
+
+        // The same file by hand is not offered for take-over.
+        let fx = Fixture::new("take-four-dns-wifi", &["wlp58s0"]);
+        fx.put(WIFI_FILE, body(&t));
+        assert_eq!(load(&fx.h).0.state, FileState::Hand);
+        let before = fx.snapshot();
+        assert_eq!(
+            take_over(&fx.h, "wifi"),
+            Err("~/wifi.yaml has settings the menu cannot keep".into())
+        );
+        assert_eq!(fx.snapshot(), before);
     }
 }

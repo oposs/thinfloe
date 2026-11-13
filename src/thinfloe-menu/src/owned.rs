@@ -54,7 +54,7 @@ pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io:
     if owner(old.as_deref()) == Owner::ByHand && !old.as_deref().is_some_and(replaceable) {
         return Err(by_hand(path));
     }
-    replace(path, |f| {
+    replace(path, old.is_none(), |f| {
         writeln!(f, "{HEADER}")?;
         f.write_all(body.as_bytes())
     })
@@ -62,7 +62,10 @@ pub fn write_with(path: &Path, body: &str, replaceable: fn(&str) -> bool) -> io:
 
 /// Write `path` anew through a file beside it and a rename, so a crash
 /// never leaves half a file and a link at `path` is replaced, not followed.
-fn replace(path: &Path, fill: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+/// `fresh`: the caller found no file at `path`, so the rename must not
+/// replace one that appeared since (`AlreadyExists`); a plain rename put
+/// the menu's file over one written by hand in between.
+fn replace(path: &Path, fresh: bool, fill: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -79,7 +82,11 @@ fn replace(path: &Path, fill: impl FnOnce(&mut fs::File) -> io::Result<()>) -> i
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         fill(&mut f)?;
         f.sync_all()?;
-        fs::rename(&tmp, path)
+        if fresh {
+            rename_noreplace(&tmp, path)
+        } else {
+            fs::rename(&tmp, path)
+        }
     })();
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -109,13 +116,13 @@ pub fn put_back(path: &Path, old: Option<&[u8]>) -> io::Result<()> {
         return remove(path);
     };
     match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return replace(path, true, |f| f.write_all(bytes)),
         Err(e) => return Err(e),
         Ok(m) if !m.file_type().is_file() => return Err(by_hand(path)),
         Ok(_) if owner(read(path)?.as_deref()) != Owner::Menu => return Err(by_hand(path)),
         Ok(_) => {}
     }
-    replace(path, |f| f.write_all(bytes))
+    replace(path, false, |f| f.write_all(bytes))
 }
 
 /// Remove a file the menu wrote. A missing file is fine; one written by
@@ -150,9 +157,42 @@ pub fn take_over(path: &Path) -> Result<Option<String>, String> {
     }
     let old = read(path).map_err(|e| e.to_string())?;
     if old.is_some() {
-        fs::rename(path, &aside).map_err(|e| e.to_string())?;
+        // A `.by-hand` made after the check above is not replaced either.
+        rename_noreplace(path, &aside).map_err(|e| match e.kind() {
+            io::ErrorKind::AlreadyExists => format!("{} exists already", home_relative(&aside)),
+            _ => e.to_string(),
+        })?;
     }
     Ok(old)
+}
+
+/// Rename `from` to `to` unless `to` exists (`AlreadyExists`), in one step:
+/// renameat2 with RENAME_NOREPLACE, or a hard link and an unlink where the
+/// file system does not offer the flag.
+pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let cstr = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(io::Error::other);
+    let (f, t) = (cstr(from)?, cstr(to)?);
+    // SAFETY: both are NUL-terminated paths that live across the call.
+    let r = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            f.as_ptr(),
+            libc::AT_FDCWD,
+            t.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() != Some(libc::EINVAL) {
+        return Err(e);
+    }
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)
 }
 
 /// Where `take_over` keeps a hand-written `path`: `<path>.by-hand`.
@@ -228,6 +268,41 @@ mod tests {
         fs::write(&p, format!("{MENU_FILE}extra=1\n")).unwrap();
         write(&p, "idle_timeout=120\n").unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), format!("{HEADER}\nidle_timeout=120\n"));
+    }
+
+    #[test]
+    fn a_file_that_appears_before_the_rename_is_kept() {
+        // `write` found no file; one written by hand appears before the new
+        // file is renamed into place.
+        let d = TestDir::new("owned", "appears");
+        let p = d.join("screen");
+        let r = replace(&p, true, |f| {
+            fs::write(&p, "by hand\n")?;
+            f.write_all(b"menu\n")
+        });
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "by hand\n");
+        assert!(!d.join("screen.tmp").exists());
+    }
+
+    #[test]
+    fn rename_noreplace_never_replaces() {
+        let d = TestDir::new("owned", "noreplace");
+        let (a, b) = (d.join("a"), d.join("b"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        assert_eq!(
+            rename_noreplace(&a, &b).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            (fs::read_to_string(&a).unwrap(), fs::read_to_string(&b).unwrap()),
+            ("a".into(), "b".into())
+        );
+        fs::remove_file(&b).unwrap();
+        rename_noreplace(&a, &b).unwrap();
+        assert!(!a.exists());
+        assert_eq!(fs::read_to_string(&b).unwrap(), "a");
     }
 
     #[test]
