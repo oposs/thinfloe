@@ -15,6 +15,10 @@
 # modules in the squashfs with a parser of its own, no dangling firmware
 # symlink, and a ucode for each chip in the field.
 #
+# And the AMD graphics firmware cut (A1 in the same spec): firmware for each
+# Ryzen APU, from a list written out here independent of amdgpu_keep.py, and
+# none for graphics cards (navi10) or for the radeon driver.
+#
 # Usage: test/integration/test-firmware.sh [path/to/ramroot.sqsh]
 
 set -uo pipefail
@@ -77,6 +81,41 @@ fi
 check "Intel WiFi firmware"                  'usr/lib/firmware/intel/iwlwifi/iwlwifi-'
 check "Intel SOF audio firmware"             'usr/lib/firmware/intel/sof/'
 check "Realtek NIC firmware"                 'usr/lib/firmware/rtl_nic/'
+
+absent() {
+    local desc="$1" pattern="$2" hit
+    hit=$(grep -m 1 -E -- "$pattern" "$LIST")
+    if [[ -n $hit ]]; then
+        echo "FAIL - $desc (found: $hit)"
+        fail=1
+    else
+        echo "ok   - $desc"
+    fi
+}
+
+# AMD graphics firmware: per Ryzen APU the files amdgpu loads for it (by
+# chip name for the older APUs, by IP version for the newer ones).
+AMD='usr/lib/firmware/amdgpu/'
+while read -r apu names; do
+    for n in $names; do
+        check "AMD APU firmware for $apu ($n)" "${AMD}${n}\.bin(\.zst)?$"
+    done
+done <<'APUS'
+Raven raven_dmcu
+Picasso picasso_vcn
+Renoir renoir_dmcub
+Cezanne/Barcelo green_sardine_dmcub
+Rembrandt yellow_carp_dmcub
+Raphael gc_10_3_6_me dcn_3_1_5_dmcub
+Mendocino gc_10_3_7_me dcn_3_1_6_dmcub
+Phoenix gc_11_0_1_mes_2 dcn_3_1_4_dmcub psp_13_0_4_toc vcn_4_0_2
+Hawk-Point gc_11_0_4_me psp_13_0_11_toc
+Strix gc_11_5_0_me dcn_3_5_dmcub psp_14_0_0_toc
+Strix-Halo gc_11_5_1_me dcn_3_5_1_dmcub vcn_4_0_6_1
+Krackan gc_11_5_2_me gc_11_5_3_me dcn_3_6_dmcub psp_14_0_4_toc psp_14_0_5_toc
+APUS
+absent "no AMD graphics card firmware (navi10)" "${AMD}navi10_"
+absent "no radeon firmware" 'usr/lib/firmware/radeon(/|$)'
 
 # Intel WiFi chips in the field or likely there: each keeps a ucode.
 IWL='usr/lib/firmware/intel/iwlwifi/iwlwifi-'

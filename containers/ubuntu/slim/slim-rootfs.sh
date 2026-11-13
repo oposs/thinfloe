@@ -206,8 +206,65 @@ remove_links_to() {
     echo "$count"
 }
 
+# A1: of linux-firmware-amd-graphics keep only what Ryzen APUs load, and drop
+# radeon/ whole. amdgpu_keep.py holds the rule and the new-APU guard (exit 3
+# on an IP version that neither kernel table knows); the links in $FW whose
+# target went are removed with it.
 prune_amdgpu() {
-    : # Task 9
+    local names=/thinfloe-slim/amdgpu-names
+    local dir=$FW/amdgpu
+    local mods drop out n m k name missing=()
+    mods=$(find "/usr/lib/modules/$KVER" -name amdgpu.ko) || die "find for amdgpu.ko failed"
+    [[ -n $mods && $mods != *$'\n'* ]] || die "want one amdgpu.ko, found: ${mods:-none}"
+    [[ -d $dir ]] || die "no $dir: is linux-firmware-amd-graphics installed?"
+    modinfo -F firmware "$mods" >"$names" || die "modinfo failed on $mods"
+    drop=$(mktemp)
+    out=$(python3 -I /thinfloe-slim/amdgpu_keep.py /thinfloe-slim/amdgpu-apu-ip.csv \
+        /thinfloe-slim/amdgpu-dgpu-ip.csv "$names" "$dir" 2>&1 >"$drop") \
+        || { rm -f "$drop"; die "amdgpu selection failed: $out"; }
+    n=$(wc -l <"$drop")
+    (cd "$dir" && xargs -d '\n' -r rm -f -- <"$drop") \
+        || { rm -f "$drop"; die "removing amdgpu files failed"; }
+    sed -e 's#^#amdgpu/#' -e 's/\.zst$//' "$drop" >>"$DROPPED"
+    sed -i "s#^#$dir/#" "$drop"
+    if [[ -d $FW/radeon ]]; then
+        find "$FW/radeon" -mindepth 1 \( -type f -o -type l \) >"$drop.radeon" \
+            || { rm -f "$drop" "$drop.radeon"; die "find over $FW/radeon failed"; }
+        rm -rf "$FW/radeon" || { rm -f "$drop" "$drop.radeon"; die "removing $FW/radeon failed"; }
+        sed -e "s#^$FW/##" -e 's/\.zst$//' "$drop.radeon" >>"$DROPPED"
+        cat "$drop.radeon" >>"$drop"
+        rm -f "$drop.radeon"
+    fi
+    m=$(remove_links_to "$drop") || { rm -f "$drop"; exit 1; }
+    rm -f "$drop"
+    # Every file amdgpu asks for under a kept prefix must still be there.
+    out=$(python3 -I - "$names" <<'PYEOF'
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("amdgpu_keep", "/thinfloe-slim/amdgpu_keep.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+with open("/thinfloe-slim/amdgpu-apu-ip.csv") as f:
+    csv_text = f.read()
+with open(sys.argv[1]) as f:
+    names = f.read().splitlines()
+for name in mod.wanted(csv_text, names):
+    print(name)
+PYEOF
+    ) || die "cannot list the amdgpu firmware names under a kept prefix: $out"
+    while IFS= read -r name; do
+        [[ -n $name ]] || continue
+        [[ -e $FW/$name || -e $FW/$name.zst ]] || missing+=("$name")
+    done <<<"$out"
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "amdgpu firmware ${missing[*]} missing after the APU prune"
+    fi
+    k=$(find "$dir" -mindepth 1 | wc -l)
+    echo "slim-rootfs: kept $k, removed $n amdgpu files" >&2
+    echo "slim-rootfs: removed radeon/ and $m firmware symlinks to removed files;" \
+        "$(grep -c . <<<"$out" || true) amdgpu names under a kept prefix checked" >&2
 }
 
 # Every firmware file that a module still in the tree asks for, that the
