@@ -408,6 +408,20 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
     systemctl enable thinfloe-plymouth-fallback.timer && \
     systemctl mask plymouth-quit.service
 
+# Cleanup. Firmware content is determined by package selection - see the
+# linux-firmware-minimal + per-vendor packages above. Never re-introduce a
+# find/rm sweep over /usr/lib/firmware. The one exception is the slim step
+# below: it keeps per Intel WiFi series the file the driver loads, keeps of
+# linux-firmware-amd-graphics only the firmware of AMD APUs (by chip name
+# and by the IP versions of the kernel's APU table, amdgpu-apu-ip.csv; the
+# build fails on an IP version that neither table knows) and drops the
+# graphics card and radeon firmware, and removes intel-ucode after dracut
+# built the early microcode archive, each with its own guards. This RUN comes
+# before dracut: no apt-get or dpkg may run after the initrd is built, since a
+# dpkg trigger would rebuild it (test-slim-last-run.sh).
+RUN rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
+    apt-get -qqy clean && apt-get -qqy autoremove
+
 # Build initramfs with dracut
 # Keep it generic but omit unnecessary modules.
 #
@@ -470,18 +484,6 @@ RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio mlx4_core mlx4_en mlx5_core mlx5_dpll ice i40e qed qede bnx2x bnxt_en cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls chcr libcxgb sfc sfc_falcon sfc_siena nfp lpfc qla2xxx bfa efct fnic csiostor qedf bnx2fc fcoe libfcoe libfc mptfc mptsas mpt3sas mpi3mr pm80xx isci mvsas aic94xx libsas megaraid_sas smartpqi hpsa esas2r ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp rnbd_client cifs cifs_md4 ksmbd ceph libceph rbd kafs rxrpc sunrpc grace nfs_acl" \
     --compress zstd --compress-level 19 \
     --kver $KERNEL_VERSION
-
-# Cleanup. Firmware content is determined by package selection - see the
-# linux-firmware-minimal + per-vendor packages above. Never re-introduce a
-# find/rm sweep over /usr/lib/firmware. The one exception is the slim step
-# below: it keeps per Intel WiFi series the file the driver loads, keeps of
-# linux-firmware-amd-graphics only the firmware of AMD APUs (by chip name
-# and by the IP versions of the kernel's APU table, amdgpu-apu-ip.csv; the
-# build fails on an IP version that neither table knows) and drops the
-# graphics card and radeon firmware, and removes intel-ucode after dracut
-# built the early microcode archive, each with its own guards.
-RUN rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
-    apt-get -qqy clean && apt-get -qqy autoremove
 
 # Slim step (docs/superpowers/specs/2026-11-12-image-size-design.md). This
 # must stay the LAST RUN of the file: nothing after it may run dpkg, apt-get

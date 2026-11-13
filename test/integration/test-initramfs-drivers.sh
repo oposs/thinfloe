@@ -60,12 +60,18 @@ fi
 # O3 removes intel-ucode from the squashfs; the CPU gets its microcode from
 # the early archive in front of the initrd.
 ucode_name=kernel/x86/microcode/GenuineIntel.bin
-ucode_size=$(awk -v n="$ucode_name" '$NF == n {print $5; exit}' "$LIST")
+# A line of lsinitramfs -l has 9 fields: mode, links, owner, group, size,
+# month, day, time or year, path. The size is the field before the month;
+# any other layout is reported instead of read from a wrong field.
+ucode_size=$(awk -v n="$ucode_name" '$NF == n {
+        if (NF == 9 && $6 ~ /^[A-Z][a-z][a-z]$/) print $5; else print "layout:" NF " fields"
+        exit
+    }' "$LIST")
 if [[ -z $ucode_size ]]; then
     echo "FAIL - the initrd carries the Intel microcode ($ucode_name is missing from the initrd)"
     fail=1
 elif [[ ! $ucode_size =~ ^[0-9]+$ ]]; then
-    echo "FAIL - the initrd carries the Intel microcode (listing format not understood: size field '$ucode_size' of $ucode_name is not a number)"
+    echo "FAIL - the initrd carries the Intel microcode (listing format not understood for $ucode_name: $ucode_size)"
     fail=1
 elif [[ $ucode_size -gt 1000000 ]]; then
     echo "ok   - the initrd carries the Intel microcode ($ucode_size bytes)"

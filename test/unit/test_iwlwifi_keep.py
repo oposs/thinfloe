@@ -126,12 +126,21 @@ class SelectTest(unittest.TestCase):
             with self.assertRaises(iwlwifi_keep.UnknownName):
                 iwlwifi_keep.select(NAMES + [odd], FILES)
 
-    def test_named_file_never_dropped(self):
+    def test_exact_stem_ceiling_wins(self):
         # modinfo names ma-b0-hr-b0-89 exactly; the hr radio ceiling (100,
-        # from ma-a0-hr-b0-100) would pick a -100 file over it.
+        # from ma-a0-hr-b0-100) must not pick a -100 file over it.
         names = [n for n in NAMES if n != "iwlwifi-ma-b0-hr-b0-100.ucode"]
         names.append("iwlwifi-ma-b0-hr-b0-89.ucode")
         files = FILES + ["iwlwifi-ma-b0-hr-b0-100.ucode.zst"]
+        keep, drop = iwlwifi_keep.select(names, files)
+        self.assertIn("iwlwifi-ma-b0-hr-b0-89.ucode.zst", keep)
+        self.assertIn("iwlwifi-ma-b0-hr-b0-100.ucode.zst", drop)
+
+    def test_named_file_never_dropped(self):
+        # modinfo names two APIs of one stem; the rule keeps the higher and
+        # would drop the lower, which modinfo names too.
+        names = NAMES + ["iwlwifi-zz-a0-gf-a0-80.ucode", "iwlwifi-zz-a0-gf-a0-83.ucode"]
+        files = FILES + ["iwlwifi-zz-a0-gf-a0-80.ucode.zst", "iwlwifi-zz-a0-gf-a0-83.ucode.zst"]
         with self.assertRaises(iwlwifi_keep.NamedFileDropped):
             iwlwifi_keep.select(names, files)
 

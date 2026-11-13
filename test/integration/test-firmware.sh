@@ -177,10 +177,10 @@ def report(desc, offenders):
 
 
 def keys(stem, c):
-    """Lookup order: (family, radio, c), then (family, c)."""
+    """Lookup order: (stem, c), then (family, radio, c), then (family, c)."""
     t = stem.split("-")
     radio = [(t[0], t[-2], c)] if len(t) >= 4 else []
-    return radio + [(t[0], c)]
+    return [("stem", stem, c)] + radio + [(t[0], c)]
 
 
 # Ceilings from modinfo; None stands for an unexpanded macro.
@@ -228,10 +228,15 @@ for p, (kind, _) in entries.items():
         stem, c, n, _ = m.groups()
         series.setdefault((stem, c), []).append((int(n), base))
 
-several, above = [], []
+several, above, unnamed = [], [], []
 for (stem, c), files in series.items():
     found = [k for k in keys(stem, c) if k in ceil]
-    if not found or ceil[found[0]] is None:
+    if not found:
+        # No modinfo entry for the family: the rule keeps the highest only.
+        if len(files) > 1:
+            unnamed += [f for _, f in files]
+        continue
+    if ceil[found[0]] is None:
         continue
     top = ceil[found[0]]
     if not any(n <= top for n, _ in files):
@@ -241,6 +246,7 @@ for (stem, c), files in series.items():
     above += [f for n, f in files if n > top]
 report("at most one Intel WiFi ucode per series with a known ceiling", several)
 report("no Intel WiFi ucode above its modinfo ceiling", above)
+report("at most one Intel WiFi ucode per series of a family modinfo does not name", unnamed)
 
 
 def resolves(path):
