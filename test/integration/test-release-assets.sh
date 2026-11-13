@@ -131,21 +131,58 @@ if ! run 4.3.0 && grep -qF "$OUT/vmlinuz" "$WORK/run.out" \
 else
     bad "release-assets.sh took a directory named vmlinuz in the out directory: $(tail -n1 "$WORK/run.out")"
 fi
-# ln across file systems: say what to do, not only ln's own message.
+# ln across file systems: say what to do, not only ln's own message. The
+# stub stat puts the out directory on another device than the artifacts.
 make_artifacts
-mkdir -p "$WORK/xdev"
+mkdir -p "$WORK/xdev" "$WORK/sdev"
 cat >"$WORK/xdev/ln" <<'STUB'
 #!/bin/bash
 echo "ln: failed to create hard link: Invalid cross-device link" >&2
 exit 1
 STUB
-chmod +x "$WORK/xdev/ln"
+cat >"$WORK/xdev/stat" <<STUB
+#!/bin/bash
+case "\${*: -1}" in
+    "$OUT"*) echo 2 ;;
+    *) echo 1 ;;
+esac
+STUB
+chmod +x "$WORK/xdev/ln" "$WORK/xdev/stat"
 if ! PATH="$WORK/xdev:$PATH" bash "$SCRIPT" "$ART" "$OUT" 4.3.0 >"$WORK/run.out" 2>&1 \
         && grep -qF "on the same file system as $ART" "$WORK/run.out"; then
-    ok "a failed hard link says that the out directory must be on the artifacts' file system"
+    ok "a failed hard link across file systems says that the out directory must be on the artifacts' file system"
 else
-    bad "a failed hard link gave only: $(tail -n1 "$WORK/run.out")"
+    bad "a failed hard link across file systems gave only: $(tail -n1 "$WORK/run.out")"
 fi
+# Another ln failure on one file system (fs.protected_hardlinks on files of
+# another user: "Operation not permitted") keeps ln's message, without the
+# file-system hint that would send the person to move the directory.
+make_artifacts
+cat >"$WORK/sdev/ln" <<'STUB'
+#!/bin/bash
+echo "ln: failed to create hard link: Operation not permitted" >&2
+exit 1
+STUB
+chmod +x "$WORK/sdev/ln"
+if ! PATH="$WORK/sdev:$PATH" bash "$SCRIPT" "$ART" "$OUT" 4.3.0 >"$WORK/run.out" 2>&1 \
+        && grep -qF "Operation not permitted" "$WORK/run.out" \
+        && ! grep -qF "same file system" "$WORK/run.out"; then
+    ok "a failed hard link on one file system keeps ln's message, without the file-system hint"
+else
+    bad "a failed hard link on one file system said: $(cat "$WORK/run.out")"
+fi
+# A symlinked out directory is checked too: find without -H did not enter
+# it and took a stray file for an empty directory.
+make_artifacts
+mkdir -p "$WORK/out-real"; : >"$WORK/out-real/stale.txt"
+ln -s "$WORK/out-real" "$OUT"
+if ! run 4.3.0 && grep -qF 'stale.txt' "$WORK/run.out" \
+        && [[ $(ls "$WORK/out-real") == stale.txt ]]; then
+    ok "release-assets.sh refuses a symlinked out directory with another file"
+else
+    bad "release-assets.sh took a symlinked out directory with a stale file: $(tail -n1 "$WORK/run.out")"
+fi
+rm "$OUT"; rm -r "$WORK/out-real"
 # A symlinked artifacts directory (the worktrees have one) is accepted.
 make_artifacts
 mv "$ART" "$WORK/artifacts-real"; ln -s "$WORK/artifacts-real" "$ART"

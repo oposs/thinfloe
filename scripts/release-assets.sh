@@ -76,14 +76,21 @@ if [[ -d $OUT ]]; then
                 exit 1
                 ;;
         esac
-    done < <(find "$OUT" -mindepth 1 -maxdepth 1 -print0)
+    # -H: a symlinked out directory is entered, not taken for empty.
+    done < <(find -H "$OUT" -mindepth 1 -maxdepth 1 -print0)
 fi
 
 mkdir -p "$OUT"
 for s in "${SOURCES[@]}"; do
     if ! ln -f "$ART/${s#*:}" "$OUT/${s%%:*}"; then
-        echo "ERROR: cannot hard-link $ART/${s#*:} into $OUT; the out directory" \
-            "must be on the same file system as $ART" >&2
+        # The file-system hint only when the devices differ: another failure
+        # (fs.protected_hardlinks, "Operation not permitted") is ln's own.
+        if [[ $(stat -L -c %d "$ART/${s#*:}") != "$(stat -L -c %d "$OUT")" ]]; then
+            echo "ERROR: cannot hard-link $ART/${s#*:} into $OUT; the out directory" \
+                "must be on the same file system as $ART" >&2
+        else
+            echo "ERROR: cannot hard-link $ART/${s#*:} into $OUT (see ln's message above)" >&2
+        fi
         exit 1
     fi
 done
