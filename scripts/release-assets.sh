@@ -64,7 +64,13 @@ done
 if [[ -d $OUT ]]; then
     while IFS= read -r -d '' f; do
         case ${f##*/} in
-            vmlinuz|initrd.img|ramroot.sqsh|thinfloe-usb.img.zst|version|SHA256SUMS) ;;
+            vmlinuz|initrd.img|ramroot.sqsh|thinfloe-usb.img.zst|version|SHA256SUMS)
+                # A directory of that name took the asset inside it (ln -f).
+                if [[ -L $f || ! -f $f ]]; then
+                    echo "ERROR: $f is not a plain file; remove it" >&2
+                    exit 1
+                fi
+                ;;
             *)
                 echo "ERROR: $OUT holds $f, which is not a release asset; remove it" >&2
                 exit 1
@@ -75,7 +81,11 @@ fi
 
 mkdir -p "$OUT"
 for s in "${SOURCES[@]}"; do
-    ln -f "$ART/${s#*:}" "$OUT/${s%%:*}"
+    if ! ln -f "$ART/${s#*:}" "$OUT/${s%%:*}"; then
+        echo "ERROR: cannot hard-link $ART/${s#*:} into $OUT; the out directory" \
+            "must be on the same file system as $ART" >&2
+        exit 1
+    fi
 done
 (cd "$OUT" && sha256sum vmlinuz initrd.img ramroot.sqsh thinfloe-usb.img.zst version >SHA256SUMS)
 echo "✓ Release assets for $VERSION in $OUT"
