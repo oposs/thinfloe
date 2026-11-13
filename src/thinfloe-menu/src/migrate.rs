@@ -10,9 +10,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::atomic;
-use crate::config::{ConfigDir, MonitorsCfg, ThinfloeConfig};
+use crate::config::{ConfigDir, MonitorsCfg, NetworkCfg, ThinfloeConfig};
 use crate::convert;
-use crate::generated::{Inputs, Table};
+use crate::generated::{self, Inputs, Table};
 use crate::netfiles::{self, FileState};
 use crate::store::{self, OpenMode};
 
@@ -231,7 +231,7 @@ struct Converted {
 /// Step 1: `start` with every table an old file is left for replaced by
 /// that file's conversion. A table without an old file keeps what
 /// `start` holds, so a second run loses nothing the first converted.
-fn convert_old(old: &OldFiles, start: &ThinfloeConfig, r: &mut Report) -> Converted {
+fn convert_old(old: &OldFiles, start: &ThinfloeConfig, inputs: &Inputs, r: &mut Report) -> Converted {
     let mut cfg = start.clone();
 
     let mut env_lines = Vec::new();
@@ -360,12 +360,48 @@ fn convert_old(old: &OldFiles, start: &ThinfloeConfig, r: &mut Report) -> Conver
             r.converted
                 .push(format!("~/{WIRED}: the wired network is now set in Settings, Network."));
         }
+        keep_what_does_not_render(&mut cfg, wifi, old.wired.as_deref(), inputs, r);
     }
 
     Converted {
         cfg,
         environment: new_environment(old.new_environment.as_deref(), &env_lines),
         sessionrc: new_sessionrc(old.new_sessionrc.as_deref(), rc_rest.as_deref()),
+    }
+}
+
+/// A converted network file the menu cannot write back (a fixed address
+/// on netboot, say) is kept as written instead: the migration must finish,
+/// and the machine keeps its file. Kept text renders without those checks.
+fn keep_what_does_not_render(
+    cfg: &mut ThinfloeConfig,
+    wifi: Option<&str>,
+    wired: Option<&str>,
+    inputs: &Inputs,
+    r: &mut Report,
+) {
+    if let Some(text) = wifi
+        && cfg.network.kept_wifi.is_none()
+        && let Err(e) = generated::render(cfg, WIFI, inputs)
+    {
+        let n = &mut cfg.network;
+        n.wifi_device = None;
+        n.networks = Vec::new();
+        n.wifi_dns = Vec::new();
+        n.kept_wifi = Some(text.to_string());
+        r.dropped.push(format!(
+            "~/{WIFI} is kept as written; the menu shows it read-only. It could not be converted: {e}"
+        ));
+    }
+    if let Some(text) = wired
+        && cfg.network.kept_wired.is_none()
+        && let Err(e) = generated::render(cfg, WIRED, inputs)
+    {
+        cfg.network.wired = NetworkCfg::default().wired;
+        cfg.network.kept_wired = Some(text.to_string());
+        r.dropped.push(format!(
+            "~/{WIRED} is kept as written; the menu shows it read-only. It could not be converted: {e}"
+        ));
     }
 }
 
@@ -490,12 +526,12 @@ pub fn migrate_home(home: &Path, state_dir: &Path, inputs: Inputs, now_epoch: i6
 
     // Step 2. The store starts from config.toml (or rebuilds it from
     // generated/), so a second run keeps what the first converted.
-    let opened = store::open(dir.clone(), inputs, OpenMode::Session, now_epoch);
+    let opened = store::open(dir.clone(), inputs.clone(), OpenMode::Session, now_epoch);
     let mut st = opened.store;
     report
         .dropped
         .extend(opened.notes.iter().map(|n| format!("~/.config/thinfloe/{n}")));
-    let conv = convert_old(&old, &st.cfg, &mut report);
+    let conv = convert_old(&old, &st.cfg, &inputs, &mut report);
     let refused = |e: String| {
         let mut why = e;
         for n in &opened.notes {
@@ -990,6 +1026,50 @@ mod tests {
         assert!(rc.starts_with(RC_TEMPLATE), "{rc}");
         assert!(rc.contains("kanshi &"), "{rc}");
         assert!(h.exists("cfg-attic/.thinfloe-home-version"));
+    }
+
+    #[test]
+    fn a_netboot_fixed_address_is_kept_not_fatal() {
+        let h = Home::with_templates("netboot-fixed");
+        let fixed = "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: \"en*\"\n      addresses: [10.0.0.5/24]\n";
+        h.put("ethernet.yaml", fixed, 0o600);
+        let netboot = Inputs {
+            default_wired: DEFAULT_WIRED.into(),
+            netboot: true,
+        };
+        let r = migrate_home(&h.home, &h.state, netboot, NOW)
+            .unwrap()
+            .expect("a report");
+        let c = h.cfg();
+        assert_eq!(c.network.kept_wired.as_deref(), Some(fixed));
+        assert!(
+            h.text(".config/thinfloe/generated/ethernet.yaml")
+                .contains("10.0.0.5/24")
+        );
+        let readme = h.text("cfg-attic/README");
+        assert!(
+            readme
+                .lines()
+                .any(|l| l.contains("~/ethernet.yaml") && l.contains("netboot")),
+            "{readme}"
+        );
+        assert_eq!(h.layout_text(), "new\n");
+        assert!(r.not_moved.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn an_environment_line_that_is_no_assignment_is_reported() {
+        let h = Home::with_templates("env-export");
+        h.put(".thinfloe-environment", "export FOO\nXCURSOR_SIZE=24\n", 0o644);
+        h.run().unwrap().expect("a report");
+        let readme = h.text("cfg-attic/README");
+        assert!(
+            readme
+                .lines()
+                .any(|l| l.contains("export FOO") && l.contains("not a variable assignment")),
+            "{readme}"
+        );
+        assert!(!h.text(".config/thinfloe/environment").contains("export FOO"));
     }
 
     #[test]

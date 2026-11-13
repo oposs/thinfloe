@@ -116,6 +116,12 @@ pub fn keyboard_from_env(text: &str) -> (Keyboard, Vec<String>, Vec<String>) {
                 ));
             }
             Some(_) => other.push(line.trim_end().to_string()),
+            None if !line.trim().is_empty() && !line.trim_start().starts_with('#') => {
+                notes.push(format!(
+                    "environment: the line \"{}\" is not a variable assignment; it is kept in the attic only.",
+                    line.trim()
+                ));
+            }
             None => {}
         }
     }
@@ -410,6 +416,16 @@ mod tests {
     fn the_last_assignment_wins() {
         let (k, _, _) = keyboard_from_env("XKB_DEFAULT_LAYOUT=fr\nexport XKB_DEFAULT_LAYOUT=\"de\"\n");
         assert_eq!(k.layout, "de");
+    }
+
+    #[test]
+    fn a_line_that_is_no_assignment_is_noted() {
+        let (k, other, notes) = keyboard_from_env("export FOO\nXKB_DEFAULT_LAYOUT=de\n# c\n\n");
+        assert_eq!(k.layout, "de");
+        assert!(other.is_empty(), "{other:?}");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("\"export FOO\""), "{notes:?}");
+        assert!(notes[0].contains("not a variable assignment"), "{notes:?}");
     }
 
     #[test]
