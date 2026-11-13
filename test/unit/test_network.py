@@ -325,7 +325,8 @@ class ApplyTests(Env):
         super().setUp()
         self.home = self.dir / "home"
         self.etc = self.dir / "etc"
-        self.home.mkdir()
+        self.gen = self.home / ".config" / "thinfloe" / "generated"
+        self.gen.mkdir(parents=True)
         self.etc.mkdir()
         self.default = self.dir / "default-ethernet.yaml"
         self.default.write_text(WIRED_DEFAULT)
@@ -353,8 +354,8 @@ class ApplyTests(Env):
         return [c for c in self.recorded() if c.startswith("netplan")]
 
     def test_apply_installs_home_files_mode_600(self):
-        (self.home / "wifi.yaml").write_text(WIFI)
-        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        (self.gen / "wifi.yaml").write_text(WIFI)
+        (self.gen / "ethernet.yaml").write_text(WIRED_HOME)
         (self.etc / "wifi.yaml").write_text(ETC_WIFI)
         rc, out, _ = self.run_main("apply")
         self.assertEqual((rc, json.loads(out)), (0, {"result": "ok", "reason": ""}))
@@ -368,10 +369,10 @@ class ApplyTests(Env):
         self.assertEqual(calls[-1], "netplan apply")
         root = Path((self.dir / "check-root").read_text().strip())
         self.assertFalse(root.exists())
-        self.assertEqual(sorted(os.listdir(self.home)), ["ethernet.yaml", "wifi.yaml"])
+        self.assertEqual(sorted(os.listdir(self.gen)), ["ethernet.yaml", "wifi.yaml"])
 
     def test_apply_template_leaves_etc_wifi(self):
-        (self.home / "wifi.yaml").write_text(TEMPLATE_WIFI)
+        (self.gen / "wifi.yaml").write_text(TEMPLATE_WIFI)
         (self.etc / "wifi.yaml").write_text(ETC_WIFI)
         rc, _, _ = self.run_main("apply")
         self.assertEqual(rc, 0)
@@ -393,7 +394,7 @@ class ApplyTests(Env):
         self.assertEqual(stat.S_IMODE((self.etc / "ethernet.yaml").stat().st_mode), 0o600)
 
     def test_apply_installs_comment_only_wired_file_as_is(self):
-        (self.home / "ethernet.yaml").write_text("# only a comment\n")
+        (self.gen / "ethernet.yaml").write_text("# only a comment\n")
         rc, _, _ = self.run_main("apply")
         self.assertEqual(rc, 0)
         self.assertEqual((self.etc / "ethernet.yaml").read_text(), "# only a comment\n")
@@ -407,7 +408,7 @@ class ApplyTests(Env):
         self.assertEqual(sorted(os.listdir(self.dir / "seen")), ["50-cloud.yaml", "ethernet.yaml"])
 
     def test_apply_rejects_bad_home_file(self):
-        (self.home / "wifi.yaml").write_text(WIFI)
+        (self.gen / "wifi.yaml").write_text(WIFI)
         (self.etc / "wifi.yaml").write_text(ETC_WIFI)
         (self.etc / "ethernet.yaml").write_text(WIRED_DEFAULT)
         before = self.snapshot()
@@ -425,8 +426,8 @@ class ApplyTests(Env):
     def test_apply_refuses_linked_home_file(self):
         target = self.dir / "elsewhere.yaml"
         target.write_text(WIFI)
-        os.symlink(target, self.home / "wifi.yaml")
-        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        os.symlink(target, self.gen / "wifi.yaml")
+        (self.gen / "ethernet.yaml").write_text(WIRED_HOME)
         before = self.snapshot()
         rc, out, _ = self.run_main("apply")
         self.assertEqual(rc, 1)
@@ -434,13 +435,47 @@ class ApplyTests(Env):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.netplan_calls(), [])
 
+    def test_apply_does_not_read_the_old_home_files(self):
+        (self.home / "wifi.yaml").write_text(WIFI)
+        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.snapshot(), {"ethernet.yaml": WIRED_DEFAULT.encode()})
+
+    def test_apply_refuses_a_linked_generated_directory(self):
+        elsewhere = self.dir / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "wifi.yaml").write_text(WIFI)
+        (self.gen / "wifi.yaml").unlink(missing_ok=True)
+        self.gen.rmdir()
+        os.symlink(elsewhere, self.gen)
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out)["reason"], "generated is a link")
+        self.assertEqual(self.snapshot(), {})
+        self.assertEqual(self.netplan_calls(), [])
+
+    def test_apply_refuses_a_linked_config_directory(self):
+        elsewhere = self.dir / "elsewhere"
+        (elsewhere / "generated").mkdir(parents=True)
+        (elsewhere / "generated" / "wifi.yaml").write_text(WIFI)
+        cfg = self.home / ".config" / "thinfloe"
+        import shutil
+        shutil.rmtree(cfg)
+        os.symlink(elsewhere, cfg)
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out)["reason"], "thinfloe is a link")
+        self.assertEqual(self.snapshot(), {})
+        self.assertEqual(self.netplan_calls(), [])
+
     def test_apply_refuses_other_than_regular_and_big_files(self):
-        os.mkfifo(self.home / "wifi.yaml")
+        os.mkfifo(self.gen / "wifi.yaml")
         rc, out, _ = self.run_main("apply")
         self.assertEqual(rc, 1)
         self.assertIn("not a regular file", json.loads(out)["reason"])
-        os.unlink(self.home / "wifi.yaml")
-        (self.home / "wifi.yaml").write_text("#" * (64 * 1024) + "x")
+        os.unlink(self.gen / "wifi.yaml")
+        (self.gen / "wifi.yaml").write_text("#" * (64 * 1024) + "x")
         rc, out, _ = self.run_main("apply")
         self.assertEqual(rc, 1)
         self.assertIn("64 KiB", json.loads(out)["reason"])
@@ -448,14 +483,14 @@ class ApplyTests(Env):
         self.assertEqual(self.netplan_calls(), [])
 
     def test_apply_netboot_ignores_home_wired(self):
-        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        (self.gen / "ethernet.yaml").write_text(WIRED_HOME)
         with mock.patch.object(nw, "is_netboot", lambda: True):
             rc, _, _ = self.run_main("apply")
         self.assertEqual(rc, 0)
         self.assertEqual((self.etc / "ethernet.yaml").read_text(), WIRED_DEFAULT)
 
     def test_apply_reports_netplan_apply_failure(self):
-        (self.home / "ethernet.yaml").write_text(WIRED_HOME)
+        (self.gen / "ethernet.yaml").write_text(WIRED_HOME)
         (self.dir / "apply-fails").write_text("")
         rc, out, _ = self.run_main("apply")
         self.assertEqual(rc, 1)

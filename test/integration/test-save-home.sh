@@ -300,15 +300,35 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-printf './my-own-junk\n' >"$WORK/home/tfuser/.save-home-exclude"
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+printf './my-own-junk\n' >"$WORK/home/tfuser/.config/thinfloe/save-home-exclude"
 printf './.cache\n' >"$WORK/exclude-default"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/exclude-default" \
      run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q 'my-own-junk' "$WORK/tar.log" 2>/dev/null; then
-    ok "~/.save-home-exclude takes precedence over the shipped defaults"
+    ok "the exclude list is read from ~/.config/thinfloe/save-home-exclude"
 else
     bad "the user's exclude file was ignored (tar log: $(cat "$WORK/tar.log"))"
+fi
+
+# A legacy home keeps its list in ~/.save-home-exclude, and the new file is
+# not read there. The layout comes from $TF_STATE_DIR/home-layout.
+setup
+echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
+mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
+printf 'legacy\n' >"$WORK/state/home-layout"
+printf './old-junk\n' >"$WORK/home/tfuser/.save-home-exclude"
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+printf './new-junk\n' >"$WORK/home/tfuser/.config/thinfloe/save-home-exclude"
+printf './.cache\n' >"$WORK/exclude-default"
+rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
+     TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/exclude-default" \
+     run_save_home "$WORK/root" "$WORK/home/tfuser")
+if grep -q 'old-junk' "$WORK/tar.log" 2>/dev/null && ! grep -q 'new-junk' "$WORK/tar.log"; then
+    ok "a legacy home reads ~/.save-home-exclude"
+else
+    bad "a legacy home did not read ~/.save-home-exclude (tar log: $(cat "$WORK/tar.log"))"
 fi
 
 # --------------------------------------------------------------- test 14
@@ -317,7 +337,8 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-printf './My Documents/big\n' >"$WORK/home/tfuser/.save-home-exclude"
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+printf './My Documents/big\n' >"$WORK/home/tfuser/.config/thinfloe/save-home-exclude"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      run_save_home "$WORK/root" "$WORK/home/tfuser")
 if grep -q 'exclude=./My Documents/big' "$WORK/tar.log" 2>/dev/null; then
@@ -332,7 +353,8 @@ fi
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
-: >"$WORK/home/tfuser/.save-home-exclude"
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+: >"$WORK/home/tfuser/.config/thinfloe/save-home-exclude"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      TF_EXCLUDE_DEFAULT_OVERRIDE="$WORK/nonexistent" \
      run_save_home "$WORK/root" "$WORK/home/tfuser")
@@ -737,7 +759,7 @@ fi
 # A user pattern naming the old names applies like any other.
 names_setup
 echo written-by-3x >"$H/.dbrrg-environment"
-printf '%s\n' './.dbrrg-*' >"$H/.save-home-exclude"
+mkdir -p "$H/.config/thinfloe"; printf '%s\n' './.dbrrg-*' >"$H/.config/thinfloe/save-home-exclude"
 names_run
 if [[ "$rc" == 0 ]] && ! grep -q 'dbrrg' <<<"$listing" \
    && grep -qxF ./.thinfloe-environment <<<"$listing" && ! grep -q 'ignored' "$WORK/out"; then

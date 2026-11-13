@@ -893,6 +893,17 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/upg" "$SQSH" usr/bin/thinfloe-upgrade >/d
         echo "FAIL - home copy does not exclude ./.thinfloe-ssh-host-keys (two machines would share a host key)"
         fail=1
     fi
+    for _p in './.config/thinfloe/ssh-host-keys' './.config/thinfloe/wg0.conf' \
+              './cfg-attic/.thinfloe-ssh-host-keys' './cfg-attic/.dbrrg-ssh-host-keys' \
+              './cfg-attic/wg0.conf' './cfg-attic/.thinfloe-password' \
+              './cfg-attic/.save-home-exclude'; do
+        if grep -qF "\"$_p\"" "$UPG"; then
+            echo "ok   - home copy excludes $_p"
+        else
+            echo "FAIL - home copy does not exclude $_p"
+            fail=1
+        fi
+    done
     if grep -q '"./wg0.conf"' "$UPG"; then
         echo "ok   - home copy excludes wg0.conf"
     else

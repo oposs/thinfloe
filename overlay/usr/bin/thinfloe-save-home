@@ -47,7 +47,7 @@ TF_ESP_LOCK_WAIT="${TF_ESP_LOCK_WAIT:-30}"
 # /boot/efi/home.tar.gz. /root holds a .bashrc, so the archive had a valid
 # member and tf_restore_home_from_file accepted it on the next boot,
 # replacing the user's home and the SSH host keys staged in
-# ~/.thinfloe-ssh-host-keys, with no error printed anywhere.
+# ~/.config/thinfloe/ssh-host-keys, with no error printed anywhere.
 TF_HOME_DIR="${TF_HOME_DIR:-$(getent passwd tfuser | cut -d: -f6)}"
 : "${TF_HOME_DIR:=/home/tfuser}"
 if [ ! -d "$TF_HOME_DIR" ]; then
@@ -106,7 +106,23 @@ cd "$TF_HOME_DIR"
 # `set --` builds a real argument list rather than a string, so a pattern
 # containing a space stays one pattern. A string split by the shell would
 # break every path with a space in it.
-EXCLUDE_FILE="$TF_HOME_DIR/.save-home-exclude"
+#
+# Which file holds the user's list depends on the home layout the initramfs
+# recorded: $TF_STATE_DIR/home-layout is "legacy" (4.x: ~/.save-home-exclude)
+# or anything else (~/.config/thinfloe/save-home-exclude). The menu's rule
+# exactly: the whole file is "legacy" or "legacy" and one newline. The state
+# file only picks between two paths in the home.
+_dsh_layout=
+_dsh_extra=
+{
+  IFS= read -r _dsh_layout || true
+  if IFS= read -r _dsh_extra || [ -n "$_dsh_extra" ]; then _dsh_layout=new; fi
+} 2>/dev/null <"$TF_STATE_DIR/home-layout" || _dsh_layout=new
+if [ "$_dsh_layout" = legacy ]; then
+  EXCLUDE_FILE="$TF_HOME_DIR/.save-home-exclude"
+else
+  EXCLUDE_FILE="$TF_HOME_DIR/.config/thinfloe/save-home-exclude"
+fi
 [ -r "$EXCLUDE_FILE" ] || EXCLUDE_FILE="$TF_EXCLUDE_DEFAULT"
 set --
 if [ -r "$EXCLUDE_FILE" ]; then

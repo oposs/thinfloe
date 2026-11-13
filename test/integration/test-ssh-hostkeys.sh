@@ -67,7 +67,9 @@ fresh_case() {
     export TF_HOME_DIR="$CASE/home"
     export TF_TEST_CHOWN_LOG="$CASE/chown.log"
     export TF_TEST_KEYGEN_LOG="$CASE/keygen.log"
-    mkdir -p "$TF_SSH_DIR" "$TF_HOME_DIR"
+    export TF_STATE_DIR="$CASE/state"
+    mkdir -p "$TF_SSH_DIR" "$TF_HOME_DIR" "$TF_STATE_DIR"
+    KS="$TF_HOME_DIR/.config/thinfloe/ssh-host-keys"
     : >"$TF_TEST_CHOWN_LOG"
     : >"$TF_TEST_KEYGEN_LOG"
 }
@@ -82,10 +84,10 @@ fresh_case() {
 # generated and that the type which WAS present is left untouched.
 
 fresh_case restore
-mkdir -p "$TF_HOME_DIR/.thinfloe-ssh-host-keys"
-echo "PRIVATE-ed25519" >"$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
-echo "PUBLIC-ed25519"  >"$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key.pub"
-chmod 644 "$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key"
+mkdir -p "$KS"
+echo "PRIVATE-ed25519" >"$KS/ssh_host_ed25519_key"
+echo "PUBLIC-ed25519"  >"$KS/ssh_host_ed25519_key.pub"
+chmod 644 "$KS/ssh_host_ed25519_key"
 
 "$SCRIPT" >/dev/null 2>&1
 
@@ -115,7 +117,7 @@ else
     bad "missing key types were not topped up - sshd would run with fewer key types"
 fi
 
-if [[ -f "$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_rsa_key" ]]; then
+if [[ -f "$KS/ssh_host_rsa_key" ]]; then
     ok "topped-up key types are restaged into the keystore"
 else
     bad "topped-up key types were not restaged - they would not persist"
@@ -153,14 +155,15 @@ else
     bad "ssh-keygen -A did not run with no keys present"
 fi
 
-if [[ -f "$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key" ]]; then
-    ok "generated keys are staged into the home keystore"
+if [[ -f "$KS/ssh_host_ed25519_key" ]]; then
+    ok "keys are staged into ~/.config/thinfloe/ssh-host-keys"
 else
     bad "generated keys were not staged into the keystore - they would not persist"
 fi
 
-if grep -q "chown -R tfuser:tfuser" "$TF_TEST_CHOWN_LOG"; then
-    ok "staged keystore is chowned back to tfuser"
+if grep -q "chown -R tfuser:tfuser" "$TF_TEST_CHOWN_LOG" &&
+   grep -q "^chown -h tfuser:tfuser $TF_HOME_DIR/.config/thinfloe\$" "$TF_TEST_CHOWN_LOG"; then
+    ok "staged keystore and the config directory are chowned back to tfuser"
 else
     bad "staged keystore not chowned to tfuser - save-home could not read it"
 fi
@@ -168,7 +171,7 @@ fi
 # 4.0 keeps no link under the 3.x name ~/.dbrrg-ssh-host-keys: a 3.x home
 # is migrated once by the initramfs and nothing reads the old name afterwards.
 OLD="$TF_HOME_DIR/.dbrrg-ssh-host-keys"
-if [[ ! -e "$OLD" && ! -L "$OLD" ]] && ! grep -q '^chown -h' "$TF_TEST_CHOWN_LOG"; then
+if [[ ! -e "$OLD" && ! -L "$OLD" ]] && ! grep -q '^chown -h.*dbrrg' "$TF_TEST_CHOWN_LOG"; then
     ok "staging makes no ~/.dbrrg-ssh-host-keys"
 else
     bad "staging makes no ~/.dbrrg-ssh-host-keys (link '$(readlink "$OLD" 2>/dev/null)')"
@@ -199,7 +202,7 @@ echo "LIVE" >"$TF_SSH_DIR/ssh_host_ed25519_key"
 echo "LIVEPUB" >"$TF_SSH_DIR/ssh_host_ed25519_key.pub"
 "$SCRIPT" --stage >/dev/null 2>&1
 
-if [[ "$(cat "$TF_HOME_DIR/.thinfloe-ssh-host-keys/ssh_host_ed25519_key" 2>/dev/null)" == "LIVE" ]]; then
+if [[ "$(cat "$KS/ssh_host_ed25519_key" 2>/dev/null)" == "LIVE" ]]; then
     ok "--stage copies the live keys into the keystore"
 else
     bad "--stage did not copy the live keys into the keystore"
@@ -216,6 +219,65 @@ if [[ -d "$TF_HOME_DIR/.dbrrg-ssh-host-keys" && ! -L "$TF_HOME_DIR/.dbrrg-ssh-ho
 else
     bad "--stage leaves a real ~/.dbrrg-ssh-host-keys alone"
 fi
+
+# --- a legacy home keeps the keystore at ~/.thinfloe-ssh-host-keys ---------
+
+fresh_case legacy
+echo legacy >"$TF_STATE_DIR/home-layout"
+OLDKS="$TF_HOME_DIR/.thinfloe-ssh-host-keys"
+mkdir -p "$OLDKS"
+echo "PRIVATE-ed25519" >"$OLDKS/ssh_host_ed25519_key"
+echo "PUBLIC-ed25519"  >"$OLDKS/ssh_host_ed25519_key.pub"
+"$SCRIPT" >/dev/null 2>&1
+if [[ "$(cat "$TF_SSH_DIR/ssh_host_ed25519_key" 2>/dev/null)" == "PRIVATE-ed25519" ]] &&
+   [[ -f "$OLDKS/ssh_host_rsa_key" ]] && [[ ! -e "$TF_HOME_DIR/.config" ]]; then
+    ok "a legacy home uses ~/.thinfloe-ssh-host-keys"
+else
+    bad "a legacy home uses ~/.thinfloe-ssh-host-keys"
+fi
+
+# --- the layout file is tfuser's: root never follows a link it plants -------
+#
+# A symlinked ~/.config/thinfloe (or ~/.config, or the keystore itself) must
+# not make root write keys or chown anything outside the home, and must not
+# install keys from there either.
+
+for where in config thinfloe keystore; do
+    fresh_case "link-$where"
+    TARGET="$CASE/elsewhere"
+    mkdir -p "$TARGET"
+    echo "LIVE" >"$TF_SSH_DIR/ssh_host_ed25519_key"
+    case $where in
+        config)   ln -s "$TARGET" "$TF_HOME_DIR/.config" ;;
+        thinfloe) mkdir -p "$TF_HOME_DIR/.config"; ln -s "$TARGET" "$TF_HOME_DIR/.config/thinfloe" ;;
+        keystore) mkdir -p "$TF_HOME_DIR/.config/thinfloe"; ln -s "$TARGET" "$KS" ;;
+    esac
+    "$SCRIPT" --stage >/dev/null 2>&1
+    if [[ -z "$(ls -A "$TARGET")" ]] && ! grep -q "$TARGET" "$TF_TEST_CHOWN_LOG"; then
+        ok "a symlinked ~/.config/thinfloe is refused (--stage, link at $where)"
+    else
+        bad "a link at $where was followed by --stage: $(ls -A "$TARGET")"
+    fi
+    # And nothing is installed from a keystore behind a link.
+    fresh_case "linkread-$where"
+    TARGET="$CASE/elsewhere"
+    mkdir -p "$TARGET"
+    echo "PLANTED" >"$TARGET/ssh_host_ed25519_key"
+    case $where in
+        config)   mkdir -p "$TARGET/thinfloe"; echo PLANTED >"$TARGET/thinfloe/ssh_host_ed25519_key"
+                  mkdir -p "$TARGET/thinfloe/ssh-host-keys"; echo PLANTED >"$TARGET/thinfloe/ssh-host-keys/ssh_host_ed25519_key"
+                  ln -s "$TARGET" "$TF_HOME_DIR/.config" ;;
+        thinfloe) mkdir -p "$TARGET/ssh-host-keys"; echo PLANTED >"$TARGET/ssh-host-keys/ssh_host_ed25519_key"
+                  mkdir -p "$TF_HOME_DIR/.config"; ln -s "$TARGET" "$TF_HOME_DIR/.config/thinfloe" ;;
+        keystore) mkdir -p "$TF_HOME_DIR/.config/thinfloe"; ln -s "$TARGET" "$KS" ;;
+    esac
+    "$SCRIPT" >/dev/null 2>&1
+    if ! grep -rq PLANTED "$TF_SSH_DIR" 2>/dev/null; then
+        ok "keys behind a symlink at $where are not installed"
+    else
+        bad "keys behind a symlink at $where were installed"
+    fi
+done
 
 if [[ $fail -ne 0 ]]; then
     echo ""

@@ -209,8 +209,8 @@ else
 fi
 
 # --- apply as root installs ---
-mkdir -p "$W/home" "$W/run"
-cp /fx/wifi-two.yaml "$W/home/wifi.yaml"
+mkdir -p "$W/home/.config/thinfloe/generated" "$W/run"
+cp /fx/wifi-two.yaml "$W/home/.config/thinfloe/generated/wifi.yaml"
 cat >"$W/netplan" <<'SH'
 #!/bin/sh
 if [ "$1" = generate ]; then exec /usr/sbin/netplan "$@"; fi
@@ -224,7 +224,7 @@ out=$(TF_NETWORK_HOME=$W/home TF_NETWORK_ESP=/ TF_NETWORK_NETPLAN=$W/netplan \
 rc=$?
 if [[ $rc -eq 0 && $out == *'"result": "ok"'* ]] \
     && [[ $(stat -c %a /etc/netplan/wifi.yaml) == 600 ]] \
-    && cmp -s /etc/netplan/wifi.yaml "$W/home/wifi.yaml" \
+    && cmp -s /etc/netplan/wifi.yaml "$W/home/.config/thinfloe/generated/wifi.yaml" \
     && [[ "$(cat "$W/record" 2>/dev/null)" == apply ]]; then
     ok "apply as root installs"
 else

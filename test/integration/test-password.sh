@@ -80,13 +80,15 @@ STUB
 
 chmod +x "$STUBS"/*
 
-STORE_NAME=".thinfloe-password"
+STORE_NAME=".config/thinfloe/password"
+OLD_STORE_NAME=".thinfloe-password"
 
 # run_password <home-for-HOME-env> <stdin-text> [args...]
 run_password() {
     local home_env="$1" input="$2"; shift 2
     printf '%s' "$input" | \
     TF_TEST_LOG="$WORK/calls.log" \
+    TF_STATE_DIR="$WORK/state" \
     TF_TEST_PASSWD_HOME="$WORK/home/tfuser" \
     TF_TEST_SHADOW_HASH="$FAKE_HASH" \
     HOME="$home_env" \
@@ -100,8 +102,8 @@ STORE="$WORK/home/tfuser/$STORE_NAME"
 
 setup() {
     rm -rf "$WORK/home" "$WORK/root" "$WORK/calls.log" \
-           "$WORK/out" "$WORK/err"
-    mkdir -p "$WORK/home/tfuser" "$WORK/root"
+           "$WORK/out" "$WORK/err" "$WORK/state" "$WORK/elsewhere"
+    mkdir -p "$WORK/home/tfuser" "$WORK/root" "$WORK/state"
     echo "root's shell config" >"$WORK/root/.bashrc"
 }
 
@@ -133,8 +135,8 @@ fi
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 mode=$(stat -c '%a' "$STORE" 2>/dev/null)
-if [[ "$mode" == "600" ]] && grep -q "^chown tfuser:tfuser $STORE\$" "$WORK/calls.log"; then
-    ok "--set stores mode 600 owned by tfuser"
+if [[ "$mode" == "600" ]] && grep -q "^chown -h tfuser:tfuser $STORE\$" "$WORK/calls.log"; then
+    ok "the hash is stored in ~/.config/thinfloe/password (mode 600, owned by tfuser)"
 else
     bad "--set stores mode 600 owned by tfuser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
 fi
@@ -168,7 +170,7 @@ fi
 # the shadow file. Observed against the real image: after --clear the field
 # read `!$y$j9T$ULDsq...`. The delete must come first.
 setup
-echo "$FAKE_HASH" >"$STORE"
+mkdir -p "$(dirname "$STORE")"; echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --clear)
 order=$(grep '^passwd ' "$WORK/calls.log" | tr '\n' ' ')
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
@@ -191,7 +193,7 @@ fi
 
 # ---------------------------------------------------------------- test 8
 setup
-echo "$FAKE_HASH" >"$STORE"
+mkdir -p "$(dirname "$STORE")"; echo "$FAKE_HASH" >"$STORE"
 rc=$(run_password "$WORK/root" '' --apply)
 if [[ "$rc" == "0" ]] && grep -q '^chpasswd -e$' "$WORK/calls.log" &&
    grep -qF "stdin: tfuser:$FAKE_HASH" "$WORK/calls.log"; then
@@ -203,7 +205,7 @@ fi
 # ---------------------------------------------------------------- test 9
 # A truncated or empty store must not become an empty password.
 setup
-: >"$STORE"
+ mkdir -p "$(dirname "$STORE")"; : >"$STORE"
 rc=$(run_password "$WORK/root" '' --apply)
 if [[ "$rc" != "0" ]] && ! grep -q '^chpasswd' "$WORK/calls.log" 2>/dev/null; then
     ok "--apply refuses an empty stored hash"
@@ -229,7 +231,7 @@ setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 OLD="$WORK/home/tfuser/.dbrrg-password"
 if [[ "$rc" == "0" ]] && [[ ! -e "$OLD" && ! -L "$OLD" ]] &&
-   ! grep -q '^chown -h' "$WORK/calls.log"; then
+   ! grep -q '^chown -h.*dbrrg' "$WORK/calls.log"; then
     ok "--set makes no ~/.dbrrg-password"
 else
     bad "--set makes no ~/.dbrrg-password (exit $rc, link '$(readlink "$OLD" 2>/dev/null)')"
@@ -241,14 +243,105 @@ fi
 # install it, and so would a migration on a boot whose archive lost the
 # home-version marker: a cleared password must not come back.
 setup
-echo "$FAKE_HASH" >"$STORE"
+mkdir -p "$(dirname "$STORE")"; echo "$FAKE_HASH" >"$STORE"
 echo "3x-hash" >"$WORK/home/tfuser/.dbrrg-password"
 rc=$(run_password "$WORK/root" '' --clear)
 if [[ "$rc" == "0" ]] && [[ ! -e "$STORE" ]] &&
    [[ ! -e "$WORK/home/tfuser/.dbrrg-password" ]]; then
-    ok "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password"
+    ok "--clear removes the new store and a 3.x ~/.dbrrg-password"
 else
     bad "--clear removes ~/.thinfloe-password and a 3.x ~/.dbrrg-password (exit $rc)"
+fi
+
+# ---------------------------------------------------------------- test 13
+# A legacy home keeps the hash in ~/.thinfloe-password; --apply reads that
+# and not the new store.
+setup
+echo legacy >"$WORK/state/home-layout"
+echo "$FAKE_HASH" >"$WORK/home/tfuser/$OLD_STORE_NAME"
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+echo 'other-hash' >"$WORK/home/tfuser/.config/thinfloe/password"
+rc=$(run_password "$WORK/root" '' --apply)
+if [[ "$rc" == "0" ]] && grep -qF "stdin: tfuser:$FAKE_HASH" "$WORK/calls.log" &&
+   ! grep -q 'other-hash' "$WORK/calls.log"; then
+    ok "--apply reads ~/.thinfloe-password on a legacy home"
+else
+    bad "--apply reads ~/.thinfloe-password on a legacy home (exit $rc)"
+fi
+
+# A legacy --set writes the old name and creates no ~/.config/thinfloe.
+setup
+echo legacy >"$WORK/state/home-layout"
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+if [[ "$rc" == "0" ]] && [[ -f "$WORK/home/tfuser/$OLD_STORE_NAME" ]] &&
+   [[ ! -e "$WORK/home/tfuser/.config" ]]; then
+    ok "--set on a legacy home writes ~/.thinfloe-password"
+else
+    bad "--set on a legacy home writes ~/.thinfloe-password (exit $rc)"
+fi
+
+# ---------------------------------------------------------------- test 14
+# --clear removes the old and the new store, whatever the layout says.
+for layout in new legacy; do
+    setup
+    echo "$layout" >"$WORK/state/home-layout"
+    mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+    echo "$FAKE_HASH" >"$STORE"
+    echo "$FAKE_HASH" >"$WORK/home/tfuser/$OLD_STORE_NAME"
+    rc=$(run_password "$WORK/root" '' --clear)
+    if [[ "$rc" == "0" && ! -e "$STORE" && ! -e "$WORK/home/tfuser/$OLD_STORE_NAME" ]]; then
+        ok "--clear removes the old and the new store ($layout)"
+    else
+        bad "--clear removes the old and the new store ($layout, exit $rc)"
+    fi
+done
+
+# ---------------------------------------------------------------- test 15
+# The layout file is tfuser's to flip, so it may only choose between two
+# paths in tfuser's home. A symlinked ~/.config/thinfloe (or ~/.config, or
+# the store) must not be followed by root: nothing lands in the target and
+# the password is not stored.
+setup
+mkdir -p "$WORK/home/tfuser/.config" "$WORK/elsewhere"
+ln -s "$WORK/elsewhere" "$WORK/home/tfuser/.config/thinfloe"
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+if [[ "$rc" != "0" ]] && [[ -z "$(ls -A "$WORK/elsewhere")" ]] &&
+   grep -q 'link' "$WORK/err"; then
+    ok "a symlinked ~/.config/thinfloe is refused by --set"
+else
+    bad "a symlinked ~/.config/thinfloe is refused by --set (exit $rc, target: $(ls -A "$WORK/elsewhere"))"
+fi
+
+setup
+mkdir -p "$WORK/elsewhere"
+ln -s "$WORK/elsewhere" "$WORK/home/tfuser/.config"
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+if [[ "$rc" != "0" ]] && [[ -z "$(ls -A "$WORK/elsewhere")" ]]; then
+    ok "a symlinked ~/.config is refused by --set"
+else
+    bad "a symlinked ~/.config is refused by --set (exit $rc, target: $(ls -A "$WORK/elsewhere"))"
+fi
+
+setup
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+echo "precious" >"$WORK/precious"
+ln -s "$WORK/precious" "$STORE"
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+if [[ "$(cat "$WORK/precious")" == "precious" ]] && [[ ! -L "$STORE" || "$rc" != "0" ]]; then
+    ok "a symlinked store is not written through by --set"
+else
+    bad "a symlinked store is not written through by --set (exit $rc, target: $(cat "$WORK/precious"))"
+fi
+
+setup
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+echo "$FAKE_HASH" >"$WORK/precious"
+ln -s "$WORK/precious" "$STORE"
+rc=$(run_password "$WORK/root" '' --apply)
+if [[ "$rc" != "0" ]] && ! grep -q '^chpasswd' "$WORK/calls.log" 2>/dev/null; then
+    ok "--apply refuses a symlinked store"
+else
+    bad "--apply refuses a symlinked store (exit $rc)"
 fi
 
 if [[ "$fail" == "0" ]]; then
