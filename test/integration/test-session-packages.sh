@@ -387,6 +387,15 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/ud" "$SQSH" \
     else
         echo "ok   - un-dockerize.service has no hwdb ordering cycle"
     fi
+    # The image ships the resolv.conf link; stopping resolved and making the
+    # link again left lookups failing for a moment at multi-user.target.
+    if grep -qE '^ExecStart.*(resolv|systemd-resolved)' \
+            "$DPKG_TMP/ud/etc/systemd/system/un-dockerize.service"; then
+        echo "FAIL - un-dockerize.service still touches resolv.conf or systemd-resolved"
+        fail=1
+    else
+        echo "ok   - un-dockerize.service leaves resolv.conf and systemd-resolved alone"
+    fi
 else
     echo "FAIL - could not extract un-dockerize.service"
     fail=1
