@@ -8,8 +8,12 @@ modinfo.txt is `modinfo -F firmware amdgpu`. The tables are the copies in
 containers/ubuntu/slim/.
 """
 
+import contextlib
 import importlib.util
+import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -133,6 +137,45 @@ class UnknownVersionsTest(unittest.TestCase):
     def test_unkept_apu_psp_refused(self):
         got = self.run_guard({"psp_15_0_0_toc.bin.zst": None, "psp_15_0_0_ta.bin.zst": None})
         self.assertIn("psp_15_0_0", got)
+
+
+class CliTest(unittest.TestCase):
+    def run_cli(self, apu_csv, extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            fw = os.path.join(tmp, "amdgpu")
+            os.mkdir(fw)
+            entries = dict(ENTRIES)
+            entries.update(extra)
+            for name, target in entries.items():
+                path = os.path.join(fw, name)
+                if target is None:
+                    open(path, "w").close()
+                else:
+                    os.symlink(target, path)
+            paths = {}
+            for key, text in (("apu", apu_csv), ("dgpu", DGPU_CSV), ("modinfo", "\n".join(MODINFO) + "\n")):
+                paths[key] = os.path.join(tmp, key)
+                with open(paths[key], "w") as f:
+                    f.write(text)
+            err, out = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                rc = amdgpu_keep.main(["amdgpu_keep.py", paths["apu"], paths["dgpu"], paths["modinfo"], fw])
+            return rc, out.getvalue(), err.getvalue()
+
+    def test_cli_prints_drop_list(self):
+        rc, out, err = self.run_cli(APU_CSV, {})
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(len(out.split()), 489)
+
+    def test_short_table_and_unknown_version_both_reported(self):
+        lines = [l for l in APU_CSV.splitlines() if not l.startswith("#")]
+        short = "\n".join(lines[:6]) + "\n"
+        rc, out, err = self.run_cli(short, {"gc_11_5_4_me.bin.zst": None})
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, "")
+        self.assertIn("amdgpu_keep: only 4 APU rows in the table, expected at least 15", err)
+        self.assertIn("amdgpu_keep: unknown amdgpu IP versions:", err)
+        self.assertIn("gc_11_5_4", err)
 
 
 if __name__ == "__main__":
