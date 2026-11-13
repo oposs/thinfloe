@@ -216,6 +216,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         kanshi: jobs::Kanshi::from_env(),
         config: std::sync::Arc::new(std::sync::Mutex::new(opened.store)),
         layout,
+        labwc: jobs::LabwcCmds::from_env(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

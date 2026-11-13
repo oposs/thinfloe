@@ -609,11 +609,10 @@ fn job_result(
             JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &paths.kanshi, &heads))
         }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
-        // Task B3 replaces this with the real apply job.
-        Job::KeyboardApply(kb) => JobResult::KeyboardApplied {
-            kb,
-            result: Err("Keyboard apply is not available yet".into()),
-        },
+        Job::KeyboardApply(kb) => {
+            let result = jobs::keyboard_apply(paths, &kb, feed);
+            JobResult::KeyboardApplied { kb, result }
+        }
         Job::DismissReport => JobResult::ReportDismissed(jobs::dismiss_report(&paths.config)),
     }
 }
@@ -896,6 +895,7 @@ impl App {
             kanshi: self.cfg.paths.kanshi.clone(),
             config: self.cfg.paths.config.clone(),
             layout: self.cfg.paths.layout,
+            labwc: self.cfg.paths.labwc.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -1552,6 +1552,7 @@ mod tests {
             kanshi: jobs::Kanshi::from_env(),
             config: crate::store::test_shared(Path::new("/nonexistent/cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: jobs::LabwcCmds::from_env(),
         }
     }
 

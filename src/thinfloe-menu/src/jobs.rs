@@ -159,16 +159,16 @@ pub enum JobResult {
         crate::monitors::MonSource,
     ),
     MonApplied(Result<(), String>),
-    /// An apply of the Keyboard tab ended; `kb` is what it applied.
-    KeyboardApplied {
-        kb: crate::config::Keyboard,
-        result: Result<crate::keyboard::KbOutcome, String>,
-    },
     MonKept(Result<(), String>),
     MonReverted(Result<(), String>),
     MonTakenOver(Result<(), String>),
     /// The status layout file was written or removed.
     StatusSaved(Result<(), String>),
+    /// An apply of the Keyboard tab ended; `kb` is what it applied.
+    KeyboardApplied {
+        kb: crate::config::Keyboard,
+        result: Result<crate::keyboard::KbOutcome, String>,
+    },
     ReportDismissed(Result<(), String>),
 }
 
@@ -216,6 +216,47 @@ pub struct Paths {
     pub config: crate::store::Shared,
     /// Which layout this boot's home has.
     pub layout: crate::migrate::HomeLayout,
+    /// The programs that hand a keyboard change to the running labwc.
+    pub labwc: LabwcCmds,
+}
+
+/// How a keyboard change reaches the running compositor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabwcCmds {
+    /// `thinfloe-compose-labwc-config` (`TF_COMPOSE_LABWC`).
+    pub compose: Vec<String>,
+    /// labwc itself (`TF_LABWC`).
+    pub labwc: Vec<String>,
+    /// The system defaults the composer merges from.
+    pub system_dir: PathBuf,
+    /// The directory labwc runs on (`TF_LABWC_CONFIG_DIR`); `None` when the
+    /// session did not compose one.
+    pub config_dir: Option<PathBuf>,
+    /// labwc's process id as labwc gave it to its children (`LABWC_PID`).
+    pub labwc_pid: Option<String>,
+}
+
+impl LabwcCmds {
+    /// Read from the environment; an empty variable counts as unset.
+    pub fn from_env() -> LabwcCmds {
+        fn var(name: &str) -> Option<String> {
+            std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+        }
+        let words = |name: &str, default: &str| -> Vec<String> {
+            var(name)
+                .unwrap_or_else(|| default.to_string())
+                .split_whitespace()
+                .map(String::from)
+                .collect()
+        };
+        LabwcCmds {
+            compose: words("TF_COMPOSE_LABWC", "/usr/bin/thinfloe-compose-labwc-config"),
+            labwc: words("TF_LABWC", "labwc"),
+            system_dir: PathBuf::from("/etc/thinfloe/labwc"),
+            config_dir: var("TF_LABWC_CONFIG_DIR").map(PathBuf::from),
+            labwc_pid: var("LABWC_PID"),
+        }
+    }
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
@@ -493,7 +534,24 @@ fn capture_as(
     source: &str,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(String, Option<i32>, String), String> {
-    let mut child = upgrade_command(cmd, args)
+    capture_env(cmd, args, &[], cap, timeout, feed, source, on_spawn)
+}
+
+/// `capture_as` with `envs` added to the tool's environment.
+#[allow(clippy::too_many_arguments)]
+fn capture_env(
+    cmd: &[String],
+    args: &[String],
+    envs: &[(&str, &str)],
+    cap: usize,
+    timeout: Duration,
+    feed: &Arc<Feed>,
+    source: &str,
+    on_spawn: impl FnOnce(i32),
+) -> Result<(String, Option<i32>, String), String> {
+    let mut command = upgrade_command(cmd, args);
+    command.envs(envs.iter().copied());
+    let mut child = command
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
     on_spawn(child.id() as i32);
@@ -863,6 +921,80 @@ pub fn status_save(store: &crate::store::Shared, text: Option<&str>) -> Result<(
         .map(|_| ())
 }
 
+/// How long the composer or labwc may take to answer a keyboard change.
+pub const KEYBOARD_TIMEOUT: Duration = Duration::from_secs(10);
+const KEYBOARD_BYTES: usize = 64 * 1024;
+const KEYBOARD_LOG_SOURCE: &str = "keyboard";
+
+/// Save the keyboard choice, then, when the session runs on a composed
+/// labwc directory, rewrite its `environment` and ask labwc to read it.
+pub fn keyboard_apply(
+    paths: &Paths,
+    kb: &crate::config::Keyboard,
+    feed: &Arc<Feed>,
+) -> Result<crate::keyboard::KbOutcome, String> {
+    use crate::keyboard::KbOutcome;
+    let (generated, user) = {
+        let mut store = lock(&paths.config);
+        store
+            .update(crate::generated::Table::Keyboard, |c| c.keyboard = kb.clone())
+            .map_err(|e| format!("Could not save the keyboard settings: {e}"))?;
+        (store.dir.generated_file("environment"), store.dir.environment())
+    };
+    let l = &paths.labwc;
+    let Some(config_dir) = l.config_dir.as_ref().filter(|d| **d != l.system_dir) else {
+        return Ok(KbOutcome::NextStart);
+    };
+    let path_arg = |p: &Path| p.to_string_lossy().into_owned();
+    let args = [
+        "--env-only".to_string(),
+        path_arg(&l.system_dir),
+        path_arg(&generated),
+        path_arg(&user),
+        path_arg(config_dir),
+    ];
+    let handed = |why: String| format!("The keyboard settings could not be handed to labwc: {why}");
+    let (_, status, stderr) = capture_as(
+        &l.compose,
+        &args,
+        KEYBOARD_BYTES,
+        KEYBOARD_TIMEOUT,
+        feed,
+        KEYBOARD_LOG_SOURCE,
+        |_| {},
+    )
+    .map_err(handed)?;
+    if status != Some(0) {
+        let first = stderr.lines().next().unwrap_or("").trim();
+        return Err(handed(match (first.is_empty(), status) {
+            (false, _) => first.to_string(),
+            (true, Some(n)) => format!("the composer failed with status {n}"),
+            (true, None) => "the composer was ended by a signal".to_string(),
+        }));
+    }
+    let Some(pid) = l.labwc_pid.as_deref().filter(|p| !p.trim().is_empty()) else {
+        return Err(
+            "labwc is not known to the menu (LABWC_PID is not set); the change takes effect at the next start.".into(),
+        );
+    };
+    let (_, status, _) = capture_env(
+        &l.labwc,
+        &["--reconfigure".to_string()],
+        &[("LABWC_PID", pid)],
+        KEYBOARD_BYTES,
+        KEYBOARD_TIMEOUT,
+        feed,
+        KEYBOARD_LOG_SOURCE,
+        |_| {},
+    )
+    .map_err(|e| format!("labwc --reconfigure failed ({e})"))?;
+    match status {
+        Some(0) => Ok(KbOutcome::Live),
+        Some(n) => Err(format!("labwc --reconfigure failed (status {n})")),
+        None => Err("labwc --reconfigure failed (ended by a signal)".into()),
+    }
+}
+
 /// Remove the migration report from the `[notice]` table.
 pub fn dismiss_report(store: &crate::store::Shared) -> Result<(), String> {
     let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1204,6 +1336,121 @@ mod tests {
         assert!(restore_failed(&d), "CRLF");
     }
 
+    /// A home with a store, and stub compose and labwc scripts that append
+    /// their arguments to `<d>/calls`.
+    fn kb_paths(d: &Path, compose: &str, labwc: &str, config_dir: Option<&Path>, pid: Option<&str>) -> Paths {
+        let mut p = net_paths(d, "/bin/true", "true");
+        p.config = crate::store::test_shared(&d.join("home/.config/thinfloe"));
+        let log = d.join("calls");
+        let wrap = |name: &str, body: &str| {
+            let script = format!("echo \"{name} $*\" >> {}; {body}", log.display());
+            ["/bin/sh", "-c", &script, "sh"].map(String::from).to_vec()
+        };
+        p.labwc = LabwcCmds {
+            compose: wrap("compose", compose),
+            labwc: wrap(
+                "labwc",
+                &format!("echo \"$LABWC_PID\" > {}; {labwc}", d.join("pid").display()),
+            ),
+            system_dir: PathBuf::from("/etc/thinfloe/labwc"),
+            config_dir: config_dir.map(Path::to_path_buf),
+            labwc_pid: pid.map(String::from),
+        };
+        p
+    }
+
+    fn de_kb() -> crate::config::Keyboard {
+        crate::config::Keyboard {
+            layout: "de".into(),
+            ..Default::default()
+        }
+    }
+
+    fn calls(d: &Path) -> Vec<String> {
+        fs::read_to_string(d.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn keyboard_apply_writes_config_then_composes_then_reconfigures() {
+        let d = dir("kb-apply");
+        let out = d.join("run/labwc");
+        let p = kb_paths(&d, "true", "true", Some(&out), Some("4242"));
+        let kb = de_kb();
+        let r = keyboard_apply(&p, &kb, &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::Live));
+        let root = d.join("home/.config/thinfloe");
+        assert_eq!(
+            calls(&d),
+            [
+                format!(
+                    "compose --env-only /etc/thinfloe/labwc {0}/generated/environment {0}/environment {1}",
+                    root.display(),
+                    out.display()
+                ),
+                "labwc --reconfigure".to_string(),
+            ]
+        );
+        assert_eq!(fs::read_to_string(d.join("pid")).unwrap().trim(), "4242");
+        let toml = fs::read_to_string(root.join("config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&toml).unwrap().keyboard, kb);
+        let env = fs::read_to_string(root.join("generated/environment")).unwrap();
+        assert!(env.lines().any(|l| l == "XKB_DEFAULT_VARIANT="), "{env}");
+        assert!(env.lines().any(|l| l == "XKB_DEFAULT_LAYOUT=de"), "{env}");
+    }
+
+    #[test]
+    fn the_plain_fallback_dir_means_next_start() {
+        let d = dir("kb-fallback");
+        let sys = PathBuf::from("/etc/thinfloe/labwc");
+        let p = kb_paths(&d, "true", "true", Some(&sys), Some("1"));
+        let r = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::NextStart));
+        assert!(calls(&d).is_empty());
+        assert!(d.join("home/.config/thinfloe/config.toml").exists());
+        let p = kb_paths(&d, "true", "true", None, Some("1"));
+        let r = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::NextStart));
+        assert!(calls(&d).is_empty());
+    }
+
+    #[test]
+    fn a_failing_composer_is_reported_and_labwc_not_asked() {
+        let d = dir("kb-compose-fail");
+        let p = kb_paths(&d, "echo boom >&2; exit 1", "true", Some(&d.join("out")), Some("1"));
+        let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+        assert!(e.contains("boom"), "{e}");
+        assert!(
+            e.starts_with("The keyboard settings could not be handed to labwc: "),
+            "{e}"
+        );
+        assert_eq!(calls(&d).len(), 1);
+    }
+
+    #[test]
+    fn a_missing_labwc_pid_is_reported() {
+        for pid in [None, Some("")] {
+            let d = dir("kb-no-pid");
+            let p = kb_paths(&d, "true", "true", Some(&d.join("out")), pid);
+            let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+            assert!(e.contains("LABWC_PID is not set"), "{e}");
+            assert!(e.contains("next start"), "{e}");
+            assert!(!calls(&d).iter().any(|c| c.starts_with("labwc")));
+        }
+    }
+
+    #[test]
+    fn a_failing_reconfigure_is_reported() {
+        let d = dir("kb-reconf-fail");
+        let p = kb_paths(&d, "true", "exit 3", Some(&d.join("out")), Some("1"));
+        let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+        assert!(e.starts_with("labwc --reconfigure failed ("), "{e}");
+        assert!(e.contains('3'), "{e}");
+    }
+
     #[test]
     fn save_runs_the_command_and_maps_its_status() {
         let d = dir("save");
@@ -1217,6 +1464,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1229,6 +1477,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1241,6 +1490,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1470,6 +1720,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1483,6 +1734,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -1694,6 +1946,7 @@ mod tests {
             kanshi: Kanshi::from_env(),
             config: net_store(d, NetworkCfg::default()),
             layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
