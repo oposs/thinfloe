@@ -23,9 +23,10 @@ import os
 import re
 import sys
 
-# Chips amdgpu loads firmware for by name. carrizo and stoney (A-series
-# APUs, HP t530 and t630 thin clients; owner, 2026-11-13) are the
-# CARRIZO/STONEY row of the table, which names no IP versions.
+# Chips amdgpu loads firmware for by name. carrizo and stoney (AMD APUs
+# with that graphics, for example the HP t530 and t630 thin clients; owner,
+# 2026-11-13) are the CARRIZO/STONEY row of the table, which names no IP
+# versions.
 CHIPS = ("carrizo", "stoney", "raven", "raven2", "picasso", "renoir", "green_sardine", "yellow_carp", "vangogh")
 APU_ONLY = ("vpe", "umsch_mm", "isp")
 # Versions with files in the package that the dGPU table does not list: the
