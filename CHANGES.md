@@ -4,16 +4,21 @@
 
 ### New
 
+- ThinFloe now shows its picture on mini PCs with AMD Ryzen processors and their built-in Radeon graphics (Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
+
 ### Changed
 
 - The daily release check, the Upgrade tile and `thinfloe-upgrade` take releases from `https://github.com/oposs/thinfloe/releases` instead of tobi.oetiker.ch. Every file of an upgrade or a fresh install comes from one release, the newest when the write starts, and is checked against that release's `SHA256SUMS`; a release without a line for a file fails with "the release has no checksum for <file>" before the stick changes. A source entered by hand is used as given and still accepts the older `<file>.sha256` checksum files.
 - The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed or new files), and such an image is offered the current release as an upgrade. A build outside a git checkout stops at once with "TF_VERSION ... is neither RELEASE (...) nor a dev version" unless `TF_VERSION=X.Y.Z` is given, and a `RELEASE` file that is not one line `X.Y.Z` stops it with "RELEASE must be one line X.Y.Z".
 - A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
+- An upgrade or a netboot now downloads about 491 MB instead of 611 MB. The running system keeps Intel WiFi firmware only in the version its driver loads, and has no drivers for DVB, TV tuner and radio cards, none for older AMD (radeon) and NVIDIA (nouveau) graphics, and no CPU microcode files, which are applied from `initrd.img` at boot as before. During boot, before the system is loaded, drivers for data-centre network cards, Fibre Channel and SAS storage controllers, InfiniBand and network file systems (CIFS, Ceph, AFS, NFS) are no longer available.
+- `locale-gen` and `systemd-hwdb update` no longer work on a running machine: the locale and hardware database sources are left out. The locales of `/etc/locale.gen` and the hardware database ship ready to use.
 
 ### Fixed
 
 - After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
 - OxuLnk no longer shows its keyboard grab as "not working" and no longer logs "keyboard grab unavailable reason=compositor does not support shortcut inhibition": the session now lets a window switch the desktop's key shortcuts off.
+- The image no longer contains the build and test scripts in `/scripts`.
 
 ## 4.2.0 - 2026-11-11
 
