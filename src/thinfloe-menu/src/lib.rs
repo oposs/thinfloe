@@ -19,6 +19,7 @@ pub mod heads;
 pub mod icons;
 pub mod jobs;
 pub mod kanshi;
+pub mod kbregistry;
 pub mod log;
 pub mod menu;
 pub mod menu_move;

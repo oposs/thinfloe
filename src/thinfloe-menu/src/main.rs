@@ -39,6 +39,17 @@ fn env_path(name: &str, default: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(default))
 }
 
+/// The XKB registry file: `TF_XKB_REGISTRY` when set and not empty (tests),
+/// else the image's. Read-only on the environment.
+// Task B2 calls this from build_menu; until then only the test does.
+#[allow(dead_code)]
+fn registry_path() -> PathBuf {
+    match std::env::var_os("TF_XKB_REGISTRY") {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(thinfloe_menu::kbregistry::REGISTRY_PATH),
+    }
+}
+
 fn user_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TF_MENU_USER_DIR") {
         return PathBuf::from(d);
@@ -471,6 +482,16 @@ mod testdir;
 mod tests {
     use super::*;
     use crate::testdir::TestDir;
+
+    #[test]
+    fn the_registry_path_is_the_override_or_the_image_file() {
+        // The environment is read only, never set (no set_var under src/).
+        let p = registry_path();
+        match std::env::var_os("TF_XKB_REGISTRY").filter(|v| !v.is_empty()) {
+            Some(v) => assert_eq!(p, PathBuf::from(v)),
+            None => assert_eq!(p, PathBuf::from(thinfloe_menu::kbregistry::REGISTRY_PATH)),
+        }
+    }
 
     #[test]
     fn usb_boot_is_a_mount_point_test() {

@@ -210,6 +210,8 @@ RUN chmod u+s /usr/bin/ping
 # OxuLnk's Depends: are listed here; libxrandr2 is for vncviewer, which
 # dlopens libXrandr.so.2 and so declares nothing.
 # test/integration/test-addon-deps.sh installs both clients and runs ldd.
+# xkb-data (last) is not an add-on library: it is the layout list of the
+# menu's Keyboard tab (/usr/share/X11/xkb/rules/evdev.xml).
 RUN apt-get install -yq --no-install-recommends \
     libasound2t64 \
     libva-drm2 \
@@ -221,7 +223,8 @@ RUN apt-get install -yq --no-install-recommends \
     libxi6 \
     libxkbcommon-x11-0 \
     libxkbcommon0 \
-    libxrandr2
+    libxrandr2 \
+    xkb-data
 
 # labwc comes from the local rebuild above, not the archive. apt resolves its
 # dependencies from the .deb's own control fields. 0.9.3-1+thinfloe1 sorts above

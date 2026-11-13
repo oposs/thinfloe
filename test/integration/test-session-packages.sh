@@ -1128,6 +1128,16 @@ else
     fail=1
 fi
 
+# The Keyboard tab reads the layout list from xkb-data; named in the Dockerfile.
+if unsquashfs -no-xattrs -d "$DPKG_TMP/xkb" "$SQSH" usr/share/X11/xkb/rules/evdev.xml >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml" ]] &&
+   [[ $(stat -c %s "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml") -gt 102400 ]]; then
+    echo "ok   - the image has the XKB registry"
+else
+    echo "FAIL - /usr/share/X11/xkb/rules/evdev.xml is missing or under 100 kB"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"
