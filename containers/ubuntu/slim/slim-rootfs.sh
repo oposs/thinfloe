@@ -85,9 +85,10 @@ run_depmod() {
 
 # O4: remove DVB, TV tuner and radio modules, and radeon. nouveau stays
 # (owner, 2026-11-13): it sets the mode on NVIDIA cards up to Volta without
-# any firmware. The set is read from modules.dep before anything changes (names still end in
-# .ko.zst): the seed directories, plus every media module that depends on
-# the set, minus every module a module outside the set depends on.
+# any firmware. The set is read from modules.dep before anything changes
+# (names still end in .ko.zst): the seed directories, plus every media
+# module that depends on the set, minus every module a module outside the
+# set depends on.
 trim_media_modules() {
     local dep=/usr/lib/modules/$KVER/modules.dep
     local list out n m

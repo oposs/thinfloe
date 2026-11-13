@@ -2,8 +2,8 @@
 # Wait until a DRM card is driven by something other than simpledrm, and until
 # udev has finished with it, so logind can hand it to labwc.
 #
-# Why this exists: a GPU driver that is not in the initrd (amdgpu, nouveau,
-# radeon; i915 was one until 2026-10-28) loads only from udev coldplug after
+# Why this exists: a GPU driver that is not in the initrd (amdgpu, nouveau;
+# i915 was one until 2026-10-28) loads only from udev coldplug after
 # switch-root. Until then /dev/dri/card0 is simpledrm. When the driver binds
 # it REMOVES simpledrm's card0 and registers its own, and in the gap there is
 # no usable card0 at all. With i915 in the initrd this returns at once on
