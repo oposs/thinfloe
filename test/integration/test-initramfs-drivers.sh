@@ -108,6 +108,22 @@ else
     fail=1
 fi
 
+# A1: amdgpu stays in --omit-drivers. Plymouth uses simpledrm until amdgpu
+# binds after switch-root, so neither the driver nor its firmware is here.
+if in_initrd amdgpu; then
+    echo "FAIL - amdgpu.ko is not in the initrd"
+    fail=1
+else
+    echo "ok   - amdgpu.ko is not in the initrd"
+fi
+amd_fw=$(awk '$NF ~ /usr\/lib\/firmware\/amdgpu(\/|$)/ {print $NF; exit}' "$LIST")
+if [[ -n $amd_fw ]]; then
+    echo "FAIL - no usr/lib/firmware/amdgpu/ in the initrd (found: $amd_fw)"
+    fail=1
+else
+    echo "ok   - no usr/lib/firmware/amdgpu/ in the initrd"
+fi
+
 # Closure: every module that a module of the initrd depends on is in the
 # initrd too. This catches an omitted library that a kept module needs.
 if ! command -v unmkinitramfs >/dev/null 2>&1 || ! command -v modinfo >/dev/null 2>&1; then

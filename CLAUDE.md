@@ -154,7 +154,16 @@ Never sweep `/usr/lib/firmware` with `find`/`rm`; change the package list in
 the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
 The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, which keeps per
-Intel WiFi series the file the driver loads (owner, 2026-11-12); removing
+Intel WiFi series the file the driver loads (owner, 2026-11-12); keeping of
+`linux-firmware-amd-graphics` only the firmware of Ryzen APUs, by chip name
+and by the IP versions of the kernel's APU table
+(`containers/ubuntu/slim/amdgpu-apu-ip.csv`, refreshed from
+`Documentation/gpu/amdgpu/apu-asic-info-table.csv` when the kernel changes),
+and dropping the graphics card firmware and `radeon/` (owner, 2026-11-12;
+`amdgpu_keep.py` fails the build with exit 3 on an IP version that neither
+`amdgpu-apu-ip.csv` nor `amdgpu-dgpu-ip.csv` knows; no QEMU test runs
+amdgpu, so only real AMD hardware shows a missing file; guards:
+`test_amdgpu_keep.py`, `test-firmware.sh`); removing
 `intel-ucode` after dracut has built the early microcode archive (the CPU
 gets its microcode from the initrd; the build stops if the archive is
 missing, and `test-firmware.sh` and `test-initramfs-drivers.sh` check both

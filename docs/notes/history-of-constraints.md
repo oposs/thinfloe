@@ -92,8 +92,31 @@ in the field), and the selector itself, which stops the build rather than
 drop a file that `modinfo` names. Two build-time checks in `slim-rootfs.sh`
 cover what the cuts must not touch: every firmware file a module still asks
 for must still exist unless a cut dropped it on purpose, and no firmware
-link may dangle, before or after the cuts. See O1 and O3 in
+link may dangle, before or after the cuts. See O1, O3 and A1 in
 `docs/superpowers/specs/2026-11-12-image-size-design.md`.
+
+The same step keeps, of `linux-firmware-amd-graphics`, only the firmware of
+Ryzen APUs (A1, owner, 2026-11-12: Raven and newer, so that AMD mini PCs
+show their picture; graphics cards get no firmware). The rule is in
+`containers/ubuntu/slim/amdgpu_keep.py`: a file stays when its name starts
+with an APU chip name (`raven_`, `picasso_`, `renoir_`, `green_sardine_`,
+`yellow_carp_`, `vangogh_` and more), with an IP version of an APU row of
+the kernel's table (`gc_11_5_0`, `dcn_3_5`, `psp_14_0_0`; MP0 is `psp`) or
+with an APU-only block (`vpe`, `umsch_mm`, `isp`), plus the target of every
+kept link. Everything else in `amdgpu/` goes, and `radeon/` whole. The APU
+and dGPU tables are copies of `Documentation/gpu/amdgpu/` of the kernel
+(`amdgpu-apu-ip.csv`, `amdgpu-dgpu-ip.csv`, tag `v7.0`) and must be
+refreshed from the kernel when it changes. The build stops when the table
+has fewer than 15 APU rows or fewer than 100 files are kept, when the
+package ships files for a `gc`, `psp`, `dcn`, `vcn` or `sdma` version that
+`modinfo` names and neither table knows (exit 3, the new-APU guard), when a
+`psp` version with a `toc` and no `sos` file (the APU pattern) is not kept,
+and when a file `modinfo` names under a kept prefix is missing after the
+prune. `amdgpu` stays out of the initrd. No QEMU test runs `amdgpu`: a
+missing file shows only on a real AMD machine, where the boot waits
+about 20 s and then runs the menu unaccelerated on simpledrm or, worst case, shows
+the failure screen after about 40 s. `test-firmware.sh` checks a pinned list
+of files per APU and that no `navi10_` file and no `radeon/` is left.
 
 ## The WiFi core stack must come from the kernel, never from a backport
 
