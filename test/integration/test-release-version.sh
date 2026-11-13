@@ -223,9 +223,13 @@ else
     bad "a release build wrote .version-kind '$(cat "$KIND" 2>/dev/null)'"
 fi
 
-# switching to a release version re-exports the rootfs
+# switching to a release version re-exports the rootfs. The export also
+# depends on the scripts it runs and the container on the slim directory;
+# without them make -q fails (exit 2).
+mkdir -p "$MTREE/scripts/lib" "$MTREE/containers/ubuntu/slim"
+: >"$MTREE/scripts/export-rootfs.sh"; : >"$MTREE/scripts/lib/common.sh"
 printf '4.2.0-dev\n' >"$KIND"
-(cd "$MTREE" && find RELEASE containers overlay -exec touch -d '2020-01-01' {} +)
+(cd "$MTREE" && find RELEASE containers overlay scripts -exec touch -d '2020-01-01' {} +)
 echo sha256:aaaa >"$MTREE/.ubuntu-container"
 touch -d '2021-01-01' "$MTREE/.ubuntu-container" "$KIND"
 for f in vmlinuz initrd.img ramroot.sqsh; do
@@ -236,10 +240,12 @@ if mk -q artifacts/rootfs/ramroot.sqsh TF_VERSION=4.2.0-dev+abc >/dev/null 2>&1;
 else
     bad "a dev build of an exported dev rootfs re-exports it"
 fi
-if ! mk -q artifacts/rootfs/ramroot.sqsh TF_VERSION=4.2.0 >/dev/null 2>&1; then
+mk -q artifacts/rootfs/ramroot.sqsh TF_VERSION=4.2.0 >/dev/null 2>&1
+rc=$?
+if [[ $rc -eq 1 ]]; then
     ok "switching to a release version re-exports the rootfs"
 else
-    bad "switching to a release version left the dev rootfs standing"
+    bad "switching to a release version left the dev rootfs standing (make -q exit $rc)"
 fi
 
 # publish.sh mirrors one downloaded GitHub release directory, with rsync
