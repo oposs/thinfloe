@@ -166,6 +166,22 @@ if [[ -n "$pconf" ]] && grep -qx 'Theme=thinfloe' "$pconf"; then
 else
     bad "plymouthd.conf in the initrd does not say Theme=thinfloe (${pconf:-not found})"
 fi
+# dracut's shell-interpreter module depends on the module of the shell
+# /bin/sh points at (dash). With dash in --omit the build printed
+# "dracut[E]: Module 'shell-interpreter' depends on module 'dash', which
+# can't be installed", dropped the module, and base's fallback copied dash
+# in all the same. The initrd's /bin/sh is dash either way.
+mods=$(find "$WORK/ex" -path '*usr/lib/dracut/modules.txt' 2>/dev/null | head -1)
+if [[ -n "$mods" ]] && grep -qx 'shell-interpreter' "$mods" && grep -qx 'dash' "$mods"; then
+    ok "the initrd has dracut's shell-interpreter and dash modules"
+else
+    bad "the initrd lacks dracut's shell-interpreter or dash module (${mods:-no modules.txt})"
+fi
+if lsinitramfs -l "$INITRD" 2>/dev/null | grep -E ' usr/bin/sh -> dash$' >/dev/null; then
+    ok "/bin/sh in the initrd is dash"
+else
+    bad "/bin/sh in the initrd is not a link to dash"
+fi
 # Plymouth's own progress assumes a 60 s boot when no boot-duration file was
 # kept, which a RAM system never has: the bar ended at 7 to 15 %. The theme
 # draws the bar from the elapsed time instead.
