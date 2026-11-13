@@ -812,7 +812,7 @@ else
     echo new >"$KDIR/config"
     echo old >"$KDIR/config.prev"
     echo prev >"$MARKER"
-    SESSION_XDG= run_session "$KMENU"
+    SESSION_XDG="" run_session "$KMENU"
     if [[ "$(cat "$KDIR/config" 2>/dev/null)" == old && ! -e "$KDIR/config.prev" && ! -e "$MARKER" &&
           "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
         ok "unconfirmed layout is undone with XDG_RUNTIME_DIR empty (marker in the home)"
