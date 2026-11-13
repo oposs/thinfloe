@@ -533,6 +533,25 @@ mod tests {
         assert_eq!(c.value.wifi_device.as_deref(), Some("wlan0"));
     }
 
+    /// An old file for another netplan version or renderer, even one the
+    /// 4.x menu wrote, is kept as written: converted, it would render as
+    /// version 2 for networkd.
+    #[test]
+    fn a_file_of_another_version_or_renderer_is_kept() {
+        let header = "# Written by the ThinFloe menu. Edits here are replaced.\n";
+        let wifi = format!(
+            "{header}network:\n  version: 2\n  renderer: NetworkManager\n  wifis:\n    wlan0:\n      dhcp4: true\n      access-points:\n        \"home\":\n          password: \"secret123\"\n"
+        );
+        let wired = format!(
+            "{header}network:\n  version: 3\n  ethernets:\n    eth:\n      match:\n        name: \"en*\"\n      dhcp4: true\n"
+        );
+        let c = network_from_files(Some(&wifi), Some(&wired));
+        assert_eq!(c.value.kept_wifi.as_deref(), Some(wifi.as_str()));
+        assert!(c.value.networks.is_empty());
+        assert_eq!(c.value.kept_wired.as_deref(), Some(wired.as_str()));
+        assert_eq!(c.notes.len(), 2, "{:?}", c.notes);
+    }
+
     #[test]
     fn the_template_counts_as_no_wifi() {
         let c = network_from_files(Some(include_str!("testdata/wifi-template.yaml")), None);
