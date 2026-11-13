@@ -235,26 +235,26 @@ pub fn descriptors() -> Vec<layout::Descriptor> {
         .collect()
 }
 
-/// Where the layout file lives below the home.
-pub const FILE: &str = ".config/thinfloe/status";
-
-/// Read the layout file and add the elements it does not name. A missing
-/// file is the default list; one that cannot be read, is not a regular file
-/// (a FIFO would block the menu), or that `layout::parse` refuses, is the
-/// default list with one note, and `refused` set. At most one byte past the
-/// limit is read, so a huge file costs nothing.
-pub fn read_layout(path: &Path) -> layout::Layout {
-    let max = layout::MAX_BYTES as u64;
-    let mut l = match crate::bounded::read_bounded(path, max, true) {
-        Ok(bytes) => layout::parse(&bytes, &offered),
-        Err(_) if std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
-            layout::Layout::default()
-        }
-        Err(e) if e == crate::bounded::too_large(max) => layout::refuse("it is over 4 KiB"),
-        Err(e) => layout::refuse(&format!("it cannot be read: {e}")),
-    };
+/// The layout for the `[status]` table: its lines through `layout::parse`,
+/// then `complete`. No `lines` is the default list. The notes say "status
+/// line N" with N the 1-based index in the table.
+pub fn layout_from(cfg: &crate::config::StatusCfg) -> layout::Layout {
+    let text = cfg.lines.as_ref().map(|l| l.join("\n")).unwrap_or_default();
+    let mut l = layout::parse(text.as_bytes(), &offered);
     layout::complete(&mut l, &descriptors());
     l
+}
+
+/// The `[status]` layout of the `config.toml` at `path`, for the watcher: a
+/// missing file is the default list; one that cannot be read or parsed is
+/// `None`, so the layout on screen stays.
+pub fn read_config_layout(path: &Path) -> Option<layout::Layout> {
+    let cfg = match crate::atomic::read(path, crate::store::CONFIG_MAX_BYTES) {
+        Ok(None) => crate::config::ThinfloeConfig::default(),
+        Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok()?,
+        Err(_) => return None,
+    };
+    Some(layout_from(&cfg.status))
 }
 
 /// The status area: the user's choice of elements, sizes and order.

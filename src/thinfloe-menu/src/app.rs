@@ -80,8 +80,11 @@ pub struct Config {
     pub addon_last_check: PathBuf,
     /// The file the battery reader writes.
     pub battery_file: PathBuf,
-    /// The status layout file, watched for changes.
-    pub status_file: PathBuf,
+    /// `config.toml`, watched for changes to its `[status]` table.
+    pub config_toml: PathBuf,
+    /// Starting up regenerated `generated/kanshi`: the running kanshi is told
+    /// once to read it again.
+    pub kanshi_changed: bool,
     /// Where the network element's sampler reads /sys, /proc, /run, /etc.
     pub network_roots: crate::netstat::Roots,
     /// Where the hardware element's sampler reads /sys and /proc.
@@ -98,14 +101,10 @@ pub struct Config {
     pub debug_move: Option<String>,
 }
 
-/// The screen settings file and who reads it.
+/// Who is told when the screen settings change.
 pub struct ScreenFile {
-    /// `~/.config/thinfloe/screen`.
-    pub path: PathBuf,
     /// The idle helper, told by SIGUSR1 to read the file again.
     pub idle_pid: Option<i32>,
-    /// The idle time the session profile sets, which wins over the file.
-    pub rc: Option<u32>,
 }
 
 struct Live {
@@ -272,6 +271,14 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     });
     let shown = Arc::new(AtomicBool::new(true));
     watch_files(&cfg, &shown, event_loop.create_proxy());
+    if cfg.kanshi_changed {
+        let kanshi = cfg.paths.kanshi.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = jobs::kanshi_reload(&kanshi) {
+                eprintln!("thinfloe-menu: {e}");
+            }
+        });
+    }
     let windows = {
         let waker = event_loop.create_proxy();
         match crate::windows::Windows::connect(move || {
@@ -359,7 +366,7 @@ struct Watch {
     addon_log: PathBuf,
     upgrade_status: PathBuf,
     battery_file: PathBuf,
-    status_file: PathBuf,
+    config_toml: PathBuf,
     addons: addons::Watcher,
     release: release::Watcher,
     battery: battery::Watcher,
@@ -374,7 +381,7 @@ impl Watch {
             addon_log: cfg.addon_log.clone(),
             upgrade_status: cfg.upgrade_status.clone(),
             battery_file: cfg.battery_file.clone(),
-            status_file: cfg.status_file.clone(),
+            config_toml: cfg.config_toml.clone(),
             // The first tick reads the files whatever they hold, so a change
             // between the menu's first read and now is not lost.
             addons: addons::Watcher::default(),
@@ -396,7 +403,7 @@ impl Watch {
         if self.battery.tick(&self.battery_file) {
             wakes.push(Wake::Battery);
         }
-        if self.status.tick(&self.status_file) {
+        if self.status.tick(&self.config_toml) {
             wakes.push(Wake::Status);
         }
         wakes
@@ -591,7 +598,7 @@ fn job_result(
         Job::MonKeep => JobResult::MonKept(jobs::mon_keep(&paths.kanshi)),
         Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
         Job::MonTakeOver => JobResult::MonTakenOver(jobs::mon_take_over(&paths.kanshi)),
-        Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.status_file, text.as_deref())),
+        Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
     }
 }
 
@@ -711,10 +718,13 @@ fn wake_flow(at: Option<Instant>) -> ControlFlow {
     at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
 
-/// Read the status layout file into `menu` and start and rest the samplers
-/// for it, with the cover and height of the last frame.
+/// Read the `[status]` table of `config.toml` into `menu` and start and rest
+/// the samplers for it, with the cover and height of the last frame. A file
+/// that cannot be read or parsed leaves the layout on screen as it is.
 fn reload_status(menu: &mut Menu, samplers: &mut Samplers, file: &std::path::Path, covered: bool, height: f32) {
-    menu.set_status_layout(crate::status::read_layout(file));
+    if let Some(layout) = crate::status::read_config_layout(file) {
+        menu.set_status_layout(layout);
+    }
     samplers.sync(&menu.status, covered, height);
 }
 
@@ -787,7 +797,7 @@ impl App {
         reload_status(
             &mut self.cfg.menu,
             &mut self.samplers,
-            &self.cfg.status_file,
+            &self.cfg.config_toml,
             self.covered,
             self.height,
         );
@@ -868,7 +878,8 @@ impl App {
             network_cmd: self.cfg.paths.network_cmd.clone(),
             homes: self.cfg.paths.homes.clone(),
             kanshi: self.cfg.paths.kanshi.clone(),
-            status_file: self.cfg.paths.status_file.clone(),
+            config: self.cfg.paths.config.clone(),
+            layout: self.cfg.paths.layout,
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -890,8 +901,8 @@ impl App {
                 self.exit = Some(code);
                 event_loop.exit();
             }
-            Some(e @ (Effect::WriteScreen { .. } | Effect::TakeOverScreen)) => {
-                let next = apply_screen(e, &self.cfg.screen, &mut self.cfg.menu);
+            Some(Effect::WriteScreen { idle }) => {
+                let next = apply_screen(idle, &self.cfg.screen, &self.cfg.paths.config, &mut self.cfg.menu);
                 self.apply(next, event_loop);
             }
             None => {}
@@ -1443,40 +1454,24 @@ fn is_input(e: &WindowEvent) -> bool {
     )
 }
 
-/// Carry out `WriteScreen` or `TakeOverScreen` and report to the menu at
-/// once, as `Menu::screen_written` expects. Returns what the menu asks next.
-/// On an error the tab is read again first, so it shows who owns the file
-/// now: a take-over whose write failed leaves no file, and the select works
-/// again; a file written by hand meanwhile offers the take-over.
-fn apply_screen(effect: Effect, screen: &ScreenFile, menu: &mut Menu) -> Option<Effect> {
-    let path = crate::owned::home_relative(&screen.path);
-    let failed = |menu: &mut Menu, message: String| {
-        menu.screen_tab = crate::screentab::load(&screen.path, screen.rc);
-        menu.screen_written(Err(message), false)
+/// Carry out `WriteScreen`: keep `idle` in `config.toml` (which renders
+/// `generated/screen`), tell the idle helper, and report to the menu at once,
+/// as `Menu::screen_written` expects. Returns what the menu asks next. A
+/// store that refuses the update is the error shown in the tab.
+fn apply_screen(idle: u32, screen: &ScreenFile, store: &crate::store::Shared, menu: &mut Menu) -> Option<Effect> {
+    let result = {
+        let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .update(crate::generated::Table::Screen, |c| c.screen.idle_timeout = idle)
+            .map(|_| crate::screentab::from_config(&store.cfg.screen))
     };
-    let idle = match effect {
-        Effect::WriteScreen { idle } => idle,
-        Effect::TakeOverScreen => match crate::owned::take_over(&screen.path) {
-            Ok(old) => {
-                let aside = crate::owned::home_relative(&crate::owned::aside(&screen.path));
-                menu.log.note(
-                    crate::log::Kind::Event,
-                    format!("Your old settings are kept in {aside}."),
-                );
-                old.as_deref()
-                    .and_then(crate::screentab::parse_idle)
-                    .unwrap_or(crate::screentab::DEFAULT_IDLE)
-            }
-            Err(e) => return failed(menu, format!("Could not take over {path}: {e}")),
-        },
-        _ => return None,
-    };
-    if let Err(e) = crate::owned::write(&screen.path, &crate::screentab::body(idle)) {
-        return failed(menu, format!("Could not write {path}: {e}"));
+    match result {
+        Ok(tab) => {
+            let signalled = screen.idle_pid.is_some_and(signal_idle_helper);
+            menu.screen_written(Ok(tab), signalled)
+        }
+        Err(message) => menu.screen_written(Err(message), false),
     }
-    let signalled = screen.idle_pid.is_some_and(signal_idle_helper);
-    let tab = crate::screentab::load(&screen.path, screen.rc);
-    menu.screen_written(Ok(tab), signalled)
 }
 
 /// Tell the idle helper to read the screen file again.
@@ -1494,6 +1489,7 @@ mod tests {
     use super::*;
     use crate::testdir::TestDir;
     use crate::upgrade_proto::Msg;
+    use std::path::Path;
     use std::sync::mpsc;
 
     #[test]
@@ -1535,7 +1531,8 @@ mod tests {
             network_cmd: jobs::default_network_cmd(),
             homes: crate::netfiles::Homes::from_env(),
             kanshi: jobs::Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(Path::new("/nonexistent/cfg")),
+            layout: crate::migrate::HomeLayout::New,
         }
     }
 
@@ -1708,7 +1705,7 @@ esac"#;
             addon_log: d.join("addon-log"),
             upgrade_status: release.clone(),
             battery_file: d.join("battery"),
-            status_file: d.join("status"),
+            config_toml: d.join("config.toml"),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
@@ -1842,16 +1839,28 @@ esac"#;
         assert!(!s.hardware_on.load(Ordering::Relaxed));
     }
 
+    fn write_status(file: &Path, lines: Option<&[&str]>) {
+        let mut c = crate::config::ThinfloeConfig::default();
+        c.status.lines = lines.map(|l| l.iter().map(|s| (*s).to_string()).collect());
+        std::fs::write(file, crate::config::to_text(&c)).unwrap();
+    }
+
+    fn reread(menu: &mut Menu, file: &Path) {
+        if let Some(l) = crate::status::read_config_layout(file) {
+            menu.set_status_layout(l);
+        }
+    }
+
     #[test]
-    fn a_changed_layout_file_is_read_again() {
+    fn a_changed_config_file_is_read_again() {
         let d = TestDir::new("app", "status-wake");
-        let file = d.join("status");
+        let file = d.join("config.toml");
         let mut w = Watch {
             addon_status: d.join("addon-status"),
             addon_log: d.join("addon-log"),
             upgrade_status: d.join("upgrade-status"),
             battery_file: d.join("battery"),
-            status_file: file.clone(),
+            config_toml: file.clone(),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
@@ -1868,28 +1877,28 @@ esac"#;
             },
             false,
         );
-        menu.set_status_layout(crate::status::read_layout(&file));
+        reread(&mut menu, &file);
         assert!(
             menu.status.needs(crate::status::Source::Network),
             "no file: the default"
         );
-        std::fs::write(&file, "-network 2x2\n-network-info 1x2\n").unwrap();
+        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
         assert_eq!(is_status(&w.tick()), 1);
         assert_eq!(is_status(&w.tick()), 0);
-        menu.set_status_layout(crate::status::read_layout(&file));
+        reread(&mut menu, &file);
         assert!(!menu.status.needs(crate::status::Source::Network));
         assert!(menu.status.needs(crate::status::Source::Hardware), "the rest appended");
         // Removed: the default again.
         std::fs::remove_file(&file).unwrap();
         assert_eq!(is_status(&w.tick()), 1);
-        menu.set_status_layout(crate::status::read_layout(&file));
+        reread(&mut menu, &file);
         assert!(menu.status.needs(crate::status::Source::Network));
     }
 
     #[test]
     fn a_re_read_layout_rests_the_sampler_it_no_longer_needs() {
         let d = TestDir::new("app", "status-resync");
-        let file = d.join("status");
+        let file = d.join("config.toml");
         let mut menu = Menu::new(
             crate::tiles::Grid {
                 tiles: Vec::new(),
@@ -1903,53 +1912,58 @@ esac"#;
         let refresh = |menu: &mut Menu, s: &mut Samplers| reload_status(menu, s, &file, false, tall);
         refresh(&mut menu, &mut s);
         assert!(s.network.is_some() && s.network_on.load(Ordering::Relaxed));
-        std::fs::write(&file, "-network 2x2\n-network-info 1x2\n").unwrap();
+        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
         refresh(&mut menu, &mut s);
         assert!(!s.network_on.load(Ordering::Relaxed), "unticked: it rests");
         assert!(s.hardware_on.load(Ordering::Relaxed), "the rest still reads");
-        std::fs::write(&file, "network 2x2\n").unwrap();
+        write_status(&file, Some(&["network 2x2"]));
         refresh(&mut menu, &mut s);
         assert!(s.network_on.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn a_layout_file_that_cannot_be_read_gives_the_default() {
+    fn a_config_file_that_cannot_be_read_keeps_the_layout_shown() {
         let d = TestDir::new("app", "status-unreadable");
-        // A directory where the file should be.
-        let l = crate::status::read_layout(&d);
-        assert!(l.refused && l.notes.len() == 1, "{l:?}");
-        assert_eq!(l.choices, crate::status::Area::shipped().layout.choices);
-        // A huge file is refused without being read whole.
-        let big = d.join("big");
-        std::fs::write(&big, vec![b'#'; 1 << 20]).unwrap();
-        let l = crate::status::read_layout(&big);
-        assert!(l.refused, "{l:?}");
-        assert_eq!(l.notes, ["status layout file ignored: it is over 4 KiB"]);
+        let file = d.join("config.toml");
+        let mut menu = Menu::new(
+            crate::tiles::Grid {
+                tiles: Vec::new(),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
+        reread(&mut menu, &file);
+        assert!(!menu.status.needs(crate::status::Source::Network));
+        let mut s = Samplers::new(Box::new(|_| Arc::default()), Box::new(|_| Arc::default()));
+        // Broken TOML, a directory, a huge file: none of them is the default.
+        std::fs::write(&file, "this is [not toml\n").unwrap();
+        reload_status(&mut menu, &mut s, &file, false, ui::SHORT_SCREEN_H);
+        assert!(!menu.status.needs(crate::status::Source::Network), "parse error");
+        assert_eq!(crate::status::read_config_layout(&d), None, "a directory");
+        let big = d.join("big.toml");
+        std::fs::write(&big, vec![b'#'; 2 << 20]).unwrap();
+        assert_eq!(crate::status::read_config_layout(&big), None, "over the cap");
     }
 
     #[test]
-    fn a_fifo_in_place_of_the_layout_file_is_refused_without_blocking() {
+    fn a_fifo_in_place_of_config_toml_is_refused_without_blocking() {
         let d = TestDir::new("app", "status-fifo");
-        let fifo = d.join("status");
+        let fifo = d.join("config.toml");
         let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: a valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
         let (tx, rx) = std::sync::mpsc::channel();
         let path = fifo.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::status::read_layout(&path));
+            let _ = tx.send(crate::status::read_config_layout(&path));
         });
         let Ok(l) = rx.recv_timeout(Duration::from_secs(5)) else {
             // Unblock the reader so the test process can end.
             let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
-            panic!("read_layout blocked on a FIFO");
+            panic!("read_config_layout blocked on a FIFO");
         };
-        assert!(l.refused, "{l:?}");
-        assert_eq!(
-            l.notes,
-            ["status layout file ignored: it cannot be read: not a regular file"]
-        );
-        assert_eq!(l.choices, crate::status::Area::shipped().layout.choices);
+        assert_eq!(l, None);
     }
 
     #[test]
@@ -2154,35 +2168,32 @@ esac"#;
         )
     }
 
-    fn screen_file(d: &TestDir, idle_pid: Option<i32>) -> ScreenFile {
-        ScreenFile {
-            path: d.join(".config/thinfloe/screen"),
-            idle_pid,
-            rc: None,
-        }
+    fn screen_file(idle_pid: Option<i32>) -> ScreenFile {
+        ScreenFile { idle_pid }
     }
 
     #[test]
     fn write_screen_writes_signals_and_saves() {
         use std::os::unix::process::ExitStatusExt;
         let d = TestDir::new("app", "write-screen");
+        let store = crate::store::test_shared(&d);
         // sleep traps nothing, so SIGUSR1 ends it.
         let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
         let pid = i32::try_from(child.id()).unwrap();
-        let screen = screen_file(&d, Some(pid));
+        let screen = screen_file(Some(pid));
         let mut menu = screen_menu();
-        let next = apply_screen(Effect::WriteScreen { idle: 120 }, &screen, &mut menu);
+        let next = apply_screen(120, &screen, &store, &mut menu);
         // Reap the child whatever the outcome.
         let _ = child.kill();
         let status = child.wait().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&screen.path).unwrap(),
-            format!("{}\nidle_timeout=120\n", crate::owned::HEADER)
-        );
+        let text = std::fs::read_to_string(d.join("config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().screen.idle_timeout, 120);
+        let generated = std::fs::read_to_string(d.join("generated/screen")).unwrap();
+        assert!(generated.ends_with("idle_timeout=120\n"), "{generated}");
         assert_eq!(status.signal(), Some(libc::SIGUSR1));
         assert_eq!(next, Some(Effect::Start(Job::Save)));
         assert_eq!(menu.screen_tab.idle, 120);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
+        assert_eq!(menu.screen_tab.error, None);
         assert!(menu.save.running);
         assert!(!menu.log.lines().any(|l| l.plain() == crate::menu::NEXT_SESSION));
     }
@@ -2190,121 +2201,31 @@ esac"#;
     #[test]
     fn write_screen_without_helper_says_next_session() {
         let d = TestDir::new("app", "write-screen-nopid");
-        let screen = screen_file(&d, None);
+        let store = crate::store::test_shared(&d);
+        let screen = screen_file(None);
         let mut menu = screen_menu();
-        let next = apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu);
+        let next = apply_screen(60, &screen, &store, &mut menu);
         assert_eq!(next, Some(Effect::Start(Job::Save)));
         assert!(menu.log.lines().any(|l| l.plain() == crate::menu::NEXT_SESSION));
     }
 
     #[test]
-    fn write_screen_refused_for_a_hand_file() {
-        let d = TestDir::new("app", "write-screen-hand");
-        let screen = screen_file(&d, None);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
+    fn write_screen_on_a_store_that_refuses_is_the_error_in_the_tab() {
+        let d = TestDir::new("app", "write-screen-ro");
+        let ro = crate::store::open(
+            crate::config::ConfigDir { root: d.join("cfg") },
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let store: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
         let mut menu = screen_menu();
-        assert_eq!(apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu), None);
-        let e = menu.screen_tab.error.clone().unwrap();
-        let want = format!("Could not write {}: ", crate::owned::home_relative(&screen.path));
-        assert!(e.starts_with(&want), "{e}");
-        assert!(e.ends_with("was written by hand"), "{e}");
-        assert!(!menu.save.running);
-        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
-    }
-
-    #[test]
-    fn take_over_screen_keeps_the_hand_value() {
-        let d = TestDir::new("app", "take-over-screen");
-        let screen = screen_file(&d, None);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
-        let mut menu = screen_menu();
-        let next = apply_screen(Effect::TakeOverScreen, &screen, &mut menu);
-        assert_eq!(next, Some(Effect::Start(Job::Save)));
-        assert_eq!(
-            std::fs::read_to_string(&screen.path).unwrap(),
-            format!("{}\nidle_timeout=900\n", crate::owned::HEADER)
-        );
-        assert_eq!(
-            std::fs::read_to_string(d.join(".config/thinfloe/screen.by-hand")).unwrap(),
-            "idle_timeout=900\n"
-        );
-        assert_eq!(menu.screen_tab.idle, 900);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
-        let aside = crate::owned::home_relative(&d.join(".config/thinfloe/screen.by-hand"));
-        let kept = format!("Your old settings are kept in {aside}.");
-        assert!(menu.log.lines().any(|l| l.plain() == kept), "{kept}");
-    }
-
-    #[test]
-    fn take_over_then_failed_write_unlocks_the_select() {
-        let d = TestDir::new("app", "take-over-write-fails");
-        let screen = screen_file(&d, None);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
-        // A directory where the write puts its temporary file.
-        std::fs::create_dir(d.join(".config/thinfloe/screen.tmp")).unwrap();
-        let mut menu = screen_menu();
-        menu.screen_tab = crate::screentab::load(&screen.path, None);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::ByHand);
-        assert_eq!(apply_screen(Effect::TakeOverScreen, &screen, &mut menu), None);
-        // The file is aside now, so the select works again.
-        assert!(!screen.path.exists());
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Unset);
-        let e = menu.screen_tab.error.clone().unwrap();
-        let want = format!("Could not write {}: ", crate::owned::home_relative(&screen.path));
-        assert!(e.starts_with(&want), "{e}");
-        assert!(!menu.save.running);
-    }
-
-    #[test]
-    fn a_hand_file_written_meanwhile_offers_take_over() {
-        let d = TestDir::new("app", "hand-meanwhile");
-        let screen = screen_file(&d, None);
-        let mut menu = screen_menu();
-        menu.screen_tab = crate::screentab::load(&screen.path, None);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Unset);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
-        assert_eq!(apply_screen(Effect::WriteScreen { idle: 60 }, &screen, &mut menu), None);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::ByHand);
-        assert_eq!(menu.screen_tab.idle, 900);
-        assert!(
-            menu.screen_tab
-                .error
-                .as_deref()
-                .unwrap()
-                .ends_with("was written by hand")
-        );
-        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
-    }
-
-    #[test]
-    fn take_over_screen_without_a_value_uses_the_default() {
-        let d = TestDir::new("app", "take-over-default");
-        let screen = screen_file(&d, None);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "something else\n").unwrap();
-        let mut menu = screen_menu();
-        apply_screen(Effect::TakeOverScreen, &screen, &mut menu);
+        let next = apply_screen(60, &screen_file(None), &store, &mut menu);
+        assert_eq!(next, None);
+        assert_eq!(menu.screen_tab.error.as_deref(), Some("The settings are read-only."));
         assert_eq!(menu.screen_tab.idle, crate::screentab::DEFAULT_IDLE);
-        assert_eq!(menu.screen_tab.source, crate::screentab::IdleSource::Menu);
-    }
-
-    #[test]
-    fn take_over_screen_refused_when_by_hand_exists() {
-        let d = TestDir::new("app", "take-over-twice");
-        let screen = screen_file(&d, None);
-        std::fs::create_dir_all(screen.path.parent().unwrap()).unwrap();
-        std::fs::write(&screen.path, "idle_timeout=900\n").unwrap();
-        std::fs::write(d.join(".config/thinfloe/screen.by-hand"), "old\n").unwrap();
-        let mut menu = screen_menu();
-        assert_eq!(apply_screen(Effect::TakeOverScreen, &screen, &mut menu), None);
-        let e = menu.screen_tab.error.clone().unwrap();
-        let want = format!("Could not take over {}: ", crate::owned::home_relative(&screen.path));
-        assert!(e.starts_with(&want), "{e}");
-        assert!(e.ends_with(".by-hand exists already"), "{e}");
-        assert_eq!(std::fs::read_to_string(&screen.path).unwrap(), "idle_timeout=900\n");
+        assert!(!menu.save.running);
+        assert!(!d.join("cfg").exists(), "nothing was written");
     }
 }

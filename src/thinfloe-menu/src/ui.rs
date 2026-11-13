@@ -8,7 +8,7 @@ use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
-use crate::screentab::{self, IdleSource};
+use crate::screentab;
 use crate::settings::{self, RowButton, SettingsEvent, SettingsTab};
 use crate::tiles::{Action, Origin, Tile};
 use crate::upgrade::UpgradeEvent;
@@ -1057,8 +1057,7 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
     edit.or(apply.map(SettingsEvent::Monitors))
 }
 
-/// When the screen turns off, in one band. The select is disabled while
-/// the session profile or a file written by hand decides.
+/// When the screen turns off, in one band.
 fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let tab = &menu.screen_tab;
@@ -1067,8 +1066,6 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
     let texts: Vec<String> = values.iter().map(|&v| screentab::label(v)).collect();
     let labels: Vec<&str> = texts.iter().map(String::as_str).collect();
     let mut idx = values.iter().position(|&v| v == tab.idle).unwrap_or(0);
-    let managed = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
-    let muted = t.palette().muted_foreground;
     let inner_w = ui.available_width() - ROW_MARGIN_X;
     egui::Frame::new()
         .fill(t.palette().card)
@@ -1086,14 +1083,11 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
                     ui.set_max_width(brand::FORM_LABEL_W);
                     ui.label(egui::RichText::new("Turn the screen off after").color(t.palette().foreground));
                 });
-                if ui
-                    .add_enabled(managed, Select::new("tf-screen-idle", &mut idx, &labels))
-                    .changed()
-                {
+                if ui.add(Select::new("tf-screen-idle", &mut idx, &labels)).changed() {
                     event = values.get(idx).map(|&v| SettingsEvent::IdleTimeout(v));
                 }
             });
-            // The notes stand under the select, in the label column's shadow.
+            // The note stands under the select, in the label column's shadow.
             let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
             let note = |ui: &mut Ui, text: egui::RichText| {
                 ui.horizontal(|ui| {
@@ -1101,23 +1095,6 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
                     ui.add(egui::Label::new(text).truncate());
                 });
             };
-            match tab.source {
-                IdleSource::Rc => note(ui, egui::RichText::new("set in ~/.thinfloe-sessionrc").color(muted)),
-                IdleSource::ByHand => {
-                    let text = format!("This is set by hand in ~/{}", screentab::SCREEN_FILE);
-                    note(ui, egui::RichText::new(text).color(muted));
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        if ui
-                            .add(Button::new("Let the menu manage it").variant(ButtonVariant::Secondary))
-                            .clicked()
-                        {
-                            event = Some(SettingsEvent::ManageScreen);
-                        }
-                    });
-                }
-                IdleSource::Menu | IdleSource::Unset => {}
-            }
             if let Some(error) = &tab.error {
                 note(ui, egui::RichText::new(error).color(t.role(role::WARN)));
             }
@@ -3728,16 +3705,11 @@ mod tests {
         }
     }
 
-    /// The Settings menu of `four_addons()` on its Screen tab, 5 minutes
-    /// set from `source`.
-    fn screen_settings(source: crate::screentab::IdleSource) -> Menu {
+    /// The Settings menu of `four_addons()` on its Screen tab, 5 minutes set.
+    fn screen_settings() -> Menu {
         let mut menu = open_settings();
         menu.settings_tab = crate::settings::SettingsTab::Screen;
-        menu.screen_tab = crate::screentab::ScreenTab {
-            idle: 300,
-            source,
-            error: None,
-        };
+        menu.screen_tab = crate::screentab::ScreenTab { idle: 300, error: None };
         menu
     }
 
@@ -3762,8 +3734,7 @@ mod tests {
 
     #[test]
     fn the_screen_tab_shows_the_timeout() {
-        use crate::screentab::IdleSource;
-        let texts = settings_texts(&screen_settings(IdleSource::Menu));
+        let texts = settings_texts(&screen_settings());
         for want in ["Turn the screen off after", "5 minutes"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
@@ -3772,18 +3743,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_tab_says_sessionrc() {
-        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::Rc));
-        assert!(texts.iter().any(|t| t == "set in ~/.thinfloe-sessionrc"), "{texts:?}");
-        assert!(!texts.iter().any(|t| t == "Let the menu manage it"), "{texts:?}");
-    }
-
-    #[test]
-    fn the_screen_tab_shows_the_sessionrc_value() {
-        let d = crate::testdir::TestDir::new("ui", "rc-value");
-        for (rc, want) in [(0, "Never"), (900, "15 minutes"), (450, "450 seconds")] {
-            let mut menu = screen_settings(crate::screentab::IdleSource::Rc);
-            menu.screen_tab = crate::screentab::load(&d.join("screen"), Some(rc));
+    fn the_screen_tab_shows_the_stored_value() {
+        for (idle, want) in [(0, "Never"), (900, "15 minutes"), (450, "450 seconds")] {
+            let mut menu = screen_settings();
+            menu.screen_tab = crate::screentab::from_config(&crate::config::ScreenCfg { idle_timeout: idle });
             let texts = settings_texts(&menu);
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
             assert!(!texts.iter().any(|t| t == "5 minutes"), "{texts:?}");
@@ -3791,11 +3754,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_tab_offers_take_over() {
-        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::ByHand));
-        let by_hand = format!("This is set by hand in ~/{}", crate::screentab::SCREEN_FILE);
-        for want in [by_hand.as_str(), "Let the menu manage it"] {
-            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+    fn the_screen_tab_has_no_sessionrc_or_take_over_notes() {
+        let texts = settings_texts(&screen_settings());
+        for gone in ["set in ~/.thinfloe-sessionrc", "Let the menu manage it"] {
+            assert!(!texts.iter().any(|t| t == gone), "{gone} in {texts:?}");
         }
     }
 
@@ -3848,8 +3810,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_the_select_and_the_take_over_button_report_their_clicks() {
-        use crate::screentab::IdleSource;
+    fn the_tabs_and_the_select_report_their_clicks() {
         use crate::settings::SettingsTab;
         let s = |e| Some(UiEvent::Settings(e));
         assert_eq!(
@@ -3857,27 +3818,18 @@ mod tests {
             [s(SettingsEvent::Tab(SettingsTab::Screen))]
         );
         assert_eq!(
-            click_labels(&screen_settings(IdleSource::Menu), &["Packages"]).0,
+            click_labels(&screen_settings(), &["Packages"]).0,
             [s(SettingsEvent::Tab(SettingsTab::Packages))]
         );
-        assert_eq!(
-            click_labels(&screen_settings(IdleSource::ByHand), &["Let the menu manage it"]).0,
-            [s(SettingsEvent::ManageScreen)]
-        );
         // The open list offers the other times; a pick reports it.
-        let (events, drawn) = click_labels(&screen_settings(IdleSource::Unset), &["5 minutes", "10 minutes"]);
+        let (events, drawn) = click_labels(&screen_settings(), &["5 minutes", "10 minutes"]);
         assert_eq!(drawn, [true, true]);
         assert_eq!(events, [None, s(SettingsEvent::IdleTimeout(600))]);
-        // A disabled select opens no list.
-        for source in [IdleSource::Rc, IdleSource::ByHand] {
-            let (events, drawn) = click_labels(&screen_settings(source), &["5 minutes", "10 minutes"]);
-            assert_eq!((events, drawn), (vec![None, None], vec![true, false]), "{source:?}");
-        }
     }
 
     #[test]
     fn the_screen_tab_shows_its_error_in_warn() {
-        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        let mut menu = screen_settings();
         menu.screen_tab.error = Some("disk full".into());
         let shapes = settings_shapes(&menu, 1280.0, 720.0);
         let color = shapes.iter().find_map(|c| match &c.shape {
@@ -5801,24 +5753,13 @@ mod tests {
         menu.activate(settings, Instant::now());
         shot(&menu, "settings-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
-        use crate::screentab::{IdleSource, ScreenTab};
+        use crate::screentab::ScreenTab;
         menu.settings_tab = crate::settings::SettingsTab::Screen;
-        for (idle, source, name) in [
-            (300, IdleSource::Menu, "settings-screen-1080.ppm"),
-            (900, IdleSource::Rc, "settings-screen-rc-1080.ppm"),
-            (300, IdleSource::ByHand, "settings-screen-byhand-1080.ppm"),
-        ] {
-            menu.screen_tab = ScreenTab {
-                idle,
-                source,
-                error: None,
-            };
-            shot(&menu, name, (1920, 1080), 1.0);
-        }
+        menu.screen_tab = ScreenTab { idle: 300, error: None };
+        shot(&menu, "settings-screen-1080.ppm", (1920, 1080), 1.0);
         menu.screen_tab = ScreenTab {
             idle: 420,
-            source: IdleSource::Menu,
-            error: Some("Could not write ~/.config/thinfloe/screen: No space left on device (os error 28)".into()),
+            error: Some("config.toml could not be written: No space left on device (os error 28)".into()),
         };
         shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
@@ -6044,7 +5985,7 @@ mod tests {
     }
 
     fn monitor_settings(mon: MonTab) -> Menu {
-        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        let mut menu = screen_settings();
         menu.monitors = mon;
         menu
     }

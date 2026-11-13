@@ -25,8 +25,6 @@ pub enum SettingsEvent {
     Tab(SettingsTab),
     /// The screen timeout select, in seconds; 0 is never.
     IdleTimeout(u32),
-    /// Let the menu manage a screen file written by hand.
-    ManageScreen,
     /// Something on the Network tab.
     Network(NetEvent),
     /// Something on the monitor part of the Screen tab.

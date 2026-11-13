@@ -27,7 +27,7 @@ use crate::log::{Kind, Log};
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
 use crate::network::{NetRequest, NetTab};
-use crate::screentab::{self, IdleSource, ScreenTab};
+use crate::screentab::{self, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::statustab::StatusEvent;
 use crate::tiles::{Action, Grid, Origin, Tile};
@@ -207,14 +207,11 @@ pub enum Effect {
     /// Send the signal to each of these process groups.
     Signal(Vec<i32>, Signal),
     Exit(i32),
-    /// Write the screen file with this idle time, then report with
+    /// Keep this idle time in the settings, then report with
     /// `screen_written`.
     WriteScreen {
         idle: u32,
     },
-    /// Put the menu's header on the screen file written by hand, then
-    /// report with `screen_written`.
-    TakeOverScreen,
 }
 
 pub struct Menu {
@@ -733,12 +730,7 @@ impl Menu {
                 return None;
             }
             SettingsEvent::IdleTimeout(idle) => {
-                let tab = &self.screen_tab;
-                let open = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
-                return (open && idle != tab.idle).then_some(Effect::WriteScreen { idle });
-            }
-            SettingsEvent::ManageScreen => {
-                return (self.screen_tab.source == IdleSource::ByHand).then_some(Effect::TakeOverScreen);
+                return (idle != self.screen_tab.idle).then_some(Effect::WriteScreen { idle });
             }
             SettingsEvent::Network(e) => {
                 let r = self.network.event(e, self.remote_running())?;
@@ -1441,7 +1433,7 @@ mod tests {
     use crate::desktop;
     use crate::jobs::{JobId, Signal};
     use crate::log::Kind;
-    use crate::screentab::{IdleSource, ScreenTab};
+    use crate::screentab::ScreenTab;
     use crate::settings::{RetryMarker, RowButton, SettingsEvent, SettingsTab};
     use crate::tiles::{SourceFile, merge};
     use std::os::unix::fs::PermissionsExt as _;
@@ -2416,12 +2408,8 @@ mod tests {
         assert!(m.visible(i));
     }
 
-    fn screen(idle: u32, source: IdleSource) -> ScreenTab {
-        ScreenTab {
-            idle,
-            source,
-            error: None,
-        }
+    fn screen(idle: u32) -> ScreenTab {
+        ScreenTab { idle, error: None }
     }
 
     #[test]
@@ -2439,46 +2427,28 @@ mod tests {
     #[test]
     fn idle_change_asks_for_a_write() {
         let (_d, mut m) = settings_menu("idle");
-        m.screen_tab = screen(300, IdleSource::Menu);
+        m.screen_tab = screen(300);
         assert_eq!(
-            m.settings(SettingsEvent::IdleTimeout(600)),
-            Some(Effect::WriteScreen { idle: 600 })
+            m.settings(SettingsEvent::IdleTimeout(120)),
+            Some(Effect::WriteScreen { idle: 120 })
         );
         assert_eq!(m.settings(SettingsEvent::IdleTimeout(300)), None, "unchanged");
-        m.screen_tab = screen(300, IdleSource::Unset);
         assert_eq!(
             m.settings(SettingsEvent::IdleTimeout(0)),
             Some(Effect::WriteScreen { idle: 0 })
         );
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "nothing to take over");
-    }
-
-    #[test]
-    fn idle_change_refused_when_rc_or_by_hand() {
-        let (_d, mut m) = settings_menu("idle-refused");
-        m.screen_tab = screen(300, IdleSource::Rc);
-        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None);
-        m.screen_tab = screen(300, IdleSource::ByHand);
-        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), Some(Effect::TakeOverScreen));
         m.logout = Some(Logout::Confirm);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "not during a logout");
-        m.screen_tab = screen(300, IdleSource::Menu);
         assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None, "not during a logout");
     }
 
     #[test]
     fn screen_written_queues_one_save() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(600, IdleSource::Menu)), true),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(600)), true), Some(Effect::Start(Job::Save)));
         assert!(m.save.running && !m.save.again);
-        assert_eq!(m.screen_written(Ok(screen(0, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(0)), true), None);
         assert!(m.save.again);
-        assert_eq!(m.screen_tab, screen(0, IdleSource::Menu));
+        assert_eq!(m.screen_tab, screen(0));
         assert_eq!(
             log(&m),
             [
@@ -2492,7 +2462,7 @@ mod tests {
     #[test]
     fn screen_change_does_not_save_after_failed_restore() {
         let mut m = Menu::new(grid(), true);
-        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(300)), true), None);
         assert!(!m.save.running);
         assert_eq!(
             log(&m),
@@ -2506,10 +2476,7 @@ mod tests {
     #[test]
     fn screen_written_without_signal_says_next_session() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(60, IdleSource::Menu)), false),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(60)), false), Some(Effect::Start(Job::Save)));
         assert_eq!(
             log(&m),
             [
@@ -2523,14 +2490,14 @@ mod tests {
     #[test]
     fn screen_write_error_shows_on_the_tab() {
         let mut m = Menu::new(grid(), false);
-        m.screen_tab = screen(300, IdleSource::Menu);
+        m.screen_tab = screen(300);
         assert_eq!(m.screen_written(Err("disk full".into()), true), None);
         assert_eq!(m.screen_tab.error.as_deref(), Some("disk full"));
         assert_eq!(m.screen_tab.idle, 300);
         assert!(!m.save.running);
         assert_eq!(log(&m), [warn("disk full")]);
         // A later write that works clears it.
-        m.screen_written(Ok(screen(600, IdleSource::Menu)), true);
+        m.screen_written(Ok(screen(600)), true);
         assert_eq!(m.screen_tab.error, None);
     }
 
@@ -3087,12 +3054,9 @@ mod tests {
     #[test]
     fn screen_written_still_saves() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(300, IdleSource::Menu)), true),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(300)), true), Some(Effect::Start(Job::Save)));
         let mut m = Menu::new(grid(), true);
-        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(300)), true), None);
         assert_eq!(
             log(&m),
             [
@@ -3909,7 +3873,7 @@ mod tests {
 
     fn status_settings() -> Menu {
         let mut m = Menu::new(grid(), false);
-        m.set_status_layout(crate::status::read_layout(std::path::Path::new("/nonexistent/status")));
+        m.set_status_layout(crate::status::layout_from(&crate::config::StatusCfg::default()));
         m.screen = Screen::Settings;
         m.settings_tab = SettingsTab::Status;
         m

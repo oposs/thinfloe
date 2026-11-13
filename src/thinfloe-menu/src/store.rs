@@ -16,7 +16,7 @@ use crate::{atomic, convert};
 /// config.toml holds WiFi passwords and is read by nobody else.
 const CONFIG_MODE: u32 = 0o600;
 /// Far above any real file; keeps a runaway file out of memory.
-const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
+pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Every generated file, in the order they are regenerated.
 const ALL_FILES: [&str; 5] = ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml"];
@@ -45,6 +45,15 @@ pub struct Opened {
 }
 
 pub type Shared = Arc<Mutex<ConfigStore>>;
+
+/// A session store on `root`, for the tests of the code that takes one.
+#[cfg(test)]
+pub fn test_shared(root: &std::path::Path) -> Shared {
+    let dir = ConfigDir {
+        root: root.to_path_buf(),
+    };
+    Arc::new(Mutex::new(open(dir, Inputs::default(), OpenMode::Session, 0).store))
+}
 
 /// What `stage` replaced, for `unstage`.
 pub struct Staged {

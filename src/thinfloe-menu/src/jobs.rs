@@ -202,8 +202,10 @@ pub struct Paths {
     pub homes: netfiles::Homes,
     /// The monitor layout file and the kanshi that applies it.
     pub kanshi: Kanshi,
-    /// The status layout file.
-    pub status_file: PathBuf,
+    /// The settings store, opened once for the whole menu.
+    pub config: crate::store::Shared,
+    /// Which layout this boot's home has.
+    pub layout: crate::migrate::HomeLayout,
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
@@ -805,14 +807,21 @@ fn write_via(path: &Path, suffix: &str, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Write the status layout file through `<file>.new` and a rename, or with
-/// `None` remove it.
-pub fn status_save(path: &Path, text: Option<&str>) -> Result<(), String> {
-    let r = match text {
-        Some(t) => write_via(path, ".new", t.as_bytes()),
-        None => remove_if_there(path),
-    };
-    r.map_err(|e| format!("{}: {e}", path.display()))
+/// Keep `text`, the status layout as `layout::to_text` writes it, in the
+/// `[status]` table of `config.toml`, or with `None` go back to the default
+/// list. A refused update (read-only store, failed write) is the error.
+pub fn status_save(store: &crate::store::Shared, text: Option<&str>) -> Result<(), String> {
+    let lines = text.map(|t| {
+        t.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    });
+    let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store
+        .update(crate::generated::Table::Status, |c| c.status.lines = lines)
+        .map(|_| ())
 }
 
 fn remove_if_there(path: &Path) -> std::io::Result<()> {
@@ -1082,7 +1091,8 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1093,7 +1103,8 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1104,7 +1115,8 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1332,7 +1344,8 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1344,7 +1357,8 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -1518,7 +1532,8 @@ mod tests {
             network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
@@ -1864,28 +1879,48 @@ mod tests {
     }
 
     #[test]
-    fn status_save_writes_through_a_new_file_and_none_removes_it() {
+    fn status_save_updates_the_status_table() {
         let d = dir("status-save");
-        // ~/.config/thinfloe/ is made when it is missing.
-        let file = d.join("config/thinfloe/status");
-        status_save(&file, Some("clock 1x1\n")).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "clock 1x1\n");
-        let new = d.join("config/thinfloe/status.new");
-        assert!(!new.exists(), "the new file is renamed over the old one");
-        // A stray link where the new file goes is replaced, not followed.
-        let target = d.join("target");
-        fs::write(&target, "keep").unwrap();
-        std::os::unix::fs::symlink(&target, &new).unwrap();
-        status_save(&file, Some("-clock 1x1\n")).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "-clock 1x1\n");
-        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
-        status_save(&file, None).unwrap();
-        assert!(!file.exists());
-        // Removing what is not there is no failure.
-        status_save(&file, None).unwrap();
-        // A directory in the way is.
-        fs::create_dir_all(&file).unwrap();
-        assert!(status_save(&file, Some("x\n")).is_err());
+        let store = crate::store::test_shared(&d.join("cfg"));
+        let lines = |s: &crate::store::Shared| s.lock().unwrap().cfg.status.lines.clone();
+        status_save(&store, Some("clock 1x1\n")).unwrap();
+        assert_eq!(lines(&store), Some(vec!["clock 1x1".to_string()]));
+        // The menu's own header comment is not a layout line.
+        status_save(
+            &store,
+            Some("# thinfloe status area, written by the menu\nclock 1x1\n-network 2x2\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            lines(&store),
+            Some(vec!["clock 1x1".to_string(), "-network 2x2".to_string()])
+        );
+        // It is on disk, and a fresh read gives the same.
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().status.lines, lines(&store));
+        status_save(&store, None).unwrap();
+        assert_eq!(lines(&store), None);
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().status.lines, None);
+        // The old file is not touched, nor made.
+        assert!(!d.join("cfg/status").exists());
+    }
+
+    #[test]
+    fn status_save_on_a_read_only_store_is_the_error() {
+        let d = dir("status-save-ro");
+        let dir_ = crate::config::ConfigDir { root: d.join("cfg") };
+        let ro = crate::store::open(
+            dir_,
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let store: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        let e = status_save(&store, Some("clock 1x1\n")).unwrap_err();
+        assert_eq!(e, "The settings are read-only.");
+        assert!(!d.join("cfg/config.toml").exists());
     }
 
     #[test]

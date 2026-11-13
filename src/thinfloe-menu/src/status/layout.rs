@@ -1,9 +1,10 @@
-//! The per-machine status layout file (`~/.config/thinfloe/status`) and the
-//! packing of element sizes into the grid. Pure: no file access here.
+//! The status layout lines (the `lines` of the `[status]` table in
+//! `config.toml`) and the packing of element sizes into the grid. Pure: no
+//! file access here.
 //!
 //! One element per line: `<id> <w>x<h>`, or `-<id> <w>x<h>` when hidden;
 //! `#` starts a comment. Ids this image does not know are kept, so a newer
-//! image finds them again after this one rewrote the file.
+//! image finds them again after this one rewrote the lines.
 
 use super::{COLUMNS, Cells, ROWS, Size};
 use std::collections::HashSet;
