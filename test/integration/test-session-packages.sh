@@ -12,8 +12,22 @@ if [[ ! -f "$SQSH" ]]; then
     exit 1
 fi
 
+# Every scratch file and directory, removed on any exit. unsquashfs gives the
+# extracted tree the image's modes (its root is 0555), so rm -rf needs a
+# chmod first; the version check's directory lacked it and every run left a
+# tmp.* directory in $TMPDIR.
+TMPS=()
+# shellcheck disable=SC2329 # run by the EXIT trap
+cleanup() {
+    local t
+    for t in "${TMPS[@]}"; do
+        chmod -R u+rwX "$t" 2>/dev/null
+        rm -rf "$t"
+    done
+}
+trap cleanup EXIT
 LIST=$(mktemp)
-trap 'rm -f "$LIST"' EXIT
+TMPS+=("$LIST")
 unsquashfs -l "$SQSH" >"$LIST" 2>/dev/null || { echo "FAIL: cannot list $SQSH" >&2; exit 1; }
 
 fail=0
@@ -111,7 +125,7 @@ absent  "lxterminal"       'usr/bin/lxterminal$'
 # still never reach the remote ThinLinc session. See CLAUDE.md's "labwc must
 # have zero keybindings".
 RC=$(mktemp -d)
-trap 'chmod -R u+rwX "$RC" 2>/dev/null; rm -rf "$LIST" "$RC"' EXIT
+TMPS+=("$RC")
 unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' 'etc/thinfloe/labwc/themerc-override' >/dev/null 2>&1
 # Test for the extracted FILE, not unsquashfs's exit code: extracting a path
 # that does not exist in the image still exits 0 (it simply extracts nothing).
@@ -176,7 +190,7 @@ fi
 # The labwc in the image must be our local rebuild, not the archive version.
 # Guards against the labwc-build stage silently dropping out of the image.
 DPKG_TMP=$(mktemp -d)
-trap 'chmod -R u+rwX "$RC" "$DPKG_TMP" 2>/dev/null; rm -f "$LIST"; rm -rf "$RC" "$DPKG_TMP"' EXIT
+TMPS+=("$DPKG_TMP")
 if unsquashfs -no-xattrs -d "$DPKG_TMP/x" "$SQSH" var/lib/dpkg/status >/dev/null 2>&1; then
     labwc_version=$(awk '/^Package: labwc$/{f=1} f&&/^Version:/{print $2; exit}' \
         "$DPKG_TMP/x/var/lib/dpkg/status")
@@ -378,6 +392,18 @@ else
     fail=1
 fi
 
+# /etc/resolv.conf ships as the link to the systemd-resolved stub, so names
+# resolve from the start of the boot. The build used to print "mv: cannot move
+# '/etc/resolv.conf'" and ship no resolv.conf at all; see the Dockerfile.
+resolv=$(unsquashfs -lls "$SQSH" etc/resolv.conf 2>/dev/null | grep -E '/etc/resolv\.conf( |$)')
+if [[ $resolv == l*" -> ../run/systemd/resolve/stub-resolv.conf" ]]; then
+    echo "ok   - /etc/resolv.conf links to the systemd-resolved stub"
+else
+    echo "FAIL - /etc/resolv.conf is not a link to ../run/systemd/resolve/stub-resolv.conf: ${resolv:-missing}"
+    fail=1
+fi
+absent "resolv.conf backup of the build" 'etc/\.resolv\.conf\.systemd-resolved\.bak$'
+
 # The account is tfuser, uid and gid 1001, home /home/tfuser. 1001 is fixed:
 # 3.x's tluser had it, field home archives carry it, and the restore keeps
 # numeric owners. /home/tluser stays as a symlink so a 3.x path in a saved
@@ -392,18 +418,6 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
         fail=1
     fi
     if grep -q '^tfuser:x:1001:' "$DPKG_TMP/acct/etc/group"; then
-# /etc/resolv.conf ships as the link to the systemd-resolved stub, so names
-# resolve from the start of the boot. The build used to print "mv: cannot move
-# '/etc/resolv.conf'" and ship no resolv.conf at all; see the Dockerfile.
-resolv=$(unsquashfs -lls "$SQSH" etc/resolv.conf 2>/dev/null | grep -E '/etc/resolv\.conf( |$)')
-if [[ $resolv == l*" -> ../run/systemd/resolve/stub-resolv.conf" ]]; then
-    echo "ok   - /etc/resolv.conf links to the systemd-resolved stub"
-else
-    echo "FAIL - /etc/resolv.conf is not a link to ../run/systemd/resolve/stub-resolv.conf: ${resolv:-missing}"
-    fail=1
-fi
-absent "resolv.conf backup of the build" 'etc/\.resolv\.conf\.systemd-resolved\.bak$'
-
         echo "ok   - group tfuser is gid 1001"
     else
         echo "FAIL - group tfuser is not gid 1001"
@@ -867,6 +881,7 @@ fi
 # on a client. Both linking and dlopen are checked: winit and wgpu load
 # their libraries at runtime.
 MENU_TMP=$(mktemp -d)
+TMPS+=("$MENU_TMP")
 if unsquashfs -no-xattrs -d "$MENU_TMP/x" "$SQSH" usr/bin/thinfloe-menu >/dev/null 2>&1 &&
    [[ -f "$MENU_TMP/x/usr/bin/thinfloe-menu" ]]; then
     MB="$MENU_TMP/x/usr/bin/thinfloe-menu"
@@ -883,8 +898,6 @@ else
     echo "FAIL - cannot extract usr/bin/thinfloe-menu from $SQSH"
     fail=1
 fi
-chmod -R u+rwX "$MENU_TMP" 2>/dev/null
-rm -rf "$MENU_TMP"
 
 # The session body is the menu now; tlclient is one of its tiles.
 if [[ -n "${SESS:-}" && -f "$SESS" ]] &&
@@ -959,6 +972,7 @@ version_ok() {
     fi
 }
 REL_TMP=$(mktemp -d)
+TMPS+=("$REL_TMP")
 rel=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
 exported=$(cat "$(dirname "$SQSH")/version" 2>/dev/null)
 if unsquashfs -no-xattrs -q -d "$REL_TMP/x" "$SQSH" etc/thinfloe/version >/dev/null 2>&1 \
@@ -970,7 +984,6 @@ else
     echo "FAIL - /etc/thinfloe/version is not artifacts/rootfs/version ('$exported') of RELEASE ('$rel'), run TF_VERSION '${TF_VERSION:-}'"
     fail=1
 fi
-rm -rf "$REL_TMP"
 # Peripheral battery: the timer refreshes /run/thinfloe/peripherals/battery,
 # which the menu's status area reads (no ThinLinc). The service also runs
 # once at boot (multi-user.target, in parallel with the menu), the timer
