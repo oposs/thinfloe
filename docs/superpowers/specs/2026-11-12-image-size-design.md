@@ -559,13 +559,13 @@ Guards:
 | O4 | about 6.7 | measured (8.0 before `nouveau` came back) |
 | O5 | 4 to 7 | review estimate |
 | A1 | about -8.6 (adds) | measured (with Carrizo and Stoney) |
-| Total | 115 to 125 | |
+| Total | 114 to 122 (measured 118.1) | sum of the rows; measured: 611.1 minus 493.0 |
 
-611 MB minus that is about 486 to 496 MB; without `A1` it would be 478 to
-488 MB. The owner accepted a budget of about 495 MB. The target of about 460 MB
-assumed 45 MB for `O4`; with the owner's keep exceptions `O4` measures
-8 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
-gives less than the audit expected, and `A1` adds about 8 MB. The approved
+611 MB minus that is about 489 to 497 MB, and the finished branch measures
+493.0 MB; without `A1` it would be about 481 to 489 MB. The owner accepted a budget of about 495 MB. The target of about 460 MB
+assumed 45 MB for `O4`; with the owner's keep exceptions and `nouveau`
+kept `O4` measures about 6.7 MB, while `O1` measures about 20 MB more than the audit's 40, and `O5`
+gives less than the audit expected, and `A1` adds about 8.6 MB. The approved
 work therefore ends about 30 to 40 MB above the target. This design does not add a
 cut to close the gap; the measured result goes to the owner with the final
 task.
@@ -637,9 +637,9 @@ Under `[Unreleased]` in `CHANGES.md`:
 `### New`:
 
 - ThinFloe now shows its picture on thin clients and mini PCs with AMD
-  processors and their built-in Radeon graphics (the A-series with Carrizo
-  and Stoney graphics, for example HP t530 and t630, and Ryzen 2000 series
-  and newer, up to Ryzen AI): the image carries the graphics firmware for
+  processors and their built-in Radeon graphics (those with Carrizo or
+  Stoney graphics, for example the HP t530 and t630 thin clients, and Ryzen
+  2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for
   these processors. AMD graphics cards still get no firmware.
 
 `### Changed`:
