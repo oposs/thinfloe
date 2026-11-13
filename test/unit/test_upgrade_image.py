@@ -765,7 +765,8 @@ class TestHomeCopyQuestion(unittest.TestCase):
     """The question is asked on a fresh install only, before the write."""
 
     def _patches(self, events, copy_result=True):
-        def write(url, device, total, progress, fd=None):
+        def write(url, device, total, progress, fd=None, started=None):
+            started()
             events.append("write")
             return ui.WriteResult(1, "0" * 64, "1" * 64)
 
@@ -849,8 +850,11 @@ class TestHomeCopyQuestion(unittest.TestCase):
             stack.enter_context(mock.patch("builtins.input", side_effect=["y", "n"]))
             for p in self._patches(events):
                 stack.enter_context(p)
-            stack.enter_context(mock.patch.object(
-                ui, "stream_image", side_effect=ui.WriteFailed("boom")))
+            # After its first byte: a failure before it leaves the stick.
+            def boom(*a, **kw):
+                kw["started"]()
+                raise ui.WriteFailed("boom")
+            stack.enter_context(mock.patch.object(ui, "stream_image", side_effect=boom))
             wipe = stack.enter_context(
                 mock.patch.object(ui, "wipe_partition_tables", return_value=True))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
