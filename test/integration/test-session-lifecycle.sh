@@ -457,6 +457,21 @@ case "$(cat "$WORK/seen" 2>/dev/null)" in
     *) bad "legacy home: sessionrc timeout: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
 esac
 rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN" "$NEW_RC" "$WORK"/idle.*
+# The same exact rule in thinfloe-session: the legacy screen file says 77,
+# the generated one 600; only a home-layout of exactly "legacy" reads the 77.
+printf '%s\n' 'idle_timeout=77' >"$SCREEN"
+printf '%s\n' 'idle_timeout=600' >"$NEW_SCREEN"
+for pair in 'legacy\n:77' 'legacy:77' '  legacy\n:600' 'legacy\nx\n:600' 'legacy\n\n:600' ' legacy:600'; do
+    rm -f "$WORK"/idle.*
+    printf "${pair%:*}" >"$WORK/state/home-layout"
+    run_session "$SEEN_MENU"
+    case "$(cat "$WORK/seen" 2>/dev/null)" in
+        *"timeout ${pair##*:} "*) ok "thinfloe-session: home-layout '${pair%:*}' picks timeout ${pair##*:}" ;;
+        *) bad "thinfloe-session: home-layout '${pair%:*}': '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+    esac
+done
+set_layout legacy
+rm -f "$SCREEN" "$NEW_SCREEN" "$WORK"/idle.*
 
 # --- TERM and INT --------------------------------------------------------
 # Run the session in the background, as labwc does; its PID is the shell's.
@@ -758,6 +773,35 @@ if [[ "$(cat "$WORK/ps/labwc.seen" 2>/dev/null)" == "FOO=unset cfg=/etc/thinfloe
 else
     bad "profile: failing composer, labwc saw '$(cat "$WORK/ps/labwc.seen" 2>/dev/null)'"
 fi
+# The menu is there but the migration fails and the layout stays legacy.
+printf '#!/bin/sh\necho "$*" >>"$PS_MIGRATE"\nexit 1\n' >"$WORK/ps/menu-fail"
+chmod 755 "$WORK/ps/menu-fail"
+profile_cfg legacy TF_MENU="$WORK/ps/menu-fail"
+if [[ "$(cat "$WORK/ps/migrate" 2>/dev/null)" == "--migrate-home" ]] &&
+   [[ "$(cat "$WORK/ps/compose.args" 2>/dev/null)" == "/etc/thinfloe/labwc $PH/.thinfloe-environment /nonexistent $PRUN/thinfloe-labwc" ]]; then
+    ok "a failed migration composes with the legacy arguments"
+else
+    bad "profile: failed migration: migrate '$(cat "$WORK/ps/migrate" 2>/dev/null)' args '$(cat "$WORK/ps/compose.args" 2>/dev/null)'"
+fi
+# home-layout is read by the menu's rule: the whole file is exactly "legacy"
+# or "legacy" and one newline. The profile must agree.
+profile_raw() { # printf-format  -> sets PR_MIGRATED
+    rm -f "$WORK/ps/migrate" "$WORK/ps/compose.args"
+    printf "$1" >"$WORK/ps/state/home-layout"
+    run_profile 0 TF_COMPOSE_LABWC_CONFIG="$WORK/ps/compose" TF_MENU="$WORK/ps/menu-fail" \
+        PS_COMPOSE_ARGS="$WORK/ps/compose.args" PS_MIGRATE="$WORK/ps/migrate" \
+        PS_LABWC_SEEN="$WORK/ps/labwc.seen"
+    [[ -e "$WORK/ps/migrate" ]] && PR_MIGRATED=legacy || PR_MIGRATED=new
+}
+for pair in 'legacy\n:legacy' 'legacy:legacy' '  legacy\n:new' 'legacy\nx\n:new' \
+            'legacy\n\n:new' ' legacy:new' 'legacy \n:new' 'Legacy\n:new' '\n:new'; do
+    profile_raw "${pair%:*}"
+    if [[ $PR_MIGRATED == "${pair##*:}" ]]; then
+        ok "profile: home-layout '${pair%:*}' is $PR_MIGRATED"
+    else
+        bad "profile: home-layout '${pair%:*}' read as $PR_MIGRATED"
+    fi
+done
 profile_cfg legacy TF_MENU=/nonexistent
 if [[ "$(cat "$WORK/ps/compose.args" 2>/dev/null)" == "/etc/thinfloe/labwc $PH/.thinfloe-environment /nonexistent $PRUN/thinfloe-labwc" ]]; then
     ok "a legacy home composes with ~/.thinfloe-environment"

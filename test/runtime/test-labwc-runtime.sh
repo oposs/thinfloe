@@ -325,9 +325,10 @@ fi
 # the other 3840x2160; a fullscreen foot covers the menu. The scale must stay.
 # The same run proves the signal the menu takes "covered" from, in both
 # directions: it looks for no monitor at the start of a frame and once a second
-# while covered. A layout (the [status] table of a config.toml) that shows only the network graph, which is
-# drawn again every second, gives it a frame a second to notice the cover in;
-# podman's default network gives the container the route the graph needs.
+# while covered. A layout (the [status] table of a config.toml) that shows
+# only the network graph, which is drawn again every second, gives it a frame
+# a second to notice the cover in; podman's default network gives the
+# container the route the graph needs.
 COVER_CONTAINER_NAME="thinfloe-runtime-test-cover-$$"
 
 COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0

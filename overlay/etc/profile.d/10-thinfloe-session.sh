@@ -49,11 +49,17 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     # does it, and the layout is read again, so a failed move keeps the
     # session on the files it still has.
     TF_STATE_DIR="${TF_STATE_DIR:-/run/thinfloe/state}"
+    # The menu's rule, exactly: the whole file is "legacy" or "legacy" and
+    # one newline. A second line (even an empty one) or any other text,
+    # blanks included, is the new layout.
     tf_home_layout() {
-        _tf_l=new
-        read -r _tf_l <"$TF_STATE_DIR/home-layout" 2>/dev/null || true
-        [ "$_tf_l" = legacy ] || _tf_l=new
-        echo "$_tf_l"
+        _tf_l=
+        _tf_x=
+        {
+            IFS= read -r _tf_l || true
+            if IFS= read -r _tf_x; then _tf_l=new; fi
+        } 2>/dev/null <"$TF_STATE_DIR/home-layout" || _tf_l=new
+        if [ "$_tf_l" = legacy ]; then echo legacy; else echo new; fi
     }
     TF_HOME_LAYOUT=$(tf_home_layout)
     if [ "$TF_HOME_LAYOUT" = legacy ] && [ -x "${TF_MENU:-/usr/bin/thinfloe-menu}" ]; then
@@ -69,6 +75,9 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
         TF_GENERATED_ENV="$HOME/.config/thinfloe/generated/environment"
         TF_USER_ENV="$HOME/.config/thinfloe/environment"
     fi
+
+    unset -f tf_home_layout
+    unset TF_HOME_LAYOUT _tf_l _tf_x
 
     # The home directory is ALREADY restored - the initramfs did it, in
     # restore_home() (thinfloe-lib.sh), before the pivot.
@@ -122,6 +131,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
         echo "thinfloe: XDG_RUNTIME_DIR unset or unwritable, falling back to /etc/thinfloe/labwc" \
             >>"$TF_SESSION_LOG"
     fi
+    unset TF_GENERATED_ENV TF_USER_ENV
     if [ -r "$LABWC_CONFIG_DIR/environment" ]; then
         set -a
         . "$LABWC_CONFIG_DIR/environment"

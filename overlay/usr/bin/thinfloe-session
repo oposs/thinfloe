@@ -22,8 +22,15 @@
 # below; anything else, a missing file included, is the new layout. The
 # profile has moved a legacy home already when it could, and set the state.
 tf_state=${TF_STATE_DIR:-/run/thinfloe/state}
-tf_layout=new
-read -r tf_layout <"$tf_state/home-layout" 2>/dev/null || true
+# The menu's rule, exactly: the whole file is "legacy" or "legacy" and one
+# newline; a second line (even an empty one) or other text is the new layout.
+tf_layout=
+tf_extra=
+{
+    IFS= read -r tf_layout || true
+    if IFS= read -r tf_extra; then tf_layout=new; fi
+} 2>/dev/null <"$tf_state/home-layout" || tf_layout=new
+unset tf_extra
 tf_cfg=$HOME/.config/thinfloe
 if [ "$tf_layout" = legacy ]; then
     kanshi_cfg=$HOME/.config/kanshi/config
