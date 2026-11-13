@@ -4,6 +4,10 @@ PROJECT_NAME := thinfloe
 VERSION := 3.0.0
 BUILD_ID := $(shell date -u +%Y%m%d-%H%M%S)
 
+# A bare `make` builds the image. The .version-kind rule below comes first
+# in the file and was the default goal: make built nothing and exited 0.
+.DEFAULT_GOAL := all
+
 CONTAINER_RUNTIME ?= podman
 
 # Parallelism cap. This machine is shared - never use more than this many
