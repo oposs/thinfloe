@@ -11,38 +11,60 @@
 # bare desktop with no keybindings and no way to recover.
 # NOTE: the home directory has ALREADY been restored, by restore_home() in
 # the initramfs before the pivot - not by this script or its caller. It has
-# to happen there so a user's ~/.thinfloe-environment (keyboard layout, cursor)
+# to happen there so a user's environment files (keyboard layout, cursor)
 # is on disk before labwc reads XKB_DEFAULT_* at startup, and so the SSH host
 # keys inside it are available before sshd starts. Do not add a restore call
 # here - it would overwrite the running session's home with the on-disk copy
 # midway through.
 
-# Monitor layout. The menu writes ~/.config/kanshi/config and kanshi is the
-# only thing that sets outputs. A new layout stays unconfirmed until the person
-# confirms it within 15 s; the menu leaves the marker below while it waits.
-# Finding it here means the session ended in that window: put the old layout
-# back BEFORE kanshi starts, so kanshi never applies the unconfirmed one.
+# Which layout the home has: the initramfs writes "legacy" or "new" to
+# $TF_STATE_DIR/home-layout. Only the exact word "legacy" means the 4.x files
+# below; anything else, a missing file included, is the new layout. The
+# profile has moved a legacy home already when it could, and set the state.
+tf_state=${TF_STATE_DIR:-/run/thinfloe/state}
+tf_layout=new
+read -r tf_layout <"$tf_state/home-layout" 2>/dev/null || true
+tf_cfg=$HOME/.config/thinfloe
+if [ "$tf_layout" = legacy ]; then
+    kanshi_cfg=$HOME/.config/kanshi/config
+    kanshi_prev=$HOME/.config/kanshi/config.prev
+    layout_marker=$HOME/.config/kanshi/thinfloe-layout-unconfirmed
+    tf_sessionrc=$HOME/.thinfloe-sessionrc
+    tf_screen=$tf_cfg/screen
+else
+    tf_layout=new
+    kanshi_cfg=$tf_cfg/generated/kanshi
+    kanshi_prev=$tf_cfg/generated/kanshi.prev
+    layout_marker=$tf_cfg/generated/layout-unconfirmed
+    tf_sessionrc=$tf_cfg/sessionrc
+    tf_screen=$tf_cfg/generated/screen
+fi
+
+# Monitor layout. The menu writes the kanshi config (generated/kanshi) and
+# kanshi is the only thing that sets outputs. A new layout stays unconfirmed
+# until the person confirms it within 15 s; the menu leaves the marker below
+# while it waits. Finding it here means the session ended in that window: put
+# the old layout back BEFORE kanshi starts, so kanshi never applies the
+# unconfirmed one.
 # The marker sits next to the config, in the home, and not in the runtime dir:
 # a home save taken inside the window then carries marker, config and
-# config.prev together, and the next boot still goes back.
-#   prev   restore config.prev over config
-#   none   there was no config before: remove config
+# the previous config together, and the next boot still goes back.
+#   prev   restore kanshi.prev over kanshi
+#   none   there was no config before: remove kanshi
 #   other  unknown content: leave the config alone
-kanshi_dir=$HOME/.config/kanshi
-layout_marker=$kanshi_dir/thinfloe-layout-unconfirmed
 if [ -e "$layout_marker" ]; then
     read -r layout_undo <"$layout_marker" 2>/dev/null || true
     case "$layout_undo" in
         prev)
-            if [ -e "$kanshi_dir/config.prev" ]; then
-                mv -f "$kanshi_dir/config.prev" "$kanshi_dir/config"
+            if [ -e "$kanshi_prev" ]; then
+                mv -f "$kanshi_prev" "$kanshi_cfg"
             else
-                echo "thinfloe: unconfirmed layout without config.prev: removing the kanshi config" >&2
-                rm -f "$kanshi_dir/config"
+                echo "thinfloe: unconfirmed layout without ${kanshi_prev##*/}: removing the kanshi config" >&2
+                rm -f "$kanshi_cfg"
             fi
             ;;
         none)
-            rm -f "$kanshi_dir/config" "$kanshi_dir/config.prev"
+            rm -f "$kanshi_cfg" "$kanshi_prev"
             ;;
     esac
     rm -f "$layout_marker"
@@ -68,8 +90,8 @@ fi
 # It runs BEFORE the menu, and so before any tile starts tlclient, because the ThinLinc client reads the monitor
 # layout once at startup - a rotation applied afterwards would leave the
 # client believing a portrait screen is still landscape.
-if [ -r "$HOME/.thinfloe-sessionrc" ]; then
-    . "$HOME/.thinfloe-sessionrc"
+if [ -r "$tf_sessionrc" ]; then
+    . "$tf_sessionrc"
 fi
 
 # Background helpers. Every one of them must die with the session: labwc
@@ -120,10 +142,12 @@ trap 'tf_signalled 143' TERM
 # blank the local screen. Any keypress restores it.
 #
 # The timeout, in seconds, 0 for never:
-#   ~/.config/thinfloe/screen, the file the menu's Screen tab writes: the
-#     last line idle_timeout=<digits>, 0 to 86400. Any other value counts
-#     as no value. Without a value it is 300.
-#   ~/.thinfloe-sessionrc, sourced above, wins over that file:
+#   ~/.config/thinfloe/generated/screen, written by the menu from the Screen
+#     tab: the last line idle_timeout=<digits>, 0 to 86400. Any other value
+#     counts as no value. Without a value it is 300. This is the only source
+#     on a new home; the sessionrc is not read for it.
+#   On a legacy (4.x) home the file is ~/.config/thinfloe/screen, and
+#   ~/.thinfloe-sessionrc, sourced above, wins over it:
 #     TF_IDLE_TIMEOUT=900   longer grace period
 #     TF_IDLE_TIMEOUT=0     disable blanking entirely (so does any value that
 #                           is not a positive number)
@@ -139,7 +163,8 @@ trap 'tf_signalled 143' TERM
 # TF_IDLE_TIMEOUT_RC=1 tells the menu that the sessionrc sets the timeout,
 # and TF_IDLE_TIMEOUT is then the one in force, as plain digits, so the
 # menu can show it without reading a shell file.
-if [ -n "${TF_IDLE_TIMEOUT:-}" ] || [ -n "${DBRRG_IDLE_TIMEOUT:-}" ]; then
+if [ "$tf_layout" = legacy ] &&
+   { [ -n "${TF_IDLE_TIMEOUT:-}" ] || [ -n "${DBRRG_IDLE_TIMEOUT:-}" ]; }; then
     : "${TF_IDLE_TIMEOUT:=$DBRRG_IDLE_TIMEOUT}"
     if [ "$TF_IDLE_TIMEOUT" -gt 0 ] 2>/dev/null; then
         # [ ] takes " 900", "+900" and "0900" as 900; so do swayidle and the
@@ -152,6 +177,7 @@ if [ -n "${TF_IDLE_TIMEOUT:-}" ] || [ -n "${DBRRG_IDLE_TIMEOUT:-}" ]; then
     export TF_IDLE_TIMEOUT TF_IDLE_TIMEOUT_RC
 else
     unset TF_IDLE_TIMEOUT_RC
+    [ "$tf_layout" = legacy ] || unset TF_IDLE_TIMEOUT DBRRG_IDLE_TIMEOUT
 fi
 unset TF_IDLE_PID
 
@@ -166,7 +192,7 @@ tf_idle_timeout() {
         fi
         return
     fi
-    _v=$(sed -n 's/^idle_timeout=//p' "$HOME/.config/thinfloe/screen" 2>/dev/null | tail -n 1)
+    _v=$(sed -n 's/^idle_timeout=//p' "$tf_screen" 2>/dev/null | tail -n 1)
     _v=${_v%"$(printf '\r')"}
     case $_v in
         ''|*[!0-9]*) echo 300; return ;;
@@ -308,9 +334,9 @@ tf_kanshi_running() {
     done
     return 1
 }
-if [ -r "$kanshi_dir/config" ] && command -v kanshi >/dev/null 2>&1 &&
+if [ -r "$kanshi_cfg" ] && command -v kanshi >/dev/null 2>&1 &&
    ! tf_kanshi_running; then
-    kanshi -c "$kanshi_dir/config" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
+    kanshi -c "$kanshi_cfg" >>"${TF_SESSION_LOG:-/dev/null}" 2>&1 &
     HELPER_PIDS="$HELPER_PIDS $!"
 fi
 

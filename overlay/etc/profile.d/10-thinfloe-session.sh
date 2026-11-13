@@ -42,69 +42,66 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     TF_SESSION_VERDICT="${TF_SESSION_VERDICT:-/usr/libexec/thinfloe/session-verdict}"
     export TF_SESSION_LOG TF_SESSION_STATUS
 
-    # Put the session environment into OUR environment before launching, so
-    # the variables are present in labwc's process environment at exec time.
-    #
-    # labwc does read this file itself via -C, but relying on that leaves the
-    # XKB settings dependent on whether labwc applies the file before or after
-    # it initialises the keyboard - and in practice the ctrl:nocaps and compose
-    # options were not taking effect. Exporting them here removes the ordering
-    # question entirely.
-    #
-    # It also means a manual `labwc -C ... ...` from the fallback console
-    # below inherits the same settings, so hand-debugging matches what the
-    # automatic start does. (The failure message further down prints the
-    # exact -C argument that was actually used, merged config dir or plain
-    # system one - see below.)
-    if [ -r /etc/thinfloe/labwc/environment ]; then
-        set -a
-        . /etc/thinfloe/labwc/environment
-        set +a
+    # Which layout the home has. The initramfs restored the home and wrote
+    # the answer to $TF_STATE_DIR/home-layout: "legacy" for a 4.x home, else
+    # (also a missing file) "new". Only the exact word "legacy" means old.
+    # A legacy home is moved to ~/.config/thinfloe once, here: the menu binary
+    # does it, and the layout is read again, so a failed move keeps the
+    # session on the files it still has.
+    TF_STATE_DIR="${TF_STATE_DIR:-/run/thinfloe/state}"
+    tf_home_layout() {
+        _tf_l=new
+        read -r _tf_l <"$TF_STATE_DIR/home-layout" 2>/dev/null || true
+        [ "$_tf_l" = legacy ] || _tf_l=new
+        echo "$_tf_l"
+    }
+    TF_HOME_LAYOUT=$(tf_home_layout)
+    if [ "$TF_HOME_LAYOUT" = legacy ] && [ -x "${TF_MENU:-/usr/bin/thinfloe-menu}" ]; then
+        "${TF_MENU:-/usr/bin/thinfloe-menu}" --migrate-home >>"$TF_SESSION_LOG" 2>&1 || true
+        TF_HOME_LAYOUT=$(tf_home_layout)
+    fi
+    if [ "$TF_HOME_LAYOUT" = legacy ]; then
+        # The 4.x file keeps its XKB lines: it takes the generated slot, so
+        # the composer does not filter them out, and there is no user file.
+        TF_GENERATED_ENV="$HOME/.thinfloe-environment"
+        TF_USER_ENV=/nonexistent
+    else
+        TF_GENERATED_ENV="$HOME/.config/thinfloe/generated/environment"
+        TF_USER_ENV="$HOME/.config/thinfloe/environment"
     fi
 
     # The home directory is ALREADY restored - the initramfs did it, in
     # restore_home() (thinfloe-lib.sh), before the pivot.
     #
     # Do not add a restore call here or in thinfloe-session. The constraint that
-    # forced it out of thinfloe-session still stands: ~/.thinfloe-environment must
-    # be on disk before labwc reads XKB_DEFAULT_* at startup, or a user's
+    # forced it out of thinfloe-session still stands: the environment files
+    # must be on disk before labwc reads XKB_DEFAULT_* at startup, or a user's
     # keyboard change takes effect only on the NEXT boot. The initramfs
     # satisfies that; a restore at this point would merely re-satisfy it,
     # and a restore any later would break it.
-
-    # User overrides, sourced AFTER the system defaults so the user wins.
-    # This file is for variables the compositor reads at STARTUP - keyboard
-    # layout, cursor theme. Commands that need a running compositor
-    # (wlr-randr, kanshi) belong in ~/.thinfloe-sessionrc instead, which runs
-    # inside the session.
     #
-    # It lives in $HOME, so it is saved by save-home and restored above on
-    # every subsequent boot: a user can set the keyboard layout for their own
-    # machine without rebuilding the image.
-    if [ -r "$HOME/.thinfloe-environment" ]; then
-        set -a
-        . "$HOME/.thinfloe-environment"
-        set +a
-    fi
-
-    # The export above puts the user's values in OUR environment, which is
-    # enough for thinfloe-session and tlclient - but not for labwc itself.
-    # Run with -C, labwc re-reads <config_dir>/environment on its own
+    # The two files are for variables the compositor reads at STARTUP -
+    # keyboard layout, cursor theme. Generated/environment is written by the
+    # menu (keyboard); ~/.config/thinfloe/environment is the user's own, kept
+    # in $HOME, so it is saved by save-home and restored on every boot.
+    # Commands that need a running compositor (wlr-randr, kanshi) belong in
+    # ~/.config/thinfloe/sessionrc instead, which runs inside the session.
+    #
+    # labwc run with -C re-reads <config_dir>/environment on its own
     # (session_environment_init(), src/config/session.c) and setenv()s
     # every key it finds there with overwrite=1, ignoring what the shell
     # already exported. Pointing -C straight at /etc/thinfloe/labwc therefore
     # let the system file's value win back over the user's for any key
     # present in both - LABWC_FULLSCREEN_SPAN_OUTPUTS and the XKB_DEFAULT_*/
-    # XCURSOR_* keys included. See docs/notes/session.md (".thinfloe-environment")
-    # for the full writeup.
+    # XCURSOR_* keys included. See docs/notes/session.md for the full writeup.
     #
     # thinfloe-compose-labwc-config builds a config directory whose merged
-    # environment file has the system defaults first and the user's
-    # overrides last, so the file labwc itself parses already has the
-    # user's values winning - see that script's header for why later wins.
-    # This relies on the home directory already being restored: it is, by
-    # the initramfs (restore_home() in thinfloe-lib.sh), before this script
-    # ever runs, so ~/.thinfloe-environment already exists here.
+    # environment file has the system defaults first, then the menu's
+    # generated file, then the user's overrides (minus the keys the menu
+    # manages) - see that script's header for why later wins. The profile
+    # sources that same merged file into its own environment, so
+    # thinfloe-session, tlclient and a manual `labwc -C "$TF_LABWC_CONFIG_DIR"`
+    # from the fallback console see what labwc sees.
     #
     # A broken merge must degrade to today's behaviour (the plain system
     # config, still correct for every machine that has no per-machine
@@ -113,8 +110,8 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
     # falls back to /etc/thinfloe/labwc and just logs it.
     LABWC_CONFIG_DIR=/etc/thinfloe/labwc
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -w "${XDG_RUNTIME_DIR:-}" ]; then
-        if /usr/bin/thinfloe-compose-labwc-config \
-                /etc/thinfloe/labwc "$HOME/.thinfloe-environment" \
+        if "${TF_COMPOSE_LABWC_CONFIG:-/usr/bin/thinfloe-compose-labwc-config}" \
+                /etc/thinfloe/labwc "$TF_GENERATED_ENV" "$TF_USER_ENV" \
                 "$XDG_RUNTIME_DIR/thinfloe-labwc" >>"$TF_SESSION_LOG" 2>&1; then
             LABWC_CONFIG_DIR="$XDG_RUNTIME_DIR/thinfloe-labwc"
         else
@@ -125,6 +122,13 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
         echo "thinfloe: XDG_RUNTIME_DIR unset or unwritable, falling back to /etc/thinfloe/labwc" \
             >>"$TF_SESSION_LOG"
     fi
+    if [ -r "$LABWC_CONFIG_DIR/environment" ]; then
+        set -a
+        . "$LABWC_CONFIG_DIR/environment"
+        set +a
+    fi
+    TF_LABWC_CONFIG_DIR="$LABWC_CONFIG_DIR"
+    export TF_LABWC_CONFIG_DIR
 
     # The compositor's stderr is the only record of why a session failed.
     # Without this redirection it lands on tty1 and is erased when getty

@@ -43,7 +43,13 @@ gone_within() {
     return 1
 }
 
-mkdir -p "$WORK/bin" "$WORK/home"
+mkdir -p "$WORK/bin" "$WORK/home" "$WORK/state"
+# The session and the profile read the layout of the home from
+# $TF_STATE_DIR/home-layout (the initramfs writes it). The cases below that
+# write the 4.x files (~/.thinfloe-sessionrc, ~/.config/kanshi, the screen
+# file) run on a "legacy" home; the others set "new".
+set_layout() { printf '%s\n' "$1" >"$WORK/state/home-layout"; }
+set_layout legacy
 # foot records its arguments instead of opening a window.
 cat >"$WORK/bin/foot" <<STUB
 #!/bin/sh
@@ -101,7 +107,7 @@ run_session() {
     printf '#!/bin/sh\n%s\n' "$1" >"$WORK/bin/menu"
     chmod 755 "$WORK/bin/menu"
     env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" \
-        XDG_RUNTIME_DIR="${SESSION_XDG-$WORK}" TF_SESSION_STATUS="$WORK/thinfloe-session.status" \
+        TF_STATE_DIR="$WORK/state" XDG_RUNTIME_DIR="${SESSION_XDG-$WORK}" TF_SESSION_STATUS="$WORK/thinfloe-session.status" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
         TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
         sh "$SESSION" >/dev/null 2>"$WORK/session.err"
@@ -421,6 +427,37 @@ fi
 mv "$WORK/wlopm.off" "$WORK/bin/wlopm"
 rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN"
 
+# A new home: the timeout comes from generated/screen alone. The sessionrc
+# is no longer read for it, and the menu is told nothing about it.
+NEW_SCREEN="$WORK/home/.config/thinfloe/generated/screen"
+NEW_RC="$WORK/home/.config/thinfloe/sessionrc"
+mkdir -p "${NEW_SCREEN%/*}"
+set_layout new
+printf '%s\n' 'TF_IDLE_TIMEOUT=5' >"$NEW_RC"
+printf '%s\n' 'idle_timeout=600' >"$NEW_SCREEN"
+printf '%s\n' 'idle_timeout=77' >"$SCREEN"
+run_session "$SEEN_MENU"
+case "$(cat "$WORK/seen" 2>/dev/null)" in
+    *"timeout 600 "*"tf=unset"*"rc=") ok "thinfloe-session ignores TF_IDLE_TIMEOUT in the new sessionrc" ;;
+    *) bad "new home: sessionrc timeout: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+esac
+rm -f "$WORK"/idle.* "$NEW_SCREEN"
+run_session "$SEEN_MENU"
+case "$(cat "$WORK/seen" 2>/dev/null)" in
+    *"timeout 300 "*) ok "new home: the old screen file is not read, the default is 300" ;;
+    *) bad "new home: no generated/screen: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+esac
+# A legacy home keeps the sessionrc timeout.
+set_layout legacy
+rm -f "$WORK"/idle.*
+printf '%s\n' 'TF_IDLE_TIMEOUT=900' >"$WORK/home/.thinfloe-sessionrc"
+run_session "$SEEN_MENU"
+case "$(cat "$WORK/seen" 2>/dev/null)" in
+    *"timeout 900 "*"tf=900"*"rc=1") ok "thinfloe-session keeps the sessionrc timeout on a legacy home" ;;
+    *) bad "legacy home: sessionrc timeout: '$(cat "$WORK/seen" 2>/dev/null)'" ;;
+esac
+rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN" "$NEW_RC" "$WORK"/idle.*
+
 # --- TERM and INT --------------------------------------------------------
 # Run the session in the background, as labwc does; its PID is the shell's.
 # Job control, because bash starts a plain background job with SIGINT
@@ -601,7 +638,7 @@ run_profile() { # menu-status [extra env assignments...]
     shift
     rm -f "$WORK/ps/steps"
     env -i PATH="$WORK/ps/bin:/usr/bin:/bin" HOME="$WORK/ps/home" \
-        XDG_RUNTIME_DIR="$WORK/ps/run" STUB_MENU_RC="$menu_rc" \
+        TF_STATE_DIR="$WORK/ps/state" XDG_RUNTIME_DIR="$WORK/ps/run" STUB_MENU_RC="$menu_rc" \
         TF_SESSION_VERDICT="$VERDICT" TF_SESSION_FAILURES="$WORK/ps/failures" \
         TF_PLYMOUTH_STEP="$WORK/ps/step" TF_LABWC_SCALE=/bin/true TF_WAIT_KMS=/bin/true \
         PS_STEPS="$WORK/ps/steps" PS_OUT="$WORK/ps/out" "$@" \
@@ -655,13 +692,102 @@ else
     bad "profile: dead boot screen: rc=$ps_rc calls '$(steps)' out=$(cat "$WORK/ps/out")"
 fi
 
+# --- the profile: migration, composer, merged environment -----------------
+# A composer stub records its arguments and writes FOO=merged into the
+# environment of the directory it is asked to build; a labwc stub that
+# records the environment it got and the -C directory; a menu stub that
+# records --migrate-home and moves the home to the new layout.
+cat >"$WORK/ps/compose" <<'STUB'
+#!/bin/sh
+echo "$*" >"$PS_COMPOSE_ARGS"
+[ "${STUB_COMPOSE_RC:-0}" -ne 0 ] && exit "$STUB_COMPOSE_RC"
+mkdir -p "$4" && echo "FOO=merged" >"$4/environment"
+STUB
+cat >"$WORK/ps/menu" <<'STUB'
+#!/bin/sh
+echo "$*" >>"$PS_MIGRATE"
+echo new >"$TF_STATE_DIR/home-layout"
+STUB
+cat >"$WORK/ps/bin/labwc" <<'STUB'
+#!/bin/sh
+echo "(labwc)" >>"$PS_STEPS"
+echo "FOO=${FOO-unset} cfg=${TF_LABWC_CONFIG_DIR-unset} C=$2" >"$PS_LABWC_SEEN"
+echo "$STUB_MENU_RC" >"$TF_SESSION_STATUS"
+exit 0
+STUB
+chmod 755 "$WORK/ps/compose" "$WORK/ps/menu" "$WORK/ps/bin/labwc"
+mkdir -p "$WORK/ps/state"
+profile_cfg() { # layout [extra env...]
+    local layout=$1
+    shift
+    rm -f "$WORK/ps/compose.args" "$WORK/ps/migrate" "$WORK/ps/labwc.seen"
+    if [[ $layout == none ]]; then rm -f "$WORK/ps/state/home-layout"; else printf '%s\n' "$layout" >"$WORK/ps/state/home-layout"; fi
+    run_profile 0 TF_COMPOSE_LABWC_CONFIG="$WORK/ps/compose" TF_MENU="$WORK/ps/menu" \
+        PS_COMPOSE_ARGS="$WORK/ps/compose.args" PS_MIGRATE="$WORK/ps/migrate" \
+        PS_LABWC_SEEN="$WORK/ps/labwc.seen" "$@"
+}
+PH="$WORK/ps/home"
+PRUN="$WORK/ps/run"
+profile_cfg legacy
+if [[ "$(cat "$WORK/ps/migrate" 2>/dev/null)" == "--migrate-home" ]]; then
+    ok "the profile runs the migration on a legacy home"
+else
+    bad "profile: migration calls '$(cat "$WORK/ps/migrate" 2>/dev/null)'"
+fi
+if [[ "$(cat "$WORK/ps/compose.args" 2>/dev/null)" == "/etc/thinfloe/labwc $PH/.config/thinfloe/generated/environment $PH/.config/thinfloe/environment $PRUN/thinfloe-labwc" ]]; then
+    ok "the profile reads the layout again after the migration"
+else
+    bad "profile: compose args after migration '$(cat "$WORK/ps/compose.args" 2>/dev/null)'"
+fi
+profile_cfg new
+[[ ! -e "$WORK/ps/migrate" ]] && ok "the profile does not run the migration on a new home" \
+    || bad "profile: migration ran on a new home"
+profile_cfg none
+[[ ! -e "$WORK/ps/migrate" && -s "$WORK/ps/compose.args" ]] && ok "the profile treats a missing home-layout as new" \
+    || bad "profile: missing home-layout: migrate=$(cat "$WORK/ps/migrate" 2>/dev/null)"
+profile_cfg new
+if [[ "$(cat "$WORK/ps/labwc.seen" 2>/dev/null)" == "FOO=merged cfg=$PRUN/thinfloe-labwc C=$PRUN/thinfloe-labwc" ]]; then
+    ok "the profile sources the merged environment"
+    ok "the profile exports TF_LABWC_CONFIG_DIR"
+else
+    bad "profile: labwc saw '$(cat "$WORK/ps/labwc.seen" 2>/dev/null)'"
+fi
+profile_cfg new STUB_COMPOSE_RC=1
+if [[ "$(cat "$WORK/ps/labwc.seen" 2>/dev/null)" == "FOO=unset cfg=/etc/thinfloe/labwc C=/etc/thinfloe/labwc" ]]; then
+    ok "the profile exports /etc/thinfloe/labwc after a failing composer"
+else
+    bad "profile: failing composer, labwc saw '$(cat "$WORK/ps/labwc.seen" 2>/dev/null)'"
+fi
+profile_cfg legacy TF_MENU=/nonexistent
+if [[ "$(cat "$WORK/ps/compose.args" 2>/dev/null)" == "/etc/thinfloe/labwc $PH/.thinfloe-environment /nonexistent $PRUN/thinfloe-labwc" ]]; then
+    ok "a legacy home composes with ~/.thinfloe-environment"
+else
+    bad "profile: legacy compose args '$(cat "$WORK/ps/compose.args" 2>/dev/null)'"
+fi
+
 # ---------------------------------------------------------------------------
 # kanshi: the session undoes an unconfirmed layout, then starts kanshi on the
 # menu's config. The fake records one argv line per start and its pid, and
 # stays alive, so "not started" is an absent file and "once" is one line.
 # ---------------------------------------------------------------------------
-KDIR="$WORK/home/.config/kanshi"
-MARKER="$KDIR/thinfloe-layout-unconfirmed"
+# kanshi_layout <legacy|new> points the paths at that layout's files and sets
+# the home-layout state the session reads.
+kanshi_layout() {
+    set_layout "$1"
+    if [[ $1 == legacy ]]; then
+        KDIR="$WORK/home/.config/kanshi"
+        KCONF="$KDIR/config"
+        KPREV="$KDIR/config.prev"
+        MARKER="$KDIR/thinfloe-layout-unconfirmed"
+        SRC="$WORK/home/.thinfloe-sessionrc"
+    else
+        KDIR="$WORK/home/.config/thinfloe/generated"
+        KCONF="$KDIR/kanshi"
+        KPREV="$KDIR/kanshi.prev"
+        MARKER="$KDIR/layout-unconfirmed"
+        SRC="$WORK/home/.config/thinfloe/sessionrc"
+    fi
+}
 cat >"$WORK/bin/kanshi" <<STUB
 #!/bin/sh
 echo "\$*" >>"$WORK/kanshi.argv"
@@ -690,7 +816,7 @@ kanshi_reset() {
     if pgrep -u "$(id -u)" -x kanshi >/dev/null; then
         bad "a kanshi of this user still runs, the next kanshi case would not start one: $(pgrep -u "$(id -u)" -x kanshi | tr '\n' ' ')"
     fi
-    rm -rf "$KDIR" "$MARKER" "$WORK/kanshi.argv" "$WORK/kanshi.pid" "$WORK/kanshi.seen" "$WORK/home/.thinfloe-sessionrc"
+    rm -rf "$KDIR" "$MARKER" "$WORK/kanshi.argv" "$WORK/kanshi.pid" "$WORK/kanshi.seen" "$SRC"
 }
 exec {kanshi_lock}>"${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/thinfloe-test-kanshi.lock"
 if ! flock -w 120 "$kanshi_lock"; then
@@ -699,127 +825,134 @@ fi
 if pgrep -u "$(id -u)" -x kanshi >/dev/null; then
     echo "skip - kanshi cases: a kanshi of this user is already running"
 else
+kanshi_cases() {
+    kanshi_layout "$1"
     # Menu stub: give a started kanshi a moment to write its argv.
     KMENU='sleep 0.3; exit 0'
 
     mkdir -p "$KDIR"
-    echo "profile a {}" >"$KDIR/config"
+    echo "profile a {}" >"$KCONF"
     run_session "$KMENU"
-    if [[ "$(cat "$WORK/kanshi.argv" 2>/dev/null)" == "-c $WORK/home/.config/kanshi/config" ]]; then
-        ok "kanshi started when the config exists: once, with -c <config>"
+    if [[ "$(cat "$WORK/kanshi.argv" 2>/dev/null)" == "-c $KCONF" ]]; then
+        ok "[$1 home] kanshi started when the config exists: once, with -c <config>"
     else
-        bad "kanshi started: argv '$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
+        bad "[$1 home] kanshi started: argv '$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
     fi
     sleep 1.2
     kp=$(head -n1 "$WORK/kanshi.pid" 2>/dev/null)
     if [[ -n $kp ]] && ! kill -0 "$kp" 2>/dev/null; then
-        ok "kanshi ends with the session (helper)"
+        ok "[$1 home] kanshi ends with the session (helper)"
     else
-        bad "kanshi pid '$kp' still running after the session"
+        bad "[$1 home] kanshi pid '$kp' still running after the session"
     fi
     kanshi_reset
 
     run_session "$KMENU"
     if [[ ! -e "$WORK/kanshi.argv" ]]; then
-        ok "no config: no kanshi"
+        ok "[$1 home] no config: no kanshi"
     else
-        bad "no config: kanshi was started: $(cat "$WORK/kanshi.argv")"
+        bad "[$1 home] no config: kanshi was started: $(cat "$WORK/kanshi.argv")"
     fi
     kanshi_reset
 
     # Already running: the sessionrc starts the fake by hand.
     mkdir -p "$KDIR"
-    echo "profile a {}" >"$KDIR/config"
-    printf 'kanshi -c "$HOME/.config/kanshi/config" &\n' >"$WORK/home/.thinfloe-sessionrc"
+    echo "profile a {}" >"$KCONF"
+    mkdir -p "${SRC%/*}"
+    printf 'kanshi -c "%s" &\n' "$KCONF" >"$SRC"
     run_session "sleep 0.5; exit 0"
     if [[ "$(wc -l <"$WORK/kanshi.argv" 2>/dev/null)" -eq 1 ]] &&
        [[ "$(wc -l <"$WORK/kanshi.pid" 2>/dev/null)" -eq 1 ]]; then
-        ok "kanshi already running: session starts no second one (pgrep finds nothing)"
+        ok "[$1 home] kanshi already running: session starts no second one (pgrep finds nothing)"
     else
-        bad "kanshi already running: argv lines: $(cat "$WORK/kanshi.argv" 2>/dev/null)"
+        bad "[$1 home] kanshi already running: argv lines: $(cat "$WORK/kanshi.argv" 2>/dev/null)"
     fi
     kanshi_reset
 
     # An unconfirmed layout is undone before kanshi starts: the config
     # kanshi is given is already the old one.
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
-    echo old >"$KDIR/config.prev"
+    echo new >"$KCONF"
+    echo old >"$KPREV"
     echo prev >"$MARKER"
     run_session "$KMENU"
-    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == old && ! -e "$KDIR/config.prev" && ! -e "$MARKER" &&
+    if [[ "$(cat "$KCONF" 2>/dev/null)" == old && ! -e "$KPREV" && ! -e "$MARKER" &&
           "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
-        ok "unconfirmed layout is undone: prev (before kanshi starts)"
+        ok "[$1 home] unconfirmed layout is undone: prev (before kanshi starts)"
     else
-        bad "undo prev: config='$(cat "$KDIR/config" 2>/dev/null)' prev=$([[ -e $KDIR/config.prev ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
+        bad "[$1 home] undo prev: config='$(cat "$KCONF" 2>/dev/null)' prev=$([[ -e $KPREV ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
     fi
     kanshi_reset
 
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
+    echo new >"$KCONF"
     echo none >"$MARKER"
     run_session "$KMENU"
-    if [[ ! -e "$KDIR/config" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]]; then
-        ok "unconfirmed layout is undone: none (config gone, no kanshi)"
+    if [[ ! -e "$KCONF" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]]; then
+        ok "[$1 home] unconfirmed layout is undone: none (config gone, no kanshi)"
     else
-        bad "undo none: config=$([[ -e $KDIR/config ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
+        bad "[$1 home] undo none: config=$([[ -e $KCONF ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
     fi
     kanshi_reset
 
     # Unknown marker content: config stays, marker goes.
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
-    echo old >"$KDIR/config.prev"
+    echo new >"$KCONF"
+    echo old >"$KPREV"
     echo garbage >"$MARKER"
     run_session "$KMENU"
-    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == new && -e "$KDIR/config.prev" && ! -e "$MARKER" ]]; then
-        ok "unconfirmed layout: unknown marker content leaves the config alone"
+    if [[ "$(cat "$KCONF" 2>/dev/null)" == new && -e "$KPREV" && ! -e "$MARKER" ]]; then
+        ok "[$1 home] unconfirmed layout: unknown marker content leaves the config alone"
     else
-        bad "unknown marker: config='$(cat "$KDIR/config" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
+        bad "[$1 home] unknown marker: config='$(cat "$KCONF" 2>/dev/null)' marker=$([[ -e $MARKER ]] && echo kept || echo gone)"
     fi
     kanshi_reset
 
     # The undo comes before the sessionrc runs: a kanshi started there sees
     # the restored config.
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
-    echo old >"$KDIR/config.prev"
+    echo new >"$KCONF"
+    echo old >"$KPREV"
     echo prev >"$MARKER"
-    printf 'kanshi -c "$HOME/.config/kanshi/config" &\n' >"$WORK/home/.thinfloe-sessionrc"
+    mkdir -p "${SRC%/*}"
+    printf 'kanshi -c "%s" &\n' "$KCONF" >"$SRC"
     run_session "$KMENU"
     if [[ "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old && "$(wc -l <"$WORK/kanshi.argv")" -eq 1 ]]; then
-        ok "unconfirmed layout is undone before the sessionrc starts kanshi"
+        ok "[$1 home] unconfirmed layout is undone before the sessionrc starts kanshi"
     else
-        bad "undo before sessionrc: seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
+        bad "[$1 home] undo before sessionrc: seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)'"
     fi
     kanshi_reset
 
     # prev without config.prev: nothing to restore, so config goes, with a message.
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
+    echo new >"$KCONF"
     echo prev >"$MARKER"
     run_session "$KMENU"
-    if [[ ! -e "$KDIR/config" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]] &&
-       grep -q 'without config.prev' "$WORK/session.err"; then
-        ok "unconfirmed layout: prev without config.prev removes the config and says so"
+    if [[ ! -e "$KCONF" && ! -e "$MARKER" && ! -e "$WORK/kanshi.argv" ]] &&
+       grep -q "without ${KPREV##*/}" "$WORK/session.err"; then
+        ok "[$1 home] unconfirmed layout: prev without config.prev removes the config and says so"
     else
-        bad "prev without config.prev: config=$([[ -e $KDIR/config ]] && echo kept || echo gone) err='$(cat "$WORK/session.err")'"
+        bad "[$1 home] prev without config.prev: config=$([[ -e $KCONF ]] && echo kept || echo gone) err='$(cat "$WORK/session.err")'"
     fi
     kanshi_reset
 
     # The marker sits in the home: the undo needs no runtime dir.
     mkdir -p "$KDIR"
-    echo new >"$KDIR/config"
-    echo old >"$KDIR/config.prev"
+    echo new >"$KCONF"
+    echo old >"$KPREV"
     echo prev >"$MARKER"
     SESSION_XDG="" run_session "$KMENU"
-    if [[ "$(cat "$KDIR/config" 2>/dev/null)" == old && ! -e "$KDIR/config.prev" && ! -e "$MARKER" &&
+    if [[ "$(cat "$KCONF" 2>/dev/null)" == old && ! -e "$KPREV" && ! -e "$MARKER" &&
           "$(cat "$WORK/kanshi.seen" 2>/dev/null)" == old ]]; then
-        ok "unconfirmed layout is undone with XDG_RUNTIME_DIR empty (marker in the home)"
+        ok "[$1 home] unconfirmed layout is undone with XDG_RUNTIME_DIR empty (marker in the home)"
     else
-        bad "undo without runtime dir: config='$(cat "$KDIR/config" 2>/dev/null)' prev=$([[ -e $KDIR/config.prev ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)' argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
+        bad "[$1 home] undo without runtime dir: config='$(cat "$KCONF" 2>/dev/null)' prev=$([[ -e $KPREV ]] && echo kept || echo gone) marker=$([[ -e $MARKER ]] && echo kept || echo gone) seen='$(cat "$WORK/kanshi.seen" 2>/dev/null)' argv='$(cat "$WORK/kanshi.argv" 2>/dev/null)'"
     fi
     kanshi_reset
+}
+kanshi_cases legacy
+kanshi_cases new
 fi
 
 exit $fail

@@ -778,6 +778,25 @@ else
     fail=1
 fi
 
+# The rest of the default home is in the new layout too: the environment and
+# the sessionrc under ~/.config/thinfloe, and none of the 4.x files.
+present "default home environment"  'home/tfuser/\.config/thinfloe/environment$'
+present "default home sessionrc"    'home/tfuser/\.config/thinfloe/sessionrc$'
+for old in .thinfloe-environment .thinfloe-sessionrc .thinfloe-home-version wifi.yaml; do
+    absent "default home $old" "home/tfuser/${old//./\\.}\$"
+done
+
+# The keys the menu manages: the composer drops them from the user's file.
+MK="$DPKG_TMP/mk/etc/thinfloe/menu-managed-keys"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/mk" "$SQSH" etc/thinfloe/menu-managed-keys >/dev/null 2>&1 &&
+   [[ "$(grep -v '^#' "$MK" | grep -v '^$' | sort | tr '\n' ' ')" == \
+      "XKB_DEFAULT_LAYOUT XKB_DEFAULT_MODEL XKB_DEFAULT_OPTIONS XKB_DEFAULT_VARIANT " ]]; then
+    echo "ok   - /etc/thinfloe/menu-managed-keys lists the four XKB keys"
+else
+    echo "FAIL - /etc/thinfloe/menu-managed-keys does not list exactly the four XKB keys"
+    fail=1
+fi
+
 # --- the NUC7i3BNK field report, in the built image ---
 
 # 1. The KMS wait script and unit must be present.
