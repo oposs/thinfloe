@@ -3493,6 +3493,57 @@ mod tests {
     }
 
     #[test]
+    fn status_notes_stay_in_their_row_on_a_narrow_screen() {
+        // A short screen 800 wide (1024 at scale 1.25 is 819): the hardware elements say "not on a
+        // small screen", the empty battery "nothing to show on this
+        // machine", and a crowded list "no room" for the rest.
+        let t0 = Instant::now();
+        let mut menu = status_menu(vec![], t0);
+        let text = "network 3x1\nnetwork-info 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\nsystem 1x1\n";
+        let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        menu.set_status_layout(layout);
+        menu.set_network(crate::status::network::sample(120), t0, std::time::SystemTime::now());
+        menu.screen = Screen::Settings;
+        menu.settings_tab = crate::settings::SettingsTab::Status;
+        let sources = menu.status_sources();
+        let notes = crate::statustab::rows(&menu.status, &sources, true)
+            .iter()
+            .filter(|r| r.note.is_some())
+            .count();
+        assert!(notes >= 6, "only {notes} rows have a note");
+        let shapes = settings_shapes(&menu, 600.0, 899.0);
+        let texts = text_rects(&shapes);
+        let heading = text_rect(&shapes, "Preview").map_or(f32::INFINITY, |r| r.top());
+        let list: Vec<&(String, Rect)> = texts.iter().filter(|(_, r)| r.bottom() < heading).collect();
+        let note_texts = ["no room", "not on a small screen", "nothing to show on this machine"];
+        let mut seen = 0;
+        for (t, r) in &list {
+            // A cut note ends with the ellipsis.
+            if !note_texts
+                .iter()
+                .any(|n| t == n || (t.ends_with('…') && n.starts_with(t.trim_end_matches('…'))))
+            {
+                continue;
+            }
+            seen += 1;
+            for (o, q) in &list {
+                if (o, q) != (t, r) && (q.center().y - r.center().y).abs() < 12.0 {
+                    assert!(
+                        !r.shrink(0.5).intersects(q.shrink(0.5)),
+                        "{t:?} {r:?} overlaps {o:?} {q:?}"
+                    );
+                }
+            }
+        }
+        assert!(seen >= 3, "notes drawn: {seen} in {list:?}");
+        // Nothing runs past the right edge of the screen either.
+        for (t, r) in &list {
+            assert!(r.right() <= 600.0, "{t:?} {r:?} runs past the screen");
+        }
+    }
+
+    #[test]
     fn every_status_row_fits_at_1080p() {
         // 1080p is the common screen; there the list must not scroll.
         let menu = status_tab_menu();

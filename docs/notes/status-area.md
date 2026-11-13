@@ -127,9 +127,10 @@ Shipped elements:
   in the file's order: a tick box, a size select offering only the
   element's `sizes()`, and Up and Down buttons. Unknown ids get no row.
   A click on the name ticks the box too. The rows are as high as the small
-  controls (`layout::space_between`, 2 pt above and below), so all eight
+  controls (shadcn-egui `layout::row`, 2 pt above and below), so all eight
   fit above the preview at 1920 x 1080; `ui.horizontal` made each row the
-  default button's height and two scrolled away.
+  default button's height and two scrolled away. The note is cut with an
+  ellipsis where the name and the controls leave no room.
 - A ticked element that is not drawn shows a muted note (`statustab::rows`),
   decided in this order: "not on a small screen" when the screen is short
   and the element has no short size; "no room" when the packing of every
