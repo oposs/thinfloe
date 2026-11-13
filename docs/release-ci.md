@@ -111,79 +111,37 @@ the container build inside `make rootfs`.
 
 ## Runner setup for the project's workflows
 
-`ci-local.yml` and `release-build-local.yml` do this before the first make
-target. Each item exists because the build assumes the development host.
+`scripts/ci-runner-setup.sh` prepares the runner after the checkout:
+`ci-local.yml` and `release-build-local.yml` run it with `all` before the
+first make target, and the `unit` job runs it with `artifacts` (item 1
+only). Each item exists because the build assumes the development host; the
+commands are in the script.
 
 1. Replace the `artifacts` symlink with a directory. The repository commits
    `artifacts` as a link to `/home/oetiker/scratch/dbrrg-artifacts`, which
-   does not exist on the runner. `skip-worktree` keeps the replaced link out
-   of `git status`, which would otherwise give the dev version `.dirty`:
-
-   ```sh
-   if [ -L artifacts ]; then rm artifacts; fi
-   mkdir -p artifacts
-   git update-index --skip-worktree artifacts
-   ```
-
-2. Set `TMPDIR`. `run-qemu-write-smoke.sh` and several integration tests
-   default it to `/scratch/oetiker/claude-tmp`:
-
-   ```sh
-   mkdir -p "$RUNNER_TEMP/thinfloe-tests"
-   echo "TMPDIR=$RUNNER_TEMP/thinfloe-tests" >>"$GITHUB_ENV"
-   ```
-
-3. Install the host tools the targets call outside containers.
-   The list has `dnsmasq-base` because the full `dnsmasq` package starts a service on
+   does not exist on the runner, and every make call would print
+   `mkdir: cannot create directory 'artifacts': File exists`.
+   `git update-index --skip-worktree artifacts` keeps the replaced link out
+   of `git status`, which would otherwise give the dev version `.dirty`.
+2. Set `TMPDIR` to `$RUNNER_TEMP/thinfloe-tests`. `run-qemu-write-smoke.sh`
+   and several integration tests default it to `/scratch/oetiker/claude-tmp`.
+3. Install the host tools the targets call outside containers. The list has
+   `dnsmasq-base` because the full `dnsmasq` package starts a service on
    port 53.
-
-   ```sh
-   sudo apt-get update
-   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-     qemu-system-x86 qemu-utils ovmf mtools gdisk dnsmasq-base \
-     squashfs-tools zstd dosfstools file shellcheck uidmap iproute2 \
-     curl python3 openssh-client
-   ```
-
 4. Let podman resolve the short image names of the Containerfiles
-   (`ubuntu:26.04`, `ubuntu:24.04`):
-
-   ```sh
-   mkdir -p ~/.config/containers
-   printf '%s\n' 'unqualified-search-registries = ["docker.io"]' \
-     'short-name-mode = "permissive"' >~/.config/containers/registries.conf
-   ```
-
+   (`ubuntu:26.04`, `ubuntu:24.04`) through `docker.io`.
 5. Allow unprivileged user namespaces. The runner starts with
    `kernel.apparmor_restrict_unprivileged_userns = 1`; the netboot, write and
-   time zone smoke tests run in user and network namespaces:
-
-   ```sh
-   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-   ```
-
-6. Give `runner` a user manager. The runner service runs in
-   `system.slice/hosted-compute-agent.service` without a user session; with
-   linger, podman reports cgroup manager `systemd` with controllers
-   `cpu memory pids`, which the `--cpu-quota` of the container builds needs.
-   The spike did not run without this step, so whether podman would fall
-   back to cgroupfs and fail is not measured.
-
-   ```sh
-   sudo loginctl enable-linger "$(id -un)"
-   uid=$(id -u)
-   for _ in $(seq 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
-   echo "XDG_RUNTIME_DIR=/run/user/$uid" >>"$GITHUB_ENV"
-   echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >>"$GITHUB_ENV"
-   ```
-
-7. Open `/dev/kvm` to `runner` (only the jobs that boot QEMU):
-
-   ```sh
-   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-   sudo udevadm control --reload-rules
-   sudo udevadm trigger --name-match=kvm
-   ```
+   time zone smoke tests run in user and network namespaces.
+6. Give `runner` a user manager (`loginctl enable-linger`). The runner
+   service runs in `system.slice/hosted-compute-agent.service` without a
+   user session; with linger, podman reports cgroup manager `systemd` with
+   controllers `cpu memory pids`, which the `--cpu-quota` of the container
+   builds needs. The spike did not run without this step, so whether podman
+   would fall back to cgroupfs and fail is not measured. The script fails
+   when the user bus is still missing 30 seconds after it.
+7. Open `/dev/kvm` to `runner` with the udev rule
+   `KERNEL=="kvm", GROUP="kvm", MODE="0666"`.
 
 Every make target runs with `MEMCAP=`, as in the spike. No disk cleanup is
 needed. `release-build-local.yml` passes `TF_VERSION` to every make call, not
