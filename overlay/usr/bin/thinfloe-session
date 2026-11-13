@@ -28,7 +28,7 @@ tf_layout=
 tf_extra=
 {
     IFS= read -r tf_layout || true
-    if IFS= read -r tf_extra; then tf_layout=new; fi
+    if IFS= read -r tf_extra || [ -n "$tf_extra" ]; then tf_layout=new; fi
 } 2>/dev/null <"$tf_state/home-layout" || tf_layout=new
 unset tf_extra
 tf_cfg=$HOME/.config/thinfloe

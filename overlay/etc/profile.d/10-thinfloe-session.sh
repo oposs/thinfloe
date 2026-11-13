@@ -57,7 +57,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] &&
         _tf_x=
         {
             IFS= read -r _tf_l || true
-            if IFS= read -r _tf_x; then _tf_l=new; fi
+            if IFS= read -r _tf_x || [ -n "$_tf_x" ]; then _tf_l=new; fi
         } 2>/dev/null <"$TF_STATE_DIR/home-layout" || _tf_l=new
         if [ "$_tf_l" = legacy ]; then echo legacy; else echo new; fi
     }

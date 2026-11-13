@@ -461,7 +461,7 @@ rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN" "$NEW_RC" "$WORK"/idle.*
 # the generated one 600; only a home-layout of exactly "legacy" reads the 77.
 printf '%s\n' 'idle_timeout=77' >"$SCREEN"
 printf '%s\n' 'idle_timeout=600' >"$NEW_SCREEN"
-for pair in 'legacy\n:77' 'legacy:77' '  legacy\n:600' 'legacy\nx\n:600' 'legacy\n\n:600' ' legacy:600'; do
+for pair in 'legacy\n:77' 'legacy:77' '  legacy\n:600' 'legacy\nx\n:600' 'legacy\nx:600' 'legacyx:600' 'legacy\n\n:600' ' legacy:600'; do
     rm -f "$WORK"/idle.*
     printf "${pair%:*}" >"$WORK/state/home-layout"
     run_session "$SEEN_MENU"
@@ -793,7 +793,7 @@ profile_raw() { # printf-format  -> sets PR_MIGRATED
         PS_LABWC_SEEN="$WORK/ps/labwc.seen"
     [[ -e "$WORK/ps/migrate" ]] && PR_MIGRATED=legacy || PR_MIGRATED=new
 }
-for pair in 'legacy\n:legacy' 'legacy:legacy' '  legacy\n:new' 'legacy\nx\n:new' \
+for pair in 'legacy\n:legacy' 'legacy:legacy' '  legacy\n:new' 'legacy\nx\n:new' 'legacy\nx:new' 'legacyx:new' \
             'legacy\n\n:new' ' legacy:new' 'legacy \n:new' 'Legacy\n:new' '\n:new'; do
     profile_raw "${pair%:*}"
     if [[ $PR_MIGRATED == "${pair##*:}" ]]; then
