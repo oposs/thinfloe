@@ -1135,6 +1135,16 @@ class TestFreshInstall(unittest.TestCase):
         self.patches["stream_image"].assert_not_called()
         self.assertEqual(Path(self.dev).read_bytes(), before)
 
+    def test_cancel_while_the_image_size_is_read_leaves_the_stick(self):
+        # image_size is a curl request of up to 30 s; nothing is written yet.
+        before = Path(self.dev).read_bytes()
+        self.patches["image_size"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
     def test_cancel_after_verify_does_not_wipe(self):
         self.patches["stamp_new_stick"].side_effect = ui.Cancelled()
         rc, out = self.run_fresh()
