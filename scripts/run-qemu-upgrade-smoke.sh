@@ -20,7 +20,13 @@
 #   - the 3.x home ticks ThinLinc (it has .thinlinc, not .config/oxulnk); the
 #     VM has no network, so the check's status for it says "failed",
 #   - afterwards: no tl.new, tl.old holding the former tl, and both
-#     syslinux.cfg copies back on DEFAULT current.
+#     syslinux.cfg copies back on DEFAULT current,
+#   - the 3.x home is on the legacy layout, its ~/wifi.yaml is installed, and
+#     smoke-home-report.sh migrates it and saves it (the smoke boots stop at
+#     multi-user.target, so no session does that),
+#   - a second boot of the same stick (LABEL current) restores the new layout,
+#     installs generated/wifi.yaml, carries the keyboard across and finds the
+#     old files in the attic, without renaming a 3.x file again.
 
 set -uo pipefail
 
@@ -60,13 +66,17 @@ home="$tmp/home"
 mkdir -p "$home/.dbrrg-ssh-host-keys" "$home/.config/dbrrg/menu" "$home/.thinlinc" || exit 2
 echo '# 3.x ThinLinc config' >"$home/.thinlinc/tlclient.conf"
 echo 'XKB_DEFAULT_LAYOUT=ch' >"$home/.dbrrg-environment"
-echo '# 3.x session rc' >"$home/.dbrrg-sessionrc"
+echo 'TF_IDLE_TIMEOUT=900' >"$home/.dbrrg-sessionrc"
+printf 'network:\n  version: 2\n  wifis:\n    wlan0:\n      dhcp4: true\n      access-points:\n        smoke:\n          password: smokepass1\n' >"$home/wifi.yaml"
 ssh-keygen -q -t ed25519 -N '' -f "$home/.dbrrg-ssh-host-keys/ssh_host_ed25519_key" || exit 2
 printf '[Desktop Entry]\nType=Application\nName=X\nExec=true\n' >"$home/.config/dbrrg/menu/x.desktop"
-tar -C "$home" -czf "$tmp/home.tar.gz" . || exit 2
+# The restore keeps the archive's owner, as a saved home is tfuser's (1001).
+tar -C "$home" --owner=1001 --group=1001 --numeric-owner -czf "$tmp/home.tar.gz" . || exit 2
 mcopy -o -i "$ESP" "$tmp/home.tar.gz" ::home.tar.gz || exit 2
 mcopy -o -i "$ESP" "$DIR/smoke-addons-report.sh" ::smoke-report.sh || exit 2
-REPORT='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run="/bin/sh /run/thinfloe/storage/efi/smoke-report.sh check"'
+mcopy -o -i "$ESP" "$DIR/smoke-home-report.sh" ::smoke-home-report.sh || exit 2
+REPORT_BASE='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none'
+REPORT="$REPORT_BASE systemd.run=\"/bin/sh /run/thinfloe/storage/efi/smoke-home-report.sh migrate\""
 
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mtype -i "$ESP" "$cfg" | tr -d '\r' >"$tmp/cfg" || exit 2
@@ -79,19 +89,23 @@ for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mcopy -o -i "$ESP" "$tmp/cfg.new" "$cfg" || exit 2
 done
 
-SMOKE_WAIT_FOR='^SMOKE-ADDON-DONE' "$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
-    qemu-system-x86_64 \
-    -machine type=q35,accel=kvm \
-    -cpu host,migratable=off \
-    -smp "${BUILD_JOBS:-4}" \
-    -m "${QEMU_MEMORY:-2G}" \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -display none \
-    -no-reboot \
-    -object rng-random,filename=/dev/urandom,id=rng0 \
-    -device virtio-rng-pci,rng=rng0 \
-    -net nic,model=virtio -net user,restrict=on \
-    -drive "file=$WORK,format=raw,if=virtio" || exit 2
+boot() {
+    SMOKE_WAIT_FOR="$1" "$DIR/run-qemu-smoke.sh" "$2" "$TIMEOUT" "$GRACE" -- \
+        qemu-system-x86_64 \
+        -machine type=q35,accel=kvm \
+        -cpu host,migratable=off \
+        -smp "${BUILD_JOBS:-4}" \
+        -m "${QEMU_MEMORY:-2G}" \
+        -bios /usr/share/ovmf/OVMF.fd \
+        -display none \
+        -no-reboot \
+        -object rng-random,filename=/dev/urandom,id=rng0 \
+        -device virtio-rng-pci,rng=rng0 \
+        -net nic,model=virtio -net user,restrict=on \
+        -drive "file=$WORK,format=raw,if=virtio"
+}
+
+boot '^SMOKE-HOME-DONE' "$LOG" || exit 2
 
 if "$DIR/check-boot-smoke.sh" "$LOG"; then
     ok "the upgrade boot reaches multi-user.target cleanly"
@@ -154,6 +168,76 @@ for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
         bad "$cfg says '$d'"
     fi
 done
+
+clean1="$tmp/log1"
+LC_ALL=C sed -E -e 's#\x1b\[[0-9;?!>=]*[ -/]*[@-~]##g' -e 's#\r##g' "$LOG" >"$clean1"
+if grep -qaF 'thinfloe: home layout legacy' "$clean1" && grep -qaF 'SMOKE-HOME layout legacy' "$clean1"; then
+    ok "boot 1: home layout legacy"
+else
+    bad "boot 1: no legacy home layout in $LOG"
+fi
+if grep -qaF 'thinfloe: installing ~/wifi.yaml into /etc/netplan' "$clean1"; then
+    ok "boot 1: the old ~/wifi.yaml is installed"
+else
+    bad "boot 1: ~/wifi.yaml was not installed ($LOG)"
+fi
+if grep -qaF 'SMOKE-HOME migrate rc=0' "$clean1" \
+   && grep -qaF 'SMOKE-HOME layout-after new' "$clean1" \
+   && grep -qaF 'SMOKE-HOME save rc=0' "$clean1"; then
+    ok "boot 1: the migration ran and the layout is new"
+else
+    bad "boot 1: the migration or the save failed ($LOG)"
+    grep -a 'SMOKE-HOME' "$clean1" | sed 's/^/         /'
+fi
+
+# Boot 2: the same stick on LABEL current, which DEFAULT is back on after the
+# rotation. It carries no APPEND of its own that the smoke could read, so give
+# it the smoke options and the check.
+LOG2="$LOG.2"
+REPORT2="$REPORT_BASE systemd.run=\"/bin/sh /run/thinfloe/storage/efi/smoke-home-report.sh check\""
+for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
+    mtype -i "$ESP" "$cfg" | tr -d '\r' >"$tmp/cfg" || exit 2
+    awk -v append="$APPEND" -v report="$REPORT2" '
+        /^LABEL /   { in_cur = ($2 == "current") }
+        in_cur && /^[[:space:]]+APPEND / { print "    APPEND ramroot=tl/ramroot.sqsh " append " " report; next }
+        { print }' "$tmp/cfg" >"$tmp/cfg.cur"
+    mcopy -o -i "$ESP" "$tmp/cfg.cur" "$cfg" || exit 2
+done
+boot '^SMOKE-HOME-DONE' "$LOG2" || exit 2
+
+clean2="$tmp/log2"
+LC_ALL=C sed -E -e 's#\x1b\[[0-9;?!>=]*[ -/]*[@-~]##g' -e 's#\r##g' "$LOG2" >"$clean2"
+if "$DIR/check-boot-smoke.sh" "$LOG2"; then
+    ok "boot 2 reaches multi-user.target cleanly"
+else
+    bad "boot 2 failed check-boot-smoke.sh"
+fi
+if grep -qaF 'thinfloe: home layout new' "$clean2"; then
+    ok "boot 2: home layout new"
+else
+    bad "boot 2: no 'thinfloe: home layout new' in $LOG2"
+fi
+if grep -qaF 'thinfloe: installing ~/.config/thinfloe/generated/wifi.yaml into /etc/netplan' "$clean2"; then
+    ok "boot 2: generated/wifi.yaml is installed"
+else
+    bad "boot 2: generated/wifi.yaml was not installed ($LOG2)"
+fi
+if grep -qaF 'SMOKE-HOME env XKB_DEFAULT_LAYOUT=ch' "$clean2"; then
+    ok "boot 2: the keyboard came across"
+else
+    bad "boot 2: no 'SMOKE-HOME env XKB_DEFAULT_LAYOUT=ch' in $LOG2"
+fi
+if grep -qaF 'SMOKE-HOME attic yes' "$clean2"; then
+    ok "boot 2: the old files are in the attic"
+else
+    bad "boot 2: no 'SMOKE-HOME attic yes' in $LOG2"
+fi
+if grep -qaF 'thinfloe: renamed' "$clean2"; then
+    bad "boot 2: a 3.x rename ran again ($LOG2)"
+else
+    ok "boot 2: no second 3.x rename"
+fi
+
 
 if [[ $fail -ne 0 ]]; then
     echo ""
