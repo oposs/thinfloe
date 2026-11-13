@@ -39,6 +39,7 @@ pub mod speed;
 pub mod status;
 pub mod statustab;
 pub mod statustab_ui;
+pub mod store;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;

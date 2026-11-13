@@ -1,8 +1,10 @@
 //! The files derived from config.toml for readers that cannot parse TOML:
 //! the session (environment, screen), kanshi and netplan.
 
+use std::fs;
 use std::io;
 use std::net::Ipv4Addr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::config::{ThinfloeConfig, xkb_options};
@@ -122,15 +124,26 @@ pub fn mode_of(name: &str) -> u32 {
 }
 
 /// Bring `dir/name` to `body` (`None`: absent). True when the file
-/// changed; an identical file is left alone, its mtime included.
+/// changed; an identical file is left alone, its mtime included, unless
+/// its mode is not `mode_of(name)`: that is fixed and counts as a change.
+/// An old file that cannot be read (too big, a link, not a regular file)
+/// counts as different and is replaced; a link is replaced, never followed.
 pub fn write_if_changed(dir: &Path, name: &str, body: Option<&str>) -> io::Result<bool> {
     let path = dir.join(name);
-    let old = atomic::read(&path, MAX_BYTES)?;
-    match body {
-        None if old.is_none() => Ok(false),
-        None => atomic::remove(&path).map(|()| true),
-        Some(b) if old.as_deref() == Some(b.as_bytes()) => Ok(false),
-        Some(b) => atomic::write(&path, b.as_bytes(), mode_of(name)).map(|()| true),
+    let old = atomic::read(&path, MAX_BYTES);
+    match (body, old) {
+        (None, Ok(None)) => Ok(false),
+        (None, _) => atomic::remove(&path).map(|()| true),
+        (Some(b), Ok(Some(o))) if o == b.as_bytes() => {
+            let want = mode_of(name);
+            if fs::metadata(&path)?.permissions().mode() & 0o777 == want {
+                Ok(false)
+            } else {
+                fs::set_permissions(&path, fs::Permissions::from_mode(want))?;
+                Ok(true)
+            }
+        }
+        (Some(b), _) => atomic::write(&path, b.as_bytes(), mode_of(name)).map(|()| true),
     }
 }
 
@@ -296,6 +309,37 @@ mod tests {
             fs::metadata(d.join("screen")).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn an_equal_netplan_file_gets_its_mode_fixed() {
+        let d = TestDir::new("generated", "fixmode");
+        fs::write(d.join("wifi.yaml"), "x\n").unwrap();
+        fs::set_permissions(d.join("wifi.yaml"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(write_if_changed(&d, "wifi.yaml", Some("x\n")).unwrap());
+        assert_eq!(
+            fs::metadata(d.join("wifi.yaml")).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!write_if_changed(&d, "wifi.yaml", Some("x\n")).unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_old_file_is_replaced() {
+        let d = TestDir::new("generated", "unreadable");
+        fs::write(d.join("screen"), vec![b'a'; MAX_BYTES as usize + 1]).unwrap();
+        assert!(write_if_changed(&d, "screen", Some("b\n")).unwrap());
+        assert_eq!(fs::read_to_string(d.join("screen")).unwrap(), "b\n");
+        let outside = d.join("outside");
+        fs::write(&outside, "keep\n").unwrap();
+        std::os::unix::fs::symlink(&outside, d.join("environment")).unwrap();
+        assert!(write_if_changed(&d, "environment", Some("c\n")).unwrap());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert_eq!(fs::read_to_string(d.join("environment")).unwrap(), "c\n");
+        std::os::unix::fs::symlink(&outside, d.join("kanshi")).unwrap();
+        assert!(write_if_changed(&d, "kanshi", None).unwrap());
+        assert!(fs::symlink_metadata(d.join("kanshi")).is_err());
+        assert!(outside.exists());
     }
 
     #[test]
