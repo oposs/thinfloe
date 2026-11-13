@@ -5,7 +5,9 @@
 #     find /usr/lib/firmware -type f -not -name "iwlwifi*" -delete
 # immediately before mksquashfs. That deleted every firmware file except
 # iwlwifi*, which left deployed clients without i915 GPU firmware (wedged
-# GPU, no runtime power management) and without CPU microcode.
+# GPU, no runtime power management) and without CPU microcode. Today the
+# squashfs leaves the microcode out on purpose, because the initrd carries it
+# (O3 in the same spec); the test asserts that it is absent.
 #
 # It also guards the one Intel WiFi firmware cut (O1 in
 # docs/superpowers/specs/2026-11-12-image-size-design.md): per series only
@@ -60,8 +62,16 @@ check() {
 # Files ship zstd-compressed, so the patterns intentionally omit any suffix.
 check "i915 DMC firmware (adlp_dmc.bin)"     'usr/lib/firmware/i915/adlp_dmc\.bin'
 check "i915 GuC firmware (adlp_guc_70.bin)"  'usr/lib/firmware/i915/adlp_guc_70\.bin'
-# Deleted by the same bug: clients have never had microcode updates.
-check "Intel CPU microcode"                  'usr/lib/firmware/intel-ucode/'
+# The squashfs once lost the microcode by accident (the sweep above). Now it
+# leaves it out on purpose: dracut put the early microcode archive into the
+# initrd (test-initramfs-drivers.sh checks it there) and the kernel applies it
+# from there, so the copy under intel-ucode is dead weight.
+if grep -qE 'usr/lib/firmware/intel-ucode' "$LIST"; then
+    echo "FAIL - no intel-ucode in the squashfs (it is applied from the initrd)"
+    fail=1
+else
+    echo "ok   - no intel-ucode in the squashfs (it is applied from the initrd)"
+fi
 # On 26.04 the real iwlwifi files live under intel/iwlwifi/ with top-level
 # compat symlinks; assert the real path.
 check "Intel WiFi firmware"                  'usr/lib/firmware/intel/iwlwifi/iwlwifi-'
