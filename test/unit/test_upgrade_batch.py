@@ -1192,6 +1192,23 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual(marks, ["@step write Downloading and writing", "@touched",
                                  "@done write"])
 
+    def test_touched_is_out_before_the_wipe_flag_is_set(self):
+        # The flag is set after the line: a signal between the two can only
+        # make the menu warn about a stick that was not wiped, never say
+        # "as it was" about a wiped one. A signal right after the line
+        # finds the flag unset, so the stick is not wiped.
+        real = ui.Progress.touched
+
+        def line_then_signal(progress):
+            real(progress)
+            raise ui.Cancelled()
+        before = Path(self.dev).read_bytes()
+        with mock.patch.object(ui.Progress, "touched", line_then_signal):
+            rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@touched", out.splitlines())
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
     def test_no_touched_before_the_first_byte(self):
         self.patches["stream_image"].side_effect = ui.Cancelled()
         rc, out = self.run_fresh()

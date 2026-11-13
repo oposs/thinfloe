@@ -2277,8 +2277,11 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
     writing = [False]
 
     def first_byte():
-        writing[0] = True
+        # The line before the flag: a signal between the two can only make
+        # the menu warn about a stick that was not wiped. The other order
+        # wiped a stick the menu called "as it was".
         progress.touched()
+        writing[0] = True
     try:
         progress.step("write", "Downloading and writing")
         # Before the first byte reaches the stick: a release without its
