@@ -38,6 +38,7 @@ def load_upgrade_image():
 ui = load_upgrade_image()
 # Most fixtures replace it; the pinned-tag case needs the real lookup.
 REAL_EXPECTED_DOWNLOAD_SHA256 = ui.expected_download_sha256
+REAL_STREAM_IMAGE = ui.stream_image
 MIB = 1024 * 1024
 # Never the real /run/thinfloe/upgrade.lock.
 _LOCK_DIR = tempfile.TemporaryDirectory()
@@ -260,6 +261,19 @@ class TestStreamImage(unittest.TestCase):
         self.assertTrue(self.lines())
         for l in self.lines():
             self.assertTrue(l.endswith(" -"), l)
+
+    def test_started_is_called_once_before_the_first_byte(self):
+        seen = []
+        ui.stream_image(self.url, self.dev, self.SIZE, self.progress,
+                        started=lambda: seen.append(Path(self.dev).stat().st_size))
+        self.assertEqual(seen, [0])
+
+    def test_started_is_not_called_when_nothing_was_written(self):
+        seen = []
+        with self.assertRaises(ui.WriteFailed):
+            ui.stream_image("file://" + self.dir.name + "/nope.zst", self.dev,
+                            None, self.progress, started=lambda: seen.append(1))
+        self.assertEqual(seen, [])
 
     def test_missing_file_is_download_failure(self):
         with self.assertRaises(ui.WriteFailed) as cm:
@@ -964,10 +978,25 @@ class TestFreshInstall(unittest.TestCase):
             self.patches[name] = m.start()
             self.addCleanup(m.stop)
 
-    def _stream(self, url, device, total, progress, fd=None):
+    def _stream(self, url, device, total, progress, fd=None, started=None):
+        if started is not None:
+            started()
         Path(device).write_bytes(b"\xee" * (128 * MIB))
         return ui.WriteResult(written=MIB, image_sha256=self.SHA,
                               download_sha256="cd" * 32)
+
+    def fails_after_the_first_byte(self, exc):
+        """A stream that wrote to the stick, then raised exc.
+
+        A stream that raises before its first byte leaves the stick as it
+        was (test_a_failure_before_the_first_byte_leaves_the_stick); every
+        wipe case needs a stream that got that far.
+        """
+        def stream(url, device, total, progress, fd=None, started=None):
+            started()
+            Path(device).write_bytes(b"\xee" * (128 * MIB))
+            raise exc
+        return stream
 
     def run_fresh(self, copy_home=False, verify=False, source="http://x"):
         import types
@@ -1025,8 +1054,8 @@ class TestFreshInstall(unittest.TestCase):
         self.patches["copy_home_to_drive"].assert_not_called()
 
     def test_write_error_fails_and_wipes(self):
-        self.patches["stream_image"].side_effect = ui.WriteFailed(
-            "the stick stopped answering")
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("the stick stopped answering"))
         rc, out = self.run_fresh()
         self.assertEqual(rc, 1)
         self.assertIn("@result failed the stick stopped answering", out)
@@ -1034,7 +1063,8 @@ class TestFreshInstall(unittest.TestCase):
         self.patches["stamp_new_stick"].assert_not_called()
 
     def test_wipe_failure_still_fails_and_is_logged(self):
-        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("x"))
         with mock.patch.object(ui, "wipe_partition_tables", return_value=False) as w:
             rc, out = self.run_fresh()
         w.assert_called_once()
@@ -1043,7 +1073,8 @@ class TestFreshInstall(unittest.TestCase):
         self.assertIn("@result failed x", out)
 
     def test_wipe_failure_is_logged_for_real(self):
-        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("x"))
         # The stick stopped taking writes: the wipe's own flush fails too.
         with mock.patch.object(ui.os, "fdatasync",
                                side_effect=OSError(errno.EIO, "Input/output error")):
@@ -1051,9 +1082,9 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("could not clear", out)
 
-    def test_curl_failure_fresh_wipes(self):
-        self.patches["stream_image"].side_effect = ui.WriteFailed(
-            "the download failed: 404")
+    def test_curl_failure_after_the_first_byte_wipes(self):
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("the download failed (curl exit 56)"))
         rc, out = self.run_fresh()
         self.assertEqual(rc, 1)
         self.assertWiped()
@@ -1084,7 +1115,8 @@ class TestFreshInstall(unittest.TestCase):
     def test_sigterm_during_write_wipes_and_gives_130(self):
         import signal
 
-        def term(url, device, total, progress, fd=None):
+        def term(url, device, total, progress, fd=None, started=None):
+            started()
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             os.kill(os.getpid(), signal.SIGTERM)
         self.patches["stream_image"].side_effect = term
@@ -1133,6 +1165,32 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual(rc, 130)
         self.assertIn("@result failed cancelled", out)
         self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
+    def test_a_download_that_never_starts_leaves_the_stick(self):
+        # The real stream: curl fails, not one byte reaches the stick.
+        before = Path(self.dev).read_bytes()
+        self.patches["stream_image"].side_effect = REAL_STREAM_IMAGE
+        rc, out = self.run_fresh(source="file://" + self.tmp.name + "/none")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed the download failed", out)
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
+    def test_a_failure_before_the_first_byte_leaves_the_stick(self):
+        before = Path(self.dev).read_bytes()
+        self.patches["stream_image"].side_effect = ui.WriteFailed(
+            "could not start the download: no curl")
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("@result failed could not start the download", out)
+        self.assertEqual(Path(self.dev).read_bytes(), before)
+
+    def test_a_cancel_before_the_first_byte_leaves_the_stick(self):
+        before = Path(self.dev).read_bytes()
+        self.patches["stream_image"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
         self.assertEqual(Path(self.dev).read_bytes(), before)
 
     def test_cancel_while_the_image_size_is_read_leaves_the_stick(self):
@@ -1241,7 +1299,8 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
         signal.signal(signal.SIGTERM, ui._cancel_on_signal)
         real_wipe = ui.wipe_partition_tables
 
-        def twice(url, device, total, progress, fd=None):
+        def twice(url, device, total, progress, fd=None, started=None):
+            started()
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             os.kill(os.getpid(), signal.SIGTERM)
 
@@ -1283,7 +1342,8 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
             self.assertEqual(signal.getsignal(s), h)
 
     def test_interactive_keyboard_interrupt_wipes(self):
-        self.patches["stream_image"].side_effect = KeyboardInterrupt()
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            KeyboardInterrupt())
         with mock.patch.object(ui, "check_drive_fits"), \
              mock.patch.object(ui, "confirm", side_effect=[True, False]), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -1294,7 +1354,7 @@ class TestCancelNeverLost(TestFreshInstall):  # noqa: inherits fixtures
     def test_interactive_sighup_wipes(self):
         import signal
         self.patches["stream_image"].side_effect = (
-            lambda *a, **k: os.kill(os.getpid(), signal.SIGHUP))
+            lambda *a, **k: (k["started"](), os.kill(os.getpid(), signal.SIGHUP)))
         old = signal.getsignal(signal.SIGHUP)
         self.addCleanup(signal.signal, signal.SIGHUP, old)
         with mock.patch.object(ui, "check_drive_fits"), \
@@ -2022,6 +2082,7 @@ class TestClosedStdout(TestFreshInstall):
 
     def test_unexpected_error_during_write_wipes_and_propagates(self):
         def boom(*a, **kw):
+            kw["started"]()
             Path(self.dev).write_bytes(b"\xee" * (128 * MIB))
             raise RuntimeError("unexpected")
         self.patches["stream_image"].side_effect = boom
@@ -2040,6 +2101,7 @@ class TestClosedStdout(TestFreshInstall):
                 return super().write(text)
 
         def stream(url, device, total, progress, *a, **kw):
+            kw["started"]()
             progress.progress(1, 2)  # stdout is gone by now
             Path(device).write_bytes(b"\xee" * (128 * MIB))
             return ui.WriteResult(written=MIB, image_sha256=self.SHA,
@@ -2293,9 +2355,9 @@ class TestExclusiveOpen(TestFreshInstall):
         # not start there (ENOSPC on the first write in the smoke).
         seen = []
 
-        def stream(url, device, total, progress, fd=None):
+        def stream(url, device, total, progress, fd=None, started=None):
             seen.append(os.lseek(fd, 0, os.SEEK_CUR))
-            return self._stream(url, device, total, progress, fd)
+            return self._stream(url, device, total, progress, fd, started)
         self.patches["stream_image"].side_effect = stream
         rc, out = self.run_fresh()
         self.assertEqual(rc, 0, out)
@@ -2450,14 +2512,16 @@ class TestWipeClosesTheWriteFirst(TestFreshInstall):
         self.patches["run_cmd"].side_effect = run_cmd
 
     def test_failed_write_probes_after_close(self):
-        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("x"))
         rc, out = self.run_fresh()
         self.assertEqual(rc, 1, out)
         self.assertWiped()
         self.assertEqual(self.probes, ["closed"])
 
     def test_cancelled_write_probes_after_close(self):
-        self.patches["stream_image"].side_effect = ui.Cancelled()
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.Cancelled())
         rc, out = self.run_fresh()
         self.assertEqual(rc, 130, out)
         self.assertWiped()
@@ -2495,7 +2559,8 @@ class TestCancelBeforeTheWipe(TestWipeClosesTheWriteFirst):
 
     def test_cancel_before_wipe_after_failed_write(self):
         self.cancel_first_wipe()
-        self.patches["stream_image"].side_effect = ui.WriteFailed("x")
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.WriteFailed("x"))
         rc, out = self.run_fresh()
         self.assertEqual(rc, 130, out)
         self.assertWiped()
@@ -2503,7 +2568,8 @@ class TestCancelBeforeTheWipe(TestWipeClosesTheWriteFirst):
 
     def test_cancel_before_wipe_after_cancelled_write(self):
         self.cancel_first_wipe()
-        self.patches["stream_image"].side_effect = ui.Cancelled()
+        self.patches["stream_image"].side_effect = self.fails_after_the_first_byte(
+            ui.Cancelled())
         rc, out = self.run_fresh()
         self.assertEqual(rc, 130, out)
         self.assertWiped()

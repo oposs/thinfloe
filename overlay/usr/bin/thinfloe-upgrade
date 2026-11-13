@@ -89,7 +89,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # ============ Constants ============
 
@@ -1063,10 +1063,13 @@ def _last_line(f) -> str:
 
 
 def stream_image(url: str, device: str, total: Optional[int],
-                 progress: Progress, fd: Optional[int] = None) -> WriteResult:
+                 progress: Progress, fd: Optional[int] = None,
+                 started: Optional[Callable[[], None]] = None) -> WriteResult:
     """curl -> zstd -dc -> device, hashing both streams on the way.
 
     fd, when given, is the device already open for writing; it stays open.
+    started, when given, is called once, right before the first byte is
+    written: until then the device is as it was.
     Otherwise the device is opened without O_TRUNC so a block device and a
     regular file (tests) behave alike. Every SYNC_EVERY bytes it is flushed and
     progress reported, so the number is what the stick has accepted.
@@ -1110,6 +1113,8 @@ def stream_image(url: str, device: str, total: Optional[int],
             if not block:
                 break
             image_hash.update(block)
+            if started is not None and written == 0:
+                started()
             view = memoryview(block)
             synced = False
             try:
@@ -2255,10 +2260,14 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
     image_name = "thinfloe-usb.img.zst"
     image_url = f"{base_url}/{image_name}"
     stick_good = False
-    # Set before the first byte goes to the stick: a cancel during the
-    # checksum fetch wiped the chosen stick although nothing had been
-    # written to it.
-    writing = False
+    # Set by stream_image right before the first byte goes to the stick. A
+    # stick that was never written stays as it was: a cancel during the
+    # checksum fetch or the size read, and a download that never started,
+    # wiped the chosen stick although nothing had been written to it.
+    writing = [False]
+
+    def first_byte():
+        writing[0] = True
     try:
         progress.step("write", "Downloading and writing")
         # Before the first byte reaches the stick: a release without its
@@ -2273,8 +2282,8 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         # is read (a curl request of up to 30 s) leaves the stick untouched.
         size = image_size(image_url)
         try:
-            writing = True
-            result = stream_image(image_url, device, size, progress, fd=fd)
+            result = stream_image(image_url, device, size, progress, fd=fd,
+                                  started=first_byte)
             if expected is not None and expected != result.download_sha256:
                 raise WriteFailed("the download was damaged; write the stick again")
             progress.done("write")
@@ -2289,7 +2298,8 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
             # signal) leaves a half-written stick: wipe it, then report.
             # The wipe closes the fd and only then clears held[0]: a signal
             # before that leaves held[0] set, and the outer handler wipes.
-            wipe_partition_tables(device, holder=held)
+            if writing[0]:
+                wipe_partition_tables(device, holder=held)
             if isinstance(e, Cancelled):
                 outcome.cancelled = True
                 outcome.reason = "cancelled"
@@ -2341,7 +2351,7 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         # After verify passed: the stick is good, nothing to wipe.
         outcome.cancelled = True
         outcome.reason = "cancelled"
-        if writing and not stick_good and held[0] is not None:
+        if writing[0] and not stick_good and held[0] is not None:
             wipe_partition_tables(device, holder=held)
         return outcome
 
