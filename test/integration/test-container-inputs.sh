@@ -225,10 +225,11 @@ else
     PROBE="$WORK/context-probe"
     mkdir -p "$PROBE"
     TAG="localhost/thinfloe-context-probe:$$"
+    # Dockerfiles whose build context is the repository root (Makefile).
+    ROOT_DOCKERFILES=(containers/ubuntu/Dockerfile)
     {
         echo "FROM scratch"
-        # Dockerfiles whose build context is the repository root (Makefile).
-        for df in containers/ubuntu/Dockerfile; do
+        for df in "${ROOT_DOCKERFILES[@]}"; do
             grep -iE '^(COPY|ADD)[[:space:]]' "$REPO/$df" | grep -vi -- '--from' \
                 | sed -E 's/^[Aa][Dd][Dd]/COPY/; s/^[Cc][Oo][Pp][Yy]/COPY/'
         done
