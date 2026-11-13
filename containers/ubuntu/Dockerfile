@@ -438,13 +438,33 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 # i915 is not in --omit-drivers: 90thinfloe installs it with its firmware, so
 # Intel graphics binds in the initrd and Plymouth keeps the boot picture.
 #
+# Server and data-centre drivers are in --omit-drivers too. ThinFloe boots from
+# USB or over HTTP; the running system keeps every driver, only the initrd
+# loses them. Four groups, each with the libraries only its modules use:
+#   - server NICs (mlx4, mlx5, ice, i40e, qed, bnx2x, bnxt, Chelsio, sfc, nfp):
+#     netboot runs on desktop NICs, which stay (e1000, igb, igc, r8169, ...).
+#   - FC and SAS HBAs (lpfc, qla2xxx, mpt3sas, megaraid_sas, smartpqi, ...):
+#     the boot disk is a USB stick, or there is none.
+#   - InfiniBand (ib_core, rdma_cm, rtrs, ib_srp, rnbd_client): no RDMA in the
+#     initrd.
+#   - network file systems (cifs, ksmbd, ceph, rbd, kafs, sunrpc and grace):
+#     the initrd fetches ramroot.sqsh over HTTP, not from a file server.
+# Not omitted: ubifs (a flash file system), mlxfw, the SCSI transport classes
+# and cnic, which kept modules need. test-initramfs-drivers.sh lists both
+# sides and checks that every dependency of a kept module is still there.
+#
+# zstd -19: zstd decompresses at the same speed at every level, so the
+# smaller initrd costs build time only. Not --ultra -22: its 128 MiB window
+# is what the kernel's initramfs decompressor would have to allocate; level 19
+# uses 8 MiB.
+#
 # The slim step at the end of this file (containers/ubuntu/slim/) depends on
 # this initrd and checks that it exists.
 RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     dracut --force --no-hostonly --add "thinfloe plymouth systemd-networkd systemd-resolved" \
     --omit "drm dash crypt dmraid multipath iscsi nfs nbd fcoe fcoe-uefi biosdevname dmsquash-live dmsquash-live-ntfs" \
-    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio" \
-    --compress "zstd -3 -T4" \
+    --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio mlx4_core mlx4_en mlx5_core mlx5_dpll ice i40e qed qede bnx2x bnxt_en cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls chcr libcxgb sfc sfc_falcon sfc_siena nfp lpfc qla2xxx bfa efct fnic csiostor qedf bnx2fc fcoe libfcoe libfc mptfc mptsas mpt3sas mpi3mr pm80xx isci mvsas aic94xx libsas megaraid_sas smartpqi hpsa esas2r ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp rnbd_client cifs cifs_md4 ksmbd ceph libceph rbd kafs rxrpc sunrpc grace nfs_acl" \
+    --compress "zstd -19 -T4" \
     --kver $KERNEL_VERSION
 
 # Cleanup. Firmware content is determined by package selection - see the
