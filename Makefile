@@ -265,7 +265,6 @@ $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		-v $(PWD)/artifacts:/artifacts \
 		-v $(PWD)/configs:/configs:ro \
 		-e EFI_PARTITION_SIZE=$(EFI_PARTITION_SIZE) \
-		-e VERSION=$(VERSION) \
 		-e BUILD_ID=$(BUILD_ID) \
 		-e PROJECT_NAME=$(PROJECT_NAME) \
 		$(IMAGE_BUILDER) \
