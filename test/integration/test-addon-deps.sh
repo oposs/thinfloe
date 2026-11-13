@@ -85,7 +85,7 @@ check_addon() {
         bad "$label: no package at $deb"
         return
     fi
-    out=$(podman run --rm --log-driver=none --network=none -v "$deb:/in/addon.deb:ro,Z" "$IMAGE" /bin/bash -c '
+    if out=$(podman run --rm --log-driver=none --network=none -v "$deb:/in/addon.deb:ro,Z" "$IMAGE" /bin/bash -c '
         set -u
         dpkg -i /in/addon.deb >/dev/null 2>&1 || { echo "dpkg -i failed"; dpkg -i /in/addon.deb 2>&1 | tail -5; exit 3; }
         # thinfloe-addon runs the add-on'"'"'s hook after dpkg.
@@ -114,8 +114,7 @@ check_addon() {
             cmp -s /usr/libexec/thinfloe/tlclient-pulseaudio /opt/thinlinc/lib/tlclient/pulseaudio \
                 || { echo "pulseaudio is not the PipeWire shim after the hook"; exit 7; }
         fi
-        exit 0' 2>&1)
-    if [[ $? -eq 0 ]]; then
+        exit 0' 2>&1); then
         ok "$label: every library resolves, the client starts and the tile icon exists"
     else
         bad "$label:"

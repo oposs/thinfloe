@@ -607,8 +607,9 @@ starts. A new add-on that needs another library needs a line here.
 that every ELF file resolves its libraries and that the client starts; run
 via `make test` with `THINLINC_DEB` (else the page and pattern of the shipped
 tile are used) and `OXULNK_DEB` (else the shipped tile's signed APT source,
-fetched with `thinfloe-addon`'s own code). A client it cannot get fails the
-test.
+fetched with `thinfloe-addon`'s own code), downloaded into a directory of
+the run unless `TF_ADDON_CACHE` names one to keep. A client it cannot get
+fails the test.
 
 ## A 3.x home is migrated once
 
