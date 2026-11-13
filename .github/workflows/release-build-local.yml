@@ -41,6 +41,18 @@ jobs:
       - name: make image
         run: make image MEMCAP= TF_VERSION="$TF_VERSION"
 
+      # The smoke tests must test the bytes that ship. A later make call
+      # that rebuilds (for example after a failed podman image inspect drops
+      # the container stamp) would ship a build the earlier smoke tests never
+      # saw, with every step green; the check before the uploads compares
+      # against these sums.
+      - name: Record the checksums of the built files
+        run: |
+          for f in rootfs/vmlinuz rootfs/initrd.img rootfs/ramroot.sqsh images/thinfloe-usb.img.zst; do
+            printf '%s  %s\n' "$(sha256sum <"artifacts/$f" | cut -d' ' -f1)" "${f##*/}"
+          done >"$RUNNER_TEMP/built.sha256"
+          cat "$RUNNER_TEMP/built.sha256"
+
       - name: make qemu-smoke
         run: make qemu-smoke MEMCAP= TF_VERSION="$TF_VERSION"
 
@@ -71,6 +83,14 @@ jobs:
       # Refuses a build whose rootfs/version is not the release version.
       - name: make release-assets
         run: make release-assets MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: Check the assets are the smoke-tested build
+        run: |
+          grep -E '  (vmlinuz|initrd\.img|ramroot\.sqsh|thinfloe-usb\.img\.zst)$' artifacts/release/SHA256SUMS >"$RUNNER_TEMP/release.sha256"
+          if ! diff -u "$RUNNER_TEMP/built.sha256" "$RUNNER_TEMP/release.sha256"; then
+            echo "::error::the release assets differ from the build the smoke tests ran on; a make call rebuilt in between"
+            exit 1
+          fi
 
       # One artifact per file: the release takes every release-asset-*
       # artifact, and these names are the assets thinfloe-upgrade fetches.
