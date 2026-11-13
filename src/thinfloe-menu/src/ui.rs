@@ -3447,6 +3447,70 @@ mod tests {
     }
 
     #[test]
+    fn clicking_an_elements_name_ticks_its_box() {
+        use crate::statustab::StatusEvent;
+        let menu = status_tab_menu();
+        let s = |e| Some(UiEvent::Settings(SettingsEvent::Status(e)));
+        let name =
+            |n: &'static str| move |t: &[(String, Rect)]| t.iter().find(|(s, _)| s == n).map(|(_, r)| r.center());
+        let clock = name("Clock");
+        let traffic = name("Network traffic");
+        let events = status_clicks(&menu, (1920.0, 2000.0), &[&clock, &traffic]);
+        assert_eq!(
+            events,
+            [
+                s(StatusEvent::Shown("clock".into(), false)),
+                s(StatusEvent::Shown("network".into(), false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_element_the_row_limit_leaves_out_says_no_room_in_its_row() {
+        // statustab.rs's layout: with the battery read and empty, the list
+        // would need a third row, which was never reserved.
+        let t0 = Instant::now();
+        let mut menu = net_menu(vec![], t0);
+        let text = "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n";
+        let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
+        crate::status::layout::complete(&mut layout, &crate::status::descriptors());
+        menu.set_status_layout(layout);
+        menu.screen = Screen::Settings;
+        menu.settings_tab = crate::settings::SettingsTab::Status;
+        let sources = menu.status_sources();
+        let placed: Vec<&str> = menu
+            .status
+            .shown(&sources, false)
+            .iter()
+            .map(|(e, _, _)| e.id())
+            .collect();
+        assert!(!placed.contains(&"network-info"), "{placed:?}");
+        let texts = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        assert!(
+            in_row(&texts, "Network details", "no room").is_some(),
+            "no note in {texts:?}"
+        );
+    }
+
+    #[test]
+    fn every_status_row_fits_at_1080p() {
+        // 1080p is the common screen; there the list must not scroll.
+        let menu = status_tab_menu();
+        let shapes = settings_shapes(&menu, 1920.0, 1080.0);
+        let heading = text_rect(&shapes, "Preview").expect("a preview heading");
+        for e in crate::status::ELEMENTS {
+            let shown = shapes.iter().any(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == e.name() => {
+                    let r = t.galley.rect.translate(t.pos.to_vec2());
+                    c.clip_rect.contains_rect(r) && r.bottom() < heading.top()
+                }
+                _ => false,
+            });
+            assert!(shown, "{} is not on screen above the preview", e.name());
+        }
+    }
+
+    #[test]
     fn the_size_select_offers_only_the_sizes_of_its_element() {
         let menu = status_tab_menu();
         for e in crate::status::ELEMENTS {

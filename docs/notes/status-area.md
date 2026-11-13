@@ -126,6 +126,10 @@ Shipped elements:
 - `SettingsTab::Status`, after Screen. One row per element this image knows,
   in the file's order: a tick box, a size select offering only the
   element's `sizes()`, and Up and Down buttons. Unknown ids get no row.
+  A click on the name ticks the box too. The rows are as high as the small
+  controls (`layout::space_between`, 2 pt above and below), so all eight
+  fit above the preview at 1920 x 1080; `ui.horizontal` made each row the
+  default button's height and two scrolled away.
 - A ticked element that is not drawn shows a muted note (`statustab::rows`),
   decided in this order: "not on a small screen" when the screen is short
   and the element has no short size; "no room" when the packing of every

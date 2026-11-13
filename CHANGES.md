@@ -48,6 +48,7 @@
 - The status area shows a graph of received and sent traffic over the last 5 minutes and, beside it, the rates, link, address, gateway, DNS servers and VPN state; after a fullscreen window closes, the graph starts again empty. On a low screen such as 1280 x 720 only the battery and the graph show, in one row.
 - The status area shows temperatures, CPU load and frequency, memory, fans, uptime and the machine's model in four parts; a hot temperature changes colour, sensors that do not fit leave out the least important, never the CPU, and fans that do not fit beside their label are left out. They are left out on a low screen such as 1280 x 720.
 - Settings has a Status tab: tick, size and order the parts of the status area, with a preview of the area as the main screen shows it. Each change is saved at once to `~/.config/thinfloe/status` and travels with the saved home; a ticked part that gets no place says "no room", "not on a small screen" or "nothing to show on this machine", and "Reset to default" removes the file. A part that a newer release adds shows at the end of the area until it is unticked.
+- On the Status tab a click on a part's name ticks its box too, all eight parts fit on a 1920 x 1080 screen without scrolling, and a change made just before Log out, Restart or Power off is saved with the home.
 
 ### Changed
 

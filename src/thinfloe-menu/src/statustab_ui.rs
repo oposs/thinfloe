@@ -12,11 +12,11 @@ use egui::{Align, Layout, Rect, RichText, Sense, Ui, Vec2, vec2};
 use shadcn_egui::Theme;
 use shadcn_egui::components::button::{Button, ButtonSize, ButtonVariant};
 use shadcn_egui::components::checkbox::Checkbox;
-use shadcn_egui::components::select::Select;
+use shadcn_egui::components::select::{Select, SelectSize};
 use std::time::Instant;
 
 /// Above and below the content of a row.
-const ROW_PAD: i8 = 6;
+const ROW_PAD: i8 = 2;
 
 /// Where the main screen puts the status area, for the preview.
 #[derive(Debug, Clone, Copy)]
@@ -73,37 +73,57 @@ fn row_band(ui: &mut Ui, row: &Row) -> Option<StatusEvent> {
         })
         .show(ui, |ui| {
             ui.set_width(inner_w);
-            ui.horizontal(|ui| {
-                let mut on = row.shown;
-                if ui.add(Checkbox::new(&mut on)).changed() {
-                    event = Some(StatusEvent::Shown(row.id.into(), on));
-                }
-                ui.label(RichText::new(row.name).color(t.palette().foreground));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let small = |text: &str| Button::new(text).variant(ButtonVariant::Secondary).size(ButtonSize::Sm);
-                    if ui.add_enabled(!row.last, small("Down")).clicked() {
-                        event = Some(StatusEvent::Down(row.id.into()));
+            // A crate row is as high as its small controls; ui.horizontal
+            // starts every row at the default button's height, and eight
+            // such rows did not fit above the preview at 1920 x 1080.
+            let mut left = None;
+            let mut right = None;
+            shadcn_egui::layout::space_between(
+                ui,
+                |ui| {
+                    let mut on = row.shown;
+                    let ticked = ui.add(Checkbox::new(&mut on)).changed();
+                    // The name ticks the box too, as "Show all drives" does.
+                    let named = ui
+                        .add(
+                            egui::Label::new(RichText::new(row.name).color(t.palette().foreground))
+                                .selectable(false)
+                                .sense(Sense::click()),
+                        )
+                        .clicked();
+                    if named {
+                        on = !on;
                     }
-                    if ui.add_enabled(!row.first, small("Up")).clicked() {
-                        event = Some(StatusEvent::Up(row.id.into()));
+                    if ticked || named {
+                        left = Some(StatusEvent::Shown(row.id.into(), on));
+                    }
+                },
+                |ui| {
+                    if let Some(note) = row.note {
+                        ui.label(RichText::new(note.text()).color(t.palette().muted_foreground));
                     }
                     let labels: Vec<String> = row.sizes.iter().map(ToString::to_string).collect();
                     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
                     let mut idx = row.sizes.iter().position(|&s| s == row.size).unwrap_or(0);
                     let id = format!("tf-status-size-{}", row.id);
                     let choose = row.sizes.len() > 1;
-                    if ui.add_enabled(choose, Select::new(&id, &mut idx, &labels)).changed()
+                    if ui
+                        .add_enabled(choose, Select::new(&id, &mut idx, &labels).size(SelectSize::Sm))
+                        .changed()
                         && let Some(&size) = row.sizes.get(idx)
                     {
-                        event = Some(StatusEvent::Size(row.id.into(), size));
+                        right = Some(StatusEvent::Size(row.id.into(), size));
                     }
-                    if let Some(note) = row.note {
-                        ui.add(
-                            egui::Label::new(RichText::new(note.text()).color(t.palette().muted_foreground)).truncate(),
-                        );
+                    let small = |text: &str| Button::new(text).variant(ButtonVariant::Secondary).size(ButtonSize::Sm);
+                    if ui.add_enabled(!row.first, small("Up")).clicked() {
+                        right = Some(StatusEvent::Up(row.id.into()));
                     }
-                });
-            });
+                    if ui.add_enabled(!row.last, small("Down")).clicked() {
+                        right = Some(StatusEvent::Down(row.id.into()));
+                    }
+                },
+            );
+            event = left.or(right);
         });
     event
 }

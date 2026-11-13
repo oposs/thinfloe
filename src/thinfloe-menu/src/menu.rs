@@ -1044,8 +1044,12 @@ impl Menu {
             self.logout = Some(Logout::Failed { message });
             return None;
         }
-        if self.save.running {
+        if self.save.running || self.status_writing {
             // The logout save follows; a queued one would only repeat it.
+            // A status layout write still running (or queued behind one)
+            // ends first: the save started beside it and the menu exited
+            // before the write reached the file, so the archive kept the
+            // old layout.
             self.save.again = false;
             self.logout = Some(Logout::WaitSave);
             return None;
@@ -1233,8 +1237,13 @@ impl Menu {
                 }
                 self.status_error = r.err();
                 self.status_writing = false;
-                let next = self.status_next.take()?;
-                self.write_status(next)
+                if let Some(next) = self.status_next.take() {
+                    return self.write_status(next);
+                }
+                match self.logout {
+                    Some(Logout::WaitSave) if !self.save.running => self.logout_after_jobs(now),
+                    _ => None,
+                }
             }
             JobResult::MonTakenOver(r) => {
                 let ok = r.is_ok();
@@ -1804,6 +1813,26 @@ mod tests {
         let mut m = Menu::new(grid(), false);
         let now = Instant::now();
         assert_eq!(m.activate(4, now), Some(Effect::Start(Job::Save)));
+        m.finished(JobResult::Saved(SaveOutcome::Saved), now);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn restart_waits_for_the_status_writes_before_it_saves() {
+        let mut m = Menu::new(grid(), false);
+        m.set_status_layout(crate::status::Area::shipped().layout);
+        let now = Instant::now();
+        assert!(written(m.status_event(StatusEvent::Shown("clock".into(), false))).is_some());
+        // A second change waits behind the running write.
+        assert_eq!(m.status_event(StatusEvent::Shown("clock".into(), true)), None);
+        // Restart a moment later: the home is not saved while a write runs.
+        assert_eq!(m.activate(4, now), None);
+        let queued = written(m.finished(JobResult::StatusSaved(Ok(())), now)).expect("the queued write");
+        assert!(queued.unwrap().lines().any(|l| l == "clock 1x1"));
+        assert_eq!(
+            m.finished(JobResult::StatusSaved(Ok(())), now),
+            Some(Effect::Start(Job::Save))
+        );
         m.finished(JobResult::Saved(SaveOutcome::Saved), now);
         assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
     }
