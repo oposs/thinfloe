@@ -74,6 +74,22 @@ if grep -qF -- "-e 'TF_VERSION=\$(TF_VERSION)'" "$REPO/Makefile"; then
 else
     bad "the Makefile does not pass TF_VERSION to the export"
 fi
+# The image step logged "Version: minors", the container tag, as the export
+# did before. It prints the version the rootfs carries, and the image rule
+# passes no VERSION.
+IMAGE_SH="$REPO/scripts/make-bootable-image.sh"
+# shellcheck disable=SC2016
+if ! grep -q '\$VERSION\|\${VERSION' "$IMAGE_SH" \
+        && grep -q 'log_info "  Version: *\$(<"\$ROOTFS_DIR/version")"' "$IMAGE_SH"; then
+    ok "the image step logs the rootfs version, not the container tag"
+else
+    bad "make-bootable-image.sh logs \$VERSION or not \$ROOTFS_DIR/version"
+fi
+if awk '/^\$\(USB_IMAGE\):/{r=1} r&&/^$/{r=0} r&&/-e VERSION=/{f=1} END{exit f}' "$REPO/Makefile"; then
+    ok "the image rule passes no VERSION to make-bootable-image.sh"
+else
+    bad "the image rule passes VERSION (the container tag) to make-bootable-image.sh"
+fi
 
 # The real Makefile in a scratch tree with a stub container runtime.
 MTREE="$WORK/mtree"

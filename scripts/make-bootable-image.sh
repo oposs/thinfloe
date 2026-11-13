@@ -6,7 +6,6 @@ set -euo pipefail
 source /scripts/lib/common.sh
 
 EFI_PARTITION_SIZE="${EFI_PARTITION_SIZE:-3000}"
-VERSION="${VERSION:-dev}"
 BUILD_ID="${BUILD_ID:-unknown}"
 PROJECT_NAME="${PROJECT_NAME:-thinfloe}"
 
@@ -15,7 +14,11 @@ IMAGE_DIR="/artifacts/images"
 CONFIG_DIR="/configs"
 
 log_info "Creating bootable image"
-log_info "  Version:    $VERSION"
+# The version the rootfs carries, as the export wrote it; the container tag
+# (VERSION) was printed here before and named no release.
+if [[ -r "$ROOTFS_DIR/version" ]]; then
+    log_info "  Version:    $(<"$ROOTFS_DIR/version")"
+fi
 log_info "  Build ID:   $BUILD_ID"
 log_info "  EFI Size:   ${EFI_PARTITION_SIZE}MB"
 
