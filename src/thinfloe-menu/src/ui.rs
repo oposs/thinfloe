@@ -959,6 +959,8 @@ fn show_settings(
         SettingsTab::Network => {
             crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
         }
+        // The pickers arrive with Task B4.
+        SettingsTab::Keyboard => None,
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
@@ -3332,6 +3334,8 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
+                    // Task B4 draws the pickers and lists their texts here.
+                    crate::settings::SettingsTab::Keyboard => ((1280.0, 720.0), &[]),
                     crate::settings::SettingsTab::Status => {
                         menu.set_status_layout(crate::status::Area::shipped().layout);
                         (

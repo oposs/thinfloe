@@ -497,6 +497,10 @@ fn panic_result(job: &Job) -> JobResult {
         Job::MonRevert => JobResult::MonReverted(Err(e)),
         Job::MonTakeOver { .. } => JobResult::MonTakenOver(Err(e)),
         Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
+        Job::KeyboardApply(kb) => JobResult::KeyboardApplied {
+            kb: kb.clone(),
+            result: Err(e),
+        },
         Job::DismissReport => JobResult::ReportDismissed(Err(e)),
     }
 }
@@ -605,6 +609,11 @@ fn job_result(
             JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &paths.kanshi, &heads))
         }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
+        // Task B3 replaces this with the real apply job.
+        Job::KeyboardApply(kb) => JobResult::KeyboardApplied {
+            kb,
+            result: Err("Keyboard apply is not available yet".into()),
+        },
         Job::DismissReport => JobResult::ReportDismissed(jobs::dismiss_report(&paths.config)),
     }
 }

@@ -31,7 +31,7 @@ use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::log::Kind;
 use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
 use thinfloe_menu::store::{self, OpenMode};
-use thinfloe_menu::{bounded, migrate, release, screentab, settings, status, tiles, ui, windows};
+use thinfloe_menu::{bounded, keyboard, migrate, release, screentab, settings, status, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -41,8 +41,6 @@ fn env_path(name: &str, default: &str) -> PathBuf {
 
 /// The XKB registry file: `TF_XKB_REGISTRY` when set and not empty (tests),
 /// else the image's. Read-only on the environment.
-// Task B2 calls this from build_menu; until then only the test does.
-#[allow(dead_code)]
 fn registry_path() -> PathBuf {
     match std::env::var_os("TF_XKB_REGISTRY") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
@@ -203,6 +201,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         .chain(&config_notes.legacy)
         .cloned()
         .collect();
+    let keyboard_cfg = opened.store.cfg.keyboard.clone();
     let (screen_tab, status_layout) = (
         screentab::from_config(&opened.store.cfg.screen),
         status::layout_from(&opened.store.cfg.status),
@@ -240,6 +239,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
+    menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, thinfloe_menu::kbregistry::read(&registry_path()));
     menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
     menu.set_status_layout(status_layout);

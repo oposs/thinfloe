@@ -159,6 +159,11 @@ pub enum JobResult {
         crate::monitors::MonSource,
     ),
     MonApplied(Result<(), String>),
+    /// An apply of the Keyboard tab ended; `kb` is what it applied.
+    KeyboardApplied {
+        kb: crate::config::Keyboard,
+        result: Result<crate::keyboard::KbOutcome, String>,
+    },
     MonKept(Result<(), String>),
     MonReverted(Result<(), String>),
     MonTakenOver(Result<(), String>),

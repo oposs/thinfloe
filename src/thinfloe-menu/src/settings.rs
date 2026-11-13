@@ -33,6 +33,8 @@ pub enum SettingsEvent {
     Status(crate::statustab::StatusEvent),
     /// *Dismiss* on the migration report.
     DismissReport,
+    /// Something on the Keyboard tab.
+    Keyboard(crate::keyboard::KbEvent),
 }
 
 /// The tabs of the Settings screen.
@@ -41,14 +43,16 @@ pub enum SettingsTab {
     Packages,
     Network,
     Screen,
+    Keyboard,
     Status,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 4] = [
+    pub const ALL: [SettingsTab; 5] = [
         SettingsTab::Packages,
         SettingsTab::Network,
         SettingsTab::Screen,
+        SettingsTab::Keyboard,
         SettingsTab::Status,
     ];
 
@@ -57,6 +61,7 @@ impl SettingsTab {
             SettingsTab::Packages => "Packages",
             SettingsTab::Network => "Network",
             SettingsTab::Screen => "Screen",
+            SettingsTab::Keyboard => "Keyboard",
             SettingsTab::Status => "Status",
         }
     }

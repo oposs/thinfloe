@@ -23,6 +23,7 @@
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
+use crate::keyboard::KeyboardTab;
 use crate::log::{Kind, Log};
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
@@ -180,6 +181,8 @@ pub enum Job {
     /// Write the status layout file with this text; `None` removes it, and
     /// the default list counts again.
     StatusSave(Option<String>),
+    /// Write the keyboard choice and tell the compositor.
+    KeyboardApply(crate::config::Keyboard),
     /// Remove the migration report from `[notice]`.
     DismissReport,
 }
@@ -312,6 +315,8 @@ pub struct Menu {
     pub network: NetTab,
     /// The monitors of the Screen tab, and the Apply it runs.
     pub monitors: MonTab,
+    /// The Keyboard tab, and the apply it runs.
+    pub keyboard: KeyboardTab,
     /// What the config directory has to say, shown on the Settings screen.
     pub config_notes: ConfigNotes,
 }
@@ -368,6 +373,11 @@ impl Menu {
             // Until `set_usb_boot` says otherwise: netboot offers less.
             network: NetTab::new(true),
             monitors: MonTab::default(),
+            // Until `build_menu` reads the config and the layout list.
+            keyboard: KeyboardTab::new(
+                crate::config::Keyboard::default(),
+                Err("The keyboard layout list is not loaded.".into()),
+            ),
             config_notes: ConfigNotes::default(),
         }
     }
@@ -751,6 +761,7 @@ impl Menu {
                     | SettingsEvent::Network(_)
                     | SettingsEvent::Monitors(_)
                     | SettingsEvent::Status(_)
+                    | SettingsEvent::Keyboard(_)
                     | SettingsEvent::DismissReport
             )
         {
@@ -779,6 +790,10 @@ impl Menu {
             }
             SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
             SettingsEvent::Status(e) => return self.status_event(e),
+            SettingsEvent::Keyboard(e) => {
+                let kb = self.keyboard.event(e)?;
+                return Some(Effect::Start(Job::KeyboardApply(kb)));
+            }
             SettingsEvent::DismissReport => {
                 return self
                     .config_notes
@@ -1245,6 +1260,14 @@ impl Menu {
                         .note(Kind::Warn, format!("The monitor arrangement was not applied: {e}"));
                 }
                 self.monitors.applied(r).map(Menu::mon_request)
+            }
+            JobResult::KeyboardApplied { kb, result } => {
+                if let Err(e) = &result {
+                    self.log
+                        .note(Kind::Warn, format!("The keyboard setting was not applied: {e}"));
+                }
+                let next = self.keyboard.done(&kb, result)?;
+                Some(Effect::Start(Job::KeyboardApply(next)))
             }
             JobResult::MonKept(r) => {
                 let ok = r.is_ok();
@@ -2850,17 +2873,73 @@ mod tests {
     }
 
     #[test]
-    fn settings_has_three_tabs() {
+    fn the_tabs_are_in_order() {
         assert_eq!(
             SettingsTab::ALL,
             [
                 SettingsTab::Packages,
                 SettingsTab::Network,
                 SettingsTab::Screen,
+                SettingsTab::Keyboard,
                 SettingsTab::Status
             ]
         );
         assert_eq!(SettingsTab::Network.label(), "Network");
+        assert_eq!(SettingsTab::Keyboard.label(), "Keyboard");
+    }
+
+    fn kb_menu() -> Menu {
+        let mut m = Menu::new(grid(), false);
+        m.screen = Screen::Settings;
+        m.keyboard = KeyboardTab::new(crate::config::Keyboard::default(), Err("no list".into()));
+        m
+    }
+
+    #[test]
+    fn a_keyboard_event_starts_the_job() {
+        use crate::config::Compose;
+        use crate::keyboard::KbEvent;
+        let mut m = kb_menu();
+        let Some(Effect::Start(Job::KeyboardApply(kb))) =
+            m.settings(SettingsEvent::Keyboard(KbEvent::Compose(Compose::Menu)))
+        else {
+            panic!("no job");
+        };
+        assert_eq!(kb.compose, Compose::Menu);
+        assert!(m.keyboard.applying);
+        // A second change waits; the result starts it.
+        assert_eq!(m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false))), None);
+        let r = JobResult::KeyboardApplied {
+            kb,
+            result: Ok(crate::keyboard::KbOutcome::Live),
+        };
+        let Some(Effect::Start(Job::KeyboardApply(next))) = m.finished(r, Instant::now()) else {
+            panic!("no second job");
+        };
+        assert!(!next.caps_as_ctrl);
+    }
+
+    #[test]
+    fn a_keyboard_event_is_ignored_after_a_failed_migration() {
+        use crate::keyboard::KbEvent;
+        let mut m = kb_menu();
+        m.config_notes.legacy = Some("old layout".into());
+        assert_eq!(m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false))), None);
+        assert!(!m.keyboard.applying);
+    }
+
+    #[test]
+    fn a_failed_keyboard_apply_is_logged() {
+        let mut m = kb_menu();
+        let kb = crate::config::Keyboard::default();
+        m.finished(
+            JobResult::KeyboardApplied {
+                kb,
+                result: Err("boom".into()),
+            },
+            Instant::now(),
+        );
+        assert_eq!(m.keyboard.note.as_deref(), Some("boom"));
     }
 
     #[test]
