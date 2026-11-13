@@ -38,9 +38,12 @@ info() { :; }
 warn() { echo "warn: $*" >>"$WORK/warnings"; }
 dinfo() { :; }
 tf_log() { :; }
+# restore_home hands home-layout to tfuser; the test runs unprivileged.
+chown() { echo "$@" >>"$WORK/chown"; }
 die()  { echo "die: $*" >>"$WORK/deaths"; return 1; }
 : >"$WORK/warnings"
 : >"$WORK/deaths"
+: >"$WORK/chown"
 
 # thinfloe-lib.sh guards its body with "if [ -z "$_TF_LIB_LOADED" ]", which
 # under bash's `set -u` needs the variable to already exist (even unset) or
@@ -409,6 +412,8 @@ fi
 
 # --- install_local_network ---
 WGUNIT=/usr/lib/systemd/system/wg-quick@.service
+# The cases below use the 4.x paths (~/wifi.yaml ...), so the state says legacy.
+LEG="$WORK/state-legacy"; mkdir -p "$LEG"; echo legacy >"$LEG/home-layout"
 
 mkhome() {  # mkhome <name>: fake newroot with a home, prints its path
     mkdir -p "$WORK/$1/home/tfuser"
@@ -418,7 +423,7 @@ mkhome() {  # mkhome <name>: fake newroot with a home, prints its path
 nr=$(mkhome net-both)
 echo "network: {version: 2}" >"$nr/home/tfuser/wifi.yaml"
 echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
-install_local_network "$nr"; rc=$?
+install_local_network "$nr" "" "$LEG"; rc=$?
 [[ $rc -eq 0 ]] && ok "install_local_network returns 0 with both files"     || bad "install_local_network returned $rc with both files"
 if cmp -s "$nr/home/tfuser/wifi.yaml" "$nr/etc/netplan/wifi.yaml" \
         && [[ "$(stat -c%a "$nr/etc/netplan/wifi.yaml")" == 600 ]]; then
@@ -442,7 +447,7 @@ else
 fi
 
 nr=$(mkhome net-none)
-install_local_network "$nr"; rc=$?
+install_local_network "$nr" "" "$LEG"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" && ! -e "$nr/etc/wireguard" \
         && ! -L "$nr/etc/systemd/system/multi-user.target.wants/wg-quick@wg0.service" ]]; then
     ok "no files: returns 0 and creates nothing"
@@ -452,7 +457,7 @@ fi
 
 nr=$(mkhome net-wg)
 echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
-install_local_network "$nr"; rc=$?
+install_local_network "$nr" "" "$LEG"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" \
         && -f "$nr/etc/wireguard/wg0.conf" \
         && -L "$nr/etc/systemd/system/multi-user.target.wants/wg-quick@wg0.service" ]]; then
@@ -463,7 +468,7 @@ fi
 
 nr=$(mkhome net-template)
 cp "$REPO/overlay/home/tfuser/wifi.yaml" "$nr/home/tfuser/wifi.yaml"
-install_local_network "$nr"; rc=$?
+install_local_network "$nr" "" "$LEG"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "unedited wifi.yaml template is not installed, returns 0"
 else
@@ -473,7 +478,7 @@ fi
 nr=$(mkhome net-symlink)
 echo secret >"$WORK/target.yaml"
 ln -s "$WORK/target.yaml" "$nr/home/tfuser/wifi.yaml"
-install_local_network "$nr"; rc=$?
+install_local_network "$nr" "" "$LEG"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "symlinked wifi.yaml is rejected, returns 0"
 else
@@ -489,7 +494,7 @@ mkship() {  # mkship <newroot>: the DHCP default the image ships
 
 nr=$(mkhome net-eth); mkship "$nr"
 echo "network: {ethernets: {eth0: {dhcp4: false}}}" >"$nr/home/tfuser/ethernet.yaml"
-install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+install_local_network "$nr" "tl/ramroot.sqsh" "$LEG"; rc=$?
 if [[ $rc -eq 0 ]] && cmp -s "$nr/home/tfuser/ethernet.yaml" "$nr/etc/netplan/ethernet.yaml" \
         && [[ "$(stat -c%a "$nr/etc/netplan/ethernet.yaml")" == 600 ]]; then
     ok "ethernet.yaml installed with mode 600"
@@ -500,7 +505,7 @@ fi
 nr=$(mkhome net-eth-link); mkship "$nr"
 echo secret >"$WORK/eth-target.yaml"
 ln -s "$WORK/eth-target.yaml" "$nr/home/tfuser/ethernet.yaml"
-install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+install_local_network "$nr" "tl/ramroot.sqsh" "$LEG"; rc=$?
 if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" ]]; then
     ok "ethernet.yaml symlink refused (shipped file unchanged)"
 else
@@ -508,7 +513,7 @@ else
 fi
 
 nr=$(mkhome net-eth-none); mkship "$nr"
-install_local_network "$nr" "tl/ramroot.sqsh"; rc=$?
+install_local_network "$nr" "tl/ramroot.sqsh" "$LEG"; rc=$?
 if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" ]]; then
     ok "no ethernet.yaml leaves the shipped file"
 else
@@ -518,7 +523,7 @@ fi
 nr=$(mkhome net-eth-netboot); mkship "$nr"
 echo "network: {version: 2}" >"$nr/home/tfuser/wifi.yaml"
 echo "custom: static" >"$nr/home/tfuser/ethernet.yaml"
-install_local_network "$nr" "https://boot.example/ramroot.sqsh"; rc=$?
+install_local_network "$nr" "https://boot.example/ramroot.sqsh" "$LEG"; rc=$?
 if [[ $rc -eq 0 && "$(cat "$nr/etc/netplan/ethernet.yaml")" == "shipped: dhcp" \
         && -f "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "netboot skips ethernet.yaml but installs wifi.yaml"
@@ -532,7 +537,7 @@ mkdir -p "$nr/etc"
 echo "not a dir" >"$nr/etc/netplan"
 echo "custom: static" >"$nr/home/tfuser/ethernet.yaml"
 echo "[Interface]" >"$nr/home/tfuser/wg0.conf"
-install_local_network "$nr" "tl/ramroot.sqsh" 2>/dev/null; rc=$?
+install_local_network "$nr" "tl/ramroot.sqsh" "$LEG" 2>/dev/null; rc=$?
 if [[ $rc -eq 0 && -f "$nr/etc/wireguard/wg0.conf" ]]; then
     ok "a failing ethernet copy still installs wg0"
 else
@@ -741,7 +746,7 @@ echo "52:54:00:ab:cd:ef" >"$WORK/sb-addr"
     tf_write_hostname "$nr" "$MID" "$nr/state"
     tf_write_hostname "$nr2" "$MID" "$nr2/state"
     tf_record_boot_mac "$WORK/sb-addr" "$WORK/sb-state"
-    install_local_network "$WORK/sb-net"
+    install_local_network "$WORK/sb-net" "" "$LEG"
     tf_status "Loading the system"
 ) 2>"$WORK/sb-stderr"
 if [[ "$(cat "$nr/etc/hostname")" == "thinfloe-abcdef" \
@@ -1346,6 +1351,118 @@ if grep -qx 'update --status=tf:Restoring the home directory' "$PLY_LOG"; then
 else
     bad "restore_home sent no step: log=$(cat "$PLY_LOG")"
 fi
+
+# --- home layout: old (legacy) or new ~/.config/thinfloe/ ----------------
+#
+# restore_home records in <state>/home-layout whether the restored home keeps
+# its files at the 4.x paths ("legacy") or below ~/.config/thinfloe/ ("new").
+# The archive decides: only an archive that lists .config/thinfloe/home-version
+# is new. No archive, or no listing at all, is new.
+
+hl() { cat "$1/home-layout" 2>/dev/null; }
+
+d="$WORK/hl-none"; mkdefault "$d"
+: >"$WORK/chown"
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+[[ "$(hl "$d/state")" == new ]] && ok "home-layout is new without an archive" \
+    || bad "home-layout without an archive: '$(hl "$d/state")'"
+grep -qxF "1001:1001 $d/state/home-layout" "$WORK/chown" \
+    && ok "home-layout is given to tfuser" \
+    || bad "home-layout not chowned to 1001:1001: $(cat "$WORK/chown")"
+
+d="$WORK/hl-new"; mkdefault "$d"; mkdir -p "$d/src/.config/thinfloe"
+echo 2 >"$d/src/.config/thinfloe/home-version"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+if [[ "$(hl "$d/state")" == new && -f "$d/newroot/home/tfuser/.config/thinfloe/home-version" ]]; then
+    ok "home-layout is new with a marked archive"
+else
+    bad "marked archive: layout '$(hl "$d/state")'"
+fi
+
+d="$WORK/hl-legacy"; mkdefault "$d"; mkdir -p "$d/src" "$d/newroot/home/tfuser/.config/thinfloe"
+echo 2 >"$d/newroot/home/tfuser/.config/thinfloe/home-version"   # the shipped default
+echo 1 >"$d/src/.thinfloe-home-version"; echo mine >"$d/src/.thinfloe-environment"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+if [[ "$(hl "$d/state")" == legacy && ! -e "$d/newroot/home/tfuser/.config/thinfloe/home-version" ]]; then
+    ok "home-layout is legacy with an unmarked archive, and the shipped marker is gone"
+else
+    bad "unmarked archive: layout '$(hl "$d/state")', marker $(ls "$d/newroot/home/tfuser/.config/thinfloe" 2>&1)"
+fi
+
+d="$WORK/hl-nomac"; mkdefault "$d"
+restore_home "$d/newroot" "$d/efi" "$d/state" "http://boot.example.org/tl/ramroot.sqsh"
+[[ "$(hl "$d/state")" == new ]] && ok "home-layout is new when the restore failed without a listing" \
+    || bad "netboot without a MAC: layout '$(hl "$d/state")'"
+
+d="$WORK/hl-mig"; mkdefault "$d" nomarker; mkdir -p "$d/src/.config/thinfloe"
+echo 2 >"$d/src/.config/thinfloe/home-version"; echo old >"$d/src/.dbrrg-environment"
+tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
+if [[ -e "$d/newroot/home/tfuser/.dbrrg-environment" \
+      && ! -e "$d/newroot/home/tfuser/.thinfloe-home-version" ]]; then
+    ok "a home with only .config/thinfloe/home-version is not renamed by the 3.x migration"
+else
+    bad "new-layout archive was touched by the 3.x migration"
+fi
+
+# install_local_network by layout
+mkst() { mkdir -p "$WORK/$1"; echo "$2" >"$WORK/$1/home-layout"; echo "$WORK/$1"; }
+mknet() {  # mknet <name>: newroot whose home holds both layouts' files
+    local n; n=$(mkhome "$1"); local h="$n/home/tfuser"
+    mkdir -p "$h/.config/thinfloe/generated"
+    echo "gen-wifi" >"$h/.config/thinfloe/generated/wifi.yaml"
+    echo "gen-eth"  >"$h/.config/thinfloe/generated/ethernet.yaml"
+    echo "gen-wg"   >"$h/.config/thinfloe/wg0.conf"
+    echo "old-wifi" >"$h/wifi.yaml"
+    echo "old-eth"  >"$h/ethernet.yaml"
+    echo "old-wg"   >"$h/wg0.conf"
+    echo "$n"
+}
+S_NEW=$(mkst st-new new); S_LEG=$(mkst st-leg legacy)
+
+nr=$(mknet ln-new); install_local_network "$nr" "" "$S_NEW"
+if [[ "$(cat "$nr/etc/netplan/wifi.yaml" 2>/dev/null)" == gen-wifi \
+   && "$(stat -c%a "$nr/etc/netplan/wifi.yaml")" == 600 \
+   && "$(cat "$nr/etc/netplan/ethernet.yaml" 2>/dev/null)" == gen-eth ]]; then
+    ok "new layout installs generated/wifi.yaml"
+else
+    bad "new layout wifi/ethernet: $(cat "$nr/etc/netplan/"* 2>&1 | tr '\n' ' ')"
+fi
+if [[ "$(cat "$nr/etc/wireguard/wg0.conf" 2>/dev/null)" == gen-wg \
+   && -L "$nr/etc/systemd/system/multi-user.target.wants/wg-quick@wg0.service" ]]; then
+    ok "new layout installs ~/.config/thinfloe/wg0.conf"
+else
+    bad "new layout wg0.conf: $(cat "$nr/etc/wireguard/wg0.conf" 2>&1)"
+fi
+
+nr=$(mknet ln-leg); install_local_network "$nr" "" "$S_LEG"
+[[ "$(cat "$nr/etc/netplan/wifi.yaml" 2>/dev/null)" == old-wifi ]] \
+    && ok "legacy layout installs ~/wifi.yaml" || bad "legacy layout wifi.yaml"
+[[ "$(cat "$nr/etc/wireguard/wg0.conf" 2>/dev/null)" == old-wg ]] \
+    && ok "legacy layout installs ~/wg0.conf" || bad "legacy layout wg0.conf"
+
+nr=$(mknet ln-netboot); install_local_network "$nr" "http://boot.example/ramroot.sqsh" "$S_NEW"
+[[ "$(cat "$nr/etc/netplan/wifi.yaml" 2>/dev/null)" == gen-wifi && ! -e "$nr/etc/netplan/ethernet.yaml" ]] \
+    && ok "netboot skips generated/ethernet.yaml but installs generated/wifi.yaml" \
+    || bad "netboot, new layout"
+
+TPL='device name of your wifi card'
+nr=$(mknet ln-tpl-new); echo "$TPL" >"$nr/home/tfuser/.config/thinfloe/generated/wifi.yaml"
+install_local_network "$nr" "" "$S_NEW"
+nr2=$(mknet ln-tpl-leg); echo "$TPL" >"$nr2/home/tfuser/wifi.yaml"
+install_local_network "$nr2" "" "$S_LEG"
+if grep -qF "$TPL" "$nr/etc/netplan/wifi.yaml" 2>/dev/null && [[ ! -e "$nr2/etc/netplan/wifi.yaml" ]]; then
+    ok "the template check applies to the legacy layout only"
+else
+    bad "template check: new installed=$([[ -e $nr/etc/netplan/wifi.yaml ]] && echo y || echo n), legacy installed=$([[ -e $nr2/etc/netplan/wifi.yaml ]] && echo y || echo n)"
+fi
+
+nr=$(mknet ln-nostate); install_local_network "$nr" "" "$WORK/no-such-state"
+[[ "$(cat "$nr/etc/netplan/wifi.yaml" 2>/dev/null)" == gen-wifi ]] \
+    && ok "a missing home-layout file means the new layout" || bad "missing state file"
+
 
 if [[ $fail -ne 0 ]]; then
     echo ""
