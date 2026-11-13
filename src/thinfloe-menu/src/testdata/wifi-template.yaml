@@ -1,0 +1,10 @@
+network:
+    version: 2
+    renderer: networkd
+    wifis:
+        # try "iw dev <iface> scan" to figure out the name
+        "device name of your wifi card":
+            dhcp4: true
+            access-points:
+                "ssid of your wifi":
+                    password: "some-nasty-password"

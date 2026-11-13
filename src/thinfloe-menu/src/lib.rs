@@ -7,6 +7,7 @@ pub mod battery;
 pub mod bounded;
 pub mod brand;
 pub mod config;
+pub mod convert;
 pub mod damage;
 pub mod density;
 pub mod desktop;
