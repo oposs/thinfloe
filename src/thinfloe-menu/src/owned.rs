@@ -85,6 +85,9 @@ fn replace(path: &Path, fresh: bool, fill: impl FnOnce(&mut fs::File) -> io::Res
         if fresh {
             rename_noreplace(&tmp, path)
         } else {
+            // Over the menu's own file. A hand file swapped in after the
+            // caller's check is replaced: RENAME_NOREPLACE cannot help when
+            // a file must be replaced, and the window stays open.
             fs::rename(&tmp, path)
         }
     })();
@@ -110,7 +113,8 @@ pub fn read_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
 /// Undo a write of the menu: `path` gets the bytes `old` back, or, when
 /// it had none, the menu's file is removed. Only the menu's own file is
 /// replaced, or an empty place filled: a link or a file written by hand
-/// that appeared meanwhile is refused with `PermissionDenied` and kept.
+/// found there is refused with `PermissionDenied` and kept, and one that
+/// appears in an empty place before the rename with `AlreadyExists`.
 pub fn put_back(path: &Path, old: Option<&[u8]>) -> io::Result<()> {
     let Some(bytes) = old else {
         return remove(path);
@@ -188,7 +192,9 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         return Ok(());
     }
     let e = io::Error::last_os_error();
-    if e.raw_os_error() != Some(libc::EINVAL) {
+    // EINVAL: the file system lacks the flag; ENOSYS: the kernel lacks
+    // renameat2.
+    if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
         return Err(e);
     }
     fs::hard_link(from, to)?;

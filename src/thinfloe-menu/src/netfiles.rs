@@ -293,14 +293,20 @@ fn flag(y: &Yaml) -> Option<bool> {
 }
 
 /// The file says another netplan version than 2, or another renderer than
-/// the image's networkd. Rewritten by the menu it would say `version: 2`
+/// the image's networkd, for the whole file or one definition. Rewritten by the menu it would say `version: 2`
 /// and `renderer: networkd` and so do something else; it counts as by hand
 /// even under the menu's header. netplan takes both as these when they are
 /// left out.
 fn foreign_format(network: Option<&Hash>) -> bool {
+    let other_renderer = |h: &Hash| get(h, "renderer").is_some_and(|r| text_of(r).as_deref() != Some("networkd"));
     network.is_some_and(|n| {
         get(n, "version").is_some_and(|v| text_of(v).as_deref() != Some("2"))
-            || get(n, "renderer").is_some_and(|r| text_of(r).as_deref() != Some("networkd"))
+            || other_renderer(n)
+            // netplan takes a renderer on one definition too.
+            || ["wifis", "ethernets"].iter().any(|kind| {
+                get_hash(Some(n), kind)
+                    .is_some_and(|defs| defs.values().filter_map(Yaml::as_hash).any(other_renderer))
+            })
     })
 }
 
@@ -2655,6 +2661,19 @@ exit 0
                 assert_eq!(e.state, FileState::Hand, "{wired}");
                 assert!(!e.manageable, "{wired}");
             }
+        }
+        // A renderer on the definition itself counts the same.
+        for header in ["", HEADER] {
+            let wifi = format!(
+                "{header}\nnetwork:\n  version: 2\n  wifis:\n    wlp58s0:\n      renderer: NetworkManager\n      dhcp4: true\n      access-points:\n        home: {{}}\n"
+            );
+            let w = parse_wifi(Some(&wifi));
+            assert_eq!((w.state, w.manageable), (FileState::Hand, false), "{wifi}");
+            let wired = format!(
+                "{header}\nnetwork:\n  version: 2\n  ethernets:\n    eth:\n      renderer: NetworkManager\n      dhcp4: true\n"
+            );
+            let e = parse_wired(Some(&wired));
+            assert_eq!((e.state, e.manageable), (FileState::Hand, false), "{wired}");
         }
         // netplan's defaults, written or left out, are the menu's.
         for head in ["  version: 2\n  renderer: networkd\n", "  version: 2\n", ""] {
