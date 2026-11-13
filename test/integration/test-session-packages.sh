@@ -392,6 +392,18 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/acct" "$SQSH" \
         fail=1
     fi
     if grep -q '^tfuser:x:1001:' "$DPKG_TMP/acct/etc/group"; then
+# /etc/resolv.conf ships as the link to the systemd-resolved stub, so names
+# resolve from the start of the boot. The build used to print "mv: cannot move
+# '/etc/resolv.conf'" and ship no resolv.conf at all; see the Dockerfile.
+resolv=$(unsquashfs -lls "$SQSH" etc/resolv.conf 2>/dev/null | grep -E '/etc/resolv\.conf( |$)')
+if [[ $resolv == l*" -> ../run/systemd/resolve/stub-resolv.conf" ]]; then
+    echo "ok   - /etc/resolv.conf links to the systemd-resolved stub"
+else
+    echo "FAIL - /etc/resolv.conf is not a link to ../run/systemd/resolve/stub-resolv.conf: ${resolv:-missing}"
+    fail=1
+fi
+absent "resolv.conf backup of the build" 'etc/\.resolv\.conf\.systemd-resolved\.bak$'
+
         echo "ok   - group tfuser is gid 1001"
     else
         echo "FAIL - group tfuser is not gid 1001"

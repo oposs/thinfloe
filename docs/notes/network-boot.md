@@ -22,6 +22,13 @@ the default route, i.e. the one whose lease was applied, not from the first
 `/sys/class/net` entry. A host name in the ramroot URL resolves through the
 resolved stub. Cost: networkd pulls in `kernel-network-modules` (every NIC
 driver), and the initrd grew from 165.6 MB to 179.3 MB.
+The running system's `/etc/resolv.conf` is the image's link to
+`../run/systemd/resolve/stub-resolv.conf`. The Dockerfile installs
+`systemd-resolved` in a `RUN --network=none`, where podman mounts no
+resolv.conf of its own, so the package's postinst can make the link (in a
+networked RUN it printed "mv: cannot move '/etc/resolv.conf'"), and
+`export-rootfs.sh` refuses an image without it. Guard:
+`test-session-packages.sh`.
 `dracut-network` stays: it ships the `systemd-networkd` and `url-lib` dracut
 modules. `isc-dhcp-client` is not installed: nothing in the image runs
 `dhclient` (the running system's netplan renders for networkd), and nothing

@@ -19,6 +19,7 @@
 - After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
 - OxuLnk no longer shows its keyboard grab as "not working" and no longer logs "keyboard grab unavailable reason=compositor does not support shortcut inhibition": the session now lets a window switch the desktop's key shortcuts off.
 - The image no longer contains the build and test scripts in `/scripts`.
+- The image now ships `/etc/resolv.conf` as the link to systemd-resolved. Before, the link appeared only when `un-dockerize.service` ran during the boot, so a program that looked up a host name earlier found no resolver.
 
 ## 4.2.0 - 2026-11-11
 
