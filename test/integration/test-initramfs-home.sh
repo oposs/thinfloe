@@ -1407,6 +1407,32 @@ else
     bad "new-layout archive was touched by the 3.x migration"
 fi
 
+# A listing that tar cut short (non-zero exit) is not trusted: the layout is
+# decided from the disk, and the marker on disk is never removed.
+tar() {   # -tzf: a cut-short listing that lost the marker, exit 1
+    if [[ "${1:-}" == -tzf ]]; then
+        command tar "$@" | grep -v home-version
+        return 1
+    fi
+    command tar "$@"
+}
+d="$WORK/hl-trunc-marker"; mkdefault "$d"; mkdir -p "$d/src/.config/thinfloe" "$d/newroot/home/tfuser/.config/thinfloe"
+echo 2 >"$d/newroot/home/tfuser/.config/thinfloe/home-version"
+echo 2 >"$d/src/.config/thinfloe/home-version"
+command tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" 2>/dev/null
+if [[ "$(hl "$d/state")" == new && -f "$d/newroot/home/tfuser/.config/thinfloe/home-version" ]]; then
+    ok "a truncated listing with the marker on disk: new, marker kept"
+else
+    bad "truncated listing, marker on disk: layout '$(hl "$d/state")'"
+fi
+d="$WORK/hl-trunc-nomarker"; mkdefault "$d"; mkdir -p "$d/src"; echo x >"$d/src/f"
+command tar -C "$d/src" -czf "$d/efi/home.tar.gz" .
+restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh" 2>/dev/null
+[[ "$(hl "$d/state")" == legacy ]] && ok "a truncated listing without the marker on disk: legacy" \
+    || bad "truncated listing, no marker: layout '$(hl "$d/state")'"
+unset -f tar
+
 # install_local_network by layout
 mkst() { mkdir -p "$WORK/$1"; echo "$2" >"$WORK/$1/home-layout"; echo "$WORK/$1"; }
 mknet() {  # mknet <name>: newroot whose home holds both layouts' files

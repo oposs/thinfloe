@@ -434,8 +434,14 @@ tf_restore_home_from_file() {
         warn "thinfloe: $_drhf_archive is not a usable tar archive"
         return 2
     fi
-    # tf_record_home_layout reads the listing; it stays in a global.
-    _TF_HOME_LIST="$_drhf_list"
+    # tf_record_home_layout reads the listing; it stays in a global. A listing
+    # tar cut short (non-zero exit) may lack the marker, so it is not kept;
+    # the flag tells tf_record_home_layout to decide from the disk.
+    if [ "$_drhf_list_rc" -eq 0 ]; then
+        _TF_HOME_LIST="$_drhf_list"
+    else
+        _TF_HOME_LIST_PARTIAL=1
+    fi
 
     # tar's default as root is --same-owner, and that is REQUIRED here, not
     # incidental. thinfloe-save-home writes the archive as tfuser, so members
@@ -544,6 +550,8 @@ TF_HOME_LAYOUT_MARKER=".config/thinfloe/home-version"
 # The tar listing of the last archive tf_restore_home_from_file accepted;
 # restore_home empties it before each restore.
 _TF_HOME_LIST=""
+# Set when that listing was incomplete and so is not kept in _TF_HOME_LIST.
+_TF_HOME_LIST_PARTIAL=""
 
 # _tf_archive_lists <listing> <name>
 #
@@ -678,7 +686,7 @@ tf_migrate_home_names() {
     done
 
     # Into the existing file when there is one, so it keeps the owner the
-    # image gave it (tfuser); the initramfs has no chown.
+    # image gave it (tfuser).
     # 2>/dev/null first: it must be in place before the redirection that fails.
     if ! echo "$TF_HOME_VERSION" 2>/dev/null > "$_tmh_home/$TF_HOME_VERSION_FILE"; then
         warn "thinfloe: could not write ~/$TF_HOME_VERSION_FILE, the next boot migrates again"
@@ -693,20 +701,24 @@ tf_migrate_home_names() {
 # list TF_HOME_LAYOUT_MARKER (a 4.x home), "new" otherwise: a marked archive,
 # no archive, or no listing at all. The image ships the marker in the default
 # home, so for a legacy archive it is removed again; the menu writes it after
-# migrating. The file belongs to tfuser (1001) because the menu rewrites it in
+# migrating. With a listing cut short the disk decides instead (marker present:
+# new) and nothing is removed. The file belongs to tfuser (1001) because the menu rewrites it in
 # place; the state directory itself stays root's. Always returns 0.
 tf_record_home_layout() {
     _rhl_home="$1"
     _rhl_state="$2"
     _rhl_layout=new
 
-    if [ -n "$_TF_HOME_LIST" ] \
+    if [ -n "$_TF_HOME_LIST_PARTIAL" ]; then
+        # The listing is incomplete: decide from the disk, remove nothing.
+        [ -e "$_rhl_home/$TF_HOME_LAYOUT_MARKER" ] || _rhl_layout=legacy
+    elif [ -n "$_TF_HOME_LIST" ] \
        && ! _tf_archive_lists "$_TF_HOME_LIST" "$TF_HOME_LAYOUT_MARKER"; then
         _rhl_layout=legacy
         rm -f "$_rhl_home/$TF_HOME_LAYOUT_MARKER" 2>/dev/null || true
     fi
 
-    if ! echo "$_rhl_layout" > "$_rhl_state/home-layout" 2>/dev/null; then
+    if ! echo "$_rhl_layout" 2>/dev/null > "$_rhl_state/home-layout"; then
         warn "thinfloe: could not record the home layout"
     elif ! chown 1001:1001 "$_rhl_state/home-layout" 2>/dev/null; then
         warn "thinfloe: could not give home-layout to tfuser"
@@ -756,6 +768,7 @@ restore_home() {
     _rh_home="$_rh_newroot/home/tfuser"
     _TF_LINK_WARNED=""
     _TF_HOME_LIST=""
+    _TF_HOME_LIST_PARTIAL=""
     tf_status "Restoring the home directory"
 
     if is_remote_url "$_rh_ramroot"; then
