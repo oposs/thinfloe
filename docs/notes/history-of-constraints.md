@@ -287,9 +287,9 @@ Two real instances of this bug have shipped in this repo:
   cycle and its fix.
 - `un-dockerize.service` was ordered `Before=systemd-hwdb-update.service`
   (part of `sysinit.target`). systemd broke the cycle by deleting the hwdb
-  update job on every boot; nothing `un-dockerize.service` does (resolv.conf,
-  `/etc/hosts`, `systemd-resolved`) has anything to do with the hardware
-  database. The `Before=` was vestigial, left over from commented-out
+  update job on every boot; nothing `un-dockerize.service` did (resolv.conf,
+  `/etc/hosts`, `systemd-resolved`; since 4.3 only `/etc/hosts`) had
+  anything to do with the hardware database. The `Before=` was vestigial, left over from commented-out
   `depmod`/`modprobe` lines. It has been removed. Because this image's
   `usr/lib/udev/hwdb.bin` ships prebuilt (confirmed via `unsquashfs -l
   ramroot.sqsh | grep hwdb.bin`), `systemd-hwdb-update.service` is now also
