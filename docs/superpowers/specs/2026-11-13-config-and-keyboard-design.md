@@ -221,7 +221,12 @@ Steps:
    - `~/.config/thinfloe/screen`, `~/.config/thinfloe/status`,
      `~/.config/kanshi/config`, `~/wifi.yaml`, `~/ethernet.yaml`: through the
      menu's existing parsers. A hand-written file the parser does not fully
-     understand is converted as far as the parser goes and reported.
+     understand (an EAP WiFi entry, a hand-written kanshi config) is kept
+     verbatim in `config.toml` (`kept_wifi`, `kept_wired`, `[monitors] kept`),
+     written under the generated header and shown read-only with "Let the
+     menu manage it", and reported. Converting it partly would drop WiFi
+     passwords (`netfiles.rs:381-389`) and take the machine offline. (Plan
+     review, 2026-11-13.)
    - `~/.thinfloe-password`, `~/.thinfloe-ssh-host-keys/`, `~/wg0.conf`,
      `~/.save-home-exclude`: copied unchanged to their new paths, modes kept.
      Their attic copies join `IDENTITY_EXCLUDES`, so a fresh install does not
