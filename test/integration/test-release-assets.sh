@@ -123,6 +123,40 @@ else
     bad "an old copy of vmlinuz was not replaced: $(tail -n1 "$WORK/run.out")"
 fi
 
+# A directory with an asset's name: ln -f put the asset inside it.
+make_artifacts; mkdir -p "$OUT/vmlinuz"
+if ! run 4.3.0 && grep -qF "$OUT/vmlinuz" "$WORK/run.out" \
+        && [[ -z $(find "$OUT" -type f) ]]; then
+    ok "release-assets.sh refuses a directory named like an asset in the out directory"
+else
+    bad "release-assets.sh took a directory named vmlinuz in the out directory: $(tail -n1 "$WORK/run.out")"
+fi
+# ln across file systems: say what to do, not only ln's own message.
+make_artifacts
+mkdir -p "$WORK/xdev"
+cat >"$WORK/xdev/ln" <<'STUB'
+#!/bin/bash
+echo "ln: failed to create hard link: Invalid cross-device link" >&2
+exit 1
+STUB
+chmod +x "$WORK/xdev/ln"
+if ! PATH="$WORK/xdev:$PATH" bash "$SCRIPT" "$ART" "$OUT" 4.3.0 >"$WORK/run.out" 2>&1 \
+        && grep -qF "on the same file system as $ART" "$WORK/run.out"; then
+    ok "a failed hard link says that the out directory must be on the artifacts' file system"
+else
+    bad "a failed hard link gave only: $(tail -n1 "$WORK/run.out")"
+fi
+# A symlinked artifacts directory (the worktrees have one) is accepted.
+make_artifacts
+mv "$ART" "$WORK/artifacts-real"; ln -s "$WORK/artifacts-real" "$ART"
+if run 4.3.0 && (cd "$OUT" && sha256sum -c SHA256SUMS >/dev/null 2>&1) \
+        && [[ $OUT/vmlinuz -ef $WORK/artifacts-real/rootfs/vmlinuz ]]; then
+    ok "a symlinked artifacts directory is accepted"
+else
+    bad "a symlinked artifacts directory was refused: $(tail -n1 "$WORK/run.out")"
+fi
+rm "$ART"; mv "$WORK/artifacts-real" "$ART"
+
 make_artifacts
 if ! bash "$SCRIPT" "$ART" >"$WORK/run.out" 2>&1 && grep -qF 'Usage:' "$WORK/run.out"; then
     ok "release-assets.sh prints its usage without arguments"
@@ -173,6 +207,16 @@ if ! mk release-assets TF_VERSION=4.2.0-dev+abc >"$WORK/make.out" 2>&1 \
 else
     bad "make release-assets did not refuse a dev TF_VERSION: $(tail -n1 "$WORK/make.out")"
 fi
+fill_tree 4.2.0
+rm -rf "$WORK/mtree-artifacts"; mv "$MTREE/artifacts" "$WORK/mtree-artifacts"
+ln -s "$WORK/mtree-artifacts" "$MTREE/artifacts"
+if mk release-assets TF_VERSION=4.2.0 >"$WORK/make.out" 2>&1 \
+        && (cd "$WORK/mtree-artifacts/release" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+    ok "make release-assets works with a symlinked artifacts directory"
+else
+    bad "make release-assets failed with a symlinked artifacts directory: $(tail -n3 "$WORK/make.out")"
+fi
+rm "$MTREE/artifacts"
 fill_tree 4.1.0
 if ! mk release-assets TF_VERSION=4.2.0 >"$WORK/make.out" 2>&1 \
         && grep -qF 'rootfs/version is not 4.2.0' "$WORK/make.out"; then
