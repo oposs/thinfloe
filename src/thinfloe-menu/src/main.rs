@@ -122,6 +122,27 @@ struct Built {
     notes: Vec<String>,
 }
 
+/// A home still in the old layout is only read, whatever was asked.
+fn open_mode(requested: OpenMode, layout: migrate::HomeLayout) -> OpenMode {
+    if layout == migrate::HomeLayout::Legacy {
+        OpenMode::ReadOnly
+    } else {
+        requested
+    }
+}
+
+/// Open the settings store as the home layout in `state_dir` allows.
+fn open_settings(
+    state_dir: &Path,
+    dir: ConfigDir,
+    inputs: Inputs,
+    requested: OpenMode,
+    now: i64,
+) -> (store::Opened, migrate::HomeLayout) {
+    let layout = migrate::home_layout(state_dir);
+    (store::open(dir, inputs, open_mode(requested, layout), now), layout)
+}
+
 /// `marker` remembers the add-ons offered a retry; `--check` passes one in
 /// memory, so that listing the tiles asks nothing away. `mode` is how the
 /// settings store is opened: the one open of the whole run. A home still in
@@ -130,14 +151,8 @@ struct Built {
 fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     let shipped = env_path("TF_MENU_SHIPPED_DIR", "/etc/thinfloe/menu");
     let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
-    let layout = migrate::home_layout(&state_dir);
     let session = mode == OpenMode::Session;
-    let mode = if layout == migrate::HomeLayout::Legacy {
-        OpenMode::ReadOnly
-    } else {
-        mode
-    };
-    let opened = store::open(ConfigDir::from_env(), config_inputs(), mode, epoch_now());
+    let (opened, layout) = open_settings(&state_dir, ConfigDir::from_env(), config_inputs(), mode, epoch_now());
     let (screen_tab, status_layout) = (
         screentab::from_config(&opened.store.cfg.screen),
         status::layout_from(&opened.store.cfg.status),
@@ -420,6 +435,59 @@ mod tests {
         let d = TestDir::new("main", "usb-boot");
         assert!(!usb_boot(&d));
         assert!(!usb_boot(&d.join("missing")));
+    }
+
+    fn settings_in(layout_word: Option<&str>, tag: &str) -> (TestDir, TestDir, store::Opened) {
+        let state = TestDir::new("main", &format!("{tag}-state"));
+        let cfg = TestDir::new("main", &format!("{tag}-cfg"));
+        if let Some(w) = layout_word {
+            std::fs::write(state.join("home-layout"), w).unwrap();
+        }
+        let (opened, _) = open_settings(
+            &state,
+            ConfigDir {
+                root: cfg.to_path_buf(),
+            },
+            Inputs::default(),
+            OpenMode::Session,
+            0,
+        );
+        (state, cfg, opened)
+    }
+
+    #[test]
+    fn a_legacy_home_opens_read_only_and_leaves_the_directory_empty() {
+        let (_s, cfg, mut opened) = settings_in(Some("legacy\n"), "legacy");
+        assert_eq!(
+            opened
+                .store
+                .update(thinfloe_menu::generated::Table::Screen, |c| c.screen.idle_timeout = 60),
+            Err("The settings are read-only.".to_string())
+        );
+        assert_eq!(opened.store.cfg.screen.idle_timeout, screentab::DEFAULT_IDLE);
+        assert_eq!(std::fs::read_dir(&*cfg).unwrap().count(), 0, "nothing was created");
+    }
+
+    #[test]
+    fn a_new_or_unrecorded_home_opens_as_a_session() {
+        for (word, tag) in [(Some("new\n"), "new"), (None, "none"), (Some("lega"), "torn")] {
+            let (_s, cfg, mut opened) = settings_in(word, tag);
+            assert!(cfg.join("config.toml").exists(), "{tag}: config.toml is made");
+            opened
+                .store
+                .update(thinfloe_menu::generated::Table::Screen, |c| c.screen.idle_timeout = 60)
+                .unwrap();
+            assert!(cfg.join("generated/screen").exists(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn open_mode_only_lowers_a_legacy_home() {
+        use migrate::HomeLayout::{Legacy, New};
+        assert_eq!(open_mode(OpenMode::Session, Legacy), OpenMode::ReadOnly);
+        assert_eq!(open_mode(OpenMode::ReadOnly, Legacy), OpenMode::ReadOnly);
+        assert_eq!(open_mode(OpenMode::Session, New), OpenMode::Session);
+        assert_eq!(open_mode(OpenMode::ReadOnly, New), OpenMode::ReadOnly);
     }
 
     fn tile(addon: bool, problem: Option<&str>) -> tiles::Tile {
