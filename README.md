@@ -1,5 +1,8 @@
 # ThinFloe
 
+[![CI](https://github.com/oposs/thinfloe/actions/workflows/ci.yml/badge.svg)](https://github.com/oposs/thinfloe/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/oposs/thinfloe)](https://github.com/oposs/thinfloe/releases/latest)
+
 ThinFloe boots a thin client from a USB stick or the network into RAM. Like an ice floe it carries you for a while and is gone at power-off, except for the saved home. Releases before 4.0 were called dbrrg (Docker-Based RamRoot Generator).
 
 Modern diskless Linux system using SquashFS + OverlayFS + ZRAM + Dracut.
@@ -7,6 +10,16 @@ Modern diskless Linux system using SquashFS + OverlayFS + ZRAM + Dracut.
 Features A/B firmware updates with automatic fallback support.
 
 ![The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Settings, Restart and Power off; below them the status area with keyboard and mouse batteries, a network traffic graph, network details, temperatures, CPU, memory, uptime and model, and the clock; at the bottom the log with add-on checks](docs/screenshot-menu.png)
+
+## Install
+
+Download `thinfloe-usb.img.zst` from the [latest release](https://github.com/oposs/thinfloe/releases/latest) and write it to a USB stick:
+
+```bash
+zstd -dc thinfloe-usb.img.zst | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+Run `lsblk` before and after plugging in the stick; the new disk is `/dev/sdX`.
 
 ## Quick Start
 
@@ -114,7 +127,7 @@ dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=f
 
 ### Upgrading Firmware
 
-Use the interactive `thinfloe-upgrade` script on a running system:
+Use the interactive `thinfloe-upgrade` script on a running system. It downloads the newest release from GitHub:
 
 ```bash
 sudo thinfloe-upgrade

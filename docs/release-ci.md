@@ -116,11 +116,13 @@ target. Each item exists because the build assumes the development host.
 
 1. Replace the `artifacts` symlink with a directory. The repository commits
    `artifacts` as a link to `/home/oetiker/scratch/dbrrg-artifacts`, which
-   does not exist on the runner:
+   does not exist on the runner. `skip-worktree` keeps the replaced link out
+   of `git status`, which would otherwise give the dev version `.dirty`:
 
    ```sh
    if [ -L artifacts ]; then rm artifacts; fi
    mkdir -p artifacts
+   git update-index --skip-worktree artifacts
    ```
 
 2. Set `TMPDIR`. `run-qemu-write-smoke.sh` and several integration tests
@@ -184,4 +186,7 @@ target. Each item exists because the build assumes the development host.
    ```
 
 Every make target runs with `MEMCAP=`, as in the spike. No disk cleanup is
-needed.
+needed. `release-build-local.yml` passes `TF_VERSION` to every make call, not
+only to `make image`: a call without it computes a dev version, exports the
+rootfs again as a dev build, and the smoke tests and assets would carry that
+one.
