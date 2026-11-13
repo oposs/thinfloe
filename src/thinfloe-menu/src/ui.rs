@@ -6096,6 +6096,42 @@ mod tests {
     fn show_the_menu_here_and_apply_report_their_clicks() {
         let menu = monitor_settings(two_monitors());
         assert_eq!(mon_clicks(&menu, &["Show the menu here"]), [mon_ev(MonEvent::MenuHere)]);
+        let mut mon = two_monitors();
+        mon.event(MonEvent::MenuHere, Instant::now());
+        let menu = monitor_settings(mon);
+        assert_eq!(mon_clicks(&menu, &["Apply"]), [mon_ev(MonEvent::Apply)]);
+    }
+
+    #[test]
+    fn apply_needs_a_change_and_a_position_change_is_one() {
+        let menu = monitor_settings(two_monitors());
+        // Nothing changed yet: Apply is off.
+        assert_eq!(mon_clicks(&menu, &["Apply"]), [None]);
+        // The Position row: the side select shows where the selected
+        // monitor sits; its list offers the other sides.
+        let texts = mon_texts(&menu);
+        let current = ["Left of", "Right of", "Above", "Below"]
+            .into_iter()
+            .find(|l| has(&texts, l))
+            .expect("a side in the Position row");
+        let other = if current == "Above" { "Below" } else { "Above" };
+        let events = mon_clicks(&menu, &[current, other]);
+        assert_eq!(events[0], None, "opening the list is no change");
+        let Some(Some(UiEvent::Settings(SettingsEvent::Monitors(MonEvent::Place(side, to))))) = events.get(1).cloned()
+        else {
+            panic!("no Place in {events:?}");
+        };
+        assert_eq!(
+            side,
+            if other == "Above" {
+                crate::kanshi::Side::Above
+            } else {
+                crate::kanshi::Side::Below
+            }
+        );
+        let mut mon = two_monitors();
+        mon.event(MonEvent::Place(side, to), Instant::now());
+        let menu = monitor_settings(mon);
         assert_eq!(mon_clicks(&menu, &["Apply"]), [mon_ev(MonEvent::Apply)]);
     }
 

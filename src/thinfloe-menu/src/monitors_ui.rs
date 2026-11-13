@@ -194,8 +194,9 @@ pub fn monitors_footer(ui: &mut Ui, mon: &MonTab) -> Option<MonEvent> {
         if mon.thinlinc_note() {
             muted(ui, &t, THINLINC_NOTE);
         }
-        // A draft with every monitor off is not offered.
-        let can = mon.editable() && !mon.busy() && layout.outputs.iter().any(|o| o.enabled);
+        // Neither a draft without a change nor one with every monitor off
+        // is offered.
+        let can = mon.editable() && !mon.busy() && mon.changed() && layout.outputs.iter().any(|o| o.enabled);
         if ui.add_enabled(can, Button::new("Apply")).clicked() {
             event = Some(MonEvent::Apply);
         }
