@@ -103,7 +103,9 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
 
 ## Monitor arrangement
 
-  **Monitor arrangement** (Settings → Screen). The menu reads the monitors
+  **Monitor arrangement** (Settings → Screen). Apply is offered once the
+  arrangement on the tab differs from the one it was made from (`changed`
+  in `monitors.rs`); a Keep or a revert starts it anew. The menu reads the monitors
   through `zwlr_output_manager_v1` and never sets them. It writes
   `~/.config/kanshi/config` (an owned file with a header line; a hand-written
   one is shown read-only until "Let the menu manage it", which keeps it as

@@ -96,6 +96,9 @@ pub struct MonTab {
     pending: Option<Vec<Profile>>,
     /// The arrangement on screen in the tab, for the connected monitors.
     draft: Option<Profile>,
+    /// `draft` as `rebuild` made it, before any edit: Apply is offered
+    /// only for a draft that differs.
+    base: Option<Profile>,
     /// Sorted criteria of the monitors `draft` was made for.
     draft_for: Vec<String>,
     selected: Option<String>,
@@ -116,6 +119,7 @@ impl Default for MonTab {
             profiles: Vec::new(),
             pending: None,
             draft: None,
+            base: None,
             draft_for: Vec::new(),
             selected: None,
             error: None,
@@ -502,6 +506,7 @@ impl MonTab {
         if !keep {
             self.selected = draft.outputs.first().map(|o| o.criteria.clone());
         }
+        self.base = Some(draft.clone());
         self.draft = Some(draft);
         self.draft_for = self.connected();
     }
@@ -624,6 +629,11 @@ impl MonTab {
     }
 
     /// Criteria of the monitor the arrangement in the tab puts the menu on.
+    /// The draft differs from the arrangement it was made from.
+    pub fn changed(&self) -> bool {
+        self.draft != self.base
+    }
+
     pub fn menu_choice(&self) -> Option<&str> {
         self.draft.as_ref()?.menu_output.as_deref()
     }
