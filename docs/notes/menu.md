@@ -177,7 +177,12 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `wifis` key (the file the menu writes with no adapter or no networks) is
   manageable, with no device and no networks; a `wifis` key must hold
   exactly one definition. A hand file without WiFi is so offered for
-  take-over, which writes the menu's file without WiFi. On 1080p a full tab scrolls; every
+  take-over, which writes the menu's file without WiFi. A file with another
+  `network.version` than 2 or another `renderer` than `networkd` counts as
+  by hand, under the menu's header too, and is not offered for take-over:
+  the menu would rewrite it as version 2 for networkd (netplan's defaults,
+  so either key may be left out). A `~/wifi.yaml` with more than three DNS
+  servers is not manageable, as the wired file. On 1080p a full tab scrolls; every
   control scrolls into reach above the pinned Apply. Guards: the `netfiles`
   and `network` tests, `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
