@@ -390,7 +390,8 @@ fn parse_output(t: &[String], line: &str) -> Result<OutputSet, String> {
 /// are not read; they follow from the place lines.
 pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
     let mut lines = text.lines();
-    if lines.next() != Some(crate::owned::HEADER) {
+    let first = lines.next();
+    if first != Some(crate::owned::HEADER) && first != Some(crate::generated::HEADER) {
         return Err("Not a file the menu wrote.".into());
     }
     let mut profiles = Vec::new();
@@ -705,6 +706,12 @@ mod tests {
     #[test]
     fn parse_round_trips_render() {
         let text = format!("{}\n\n{}", crate::owned::HEADER, render(&sample()));
+        assert_eq!(parse(&text).unwrap(), sample());
+    }
+
+    #[test]
+    fn parse_reads_the_generated_header_too() {
+        let text = format!("{}\n\n{}", crate::generated::HEADER, render(&sample()));
         assert_eq!(parse(&text).unwrap(), sample());
     }
 

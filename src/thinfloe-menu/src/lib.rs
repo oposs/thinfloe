@@ -2,6 +2,7 @@
 
 pub mod addons;
 pub mod app;
+pub mod atomic;
 pub mod battery;
 pub mod bounded;
 pub mod brand;
@@ -10,6 +11,7 @@ pub mod damage;
 pub mod density;
 pub mod desktop;
 pub mod drives;
+pub mod generated;
 pub mod hardware;
 pub mod header;
 pub mod heads;
