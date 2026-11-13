@@ -50,6 +50,14 @@ class TestProgress(unittest.TestCase):
         out = io.StringIO()
         return ui.Progress(out, batch, interval), out
 
+    def test_touched_is_one_line_in_batch_and_silent_over_ssh(self):
+        p, out = self.make(True)
+        p.touched()
+        self.assertEqual(out.getvalue(), "@touched\n")
+        p, out = self.make(False)
+        p.touched()
+        self.assertEqual(out.getvalue(), "")
+
     def test_batch_lines(self):
         p, out = self.make(True, 0)
         p.step("write", "Writing")
@@ -1175,6 +1183,20 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("@result failed the download failed", out)
         self.assertEqual(Path(self.dev).read_bytes(), before)
+
+    def test_touched_comes_once_with_the_first_byte(self):
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 0, out)
+        marks = [l for l in out.splitlines()
+                 if l in ("@step write Downloading and writing", "@touched", "@done write")]
+        self.assertEqual(marks, ["@step write Downloading and writing", "@touched",
+                                 "@done write"])
+
+    def test_no_touched_before_the_first_byte(self):
+        self.patches["stream_image"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertNotIn("@touched", out.splitlines())
 
     def test_a_failure_before_the_first_byte_leaves_the_stick(self):
         before = Path(self.dev).read_bytes()

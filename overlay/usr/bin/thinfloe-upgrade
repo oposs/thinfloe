@@ -42,7 +42,8 @@ of its own and cancels it with SIGTERM to that group:
       used as given; its files are checked against SHA256SUMS, else
       <name>.sha256, else logged as not checked.
       stdout carries @step <id> <text>, @progress <done> <total|->,
-      @done <id> and at most one @result ok|failed [<reason>].
+      @done <id>, @touched (once, right before a fresh install writes its
+      first byte) and at most one @result ok|failed [<reason>].
       Exit 0 done, 1 failed, 2 refused or misuse (nothing was written),
       130 cancelled.
 
@@ -52,7 +53,9 @@ What the menu must know about `write`:
   - @result ok may carry no reason.
   - Exit 130 after `@done write` or `@done verify` of a fresh install can
     leave a good stick that was not wiped: the cancel came after the write
-    was checked. Before that point a cancel wipes the stick.
+    was checked. Between @touched and that point a cancel or a failure
+    wipes the stick; before @touched the stick is as it was.
+  - An older menu logs @touched as program output; nothing else changes.
   - A cancel during the upgrade's `switch` step is ignored: the switch is
     never cut halfway, and the job ends with @result ok (show "the cancel
     came too late").
@@ -169,6 +172,7 @@ class Progress:
       @step <id> <text>      a phase starts
       @progress <done> <total|->   bytes so far; "-" when the total is unknown
       @done <id>             the phase ended
+      @touched               a fresh install writes its first byte now
       @result ok|failed <reason>
     Newlines in text are replaced by spaces so one message stays one line.
 
@@ -247,6 +251,11 @@ class Progress:
         self._open = True
         if last:
             self._close_line()
+
+    def touched(self) -> None:
+        """The stick changes from here on (batch: @touched; SSH: nothing)."""
+        if self.batch:
+            self._emit("@touched\n")
 
     def done(self, id: str) -> None:
         if self.batch:
@@ -2214,9 +2223,10 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
                   expect_id: Optional[str] = None) -> FreshOutcome:
     """Write the image to a drive and finish the stick.
 
-    Used by both modes. A failure during write, checksum or verify leaves
-    a stick that may half-boot, so it is wiped. Once verify passed the
-    stick is good and later failures only fail the report.
+    Used by both modes. Before the first byte a failure or a cancel leaves
+    the stick as it was. After it, a failure during write, checksum or
+    verify leaves a stick that may half-boot, so it is wiped. Once verify
+    passed the stick is good and later failures only fail the report.
 
     The drive is opened once, with O_EXCL, before anything is fetched: the
     kernel answers EBUSY while a partition is mounted or the drive is held
@@ -2268,6 +2278,7 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
 
     def first_byte():
         writing[0] = True
+        progress.touched()
     try:
         progress.step("write", "Downloading and writing")
         # Before the first byte reaches the stick: a release without its
@@ -2295,7 +2306,8 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
                 progress.done("verify")
         except BaseException as e:
             # Anything that ends the write early (a closed stdout, a bug, a
-            # signal) leaves a half-written stick: wipe it, then report.
+            # signal) after its first byte leaves a half-written stick: wipe
+            # it, then report. Before the first byte there is nothing to wipe.
             # The wipe closes the fd and only then clears held[0]: a signal
             # before that leaves held[0] set, and the outer handler wipes.
             if writing[0]:

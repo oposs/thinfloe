@@ -1,5 +1,6 @@
 //! The progress lines `thinfloe-upgrade write` prints on stdout:
-//! `@step <id> <text>`, `@progress <done> <total|->`, `@done <id>` and
+//! `@step <id> <text>`, `@progress <done> <total|->`, `@done <id>`,
+//! `@touched` (the first byte goes to the stick) and
 //! `@result ok|failed <reason>`. Anything else is program output.
 
 /// Longest text or reason kept, in characters.
@@ -8,10 +9,24 @@ const ID_MAX: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
-    Step { id: String, text: String },
-    Progress { done: u64, total: Option<u64> },
-    Done { id: String },
-    Result { ok: bool, reason: String },
+    Step {
+        id: String,
+        text: String,
+    },
+    Progress {
+        done: u64,
+        total: Option<u64>,
+    },
+    Done {
+        id: String,
+    },
+    /// A fresh install changes the stick from here on; before it, a cancel
+    /// or a failure leaves the stick as it was.
+    Touched,
+    Result {
+        ok: bool,
+        reason: String,
+    },
 }
 
 fn valid_id(s: &str) -> bool {
@@ -56,6 +71,7 @@ pub fn parse(line: &str) -> Option<Msg> {
             Some(Msg::Progress { done, total })
         }
         "@done" => valid_id(rest).then(|| Msg::Done { id: rest.to_string() }),
+        "@touched" => rest.is_empty().then_some(Msg::Touched),
         "@result" => {
             let (word, reason) = match rest.split_once(' ') {
                 Some((w, r)) => (w, r),
@@ -106,6 +122,7 @@ mod tests {
     #[test]
     fn done_and_result() {
         assert_eq!(parse("@done verify"), Some(Msg::Done { id: "verify".into() }));
+        assert_eq!(parse("@touched"), Some(Msg::Touched));
         assert_eq!(
             parse("@result ok"),
             Some(Msg::Result {
@@ -133,6 +150,7 @@ mod tests {
             "@progress 18446744073709551616 -",
             "@done",
             "@bogus x",
+            "@touched now",
         ] {
             assert_eq!(parse(l), None, "{l}");
         }

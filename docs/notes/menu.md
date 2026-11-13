@@ -20,8 +20,10 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `src/thinfloe-menu/src/upgrade_ui.rs` from the state in `upgrade.rs`. It
   writes through `sudo -n thinfloe-upgrade write` and never sends SIGKILL to
   it. Restart, Power off and Log out wait for a running write ("Writing
-  SanDisk Cruzer"); on a fresh install the dialog says the stick will not
-  start until it is written again. After a successful write, a step the tool
+  SanDisk Cruzer"); on a fresh install that has written its first byte
+  (`@touched`) the dialog says the stick will not start until it is written
+  again; before that byte a cancel says "Cancelled before anything was
+  written. The stick is as it was." After a successful write, a step the tool
   skipped is left out and one it began without `@done` is drawn done.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
