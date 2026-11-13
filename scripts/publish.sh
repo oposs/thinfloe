@@ -54,6 +54,8 @@ fi
 # neither sent nor stored twice. 3.x reads no checksum; the .sha256 names
 # the old file for whoever verifies a download of it by hand.
 WORK_DIR="$REL/publish-work"
+# Its hard links stayed in the release directory after every run.
+trap 'rm -rf -- "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR"
 ln -f "$REL/thinfloe-usb.img.zst" "$WORK_DIR/thinfloe-usb.img.zst"
 ln -f "$REL/thinfloe-usb.img.zst" "$WORK_DIR/dbrrg-usb.img.zst"

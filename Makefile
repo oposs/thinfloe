@@ -22,6 +22,18 @@ IMAGE_DIR := $(ARTIFACT_DIR)/images
 # below the release and is offered it. `make ... TF_VERSION=X.Y.Z` builds
 # the release itself. Both are checked here, before anything is built, in
 # the same form export-rootfs.sh checks.
+# help and clean build nothing, so they need no version: `make help` with a
+# broken RELEASE, or outside git without TF_VERSION, stopped with the
+# version error.
+NO_VERSION_GOALS := help clean
+ifeq ($(MAKECMDGOALS),)
+NEEDS_VERSION := 1
+else ifneq ($(filter-out $(NO_VERSION_GOALS),$(MAKECMDGOALS)),)
+NEEDS_VERSION := 1
+endif
+# make -n and make -q only look: they must not write the stamp below.
+DRY_RUN := $(findstring n,$(firstword -$(MAKEFLAGS)))$(findstring q,$(firstword -$(MAKEFLAGS)))
+ifdef NEEDS_VERSION
 ifneq ($(shell [ -f RELEASE ] && [ "$$(wc -l <RELEASE)" = 1 ] && grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' RELEASE && echo ok),ok)
 $(error RELEASE must be one line X.Y.Z, found: '$(shell cat RELEASE 2>/dev/null)')
 endif
@@ -47,7 +59,18 @@ endif
 # rewritten only when its content differs. A dev version so names the
 # commit the rootfs was last exported from.
 VERSION_KIND_STAMP := $(ROOTFS_DIR)/.version-kind
+ifeq ($(DRY_RUN),)
 $(shell [ "$$(cat $(VERSION_KIND_STAMP) 2>/dev/null)" = "$(VERSION_KIND)" ] || { mkdir -p $(ROOTFS_DIR) && echo "$(VERSION_KIND)" >$(VERSION_KIND_STAMP); })
+else ifneq ($(shell cat $(VERSION_KIND_STAMP) 2>/dev/null),$(VERSION_KIND))
+# The stamp is out of date: -q reports it, -n shows the export it causes.
+$(VERSION_KIND_STAMP): FORCE
+endif
+endif
+$(VERSION_KIND_STAMP):
+	mkdir -p $(ROOTFS_DIR)
+	echo "$(VERSION_KIND)" >$@
+.PHONY: FORCE
+FORCE:
 
 # Container images
 UBUNTU_IMAGE := $(PROJECT_NAME)-ubuntu:$(VERSION)
@@ -196,7 +219,6 @@ $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) scripts
 		-v $(PWD)/artifacts:/artifacts \
 		-e SQUASHFS_COMP=$(SQUASHFS_COMP) \
 		-e SQUASHFS_COMP_LEVEL=$(SQUASHFS_COMP_LEVEL) \
-		-e VERSION=$(VERSION) \
 		-e 'TF_VERSION=$(TF_VERSION)' \
 		-e BUILD_ID=$(BUILD_ID) \
 		-e BUILD_JOBS=$(BUILD_JOBS) \

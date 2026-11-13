@@ -971,14 +971,22 @@ version_ok() {
         [[ "$1" == "$2" || "$1" =~ ^"$2"-dev\+[0-9a-f]+(\.dirty)?$ ]]
     fi
 }
+# The rootfs $1 carries the version of the version file beside it, and
+# version_ok takes it. $2 = RELEASE, $3 = TF_VERSION of the run, $4 = a scratch
+# directory. test-release-version.sh runs it on a fake rootfs.
+rootfs_version_ok() {
+    local exported
+    exported=$(cat "$(dirname "$1")/version" 2>/dev/null)
+    unsquashfs -no-xattrs -q -d "$4/x" "$1" etc/thinfloe/version >/dev/null 2>&1 \
+        && [[ -f "$4/x/etc/thinfloe/version" ]] \
+        && [[ "$(cat "$4/x/etc/thinfloe/version")" == "$exported" ]] \
+        && version_ok "$exported" "$2" "$3"
+}
 REL_TMP=$(mktemp -d)
 TMPS+=("$REL_TMP")
 rel=$(cat "$(dirname "$0")/../../RELEASE" 2>/dev/null)
 exported=$(cat "$(dirname "$SQSH")/version" 2>/dev/null)
-if unsquashfs -no-xattrs -q -d "$REL_TMP/x" "$SQSH" etc/thinfloe/version >/dev/null 2>&1 \
-        && [[ -f "$REL_TMP/x/etc/thinfloe/version" ]] \
-        && [[ "$(cat "$REL_TMP/x/etc/thinfloe/version")" == "$exported" ]] \
-        && version_ok "$exported" "$rel" "${TF_VERSION:-}"; then
+if rootfs_version_ok "$SQSH" "$rel" "${TF_VERSION:-}" "$REL_TMP"; then
     echo "ok   - /etc/thinfloe/version is artifacts/rootfs/version, of RELEASE ($exported)"
 else
     echo "FAIL - /etc/thinfloe/version is not artifacts/rootfs/version ('$exported') of RELEASE ('$rel'), run TF_VERSION '${TF_VERSION:-}'"
