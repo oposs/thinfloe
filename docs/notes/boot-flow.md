@@ -41,7 +41,7 @@ The boot process involves several interconnected components:
      before the pivot, so the home directory is in place before
      `multi-user.target`
 
-4. **Un-dockerization** (overlay/etc/systemd/system/un-dockerize.service) - First-boot service removes Docker artifacts, fixes /etc/hosts, reconfigures systemd-resolved
+4. **Un-dockerization** (overlay/etc/systemd/system/un-dockerize.service) - First-boot service removes Docker artifacts, fixes /etc/hosts (resolv.conf ships as the systemd-resolved stub link)
 
 5. **Home Persistence** - the initramfs restores the home directory before
    the pivot (`restore_home()` in the dracut module). `thinfloe-menu` saves it

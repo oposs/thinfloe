@@ -27,7 +27,8 @@ The running system's `/etc/resolv.conf` is the image's link to
 `systemd-resolved` in a `RUN --network=none`, where podman mounts no
 resolv.conf of its own, so the package's postinst can make the link (in a
 networked RUN it printed "mv: cannot move '/etc/resolv.conf'"), and
-`export-rootfs.sh` refuses an image without it. Guard:
+`export-rootfs.sh` refuses an image without it. `un-dockerize.service` no
+longer stops resolved or makes the link again. Guard:
 `test-session-packages.sh`.
 `dracut-network` stays: it ships the `systemd-networkd` and `url-lib` dracut
 modules. `isc-dhcp-client` is not installed: nothing in the image runs

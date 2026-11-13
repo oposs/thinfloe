@@ -5,18 +5,20 @@ Description=Undockerize this Image
 # implicitly ordered After=basic.target -> After=sysinit.target. Declaring
 # Before= on it made this unit both before and after the same target, and
 # systemd broke the resulting cycle by deleting the hwdb update job on every
-# single boot. Nothing this service does - resolv.conf, /etc/hosts,
-# systemd-resolved - relates to the hardware database; the ordering was
-# vestigial, left over from the depmod/modprobe lines commented out below.
+# single boot. Nothing this service does relates to the hardware database;
+# the ordering was vestigial, left over from the depmod/modprobe lines
+# commented out below.
+#
+# No resolv.conf step: the image ships /etc/resolv.conf as the link to the
+# systemd-resolved stub. Stopping resolved here, removing the link and
+# making it again left name lookups failing for a moment at
+# multi-user.target. systemd-resolved rereads /etc/hosts when it changes.
 
 [Service]
 Type=oneshot
-ExecStart=/bin/systemctl stop systemd-resolved
-ExecStart=/bin/rm -f /.dockerenv /etc/resolv.conf /run/systemd/resolve/*resolv.conf
-ExecStart=/bin/ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+ExecStart=/bin/rm -f /.dockerenv
 ExecStart=/bin/mv /etc/hosts.in /etc/hosts
 ExecStart=/bin/sed -i s/HOSTNAME/%H/g /etc/hosts
-ExecStart=/bin/systemctl start systemd-resolved
 # ExecStart=/sbin/depmod -a
 # ExecStart=/sbin/modprobe snd-hda-intel
 ExecStartPost=/bin/systemctl disable un-dockerize.service
