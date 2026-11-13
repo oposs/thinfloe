@@ -1,0 +1,29 @@
+name: Release build
+
+# Called by Create release PR on the release branch before the pull request
+# exists (D28). ThinFloe builds with its own make targets, so the whole build
+# lives in release-build-local.yml. Read-only: nothing here writes the
+# repository.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version being released.
+        type: string
+        required: true
+      ref:
+        description: The release branch head to build.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    uses: ./.github/workflows/release-build-local.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ inputs.version }}
+      ref: ${{ inputs.ref }}

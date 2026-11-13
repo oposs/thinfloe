@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # D28: Create release PR runs this file on the release branch before it
+  # opens the pull request, with the commit to test in `ref`.
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to test; empty on push and pull_request.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ThinFloe's own jobs: the unit tests, and the image build with the
+  # integration tests, the QEMU smoke tests and the runtime tests
+  # (docs/release-ci.md, "CI split").
+  local:
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'github-actions[bot]') }}
+    uses: ./.github/workflows/ci-local.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ inputs.ref }}
+
+  release-pr-current:
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'github-actions[bot]') }}
+    uses: oposs/repo-infra/.github/workflows/ri-release-pr-current.yml@v2
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    with:
+      ref: ${{ inputs.ref }}
+
+  # D28 release mode, decided by repo-infra (D33). It runs on every event and
+  # carries no D31 skip: on the release pull request Create release PR opened,
+  # this verdict is what ci-passed decides on.
+  release-verdict:
+    uses: oposs/repo-infra/.github/workflows/ri-release-verdict.yml@v2
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+
+  # The single context the ruleset requires (spec D2). It exists so branch
+  # protection can name one check that means "this repository's CI passed",
+  # whatever this repository's jobs happen to be. Its needs: list names every
+  # other job of ci.yml; check verifies it (D30). Copy the rest word for word.
+  #
+  # `if: always()` is load-bearing. Without it this job is *skipped* when a
+  # dependency fails, and a skipped job reports Success -- so the required
+  # check would go green on a red build. It fails open, silently, and looks
+  # like it is working.
+  #
+  # A required check cannot be a called workflow's job: GitHub names that
+  # `<caller job> / <called job>`, and a called workflow cannot read the
+  # caller's needs. So this job stays here and reads release-verdict (D33).
+  # On a release pull request the test results do not count: Create release
+  # PR tested exactly the head that carries the release-built status.
+  ci-passed:
+    if: always()
+    needs: [local, release-pr-current, release-verdict]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Judge the needed jobs
+        env:
+          VERDICT: ${{ needs.release-verdict.result }}
+          MODE: ${{ needs.release-verdict.outputs.mode }}
+          OK: ${{ needs.release-verdict.outputs.ok }}
+          MESSAGE: ${{ needs.release-verdict.outputs.message }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          if [ "$VERDICT" != success ]; then
+            echo "::error::release-verdict did not succeed ($VERDICT); no verdict, no green"
+            exit 1
+          fi
+          if [ "$MODE" = release ]; then
+            if [ "$OK" != true ]; then
+              echo "::error::$MESSAGE"
+              exit 1
+            fi
+            echo "::notice::$MESSAGE"
+            exit 0
+          fi
+          if [ "$MODE" != ordinary ]; then
+            echo "::error::release-verdict gave an unknown mode ($MODE); no verdict, no green"
+            exit 1
+          fi
+          if [ "$FAILED" = true ]; then
+            echo "::error::a job this one needs failed or was cancelled"
+            exit 1
+          fi

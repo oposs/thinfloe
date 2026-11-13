@@ -1,0 +1,25 @@
+{
+  "moving_major_tag": false,
+  "version_files": [
+    {
+      "path": "RELEASE",
+      "pattern": "^[0-9][^\\n]*$",
+      "replacement": "$VERSION",
+      "verify": "^$VERSION$"
+    }
+  ],
+  "release_files": [],
+  "release_assets": [
+    "vmlinuz",
+    "initrd.img",
+    "ramroot.sqsh",
+    "thinfloe-usb.img.zst",
+    "version",
+    "SHA256SUMS"
+  ],
+  "exceptions": {
+    "linux-packages": "ThinFloe ships a bootable image, not a program installed through a package manager",
+    "homebrew": "ThinFloe ships a bootable image, not a program installed through a package manager",
+    "man-page": "the command line tools run inside the image; the README documents the ones used over SSH"
+  }
+}

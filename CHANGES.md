@@ -4,6 +4,21 @@
 
 ### New
 
+### Changed
+
+- The daily release check, the Upgrade tile and `thinfloe-upgrade` take releases from `https://github.com/oposs/thinfloe/releases` instead of tobi.oetiker.ch. Every file of an upgrade or a fresh install comes from one release, the newest when the write starts, and is checked against that release's `SHA256SUMS`; a release without a line for a file fails with "the release has no checksum for <file>" before the stick changes. A source entered by hand is used as given and still accepts the older `<file>.sha256` checksum files.
+- The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed or new files), and such an image is offered the current release as an upgrade. A build outside a git checkout stops at once with "TF_VERSION ... is neither RELEASE (...) nor a dev version" unless `TF_VERSION=X.Y.Z` is given, and a `RELEASE` file that is not one line `X.Y.Z` stops it with "RELEASE must be one line X.Y.Z".
+- A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
+
+### Fixed
+
+- After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
+- OxuLnk no longer shows its keyboard grab as "not working" and no longer logs "keyboard grab unavailable reason=compositor does not support shortcut inhibition": the session now lets a window switch the desktop's key shortcuts off.
+
+## 4.2.0 - 2026-11-11
+
+### New
+
 - The Upgrade tile opens an Upgrade screen in the menu instead of a terminal: choose the release, the USB stick and whether to upgrade or erase it, confirm once, then follow each step with a bar, the write speed and the time left, and cancel while it downloads or writes. Only USB sticks are listed unless you tick "Show all drives", and erasing another drive needs its name and size typed in. The tile reads "Upgrade to X.Y.Z" when a newer release is known; the check runs five minutes after boot and once a day, and the menu header now shows the installed version.
 - Add-ons listed in `~/.config/thinfloe/addons` are installed at every boot from their copy on the boot stick, with no network, and are checked for new versions one minute after boot and once a day at a random time within an hour; a new version becomes active at the next boot. On netboot, that check fetches and installs them once the network is up. The first boot after an upgrade from 3.x lists ThinLinc and OxuLnk when the home holds their settings (`~/.thinlinc`, `~/.config/oxulnk`), or both when the stick had no saved home.
 - An add-on copy on the boot stick always leaves room for a second copy of the saved home directory, and an update cut off by a power failure while it was being made current is finished at the next boot. A ticked add-on that the boot did not install, because its time ran out or the install failed, is installed from the boot stick by the check one minute after boot.
@@ -29,9 +44,6 @@
 
 ### Changed
 
-- The daily release check, the Upgrade tile and `thinfloe-upgrade` take releases from `https://github.com/oposs/thinfloe/releases` instead of tobi.oetiker.ch. Every file of an upgrade or a fresh install comes from one release, the newest when the write starts, and is checked against that release's `SHA256SUMS`; a release without a line for a file fails with "the release has no checksum for <file>" before the stick changes. A source entered by hand is used as given and still accepts the older `<file>.sha256` checksum files.
-- The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed or new files), and such an image is offered the current release as an upgrade. A build outside a git checkout stops at once with "TF_VERSION ... is neither RELEASE (...) nor a dev version" unless `TF_VERSION=X.Y.Z` is given, and a `RELEASE` file that is not one line `X.Y.Z` stops it with "RELEASE must be one line X.Y.Z".
-- A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
 - The menu's tiles keep their shape and look the same size on every screen. A 4K screen that reports its size no longer gets stretched tiles (one that reports none or an implausible size still gets double size), and a small, dense laptop screen shrinks the menu to fit.
 - Each row in Settings shows one status line, with its button at the right edge. Long text in a row is cut with "…" and the button stays visible.
 - A long add-on name in Settings is cut with "…", so the source address, the status line and the button stay visible.
@@ -65,8 +77,6 @@
 
 ### Fixed
 
-- After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
-- OxuLnk no longer shows its keyboard grab as "not working" and no longer logs "keyboard grab unavailable reason=compositor does not support shortcut inhibition": the session now lets a window switch the desktop's key shortcuts off.
 - A named pipe put in place of a tile file, an icon or a status file while the menu reads it no longer hangs the menu, which left the screen black at login.
 - Screen blanking that stops because its helper exited is restarted after 5 seconds; before, the screen no longer blanked for the rest of the session.
 - Sound from ThinLinc and OxuLnk played quietly, because the speakers and headphones started at 40 % on every boot and the machine has no volume control. Outputs and microphones now start at 100 %, so the remote desktop sets the loudness. A volume set by hand with `wpctl` or `pactl` is kept.

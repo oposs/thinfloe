@@ -1,0 +1,60 @@
+name: Changelog
+# The changelog.yml of every repository (D2, D6, D33). Copy it word for word;
+# check compares it with this text.
+#
+# Required, not advisory (spec D2). Being required is only safe because the
+# escape hatch below is a JOB-level `if:`. A job skipped by a condition
+# reports Success, while a WORKFLOW skipped by a paths/branches filter stays
+# Pending forever and blocks the merge. Never add paths: or paths-ignore: to
+# this workflow (spec D13).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  # The no-changelog label is the deliberate escape hatch for typo and CI-only
+  # changes. Without it every weekly dependabot PR is blocked, since the
+  # check is required. release/* always runs: a release pull request is gated
+  # on its build, and the label must not turn that red check green.
+  changelog:
+    if: >-
+      startsWith(github.head_ref, 'release/') ||
+      !contains(github.event.pull_request.labels.*.name, 'no-changelog')
+    uses: oposs/repo-infra/.github/workflows/ri-changelog.yml@v2
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+
+  # No `name:`: the check context is the job id, `changelog-updated`, which is
+  # what the ruleset requires. Renaming this job silently un-requires the check.
+  #
+  # The same label condition, joined with always(). Without it this job is
+  # skipped when `changelog` fails, and a skipped required check counts as
+  # passed. !cancelled() is not enough: in a cancelled run it skips this job
+  # too. always() runs it there, and the step fails on a cancelled changelog.
+  changelog-updated:
+    if: >-
+      always() && (startsWith(github.head_ref, 'release/') ||
+      !contains(github.event.pull_request.labels.*.name, 'no-changelog'))
+    needs: changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Read the changelog verdict
+        env:
+          RESULT: ${{ needs.changelog.result }}
+          MESSAGE: ${{ needs.changelog.outputs.message }}
+        run: |
+          if [ "$RESULT" != success ]; then
+            echo "::error::changelog did not pass ($RESULT): $MESSAGE"
+            exit 1
+          fi
+          echo "::notice::$MESSAGE"

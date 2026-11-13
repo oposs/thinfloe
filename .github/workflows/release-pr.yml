@@ -1,0 +1,105 @@
+name: Create release PR
+# The release-pr.yml of every repository (D28, D33). Copy it; a repository
+# may add jobs between prepare and finish, and finish then needs them too.
+# check reviews the structure: prepare and finish call repo-infra, build and
+# test call this repository's own release-build.yml and ci.yml, and finish
+# needs every other job.
+#
+# One release flow for every repository (D28). The release is built and
+# tested on the release branch before the pull request exists, so the pull
+# request can be merged at once:
+#
+#   prepare  ri-release-prepare: guard, refusals, stale drafts and parked
+#            runs, roll, bump, commit the release branch
+#   build    .github/workflows/release-build.yml, which calls the build
+#            pieces the repository needs
+#   test     .github/workflows/ci.yml on the release branch, beside build
+#   finish   ri-release-finish: commit the declared release files, draft the
+#            release, mark the head, write the two required checks, open the
+#            pull request, judge it against main, then delete the
+#            pull request's parked runs
+#
+# main is protected and GITHUB_TOKEN cannot be given a ruleset bypass: the
+# bypass list takes users, teams and GitHub Apps, and the Actions token is
+# none of those. So the release still lands through a pull request. Merging
+# it triggers release-publish.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type
+        required: true
+        default: bugfix
+        type: choice
+        options:
+          - bugfix
+          - feature
+          - major
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Every job grants its own permissions; the workflow level stays read-only.
+permissions:
+  checks: read
+  actions: read
+
+jobs:
+  prepare:
+    uses: oposs/repo-infra/.github/workflows/ri-release-prepare.yml@v2
+    permissions:
+      contents: write
+      pull-requests: read
+      checks: read
+      actions: write
+    with:
+      release_type: ${{ inputs.release_type }}
+
+  # The repository's own build (D28), release-build.yml, which calls the build
+  # pieces it needs and any jobs of its own. The `uses:` path resolves at the dispatched
+  # commit on main. contents: read, so its one way to write the repository is
+  # the release-files artifact, which `finish` checks against release_files.
+  # It gets the secrets: a build that signs a binary needs its key. No
+  # repository secret may carry write access to the repository
+  # (references/conventions.md).
+  build:
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ needs.prepare.outputs.head }}
+    secrets: inherit
+
+  # The same ci.yml every pull request runs, on the release branch, beside
+  # build. GitHub checks the permissions of every job of the called file,
+  # skipped or not, so this grants the union of what ci.yml's jobs ask for.
+  test:
+    needs: prepare
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+      checks: write
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.head }}
+    secrets: inherit
+
+  finish:
+    needs: [prepare, build, test]
+    uses: oposs/repo-infra/.github/workflows/ri-release-finish.yml@v2
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      checks: write
+      actions: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      date: ${{ needs.prepare.outputs.date }}
+      head: ${{ needs.prepare.outputs.head }}
+      base: ${{ needs.prepare.outputs.base }}
