@@ -766,15 +766,15 @@ else
     fail=1
 fi
 
-# The default home must carry the 4.0 home marker. Without it a home saved
-# from it lists no marker, and every boot would treat it as a 3.x home.
-MARKER="$DPKG_TMP/hv/home/tfuser/.thinfloe-home-version"
+# The default home must carry the new-layout marker. Without it a home saved
+# from it lists no marker, and every boot would treat it as an old home.
+MARKER="$DPKG_TMP/hv/home/tfuser/.config/thinfloe/home-version"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/hv" "$SQSH" \
-        home/tfuser/.thinfloe-home-version >/dev/null 2>&1 &&
-   [[ -f "$MARKER" && "$(cat "$MARKER")" == "1" ]]; then
-    echo "ok   - the default home carries ~/.thinfloe-home-version 1"
+        home/tfuser/.config/thinfloe/home-version >/dev/null 2>&1 &&
+   [[ -f "$MARKER" && "$(cat "$MARKER")" == "2" ]]; then
+    echo "ok   - the default home carries ~/.config/thinfloe/home-version 2"
 else
-    echo "FAIL - the default home has no ~/.thinfloe-home-version holding 1"
+    echo "FAIL - the default home has no ~/.config/thinfloe/home-version holding 2"
     fail=1
 fi
 

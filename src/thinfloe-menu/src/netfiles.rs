@@ -1145,7 +1145,7 @@ mod tests {
     use yaml_rust2::{Yaml, YamlLoader};
 
     const SHIPPED_WIRED: &str = include_str!("../../../overlay/etc/netplan/ethernet.yaml");
-    const SHIPPED_WIFI: &str = include_str!("../../../overlay/home/tfuser/wifi.yaml");
+    const SHIPPED_WIFI: &str = include_str!("testdata/shipped-wifi.yaml");
 
     /// Ruling 23: netplan by its full path, whatever PATH the session has.
     #[test]

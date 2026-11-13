@@ -1,66 +1,139 @@
 #!/bin/sh
 # Compose a labwc config directory that merges the system defaults in
-# /etc/thinfloe/labwc with a user's per-machine ~/.thinfloe-environment, so that
-# labwc's OWN re-read of the environment file (session_environment_init(),
-# src/config/session.c) sees the user's values LAST and keeps them.
+# /etc/thinfloe/labwc with the menu's generated environment and a user's
+# per-machine ~/.config/thinfloe/environment, so that labwc's OWN re-read of
+# the environment file (session_environment_init(), src/config/session.c)
+# sees the right values LAST and keeps them.
 #
-# Background: 10-thinfloe-session.sh sources both files into the shell with
+# Background: 10-thinfloe-session.sh sources the files into the shell with
 # "set -a" before exec'ing labwc, which is correct - but labwc, run with
 # -C, does not inherit and trust that; it re-reads <config_dir>/environment
 # itself and setenv()s every key with overwrite=1
 # (src/common/dir.c:153-157: with -C, this is the ONLY environment file it
-# considers - the XDG list is skipped entirely). So any key present in both
-# the system file and the user's file was silently reset to the system
-# value the moment labwc started, regardless of what the shell had already
-# exported. See docs/notes/session.md (".thinfloe-environment") for the full
-# writeup and test/runtime/test-labwc-runtime.sh for the assertion that a
-# LATER duplicate assignment in that file is what wins - the assumption
-# this script's ordering depends on.
+# considers - the XDG list is skipped entirely). So any key present in two
+# files was silently reset to the earlier value the moment labwc started,
+# regardless of what the shell had already exported. See
+# docs/notes/session.md for the full writeup and
+# test/runtime/test-labwc-runtime.sh for the assertion that a LATER
+# duplicate assignment in that file is what wins - the assumption this
+# script's ordering depends on.
 #
-# Usage: thinfloe-compose-labwc-config <system-dir> <user-env-file> <output-dir>
+# Usage: thinfloe-compose-labwc-config [--env-only] <system-dir> <generated-env> <user-env> <output-dir>
 #
 #   <system-dir>     e.g. /etc/thinfloe/labwc - rc.xml and the system defaults
-#   <user-env-file>  e.g. $HOME/.thinfloe-environment - may not exist, that is
-#                    not an error
+#   <generated-env>  e.g. $HOME/.config/thinfloe/generated/environment, written
+#                    by the menu - may not exist, that is not an error
+#   <user-env>       e.g. $HOME/.config/thinfloe/environment - may not exist,
+#                    that is not an error
 #   <output-dir>     e.g. $XDG_RUNTIME_DIR/thinfloe-labwc - passed to labwc -C
 #
 # Every file in <system-dir> other than 'environment' is symlinked into
 # <output-dir> unchanged - rc.xml stays a single source of truth, and a
 # future file added under /etc/thinfloe/labwc/ is picked up without touching
-# this script. 'environment' itself is composed as <system-dir>/environment
-# followed by <user-env-file>.
+# this script. 'environment' is composed as <system-dir>/environment, then
+# <generated-env>, then <user-env> without the lines whose key is listed in
+# ${TF_MANAGED_KEYS:-/etc/thinfloe/menu-managed-keys} (the keys the menu
+# sets; the key is the text before the first "=", after leading blanks and
+# an optional "export "). Comment lines are kept.
 #
-# <output-dir> is wiped and rebuilt on every call: everything under it is
-# derived from the two inputs and nothing is ever authored there directly,
-# so rebuilding from scratch is what makes running this twice idempotent
-# instead of accumulating stale symlinks or appended environment lines.
+# Without --env-only, <output-dir> is wiped and rebuilt on every call:
+# everything under it is derived from the inputs and nothing is ever
+# authored there directly, so rebuilding from scratch is what makes running
+# this twice idempotent instead of accumulating stale symlinks or appended
+# environment lines.
+#
+# With --env-only, <output-dir> must already exist; only 'environment' is
+# rewritten (a temporary file in <output-dir>, renamed over it), so the
+# scaled rc.xml and themerc-override that labwc-scale put there survive.
 
 set -eu
 
+me=thinfloe-compose-labwc-config
+ENV_ONLY=0
+if [ "${1:-}" = "--env-only" ]; then
+    ENV_ONLY=1
+    shift
+fi
+
 usage() {
-    echo "Usage: thinfloe-compose-labwc-config <system-dir> <user-env-file> <output-dir>" >&2
+    echo "Usage: $me [--env-only] <system-dir> <generated-env> <user-env> <output-dir>" >&2
     exit 1
 }
 
-[ $# -eq 3 ] || usage
+[ $# -eq 4 ] || usage
 
-USER_ENV_FILE=$2
-OUT_DIR=$3
+GEN_ENV_FILE=$2
+USER_ENV_FILE=$3
+OUT_DIR=$4
+MANAGED_KEYS=${TF_MANAGED_KEYS:-/etc/thinfloe/menu-managed-keys}
 
 SYSTEM_DIR=$(cd "$1" 2>/dev/null && pwd) || {
-    echo "thinfloe-compose-labwc-config: cannot read system config dir '$1'" >&2
+    echo "$me: cannot read system config dir '$1'" >&2
     exit 1
 }
+
+# Write the merged environment to stdout. Later lines win in labwc's parser,
+# so the order is the precedence.
+merged_environment() {
+    if [ -r "$SYSTEM_DIR/environment" ]; then
+        cat "$SYSTEM_DIR/environment"
+    fi
+    if [ -r "$GEN_ENV_FILE" ]; then
+        cat "$GEN_ENV_FILE"
+    fi
+    if [ -r "$USER_ENV_FILE" ]; then
+        if [ -r "$MANAGED_KEYS" ]; then
+            awk '
+                FNR == NR {
+                    k = $0
+                    sub(/^[ \t]+/, "", k)
+                    sub(/[ \t\r]+$/, "", k)
+                    if (k != "" && substr(k, 1, 1) != "#") managed[k] = 1
+                    next
+                }
+                {
+                    k = $0
+                    sub(/^[ \t]+/, "", k)
+                    if (substr(k, 1, 1) != "#") {
+                        sub(/^export[ \t]+/, "", k)
+                        i = index(k, "=")
+                        if (i > 0 && (substr(k, 1, i - 1) in managed)) next
+                    }
+                    print
+                }
+            ' "$MANAGED_KEYS" "$USER_ENV_FILE"
+        else
+            cat "$USER_ENV_FILE"
+        fi
+    fi
+}
+
+if [ "$ENV_ONLY" -eq 1 ]; then
+    [ -d "$OUT_DIR" ] || {
+        echo "$me: no composed dir '$OUT_DIR'" >&2
+        exit 1
+    }
+    TMP_ENV=$(mktemp "$OUT_DIR/.environment.XXXXXX") || {
+        echo "$me: cannot write into '$OUT_DIR'" >&2
+        exit 1
+    }
+    if merged_environment >"$TMP_ENV" && mv -f "$TMP_ENV" "$OUT_DIR/environment"; then
+        exit 0
+    fi
+    rm -f "$TMP_ENV"
+    echo "$me: cannot write '$OUT_DIR/environment'" >&2
+    exit 1
+fi
 
 if [ -e "$OUT_DIR" ]; then
     rm -rf "$OUT_DIR" 2>/dev/null || {
-        echo "thinfloe-compose-labwc-config: cannot clear existing output dir '$OUT_DIR'" >&2
+        echo "$me: cannot clear existing output dir '$OUT_DIR'" >&2
         exit 1
     }
 fi
 
 mkdir -p "$OUT_DIR" 2>/dev/null || {
-    echo "thinfloe-compose-labwc-config: cannot create output dir '$OUT_DIR'" >&2
+    echo "$me: cannot create output dir '$OUT_DIR'" >&2
     exit 1
 }
 
@@ -71,15 +144,4 @@ for entry in "$SYSTEM_DIR"/*; do
     ln -s "$entry" "$OUT_DIR/$name"
 done
 
-# System defaults first, user overrides last: labwc's own parser setenv()s
-# each assignment with overwrite=1, so whichever occurrence of a duplicate
-# key comes LATER in the file wins. Putting the user's file second is what
-# makes the override effective instead of silently discarded.
-MERGED_ENV="$OUT_DIR/environment"
-: >"$MERGED_ENV"
-if [ -r "$SYSTEM_DIR/environment" ]; then
-    cat "$SYSTEM_DIR/environment" >>"$MERGED_ENV"
-fi
-if [ -r "$USER_ENV_FILE" ]; then
-    cat "$USER_ENV_FILE" >>"$MERGED_ENV"
-fi
+merged_environment >"$OUT_DIR/environment"

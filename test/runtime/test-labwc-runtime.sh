@@ -572,7 +572,7 @@ true'
         "$IMAGE" \
         sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
                printf "%s\n" "$MM_SCRIPT" >/tmp/mm.sh &&
-               thinfloe-compose-labwc-config /etc/thinfloe/labwc /nonexistent /tmp/xdg/thinfloe-labwc &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /nonexistent /nonexistent /tmp/xdg/thinfloe-labwc &&
                labwc -C /tmp/xdg/thinfloe-labwc -S "bash /tmp/mm.sh"' 2>&1)
     rc=$?
     if [[ $rc -eq 124 || $rc -eq 137 ]]; then

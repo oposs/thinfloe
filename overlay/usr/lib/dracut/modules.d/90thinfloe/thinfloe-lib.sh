@@ -536,9 +536,9 @@ TF_HOME_RENAMES=".dbrrg-environment:.thinfloe-environment
 .dbrrg-ssh-host-keys:.thinfloe-ssh-host-keys
 .config/dbrrg:.config/thinfloe"
 
-# The marker of a home that has 4.0 names. Every default home ships it
-# (overlay/home/tfuser), and the migration writes it, so every home saved by
-# 4.0 lists it. An archive that does not is a 3.x home, migrated once.
+# The marker of a home that has 4.0 names. The migration writes it, so every
+# home saved by 4.0 lists it (the default home ships the new-layout marker below). An archive that
+# lists neither is a 3.x home, migrated once.
 TF_HOME_VERSION_FILE=".thinfloe-home-version"
 TF_HOME_VERSION=1
 

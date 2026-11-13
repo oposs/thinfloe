@@ -467,7 +467,7 @@ else
 fi
 
 nr=$(mkhome net-template)
-cp "$REPO/overlay/home/tfuser/wifi.yaml" "$nr/home/tfuser/wifi.yaml"
+cp "$REPO/test/fixtures/legacy-wifi.yaml" "$nr/home/tfuser/wifi.yaml"
 install_local_network "$nr" "" "$LEG"; rc=$?
 if [[ $rc -eq 0 && ! -e "$nr/etc/netplan/wifi.yaml" ]]; then
     ok "unedited wifi.yaml template is not installed, returns 0"
@@ -817,11 +817,14 @@ check_3x_result() {
     if [[ -z "$problems" ]]; then ok "$label"; else bad "$label:$problems"; fi
 }
 
-if [[ "$(cat "$REPO/overlay/home/tfuser/.thinfloe-home-version" 2>/dev/null)" == "1" ]]; then
-    ok "the image's default home carries ~/.thinfloe-home-version 1"
+if [[ "$(cat "$REPO/overlay/home/tfuser/.config/thinfloe/home-version" 2>/dev/null)" == "2" ]]; then
+    ok "the image's default home carries ~/.config/thinfloe/home-version 2"
 else
-    bad "overlay/home/tfuser/.thinfloe-home-version missing or not 1"
+    bad "overlay/home/tfuser/.config/thinfloe/home-version missing or not 2"
 fi
+[[ ! -e "$REPO/overlay/home/tfuser/.thinfloe-home-version" ]] \
+    && ok "the image's default home carries no legacy marker" \
+    || bad "overlay/home/tfuser/.thinfloe-home-version must not ship"
 
 # The default home ships the marker, so after extraction it is on disk
 # whatever the archive held. The 3.x archive does not list it: migrated.
