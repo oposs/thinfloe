@@ -49,11 +49,13 @@ release.
 `scripts/publish.sh <release-dir>` is the one-time bridge mirror: it copies
 one downloaded GitHub release to `https://tobi.oetiker.ch/dbrrg`, where 3.x
 to 4.2 sticks still look, and adds `thinfloe-usb.img.zst.sha256` for 4.0 to
-4.2 and `dbrrg-usb.img.zst` (a hard link) for the 3.x `upgrade-image`.
+4.2, and `dbrrg-usb.img.zst` (a hard link) with its
+`dbrrg-usb.img.zst.sha256` for the 3.x `upgrade-image`.
 
 ## Where code lives
 
 - Build: `containers/ubuntu/Dockerfile` (rootfs, labwc rebuild, `menu-build` stage with Rust 1.96.0), `containers/ipxe/`, `containers/image-builder/`, `scripts/` (export, image, QEMU smoke tests), `Makefile`.
+- CI and releases: `.github/workflows/` (repo-infra callers; ThinFloe's own jobs in `ci-local.yml` and `release-build-local.yml`, runner setup in `scripts/ci-runner-setup.sh`), `.github/repo-infra.json` (version file, release assets, exceptions).
 - Image customisation: `overlay/` (standard filesystem layout, applied by `tar --exclude="*~"`); rebuild with `make image`.
 - Initramfs: `overlay/usr/lib/dracut/modules.d/90thinfloe/` (`module-setup.sh`, hooks, `thinfloe-lib.sh`).
 - Boot menu and kernel parameters: `configs/syslinux.cfg`.
@@ -78,6 +80,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - `MENU_FILES`, `MENU_DIRS`, `PATCH_FILES` and `OVERLAY_DIRS` in the `Makefile` are prerequisites of `.ubuntu-container`; a new input needs a line there, or tests validate a stale image. Each container stamp holds the image ID it built; build with a distinct `VERSION` per checkout. Guards: `test-container-inputs.sh`, `test-container-stamp.sh`.
 - Netplan files are made mode 0600 by a `chmod` in the Dockerfile (git stores only 644/755).
 - `isc-dhcp-client` is not installed and nothing may call `dhclient`; DHCP is `systemd-networkd`'s job, in the initramfs too.
+- Every make call of a release build carries `TF_VERSION=X.Y.Z`, not only `make image`: a call without it computes a dev version, exports the rootfs again, and the smoke tests and the assets are a dev build. `release-build-local.yml` sets it for the whole job and compares the assets with the smoke-tested build.
 
 ### Initramfs
 
