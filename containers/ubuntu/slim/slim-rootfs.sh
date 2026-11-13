@@ -32,6 +32,14 @@ module_firmware() {
 }
 
 # Exactly one kernel, and the initrd that dracut built for it.
+# preconditions saw no dangling link under $FW, so there must be none now.
+# $1 says when, for the message. Runs after every cut (see main).
+check_no_dangling_links() {
+    local links
+    links=$(find "$FW" -xtype l) || die "find over $FW failed"
+    [[ -z $links ]] || die "dangling firmware symlinks $1:"$'\n'"$links"
+}
+
 preconditions() {
     local dirs=()
     local d
@@ -59,9 +67,7 @@ preconditions() {
     [[ -s $FW_BEFORE ]] || die "no module names firmware that exists under $FW"
     : >"$DROPPED"
     # The packages ship no dangling firmware link; a cut must not add one.
-    local links
-    links=$(find "$FW" -xtype l) || die "find over $FW failed"
-    [[ -z $links ]] || die "dangling firmware symlinks before any cut:"$'\n'"$links"
+    check_no_dangling_links "before any cut"
 }
 
 # Rebuild the module index for the final file names and fail on any depmod
@@ -196,8 +202,7 @@ remove_links_to() {
         sed -e "s#^$FW/##" -e 's/\.zst$//' <<<"$link" >>"$DROPPED"
         count=$((count + 1))
     done <<<"$links"
-    links=$(find "$FW" -xtype l) || die "find over $FW failed"
-    [[ -z $links ]] || die "dangling firmware symlinks after the cut:"$'\n'"$links"
+    check_no_dangling_links "after the cut"
     echo "$count"
 }
 
@@ -274,6 +279,8 @@ main() {
     prune_amdgpu
     check_firmware_names
     drop_intel_ucode
+    # The single place that covers every firmware cut, the AMD prune included.
+    check_no_dangling_links "after the last firmware cut"
     drop_i18n
     drop_hwdb_sources
 }
