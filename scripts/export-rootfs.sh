@@ -8,7 +8,6 @@ source /scripts/lib/common.sh
 ARTIFACT_DIR="/artifacts/rootfs"
 SQUASHFS_COMP="${SQUASHFS_COMP:-zstd}"
 SQUASHFS_COMP_LEVEL="${SQUASHFS_COMP_LEVEL:-19}"
-VERSION="${VERSION:-dev}"
 BUILD_ID="${BUILD_ID:-unknown}"
 BUILD_JOBS="${BUILD_JOBS:-4}"
 TF_VERSION="${TF_VERSION:-}"
@@ -20,9 +19,10 @@ valid_version() {
 }
 
 log_info "Rootfs Export"
-log_info "  Version:     $VERSION"
+# Only the version the rootfs carries: the container tag (VERSION) was
+# printed as "Version: 3.0.0" beside it and named no release.
+log_info "  Version:     $TF_VERSION"
 log_info "  Build ID:    $BUILD_ID"
-log_info "  TF version:  $TF_VERSION"
 log_info "  Compression: ${SQUASHFS_COMP}:${SQUASHFS_COMP_LEVEL}"
 
 # Before anything is exported, so a wrong version leaves no new artifact.
@@ -47,7 +47,8 @@ log_success "Initramfs exported"
 
 # Cleanup
 log_step "Cleaning up rootfs..."
-rm -rf /boot/* /.dockerenv /etc/machine-id /var/lib/dbus/machine-id /var/log/* /tmp/* /var/tmp/*
+find /boot /var/log /tmp /var/tmp -mindepth 1 -delete
+rm -f /.dockerenv /etc/machine-id /var/lib/dbus/machine-id
 log_success "Cleanup complete"
 
 # Write the version into the rootfs and next to it. This container is
@@ -91,6 +92,6 @@ mksquashfs / "$SQSH_OUTPUT" \
     -e boot tmp var/tmp artifacts proc sys dev run scripts \
        etc/hostname || die "mksquashfs failed"
 
-log_success "SquashFS created: $(format_bytes $(stat -c%s "$SQSH_OUTPUT"))"
+log_success "SquashFS created: $(format_bytes "$(stat -c%s "$SQSH_OUTPUT")")"
 
 chmod 644 "${ARTIFACT_DIR}"/*
