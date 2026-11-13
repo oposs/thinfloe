@@ -5,6 +5,7 @@ pub mod app;
 pub mod battery;
 pub mod bounded;
 pub mod brand;
+pub mod config;
 pub mod damage;
 pub mod density;
 pub mod desktop;

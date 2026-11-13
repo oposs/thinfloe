@@ -313,7 +313,8 @@ fn bad<T>(line: &str) -> Result<T, String> {
     Err(format!("Not a line the menu wrote: {line}"))
 }
 
-fn parse_mode(text: &str) -> Option<Mode> {
+/// The mode from kanshi's text (`WxH` or `WxH@R.RRRHz`); `preferred` is false.
+pub fn parse_mode(text: &str) -> Option<Mode> {
     let (size, rate) = match text.split_once('@') {
         Some((s, r)) => (s, Some(r)),
         None => (text, None),
