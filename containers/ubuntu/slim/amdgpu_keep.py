@@ -12,7 +12,8 @@ docs/superpowers/specs/2026-11-12-image-size-design.md.
 Usage: amdgpu_keep.py APU_CSV DGPU_CSV MODINFO_FILE FIRMWARE_DIR
 prints the names in FIRMWARE_DIR to drop, one per line. Exit 2 when the
 table or the selection is too small, exit 3 when the package ships files
-for an IP version neither table knows.
+for an IP version neither table knows. When both hold, both reasons are
+printed and the exit is 3. On exit 2 or 3 nothing goes to stdout.
 """
 
 import csv
@@ -84,8 +85,8 @@ def _table_versions(csv_text):
     return found
 
 
-def apu_prefixes(csv_text):
-    """(three-part IP prefixes, two-part prefixes for patch level 0)."""
+def _prefixes(csv_text):
+    """(three-part prefixes, two-part prefixes, number of APU rows)."""
     three, two = set(), set()
     rows = 0
     for row in _rows(csv_text):
@@ -96,9 +97,15 @@ def apu_prefixes(csv_text):
             three.add(f"{block}_{x}_{y}_{z}")
             if z == 0:
                 two.add(f"{block}_{x}_{y}")
+    return sorted(three), sorted(two), rows
+
+
+def apu_prefixes(csv_text):
+    """(three-part IP prefixes, two-part prefixes for patch level 0)."""
+    three, two, rows = _prefixes(csv_text)
     if rows < MIN_ROWS:
         raise TooSmall(f"only {rows} APU rows in the table, expected at least {MIN_ROWS}")
-    return sorted(three), sorted(two)
+    return three, two
 
 
 def _stem(name):
@@ -118,10 +125,8 @@ def _matches(stem, three, two):
     return False
 
 
-def select(csv_text, entries):
-    """entries maps each name in amdgpu/ to its link target or None.
-    Returns (keep, drop), both sorted."""
-    three, two = apu_prefixes(csv_text)
+def _select(three, two, entries):
+    """The kept names of entries, without the floors."""
     keep = {n for n in entries if _matches(_stem(n), three, two)}
     changed = True
     while changed:
@@ -134,6 +139,13 @@ def select(csv_text, entries):
                 if target in entries and target not in keep:
                     keep.add(target)
                     changed = True
+    return keep
+
+
+def select(csv_text, entries):
+    """entries maps each name in amdgpu/ to its link target or None.
+    Returns (keep, drop), both sorted."""
+    keep = _select(*apu_prefixes(csv_text), entries)
     if len(keep) < MIN_KEEP:
         raise TooSmall(f"only {len(keep)} files kept, expected at least {MIN_KEEP}")
     return sorted(keep), sorted(set(entries) - keep)
@@ -206,11 +218,16 @@ def main(argv):
     with open(modinfo_file) as f:
         modinfo = f.read().splitlines()
     entries = _scan(firmware_dir)
+    small = None
     try:
         keep, drop = select(apu, entries)
     except TooSmall as e:
-        sys.stderr.write(f"amdgpu_keep: {e}\n")
-        return 2
+        small = e
+        # The guard below still needs a selection: take the unchecked one.
+        three, two, _ = _prefixes(apu)
+        keep = sorted(_select(three, two, entries))
+    if small is not None:
+        sys.stderr.write(f"amdgpu_keep: {small}\n")
     unknown = unknown_versions(apu, dgpu, modinfo, entries, keep)
     if unknown:
         sys.stderr.write(
@@ -218,6 +235,8 @@ def main(argv):
             % " ".join(unknown)
         )
         return 3
+    if small is not None:
+        return 2
     for n in drop:
         print(n)
     return 0

@@ -30,6 +30,18 @@ fi
 
 fail=0
 
+# A check that something is not in the initrd: $2 is what the test found
+# (empty when nothing), shown on FAIL.
+absent() {
+    local desc="$1" found="$2"
+    if [[ -n $found ]]; then
+        echo "FAIL - $desc (found: $found)"
+        fail=1
+    else
+        echo "ok   - $desc"
+    fi
+}
+
 # S1 decompresses modules in the squashfs only. The initrd keeps them
 # compressed, which shows that S1 ran after dracut.
 zst=$(grep -cE '\.ko\.zst$' "$LIST")
@@ -90,12 +102,7 @@ absent_bad=()
 for m in "${OMITTED[@]}"; do
     in_initrd "$m" && absent_bad+=("$m")
 done
-if [[ ${#absent_bad[@]} -eq 0 ]]; then
-    echo "ok   - none of the ${#OMITTED[@]} server and data-centre modules is in the initrd"
-else
-    echo "FAIL - modules that must be out of the initrd: ${absent_bad[*]}"
-    fail=1
-fi
+absent "none of the ${#OMITTED[@]} server and data-centre modules is in the initrd" "${absent_bad[*]}"
 
 present_bad=()
 for m in "${PRESENT[@]}"; do
@@ -110,19 +117,10 @@ fi
 
 # A1: amdgpu stays in --omit-drivers. Plymouth uses simpledrm until amdgpu
 # binds after switch-root, so neither the driver nor its firmware is here.
-if in_initrd amdgpu; then
-    echo "FAIL - amdgpu.ko is not in the initrd"
-    fail=1
-else
-    echo "ok   - amdgpu.ko is not in the initrd"
-fi
-amd_fw=$(awk '$NF ~ /usr\/lib\/firmware\/amdgpu(\/|$)/ {print $NF; exit}' "$LIST")
-if [[ -n $amd_fw ]]; then
-    echo "FAIL - no usr/lib/firmware/amdgpu/ in the initrd (found: $amd_fw)"
-    fail=1
-else
-    echo "ok   - no usr/lib/firmware/amdgpu/ in the initrd"
-fi
+absent "amdgpu.ko is not in the initrd" \
+    "$(awk '$NF ~ /(^|\/)amdgpu\.ko(\.[a-z]+)?$/ {print $NF; exit}' "$LIST")"
+absent "no usr/lib/firmware/amdgpu/ in the initrd" \
+    "$(awk '$NF ~ /usr\/lib\/firmware\/amdgpu(\/|$)/ {print $NF; exit}' "$LIST")"
 
 # Closure: every module that a module of the initrd depends on is in the
 # initrd too. This catches an omitted library that a kept module needs.
@@ -174,11 +172,11 @@ else
 fi
 
 # O5: the Dockerfile asks for zstd level 19 for the main archive.
-# Level 15 gives a 4 MiB window; levels 17 to 19 give 8 MiB.
+# Level 15 gives a 4 MiB window. Levels 17 to 19 give 8 MiB.
 # So the check rules out level 16 or lower and --ultra.
 # It cannot tell level 17, 18 and 19 apart.
 # dracut with 3cpio ignores a level inside a custom --compress string.
-# It then uses level 15; only --compress-level counts.
+# dracut then uses level 15. Only --compress-level counts.
 # The main archive is the zstd frame after the early microcode cpio.
 trailer=$(LC_ALL=C grep -obUaP 'TRAILER!!!' "$INITRD" | head -1 | cut -d: -f1)
 off=""

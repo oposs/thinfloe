@@ -153,25 +153,23 @@ Guards: `test-session-packages.sh`, `test-password.sh`.
 Never sweep `/usr/lib/firmware` with `find`/`rm`; change the package list in
 the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
-The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, which keeps per
-Intel WiFi series the file the driver loads (owner, 2026-11-12); keeping of
-`linux-firmware-amd-graphics` only the firmware of Ryzen APUs, by chip name
-and by the IP versions of the kernel's APU table
-(`containers/ubuntu/slim/amdgpu-apu-ip.csv`, refreshed from
-`Documentation/gpu/amdgpu/apu-asic-info-table.csv` when the kernel changes),
-and dropping the graphics card firmware and `radeon/` (owner, 2026-11-12;
-`amdgpu_keep.py` fails the build with exit 3 on an IP version that neither
-`amdgpu-apu-ip.csv` nor `amdgpu-dgpu-ip.csv` knows; no QEMU test runs
-amdgpu, so only real AMD hardware shows a missing file; guards:
-`test_amdgpu_keep.py`, `test-firmware.sh`); removing
-`intel-ucode` after dracut has built the early microcode archive (the CPU
-gets its microcode from the initrd; the build stops if the archive is
-missing, and `test-firmware.sh` and `test-initramfs-drivers.sh` check both
-sides). Guards of the
-iwlwifi cut: `test_iwlwifi_keep.py`, `test-firmware.sh` and the selector's
-refusal to drop a file that `modinfo` names. The build-time firmware-name
-check in `slim-rootfs.sh` guards against losing firmware outside the
-intended drops, and the build fails on any dangling firmware link.
+The exceptions are three cuts in `containers/ubuntu/slim/slim-rootfs.sh`
+(owner, 2026-11-12):
+
+- Intel WiFi: per series only the ucode the driver loads.
+- AMD graphics: only Ryzen APU firmware, by chip name and by the IP versions
+  of the kernel's table (`containers/ubuntu/slim/amdgpu-apu-ip.csv`, refreshed
+  from `Documentation/gpu/amdgpu/apu-asic-info-table.csv` when the kernel
+  changes); graphics card firmware and `radeon/` are dropped. An IP version
+  that neither `amdgpu-apu-ip.csv` nor `amdgpu-dgpu-ip.csv` knows fails the
+  build (exit 3). No QEMU test runs amdgpu.
+- `intel-ucode`, after dracut has built the early microcode archive (the
+  build stops without it).
+
+Guards: `test-firmware.sh`, `test-initramfs-drivers.sh`,
+`test_iwlwifi_keep.py`, `test_amdgpu_keep.py`, and the build's checks that
+every firmware name a module asks for survives unless dropped on purpose and
+that no firmware link dangles.
 [Story](docs/notes/history-of-constraints.md#firmware-is-selected-by-package-never-by-cleanup).
 
 ### The WiFi core stack must come from the kernel, never from a backport

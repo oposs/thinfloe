@@ -214,7 +214,8 @@ prune_amdgpu() {
     local names=/thinfloe-slim/amdgpu-names
     local dir=$FW/amdgpu
     local mods drop out n m k name missing=()
-    mods=$(find "/usr/lib/modules/$KVER" -name amdgpu.ko) || die "find for amdgpu.ko failed"
+    # amdgpu.ko or amdgpu.ko.zst: this step does not depend on decompress_modules.
+    mods=$(find "/usr/lib/modules/$KVER" -name 'amdgpu.ko*') || die "find for amdgpu.ko failed"
     [[ -n $mods && $mods != *$'\n'* ]] || die "want one amdgpu.ko, found: ${mods:-none}"
     [[ -d $dir ]] || die "no $dir: is linux-firmware-amd-graphics installed?"
     modinfo -F firmware "$mods" >"$names" || die "modinfo failed on $mods"
