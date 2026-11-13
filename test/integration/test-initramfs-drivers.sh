@@ -119,27 +119,67 @@ else
         echo "FAIL - cannot unpack $INITRD"
         fail=1
     else
-        mapfile -d '' -t mods < <(find "$TREE" -name '*.ko.zst' -print0)
-        missing=()
-        for f in "${mods[@]}"; do
-            deps=$(modinfo -F depends "$f" 2>/dev/null) || deps=""
-            [[ -n $deps ]] || continue
-            IFS=, read -r -a dl <<<"$deps"
-            for d in "${dl[@]}"; do
-                [[ -n $d ]] || continue
-                in_initrd "$d" || missing+=("$(basename "$f" .ko.zst) needs $d")
-            done
-        done
+        mapfile -d '' -t mods < <(find "$TREE" \( -name '*.ko.zst' -o -name '*.ko' \) -print0)
         if [[ ${#mods[@]} -lt 100 ]]; then
             echo "FAIL - closure check found only ${#mods[@]} modules in the unpacked initrd"
             fail=1
-        elif [[ ${#missing[@]} -eq 0 ]]; then
-            echo "ok   - every dependency of the ${#mods[@]} modules in the initrd is in the initrd"
         else
-            echo "FAIL - modules without their dependency in the initrd:"
-            printf '       %s\n' "${missing[@]}"
-            fail=1
+            missing=()
+            modinfo_failed=()
+            with_deps=0
+            for f in "${mods[@]}"; do
+                if ! deps=$(modinfo -F depends "$f" 2>/dev/null); then
+                    modinfo_failed+=("$(basename "$f")")
+                    continue
+                fi
+                [[ -n $deps ]] || continue
+                with_deps=$((with_deps + 1))
+                IFS=, read -r -a dl <<<"$deps"
+                for d in "${dl[@]}"; do
+                    [[ -n $d ]] || continue
+                    in_initrd "$d" || missing+=("$(basename "$f") needs $d")
+                done
+            done
+            if [[ ${#modinfo_failed[@]} -gt 0 ]]; then
+                echo "FAIL - modinfo failed on ${#modinfo_failed[@]} modules: ${modinfo_failed[*]:0:5}"
+                fail=1
+            elif [[ $with_deps -eq 0 ]]; then
+                echo "FAIL - no module of the initrd has a dependency (modinfo output not understood)"
+                fail=1
+            elif [[ ${#missing[@]} -eq 0 ]]; then
+                echo "ok   - every dependency of the ${#mods[@]} modules in the initrd is in the initrd"
+            else
+                echo "FAIL - modules without their dependency in the initrd:"
+                printf '       %s\n' "${missing[@]}"
+                fail=1
+            fi
         fi
+    fi
+fi
+
+# O5: the main archive is compressed at zstd level 19, whose window is 8 MiB
+# (level 15 gives 4 MiB). dracut with 3cpio ignores a level inside a custom
+# --compress string and uses 15; only --compress-level counts. The main
+# archive is the zstd frame after the early microcode cpio.
+trailer=$(LC_ALL=C grep -obUaP 'TRAILER!!!' "$INITRD" | head -1 | cut -d: -f1)
+off=""
+if [[ -n $trailer ]]; then
+    off=$(LC_ALL=C grep -obUaP '\x28\xb5\x2f\xfd' "$INITRD" | cut -d: -f1 | awk -v t="$trailer" '$1 >= t {print; exit}')
+fi
+if [[ -z $off ]]; then
+    echo "FAIL - the initrd main archive is not a zstd frame (no zstd frame after the early cpio)"
+    fail=1
+else
+    tail -c +$((off + 1)) "$INITRD" >"$WORK/main.zst"
+    win=$(zstd -lv "$WORK/main.zst" 2>/dev/null | sed -n 's/^Window Size:.*(\([0-9]*\) B).*/\1/p')
+    if [[ ! $win =~ ^[0-9]+$ ]]; then
+        echo "FAIL - the initrd is compressed at zstd level 19 (window size not readable from zstd -lv)"
+        fail=1
+    elif [[ $win -ge 8388608 ]]; then
+        echo "ok   - the initrd is compressed at zstd level 19 (window $win bytes)"
+    else
+        echo "FAIL - the initrd is compressed at zstd level 19 (window $win bytes, want at least 8388608)"
+        fail=1
     fi
 fi
 

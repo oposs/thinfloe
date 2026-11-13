@@ -453,10 +453,13 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 # and cnic, which kept modules need. test-initramfs-drivers.sh lists both
 # sides and checks that every dependency of a kept module is still there.
 #
-# zstd -19: zstd decompresses at the same speed at every level, so the
-# smaller initrd costs build time only. Not --ultra -22: its 128 MiB window
-# is what the kernel's initramfs decompressor would have to allocate; level 19
-# uses 8 MiB.
+# zstd level 19 through --compress-level: zstd decompresses at the same speed at
+# every level, so the smaller initrd costs build time only. dracut builds the
+# archive with 3cpio and ignores a level inside a custom --compress string; it
+# maps "zstd -3" or "zstd -19" to its own default, level 15 (build log:
+# "mapped to 3cpio config 'zstd -15'"). Not --ultra -22: its 128 MiB window is
+# what the kernel's initramfs decompressor would have to allocate; level 19
+# uses 8 MiB. test-initramfs-drivers.sh checks the window of the main archive.
 #
 # The slim step at the end of this file (containers/ubuntu/slim/) depends on
 # this initrd and checks that it exists.
@@ -464,7 +467,7 @@ RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
     dracut --force --no-hostonly --add "thinfloe plymouth systemd-networkd systemd-resolved" \
     --omit "drm dash crypt dmraid multipath iscsi nfs nbd fcoe fcoe-uefi biosdevname dmsquash-live dmsquash-live-ntfs" \
     --omit-drivers "btrfs xfs reiserfs jfs ocfs2 gfs2 f2fs bcachefs cramfs minix hfs hfsplus qnx4 qnx6 ufs nouveau radeon amdgpu vmwgfx qxl virtio-gpu bochs cfg80211 mac80211 mt76 mt76-sdio mt76-connac-lib mt792x-lib mt7921-common mt7921s libertas libertas_sdio mlx4_core mlx4_en mlx5_core mlx5_dpll ice i40e qed qede bnx2x bnxt_en cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls chcr libcxgb sfc sfc_falcon sfc_siena nfp lpfc qla2xxx bfa efct fnic csiostor qedf bnx2fc fcoe libfcoe libfc mptfc mptsas mpt3sas mpi3mr pm80xx isci mvsas aic94xx libsas megaraid_sas smartpqi hpsa esas2r ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp rnbd_client cifs cifs_md4 ksmbd ceph libceph rbd kafs rxrpc sunrpc grace nfs_acl" \
-    --compress "zstd -19 -T4" \
+    --compress zstd --compress-level 19 \
     --kver $KERNEL_VERSION
 
 # Cleanup. Firmware content is determined by package selection - see the
