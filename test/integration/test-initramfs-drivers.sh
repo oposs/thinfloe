@@ -157,11 +157,13 @@ else
     fi
 fi
 
-# O5: the main archive is compressed at zstd level 19, whose window is 8 MiB
-# (level 15 gives 4 MiB). Levels 17, 18 and 19 all have the 8 MiB window, so
-# the window cannot tell them apart; it does rule out 16 or lower and --ultra. dracut with 3cpio ignores a level inside a custom
-# --compress string and uses 15; only --compress-level counts. The main
-# archive is the zstd frame after the early microcode cpio.
+# O5: the Dockerfile asks for zstd level 19 for the main archive.
+# Level 15 gives a 4 MiB window; levels 17 to 19 give 8 MiB.
+# So the check rules out level 16 or lower and --ultra.
+# It cannot tell level 17, 18 and 19 apart.
+# dracut with 3cpio ignores a level inside a custom --compress string.
+# It then uses level 15; only --compress-level counts.
+# The main archive is the zstd frame after the early microcode cpio.
 trailer=$(LC_ALL=C grep -obUaP 'TRAILER!!!' "$INITRD" | head -1 | cut -d: -f1)
 off=""
 if [[ -n $trailer ]]; then
@@ -174,7 +176,7 @@ else
     tail -c +$((off + 1)) "$INITRD" >"$WORK/main.zst"
     win=$(zstd -lv "$WORK/main.zst" 2>/dev/null | sed -n 's/^Window Size:.*(\([0-9]*\) B).*/\1/p')
     if [[ ! $win =~ ^[0-9]+$ ]]; then
-        echo "FAIL - the initrd is compressed at zstd level 19 (window size not readable from zstd -lv)"
+        echo "FAIL - the initrd is compressed at zstd level 17 to 19 (window size not readable from zstd -lv)"
         fail=1
     elif [[ $win -eq 8388608 ]]; then
         echo "ok   - the initrd is compressed at zstd level 17 to 19 (window $win bytes)"
