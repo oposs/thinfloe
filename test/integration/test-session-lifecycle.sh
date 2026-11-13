@@ -30,6 +30,18 @@ trap cleanup EXIT
 fail=0
 ok()   { echo "ok   - $1"; }
 bad()  { echo "FAIL - $1"; fail=1; }
+# gone_within <pid> <seconds>: true once the process has ended, a zombie
+# (state Z, dead but not yet reaped) counting as ended; false when it still
+# runs after <seconds>.
+gone_within() {
+    local pid=$1 tries=$(( $2 * 20 )) stat
+    while (( tries-- > 0 )); do
+        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+        [[ ${stat##*) } == Z* ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
 
 mkdir -p "$WORK/bin" "$WORK/home"
 # foot records its arguments instead of opening a window.
@@ -132,8 +144,11 @@ else
     bad "session: scale helper output '$(cat "$WORK/helper.out" 2>/dev/null)'"
 fi
 hp=$(cat "$WORK/helper.pid" 2>/dev/null)
-sleep 0.3
-if [[ -n "$hp" ]] && ! kill -0 "$hp" 2>/dev/null; then
+# The session sends TERM on its way out and does not wait. A fixed 0.3 s
+# then one kill -0 failed under load (2026-11-13, one run in make test):
+# the helper was still dying, or a zombie not yet reaped, which kill -0
+# also finds. A live helper that ignores TERM still fails after 5 s.
+if [[ -n "$hp" ]] && gone_within "$hp" 5; then
     ok "session: the scale helper ends with the session"
 else
     bad "session: scale helper $hp still running"
