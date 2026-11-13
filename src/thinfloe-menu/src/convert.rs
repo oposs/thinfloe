@@ -28,21 +28,56 @@ fn note_kept(file: &str, why: &str) -> String {
 
 // ---- environment ----
 
-/// `KEY=value` of an active shell line (`export ` allowed); the value
-/// loses one pair of matching quotes.
-fn assignment(line: &str) -> Option<(&str, &str)> {
+/// What follows `KEY=` on a shell line.
+#[derive(Debug, PartialEq, Eq)]
+enum Value {
+    /// The shell word; a comment after it is ignored.
+    Word(String),
+    /// A command or operator follows the word: not a plain assignment.
+    Trailing,
+}
+
+/// The shell word at the start of `v`, quotes removed: it ends at the first
+/// unquoted blank, `#`, `;`, `&` or `|`.
+fn shell_word(v: &str) -> Value {
+    let mut word = String::new();
+    let mut chars = v.chars();
+    let mut tail = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                for q in chars.by_ref() {
+                    if q == c {
+                        break;
+                    }
+                    word.push(q);
+                }
+            }
+            ' ' | '\t' | '#' | ';' | '&' | '|' => {
+                tail.push(c);
+                tail.extend(chars);
+                break;
+            }
+            _ => word.push(c),
+        }
+    }
+    let tail = tail.trim_start_matches([' ', '\t']);
+    if tail.is_empty() || tail.starts_with('#') {
+        Value::Word(word)
+    } else {
+        Value::Trailing
+    }
+}
+
+/// `KEY=value` of an active shell line (`export ` allowed).
+fn assignment(line: &str) -> Option<(&str, Value)> {
     let l = line.trim_start();
     if l.starts_with('#') {
         return None;
     }
     let l = l.strip_prefix("export ").map_or(l, str::trim_start);
     let (k, v) = l.split_once('=')?;
-    let v = v.trim_end();
-    let v = [('"', '"'), ('\'', '\'')]
-        .iter()
-        .find_map(|(a, b)| v.strip_prefix(*a).and_then(|v| v.strip_suffix(*b)))
-        .unwrap_or(v);
-    Some((k.trim_end(), v))
+    Some((k.trim_end(), shell_word(v)))
 }
 
 const KB_KEYS: [&str; 4] = [
@@ -66,19 +101,25 @@ fn first_entry(key: &str, value: &str, notes: &mut Vec<String>) -> String {
 /// The keyboard of an `environment` file, its other active lines (kept in
 /// the user's own file) and the report lines.
 pub fn keyboard_from_env(text: &str) -> (Keyboard, Vec<String>, Vec<String>) {
-    let mut last: HashMap<&str, &str> = HashMap::new();
+    let mut last: HashMap<&str, String> = HashMap::new();
     let mut other = Vec::new();
+    let mut notes = Vec::new();
     for line in text.lines() {
         match assignment(line) {
-            Some((k, v)) if KB_KEYS.contains(&k) => {
+            Some((k, Value::Word(v))) if KB_KEYS.contains(&k) => {
                 last.insert(k, v);
+            }
+            Some((k, Value::Trailing)) if KB_KEYS.contains(&k) => {
+                notes.push(format!(
+                    "environment: the line \"{}\" is not a plain assignment and is ignored.",
+                    line.trim()
+                ));
             }
             Some(_) => other.push(line.trim_end().to_string()),
             None => {}
         }
     }
     let mut kb = Keyboard::default();
-    let mut notes = Vec::new();
 
     if let Some(model) = last
         .get("XKB_DEFAULT_MODEL")
@@ -155,17 +196,32 @@ fn normalise_idle(v: &str) -> u32 {
 
 /// The idle time from the last `TF_IDLE_TIMEOUT=` assignment (else
 /// `DBRRG_IDLE_TIMEOUT=`) and the file without those lines.
-pub fn idle_from_sessionrc(text: &str) -> (Option<u32>, String) {
+pub fn idle_from_sessionrc(text: &str) -> (Option<u32>, String, Vec<String>) {
     let (mut tf, mut dbrrg) = (None, None);
     let mut rest = String::new();
+    let mut notes = Vec::new();
     for line in text.split_inclusive('\n') {
-        match assignment(line.trim_end_matches('\n')) {
-            Some(("TF_IDLE_TIMEOUT", v)) => tf = Some(normalise_idle(v)),
-            Some(("DBRRG_IDLE_TIMEOUT", v)) => dbrrg = Some(normalise_idle(v)),
+        let trimmed = line.trim_end_matches('\n');
+        match assignment(trimmed) {
+            Some((k @ ("TF_IDLE_TIMEOUT" | "DBRRG_IDLE_TIMEOUT"), Value::Word(v))) => {
+                let n = Some(normalise_idle(&v));
+                if k == "TF_IDLE_TIMEOUT" {
+                    tf = n;
+                } else {
+                    dbrrg = n;
+                }
+            }
+            Some(("TF_IDLE_TIMEOUT" | "DBRRG_IDLE_TIMEOUT", Value::Trailing)) => {
+                notes.push(format!(
+                    "sessionrc: the line \"{}\" is not a plain assignment and is left as it is.",
+                    trimmed.trim()
+                ));
+                rest.push_str(line);
+            }
             _ => rest.push_str(line),
         }
     }
-    (tf.or(dbrrg), rest)
+    (tf.or(dbrrg), rest, notes)
 }
 
 // ---- screen, status, monitors ----
@@ -365,7 +421,7 @@ mod tests {
 
     #[test]
     fn idle_from_sessionrc_takes_the_last() {
-        let (n, rest) = idle_from_sessionrc(
+        let (n, rest, _) = idle_from_sessionrc(
             "TF_IDLE_TIMEOUT=60\nwlr-randr --output DP-1 --transform 90\nexport TF_IDLE_TIMEOUT=0900\n",
         );
         assert_eq!(n, Some(900));
@@ -377,7 +433,35 @@ mod tests {
         assert_eq!(idle_from_sessionrc("DBRRG_IDLE_TIMEOUT=120").0, Some(120));
         assert_eq!(idle_from_sessionrc("TF_IDLE_TIMEOUT=abc").0, Some(0));
         assert_eq!(idle_from_sessionrc("TF_IDLE_TIMEOUT=\" +30 \"").0, Some(30));
-        assert_eq!(idle_from_sessionrc("echo hi\n"), (None, "echo hi\n".to_string()));
+        assert_eq!(
+            idle_from_sessionrc("echo hi\n"),
+            (None, "echo hi\n".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_ends_the_value() {
+        let (n, rest, notes) = idle_from_sessionrc("TF_IDLE_TIMEOUT=300  # five minutes\necho hi\n");
+        assert_eq!(n, Some(300));
+        assert_eq!(rest, "echo hi\n");
+        assert!(notes.is_empty(), "{notes:?}");
+        let (k, _, _) = keyboard_from_env("XKB_DEFAULT_LAYOUT=de # x\n");
+        assert_eq!(k.layout, "de");
+        let (k, _, notes) = keyboard_from_env("XKB_DEFAULT_LAYOUT=\"de\"#x\n");
+        assert_eq!(k.layout, "de");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_trailing_command_leaves_the_line_alone() {
+        let text = "TF_IDLE_TIMEOUT=300; echo hi\n";
+        let (n, rest, notes) = idle_from_sessionrc(text);
+        assert_eq!(n, None);
+        assert_eq!(rest, text);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("TF_IDLE_TIMEOUT=300; echo hi"), "{notes:?}");
+        let (n, _, _) = idle_from_sessionrc("TF_IDLE_TIMEOUT=60\nTF_IDLE_TIMEOUT=300 && x\n");
+        assert_eq!(n, Some(60));
     }
 
     #[test]
