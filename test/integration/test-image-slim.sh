@@ -131,8 +131,8 @@ else
     fi
 fi
 
-# DVB, TV tuner and radio modules, radeon and nouveau (O4). Names carry .ko
-# here because the modules are decompressed (S1).
+# DVB, TV tuner and radio modules, and radeon (O4); nouveau stays (owner,
+# 2026-11-13). Names carry .ko here because the modules are decompressed (S1).
 absent_except() {
     local desc="$1" pattern="$2" except="$3" hit
     hit=$(grep -E -- "$pattern" "$LIST" | grep -vE -- "$except" | head -1 || true)
@@ -150,9 +150,9 @@ absent_except "no DVB, tuner or radio modules" \
 absent "no cx88-dvb"                  "${MODS}.*/cx88-dvb\\.ko\$"
 absent "no saa7134-dvb"               "${MODS}.*/saa7134-dvb\\.ko\$"
 absent "no em28xx-dvb"                "${MODS}.*/em28xx-dvb\\.ko\$"
-absent "no radeon or nouveau modules" "${MODS}drivers/gpu/drm/(radeon|nouveau)/"
+absent "no radeon modules"            "${MODS}drivers/gpu/drm/radeon/"
 for m in cx88xx cx8800 saa7134 em28xx em28xx-v4l uvcvideo ib_core comedi \
-    industrialio can dsa_core mtd mlx5_core amdgpu iwlwifi snd-fm801 tea575x; do
+    industrialio can dsa_core mtd mlx5_core amdgpu nouveau iwlwifi snd-fm801 tea575x; do
     check "module $m kept" "${MODS}.*/$m\\.ko\$"
 done
 

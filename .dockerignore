@@ -4,5 +4,7 @@
 !brand
 !containers/ubuntu/patches
 !containers/ubuntu/slim
+containers/ubuntu/slim/**/*~
+containers/ubuntu/slim/**/__pycache__
 !src/thinfloe-menu
 src/thinfloe-menu/target

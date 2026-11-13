@@ -78,8 +78,8 @@ Not standing constraints, but each has broken something or is guarded by a test.
 ### Build
 
 - `MENU_FILES`, `MENU_DIRS`, `PATCH_FILES` and `OVERLAY_DIRS` in the `Makefile` are prerequisites of `.ubuntu-container`; a new input needs a line there, or tests validate a stale image. Each container stamp holds the image ID it built; build with a distinct `VERSION` per checkout. Guards: `test-container-inputs.sh`, `test-container-stamp.sh`.
-- `SLIM_FILES` (`containers/ubuntu/slim/`) and `scripts/export-rootfs.sh` are prerequisites too (the second of the rootfs artifacts). Guard: `test-container-inputs.sh`.
-- The `RUN` that calls `containers/ubuntu/slim/slim-rootfs.sh` stays the last in the Dockerfile; nothing after it may run `dpkg`, `apt-get` or dracut (a `dpkg` trigger reruns dracut on the slimmed tree). `test-image-slim.sh` checks the built image.
+- `SLIM_FILES` (`containers/ubuntu/slim/`, without `*~` and `__pycache__`) is a prerequisite too, and `scripts/export-rootfs.sh` and `scripts/lib/common.sh` are prerequisites of the rootfs artifacts. Guard: `test-container-inputs.sh`.
+- The `RUN` that calls `containers/ubuntu/slim/slim-rootfs.sh` stays the last in the Dockerfile; nothing after it may run `dpkg`, `apt-get` or dracut (a `dpkg` trigger reruns dracut on the slimmed tree). Guard: `test-slim-last-run.sh`.
 - `test-image-size.sh` holds the size budget of `ramroot.sqsh`, `initrd.img` and their sum; raising it needs a reason in the commit message.
 - Netplan files are made mode 0600 by a `chmod` in the Dockerfile (git stores only 644/755).
 - `isc-dhcp-client` is not installed and nothing may call `dhclient`; DHCP is `systemd-networkd`'s job, in the initramfs too.
@@ -160,7 +160,7 @@ The exceptions are three cuts in `containers/ubuntu/slim/slim-rootfs.sh`
 (owner, 2026-11-12):
 
 - Intel WiFi: per series only the ucode the driver loads.
-- AMD graphics: only Ryzen APU firmware, by chip name and by the IP versions
+- AMD graphics: only APU firmware (Carrizo, Stoney, Ryzen), by chip name and by the IP versions
   of the kernel's table (`containers/ubuntu/slim/amdgpu-apu-ip.csv`, refreshed
   from `Documentation/gpu/amdgpu/apu-asic-info-table.csv` when the kernel
   changes); graphics card firmware and `radeon/` are dropped. An IP version

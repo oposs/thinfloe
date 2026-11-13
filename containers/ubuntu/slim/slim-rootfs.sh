@@ -83,8 +83,9 @@ run_depmod() {
     [[ -z $new ]] || die "depmod reports new problems:"$'\n'"$new"
 }
 
-# O4: remove DVB, TV tuner and radio modules, and radeon and nouveau. The
-# set is read from modules.dep before anything changes (names still end in
+# O4: remove DVB, TV tuner and radio modules, and radeon. nouveau stays
+# (owner, 2026-11-13): it sets the mode on NVIDIA cards up to Volta without
+# any firmware. The set is read from modules.dep before anything changes (names still end in
 # .ko.zst): the seed directories, plus every media module that depends on
 # the set, minus every module a module outside the set depends on.
 trim_media_modules() {
@@ -103,7 +104,7 @@ SEEDS = (
     "kernel/drivers/media/usb/dvb-usb-v2/",
 )
 MEDIA = ("kernel/drivers/media/", "kernel/drivers/staging/media/")
-GPU = ("kernel/drivers/gpu/drm/radeon/", "kernel/drivers/gpu/drm/nouveau/")
+GPU = ("kernel/drivers/gpu/drm/radeon/",)
 
 deps = {}
 with open(sys.argv[1]) as f:
@@ -135,7 +136,7 @@ while changed:
 gpu = {m for m in deps if m.startswith(GPU)}
 for m, d in deps.items():
     if m not in gpu and any(x in gpu for x in d):
-        sys.exit("slim-rootfs: %s depends on a radeon or nouveau module" % m)
+        sys.exit("slim-rootfs: %s depends on a radeon module" % m)
 media = sorted(cut - gpu)
 for m in media + sorted(gpu):
     print(m)
@@ -151,7 +152,7 @@ PYEOF
     (cd "/usr/lib/modules/$KVER" && xargs -d '\n' -r rm -f -- <"$list") \
         || { rm -f "$list"; die "removing media modules failed"; }
     rm -f "$list"
-    echo "slim-rootfs: removed $n media modules, $m radeon and nouveau modules" >&2
+    echo "slim-rootfs: removed $n media modules, $m radeon modules" >&2
 }
 
 # The squashfs compresses better as a whole than the zstd files inside it.
@@ -206,7 +207,7 @@ remove_links_to() {
     echo "$count"
 }
 
-# A1: of linux-firmware-amd-graphics keep only what Ryzen APUs load, and drop
+# A1: of linux-firmware-amd-graphics keep only what AMD APUs load, and drop
 # radeon/ whole. amdgpu_keep.py holds the rule and the new-APU guard (exit 3
 # on an IP version that neither kernel table knows); the links in $FW whose
 # target went are removed with it.

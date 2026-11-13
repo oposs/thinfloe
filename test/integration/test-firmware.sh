@@ -16,7 +16,8 @@
 # symlink, and a ucode for each chip in the field.
 #
 # And the AMD graphics firmware cut (A1 in the same spec): firmware for each
-# Ryzen APU, from a list written out here independent of amdgpu_keep.py, and
+# AMD APU (Carrizo, Stoney, Ryzen), from a list written out here independent
+# of amdgpu_keep.py, and
 # none for graphics cards (navi10) or for the radeon driver.
 #
 # Usage: test/integration/test-firmware.sh [path/to/ramroot.sqsh]
@@ -93,7 +94,7 @@ absent() {
     fi
 }
 
-# AMD graphics firmware: per Ryzen APU the files amdgpu loads for it (by
+# AMD graphics firmware: per APU the files amdgpu loads for it (by
 # chip name for the older APUs, by IP version for the newer ones).
 AMD='usr/lib/firmware/amdgpu/'
 while read -r apu names; do
@@ -101,6 +102,8 @@ while read -r apu names; do
         check "AMD APU firmware for $apu ($n)" "${AMD}${n}\.bin(\.zst)?$"
     done
 done <<'APUS'
+Carrizo carrizo_me
+Stoney stoney_me
 Raven raven_dmcu
 Picasso picasso_vcn
 Renoir renoir_dmcub
