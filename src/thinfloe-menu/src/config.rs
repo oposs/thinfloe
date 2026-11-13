@@ -331,9 +331,25 @@ fn rotation_from_word(w: &str) -> Option<Rotation> {
         .find(|r| rotation_word(*r) == w)
 }
 
+/// Criteria, `to` and the menu output go into `generated/kanshi` as they
+/// are: a quote, a brace or a line break would break the file or add
+/// profile lines of someone else's choosing.
+fn check_kanshi_name(name: &str) -> Result<(), String> {
+    if name.chars().any(|c| matches!(c, '"' | '{' | '}') || c.is_control()) {
+        return Err(format!(
+            "Monitor name {name:?} has a character the kanshi file cannot hold (a quote, a brace or a line break)."
+        ));
+    }
+    Ok(())
+}
+
 impl OutputCfg {
     fn to_set(&self) -> Result<OutputSet, String> {
         let name = &self.criteria;
+        check_kanshi_name(name)?;
+        if let Some(to) = &self.to {
+            check_kanshi_name(to)?;
+        }
         let mode = kanshi::parse_mode(&self.mode).ok_or(format!("Output {name}: bad mode {}", self.mode))?;
         let rotation =
             rotation_from_word(&self.rotation).ok_or(format!("Output {name}: bad rotation {}", self.rotation))?;
@@ -375,6 +391,9 @@ impl MonitorsCfg {
         self.profiles
             .iter()
             .map(|p| {
+                if let Some(m) = &p.menu_output {
+                    check_kanshi_name(m)?;
+                }
                 Ok(Profile {
                     outputs: p.outputs.iter().map(OutputCfg::to_set).collect::<Result<_, _>>()?,
                     menu_output: p.menu_output.clone(),
@@ -792,6 +811,29 @@ mod tests {
         n.wired.mode = "dhcp".into();
         n.wired.dns = vec!["nope".into()];
         assert!(n.wired().is_err());
+    }
+
+    #[test]
+    fn a_name_the_kanshi_file_could_not_hold_is_refused() {
+        // Criteria, `to` and the menu output go into generated/kanshi
+        // verbatim; a quote, line break or brace would break or inject.
+        for bad in ["a\"b", "a\nb", "a\rb", "a}b", "a{b"] {
+            let fields: [fn(&mut MonitorsCfg, &str); 3] = [
+                |m, v| m.profiles[0].outputs[0].criteria = v.into(),
+                |m, v| m.profiles[0].outputs[1].to = Some(v.into()),
+                |m, v| m.profiles[0].menu_output = Some(v.into()),
+            ];
+            for set in fields {
+                let mut m = MonitorsCfg::from_profiles(&sample_profiles());
+                set(&mut m, bad);
+                let e = m.to_profiles().unwrap_err();
+                assert!(e.contains("kanshi"), "{bad:?}: {e}");
+            }
+        }
+        // Spaces, dots and dashes are what real monitor names hold.
+        let mut m = MonitorsCfg::from_profiles(&sample_profiles());
+        m.profiles[0].outputs[0].criteria = "Dell Inc. U2419H ABC-1".into();
+        assert!(m.to_profiles().is_ok());
     }
 
     #[test]

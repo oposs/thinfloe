@@ -238,7 +238,7 @@ fn quoted(criteria: &str) -> String {
     }
 }
 
-/// The body of the file (`owned::write` adds the header): one kanshi
+/// The body of the file (`generated::render` adds the header): one kanshi
 /// profile per entry. Callers check `positions` first; a layout that
 /// cannot be placed renders its outputs at 0,0.
 pub fn render(profiles: &[Profile]) -> String {
@@ -713,6 +713,12 @@ mod tests {
     fn parse_reads_the_generated_header_too() {
         let text = format!("{}\n\n{}", crate::generated::HEADER, render(&sample()));
         assert_eq!(parse(&text).unwrap(), sample());
+    }
+
+    #[test]
+    fn parse_refuses_a_kept_hand_file_under_the_generated_header() {
+        let text = format!("{}\nprofile {{\n\toutput * enable\n}}\n", crate::generated::HEADER);
+        assert!(parse(&text).is_err());
     }
 
     #[test]

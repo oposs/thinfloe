@@ -158,21 +158,25 @@ pub enum Job {
     NetTakeOver {
         which: &'static str,
     },
-    /// Read `~/.config/kanshi/config`.
+    /// Read `[monitors]` from the settings.
     MonLoad,
     /// Write the monitor layout and let kanshi apply it, undoably.
     MonApply {
-        text: String,
+        profiles: Vec<crate::kanshi::Profile>,
         menu_output: Option<String>,
-        /// Kept as `config.prev` when there is no file.
+        /// Kept as `generated/kanshi.prev` when there is no file.
         prev: Option<String>,
     },
-    /// The new layout is confirmed.
-    MonKeep,
+    /// The new layout is confirmed: `profiles` go into `[monitors]`.
+    MonKeep {
+        profiles: Vec<crate::kanshi::Profile>,
+    },
     /// Put the layout before the Apply back.
     MonRevert,
-    /// Move a hand-written kanshi config aside.
-    MonTakeOver,
+    /// Replace a kept hand-written kanshi file by the layout on screen.
+    MonTakeOver {
+        heads: Vec<crate::heads::Head>,
+    },
     /// Write the status layout file with this text; `None` removes it, and
     /// the default list counts again.
     StatusSave(Option<String>),
@@ -364,17 +368,17 @@ impl Menu {
         Effect::Start(match r {
             MonRequest::Load => Job::MonLoad,
             MonRequest::Apply {
-                text,
+                profiles,
                 menu_output,
                 prev,
             } => Job::MonApply {
-                text,
+                profiles,
                 menu_output,
                 prev,
             },
-            MonRequest::Keep => Job::MonKeep,
+            MonRequest::Keep { profiles } => Job::MonKeep { profiles },
             MonRequest::Revert => Job::MonRevert,
-            MonRequest::TakeOver => Job::MonTakeOver,
+            MonRequest::TakeOver { heads } => Job::MonTakeOver { heads },
         })
     }
 
@@ -1187,8 +1191,8 @@ impl Menu {
                 }
                 if save { self.net_changed_home() } else { None }
             }
-            JobResult::MonLoaded(text, owner) => {
-                self.monitors.loaded(text, owner);
+            JobResult::MonLoaded(profiles, source) => {
+                self.monitors.loaded(profiles, source);
                 None
             }
             JobResult::MonApplied(r) => {
@@ -3612,7 +3616,7 @@ mod tests {
         assert_eq!(m.heads_changed(heads), Some(Effect::Start(Job::MonLoad)));
         assert_eq!(
             m.finished(
-                JobResult::MonLoaded(Ok(None), crate::owned::Owner::Missing),
+                JobResult::MonLoaded(Ok(None), crate::monitors::MonSource::Missing),
                 Instant::now()
             ),
             None
@@ -3628,11 +3632,13 @@ mod tests {
         m.settings_tab = SettingsTab::Screen;
         m.monitors_event(MonEvent::Select("DP-2".into()), now);
         assert_eq!(m.monitors_event(MonEvent::MenuHere, now), None);
-        let Some(Effect::Start(Job::MonApply { text, menu_output, .. })) = m.monitors_event(MonEvent::Apply, now)
+        let Some(Effect::Start(Job::MonApply {
+            profiles, menu_output, ..
+        })) = m.monitors_event(MonEvent::Apply, now)
         else {
             panic!("no Apply job")
         };
-        assert!(text.contains("# thinfloe menu DP-2"), "{text}");
+        assert_eq!(profiles[0].menu_output.as_deref(), Some("DP-2"));
         assert_eq!(menu_output.as_deref(), Some("DP-2"));
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
         // The countdown runs on whatever the screen shows.
@@ -3656,7 +3662,10 @@ mod tests {
         let mut m = mon_menu();
         assert!(m.monitors_event(MonEvent::Apply, now).is_some());
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
-        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert!(matches!(
+            m.monitors_event(MonEvent::Keep, now),
+            Some(Effect::Start(Job::MonKeep { .. }))
+        ));
         assert_eq!(m.finished(JobResult::MonKept(Err("EISDIR".into())), now), None);
         assert!(m.log.last().unwrap().plain().contains("could not be confirmed: EISDIR"));
     }
@@ -3671,7 +3680,10 @@ mod tests {
             Some(Effect::Start(Job::MonApply { .. }))
         ));
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
-        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert!(matches!(
+            m.monitors_event(MonEvent::Keep, now),
+            Some(Effect::Start(Job::MonKeep { .. }))
+        ));
         assert_eq!(
             m.finished(JobResult::MonKept(Ok(())), now),
             Some(Effect::Start(Job::Save))

@@ -5980,7 +5980,7 @@ mod tests {
     fn two_monitors() -> MonTab {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
-        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
         mon
     }
 
@@ -6171,7 +6171,7 @@ mod tests {
             h.enabled = false;
         }
         mon.heads_changed(heads);
-        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
         assert!(mon.editable());
         assert_eq!(mon_clicks(&monitor_settings(mon), &["Apply"]), [None]);
     }
@@ -6230,13 +6230,10 @@ mod tests {
     fn a_hand_written_kanshi_file_is_shown_with_the_take_over() {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
-        mon.loaded(
-            Ok(Some("profile {\n  output * enable\n}\n".into())),
-            crate::owned::Owner::ByHand,
-        );
+        mon.loaded(Ok(None), crate::monitors::MonSource::Kept);
         let menu = monitor_settings(mon);
         let texts = mon_texts(&menu);
-        let line = "The monitor arrangement is set by hand in ~/.config/kanshi/config.";
+        let line = "The monitor arrangement is a kanshi file written by hand, which the menu keeps as it is.";
         assert!(has(&texts, line), "{texts:?}");
         // The monitors are shown, but nothing is offered to change them.
         assert!(has(&texts, "DP-1"), "{texts:?}");
@@ -6290,10 +6287,7 @@ mod tests {
         shot(&monitor_settings(keep), "screen-monitors-keep.ppm", (1920, 1080), 1.0);
         let mut hand = MonTab::default();
         hand.heads_changed(mon_heads());
-        hand.loaded(
-            Ok(Some("profile {\n  output * enable\n}\n".into())),
-            crate::owned::Owner::ByHand,
-        );
+        hand.loaded(Ok(None), crate::monitors::MonSource::Kept);
         shot(&monitor_settings(hand), "screen-monitors-hand.ppm", (1920, 1080), 1.0);
     }
 

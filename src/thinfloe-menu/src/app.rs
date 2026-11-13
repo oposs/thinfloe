@@ -490,12 +490,12 @@ fn panic_result(job: &Job) -> JobResult {
             net_failed(job, e)
         }
         // Unreadable: nothing is written over a file nobody could read.
-        Job::MonLoad => JobResult::MonLoaded(Err(e), crate::owned::Owner::ByHand),
+        Job::MonLoad => JobResult::MonLoaded(Err(e), crate::monitors::MonSource::Kept),
         Job::MonApply { .. } => JobResult::MonApplied(Err(e)),
         // The marker may still be there: the next session would go back.
-        Job::MonKeep => JobResult::MonKept(Err(e)),
+        Job::MonKeep { .. } => JobResult::MonKept(Err(e)),
         Job::MonRevert => JobResult::MonReverted(Err(e)),
-        Job::MonTakeOver => JobResult::MonTakenOver(Err(e)),
+        Job::MonTakeOver { .. } => JobResult::MonTakenOver(Err(e)),
         Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
     }
 }
@@ -588,16 +588,19 @@ fn job_result(
         }
         Job::NetTakeOver { which } => JobResult::NetTakenOver(netfiles::take_over(&paths.homes, which)),
         Job::MonLoad => {
-            let (text, owner) = jobs::mon_load(&paths.kanshi);
-            JobResult::MonLoaded(text, owner)
+            let (profiles, source) = jobs::mon_load(&paths.config);
+            JobResult::MonLoaded(profiles, source)
         }
         // The connector name is for the window move, which the menu does.
-        Job::MonApply { text, prev, .. } => {
-            JobResult::MonApplied(jobs::mon_apply(&paths.kanshi, &text, prev.as_deref()))
-        }
-        Job::MonKeep => JobResult::MonKept(jobs::mon_keep(&paths.kanshi)),
+        Job::MonApply { profiles, prev, .. } => JobResult::MonApplied(jobs::mon_apply(
+            &paths.config,
+            &paths.kanshi,
+            &profiles,
+            prev.as_deref(),
+        )),
+        Job::MonKeep { profiles } => JobResult::MonKept(jobs::mon_keep(&paths.config, &paths.kanshi, profiles)),
         Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
-        Job::MonTakeOver => JobResult::MonTakenOver(jobs::mon_take_over(&paths.kanshi)),
+        Job::MonTakeOver { heads } => JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &heads)),
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
     }
 }
@@ -1518,7 +1521,10 @@ mod tests {
 
     #[test]
     fn a_keep_job_that_panics_does_not_report_success() {
-        assert!(matches!(panic_result(&Job::MonKeep), JobResult::MonKept(Err(_))));
+        assert!(matches!(
+            panic_result(&Job::MonKeep { profiles: Vec::new() }),
+            JobResult::MonKept(Err(_))
+        ));
         assert!(matches!(panic_result(&Job::MonRevert), JobResult::MonReverted(Err(_))));
     }
 
