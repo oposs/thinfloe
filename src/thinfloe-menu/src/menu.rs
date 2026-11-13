@@ -1258,11 +1258,11 @@ impl Menu {
                 if !self.network.taking_over() {
                     return None;
                 }
-                let which = self.network.taking_over_file();
+                let what = self.network.taking_over_name();
                 match &r {
                     Ok(()) => self
                         .log
-                        .note(Kind::Event, format!("~/{which} is now managed by the menu.")),
+                        .note(Kind::Event, format!("{what} are now managed by the menu.")),
                     Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
                 }
                 if self.network.take_over_done(r) {
@@ -2988,7 +2988,7 @@ mod tests {
             [
                 ev("Network settings applied."),
                 ev("Saving the home directory…"),
-                ev("~/wifi.yaml is now managed by the menu."),
+                ev("The WiFi settings are now managed by the menu."),
             ]
         );
     }
@@ -3023,7 +3023,7 @@ mod tests {
         let now = Instant::now();
         net_apply(&mut m);
         let failed = ApplyFailed {
-            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            reason: "x; generated/wifi.yaml could not be restored: busy".into(),
             home_changed: true,
         };
         assert_eq!(
@@ -3033,7 +3033,7 @@ mod tests {
         assert_eq!(
             log(&m),
             [
-                warn("Network settings not applied: x; ~/wifi.yaml could not be put back: busy"),
+                warn("Network settings not applied: x; generated/wifi.yaml could not be restored: busy"),
                 ev("Saving the home directory…"),
             ]
         );

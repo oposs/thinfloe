@@ -55,7 +55,9 @@ pub fn test_shared(root: &std::path::Path) -> Shared {
     Arc::new(Mutex::new(open(dir, Inputs::default(), OpenMode::Session, 0).store))
 }
 
-/// What `stage` replaced, for `unstage`.
+/// What `stage` replaced, for `unstage`. `None` stands for a file that was
+/// absent or that could not be read; `unstage` removes what `stage` put in
+/// its place.
 pub struct Staged {
     pub old: Vec<(&'static str, Option<Vec<u8>>)>,
 }
@@ -63,7 +65,12 @@ pub struct Staged {
 fn read_config(dir: &ConfigDir) -> Result<Option<ThinfloeConfig>, String> {
     match atomic::read(&dir.config_toml(), CONFIG_MAX_BYTES) {
         Ok(None) => Ok(None),
-        Ok(Some(b)) => config::parse(&String::from_utf8_lossy(&b)).map(Some),
+        // Strict: a lossy read would replace a byte of an SSID or a password
+        // and write the change back. Invalid UTF-8 is a broken file.
+        Ok(Some(b)) => String::from_utf8(b)
+            .map_err(|e| format!("config.toml is not valid UTF-8 ({e})"))
+            .and_then(|t| config::parse(&t))
+            .map(Some),
         Err(e) => Err(format!("config.toml: {e}")),
     }
 }
@@ -161,7 +168,7 @@ impl ConfigStore {
             .map_err(|e| format!("config.toml could not be written: {e}"))
     }
 
-    fn refuse_read_only(&self) -> Result<(), String> {
+    pub fn refuse_read_only(&self) -> Result<(), String> {
         if self.read_only {
             Err("The settings are read-only.".into())
         } else {
@@ -208,14 +215,16 @@ impl ConfigStore {
         let mut staged = Staged { old: Vec::new() };
         for (name, body) in files {
             let path = self.dir.generated_file(name);
-            let step = atomic::read(&path, generated::MAX_BYTES)
-                .map_err(|e| format!("generated/{name} could not be read: {e}"))
-                .and_then(|old| {
-                    staged.old.push((name, old));
-                    generated::write_if_changed(&self.dir.generated(), name, body.as_deref())
-                        .map(|_| ())
-                        .map_err(|e| format!("generated/{name} could not be written: {e}"))
-                });
+            // An old file that cannot be read (a link, too big, not a
+            // regular file) is no config of ours to keep: it is replaced,
+            // as `write_if_changed` does, and there are no bytes to put
+            // back. Refusing instead would block every network Apply for
+            // good, and the person could never fix the WiFi.
+            let old = atomic::read(&path, generated::MAX_BYTES).unwrap_or(None);
+            staged.old.push((name, old));
+            let step = generated::write_if_changed(&self.dir.generated(), name, body.as_deref())
+                .map(|_| ())
+                .map_err(|e| format!("generated/{name} could not be written: {e}"));
             if let Err(e) = step {
                 let _ = self.unstage(staged);
                 return Err(e);
@@ -459,5 +468,90 @@ mod tests {
         o.store.commit(cand.clone()).unwrap();
         assert_eq!(o.store.cfg, cand);
         assert!(o.store.has_generated());
+    }
+
+    #[test]
+    fn stage_replaces_an_old_file_it_cannot_read() {
+        let d = TestDir::new("store", "unreadable-old");
+        let o = open_session(&d);
+        let gdir = cdir(&d).generated();
+        let wifi = cdir(&d).generated_file("wifi.yaml");
+        // A link, and a file too big, are no old bytes to keep: replaced.
+        let target = d.join("elsewhere.yaml");
+        fs::write(&target, "elsewhere: 1\n").unwrap();
+        std::os::unix::fs::symlink(&target, &wifi).unwrap();
+        let big = cdir(&d).generated_file("ethernet.yaml");
+        fs::write(&big, vec![b'x'; generated::MAX_BYTES as usize + 1]).unwrap();
+        let cand = one_net();
+        let s = o.store.stage(Table::Network, &cand).unwrap();
+        assert!(!fs::symlink_metadata(&wifi).unwrap().file_type().is_symlink());
+        assert!(gen_text(&d, "wifi.yaml").unwrap().contains("secret-pw"));
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"elsewhere: 1\n",
+            "the link was not followed"
+        );
+        // ethernet.yaml renders to nothing for DHCP: the big file is gone.
+        assert!(fs::symlink_metadata(&big).is_err());
+        // With nothing readable to put back, the replacements go.
+        o.store.unstage(s).unwrap();
+        assert!(fs::symlink_metadata(&wifi).is_err() && fs::symlink_metadata(&big).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"elsewhere: 1\n");
+        assert!(gdir.exists());
+    }
+
+    #[test]
+    fn invalid_utf8_in_config_takes_the_broken_path() {
+        let d = TestDir::new("store", "utf8");
+        let want = one_net();
+        let mut bytes = to_text(&want).into_bytes();
+        let at = bytes.windows(4).position(|w| w == b"home").unwrap();
+        bytes[at + 2] = 0xff;
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), &bytes).unwrap();
+        let body = crate::generated::render(&want, "wifi.yaml", &inputs())
+            .unwrap()
+            .unwrap();
+        put_generated(&d, "wifi.yaml", &body);
+        let o = open_session(&d);
+        let kept = cdir(&d).root.join("config.toml.broken-1700000000");
+        assert_eq!(fs::read(kept).unwrap(), bytes, "the bytes are kept as they were");
+        assert_eq!(o.store.cfg.network.networks, want.network.networks);
+        assert!(o.notes[0].contains("UTF-8"), "{:?}", o.notes);
+        assert_eq!(gen_text(&d, "wifi.yaml").unwrap(), body);
+        assert!(parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).is_ok());
+        // Read-only: told, not rewritten.
+        let d = TestDir::new("store", "utf8-ro");
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), &bytes).unwrap();
+        let o = open(cdir(&d), inputs(), OpenMode::ReadOnly, NOW);
+        assert!(o.notes[0].contains("UTF-8"), "{:?}", o.notes);
+        assert_eq!(fs::read(cdir(&d).config_toml()).unwrap(), bytes);
+    }
+
+    /// Review Focus 5: a keyboard change between a network stage and its
+    /// undo leaves the staged network files alone, and the undo puts back
+    /// exactly the network files.
+    #[test]
+    fn a_keyboard_change_during_a_stage_leaves_the_staged_files() {
+        let d = TestDir::new("store", "keyboard-while-staged");
+        let mut o = open_session(&d);
+        put_generated(&d, "ethernet.yaml", &format!("{HEADER}\nold wired\n"));
+        let wired_before = fs::read(cdir(&d).generated_file("ethernet.yaml")).unwrap();
+        let s = o.store.stage(Table::Network, &one_net()).unwrap();
+        let staged = gen_text(&d, "wifi.yaml").unwrap();
+        o.store
+            .update(Table::Keyboard, |c| c.keyboard.layout = "ch".into())
+            .unwrap();
+        assert_eq!(gen_text(&d, "wifi.yaml").unwrap(), staged);
+        o.store.unstage(s).unwrap();
+        assert!(gen_text(&d, "wifi.yaml").is_none());
+        assert_eq!(
+            fs::read(cdir(&d).generated_file("ethernet.yaml")).unwrap(),
+            wired_before
+        );
+        assert!(gen_text(&d, "environment").unwrap().contains("XKB_DEFAULT_LAYOUT=ch"));
+        assert_eq!(o.store.cfg.keyboard.layout, "ch");
+        assert!(o.store.cfg.network.networks.is_empty());
     }
 }

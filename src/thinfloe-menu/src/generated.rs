@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::config::{ThinfloeConfig, xkb_options};
-use crate::netfiles::{Wired, render_wifi, render_wired};
+use crate::netfiles::{Wired, render_wifi, render_wired, without_menu_header};
 use crate::{atomic, kanshi, screentab};
 
 /// First line of every generated file.
@@ -93,7 +93,8 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
                 return Ok(None);
             }
             let dns = ipv4_list(&n.wifi_dns)?;
-            Ok(Some(with_header(&render_wifi(n.wifi_device.as_deref(), &nets, &dns))))
+            let text = render_wifi(n.wifi_device.as_deref(), &nets, &dns);
+            Ok(Some(with_header(without_menu_header(&text))))
         }
         "ethernet.yaml" => {
             let n = &cfg.network;
@@ -108,7 +109,7 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
                     _ => {}
                 }
             }
-            Ok(render_wired(&inp.default_wired, &wired)?.map(|t| with_header(&t)))
+            Ok(render_wired(&inp.default_wired, &wired)?.map(|t| with_header(without_menu_header(&t))))
         }
         other => Err(format!("No generated file named {other}")),
     }
@@ -236,7 +237,15 @@ mod tests {
         let w = render(&cfg, "wifi.yaml", &inp()).unwrap().unwrap();
         assert_eq!(
             w,
-            format!("{HEADER}\n{}", render_wifi(Some("wlan0"), &cfg.network.nets(), &[]))
+            format!(
+                "{HEADER}\n{}",
+                without_menu_header(&render_wifi(Some("wlan0"), &cfg.network.nets(), &[]))
+            )
+        );
+        assert_eq!(
+            w.matches("Edits here").count() + w.matches("Written by").count(),
+            1,
+            "one header: {w}"
         );
         cfg.network.set_wired(&Wired::Static {
             address: "10.0.0.5".parse().unwrap(),

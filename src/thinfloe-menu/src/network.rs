@@ -581,11 +581,11 @@ impl NetTab {
         self.taking_over.is_some()
     }
 
-    /// The home file the running take-over is for.
-    pub fn taking_over_file(&self) -> &'static str {
+    /// The settings the running take-over is for.
+    pub fn taking_over_name(&self) -> &'static str {
         match self.taking_over {
-            Some("wired") => netfiles::WIRED_FILE,
-            _ => netfiles::WIFI_FILE,
+            Some("wired") => "The wired settings",
+            _ => "The WiFi settings",
         }
     }
 
@@ -1302,8 +1302,8 @@ mod tests {
             t.event(NetEvent::TakeOver("wifi"), false),
             Some(NetRequest::TakeOver("wifi"))
         );
-        assert!(!t.take_over_done(Err("~/wifi.yaml: busy".into())));
-        assert_eq!(t.error(), Some("~/wifi.yaml: busy"));
+        assert!(!t.take_over_done(Err("generated/wifi.yaml: busy".into())));
+        assert_eq!(t.error(), Some("generated/wifi.yaml: busy"));
         // A failed take-over may have changed the files: read them again.
         assert!(t.load_due);
         // A menu file or an unknown name is not taken over.
@@ -1429,7 +1429,7 @@ mod tests {
         // The home could not be put back: it changed, and is saved.
         t.event(NetEvent::Apply, false);
         assert!(t.apply_done(Err(ApplyFailed {
-            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            reason: "x; generated/wifi.yaml could not be restored: busy".into(),
             home_changed: true
         })));
         assert_eq!(t.poll(now, true), Some(NetRequest::Load));

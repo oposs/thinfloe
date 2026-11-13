@@ -574,7 +574,7 @@ fn job_result(
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
         },
         Job::NetLoad => {
-            let (wifi, wired) = netfiles::load(&paths.homes);
+            let (wifi, wired) = jobs::net_load(paths);
             JobResult::NetLoaded(wifi, wired, netfiles::wifi_devices(&paths.homes.sys_net))
         }
         Job::NetStatus => JobResult::NetStatus(jobs::network_status(paths, feed)),
@@ -586,7 +586,7 @@ fn job_result(
                 started(JobResult::NetApplyStarted { pgid })
             }))
         }
-        Job::NetTakeOver { which } => JobResult::NetTakenOver(netfiles::take_over(&paths.homes, which)),
+        Job::NetTakeOver { which } => JobResult::NetTakenOver(jobs::net_take_over(paths, which)),
         Job::MonLoad => {
             let (profiles, source) = jobs::mon_load(&paths.config);
             JobResult::MonLoaded(profiles, source)
@@ -1601,6 +1601,18 @@ esac"#;
         .unwrap();
         let mut p = paths(Vec::new());
         p.network_cmd = ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec();
+        p.config = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::store::open(
+                crate::config::ConfigDir { root: d.join("cfg") },
+                crate::generated::Inputs {
+                    default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
+                    netboot: false,
+                },
+                crate::store::OpenMode::Session,
+                0,
+            )
+            .store,
+        ));
         p.homes = netfiles::Homes {
             home: home.clone(),
             sys_net: d.join("sys"),
@@ -1645,8 +1657,8 @@ esac"#;
             ),
             "{got:?}"
         );
-        let text = std::fs::read_to_string(home.join("wifi.yaml")).unwrap();
-        assert!(text.starts_with(crate::owned::HEADER), "{text}");
+        let text = std::fs::read_to_string(d.join("cfg/generated/wifi.yaml")).unwrap();
+        assert!(text.starts_with(crate::generated::HEADER), "{text}");
         let got = run(Job::NetTakeOver { which: "wifi" });
         assert!(matches!(&got[..], [JobResult::NetTakenOver(_)]), "{got:?}");
     }

@@ -4074,7 +4074,7 @@ mod tests {
         );
     }
 
-    const WIFI_KEEPS_DNS: &str = "WiFi keeps the DNS servers set in ~/wifi.yaml.";
+    const WIFI_KEEPS_DNS: &str = "WiFi keeps the DNS servers from your old settings.";
 
     #[test]
     fn the_network_tab_says_a_hand_wifi_file_keeps_its_dns() {
@@ -4124,7 +4124,7 @@ mod tests {
         for want in [
             "WiFi networks",
             "Home",
-            "This is set by hand in ~/wifi.yaml",
+            "Kept from your old settings; the menu cannot change it.",
             "Let the menu manage it",
         ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
@@ -4140,7 +4140,10 @@ mod tests {
             ))))]
         );
         let texts = net_texts(&network_settings(hand(false)));
-        assert!(has(&texts, "This is set by hand in ~/wifi.yaml"), "{texts:?}");
+        assert!(
+            has(&texts, "Kept from your old settings; the menu cannot change it."),
+            "{texts:?}"
+        );
         assert!(!has(&texts, "Let the menu manage it"), "{texts:?}");
     }
 
@@ -4179,7 +4182,11 @@ mod tests {
             (FileState::Menu, vec![], true),
             (FileState::Hand, hand),
         )));
-        for want in ["DNS servers", "8.8.4.4", "Set by hand in ~/ethernet.yaml."] {
+        for want in [
+            "DNS servers",
+            "8.8.4.4",
+            "Kept from your old settings; the menu cannot change it.",
+        ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
         }
         // Netboot: the line alone.
@@ -4287,7 +4294,7 @@ mod tests {
             "Let the menu manage it",
             "DNS servers",
             "Used for wired and WiFi. Empty: the servers DHCP sends.",
-            "WiFi keeps the DNS servers set in ~/wifi.yaml.",
+            "WiFi keeps the DNS servers from your old settings.",
         ];
         // Before any scrolling something is out of reach: the tab does not
         // fit, so the scrolling below is what the test checks.
@@ -4335,7 +4342,7 @@ mod tests {
         for want in [
             "Fixed address",
             "192.168.1.10/24",
-            "This is set by hand in ~/ethernet.yaml",
+            "Kept from your old settings; the menu cannot change it.",
             "Let the menu manage it",
         ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");

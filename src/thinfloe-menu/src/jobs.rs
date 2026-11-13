@@ -682,8 +682,36 @@ impl ApplyFailed {
     }
 }
 
-/// Save `change` into the home, then (only when that worked) let the root
-/// tool `apply` it, in a process group of its own that `on_spawn` gets.
+/// What the Network tab shows: the `[network]` table of the settings.
+pub fn net_load(paths: &Paths) -> (netfiles::WifiFile, netfiles::WiredFile) {
+    netfiles::view(&lock(&paths.config).cfg.network)
+}
+
+/// The settings as they are and the inputs rendering needs, copied so the
+/// store is not locked while netplan checks a candidate.
+fn net_snapshot(paths: &Paths) -> (crate::config::ThinfloeConfig, crate::generated::Inputs) {
+    let s = lock(&paths.config);
+    (s.cfg.clone(), s.inputs.clone())
+}
+
+/// *Let the menu manage it*: the kept text `which` becomes the menu's own
+/// settings, written through the store like any other change. A store that
+/// refuses writes refuses before netplan is asked.
+pub fn net_take_over(paths: &Paths, which: &str) -> Result<(), String> {
+    lock(&paths.config).refuse_read_only()?;
+    let (cfg, inputs) = net_snapshot(paths);
+    let net = netfiles::take_over(&cfg.network, which, &paths.homes, &inputs)?;
+    lock(&paths.config)
+        .update(crate::generated::Table::Network, |c| c.network = net)
+        .map(|_| ())
+}
+
+/// Plan `change`, stage the generated network files, then (only when that
+/// worked) let the root tool `apply` them, in a process group of its own
+/// that `on_spawn` gets. Success makes the candidate `[network]`; a failure
+/// puts back exactly the generated network files the stage replaced. The
+/// candidate is built on the settings as they are at that moment, so a
+/// keyboard or screen change made while the tool runs is kept.
 /// `netboot` is the caller's to know.
 pub fn network_apply(
     paths: &Paths,
@@ -692,45 +720,40 @@ pub fn network_apply(
     feed: &Arc<Feed>,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(), ApplyFailed> {
-    // Ruling 16: what the home held, so a failed apply can put it back.
-    // `save` writes only menu, template and missing files, all readable.
-    // Both files, whatever the change names: a wired change rewrites
-    // ~/wifi.yaml too when the DNS servers change.
-    let before: Vec<(&str, Option<Vec<u8>>)> = [netfiles::WIFI_FILE, netfiles::WIRED_FILE]
-        .iter()
-        .filter_map(|name| {
-            crate::owned::read_bytes(&paths.homes.home.join(name))
-                .ok()
-                .map(|b| (*name, b))
-        })
-        .collect();
-    // A save can fail after it wrote one file; that one goes back too.
-    netfiles::save(&paths.homes, change, netboot).map_err(|e| put_back(&paths.homes.home, &before, e))?;
+    lock(&paths.config).refuse_read_only().map_err(ApplyFailed::new)?;
+    let (cfg, inputs) = net_snapshot(paths);
+    let net = netfiles::plan(&cfg.network, change, netboot, &paths.homes, &inputs).map_err(ApplyFailed::new)?;
+    let staged = {
+        let s = lock(&paths.config);
+        let mut candidate = s.cfg.clone();
+        candidate.network = net.clone();
+        s.stage(crate::generated::Table::Network, &candidate)
+            .map_err(ApplyFailed::new)?
+    };
     let result = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)
         .and_then(|text| nettab::parse_result(&text));
-    result.map_err(|reason| put_back(&paths.homes.home, &before, reason))
-}
-
-/// Put back each file of `before` that the save changed. A file that
-/// cannot be put back is named in the reason, and the home counts as
-/// changed.
-fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> ApplyFailed {
-    let mut failed = ApplyFailed::new(reason);
-    for (name, old) in before {
-        let path = home.join(name);
-        // Unchanged: nothing to do. Anything else, a read that fails
-        // included, goes to `put_back`, which keeps a link or a hand file
-        // and says so.
-        let now = crate::owned::read_bytes(&path);
-        if now.as_ref().is_ok_and(|b| b == old) {
-            continue;
+    match result {
+        Ok(()) => {
+            let mut s = lock(&paths.config);
+            let mut candidate = s.cfg.clone();
+            candidate.network = net;
+            // The tool applied the staged files, so they stay. The
+            // settings that do not follow are told, and the home is saved
+            // with the files as they are.
+            s.commit(candidate).map_err(|e| ApplyFailed {
+                reason: format!("The network was applied, but the settings could not be saved: {e}"),
+                home_changed: true,
+            })
         }
-        if let Err(e) = crate::owned::put_back(&path, old.as_deref()) {
-            failed.reason = format!("{}; ~/{name} could not be put back: {e}", failed.reason);
-            failed.home_changed = true;
+        Err(reason) => {
+            let mut failed = ApplyFailed::new(reason);
+            if let Err(e) = lock(&paths.config).unstage(staged) {
+                failed.reason = format!("{}; {e}", failed.reason);
+                failed.home_changed = true;
+            }
+            Err(failed)
         }
     }
-    failed
 }
 
 /// The monitor layout: kanshi's config, the files that make an Apply
@@ -1604,6 +1627,42 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     }
 
+    use crate::config::{NetCfg, NetworkCfg};
+    use crate::generated::{Inputs, Table};
+    use crate::store::{OpenMode, Shared};
+
+    const SHIPPED_WIRED: &str = include_str!("../../../overlay/etc/netplan/ethernet.yaml");
+
+    fn net_inputs() -> Inputs {
+        Inputs {
+            default_wired: SHIPPED_WIRED.into(),
+            netboot: false,
+        }
+    }
+
+    /// A session store under `d/cfg` holding `net`, its generated files
+    /// written as the menu writes them.
+    fn net_store(d: &Path, net: NetworkCfg) -> Shared {
+        let dir = crate::config::ConfigDir { root: d.join("cfg") };
+        let s = Arc::new(std::sync::Mutex::new(
+            crate::store::open(dir, net_inputs(), OpenMode::Session, 0).store,
+        ));
+        lock(&s).update(Table::Network, |c| c.network = net).unwrap();
+        s
+    }
+
+    fn home_net() -> NetworkCfg {
+        NetworkCfg {
+            wifi_device: Some("wlan0".into()),
+            networks: vec![NetCfg {
+                ssid: "home".into(),
+                hidden: false,
+                password: Some("secret123".into()),
+            }],
+            ..NetworkCfg::default()
+        }
+    }
+
     fn net_paths(d: &Path, netplan: &str, tool: &str) -> Paths {
         let mut p = Paths {
             save_home: PathBuf::from("/nonexistent/save-home"),
@@ -1613,18 +1672,40 @@ mod tests {
             network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            config: crate::store::test_shared(&d.join("cfg")),
+            config: net_store(d, NetworkCfg::default()),
             layout: crate::migrate::HomeLayout::New,
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
             sys_net: d.join("sys"),
             netplan: netplan.to_string(),
-            default_wired: d.join("missing-default"),
+            default_wired: d.join("default-ethernet.yaml"),
         };
+        std::fs::write(&p.homes.default_wired, SHIPPED_WIRED).unwrap();
         std::fs::create_dir_all(d.join("home")).unwrap();
         std::fs::create_dir_all(d.join("sys/eno1")).unwrap();
+        std::fs::create_dir_all(d.join("sys/wlan0/wireless")).unwrap();
         p
+    }
+
+    fn gen_file(p: &Paths, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(lock(&p.config).dir.generated_file(name)).ok()
+    }
+
+    fn generated_bytes(p: &Paths) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        (gen_file(p, "wifi.yaml"), gen_file(p, "ethernet.yaml"))
+    }
+
+    fn config_bytes(p: &Paths) -> Vec<u8> {
+        std::fs::read(lock(&p.config).dir.config_toml()).unwrap()
+    }
+
+    fn one_net(ssid: &str) -> Vec<netfiles::Net> {
+        vec![netfiles::Net {
+            ssid: ssid.into(),
+            hidden: false,
+            password: Some("secret123".into()),
+        }]
     }
 
     #[test]
@@ -1636,7 +1717,9 @@ mod tests {
             marker.display()
         );
         // The default wired file is missing, so no new set can be built.
-        let p = net_paths(&d, "/bin/true", &tool);
+        let mut p = net_paths(&d, "/bin/true", &tool);
+        p.homes.default_wired = d.join("missing-default");
+        let before = (generated_bytes(&p), config_bytes(&p));
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::dhcp()),
@@ -1648,13 +1731,14 @@ mod tests {
         assert!(!marker.exists(), "the root tool ran after a failed save");
         assert!(!spawned.get());
         // netplan refusing the set fails the save as well.
-        let p = net_paths(&d, "/bin/false", &tool);
+        let p2 = net_paths(&d, "/bin/false", &tool);
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("home")),
             wired: None,
         };
-        assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
+        assert!(network_apply(&p2, &change, false, &feed, |_| {}).is_err());
         assert!(!marker.exists());
+        assert_eq!((generated_bytes(&p), config_bytes(&p)), before);
     }
 
     #[test]
@@ -1668,10 +1752,28 @@ mod tests {
         let p = net_paths(&d, "/bin/true", &tool);
         let feed = Arc::new(Feed::default());
         let pgid = std::cell::Cell::new(0);
-        let r = network_apply(&p, &netfiles::Change::default(), false, &feed, |g| pgid.set(g));
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        let r = network_apply(&p, &change, false, &feed, |g| pgid.set(g));
         assert_eq!(r, Ok(()));
         assert!(marker.exists());
         assert!(pgid.get() > 1);
+        // The generated file is written, then [network] committed.
+        let wifi = String::from_utf8(gen_file(&p, "wifi.yaml").unwrap()).unwrap();
+        assert!(
+            wifi.starts_with(crate::generated::HEADER) && wifi.contains("secret123"),
+            "{wifi}"
+        );
+        let mode = std::fs::metadata(lock(&p.config).dir.generated_file("wifi.yaml"))
+            .unwrap()
+            .permissions();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o600);
+        assert_eq!(lock(&p.config).cfg.network.nets(), one_net("home"));
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk.network.nets(), one_net("home"));
+        // A tool that fails, or does not answer.
         let tool = "echo '{\"result\":\"failed\",\"reason\":\"no link\"}'; exit 1";
         let p = net_paths(&d, "/bin/true", tool);
         assert_eq!(
@@ -1682,40 +1784,11 @@ mod tests {
         assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
     }
 
-    /// `net_paths` with a shipped wired file, a menu ~/wifi.yaml and,
-    /// when `wired` is given, a menu ~/ethernet.yaml.
-    fn net_home(d: &Path, tool: &str, wired: Option<&str>) -> Paths {
+    /// `net_paths` with a shipped wired default and the settings `net`.
+    fn net_home(d: &Path, tool: &str, net: NetworkCfg) -> Paths {
         let mut p = net_paths(d, "/bin/true", tool);
-        let default = d.join("default-ethernet.yaml");
-        std::fs::write(
-            &default,
-            "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: 'en*'\n      dhcp4: true\n",
-        )
-        .unwrap();
-        p.homes.default_wired = default;
-        let home = d.join("home");
-        for f in ["wifi.yaml", "ethernet.yaml"] {
-            let path = home.join(f);
-            if path.is_dir() {
-                std::fs::remove_dir(&path).unwrap();
-            } else {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        std::fs::write(
-            home.join("wifi.yaml"),
-            format!("{}\nnetwork:\n  version: 2\n  # old\n", crate::owned::HEADER),
-        )
-        .unwrap();
-        if let Some(w) = wired {
-            std::fs::write(home.join("ethernet.yaml"), format!("{}\n{w}", crate::owned::HEADER)).unwrap();
-        }
+        p.config = net_store(d, net);
         p
-    }
-
-    fn home_bytes(p: &Paths) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-        let get = |f: &str| std::fs::read(p.homes.home.join(f)).ok();
-        (get("wifi.yaml"), get("ethernet.yaml"))
     }
 
     fn fixed_wired() -> netfiles::Wired {
@@ -1730,14 +1803,15 @@ mod tests {
     const FAILS: &str = r#"echo '{"result":"failed","reason":"x"}'; exit 1"#;
 
     #[test]
-    fn a_failed_network_apply_puts_the_home_back() {
+    fn a_failed_network_apply_puts_the_generated_files_back() {
         let d = dir("net-put-back");
         let feed = Arc::new(Feed::default());
         // A changed WiFi file and a new wired file.
-        let p = net_home(&d, FAILS, None);
-        let before = home_bytes(&p);
+        let p = net_home(&d, FAILS, home_net());
+        let before = (generated_bytes(&p), config_bytes(&p));
+        let cfg_before = lock(&p.config).cfg.clone();
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("cafe")),
             wired: Some(fixed_wired()),
         };
         let r = network_apply(&p, &change, false, &feed, |_| {});
@@ -1748,43 +1822,40 @@ mod tests {
                 home_changed: false
             })
         );
-        assert_eq!(home_bytes(&p), before);
-        assert!(before.1.is_none(), "the new wired file is removed");
+        assert_eq!((generated_bytes(&p), config_bytes(&p)), before);
+        assert_eq!(lock(&p.config).cfg, cfg_before, "[network] is unchanged");
+        assert!(before.0.1.is_none(), "the new wired file is removed");
         // A wired file that existed comes back after DHCP removed it.
-        let p = net_home(&d, FAILS, Some("network:\n  version: 2\n  # fixed\n"));
-        let before = home_bytes(&p);
+        let mut with_fixed = home_net();
+        with_fixed.set_wired(&fixed_wired());
+        let p = net_home(&d, FAILS, with_fixed);
+        let before = generated_bytes(&p);
+        assert!(before.1.is_some());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::dhcp()),
         };
         assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
-        assert_eq!(home_bytes(&p), before);
-        assert!(before.1.is_some());
+        assert_eq!(generated_bytes(&p), before);
         // The same change that works keeps the new files.
-        let p = net_home(&d, r#"echo '{"result":"ok","reason":""}'"#, None);
+        let p = net_home(&d, r#"echo '{"result":"ok","reason":""}'"#, home_net());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(fixed_wired()),
         };
         assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
-        assert!(home_bytes(&p).1.is_some());
+        assert!(generated_bytes(&p).1.is_some());
     }
 
-    /// A change of the DNS servers alone rewrites ~/wifi.yaml as well; a
+    /// A change of the DNS servers alone rewrites the WiFi file as well; a
     /// failed apply puts that one back too.
     #[test]
     fn a_failed_dns_change_puts_the_wifi_file_back() {
         let d = dir("net-put-back-dns");
         let feed = Arc::new(Feed::default());
-        let p = net_home(&d, FAILS, None);
-        let nets = [netfiles::Net {
-            ssid: "home".into(),
-            hidden: false,
-            password: Some("secret123".into()),
-        }];
-        let wifi = netfiles::render_wifi(Some("wlp58s0"), &nets, &[]);
-        std::fs::write(p.homes.home.join("wifi.yaml"), wifi).unwrap();
-        let before = home_bytes(&p);
+        let p = net_home(&d, FAILS, home_net());
+        let before = generated_bytes(&p);
+        assert!(before.0.is_some());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::Dhcp {
@@ -1792,29 +1863,30 @@ mod tests {
             }),
         };
         assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
-        assert_eq!(home_bytes(&p), before);
+        assert_eq!(generated_bytes(&p), before);
     }
 
-    /// Ruling 16 for a save that fails halfway: ~/wifi.yaml is written,
-    /// then ~/ethernet.yaml cannot be, so ~/wifi.yaml goes back as it was.
+    /// A save that fails halfway: the WiFi file is written, then the wired
+    /// one cannot be, so the WiFi file goes back as it was.
     #[test]
-    fn a_save_that_fails_halfway_puts_the_home_back() {
+    fn a_save_that_fails_halfway_puts_the_generated_files_back() {
         let d = dir("net-save-halfway");
         let feed = Arc::new(Feed::default());
         let marker = d.join("called");
         let tool = format!("touch {}; {FAILS}", marker.display());
-        let p = net_home(&d, &tool, None);
+        let p = net_home(&d, &tool, home_net());
         // A directory where the wired write puts its temporary file.
-        std::fs::create_dir_all(p.homes.home.join("ethernet.yaml.tmp/x")).unwrap();
-        let before = home_bytes(&p);
+        let tmp = lock(&p.config).dir.generated().join("ethernet.yaml.tmp/x");
+        std::fs::create_dir_all(tmp).unwrap();
+        let before = generated_bytes(&p);
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("cafe")),
             wired: Some(fixed_wired()),
         };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
         assert!(!r.home_changed, "{r:?}");
-        assert!(!r.reason.is_empty());
-        assert_eq!(home_bytes(&p), before, "~/wifi.yaml is put back");
+        assert!(r.reason.contains("ethernet.yaml"), "{r:?}");
+        assert_eq!(generated_bytes(&p), before, "the WiFi file is put back");
         assert!(!marker.exists(), "the root tool ran after a failed save");
     }
 
@@ -1822,70 +1894,152 @@ mod tests {
     fn a_home_that_cannot_be_put_back_says_so() {
         let d = dir("net-no-put-back");
         let feed = Arc::new(Feed::default());
-        // The tool fails and leaves a directory where ~/ethernet.yaml was.
-        let home = d.join("home");
+        // The tool fails and leaves generated/ unwritable.
         let tool = format!(
-            r#"rm -f {0}/ethernet.yaml; mkdir {0}/ethernet.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display()
+            r#"chmod 555 {}/cfg/generated; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            d.display()
         );
-        let p = net_home(&d, &tool, None);
+        let p = net_home(&d, &tool, home_net());
         let change = netfiles::Change {
-            wifi: None,
-            wired: Some(fixed_wired()),
+            wifi: Some(one_net("cafe")),
+            wired: None,
         };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        let dir = lock(&p.config).dir.generated();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert!(r.home_changed);
         assert!(
-            r.reason.starts_with("x; ~/ethernet.yaml could not be put back: "),
+            r.reason.starts_with("x; generated/wifi.yaml could not be restored: "),
             "{}",
             r.reason
         );
     }
 
     #[test]
-    fn putting_back_never_writes_over_a_link_or_a_hand_file() {
-        let d = dir("net-put-back-refused");
+    fn unstage_never_follows_a_link() {
+        let d = dir("net-unstage-link");
         let feed = Arc::new(Feed::default());
-        let home = d.join("home");
         let target = d.join("elsewhere.yaml");
-        let change = netfiles::Change {
-            wifi: Some(Vec::new()),
-            wired: None,
-        };
-        // (a) A link appears at ~/wifi.yaml during the apply.
+        // A link appears at generated/wifi.yaml during the apply.
+        let p0 = net_home(&d, "true", home_net());
+        let link = lock(&p0.config).dir.generated_file("wifi.yaml");
         let tool = format!(
-            r#"rm -f {0}/wifi.yaml; ln -s {1} {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display(),
+            r#"rm -f {0}; ln -s {1} {0}; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            link.display(),
             target.display()
         );
-        let p = net_home(&d, &tool, None);
+        let mut p = p0;
+        p.network_cmd = ["/bin/sh", "-c", &tool, "sh"].map(String::from).to_vec();
         std::fs::write(&target, "elsewhere: 1\n").unwrap();
+        let before = gen_file(&p, "wifi.yaml").unwrap();
+        let change = netfiles::Change {
+            wifi: Some(one_net("cafe")),
+            wired: None,
+        };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
-        assert!(r.home_changed);
-        assert!(
-            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
-            "{}",
-            r.reason
-        );
-        let link = home.join("wifi.yaml");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(r.reason, "x");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), before);
         assert_eq!(std::fs::read(&target).unwrap(), b"elsewhere: 1\n");
-        std::fs::remove_file(&link).unwrap();
-        // (b) A hand file without the header appears.
+    }
+
+    /// A keyboard change while a network Apply runs: the Apply's files stay
+    /// out of its way, and its commit keeps the keyboard.
+    #[test]
+    fn a_keyboard_change_during_an_apply_is_kept() {
+        let d = dir("net-apply-keyboard");
+        let feed = Arc::new(Feed::default());
+        let (started, go) = (d.join("started"), d.join("go"));
         let tool = format!(
-            r#"printf 'hand: 1\n' > {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display()
+            r#"touch {}; while [ ! -e {} ]; do sleep 0.05; done; echo '{{"result":"ok","reason":""}}'"#,
+            started.display(),
+            go.display()
         );
-        let p = net_home(&d, &tool, None);
-        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
-        assert!(r.home_changed);
+        let p = net_home(&d, &tool, NetworkCfg::default());
+        let store = p.config.clone();
+        let (s2, g2) = (started.clone(), go.clone());
+        let helper = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !s2.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let r = lock(&store).update(Table::Keyboard, |c| c.keyboard.layout = "ch".into());
+            std::fs::write(g2, "").unwrap();
+            r
+        });
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
+        assert!(helper.join().unwrap().is_ok());
+        let cfg = lock(&p.config).cfg.clone();
+        assert_eq!(
+            (cfg.keyboard.layout.as_str(), cfg.network.nets()),
+            ("ch", one_net("home"))
+        );
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk, cfg);
         assert!(
-            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
-            "{}",
-            r.reason
+            String::from_utf8(gen_file(&p, "wifi.yaml").unwrap())
+                .unwrap()
+                .contains("home")
         );
-        assert_eq!(std::fs::read(home.join("wifi.yaml")).unwrap(), b"hand: 1\n");
+    }
+
+    #[test]
+    fn a_read_only_store_refuses_before_anything_runs() {
+        let d = dir("net-read-only");
+        let feed = Arc::new(Feed::default());
+        let marker = d.join("called");
+        let tool = format!(
+            "touch {}; echo '{{\"result\":\"ok\",\"reason\":\"\"}}'",
+            marker.display()
+        );
+        let mut p = net_paths(&d, "/bin/true", &tool);
+        let dir = crate::config::ConfigDir { root: d.join("ro") };
+        p.config = Arc::new(std::sync::Mutex::new(
+            crate::store::open(dir, net_inputs(), OpenMode::ReadOnly, 0).store,
+        ));
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.reason.contains("read-only"), "{r:?}");
+        assert!(!r.home_changed);
+        assert!(!marker.exists());
+        assert!(!d.join("ro").exists(), "nothing was written");
+        let e = net_take_over(&p, "wifi").unwrap_err();
+        assert!(e.contains("read-only"), "{e}");
+    }
+
+    #[test]
+    fn a_kept_wifi_text_is_taken_over_through_the_store() {
+        let d = dir("net-take-over");
+        let mut p = net_paths(&d, "/bin/true", "true");
+        let hand = "network:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlp2s0:\n      dhcp4: true\n      access-points:\n        home:\n          password: secret123\n";
+        p.config = net_store(
+            &d,
+            NetworkCfg {
+                kept_wifi: Some(hand.into()),
+                ..NetworkCfg::default()
+            },
+        );
+        assert!(
+            String::from_utf8(gen_file(&p, "wifi.yaml").unwrap())
+                .unwrap()
+                .contains("wlp2s0")
+        );
+        let (w, _) = net_load(&p);
+        assert_eq!(w.state, netfiles::FileState::Hand);
+        assert_eq!(net_take_over(&p, "wifi"), Ok(()));
+        let (w, _) = net_load(&p);
+        assert_eq!((w.state, w.networks), (netfiles::FileState::Menu, one_net("home")));
+        assert!(lock(&p.config).cfg.network.kept_wifi.is_none());
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert!(on_disk.network.kept_wifi.is_none());
+        assert!(net_take_over(&p, "wifi").is_err(), "nothing kept any more");
     }
 
     #[test]
