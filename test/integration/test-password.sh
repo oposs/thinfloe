@@ -135,7 +135,7 @@ fi
 setup
 rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
 mode=$(stat -c '%a' "$STORE" 2>/dev/null)
-if [[ "$mode" == "600" ]] && grep -q "^chown -h tfuser:tfuser $STORE\$" "$WORK/calls.log"; then
+if [[ "$mode" == "600" ]] && grep -q "^chown -h tfuser:tfuser $(dirname "$STORE")/.password\." "$WORK/calls.log"; then
     ok "the hash is stored in ~/.config/thinfloe/password (mode 600, owned by tfuser)"
 else
     bad "--set stores mode 600 owned by tfuser (mode '$mode', chown: $(grep '^chown' "$WORK/calls.log" 2>/dev/null | head -1))"
@@ -205,7 +205,7 @@ fi
 # ---------------------------------------------------------------- test 9
 # A truncated or empty store must not become an empty password.
 setup
- mkdir -p "$(dirname "$STORE")"; : >"$STORE"
+mkdir -p "$(dirname "$STORE")"; : >"$STORE"
 rc=$(run_password "$WORK/root" '' --apply)
 if [[ "$rc" != "0" ]] && ! grep -q '^chpasswd' "$WORK/calls.log" 2>/dev/null; then
     ok "--apply refuses an empty stored hash"
@@ -342,6 +342,39 @@ if [[ "$rc" != "0" ]] && ! grep -q '^chpasswd' "$WORK/calls.log" 2>/dev/null; th
     ok "--apply refuses a symlinked store"
 else
     bad "--apply refuses a symlinked store (exit $rc)"
+fi
+
+# ---------------------------------------------------------------- test 16
+# A failing mv must not leave a temp file holding the hash in the home, where
+# the next save would archive it.
+setup
+mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+cat >"$STUBS/mv" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+chmod +x "$STUBS/mv"
+rc=$(run_password "$WORK/root" $'swordfish\nswordfish\n')
+rm -f "$STUBS/mv"
+if [[ "$rc" != "0" ]] && [[ -z "$(ls -A "$WORK/home/tfuser/.config/thinfloe")" ]]; then
+    ok "a failing rename leaves no temporary file with the hash"
+else
+    bad "a failing rename leaves no temporary file (exit $rc, left: $(ls -A "$WORK/home/tfuser/.config/thinfloe"))"
+fi
+
+# ---------------------------------------------------------------- test 17
+# A legacy home uses neither ~/.config nor ~/.config/thinfloe: a link there
+# must not stop --apply (a unit before ssh.service) or --set.
+setup
+echo legacy >"$WORK/state/home-layout"
+mkdir -p "$WORK/elsewhere"
+ln -s "$WORK/elsewhere" "$WORK/home/tfuser/.config"
+echo "$FAKE_HASH" >"$WORK/home/tfuser/$OLD_STORE_NAME"
+rc=$(run_password "$WORK/root" '' --apply)
+if [[ "$rc" == "0" ]] && grep -qF "stdin: tfuser:$FAKE_HASH" "$WORK/calls.log"; then
+    ok "legacy --apply works with a symlinked ~/.config"
+else
+    bad "legacy --apply works with a symlinked ~/.config (exit $rc: $(cat "$WORK/err"))"
 fi
 
 if [[ "$fail" == "0" ]]; then

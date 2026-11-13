@@ -132,10 +132,22 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
         )
 
 
+def _pin_layout(self, layout=None):
+    """Point the layout reader at a fixture, never at the real /run state."""
+    state = tempfile.TemporaryDirectory()
+    self.addCleanup(state.cleanup)
+    if layout is not None:
+        Path(state.name, "home-layout").write_text(layout + "\n")
+    patcher = mock.patch.object(ui, "STATE_DIR", state.name)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+
 class TestHomeArchiveArgv(unittest.TestCase):
     """The tar command line that writes a new stick's home.tar.gz."""
 
     def setUp(self):
+        _pin_layout(self)
         patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -161,6 +173,7 @@ class TestHomeArchiveContents(unittest.TestCase):
     """Run the real tar and look inside the result."""
 
     def setUp(self):
+        _pin_layout(self)
         patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -222,6 +235,7 @@ class TestHomeArchiveOldNames(unittest.TestCase):
     once, so no ~/.dbrrg-* link is made for the new stick."""
 
     def setUp(self):
+        _pin_layout(self)
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
         root = Path(self.work.name)
@@ -269,6 +283,7 @@ class TestHomeArchiveExcludes(unittest.TestCase):
     """The exclude list is the one thinfloe-save-home uses, plus machine identity."""
 
     def setUp(self):
+        _pin_layout(self)
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
         root = Path(self.work.name)
@@ -350,6 +365,16 @@ class TestHomeArchiveExcludes(unittest.TestCase):
         self.assertEqual(
             ui.load_exclude_patterns(str(self.home), "new"), ["./.cache"]
         )
+
+    def test_the_archive_reads_the_state_dir_it_is_given(self):
+        # Without an explicit layout the state file decides; the tests pin
+        # it to a fixture so a legacy machine running them is not read.
+        _pin_layout(self, "legacy")
+        self.default.write_text("./.cache\n")
+        (self.home / ".save-home-exclude").write_text("./.other-cache\n")
+        members = self._members()
+        self.assertIn("./.cache/f", members)
+        self.assertNotIn("./.other-cache/f", members)
 
     def test_home_layout_follows_the_menus_rule(self):
         state = Path(self.work.name) / "state"

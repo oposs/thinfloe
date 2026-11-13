@@ -279,6 +279,41 @@ for where in config thinfloe keystore; do
     fi
 done
 
+# --- a legacy home does not use ~/.config: a link there is irrelevant -------
+
+fresh_case legacylink
+echo legacy >"$TF_STATE_DIR/home-layout"
+mkdir -p "$CASE/elsewhere"
+ln -s "$CASE/elsewhere" "$TF_HOME_DIR/.config"
+OLDKS="$TF_HOME_DIR/.thinfloe-ssh-host-keys"
+mkdir -p "$OLDKS"
+for t in rsa ecdsa ed25519; do
+    echo "KEEP-$t" >"$OLDKS/ssh_host_${t}_key"
+    echo "PUBLIC-$t"  >"$OLDKS/ssh_host_${t}_key.pub"
+done
+"$SCRIPT" >/dev/null 2>&1
+# (ssh-keygen -A still runs to top up; it leaves existing keys alone.)
+if [[ "$(cat "$TF_SSH_DIR/ssh_host_rsa_key" 2>/dev/null)" == "KEEP-rsa" ]]; then
+    ok "a legacy home with a symlinked ~/.config keeps its keys (not regenerated)"
+else
+    bad "a legacy home with a symlinked ~/.config lost its keys (keygen: $(cat "$TF_TEST_KEYGEN_LOG"))"
+fi
+
+# --- chmod does not follow a link planted inside the keystore ---------------
+
+fresh_case chmodlink
+echo "LIVE" >"$TF_SSH_DIR/ssh_host_ed25519_key"
+mkdir -p "$KS"
+echo precious >"$CASE/precious"
+chmod 644 "$CASE/precious"
+ln -s "$CASE/precious" "$KS/ssh_host_dsa_key"
+"$SCRIPT" --stage >/dev/null 2>&1
+if [[ "$(stat -c %a "$CASE/precious")" == "644" ]]; then
+    ok "a link inside the keystore is not chmod-followed"
+else
+    bad "a link inside the keystore was chmod-followed (mode $(stat -c %a "$CASE/precious"))"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - SSH host key persistence"

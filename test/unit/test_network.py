@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -460,7 +461,6 @@ class ApplyTests(Env):
         (elsewhere / "generated").mkdir(parents=True)
         (elsewhere / "generated" / "wifi.yaml").write_text(WIFI)
         cfg = self.home / ".config" / "thinfloe"
-        import shutil
         shutil.rmtree(cfg)
         os.symlink(elsewhere, cfg)
         rc, out, _ = self.run_main("apply")

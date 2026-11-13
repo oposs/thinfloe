@@ -52,9 +52,15 @@ else
 fi
 
 # Refuse a link anywhere on the way to the keystore: root would otherwise
-# read keys from, or write and chown in, a place tfuser chose.
+# read keys from, or write and chown in, a place tfuser chose. Only the
+# components this layout uses count: a legacy home never touches ~/.config.
 keystore_path_is_safe() {
-    for _p in "$HOME_DIR/.config" "$CFG_DIR" "$KEYSTORE"; do
+    if [ "$layout" = legacy ]; then
+        set -- "$KEYSTORE"
+    else
+        set -- "$HOME_DIR/.config" "$CFG_DIR" "$KEYSTORE"
+    fi
+    for _p in "$@"; do
         if [ -L "$_p" ]; then
             echo "thinfloe-ssh-hostkeys: $_p is a link; not using the keystore" >&2
             return 1
@@ -127,7 +133,10 @@ stage_to_keystore() {
     chown -R "$KEY_OWNER:$KEY_OWNER" "$KEYSTORE" 2>/dev/null || \
         echo "thinfloe-ssh-hostkeys: WARNING could not chown $KEYSTORE" >&2
     chmod 700 "$KEYSTORE" 2>/dev/null || true
-    chmod 600 "$KEYSTORE"/ssh_host_*_key 2>/dev/null || true
+    # chmod follows links: skip a link entry planted inside the keystore.
+    for _k in "$KEYSTORE"/ssh_host_*_key; do
+        [ -L "$_k" ] || chmod 600 "$_k" 2>/dev/null || true
+    done
 
     return 0
 }
