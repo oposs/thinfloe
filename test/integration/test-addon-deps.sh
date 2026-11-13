@@ -5,9 +5,11 @@
 # every ELF file resolves all its libraries and that the client starts.
 #
 # ThinLinc: $THINLINC_DEB, else the .deb that the shipped tile's page and
-# pattern name, downloaded once into ${TMPDIR}/thinfloe-addon-cache/.
+# pattern name, downloaded into the cache.
 # OxuLnk: $OXULNK_DEB, else the package the shipped tile's signed APT source
 # offers, fetched with thinfloe-addon's own code into the same cache.
+# The cache is $TF_ADDON_CACHE, which this script never removes, else a
+# directory of this run that it removes on exit.
 # Neither available for a client: the test fails.
 #
 # Usage: TF_UBUNTU_IMAGE=localhost/thinfloe-ubuntu:X test/integration/test-addon-deps.sh
@@ -18,7 +20,13 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
 TILE="$REPO/overlay/etc/thinfloe/menu/10-thinlinc.desktop"
 OXULNK_TILE="$REPO/overlay/etc/thinfloe/menu/20-oxulnk.desktop"
-CACHE="${TMPDIR:-/scratch/oetiker/claude-tmp}/thinfloe-addon-cache"
+if [[ -n "${TF_ADDON_CACHE:-}" ]]; then
+    CACHE=$TF_ADDON_CACHE
+else
+    # A fixed thinfloe-addon-cache directory in $TMPDIR outlived every run.
+    CACHE=$(mktemp -d) || { echo "FAIL - cannot make a cache directory" >&2; exit 1; }
+    trap 'rm -rf "$CACHE"' EXIT
+fi
 
 fail=0
 ok()  { echo "ok   - $1"; }

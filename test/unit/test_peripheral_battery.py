@@ -520,6 +520,7 @@ def fake_hidraw(sysfs, name, hid_id, driver, desc, phys):
 class SysfsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(dir=os.environ.get("TMPDIR")))
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.sysfs = self.tmp / "sys"
 
     def test_find_nodes_skips_kernel_driven_logitech(self):
@@ -592,6 +593,7 @@ class SysfsTests(unittest.TestCase):
 class MainTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(dir=os.environ.get("TMPDIR")))
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.out = self.tmp / "peripherals"
         self.state = self.tmp / "state"
         self.out.mkdir()
@@ -1025,6 +1027,7 @@ class FakeListener:
 class WatchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(dir=os.environ.get("TMPDIR")))
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.out = self.tmp / "peripherals"
         self.state = self.tmp / "state"
         self.out.mkdir()
@@ -1586,6 +1589,7 @@ class UdevRuleTests(unittest.TestCase):
         # product and a counter; find_hidpp_nodes reads the same three from
         # HID_ID in the device's uevent.
         tmp = Path(tempfile.mkdtemp(dir=os.environ.get("TMPDIR")))
+        self.addCleanup(shutil.rmtree, tmp)
         sysfs, devdir = tmp / "sys", tmp / "dev"
         cases = {"hidraw0": ("0003", "046D", "C548", True),    # Bolt over USB
                  "hidraw1": ("0005", "046D", "B023", True),    # over Bluetooth
