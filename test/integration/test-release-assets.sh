@@ -140,8 +140,14 @@ cat >"$WORK/xdev/ln" <<'STUB'
 echo "ln: failed to create hard link: Invalid cross-device link" >&2
 exit 1
 STUB
+# It answers only the device question (stat -L -c %d); the size check
+# and anything else go to the real stat.
+REAL_STAT=$(command -v stat)
 cat >"$WORK/xdev/stat" <<STUB
 #!/bin/bash
+if [[ "\$1 \$2 \$3" != "-L -c %d" ]]; then
+    exec "$REAL_STAT" "\$@"
+fi
 case "\${*: -1}" in
     "$OUT"*) echo 2 ;;
     *) echo 1 ;;
