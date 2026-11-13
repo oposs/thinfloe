@@ -205,15 +205,21 @@ for goal in help clean; do
     fi
 done
 # The release-assets check refuses only release-assets: another goal parses
-# with a dev TF_VERSION.
-for args in "help" "-n artifacts/rootfs/.version-kind"; do
-    # shellcheck disable=SC2086  # two words on purpose
-    if mk $args TF_VERSION=4.2.0-dev+abc >/dev/null 2>&1; then
-        ok "make $args parses with a dev TF_VERSION"
-    else
-        bad "make $args refuses a dev TF_VERSION"
-    fi
-done
+# with a dev TF_VERSION. (help is no case: it skips the version checks.)
+if mk -n artifacts/rootfs/.version-kind TF_VERSION=4.2.0-dev+abc >/dev/null 2>&1; then
+    ok "make -n artifacts/rootfs/.version-kind parses with a dev TF_VERSION"
+else
+    bad "make -n artifacts/rootfs/.version-kind refuses a dev TF_VERSION"
+fi
+# A bare `make` builds the image. When the stamp rule above was the first
+# rule, it was the default goal: make said ".version-kind is up to date",
+# exited 0 and built nothing.
+goal=$(mk -pn TF_VERSION=4.2.0 2>/dev/null | grep '^\.DEFAULT_GOAL :=')
+if [[ $goal == '.DEFAULT_GOAL := all' ]]; then
+    ok "a bare make builds all"
+else
+    bad "the default goal of a bare make is '${goal:-not found}', not all"
+fi
 
 # The session-packages check of the version in the rootfs: in a release run
 # (TF_VERSION is RELEASE) only RELEASE itself passes, else also a dev build.
