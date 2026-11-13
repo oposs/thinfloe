@@ -21,23 +21,35 @@ make qemu-smoke          # boot the USB image in QEMU (also: -addons, -write, -u
                          #   -netboot, -two-sticks, -grow, -timezone, -timezone-netboot)
 make qemu-test           # QEMU with boot, target and empty drives for upgrade tests
 dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
-scripts/publish.sh       # publish a release for thinfloe-upgrade
+make release-assets TF_VERSION=X.Y.Z  # the six release assets to artifacts/release/
 ```
 
 Menu crate: `cargo test`, `cargo clippy` and `cargo fmt` in `src/thinfloe-menu`.
 
-`scripts/publish.sh` uploads `version`, `vmlinuz`, `initrd.img`,
-`ramroot.sqsh` and `thinfloe-usb.img.zst` with its checksum to
-`https://tobi.oetiker.ch/dbrrg` (the server kept its name), and the image
-again as `dbrrg-usb.img.zst` (a hard link under `artifacts/images/bridge/`)
-because the 3.x `upgrade-image` fetches only that name; `vmlinuz`,
-`initrd.img` and `ramroot.sqsh` keep their names. `version` (read by
-`thinfloe-upgrade check`) is `artifacts/rootfs/version`, which
-`scripts/export-rootfs.sh` writes together with the rootfs's
-`/etc/thinfloe/version` from `TF_VERSION`. The release pull request sets
-`RELEASE` (one line `X.Y.Z`); local builds are `X.Y.Z-dev+<sha>` (`.dirty`
-for a changed tree); `make … TF_VERSION=X.Y.Z` reproduces a release. The
-publish refuses anything but `X.Y.Z`.
+A release starts on GitHub: the **Create release PR** workflow
+(`release-pr.yml`, run by hand with bugfix, feature or major) rolls
+`CHANGES.md`, writes the version to `RELEASE`, builds the image and runs the
+nine smoke tests on it (`release-build-local.yml`), runs `ci.yml`, drafts the
+release and opens the release pull request; merging it publishes the
+release. Each release carries exactly six assets: `vmlinuz`, `initrd.img`,
+`ramroot.sqsh`, `thinfloe-usb.img.zst`, `version` and `SHA256SUMS`, no
+version in any name. `thinfloe-upgrade` reads
+`https://github.com/oposs/thinfloe/releases/latest/download` and pins each
+write to one tag. The runner setup, the CI split and the measurements are in
+[docs/release-ci.md](docs/release-ci.md); the callers in `.github/workflows/`
+follow the repo-infra standard (`.github/repo-infra.json`).
+
+`version` (read by `thinfloe-upgrade check`) is `artifacts/rootfs/version`,
+which `scripts/export-rootfs.sh` writes together with the rootfs's
+`/etc/thinfloe/version` from `TF_VERSION`. `RELEASE` (one line `X.Y.Z`) is
+set only by the release pull request; local builds are `X.Y.Z-dev+<sha>`
+(`.dirty` for a changed tree); `make … TF_VERSION=X.Y.Z` reproduces a
+release.
+
+`scripts/publish.sh <release-dir>` is the one-time bridge mirror: it copies
+one downloaded GitHub release to `https://tobi.oetiker.ch/dbrrg`, where 3.x
+to 4.2 sticks still look, and adds `thinfloe-usb.img.zst.sha256` for 4.0 to
+4.2 and `dbrrg-usb.img.zst` (a hard link) for the 3.x `upgrade-image`.
 
 ## Where code lives
 
