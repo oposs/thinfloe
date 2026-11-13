@@ -4,10 +4,15 @@
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 4.3.0 - 2026-11-13
+### New
 - ThinFloe now shows its picture on thin clients and mini PCs with AMD processors and their built-in Radeon graphics (those with Carrizo or Stoney graphics, for example the HP t530 and t630 thin clients, and Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
 
 ### Changed
-
 - The daily release check, the Upgrade tile and `thinfloe-upgrade` take releases from `https://github.com/oposs/thinfloe/releases` instead of tobi.oetiker.ch. Every file of an upgrade or a fresh install comes from one release, the newest when the write starts, and is checked against that release's `SHA256SUMS`; a release without a line for a file fails with "the release has no checksum for <file>" before the stick changes, and a write this machine refuses anyway (a swapped stick, an internal disk, a mounted stick) says so before the release is read. A source entered by hand is used as given and still accepts the older `<file>.sha256` checksum files.
 - The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed or new files), and such an image is offered the current release as an upgrade. A build outside a git checkout stops at once with "TF_VERSION ... is neither RELEASE (...) nor a dev version" unless `TF_VERSION=X.Y.Z` is given, and a `RELEASE` file that is not one line `X.Y.Z` stops it with "RELEASE must be one line X.Y.Z".
 - A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
@@ -18,7 +23,6 @@
 - In the Settings Status tab, a click on a part's name ticks it, and a note such as "no room" that does not fit its row is cut short instead of running into the next column.
 
 ### Fixed
-
 - After the monitor woke from power save, the keyboard of a fullscreen ThinLinc session could stop working: the keys went to the hidden menu behind it, where Tab and Enter could start Restart. A fullscreen window on top now keeps the keyboard when the menu opens its window again; beside a window that is not fullscreen, the menu still takes the keyboard as before.
 - OxuLnk no longer shows its keyboard grab as "not working" and no longer logs "keyboard grab unavailable reason=compositor does not support shortcut inhibition": the session now lets a window switch the desktop's key shortcuts off.
 - The image no longer contains the build and test scripts in `/scripts`.
