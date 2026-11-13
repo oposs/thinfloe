@@ -158,7 +158,8 @@ else
 fi
 
 # O5: the main archive is compressed at zstd level 19, whose window is 8 MiB
-# (level 15 gives 4 MiB). dracut with 3cpio ignores a level inside a custom
+# (level 15 gives 4 MiB). Levels 17, 18 and 19 all have the 8 MiB window, so
+# the window cannot tell them apart; it does rule out 16 or lower and --ultra. dracut with 3cpio ignores a level inside a custom
 # --compress string and uses 15; only --compress-level counts. The main
 # archive is the zstd frame after the early microcode cpio.
 trailer=$(LC_ALL=C grep -obUaP 'TRAILER!!!' "$INITRD" | head -1 | cut -d: -f1)
@@ -175,10 +176,13 @@ else
     if [[ ! $win =~ ^[0-9]+$ ]]; then
         echo "FAIL - the initrd is compressed at zstd level 19 (window size not readable from zstd -lv)"
         fail=1
-    elif [[ $win -ge 8388608 ]]; then
-        echo "ok   - the initrd is compressed at zstd level 19 (window $win bytes)"
+    elif [[ $win -eq 8388608 ]]; then
+        echo "ok   - the initrd is compressed at zstd level 17 to 19 (window $win bytes)"
+    elif [[ $win -lt 8388608 ]]; then
+        echo "FAIL - the initrd is compressed at zstd level 17 to 19 (window $win bytes, want 8388608: level 16 or lower)"
+        fail=1
     else
-        echo "FAIL - the initrd is compressed at zstd level 19 (window $win bytes, want at least 8388608)"
+        echo "FAIL - the initrd is compressed at zstd level 17 to 19 (window $win bytes, want 8388608: an --ultra level)"
         fail=1
     fi
 fi
