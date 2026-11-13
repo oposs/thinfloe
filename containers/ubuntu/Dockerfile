@@ -53,8 +53,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -yq --no-install-recommends rustup ca-certificates gcc libc6-dev
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
-COPY src/thinfloe-menu/ /build/thinfloe-menu/
-WORKDIR /build/thinfloe-menu
+# The tree mirrors the repository: migrate.rs embeds the home templates from
+# overlay/home/tfuser/.config/thinfloe by a path relative to its own file.
+COPY src/thinfloe-menu/ /build/src/thinfloe-menu/
+COPY overlay/home/tfuser/.config/thinfloe/ /build/overlay/home/tfuser/.config/thinfloe/
+WORKDIR /build/src/thinfloe-menu
 RUN set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     rustup toolchain install "$toolchain" --profile minimal; \
