@@ -534,9 +534,10 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
-                // Stopping a fresh install leaves a stick that does not start.
+                // Stopping a fresh install after its first byte leaves a
+                // stick that does not start; before it, the stick is as it was.
                 if menu.ending != Action::Logout
-                    && menu.upgrade.fresh_running()
+                    && menu.upgrade.fresh_touched()
                     && let Some(drive) = menu.upgrade.job_drive()
                 {
                     ui.label(
@@ -5095,6 +5096,7 @@ mod tests {
             }),
             now,
         );
+        menu.finished(JobResult::UpgradeMsg(Msg::Touched), now);
         let msg = |d| JobResult::UpgradeMsg(Msg::Progress { done: d, total });
         menu.finished(msg(done - 120_000_000), now);
         menu.finished(msg(done), now + Duration::from_secs(10));
@@ -5350,6 +5352,31 @@ mod tests {
         menu.ending = Action::Logout;
         let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 720.0));
         assert!(!texts.iter().any(|t| t.contains("anyway")), "{texts:?}");
+    }
+
+    #[test]
+    fn the_dialog_does_not_warn_before_the_first_byte() {
+        use crate::jobs::JobResult;
+        use crate::upgrade_proto::Msg;
+        let now = Instant::now();
+        let mut menu = erase_chosen();
+        menu.upgrade_event(UpgradeEvent::Confirm, now);
+        menu.finished(JobResult::UpgradeStarted { pgid: 4242 }, now);
+        menu.finished(
+            JobResult::UpgradeMsg(Msg::Step {
+                id: "write".into(),
+                text: "Downloading and writing".into(),
+            }),
+            now,
+        );
+        menu.ending = Action::Reboot;
+        menu.logout = Some(Logout::WaitAddons);
+        let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 720.0));
+        assert!(texts.iter().any(|t| t == "Restart anyway"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("will not start")),
+            "no byte was written yet: {texts:?}"
+        );
     }
 
     /// Where `label` is drawn on a `w` x `h` screen (points), and whether

@@ -32,10 +32,12 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   `--allow-internal`), whose `id` differs from `--expect-id`, or that is
   mounted (fresh mode: always; upgrade mode: unless it is the boot stick),
   with exit 2. Progress goes to stdout as `@step <id> <text>`, `@progress
-  <done> <total or ->`, `@done <id>` and one `@result ok|failed <reason>`;
+  <done> <total or ->`, `@done <id>`, `@touched` (a fresh write's first byte) and one
+  `@result ok|failed <reason>`;
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
-  that is cancelled or fails wipes the start of the stick, so it does not
-  try to boot half-written; an upgrade that is cancelled or fails leaves a
+  that is cancelled or fails after its first byte wipes the start of the
+  stick, so it does not try to boot half-written; before the first byte the
+  stick is as it was; an upgrade that is cancelled or fails leaves a
   stick that starts its current release (`tl/` whole, `DEFAULT` on a release
   that boots), though `tl.old/` may be gone and a complete `tl.new/` may stay
   staged. The `id` is `sn-<serial>` (`nosn` without a serial),

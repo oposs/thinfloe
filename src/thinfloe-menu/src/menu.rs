@@ -3437,8 +3437,11 @@ mod tests {
         assert_eq!(m.logout, Some(Logout::WaitAddons));
         assert!(!m.refuses_input(), "Stay and Restart anyway are offered");
         assert_eq!(m.tick(now + STOP_GRACE * 4), None, "the write is waited for");
-        // The dialog can say the stick will not start: a fresh install runs.
-        assert!(m.upgrade.fresh_running());
+        // The dialog can say the stick will not start: a fresh install has
+        // written to it.
+        assert!(!m.upgrade.fresh_touched());
+        assert_eq!(msg(&mut m, Msg::Touched), None);
+        assert!(m.upgrade.fresh_touched());
         assert_eq!(
             m.choose(Choice::LeaveAnyway, now),
             Some(Effect::Signal(vec![4242], Signal::Term))

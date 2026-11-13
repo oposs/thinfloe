@@ -29,8 +29,20 @@ pub enum Outcome {
     Done { boot_stick: bool, late_cancel: bool },
     Failed { reason: String },
     Refused { reason: String },
-    Cancelled { mode: Mode, written: bool },
+    Cancelled { mode: Mode, stick: CancelledStick },
     NoResult { status: String },
+}
+
+/// What a cancel left on the stick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledStick {
+    /// Nothing was written: an upgrade, or a fresh install cancelled
+    /// before `@touched`.
+    Unchanged,
+    /// A fresh install was cut after its first byte: the tool wiped it.
+    Wiped,
+    /// The image was written (and checked) before the cancel came.
+    MayStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +117,8 @@ struct Job {
     pgid: Option<i32>,
     current: Option<String>,
     done: HashSet<String>,
+    /// `@touched` came: a fresh install has changed the stick.
+    touched: bool,
     result: Option<(bool, String)>,
 }
 
@@ -453,6 +467,7 @@ impl Upgrade {
                 }
                 job.done.insert(id);
             }
+            Msg::Touched => job.touched = true,
             Msg::Result { ok, reason } => {
                 if job.result.is_none() {
                     job.result = Some((ok, reason));
@@ -478,9 +493,15 @@ impl Upgrade {
             },
             (Some((false, _)), Ok(Some(130))) => Outcome::Cancelled {
                 mode: job.mode,
-                written: job.mode == Mode::Fresh
-                    && job.done.contains("write")
-                    && (!job.verify || job.done.contains("verify")),
+                stick: if job.mode != Mode::Fresh {
+                    CancelledStick::Unchanged
+                } else if job.done.contains("write") && (!job.verify || job.done.contains("verify")) {
+                    CancelledStick::MayStart
+                } else if job.touched || job.done.contains("write") {
+                    CancelledStick::Wiped
+                } else {
+                    CancelledStick::Unchanged
+                },
             },
             (Some((false, reason)), Ok(Some(2))) => Outcome::Refused { reason: reason.clone() },
             (Some((false, reason)), _) => Outcome::Failed { reason: reason.clone() },
@@ -563,6 +584,14 @@ impl Upgrade {
         self.job.as_ref().is_some_and(|j| j.mode == Mode::Fresh)
     }
 
+    /// A fresh install has written to its stick (`@touched`): stopping it
+    /// now leaves a wiped stick. Before that the stick is as it was.
+    pub fn fresh_touched(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|j| j.mode == Mode::Fresh && (j.touched || j.done.contains("write")))
+    }
+
     pub fn pgid(&self) -> Option<i32> {
         self.job.as_ref()?.pgid
     }
@@ -608,14 +637,21 @@ impl Upgrade {
             }
             Outcome::Cancelled {
                 mode: Mode::Fresh,
-                written: false,
+                stick: CancelledStick::Unchanged,
+            } => (
+                "Cancelled before anything was written. The stick is as it was.".to_string(),
+                Tone::Plain,
+            ),
+            Outcome::Cancelled {
+                mode: Mode::Fresh,
+                stick: CancelledStick::Wiped,
             } => (
                 "Cancelled. The stick will not start until it is written again.".to_string(),
                 Tone::Warn,
             ),
             Outcome::Cancelled {
                 mode: Mode::Fresh,
-                written: true,
+                stick: CancelledStick::MayStart,
             } => (
                 "Cancelled after the image was written. The stick may start; write it again to be sure.".to_string(),
                 Tone::Warn,
@@ -701,6 +737,7 @@ impl Upgrade {
             pgid: None,
             current: None,
             done: HashSet::new(),
+            touched: false,
             result: None,
         });
         self.stage = Stage::Running;
@@ -1260,7 +1297,7 @@ mod tests {
             u.stage,
             Stage::Finished(Outcome::Cancelled {
                 mode: Mode::Fresh,
-                written: true
+                stick: CancelledStick::MayStart
             })
         );
         assert_eq!(
@@ -1277,8 +1314,54 @@ mod tests {
             u.stage,
             Stage::Finished(Outcome::Cancelled {
                 mode: Mode::Fresh,
-                written: true
+                stick: CancelledStick::MayStart
             })
+        );
+    }
+
+    #[test]
+    fn a_cancel_before_the_first_byte_leaves_the_stick() {
+        // No @touched: the tool wrote nothing, the stick is as it was.
+        let (mut u, t) = running_fresh(true);
+        u.message(step("write"), t);
+        assert!(u.fresh_running());
+        assert!(!u.fresh_touched());
+        u.message(result(false, "cancelled"), t);
+        u.ended(Ok(Some(130)));
+        assert_eq!(
+            u.stage,
+            Stage::Finished(Outcome::Cancelled {
+                mode: Mode::Fresh,
+                stick: CancelledStick::Unchanged
+            })
+        );
+        assert_eq!(
+            u.outcome_text(),
+            (
+                "Cancelled before anything was written. The stick is as it was.".to_string(),
+                Tone::Plain
+            )
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_the_first_byte_leaves_a_wiped_stick() {
+        let (mut u, t) = running_fresh(true);
+        u.message(step("write"), t);
+        u.message(Msg::Touched, t);
+        assert!(u.fresh_touched());
+        u.message(result(false, "cancelled"), t);
+        u.ended(Ok(Some(130)));
+        assert_eq!(
+            u.stage,
+            Stage::Finished(Outcome::Cancelled {
+                mode: Mode::Fresh,
+                stick: CancelledStick::Wiped
+            })
+        );
+        assert_eq!(
+            u.outcome_text().0,
+            "Cancelled. The stick will not start until it is written again."
         );
     }
 
@@ -1294,7 +1377,7 @@ mod tests {
             u.stage,
             Stage::Finished(Outcome::Cancelled {
                 mode: Mode::Fresh,
-                written: false
+                stick: CancelledStick::Wiped
             })
         );
         assert_eq!(
@@ -1314,7 +1397,7 @@ mod tests {
             u.stage,
             Stage::Finished(Outcome::Cancelled {
                 mode: Mode::Upgrade,
-                written: false
+                stick: CancelledStick::Unchanged
             })
         );
         assert_eq!(
