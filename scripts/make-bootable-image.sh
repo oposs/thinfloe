@@ -81,4 +81,4 @@ $CP "$ROOTFS_DIR/vmlinuz" ::tl/vmlinuz
 $CP "$ROOTFS_DIR/initrd.img" ::tl/initrd.img
 $CP "$ROOTFS_DIR/ramroot.sqsh" ::tl/ramroot.sqsh
 
-log_success "Bootable image created: $(format_bytes $(stat -c%s "$IMG"))"
+log_success "Bootable image created: $(format_bytes "$(stat -c%s "$IMG")")"
