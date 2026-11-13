@@ -4,11 +4,15 @@
 # (lsinitramfs -l) because the microcode check needs the size. Later size
 # reduction steps append their checks here.
 #
-# Usage: test/integration/test-initramfs-drivers.sh [path/to/initrd.img]
+# The names of the modules left out of the initrd are checked against the
+# modules of ramroot.sqsh (next to the initrd unless given).
+#
+# Usage: test/integration/test-initramfs-drivers.sh [path/to/initrd.img [path/to/ramroot.sqsh]]
 
 set -uo pipefail
 
 INITRD="${1:-artifacts/rootfs/initrd.img}"
+SQSH="${2:-$(dirname "$INITRD")/ramroot.sqsh}"
 
 if [[ ! -f "$INITRD" ]]; then
     echo "FAIL: $INITRD not found - run 'make rootfs' first" >&2
@@ -103,6 +107,32 @@ for m in "${OMITTED[@]}"; do
     in_initrd "$m" && absent_bad+=("$m")
 done
 absent "none of the ${#OMITTED[@]} server and data-centre modules is in the initrd" "${absent_bad[*]}"
+
+# Each omitted name must be a module of the running system. A module renamed
+# in a later kernel would pass the check above without testing anything,
+# and the driver would come back into the initrd unnoticed.
+if [[ ! -f $SQSH ]] || ! command -v unsquashfs >/dev/null 2>&1; then
+    echo "FAIL - every omitted name is a module in ramroot.sqsh ($SQSH or unsquashfs missing; run 'make rootfs' first)"
+    fail=1
+else
+    SQNAMES="$WORK/sqsh-module-names.txt"
+    unsquashfs -l "$SQSH" 2>/dev/null \
+        | awk '$NF ~ /usr\/lib\/modules\/.*\.ko(\.[a-z]+)?$/ {n=$NF; sub(/.*\//, "", n); sub(/\.ko(\.[a-z]+)?$/, "", n); gsub(/-/, "_", n); print n}' \
+        | sort -u >"$SQNAMES"
+    unknown=()
+    for m in "${OMITTED[@]}"; do
+        grep -qxF "${m//-/_}" "$SQNAMES" || unknown+=("$m")
+    done
+    if [[ $(wc -l <"$SQNAMES") -lt 1000 ]]; then
+        echo "FAIL - every omitted name is a module in ramroot.sqsh (only $(wc -l <"$SQNAMES") module names listed from $SQSH)"
+        fail=1
+    elif [[ ${#unknown[@]} -eq 0 ]]; then
+        echo "ok   - every one of the ${#OMITTED[@]} omitted names is a module in ramroot.sqsh"
+    else
+        echo "FAIL - every omitted name is a module in ramroot.sqsh (no module: ${unknown[*]})"
+        fail=1
+    fi
+fi
 
 present_bad=()
 for m in "${PRESENT[@]}"; do

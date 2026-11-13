@@ -4,14 +4,14 @@
 
 ### New
 
-- ThinFloe now shows its picture on mini PCs with AMD Ryzen processors and their built-in Radeon graphics (Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
+- ThinFloe now shows its picture on thin clients and mini PCs with AMD processors and their built-in Radeon graphics (the A-series with Carrizo and Stoney graphics, for example HP t530 and t630, and Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
 
 ### Changed
 
 - The daily release check, the Upgrade tile and `thinfloe-upgrade` take releases from `https://github.com/oposs/thinfloe/releases` instead of tobi.oetiker.ch. Every file of an upgrade or a fresh install comes from one release, the newest when the write starts, and is checked against that release's `SHA256SUMS`; a release without a line for a file fails with "the release has no checksum for <file>" before the stick changes. A source entered by hand is used as given and still accepts the older `<file>.sha256` checksum files.
 - The menu header of a self-built image shows a version such as `4.2.0-dev+85034f2` (with `.dirty` when built from changed or new files), and such an image is offered the current release as an upgrade. A build outside a git checkout stops at once with "TF_VERSION ... is neither RELEASE (...) nor a dev version" unless `TF_VERSION=X.Y.Z` is given, and a `RELEASE` file that is not one line `X.Y.Z` stops it with "RELEASE must be one line X.Y.Z".
 - A new stick no longer comes with ThinLinc settings for the owner's server: ThinLinc starts with its own defaults. Upgraded sticks keep the settings they have.
-- An upgrade or a netboot now downloads about 491 MB instead of 611 MB. The running system keeps Intel WiFi firmware only in the version its driver loads, and has no drivers for DVB, TV tuner and radio cards, none for older AMD (radeon) and NVIDIA (nouveau) graphics, and no CPU microcode files, which are applied from `initrd.img` at boot as before. During boot, before the system is loaded, drivers for data-centre network cards, Fibre Channel and SAS storage controllers, InfiniBand and network file systems (CIFS, Ceph, AFS, NFS) are no longer available.
+- An upgrade or a netboot now downloads about 493 MB instead of 611 MB. The running system keeps Intel WiFi firmware only in the version its driver loads, and has no drivers for DVB, TV tuner and radio cards, none for older AMD (radeon) graphics, and no CPU microcode files, which are applied from `initrd.img` at boot as before. During boot, before the system is loaded, drivers for data-centre network cards, Fibre Channel and SAS storage controllers, InfiniBand and network file systems (CIFS, Ceph, AFS, NFS) are no longer available.
 - `locale-gen` and `systemd-hwdb update` no longer work on a running machine: the locale and hardware database sources are left out. The locales of `/etc/locale.gen` and the hardware database ship ready to use.
 
 ### Fixed

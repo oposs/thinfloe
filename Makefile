@@ -160,8 +160,9 @@ MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prun
 # The slim step is copied into the ubuntu container and run as its last RUN.
 # Like PATCH_FILES, its files and their directory are prerequisites of
 # .ubuntu-container: the files catch an edit, the directory catches a
-# deleted file.
-SLIM_FILES := $(wildcard containers/ubuntu/slim/*)
+# deleted file. Editor backups and bytecode are no input (.dockerignore
+# keeps them out of the build context too).
+SLIM_FILES := $(filter-out %~ %/__pycache__,$(wildcard containers/ubuntu/slim/*))
 
 # Each container stamp holds the ID of the image its build produced, and is
 # removed at parse time unless the tag still names exactly that image.
@@ -522,6 +523,7 @@ test: test-unit rootfs
 	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@test/integration/test-squashfs-format.sh
 	@test/integration/test-image-slim.sh
+	@test/integration/test-slim-last-run.sh
 	@test/integration/test-initramfs-drivers.sh
 	@test/integration/test-image-size.sh
 	@test/integration/test-labwc-config-merge.sh

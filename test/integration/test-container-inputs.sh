@@ -166,6 +166,24 @@ else
     bad "a __pycache__ under overlay/ makes the image rebuild"
 fi
 
+# An editor backup or bytecode in the slim directory is no build input. The
+# file exists already (the directory's mtime is old); rewriting it touches
+# the file, and for bytecode its __pycache__ too (a new .pyc is renamed in).
+for junk in containers/ubuntu/slim/slim-rootfs.sh~ containers/ubuntu/slim/__pycache__/x.cpython-312.pyc; do
+    reset
+    mkdir -p "$TREE/$(dirname "$junk")"
+    : >"$TREE/$junk"
+    (cd "$TREE" && find containers -exec touch -d '2020-01-01' {} +)
+    touch "$TREE/$junk"
+    [[ $junk == */__pycache__/* ]] && touch "$TREE/$(dirname "$junk")"
+    if [[ $(state) == up-to-date ]]; then
+        ok "a rewritten ${junk##*/} in containers/ubuntu/slim/ does not make the container stale"
+    else
+        bad "a rewritten ${junk##*/} in containers/ubuntu/slim/ makes the container rebuild ($(state))"
+    fi
+    rm -rf "$TREE/containers/ubuntu/slim/__pycache__" "$TREE/containers/ubuntu/slim/slim-rootfs.sh~"
+done
+
 # The export step reads scripts/export-rootfs.sh and scripts/lib/common.sh
 # from the bind mount; a change to either must re-export the artifacts.
 export_state() {
@@ -225,6 +243,35 @@ else
         bad "the build context lacks a COPY/ADD source (.dockerignore?): $(grep -m1 -iE 'error|no items' "$PROBE/log")"
     fi
     "$RT" rmi -f "$TAG" >/dev/null 2>&1
+
+    # The real .dockerignore keeps editor backups and bytecode of the slim
+    # directory out of the context: a COPY of them must find nothing, while
+    # a COPY of a real slim file works (the control).
+    CTX="$WORK/context-slim"
+    mkdir -p "$CTX/containers/ubuntu/slim/__pycache__"
+    cp "$REPO/.dockerignore" "$CTX/"
+    : >"$CTX/containers/ubuntu/slim/keep.sh"
+    : >"$CTX/containers/ubuntu/slim/keep.sh~"
+    : >"$CTX/containers/ubuntu/slim/__pycache__/keep.cpython-312.pyc"
+    probe() {
+        printf 'FROM scratch\nCOPY %s /x\n' "$1" >"$CTX/Dockerfile.probe"
+        "$RT" build --network=none --pull=never -q -t "$TAG" \
+            -f "$CTX/Dockerfile.probe" "$CTX" >"$CTX/log" 2>&1
+        local rc=$?
+        "$RT" rmi -f "$TAG" >/dev/null 2>&1
+        return $rc
+    }
+    if ! probe containers/ubuntu/slim/keep.sh; then
+        bad "the build context lacks a plain slim file (control): $(grep -m1 -iE 'error' "$CTX/log")"
+    else
+        for junk in containers/ubuntu/slim/keep.sh~ containers/ubuntu/slim/__pycache__/keep.cpython-312.pyc; do
+            if probe "$junk"; then
+                bad "the build context has ${junk#containers/ubuntu/slim/} from containers/ubuntu/slim/ (.dockerignore)"
+            else
+                ok "the build context leaves ${junk#containers/ubuntu/slim/} in containers/ubuntu/slim/ out"
+            fi
+        done
+    fi
 fi
 
 exit $fail

@@ -2,7 +2,8 @@
 
 Date: 2026-11-12. Status: approved by the owner 2026-11-12: the design and
 the plan, a size budget of about 495 MB (final measured size plus 2 %), and
-the removal of `radeon` and `nouveau` as part of `O4`. The AMD test machine
+the removal of `radeon` as part of `O4` (`nouveau` stays: owner,
+2026-11-13, see `O4`). The AMD test machine
 for the hardware check is not yet named.
 
 Step 9 (R9) of `docs/superpowers/specs/2026-11-12-github-release-flow-design.md`
@@ -348,7 +349,7 @@ running system keeps all of them; only the initrd loses them.
     shows the early update or the current revision. QEMU cannot show it: a
     guest does not load microcode.
 
-### O4: no DVB, TV tuner or radio modules, no `radeon` or `nouveau`
+### O4: no DVB, TV tuner or radio modules, no `radeon`
 
 - Where: `slim-rootfs.sh` step 1.
 - Rule (*architect*): seed = every module under
@@ -368,26 +369,35 @@ running system keeps all of them; only the initrd loses them.
   analog capture drivers stay, but lose their tuners without an error at
   build time. That is within scope: TV tuners are what `O4` removes.
 - Also removed (*owner*, 2026-11-12): every module under
-  `kernel/drivers/gpu/drm/radeon/` and `kernel/drivers/gpu/drm/nouveau/`
-  (`radeon`, `nouveau`, and the encoder modules `ch7006` and `sil164` in the
-  nouveau directory). Neither driver works without firmware, and the image
-  ships none for them: `A1` removes the package's `radeon/` firmware
-  directory, and no NVIDIA firmware is installed. No other module in
-  `modules.dep` of 7.0.0-43 depends on any of these four, so nothing is put
-  back. The `--omit-drivers` entries for them in the initrd stay.
+  `kernel/drivers/gpu/drm/radeon/` (one module, `radeon`). On SI, CIK and
+  r600 and later it fails without firmware after it has removed the firmware
+  framebuffer, and the image ships none (`A1` removes the package's
+  `radeon/` directory), so without it those machines keep `simpledrm`. No
+  other module in `modules.dep` of 7.0.0-43 depends on it. Its
+  `--omit-drivers` entry in the initrd stays.
+- `nouveau` stays (*owner*, 2026-11-13, correcting the 2026-11-12 decision,
+  which assumed it needs firmware): it sets the mode without any firmware on
+  NVIDIA GPUs up to Volta; firmware is needed only for acceleration and
+  reclocking. Without it an NVIDIA machine waits the full 20 s of `wait-kms`
+  and runs on `simpledrm`, one output at the firmware's mode. It binds after
+  switch-root, like `amdgpu`, and stays in `--omit-drivers`, out of the
+  initrd. No NVIDIA firmware package is added. The `nouveau` directory
+  (`nouveau`, `ch7006`, `sil164`) costs about 1.3 MB of the squashfs
+  (6.6 MB uncompressed).
 - Kept (*owner*): `uvcvideo`, InfiniBand, comedi, IIO, staging, CAN and DSA,
   MTD, server NICs and HBAs, WiFi drivers without firmware, `amdgpu` (for
   `A1`). The rule touches none of them.
 - Saving: 6.0 MB measured for the media part: 218 modules in the seed
   directories, 260 after the closure, 1 put back (`tea575x`), 259 removed;
-  2.0 MB for `radeon` and `nouveau` (4 modules, as `.ko.zst`); 8.0 MB in all.
+  2.0 MB for `radeon` and `nouveau` (4 modules, as `.ko.zst`); 8.0 MB in all,
+  before `nouveau` came back.
   The audit's 45 MB covered the broader list before the owner's keep
   exceptions; see "Expected result".
 - Guards:
   - Build: the `depmod -e` comparison of `S1`.
   - `make test` (`test-image-slim.sh`): no module under the seed
     directories except `tea575x`; no module under `gpu/drm/radeon/` or
-    `gpu/drm/nouveau/`; present: `uvcvideo`, `ib_core`, `comedi`,
+    present: `nouveau`, `uvcvideo`, `ib_core`, `comedi`,
     `industrialio`, `can`, `dsa_core`, `mtd`, `mlx5_core`, `amdgpu`,
     `iwlwifi`, `snd-fm801`.
 
@@ -431,9 +441,11 @@ running system keeps all of them; only the initrd loses them.
   Hawk Point, Strix, Krackan and newer. *Architect*: every APU row of the
   table from Raven on, so also Raphael, Granite Ridge and Dragon Range (the
   graphics in Ryzen 7000 and 9000 desktop processors), Van Gogh (Steam Deck),
-  Strix Halo and Gorgon Point. Carrizo and Stoney (2015, before Raven) and
-  the older APUs the `radeon` driver runs are left out; the `radeon/`
-  directory of the package is removed whole.
+  Strix Halo and Gorgon Point. *Owner*, 2026-11-13: also Carrizo and Stoney
+  (2015, before Raven; HP t530 and t630 thin clients), which amdgpu drives by
+  default and which load firmware by chip name. The older APUs the `radeon`
+  driver runs (Kaveri and before) are left out; the `radeon/` directory of
+  the package is removed whole.
 
 Source of the rule: the kernel's own APU table,
 `Documentation/gpu/amdgpu/apu-asic-info-table.csv` at tag `v7.0` of
@@ -442,8 +454,10 @@ the DCN, GC, VCN, SDMA and MP0 (PSP) IP versions of one APU. amdgpu loads
 firmware in two naming schemes, which `modinfo -F firmware amdgpu` (692 names
 in 7.0.0-43) confirms:
 
-- Older APUs by chip name: `raven_*`, `raven2_*`, `picasso_*`, `renoir_*`,
-  `green_sardine_*`, `yellow_carp_*`, `vangogh_*`.
+- Older APUs by chip name: `carrizo_*`, `stoney_*`, `raven_*`, `raven2_*`,
+  `picasso_*`, `renoir_*`, `green_sardine_*`, `yellow_carp_*`, `vangogh_*`.
+  The CARRIZO/STONEY row of the table names no IP version (DCE 11, GC 8,
+  VCE 3 / UVD 6), so its chips are kept by name only.
 - Newer APUs by IP version, found through IP discovery: `gc_X_Y_Z_*`,
   `psp_X_Y_Z_*`, `dcn_X_Y_Z_*`, `vcn_X_Y_Z*`, `sdma_X_Y_Z`. A version with
   patch level 0 may be named with two parts: DCN 3.5.0 loads
@@ -489,7 +503,10 @@ the package holds 27.3 MB in `amdgpu/` (667 names, 122 of them links) and
 489 names (19.1 MB) and `radeon/`. Every one of the 177 names that
 `modinfo` lists under a kept prefix is in the package. Since the files are
 `.zst`, the squashfs grows by about 8 MB; the whole package would have cost
-about 29 MB.
+about 29 MB. With Carrizo and Stoney (2026-11-13) the rule keeps 196 names
+and drops 471; the 18 more names (16 files, 0.6 MB, and 2 links) are all that
+`modinfo` lists for the two chips, so 195 names under a kept prefix are
+checked.
 
 Guards:
 
@@ -499,15 +516,17 @@ Guards:
   `dcn_3_6_dmcub`, `gc_11_5_0_mes_2`, `psp_14_0_0_toc`, `raven_dmcu`,
   `green_sardine_vcn`, `vangogh_toc`, `isp_4_1_1` kept; `vcn_4_0_0` kept
   through the link from `vcn_4_0_2`; `navi10_*`, `gc_11_0_0_*`,
-  `psp_13_0_0_*`, `smu_13_0_0`, `polaris10_*`, `carrizo_*` dropped; totals
-  178 kept, 489 dropped; a table with fewer than 15 rows refused; the
+  `psp_13_0_0_*`, `smu_13_0_0`, `polaris10_*`, `kaveri_*` dropped; every
+  `carrizo_*` and `stoney_*` name `modinfo` lists kept; totals 196 kept, 471
+  dropped; a table with fewer than 15 rows refused; the
   new-APU guard refuses a fixture with a synthetic `gc_11_5_4_me.bin.zst`
   and a fixture with a `psp` version that has `toc` but no `sos` and is not
   kept.
 - Build: after the prune, every name `modinfo -F firmware amdgpu` lists
   under a kept prefix exists; no dangling symlink under `/usr/lib/firmware`.
 - `make test` (`test-firmware.sh`), a pinned list written out in the test,
-  independent of the rule, one check per APU: Raven (`raven_dmcu`), Picasso
+  independent of the rule, one check per APU: Carrizo (`carrizo_me`),
+  Stoney (`stoney_me`), Raven (`raven_dmcu`), Picasso
   (`picasso_vcn`), Renoir (`renoir_dmcub`), Cezanne and Barcelo
   (`green_sardine_dmcub`), Rembrandt (`yellow_carp_dmcub`), Raphael
   (`gc_10_3_6_me`, `dcn_3_1_5_dmcub`), Mendocino (`gc_10_3_7_me`,
@@ -537,9 +556,9 @@ Guards:
 | O1 | 55 to 61 | measured |
 | O2 | 11.7 | measured |
 | O3 | 14 or more | audit |
-| O4 | 8 | measured |
+| O4 | about 6.7 | measured (8.0 before `nouveau` came back) |
 | O5 | 4 to 7 | review estimate |
-| A1 | about -8 (adds) | measured |
+| A1 | about -8.6 (adds) | measured (with Carrizo and Stoney) |
 | Total | 115 to 125 | |
 
 611 MB minus that is about 486 to 496 MB; without `A1` it would be 478 to
@@ -617,17 +636,18 @@ Under `[Unreleased]` in `CHANGES.md`:
 
 `### New`:
 
-- ThinFloe now shows its picture on mini PCs with AMD Ryzen processors and
-  their built-in Radeon graphics (Ryzen 2000 series and newer, up to Ryzen
-  AI): the image carries the graphics firmware for these processors. AMD
-  graphics cards still get no firmware.
+- ThinFloe now shows its picture on thin clients and mini PCs with AMD
+  processors and their built-in Radeon graphics (the A-series with Carrizo
+  and Stoney graphics, for example HP t530 and t630, and Ryzen 2000 series
+  and newer, up to Ryzen AI): the image carries the graphics firmware for
+  these processors. AMD graphics cards still get no firmware.
 
 `### Changed`:
 
 - An upgrade or a netboot now downloads about N MB instead of 611 MB. The
   running system keeps Intel WiFi firmware only in the version its driver
   loads, and has no drivers for DVB, TV tuner and radio cards, none for
-  older AMD (`radeon`) and NVIDIA (`nouveau`) graphics, and no CPU
+  older AMD (`radeon`) graphics, and no CPU
   microcode files, which are applied from `initrd.img` at boot as before.
   During boot, before the system is loaded, drivers for data-centre network
   cards, Fibre Channel and SAS storage controllers, InfiniBand and network

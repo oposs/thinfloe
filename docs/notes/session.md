@@ -139,14 +139,14 @@ after the X11 removal" above.
 ## The session waits for the GPU before it starts
 
 `thinfloe-wait-kms.service` waits up to 20 s for a real KMS driver before the
-tty1 autologin: amdgpu is omitted from the initrd and binds only after
-switch-root, and simpledrm's `card0` alone does not count. nouveau and radeon
-are not in the image at all.
+tty1 autologin: amdgpu and nouveau are omitted from the initrd and bind only
+after switch-root, and simpledrm's `card0` alone does not count. radeon is not
+in the image at all, so its machines stay on simpledrm.
 i915 is in the initrd, so on Intel graphics the wait ends at once. `10-thinfloe-session.sh`
 retries labwc once after another wait-kms, so a machine with no GPU waits about
 40 s before the failure screen.
 
-On AMD Ryzen APUs `amdgpu` binds after switch-root and replaces `simpledrm`,
+On AMD APUs (Carrizo, Stoney, Ryzen) `amdgpu` binds after switch-root and replaces `simpledrm`,
 which Plymouth and the boot used until then; the image carries only the APU
 firmware (A1 in `docs/superpowers/specs/2026-11-12-image-size-design.md`).
 When the firmware a chip needs is missing, amdgpu fails; the boot waits about

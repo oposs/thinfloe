@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Pick the AMD graphics firmware that Ryzen APUs load.
+"""Pick the AMD graphics firmware that AMD APUs load (Carrizo, Stoney,
+Ryzen).
 
-amdgpu loads firmware for the older APUs by chip name (raven_*, renoir_*,
-...) and for the newer ones by IP version found through IP discovery
+amdgpu loads firmware for the older APUs by chip name (carrizo_*, raven_*,
+renoir_*, ...) and for the newer ones by IP version found through IP discovery
 (gc_X_Y_Z_*, psp_X_Y_Z_*, dcn_X_Y_Z_*, vcn_X_Y_Z*, sdma_X_Y_Z). The IP
 versions of every APU come from the kernel's own table,
 Documentation/gpu/amdgpu/apu-asic-info-table.csv, copied next to this
@@ -22,7 +23,10 @@ import os
 import re
 import sys
 
-CHIPS = ("raven", "raven2", "picasso", "renoir", "green_sardine", "yellow_carp", "vangogh")
+# Chips amdgpu loads firmware for by name. carrizo and stoney (A-series
+# APUs, HP t530 and t630 thin clients; owner, 2026-11-13) are the
+# CARRIZO/STONEY row of the table, which names no IP versions.
+CHIPS = ("carrizo", "stoney", "raven", "raven2", "picasso", "renoir", "green_sardine", "yellow_carp", "vangogh")
 APU_ONLY = ("vpe", "umsch_mm", "isp")
 # Versions with files in the package that the dGPU table does not list: the
 # MI300 to MI350 accelerators.
@@ -42,6 +46,7 @@ COLUMNS = {
     "SDMA version": ("sdma", ()),
     "MP0 version": ("psp", ()),
 }
+# Its cells (DCE 11, GC 8, VCE 3 / UVD 6) give no IP prefix; CHIPS keeps it.
 SKIP_CODES = ("CARRIZO/STONEY",)
 CELL_RE = re.compile(r"^(?:(?P<tag>[A-Z]+)\s+)?(?P<ver>\d+(?:\.\d+){1,2})$")
 VERSION_RE = re.compile(r"^(?P<block>gc|psp|dcn|vcn|sdma)_(?P<x>\d+)_(?P<y>\d+)(?:_(?P<z>\d+))?(?=_|$)")

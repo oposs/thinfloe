@@ -78,6 +78,29 @@ class SelectTest(unittest.TestCase):
             "umsch_mm_4_0_0.bin.zst",
         )
 
+    def test_carrizo_stoney_kept(self):
+        # HP t530 and t630 class thin clients (owner, 2026-11-13).
+        self.assertKept(
+            "carrizo_me.bin.zst",
+            "carrizo_rlc.bin.zst",
+            "carrizo_uvd.bin.zst",
+            "carrizo_mec2.bin.zst",
+            "carrizo_mec.bin.zst",
+            "carrizo_sdma1.bin.zst",
+            "carrizo_sdma.bin.zst",
+            "stoney_me.bin.zst",
+            "stoney_rlc.bin.zst",
+            "stoney_vce.bin.zst",
+        )
+        # Every name modinfo lists for the two chips is kept, and the two
+        # prefixes match nothing but those chips' own files.
+        names = [m[len("amdgpu/") :] + ".zst" for m in MODINFO if m.startswith(("amdgpu/carrizo_", "amdgpu/stoney_"))]
+        self.assertEqual(len(names), 18)
+        for n in names:
+            self.assertIn(n, self.keep)
+        chip = [n for n in self.keep if n.startswith(("carrizo", "stoney"))]
+        self.assertEqual(sorted(chip), sorted(names))
+
     def test_older_apus_by_chip(self):
         self.assertKept(
             "raven_dmcu.bin.zst",
@@ -93,7 +116,8 @@ class SelectTest(unittest.TestCase):
         self.assertKept("vcn_4_0_2.bin.zst", "vcn_4_0_0.bin.zst")
 
     def test_dgpu_dropped(self):
-        prefixes = ("navi10_", "gc_11_0_0_", "psp_13_0_0_", "smu_13_0_0", "polaris10_", "carrizo_")
+        # kaveri: a CIK APU, which radeon drives by default; left out.
+        prefixes = ("navi10_", "gc_11_0_0_", "psp_13_0_0_", "smu_13_0_0", "polaris10_", "kaveri_")
         want = [n for n in ENTRIES if n.startswith(prefixes)]
         self.assertGreater(len(want), 30)
         for n in want:
@@ -102,13 +126,14 @@ class SelectTest(unittest.TestCase):
 
     def test_fixture_totals(self):
         self.assertEqual(len(ENTRIES), 667)
-        self.assertEqual(len(self.keep), 178)
-        self.assertEqual(len(self.drop), 489)
+        # 178 for Raven and newer, plus the 18 Carrizo and Stoney names.
+        self.assertEqual(len(self.keep), 196)
+        self.assertEqual(len(self.drop), 471)
         self.assertEqual(set(self.keep) | set(self.drop), set(ENTRIES))
 
     def test_wanted_names_all_kept(self):
         want = amdgpu_keep.wanted(APU_CSV, MODINFO)
-        self.assertEqual(len(want), 177)
+        self.assertEqual(len(want), 195)
         for name in want:
             self.assertIn(name[len("amdgpu/") :] + ".zst", self.keep)
 
@@ -165,7 +190,7 @@ class CliTest(unittest.TestCase):
     def test_cli_prints_drop_list(self):
         rc, out, err = self.run_cli(APU_CSV, {})
         self.assertEqual((rc, err), (0, ""))
-        self.assertEqual(len(out.split()), 489)
+        self.assertEqual(len(out.split()), 471)
 
     def test_short_table_and_unknown_version_both_reported(self):
         lines = [l for l in APU_CSV.splitlines() if not l.startswith("#")]

@@ -96,11 +96,12 @@ link may dangle, before or after the cuts. See O1, O3 and A1 in
 `docs/superpowers/specs/2026-11-12-image-size-design.md`.
 
 The same step keeps, of `linux-firmware-amd-graphics`, only the firmware of
-Ryzen APUs (A1, owner, 2026-11-12: Raven and newer, so that AMD mini PCs
-show their picture; graphics cards get no firmware). The rule is in
+AMD APUs (A1, owner, 2026-11-12: Raven and newer, so that AMD mini PCs
+show their picture; owner, 2026-11-13: also Carrizo and Stoney, for HP t530
+and t630 thin clients; graphics cards get no firmware). The rule is in
 `containers/ubuntu/slim/amdgpu_keep.py`: a file stays when its name starts
-with an APU chip name (`raven_`, `picasso_`, `renoir_`, `green_sardine_`,
-`yellow_carp_`, `vangogh_` and more), with an IP version of an APU row of
+with an APU chip name (`carrizo_`, `stoney_`, `raven_`, `picasso_`,
+`renoir_`, `green_sardine_`, `yellow_carp_`, `vangogh_` and more), with an IP version of an APU row of
 the kernel's table (`gc_11_5_0`, `dcn_3_5`, `psp_14_0_0`; MP0 is `psp`) or
 with an APU-only block (`vpe`, `umsch_mm`, `isp`), plus the target of every
 kept link. Everything else in `amdgpu/` goes, and `radeon/` whole. The APU

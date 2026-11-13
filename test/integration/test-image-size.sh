@@ -10,12 +10,14 @@
 
 set -uo pipefail
 
-# Budgets in bytes: the sizes measured on 2026-11-13 (ramroot.sqsh 389.1 MB,
-# initrd.img 84.7 MB, sum 491.1 MB) plus 2 %, rounded up to a whole MB.
+# Budgets in bytes: the sizes measured on 2026-11-13 plus 2 %, rounded up to
+# a whole MB. initrd.img 84.7 MB; ramroot.sqsh 391.0 MB and the sum 493.0 MB
+# after nouveau stayed and Carrizo/Stoney firmware came in (first set at
+# 389.1 MB and 491.1 MB).
 # Raising one needs a reason in the commit message.
-MAX_SQSH=397000000
+MAX_SQSH=399000000
 MAX_INITRD=87000000
-MAX_SUM=501000000
+MAX_SUM=503000000
 
 DIR="${1:-artifacts/rootfs}"
 BASE="${2:-}"

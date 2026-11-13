@@ -475,7 +475,7 @@ RUN KERNEL_VERSION=$(ls /lib/modules | head -1) && \
 # linux-firmware-minimal + per-vendor packages above. Never re-introduce a
 # find/rm sweep over /usr/lib/firmware. The one exception is the slim step
 # below: it keeps per Intel WiFi series the file the driver loads, keeps of
-# linux-firmware-amd-graphics only the firmware of Ryzen APUs (by chip name
+# linux-firmware-amd-graphics only the firmware of AMD APUs (by chip name
 # and by the IP versions of the kernel's APU table, amdgpu-apu-ip.csv; the
 # build fails on an IP version that neither table knows) and drops the
 # graphics card and radeon firmware, and removes intel-ucode after dracut
