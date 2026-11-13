@@ -1,0 +1,174 @@
+name: Release build (ThinFloe)
+
+# Builds the release image with TF_VERSION set to the release version, runs
+# the nine QEMU smoke tests on exactly the bytes it uploads, and uploads the
+# six release assets, one artifact release-asset-<name> each. The runner
+# setup steps are those of docs/release-ci.md, "Runner setup for the
+# project's workflows".
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version being released.
+        type: string
+        required: true
+      ref:
+        description: The release branch head to build.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BUILD_JOBS: "4"
+      # Every make call needs it, not only `make image`: without it make
+      # computes a dev version, re-exports the rootfs as a dev build and the
+      # smoke tests and assets would carry that one.
+      TF_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Item 1. The committed artifacts symlink points at the development
+      # host's scratch disk and dangles here.
+      - name: Replace the artifacts symlink with a directory
+        run: |
+          if [ -L artifacts ]; then rm artifacts; fi
+          mkdir -p artifacts
+          git update-index --skip-worktree artifacts
+
+      # Item 2. run-qemu-write-smoke.sh defaults TMPDIR to the development
+      # host's scratch disk.
+      - name: Set TMPDIR
+        run: |
+          mkdir -p "$RUNNER_TEMP/thinfloe-tests"
+          echo "TMPDIR=$RUNNER_TEMP/thinfloe-tests" >>"$GITHUB_ENV"
+
+      # Item 3. dnsmasq-base, because the full dnsmasq package starts a
+      # service on port 53.
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf mtools gdisk dnsmasq-base \
+            squashfs-tools zstd dosfstools file shellcheck uidmap iproute2 \
+            curl python3 openssh-client
+
+      # Item 4. The Containerfiles use short image names (ubuntu:26.04).
+      - name: Let podman resolve short image names
+        run: |
+          mkdir -p ~/.config/containers
+          printf '%s\n' 'unqualified-search-registries = ["docker.io"]' \
+            'short-name-mode = "permissive"' >~/.config/containers/registries.conf
+
+      # Item 5. The netboot, write and time zone smoke tests run in user and
+      # network namespaces, which AppArmor blocks on the runner.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Item 6. Without a user manager podman has no systemd cgroup manager
+      # for the --cpu-quota of the container builds.
+      - name: Start a user manager for runner
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          uid=$(id -u)
+          for _ in $(seq 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >>"$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >>"$GITHUB_ENV"
+
+      # Item 7. runner is not in group kvm; without this QEMU falls back to
+      # TCG and the smoke tests time out.
+      - name: Open /dev/kvm to runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: make image
+        run: make image MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke
+        run: make qemu-smoke MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-netboot
+        run: make qemu-smoke-netboot MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-upgrade
+        run: make qemu-smoke-upgrade MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-write
+        run: make qemu-smoke-write MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-grow
+        run: make qemu-smoke-grow MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-two-sticks
+        run: make qemu-smoke-two-sticks MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-addons
+        run: make qemu-smoke-addons MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-timezone
+        run: make qemu-smoke-timezone MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-timezone-netboot
+        run: make qemu-smoke-timezone-netboot MEMCAP= TF_VERSION="$TF_VERSION"
+
+      # Refuses a build whose rootfs/version is not the release version.
+      - name: make release-assets
+        run: make release-assets MEMCAP= TF_VERSION="$TF_VERSION"
+
+      # One artifact per file: the release takes every release-asset-*
+      # artifact, and these names are the assets thinfloe-upgrade fetches.
+      # The image and the SquashFS are compressed already.
+      - name: Upload vmlinuz
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-vmlinuz
+          path: artifacts/release/vmlinuz
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload initrd.img
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-initrd.img
+          path: artifacts/release/initrd.img
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload ramroot.sqsh
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-ramroot.sqsh
+          path: artifacts/release/ramroot.sqsh
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload thinfloe-usb.img.zst
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-thinfloe-usb.img.zst
+          path: artifacts/release/thinfloe-usb.img.zst
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload version
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-version
+          path: artifacts/release/version
+          if-no-files-found: error
+
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-SHA256SUMS
+          path: artifacts/release/SHA256SUMS
+          if-no-files-found: error
