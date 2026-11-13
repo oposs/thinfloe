@@ -20,7 +20,7 @@ if ! command -v lsinitramfs >/dev/null 2>&1; then
 fi
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 LIST="$WORK/list.txt"
 
 if ! lsinitramfs -l "$INITRD" >"$LIST" 2>/dev/null; then
@@ -56,6 +56,91 @@ elif [[ $ucode_size -gt 1000000 ]]; then
 else
     echo "FAIL - the initrd carries the Intel microcode ($ucode_name has $ucode_size bytes, want over 1000000)"
     fail=1
+fi
+
+# O2: server and data-centre drivers stay out of the initrd (ThinFloe boots
+# from USB or over HTTP; the running system keeps every driver). Names are
+# module file names; "-" and "_" are the same.
+OMITTED=(
+    # server NICs
+    mlx4_core mlx4_en mlx5_core mlx5_dpll ice i40e qed qede bnx2x bnxt_en
+    cxgb cxgb3 cxgb4 cxgb4vf ch_ipsec ch_ktls chcr libcxgb sfc sfc_falcon
+    sfc_siena nfp
+    # FC and SAS HBAs
+    lpfc qla2xxx bfa efct fnic csiostor qedf bnx2fc fcoe libfcoe libfc mptfc
+    mptsas mpt3sas mpi3mr pm80xx isci mvsas aic94xx libsas megaraid_sas
+    smartpqi hpsa esas2r
+    # InfiniBand
+    ib_core ib_cm iw_cm rdma_cm rtrs_client rtrs_core ib_srp rnbd_client
+    # network file systems
+    cifs cifs_md4 ksmbd ceph libceph rbd kafs rxrpc sunrpc grace nfs_acl
+)
+# These stay: desktop NICs, i915, overlay and zram for the boot, and ubifs
+# (a flash file system, not a network one).
+PRESENT=(e1000 e1000e igb igc r8169 atlantic tg3 i915 overlay zram ubifs)
+
+# Module names in the initrd, one per line, "-" read as "_".
+NAMES="$WORK/module-names.txt"
+awk '$NF ~ /\.ko(\.zst)?$/ {n=$NF; sub(/.*\//, "", n); sub(/\.ko(\.zst)?$/, "", n); gsub(/-/, "_", n); print n}' \
+    "$LIST" | sort -u >"$NAMES"
+
+in_initrd() { grep -qxF "${1//-/_}" "$NAMES"; }
+
+absent_bad=()
+for m in "${OMITTED[@]}"; do
+    in_initrd "$m" && absent_bad+=("$m")
+done
+if [[ ${#absent_bad[@]} -eq 0 ]]; then
+    echo "ok   - none of the ${#OMITTED[@]} server and data-centre modules is in the initrd"
+else
+    echo "FAIL - modules that must be out of the initrd: ${absent_bad[*]}"
+    fail=1
+fi
+
+present_bad=()
+for m in "${PRESENT[@]}"; do
+    in_initrd "$m" || present_bad+=("$m")
+done
+if [[ ${#present_bad[@]} -eq 0 ]]; then
+    echo "ok   - the boot and desktop NIC modules are in the initrd (${PRESENT[*]})"
+else
+    echo "FAIL - modules missing from the initrd: ${present_bad[*]}"
+    fail=1
+fi
+
+# Closure: every module that a module of the initrd depends on is in the
+# initrd too. This catches an omitted library that a kept module needs.
+if ! command -v unmkinitramfs >/dev/null 2>&1 || ! command -v modinfo >/dev/null 2>&1; then
+    echo "FAIL - closure check needs unmkinitramfs and modinfo"
+    fail=1
+else
+    TREE="$WORK/tree"
+    if ! unmkinitramfs "$INITRD" "$TREE" >/dev/null 2>&1; then
+        echo "FAIL - cannot unpack $INITRD"
+        fail=1
+    else
+        mapfile -d '' -t mods < <(find "$TREE" -name '*.ko.zst' -print0)
+        missing=()
+        for f in "${mods[@]}"; do
+            deps=$(modinfo -F depends "$f" 2>/dev/null) || deps=""
+            [[ -n $deps ]] || continue
+            IFS=, read -r -a dl <<<"$deps"
+            for d in "${dl[@]}"; do
+                [[ -n $d ]] || continue
+                in_initrd "$d" || missing+=("$(basename "$f" .ko.zst) needs $d")
+            done
+        done
+        if [[ ${#mods[@]} -lt 100 ]]; then
+            echo "FAIL - closure check found only ${#mods[@]} modules in the unpacked initrd"
+            fail=1
+        elif [[ ${#missing[@]} -eq 0 ]]; then
+            echo "ok   - every dependency of the ${#mods[@]} modules in the initrd is in the initrd"
+        else
+            echo "FAIL - modules without their dependency in the initrd:"
+            printf '       %s\n' "${missing[@]}"
+            fail=1
+        fi
+    fi
 fi
 
 if [[ $fail -eq 0 ]]; then
