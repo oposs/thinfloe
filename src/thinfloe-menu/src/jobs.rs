@@ -1090,10 +1090,9 @@ pub fn mon_revert(k: &Kanshi) -> Result<(), String> {
 }
 
 /// *Let the menu manage it*: the kept hand-written file is replaced by the
-/// layout on screen, which becomes the saved arrangement. The hand-written
-/// text is gone from `[monitors]`; a running kanshi keeps what it has read
-/// until its next start.
-pub fn mon_take_over(store: &crate::store::Shared, heads: &[crate::heads::Head]) -> Result<(), String> {
+/// layout on screen, which becomes the saved arrangement, and kanshi reads
+/// the new file. A refused update reloads nothing.
+pub fn mon_take_over(store: &crate::store::Shared, k: &Kanshi, heads: &[crate::heads::Head]) -> Result<(), String> {
     let profiles = if heads.is_empty() {
         Vec::new()
     } else {
@@ -1103,7 +1102,8 @@ pub fn mon_take_over(store: &crate::store::Shared, heads: &[crate::heads::Head])
         .update(crate::generated::Table::Monitors, |c| {
             c.monitors = crate::config::MonitorsCfg::from_profiles(&profiles);
         })
-        .map(|_| ())
+        .map(|_| ())?;
+    kanshi_reload(k)
 }
 
 #[cfg(test)]
@@ -2257,7 +2257,8 @@ mod tests {
         assert!(!k.marker.exists());
         assert!(!d.join("started").exists(), "kanshi was not asked");
         // Taking over and loading go through the store, too.
-        assert!(mon_take_over(&ro, &[]).unwrap_err().contains("read-only"));
+        assert!(mon_take_over(&ro, &k, &[]).unwrap_err().contains("read-only"));
+        assert!(!d.join("started").exists(), "a refused take-over reloads nothing");
         assert_eq!(mon_load(&ro).1, crate::monitors::MonSource::Menu);
     }
 
@@ -2591,7 +2592,7 @@ mod tests {
         use crate::heads::{Head, Mode, Rotation};
         use crate::monitors::MonSource;
         let d = dir("mon-load");
-        let (store, k) = mon_home(&d, "exit 0");
+        let (store, k) = mon_home(&d, &recording(&d));
         assert_eq!(mon_load(&store), (Ok(None), MonSource::Missing));
         save_profiles(&store, &[layout(Rotation::R90)]);
         assert_eq!(
@@ -2633,7 +2634,7 @@ mod tests {
             rotation: Rotation::Normal,
         };
         let heads = vec![head("DP-1", 0), head("DP-2", 1920)];
-        assert_eq!(mon_take_over(&store, &heads), Ok(()));
+        assert_eq!(mon_take_over(&store, &k, &heads), Ok(()));
         let want = crate::kanshi::from_heads(&heads);
         // The settings keep no preferred flag, as the file never did.
         let stored = crate::config::MonitorsCfg::from_profiles(std::slice::from_ref(&want))
@@ -2643,6 +2644,17 @@ mod tests {
         assert_eq!(saved(&store).kept, None);
         assert_eq!(on_disk(&d).kept, None);
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[want])));
+
+        // kanshi was told to read the new file, with the settings written.
+        let log = read(&d.join("started")).unwrap();
+        assert!(
+            log.starts_with(&format!("args -c {}\nmarker \n", k.config.display())),
+            "{log}"
+        );
+        assert!(
+            log.contains("config transform normal"),
+            "the new file was already written: {log}"
+        );
 
         // Settings that do not convert are an error, and read-only.
         store

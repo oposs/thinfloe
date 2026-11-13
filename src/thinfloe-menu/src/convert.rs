@@ -256,9 +256,14 @@ pub fn status_from_file(bytes: &[u8]) -> Converted<StatusCfg> {
 }
 
 pub fn monitors_from_kanshi(text: &str) -> Converted<MonitorsCfg> {
-    match kanshi::parse(text) {
-        Ok(p) => Converted {
-            value: MonitorsCfg::from_profiles(&p),
+    // A name the generated file could not hold again is no profile either.
+    let parsed = kanshi::parse(text).and_then(|p| {
+        let cfg = MonitorsCfg::from_profiles(&p);
+        cfg.to_profiles().map(|_| cfg)
+    });
+    match parsed {
+        Ok(cfg) => Converted {
+            value: cfg,
             notes: Vec::new(),
         },
         Err(e) => Converted {
@@ -565,6 +570,22 @@ mod tests {
         assert_eq!(c.value.kept.as_deref(), Some(text));
         assert!(c.value.profiles.is_empty());
         assert!(c.notes[0].contains("kept as written; the menu shows it read-only"));
+    }
+
+    #[test]
+    fn a_menu_kanshi_file_with_a_name_the_settings_cannot_hold_is_kept() {
+        // A brace parses, but would not render again; a quote is no
+        // parsable name at all. Either way the text stays as written.
+        for name in ["a}b", "a\"b"] {
+            let text = format!(
+                "{}\n\nprofile {{\n\toutput {name} enable mode 1920x1080 position 0,0 transform normal scale 1\n}}\n",
+                crate::owned::HEADER
+            );
+            let c = monitors_from_kanshi(&text);
+            assert_eq!(c.value.kept.as_deref(), Some(text.as_str()), "{name}");
+            assert!(c.value.profiles.is_empty(), "{name}");
+            assert_eq!(c.notes.len(), 1, "{name}");
+        }
     }
 
     #[test]

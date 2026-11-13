@@ -600,7 +600,9 @@ fn job_result(
         )),
         Job::MonKeep { profiles } => JobResult::MonKept(jobs::mon_keep(&paths.config, &paths.kanshi, profiles)),
         Job::MonRevert => JobResult::MonReverted(jobs::mon_revert(&paths.kanshi)),
-        Job::MonTakeOver { heads } => JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &heads)),
+        Job::MonTakeOver { heads } => {
+            JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &paths.kanshi, &heads))
+        }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
     }
 }
