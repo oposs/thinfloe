@@ -1,7 +1,8 @@
 #!/bin/bash
-# The slim step must stay the last RUN of the ubuntu Dockerfile, and no
-# apt-get or dpkg may run after dracut built the initrd: a dpkg run can fire
-# the update-initramfs trigger, which rebuilds the initrd with default flags
+# The slim step must stay the last RUN of the ubuntu Dockerfile, directly
+# after the dracut RUN, and no apt-get, dpkg, dracut or update-initramfs may
+# run after dracut built the initrd: a dpkg run can fire the
+# update-initramfs trigger, which rebuilds the initrd with default flags
 # (spec 2026-11-12-image-size, "Why a separate step, and why last").
 # Static: needs no built image.
 #
@@ -39,6 +40,34 @@ elif [[ -z $after ]]; then
 else
     echo "FAIL - no apt-get or dpkg after the dracut RUN (found: $(head -n 1 <<<"$after"))"
     fail=1
+fi
+
+# The dracut RUN ends at the first line from `dracut --force` on that has no
+# continuation backslash. After it, no line (comments left out) calls dracut
+# or update-initramfs, which would replace the initrd the slim step checks.
+end=$(awk '/^[[:space:]]*dracut --force/ {on=1} on && !/\\$/ {print NR; exit}' "$DOCKERFILE")
+if [[ -z $end ]]; then
+    echo "FAIL - no dracut or update-initramfs after the dracut RUN (no line runs dracut --force)"
+    echo "FAIL - no RUN between the dracut RUN and the slim RUN (no line runs dracut --force)"
+    fail=1
+else
+    again=$(awk -v end="$end" 'NR > end && !/^[[:space:]]*#/ &&
+        /(^|[^[:alnum:]_.-])(dracut|update-initramfs)([^[:alnum:]_.-]|$)/ {print NR ": " $0}' "$DOCKERFILE")
+    if [[ -z $again ]]; then
+        echo "ok   - no dracut or update-initramfs after the dracut RUN"
+    else
+        echo "FAIL - no dracut or update-initramfs after the dracut RUN (found: $(head -n 1 <<<"$again"))"
+        fail=1
+    fi
+    # Any RUN after the dracut RUN other than the slim RUN itself.
+    between=$(awk -v end="$end" 'NR > end && /^[Rr][Uu][Nn][[:space:]]/ &&
+        !/\/thinfloe-slim\/slim-rootfs\.sh/ {print NR ": " $0}' "$DOCKERFILE")
+    if [[ -z $between ]]; then
+        echo "ok   - no RUN between the dracut RUN and the slim RUN"
+    else
+        echo "FAIL - no RUN between the dracut RUN and the slim RUN (found: $(head -n 1 <<<"$between"))"
+        fail=1
+    fi
 fi
 
 if [[ $fail -eq 0 ]]; then
