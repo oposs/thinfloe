@@ -3494,9 +3494,10 @@ mod tests {
 
     #[test]
     fn status_notes_stay_in_their_row_on_a_narrow_screen() {
-        // A short screen 800 wide (1024 at scale 1.25 is 819): the hardware elements say "not on a
-        // small screen", the empty battery "nothing to show on this
-        // machine", and a crowded list "no room" for the rest.
+        // A short screen 600 wide, narrower than 1024 at scale 1.25 (819):
+        // the hardware elements say "not on a small screen", the empty
+        // battery "nothing to show on this machine", and a crowded list
+        // "no room" for the rest.
         let t0 = Instant::now();
         let mut menu = status_menu(vec![], t0);
         let text = "network 3x1\nnetwork-info 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\nsystem 1x1\n";
