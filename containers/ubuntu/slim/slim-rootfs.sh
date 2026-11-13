@@ -31,7 +31,6 @@ module_firmware() {
     find "$1" -name '*.ko*' -print0 | xargs -0 -r modinfo -F firmware | sort -u
 }
 
-# Exactly one kernel, and the initrd that dracut built for it.
 # preconditions saw no dangling link under $FW, so there must be none now.
 # $1 says when, for the message. Runs after every cut (see main).
 check_no_dangling_links() {
@@ -40,6 +39,7 @@ check_no_dangling_links() {
     [[ -z $links ]] || die "dangling firmware symlinks $1:"$'\n'"$links"
 }
 
+# Exactly one kernel, and the initrd that dracut built for it.
 preconditions() {
     local dirs=()
     local d
