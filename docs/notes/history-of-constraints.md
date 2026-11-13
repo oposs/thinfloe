@@ -79,8 +79,12 @@ The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, the last step
 of the image build (owner, 2026-11-12). It keeps, per Intel WiFi series, only
 the ucode file the driver loads (the rule is in
 `containers/ubuntu/slim/iwlwifi_keep.py`) and removes the compat symlinks
-that pointed at the dropped files. Removing `intel-ucode` after dracut has
-built the early microcode archive is planned as the next cut there (O3).
+that pointed at the dropped files. It also removes `intel-ucode` from the
+squashfs after dracut has built the early microcode archive (O3): the kernel
+applies the microcode from the initrd. The build stops if
+`kernel/x86/microcode/GenuineIntel.bin` is not in `/boot/initrd.img-<kver>`;
+`test-firmware.sh` checks that the squashfs has no `intel-ucode` and
+`test-initramfs-drivers.sh` that the initrd carries the Intel microcode.
 The iwlwifi cut is guarded by `test/unit/test_iwlwifi_keep.py`, the Intel
 WiFi checks in `test-firmware.sh` (at most one ucode per series, none above
 the driver's maximum, no dangling firmware symlink, a ucode for every chip

@@ -155,7 +155,10 @@ the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
 The one exception is `containers/ubuntu/slim/slim-rootfs.sh`, which keeps per
 Intel WiFi series the file the driver loads (owner, 2026-11-12); removing
-`intel-ucode` after dracut is planned as the next cut there. Guards of the
+`intel-ucode` after dracut has built the early microcode archive (the CPU
+gets its microcode from the initrd; the build stops if the archive is
+missing, and `test-firmware.sh` and `test-initramfs-drivers.sh` check both
+sides). Guards of the
 iwlwifi cut: `test_iwlwifi_keep.py`, `test-firmware.sh` and the selector's
 refusal to drop a file that `modinfo` names. The build-time firmware-name
 check in `slim-rootfs.sh` guards against losing firmware outside the

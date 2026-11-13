@@ -228,8 +228,17 @@ check_firmware_names() {
     echo "slim-rootfs: $(grep -c . <<<"$want" || true) module firmware names checked" >&2
 }
 
+# The CPU gets its microcode from the early archive that dracut put in front
+# of the initrd. The copy under intel-ucode is then dead weight in the
+# squashfs. Remove it only when the archive is really there.
 drop_intel_ucode() {
-    : # Task 7
+    local tmp=/thinfloe-slim/initrd-list
+    # No pipe: grep -q can end the lister with SIGPIPE, which pipefail reports.
+    if ! { 3cpio --list "/boot/initrd.img-$KVER" >"$tmp" \
+        && grep -qx kernel/x86/microcode/GenuineIntel.bin "$tmp"; }; then
+        die "no early microcode in /boot/initrd.img-$KVER; not removing intel-ucode"
+    fi
+    rm -rf /usr/lib/firmware/intel-ucode
 }
 
 # The locale archive is compiled; the sources are not read at run time.
