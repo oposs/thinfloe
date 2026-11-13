@@ -10,11 +10,12 @@
 
 set -uo pipefail
 
-# Budgets in bytes: the Task 1 baseline plus 2 %, rounded up to a whole MB.
-# Task 10 of the image size plan lowers them to the final sizes.
-MAX_SQSH=504000000
-MAX_INITRD=102000000
-MAX_SUM=624000000
+# Budgets in bytes: the sizes measured on 2026-11-13 (ramroot.sqsh 389.1 MB,
+# initrd.img 84.7 MB, sum 491.1 MB) plus 2 %, rounded up to a whole MB.
+# Raising one needs a reason in the commit message.
+MAX_SQSH=397000000
+MAX_INITRD=87000000
+MAX_SUM=501000000
 
 DIR="${1:-artifacts/rootfs}"
 BASE="${2:-}"
