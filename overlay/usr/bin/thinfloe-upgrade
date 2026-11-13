@@ -2269,10 +2269,12 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
             return outcome
         if expected is None:
             log(f"checksum not checked: {missing_checksum_note(base_url, image_name)}")
+        # Outside the try below, whose handler wipes: a cancel while the size
+        # is read (a curl request of up to 30 s) leaves the stick untouched.
+        size = image_size(image_url)
         try:
             writing = True
-            result = stream_image(image_url, device, image_size(image_url), progress,
-                                  fd=fd)
+            result = stream_image(image_url, device, size, progress, fd=fd)
             if expected is not None and expected != result.download_sha256:
                 raise WriteFailed("the download was damaged; write the stick again")
             progress.done("write")
