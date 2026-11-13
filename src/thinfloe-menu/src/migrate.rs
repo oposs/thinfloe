@@ -1,8 +1,9 @@
 //! `thinfloe-menu --migrate-home`: moves a 4.x home into
 //! `~/.config/thinfloe/` once. Old files are read and converted into
 //! `config.toml`, the generated files and the copied files are written,
-//! then the old files move into `~/cfg-attic/`. A failure before the move
-//! leaves every old file where it was; no old file is ever deleted.
+//! `home-version` and `home-layout` switch to the new layout, and only
+//! then the old files move into `~/cfg-attic/`. A failure before the
+//! switch leaves every old file where it was; no old file is ever deleted.
 
 use std::fs;
 use std::io::{self, Write};
@@ -512,8 +513,9 @@ fn move_to_attic(home: &Path, attic: &Path, rel: &str, now_epoch: i64) -> io::Re
 }
 
 /// Run the migration when `home-layout` says `legacy`; `Ok(None)` when it
-/// does not. An `Err` before the old files move leaves all of them in
-/// place; the next start tries again.
+/// does not. An `Err` leaves every old file in place and the layout
+/// legacy; the next start tries again. Once `home-version` and
+/// `home-layout` say new, the result is `Ok` with what went wrong after.
 pub fn migrate_home(home: &Path, state_dir: &Path, inputs: Inputs, now_epoch: i64) -> Result<Option<Report>, String> {
     if home_layout(state_dir) == HomeLayout::New {
         return Ok(None);
@@ -569,7 +571,15 @@ pub fn migrate_home(home: &Path, state_dir: &Path, inputs: Inputs, now_epoch: i6
         }
     }
 
-    // Step 3: a file that does not move stays where it was.
+    // The marker before any move: once the old files leave, every reader
+    // must already look at the new paths. Up to here a failure leaves
+    // every old file in place and the layout legacy.
+    atomic::write(&dir.home_version(), HOME_VERSION, 0o644)
+        .map_err(|e| format!("{} could not be written: {e}", dir.home_version().display()))?;
+    set_new(state_dir).map_err(|e| format!("{} could not be written: {e}", state_dir.join(LAYOUT_FILE).display()))?;
+
+    // Step 3: the home is migrated; a file that does not move stays
+    // where it was and is no longer read.
     let attic = home.join(ATTIC);
     for rel in OLD_FILES {
         if !taken(&home.join(rel)) {
@@ -580,15 +590,19 @@ pub fn migrate_home(home: &Path, state_dir: &Path, inputs: Inputs, now_epoch: i6
         }
     }
 
-    // Step 4.
-    atomic::write(&dir.home_version(), HOME_VERSION, 0o644)
-        .map_err(|e| format!("{} could not be written: {e}", dir.home_version().display()))?;
+    // Step 4: what goes wrong now is reported, not fatal.
     let readme = attic_slot(&attic, "README", now_epoch);
-    atomic::write(&readme, report.readme().as_bytes(), 0o644)
-        .map_err(|e| format!("{} could not be written: {e}", readme.display()))?;
+    if let Err(e) = atomic::write(&readme, report.readme().as_bytes(), 0o644) {
+        report
+            .dropped
+            .push(format!("{} could not be written: {e}", readme.display()));
+    }
     let summary = report.summary();
-    st.update(Table::Notice, |c| c.notice.migration = Some(summary))?;
-    set_new(state_dir).map_err(|e| format!("{} could not be written: {e}", state_dir.join(LAYOUT_FILE).display()))?;
+    if let Err(e) = st.update(Table::Notice, |c| c.notice.migration = Some(summary)) {
+        report
+            .dropped
+            .push(format!("The Settings notice could not be saved: {e}"));
+    }
     Ok(Some(report))
 }
 
@@ -928,15 +942,15 @@ mod tests {
         let h = Home::with_templates("again");
         h.put(".thinfloe-environment", HAND_ENV, 0o644);
         h.put("wifi.yaml", HAND_WIFI, 0o600);
-        fs::create_dir_all(h.dir().home_version()).unwrap();
-
-        let first = h.run();
-        assert!(first.is_err(), "{first:?}");
-        assert_eq!(h.layout_text(), "legacy\n");
+        h.run().unwrap().expect("a report");
+        // The partial state of an earlier run: a valid config.toml, the
+        // attic filled, no marker, the layout still legacy.
+        fs::remove_file(h.dir().home_version()).unwrap();
+        fs::write(h.state.join("home-layout"), "legacy\n").unwrap();
+        assert!(config::parse(&h.text(".config/thinfloe/config.toml")).is_ok());
         assert_eq!(h.text("cfg-attic/.thinfloe-environment"), HAND_ENV);
         assert_eq!(h.text("cfg-attic/wifi.yaml"), HAND_WIFI);
-
-        fs::remove_dir(h.dir().home_version()).unwrap();
+        let readme = h.text("cfg-attic/README");
         // The shipped old templates come back with the next restore.
         h.put(".thinfloe-environment", "# template\n", 0o644);
         h.put("wifi.yaml", include_str!("testdata/wifi-template.yaml"), 0o644);
@@ -947,12 +961,52 @@ mod tests {
         assert_eq!(c.keyboard.layout, "ch");
         assert_eq!(h.text("cfg-attic/.thinfloe-environment"), HAND_ENV);
         assert_eq!(h.text("cfg-attic/wifi.yaml"), HAND_WIFI);
+        assert_eq!(h.text("cfg-attic/README"), readme);
         assert_eq!(h.text("cfg-attic/.thinfloe-environment.1700000000"), "# template\n");
         assert!(h.exists("cfg-attic/wifi.yaml.1700000000"));
+        assert!(h.exists("cfg-attic/README.1700000000"));
         let env = h.text(".config/thinfloe/environment");
         assert_eq!(env.matches("XCURSOR_SIZE=32").count(), 1, "{env}");
         assert_eq!(h.text(".config/thinfloe/home-version"), "2\n");
         assert_eq!(h.layout_text(), "new\n");
+    }
+
+    #[test]
+    fn a_failed_marker_moves_nothing() {
+        let h = Home::with_templates("marker");
+        h.put(".thinfloe-environment", HAND_ENV, 0o644);
+        h.put("wifi.yaml", HAND_WIFI, 0o600);
+        fs::create_dir_all(h.dir().home_version()).unwrap();
+        let r = h.run();
+        assert!(r.as_ref().is_err_and(|e| e.contains("home-version")), "{r:?}");
+        assert_eq!(h.text(".thinfloe-environment"), HAND_ENV);
+        assert_eq!(h.text("wifi.yaml"), HAND_WIFI);
+        assert!(!h.exists("cfg-attic"));
+        assert_eq!(h.layout_text(), "legacy\n");
+    }
+
+    #[test]
+    fn a_failed_move_after_the_marker_still_migrates() {
+        let h = Home::with_templates("blocked");
+        h.put(".thinfloe-environment", HAND_ENV, 0o644);
+        h.put(".config/thinfloe/screen", "idle_timeout=600\n", 0o644);
+        // Nothing can go below cfg-attic/.config.
+        h.put("cfg-attic/.config", "in the way\n", 0o644);
+        let r = h.run().unwrap().expect("a report");
+        assert_eq!(h.layout_text(), "new\n");
+        assert_eq!(h.text(".config/thinfloe/home-version"), "2\n");
+        assert_eq!(h.cfg().screen.idle_timeout, 600);
+        assert_eq!(h.text("cfg-attic/.thinfloe-environment"), HAND_ENV);
+        assert!(h.exists(".config/thinfloe/screen"));
+        assert_eq!(r.not_moved.len(), 1, "{r:?}");
+        assert!(r.not_moved[0].contains("~/.config/thinfloe/screen"), "{r:?}");
+        assert!(h.text("cfg-attic/README").contains("~/.config/thinfloe/screen"));
+        assert!(
+            h.cfg()
+                .notice
+                .migration
+                .is_some_and(|s| s.contains("could not be moved"))
+        );
     }
 
     #[test]
