@@ -4,7 +4,7 @@
 
 ### New
 
-- ThinFloe now shows its picture on thin clients and mini PCs with AMD processors and their built-in Radeon graphics (the A-series with Carrizo and Stoney graphics, for example HP t530 and t630, and Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
+- ThinFloe now shows its picture on thin clients and mini PCs with AMD processors and their built-in Radeon graphics (those with Carrizo or Stoney graphics, for example the HP t530 and t630 thin clients, and Ryzen 2000 series and newer, up to Ryzen AI): the image carries the graphics firmware for these processors. AMD graphics cards still get no firmware.
 
 ### Changed
 
