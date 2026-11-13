@@ -13,10 +13,12 @@ Description=Undockerize this Image
 # systemd-resolved stub. Stopping resolved here, removing the link and
 # making it again left name lookups failing for a moment at
 # multi-user.target. systemd-resolved rereads /etc/hosts when it changes.
+#
+# No /.dockerenv step: export-rootfs.sh removes it before mksquashfs, so
+# the image never has one.
 
 [Service]
 Type=oneshot
-ExecStart=/bin/rm -f /.dockerenv
 ExecStart=/bin/mv /etc/hosts.in /etc/hosts
 ExecStart=/bin/sed -i s/HOSTNAME/%H/g /etc/hosts
 # ExecStart=/sbin/depmod -a
