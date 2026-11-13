@@ -201,6 +201,8 @@ for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
         /^LABEL /   { in_cur = ($2 == "current") }
         in_cur && /^[[:space:]]+APPEND / { print "    APPEND ramroot=tl/ramroot.sqsh " append " " report; next }
         { print }' "$tmp/cfg" >"$tmp/cfg.cur"
+    grep -q 'systemd.run=.*smoke-home-report.sh check' "$tmp/cfg.cur" \
+        || { echo "boot 2: the rewrite of $cfg did not match LABEL current" >&2; exit 2; }
     mcopy -o -i "$ESP" "$tmp/cfg.cur" "$cfg" || exit 2
 done
 boot '^SMOKE-HOME-DONE' "$LOG2" || exit 2
@@ -222,7 +224,7 @@ if grep -qaF 'thinfloe: installing ~/.config/thinfloe/generated/wifi.yaml into /
 else
     bad "boot 2: generated/wifi.yaml was not installed ($LOG2)"
 fi
-if grep -qaF 'SMOKE-HOME env XKB_DEFAULT_LAYOUT=ch' "$clean2"; then
+if grep -qaxF 'SMOKE-HOME env XKB_DEFAULT_LAYOUT=ch' "$clean2"; then
     ok "boot 2: the keyboard came across"
 else
     bad "boot 2: no 'SMOKE-HOME env XKB_DEFAULT_LAYOUT=ch' in $LOG2"
@@ -232,12 +234,16 @@ if grep -qaF 'SMOKE-HOME attic yes' "$clean2"; then
 else
     bad "boot 2: no 'SMOKE-HOME attic yes' in $LOG2"
 fi
-if grep -qaF 'thinfloe: renamed' "$clean2"; then
-    bad "boot 2: a 3.x rename ran again ($LOG2)"
+if grep -qaF 'thinfloe: renamed' "$clean2" || ! grep -qaxF 'SMOKE-HOME oldmarker no' "$clean2"; then
+    bad "boot 2: the 3.x migration ran again on a new home ($LOG2)"
 else
-    ok "boot 2: no second 3.x rename"
+    ok "boot 2: no second 3.x rename, no new 3.x home-version marker"
 fi
-
+if grep -qaF 'thinfloe: installing ~/wifi.yaml into /etc/netplan' "$clean2"; then
+    bad "boot 2: the old ~/wifi.yaml was installed again ($LOG2)"
+else
+    ok "boot 2: the old ~/wifi.yaml is not installed"
+fi
 
 if [[ $fail -ne 0 ]]; then
     echo ""

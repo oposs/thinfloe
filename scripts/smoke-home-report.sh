@@ -37,6 +37,12 @@ check)
         else
             echo "SMOKE-HOME attic no"
         fi
+        # The 3.x marker: a new-layout home must never get a fresh one.
+        if [ -e "$HOME_DIR/.thinfloe-home-version" ]; then
+            echo "SMOKE-HOME oldmarker yes"
+        else
+            echo "SMOKE-HOME oldmarker no"
+        fi
         echo "SMOKE-HOME-DONE"
     } >"$CONSOLE" 2>&1
     ;;
