@@ -84,3 +84,13 @@ jobs:
       - name: make test-runtime
         run: make test-runtime MEMCAP=
 
+      # The serial console logs of the smoke tests, their .1 and .2 boots and
+      # the write test's HTTP log; the console tail alone rarely says why a
+      # boot failed.
+      - name: Upload the smoke test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-logs
+          path: artifacts/images/*.log*
+          if-no-files-found: ignore

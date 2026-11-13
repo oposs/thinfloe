@@ -147,4 +147,8 @@ Every make target runs with `MEMCAP=`, as in the spike. No disk cleanup is
 needed. `release-build-local.yml` passes `TF_VERSION` to every make call, not
 only to `make image`: a call without it computes a dev version, exports the
 rootfs again as a dev build, and the smoke tests and assets would carry that
-one.
+one. It also records the checksums of the four built files after
+`make image` and fails before the uploads when `artifacts/release/SHA256SUMS`
+names other ones. On a failure, both image jobs upload
+`artifacts/images/*.log*` (the smoke tests' serial logs and the write test's
+HTTP log) as `ci-logs` or `release-build-logs`.

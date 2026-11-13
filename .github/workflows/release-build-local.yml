@@ -141,3 +141,13 @@ jobs:
           path: artifacts/release/SHA256SUMS
           if-no-files-found: error
 
+      # The serial console logs of the smoke tests, their .1 and .2 boots and
+      # the write test's HTTP log. The name does not start with
+      # release-asset-, so the release never takes it.
+      - name: Upload the smoke test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-build-logs
+          path: artifacts/images/*.log*
+          if-no-files-found: ignore
