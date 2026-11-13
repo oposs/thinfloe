@@ -15,11 +15,16 @@ ok()  { echo "ok   - $1"; }
 bad() { echo "FAIL - $1"; fail=1; }
 
 if [[ -e overlay/home/tfuser/.thinlinc ]]; then
-    bad "overlay/home/tfuser/.thinlinc exists ($(ls overlay/home/tfuser/.thinlinc | tr '\n' ' '))"
+    bad "overlay/home/tfuser/.thinlinc exists ($(find overlay/home/tfuser/.thinlinc -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null))"
 else
     ok "the overlay carries no ThinLinc client settings"
 fi
 
+# grep -r only warns about a directory that is not there and then finds
+# nothing in it, which passed as "no site-specific content".
+for d in overlay configs containers brand; do
+    [[ -d $d ]] || bad "$d is missing, so it was not searched"
+done
 hits=$(grep -rIl -e aarweg -e 'thinlinc-[a-z]*-[0-9]*\.oetiker\.ch' \
     -e '192\.168\.0\.11' -e 46022 overlay configs containers brand)
 if [[ -z $hits ]]; then
