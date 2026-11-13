@@ -667,19 +667,7 @@ fn running_footer(ui: &mut Ui, u: &Upgrade, t: &Theme, w: f32) -> Option<Upgrade
         if u.cancelling {
             muted(ui, t, "Cancelling…");
         } else if u.cancel_asked {
-            if u.fresh_touched() {
-                warn(
-                    ui,
-                    t,
-                    "Stop writing? The stick will not start until it is written again.",
-                );
-            } else {
-                warn(
-                    ui,
-                    t,
-                    "Stop writing? Nothing has been written yet; the stick stays as it was.",
-                );
-            }
+            warn(ui, t, u.cancel_question());
             ui.horizontal(|ui| {
                 if ui
                     .add(Button::new("Keep writing").variant(ButtonVariant::Secondary))

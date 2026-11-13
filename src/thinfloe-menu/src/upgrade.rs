@@ -584,6 +584,20 @@ impl Upgrade {
         self.job.as_ref().is_some_and(|j| j.mode == Mode::Fresh)
     }
 
+    /// The question of the Cancel button: what stopping the write leaves.
+    pub fn cancel_question(&self) -> &'static str {
+        if !self.fresh_running() {
+            // An upgrade writes tl.new/ and never wipes; a cut copy is
+            // removed or left staged, and DEFAULT stays on a release that
+            // boots (docs/notes/esp-and-upgrade.md).
+            "Stop writing? The stick still starts its current release."
+        } else if self.fresh_touched() {
+            "Stop writing? The stick will not start until it is written again."
+        } else {
+            "Stop writing? Nothing has been written yet; the stick stays as it was."
+        }
+    }
+
     /// A fresh install has written to its stick (`@touched`): stopping it
     /// now leaves a wiped stick. Before that the stick is as it was.
     pub fn fresh_touched(&self) -> bool {
@@ -1316,6 +1330,32 @@ mod tests {
                 mode: Mode::Fresh,
                 stick: CancelledStick::MayStart
             })
+        );
+    }
+
+    #[test]
+    fn the_cancel_question_says_what_each_mode_leaves() {
+        let (mut u, t) = running_fresh(true);
+        u.message(step("write"), t);
+        assert_eq!(
+            u.cancel_question(),
+            "Stop writing? Nothing has been written yet; the stick stays as it was."
+        );
+        u.message(Msg::Touched, t);
+        assert_eq!(
+            u.cancel_question(),
+            "Stop writing? The stick will not start until it is written again."
+        );
+        // An upgrade writes tl.new/ and never wipes: the stick keeps its
+        // current release, whatever was copied.
+        let (mut u, t) = running_upgrade(Drive {
+            is_thinfloe: true,
+            ..stick("/dev/sdc", "sn-C:1:1")
+        });
+        u.message(step("write"), t);
+        assert_eq!(
+            u.cancel_question(),
+            "Stop writing? The stick still starts its current release."
         );
     }
 
