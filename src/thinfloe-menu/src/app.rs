@@ -497,6 +497,7 @@ fn panic_result(job: &Job) -> JobResult {
         Job::MonRevert => JobResult::MonReverted(Err(e)),
         Job::MonTakeOver { .. } => JobResult::MonTakenOver(Err(e)),
         Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
+        Job::DismissReport => JobResult::ReportDismissed(Err(e)),
     }
 }
 
@@ -604,6 +605,7 @@ fn job_result(
             JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &paths.kanshi, &heads))
         }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
+        Job::DismissReport => JobResult::ReportDismissed(jobs::dismiss_report(&paths.config)),
     }
 }
 
@@ -1661,6 +1663,34 @@ esac"#;
         assert!(text.starts_with(crate::generated::HEADER), "{text}");
         let got = run(Job::NetTakeOver { which: "wifi" });
         assert!(matches!(&got[..], [JobResult::NetTakenOver(_)]), "{got:?}");
+    }
+
+    #[test]
+    fn dismiss_report_clears_the_notice() {
+        let d = TestDir::new("app", "dismiss-report");
+        let mut p = paths(Vec::new());
+        p.config = crate::store::test_shared(&d.join("cfg"));
+        p.config
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Notice, |c| {
+                c.notice.migration = Some("3 files were moved".into());
+            })
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(d.join("cfg/config.toml"))
+                .unwrap()
+                .contains("migration")
+        );
+        let (tx, rx) = mpsc::channel();
+        run_job(Job::DismissReport, &p, &Arc::new(Feed::default()), false, move |r| {
+            let _ = tx.send(r);
+        });
+        let got: Vec<_> = rx.try_iter().collect();
+        assert_eq!(got, [JobResult::ReportDismissed(Ok(()))]);
+        let text = std::fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert!(!text.contains("migration"), "{text}");
+        assert_eq!(p.config.lock().unwrap().cfg.notice.migration, None);
     }
 
     #[test]

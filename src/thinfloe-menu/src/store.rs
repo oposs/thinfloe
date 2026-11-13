@@ -201,8 +201,14 @@ impl ConfigStore {
             .map_err(|e| format!("config.toml could not be written: {e}"))
     }
 
+    /// Whether the store refuses changes (opened read-only, or `config.toml`
+    /// could not be restored).
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
     pub fn refuse_read_only(&self) -> Result<(), String> {
-        if self.read_only {
+        if self.read_only() {
             Err("The settings are read-only.".into())
         } else {
             Ok(())
@@ -333,6 +339,13 @@ mod tests {
 
     fn open_session(d: &TestDir) -> Opened {
         open(cdir(d), inputs(), OpenMode::Session, NOW)
+    }
+
+    #[test]
+    fn read_only_says_whether_the_store_refuses_changes() {
+        let d = TestDir::new("store", "read-only-flag");
+        assert!(!open_session(&d).store.read_only());
+        assert!(open(cdir(&d), inputs(), OpenMode::ReadOnly, NOW).store.read_only());
     }
 
     fn one_net() -> ThinfloeConfig {

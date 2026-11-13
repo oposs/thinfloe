@@ -4,7 +4,7 @@
 //! menu's own. Nothing here writes a file: the store does, after the
 //! candidate rendered as generated/wifi.yaml and generated/ethernet.yaml
 //! passed `netplan generate`. The parsers also read the old
-//! ~/wifi.yaml and ~/ethernet.yaml for the converter.
+//! ~/wifi.yaml and ~/ethernet.yaml, as old files, for the converter.
 
 use crate::config::NetworkCfg;
 use crate::generated::{self, Inputs};
@@ -24,11 +24,11 @@ use yaml_rust2::{Yaml, YamlEmitter};
 /// First line of the text `render_wifi` and `render_wired` give (and of the
 /// files the 3.x menu wrote into the home): the mark of text in the menu's
 /// own form. The generated files carry `generated::HEADER` instead.
-pub const MENU_HEADER: &str = "# Written by the ThinFloe menu. Edits here are replaced.";
+pub use crate::migrate::LEGACY_MENU_HEADER as MENU_HEADER;
 
 pub const WIFI_FILE: &str = "wifi.yaml";
 pub const WIRED_FILE: &str = "ethernet.yaml";
-/// Text of the shipped ~/wifi.yaml template; the menu never writes it.
+/// Text of the shipped template of the old ~/wifi.yaml; the menu never writes it.
 pub const TEMPLATE_MARKER: &str = "device name of your wifi card";
 /// A readable copy of the shipped /etc/netplan/ethernet.yaml (that one is
 /// mode 600). Its `eth` definition is the base of a fixed address.
@@ -66,7 +66,7 @@ pub enum FileState {
 }
 
 /// Who wrote `text` (`None`: no file). `template_rule` lets the template
-/// count as `Template`; only ~/wifi.yaml has one.
+/// count as `Template`; only the old ~/wifi.yaml has one.
 pub fn state(text: Option<&str>, template_rule: bool) -> FileState {
     match text {
         None => FileState::Missing,
@@ -86,7 +86,7 @@ pub struct Net {
 
 /// The wired addressing. The DNS servers are the machine's one DNS
 /// setting: empty means those DHCP gives (DHCP) or none (fixed). The menu
-/// writes them into ~/wifi.yaml too, see `save`.
+/// writes them into generated/wifi.yaml too, see `save`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wired {
     /// `dns` not empty: these replace the servers DHCP gives.
@@ -427,7 +427,7 @@ pub fn parse_wifi(text: Option<&str>) -> WifiFile {
     f
 }
 
-/// The menu's ~/wifi.yaml: one definition for `device` with the networks
+/// The text of generated/wifi.yaml: one definition for `device` with the networks
 /// that pass the input checks (`save` refuses the others before it gets
 /// here). No device or no network: a file with no WiFi at all, which
 /// netplan accepts. `dns` not empty: these servers replace those DHCP
@@ -694,7 +694,7 @@ fn set_dhcp_dns(def: &mut Hash, dns: &[Ipv4Addr]) {
     set(def, "nameservers", nameservers_yaml(dns));
 }
 
-/// The menu's ~/ethernet.yaml: `default` (the shipped file) with only the
+/// The text of generated/ethernet.yaml: `default` (the shipped file) with only the
 /// addressing and the DNS servers of `eth` changed. `None`: DHCP with the
 /// servers DHCP gives, which is the default itself.
 pub fn render_wired(default: &str, wired: &Wired) -> Result<Option<String>, String> {
@@ -2134,7 +2134,7 @@ exit 0
         assert!(!parse_wired(Some(&t)).manageable, "{t}");
     }
 
-    /// The form takes up to three DNS servers, so a ~/ethernet.yaml with
+    /// The form takes up to three DNS servers, so a wired setting with
     /// more is not the menu's to keep: a hand file is not taken over, and a
     /// menu file counts as by hand for WiFi.
     #[test]

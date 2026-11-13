@@ -579,7 +579,7 @@ mod tests {
         for name in ["a}b", "a\"b"] {
             let text = format!(
                 "{}\n\nprofile {{\n\toutput {name} enable mode 1920x1080 position 0,0 transform normal scale 1\n}}\n",
-                crate::owned::HEADER
+                crate::migrate::LEGACY_MENU_HEADER
             );
             let c = monitors_from_kanshi(&text);
             assert_eq!(c.value.kept.as_deref(), Some(text.as_str()), "{name}");
@@ -605,7 +605,11 @@ mod tests {
             }],
             menu_output: None,
         }];
-        let text = format!("{}\n\n{}", crate::owned::HEADER, crate::kanshi::render(&p));
+        let text = format!(
+            "{}\n\n{}",
+            crate::migrate::LEGACY_MENU_HEADER,
+            crate::kanshi::render(&p)
+        );
         let c = monitors_from_kanshi(&text);
         assert_eq!(c.value, MonitorsCfg::from_profiles(&p));
         assert!(c.notes.is_empty());

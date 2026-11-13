@@ -936,6 +936,9 @@ fn show_settings(
         });
     });
     s_ui.add_space(GAP);
+    if let Some(e) = config_notes_band(&mut s_ui, menu, width) {
+        event = Some(e);
+    }
     let labels = SettingsTab::ALL.map(SettingsTab::label);
     let mut idx = SettingsTab::ALL
         .iter()
@@ -945,6 +948,11 @@ fn show_settings(
         event = Some(SettingsEvent::Tab(SettingsTab::ALL[idx]));
     }
     s_ui.add_space(GAP);
+    // A failed migration leaves the old settings in place: the tabs that
+    // would change them show them and take no click.
+    if menu.config_notes.legacy.is_some() && menu.settings_tab != SettingsTab::Packages {
+        s_ui.disable();
+    }
     let body = match menu.settings_tab {
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
         SettingsTab::Screen => screen_tab(&mut s_ui, menu, width, now),
@@ -956,6 +964,63 @@ fn show_settings(
         }
     };
     event.or(body)
+}
+
+/// Padding above and below the notes band.
+const NOTES_PAD: i8 = 12;
+
+/// What the config directory has to say, as one muted band under the title:
+/// the store's problems, the `environment` lines the menu overrides, the
+/// migration report (with Dismiss) and the legacy note. Nothing, no band.
+fn config_notes_band(ui: &mut Ui, menu: &Menu, width: f32) -> Option<SettingsEvent> {
+    let notes = &menu.config_notes;
+    if notes.broken.is_empty() && notes.dropped_env.is_empty() && notes.report.is_none() && notes.legacy.is_none() {
+        return None;
+    }
+    let t = Theme::current(ui.ctx());
+    let mut event = None;
+    egui::Frame::new()
+        .fill(t.palette().card)
+        .inner_margin(egui::Margin {
+            left: ROW_LEFT,
+            right: ROW_RIGHT,
+            top: NOTES_PAD,
+            bottom: NOTES_PAD,
+        })
+        .show(ui, |ui| {
+            // The frame's margins are part of the panel's width.
+            ui.set_width(width - ROW_MARGIN_X);
+            let muted = |text: &str| egui::RichText::new(text).color(t.palette().muted_foreground);
+            for line in &notes.broken {
+                ui.label(muted(line));
+            }
+            if !notes.dropped_env.is_empty() {
+                ui.label(muted(
+                    "These lines in ~/.config/thinfloe/environment are ignored because the menu sets them:",
+                ));
+                for line in &notes.dropped_env {
+                    ui.label(muted(line));
+                }
+            }
+            if let Some(report) = &notes.report {
+                ui.horizontal(|ui| {
+                    ui.label(muted(report));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(Button::new("Dismiss").variant(ButtonVariant::Secondary))
+                            .clicked()
+                        {
+                            event = Some(SettingsEvent::DismissReport);
+                        }
+                    });
+                });
+            }
+            if let Some(legacy) = &notes.legacy {
+                ui.label(egui::RichText::new(legacy).color(t.role(role::WARN)));
+            }
+        });
+    ui.add_space(GAP);
+    event
 }
 
 /// The Packages tab: when the add-ons were last checked, and one row each.
@@ -3189,6 +3254,58 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_notes_are_one_band_under_the_title() {
+        let mut menu = open_settings();
+        menu.config_notes = crate::menu::ConfigNotes {
+            broken: vec!["config.toml could not be read (bad); defaults are shown.".into()],
+            dropped_env: vec!["XKB_DEFAULT_LAYOUT=de".into()],
+            report: Some("Moved 3 files.".into()),
+            legacy: Some("Your settings could not be moved.".into()),
+        };
+        let (w, h) = (1920.0, 1080.0);
+        let shapes = settings_shapes(&menu, w, h);
+        let texts = text_rects(&shapes);
+        let find = |what: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t == what)
+                .unwrap_or_else(|| panic!("{what} not drawn in {texts:?}"))
+                .1
+        };
+        let order = [
+            find("Settings"),
+            find("config.toml could not be read (bad); defaults are shown."),
+            find("These lines in ~/.config/thinfloe/environment are ignored because the menu sets them:"),
+            find("XKB_DEFAULT_LAYOUT=de"),
+            find("Moved 3 files."),
+            find("Dismiss"),
+            find("Your settings could not be moved."),
+            find("Packages"),
+        ];
+        // Title, broken, dropped heading, the line, the report, the legacy
+        // note, then the tabs: top to bottom (Dismiss sits beside the report).
+        for pair in order.windows(2) {
+            if pair[1] == order[5] {
+                continue;
+            }
+            assert!(pair[0].min.y <= pair[1].min.y + 1.0, "{order:?}");
+        }
+        assert!(order[6].min.y >= order[4].min.y, "legacy after the report");
+        assert!(order[7].min.y > order[6].max.y - 1.0, "the notes are before the tabs");
+        // All inside the panel, which is as wide as the tile group.
+        let panel_left = (w - crate::density::GROUP_W) / 2.0;
+        for r in &order {
+            assert!(
+                r.min.x >= panel_left - 1.0 && r.max.x <= panel_left + crate::density::GROUP_W + 1.0,
+                "{r:?}"
+            );
+        }
+        // No note, no band.
+        let plain = text_rects(&settings_shapes(&open_settings(), w, h));
+        assert!(!plain.iter().any(|(t, _)| t == "Dismiss"));
+    }
+
+    #[test]
     fn settings_draws_nothing_rounded() {
         // (name, menu, screen, texts that must be drawn): the Network
         // cases at 1080p, where every band is on screen, and each case
@@ -3919,7 +4036,7 @@ mod tests {
         net
     }
 
-    /// Menu-owned files: two saved networks (one secured, one open and
+    /// Menu-made settings: two saved networks (one secured, one open and
     /// hidden) and a fixed wired address.
     fn two_networks() -> crate::network::NetTab {
         use crate::netfiles::FileState;
@@ -4173,7 +4290,7 @@ mod tests {
         menu.network.event(NetEvent::DnsText("8.8.8.8".into()), false);
         assert!(menu.network.dirty());
         assert!(has(&net_texts(&menu), "8.8.8.8"));
-        // A hand ~/ethernet.yaml: its servers, greyed, and why.
+        // A kept (hand-written) wired setting: its servers, greyed, and why.
         let hand = Wired::Dhcp {
             dns: vec!["8.8.4.4".parse().unwrap()],
         };
@@ -4245,7 +4362,7 @@ mod tests {
     }
 
     /// On 1080p the bands of a full Network tab outgrow the panel: a
-    /// hand ~/wifi.yaml beside a fixed address, both take-over buttons and
+    /// kept hand-written WiFi setting beside a fixed address, both take-over buttons and
     /// the DNS section. Every control scrolls into reach above the pinned
     /// Apply, and a click there lands.
     #[test]
@@ -5770,7 +5887,7 @@ mod tests {
         };
         shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
-        // The Network tab: menu-owned files, two networks, a fixed address.
+        // The Network tab: menu-made settings, two networks, a fixed address.
         let mut net = two_networks();
         net.status_done(Ok(vec![crate::nettab::Iface {
             name: "enp1s0".into(),

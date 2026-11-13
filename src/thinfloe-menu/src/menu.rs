@@ -180,6 +180,8 @@ pub enum Job {
     /// Write the status layout file with this text; `None` removes it, and
     /// the default list counts again.
     StatusSave(Option<String>),
+    /// Remove the migration report from `[notice]`.
+    DismissReport,
 }
 
 /// What fills the space above the log.
@@ -217,6 +219,24 @@ pub enum Effect {
         idle: u32,
     },
 }
+
+/// What the Settings screen tells about the config directory, in the order
+/// it is shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigNotes {
+    /// Problems the settings store reported when it opened (a broken or
+    /// missing `config.toml`).
+    pub broken: Vec<String>,
+    /// Active lines of the user's `environment` that the menu overrides.
+    pub dropped_env: Vec<String>,
+    /// The migration report, until it is dismissed.
+    pub report: Option<String>,
+    /// The migration failed this boot: the settings are only read.
+    pub legacy: Option<String>,
+}
+
+/// `ConfigNotes::legacy` when the migration failed this boot.
+pub const LEGACY_NOTE: &str = "Your settings could not be moved to ~/.config/thinfloe; they stay as they were until the next start. See the session log.";
 
 pub struct Menu {
     pub tiles: Vec<Tile>,
@@ -292,6 +312,8 @@ pub struct Menu {
     pub network: NetTab,
     /// The monitors of the Screen tab, and the Apply it runs.
     pub monitors: MonTab,
+    /// What the config directory has to say, shown on the Settings screen.
+    pub config_notes: ConfigNotes,
 }
 
 impl Menu {
@@ -346,6 +368,7 @@ impl Menu {
             // Until `set_usb_boot` says otherwise: netboot offers less.
             network: NetTab::new(true),
             monitors: MonTab::default(),
+            config_notes: ConfigNotes::default(),
         }
     }
 
@@ -719,6 +742,20 @@ impl Menu {
         if self.logout.is_some() || self.screen != Screen::Settings {
             return None;
         }
+        // The migration failed this boot: Network, Screen and Status show the
+        // old state and take no change (their bodies are disabled, too).
+        if self.config_notes.legacy.is_some()
+            && matches!(
+                event,
+                SettingsEvent::IdleTimeout(_)
+                    | SettingsEvent::Network(_)
+                    | SettingsEvent::Monitors(_)
+                    | SettingsEvent::Status(_)
+                    | SettingsEvent::DismissReport
+            )
+        {
+            return None;
+        }
         let (verb, id) = match event {
             SettingsEvent::Back => {
                 // Plan call 5: what was not applied goes with the screen.
@@ -742,6 +779,13 @@ impl Menu {
             }
             SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
             SettingsEvent::Status(e) => return self.status_event(e),
+            SettingsEvent::DismissReport => {
+                return self
+                    .config_notes
+                    .report
+                    .is_some()
+                    .then_some(Effect::Start(Job::DismissReport));
+            }
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
             // offers, and the next boot would install that unattended.
@@ -1226,6 +1270,15 @@ impl Menu {
                 }
                 self.monitors.reverted(r).map(Menu::mon_request)
             }
+            JobResult::ReportDismissed(r) => {
+                match r {
+                    Ok(()) => self.config_notes.report = None,
+                    Err(e) => self
+                        .log
+                        .note(Kind::Warn, format!("The migration report could not be dismissed: {e}")),
+                }
+                None
+            }
             JobResult::StatusSaved(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1246,7 +1299,7 @@ impl Menu {
                 match &r {
                     Ok(()) => self
                         .log
-                        .note(Kind::Event, "~/.config/kanshi/config is now managed by the menu."),
+                        .note(Kind::Event, "The monitor arrangement is now managed by the menu."),
                     Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
                 }
                 if !self.monitors.taken_over(r) {
@@ -3971,5 +4024,68 @@ mod tests {
         m.finished(JobResult::StatusSaved(Ok(())), now);
         m.set_status_layout(crate::status::layout::parse(b"-clock 1x1\n", &crate::status::offered));
         assert!(!m.status.layout.choices[0].shown);
+    }
+
+    fn legacy_menu() -> Menu {
+        let (_d, mut m) = settings_menu("legacy-settings");
+        m.config_notes.legacy = Some("legacy".into());
+        m
+    }
+
+    #[test]
+    fn a_dismissed_report_is_cleared() {
+        let (_d, mut m) = settings_menu("dismiss-report");
+        assert_eq!(m.settings(SettingsEvent::DismissReport), None);
+        m.config_notes.report = Some("3 files were moved".into());
+        assert_eq!(
+            m.settings(SettingsEvent::DismissReport),
+            Some(Effect::Start(Job::DismissReport))
+        );
+        // The band stays until the job reports.
+        assert!(m.config_notes.report.is_some());
+        assert_eq!(m.finished(JobResult::ReportDismissed(Ok(())), Instant::now()), None);
+        assert_eq!(m.config_notes.report, None);
+    }
+
+    #[test]
+    fn a_report_that_could_not_be_dismissed_stays_and_is_logged() {
+        let (_d, mut m) = settings_menu("dismiss-report-fails");
+        m.config_notes.report = Some("3 files were moved".into());
+        assert_eq!(
+            m.finished(
+                JobResult::ReportDismissed(Err("The settings are read-only.".into())),
+                Instant::now()
+            ),
+            None
+        );
+        assert!(m.config_notes.report.is_some());
+        assert!(
+            m.log
+                .lines()
+                .any(|l| l.kind == Kind::Warn && crate::log::plain(&l.runs).contains("The settings are read-only."))
+        );
+    }
+
+    #[test]
+    fn the_legacy_layout_ignores_setting_changes() {
+        use crate::monitors::MonEvent;
+        use crate::network::NetEvent;
+        let mut m = legacy_menu();
+        m.settings_tab = SettingsTab::Screen;
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(60)), None);
+        assert_eq!(m.settings(SettingsEvent::Status(StatusEvent::Reset)), None);
+        assert_eq!(m.settings(SettingsEvent::Monitors(MonEvent::Apply)), None);
+        assert_eq!(m.settings(SettingsEvent::Network(NetEvent::WiredMode(true))), None);
+        assert_eq!(m.settings(SettingsEvent::DismissReport), None);
+        // Navigation and the packages still work.
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Packages)), None);
+        assert_eq!(m.settings_tab, SettingsTab::Packages);
+        assert!(m.settings(SettingsEvent::CheckNow).is_some());
+        // The same event on a menu without the note is taken.
+        let (_d, mut ok) = settings_menu("not-legacy");
+        assert_eq!(
+            ok.settings(SettingsEvent::IdleTimeout(60)),
+            Some(Effect::WriteScreen { idle: 60 })
+        );
     }
 }

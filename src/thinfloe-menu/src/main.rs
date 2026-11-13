@@ -23,13 +23,13 @@ use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config, ScreenFile};
 use thinfloe_menu::battery;
-use thinfloe_menu::config::ConfigDir;
+use thinfloe_menu::config::{self, ConfigDir};
 use thinfloe_menu::generated::Inputs;
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::log::Kind;
-use thinfloe_menu::menu::Menu;
+use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
 use thinfloe_menu::store::{self, OpenMode};
 use thinfloe_menu::{bounded, migrate, release, screentab, settings, status, tiles, ui, windows};
 
@@ -143,6 +143,30 @@ fn open_settings(
     (store::open(dir, inputs, open_mode(requested, layout), now), layout)
 }
 
+/// What the Settings screen says about the config directory. On a legacy
+/// home the store's own notes (it reads a `config.toml` that is not the
+/// truth there) and the environment lines give way to the one legacy note.
+fn collect_notes(
+    layout: migrate::HomeLayout,
+    store_notes: Vec<String>,
+    user_env: Option<&str>,
+    managed: &[String],
+    report: Option<String>,
+) -> ConfigNotes {
+    if layout == migrate::HomeLayout::Legacy {
+        return ConfigNotes {
+            legacy: Some(LEGACY_NOTE.to_string()),
+            ..ConfigNotes::default()
+        };
+    }
+    ConfigNotes {
+        broken: store_notes,
+        dropped_env: user_env.map_or_else(Vec::new, |t| config::dropped_env_lines(t, managed)),
+        report,
+        legacy: None,
+    }
+}
+
 /// `marker` remembers the add-ons offered a retry; `--check` passes one in
 /// memory, so that listing the tiles asks nothing away. `mode` is how the
 /// settings store is opened: the one open of the whole run. A home still in
@@ -152,7 +176,22 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     let shipped = env_path("TF_MENU_SHIPPED_DIR", "/etc/thinfloe/menu");
     let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
     let session = mode == OpenMode::Session;
-    let (opened, layout) = open_settings(&state_dir, ConfigDir::from_env(), config_inputs(), mode, epoch_now());
+    let dir = ConfigDir::from_env();
+    let (opened, layout) = open_settings(&state_dir, dir.clone(), config_inputs(), mode, epoch_now());
+    let config_notes = collect_notes(
+        layout,
+        opened.notes,
+        bounded::read_text(&dir.environment(), ENV_MAX_BYTES).as_deref(),
+        &config::read_managed_keys(&env_path("TF_MANAGED_KEYS", "/etc/thinfloe/menu-managed-keys")),
+        opened.store.cfg.notice.migration.clone(),
+    );
+    // What `--check` prints and the session log keeps.
+    let notes: Vec<String> = config_notes
+        .broken
+        .iter()
+        .chain(&config_notes.legacy)
+        .cloned()
+        .collect();
     let (screen_tab, status_layout) = (
         screentab::from_config(&opened.store.cfg.screen),
         status::layout_from(&opened.store.cfg.status),
@@ -173,7 +212,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     tiles::mark_missing_programs(&mut grid.tiles, &path);
     let mut menu = Menu::new(grid, jobs::restore_failed(&paths.state_dir));
     if session {
-        for note in &opened.notes {
+        for note in &notes {
             menu.log.note(Kind::Warn, note.clone());
         }
     }
@@ -190,6 +229,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
+    menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
     menu.set_status_layout(status_layout);
     Built {
@@ -197,7 +237,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         paths,
         roots: IconRoots::system(),
         kanshi_changed: opened.kanshi_changed,
-        notes: opened.notes,
+        notes,
     }
 }
 
@@ -356,6 +396,9 @@ fn migrate_home() -> ExitCode {
 
 /// The shipped wired default is tiny.
 const MIGRATE_MAX_BYTES: u64 = 64 * 1024;
+/// The user's `environment` is a few lines; this bounds the read for the
+/// notes about ignored ones.
+const ENV_MAX_BYTES: u64 = 64 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -488,6 +531,41 @@ mod tests {
         assert_eq!(open_mode(OpenMode::ReadOnly, Legacy), OpenMode::ReadOnly);
         assert_eq!(open_mode(OpenMode::Session, New), OpenMode::Session);
         assert_eq!(open_mode(OpenMode::ReadOnly, New), OpenMode::ReadOnly);
+    }
+
+    #[test]
+    fn a_legacy_home_shows_the_legacy_note_instead_of_the_store_notes() {
+        let notes = collect_notes(
+            migrate::HomeLayout::Legacy,
+            vec!["config.toml is missing; defaults are shown.".into()],
+            Some("XKB_DEFAULT_LAYOUT=de\n"),
+            &["XKB_DEFAULT_LAYOUT".to_string()],
+            Some("ignored".into()),
+        );
+        assert_eq!(
+            notes,
+            ConfigNotes {
+                legacy: Some(LEGACY_NOTE.to_string()),
+                ..ConfigNotes::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_home_shows_the_store_notes_the_ignored_lines_and_the_report() {
+        let notes = collect_notes(
+            migrate::HomeLayout::New,
+            vec!["config.toml could not be read (x).".into()],
+            Some("# c\nXKB_DEFAULT_LAYOUT=de\nXCURSOR_SIZE=32\n"),
+            &["XKB_DEFAULT_LAYOUT".to_string()],
+            Some("Moved 3 files.".into()),
+        );
+        assert_eq!(notes.broken, ["config.toml could not be read (x)."]);
+        assert_eq!(notes.dropped_env, ["XKB_DEFAULT_LAYOUT=de"]);
+        assert_eq!(notes.report.as_deref(), Some("Moved 3 files."));
+        assert_eq!(notes.legacy, None);
+        let none = collect_notes(migrate::HomeLayout::New, vec![], None, &[], None);
+        assert_eq!(none, ConfigNotes::default());
     }
 
     fn tile(addon: bool, problem: Option<&str>) -> tiles::Tile {

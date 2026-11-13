@@ -580,7 +580,7 @@ mod tests {
             ],
             menu_output: Some("HEADLESS-1".into()),
         };
-        let text = format!("{}\n\n{}", crate::owned::HEADER, render(&[p]));
+        let text = format!("{}\n\n{}", crate::migrate::LEGACY_MENU_HEADER, render(&[p]));
         assert_eq!(text, include_str!("../../../test/runtime/kanshi-two.conf"));
     }
 
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn parse_round_trips_render() {
-        let text = format!("{}\n\n{}", crate::owned::HEADER, render(&sample()));
+        let text = format!("{}\n\n{}", crate::migrate::LEGACY_MENU_HEADER, render(&sample()));
         assert_eq!(parse(&text).unwrap(), sample());
     }
 
@@ -726,7 +726,7 @@ mod tests {
         assert!(parse("profile { output * enable }\n").is_err());
         let bad = format!(
             "{}\n\nprofile {{\n\toutput A enable mode 1x1 position 0,0 transform normal scale 2\n}}\n",
-            crate::owned::HEADER
+            crate::migrate::LEGACY_MENU_HEADER
         );
         assert!(parse(&bad).is_err());
     }

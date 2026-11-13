@@ -31,7 +31,6 @@ pub mod nettab;
 pub mod network;
 pub mod network_ui;
 pub mod outputs;
-pub mod owned;
 pub mod raster;
 pub mod release;
 pub mod screentab;

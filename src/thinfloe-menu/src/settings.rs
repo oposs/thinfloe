@@ -31,6 +31,8 @@ pub enum SettingsEvent {
     Monitors(crate::monitors::MonEvent),
     /// Something on the Status tab.
     Status(crate::statustab::StatusEvent),
+    /// *Dismiss* on the migration report.
+    DismissReport,
 }
 
 /// The tabs of the Settings screen.

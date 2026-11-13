@@ -60,7 +60,7 @@ const COPIED: [(&str, &str); 4] = [
     (".save-home-exclude", "save-home-exclude"),
 ];
 
-/// Today's cap for the menu's files in the home (`owned`).
+/// The cap for each of the menu's old files in the home.
 const MAX_BYTES: u64 = 64 * 1024;
 const LAYOUT_FILE: &str = "home-layout";
 const ATTIC: &str = "cfg-attic";

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### New
+- The Settings screen tells what happened to the settings files: a note when lines in `~/.config/thinfloe/environment` are ignored because the menu sets them, and the report of the move of the settings to `~/.config/thinfloe` with a "Dismiss" button. When that move failed at boot, the screen says the settings stay as they were until the next start, and the Network, Screen and Status tabs show them without taking changes.
 
 ### Changed
 

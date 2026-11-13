@@ -60,6 +60,16 @@ pub fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
+/// `path` as `~/rest` when it lies under $HOME, else as it is.
+pub fn home_relative(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(rest) = path.strip_prefix(home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

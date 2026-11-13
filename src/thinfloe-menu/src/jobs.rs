@@ -164,6 +164,7 @@ pub enum JobResult {
     MonTakenOver(Result<(), String>),
     /// The status layout file was written or removed.
     StatusSaved(Result<(), String>),
+    ReportDismissed(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,6 +858,14 @@ pub fn status_save(store: &crate::store::Shared, text: Option<&str>) -> Result<(
         .map(|_| ())
 }
 
+/// Remove the migration report from the `[notice]` table.
+pub fn dismiss_report(store: &crate::store::Shared) -> Result<(), String> {
+    let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store
+        .update(crate::generated::Table::Notice, |c| c.notice.migration = None)
+        .map(|_| ())
+}
+
 fn remove_if_there(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
@@ -968,9 +977,12 @@ pub fn mon_apply(
     profiles: &[crate::kanshi::Profile],
     prev_body: Option<&str>,
 ) -> Result<(), String> {
-    let rel = crate::owned::home_relative(&k.config);
+    let rel = crate::atomic::home_relative(&k.config);
     let mut candidate = {
         let s = lock(store);
+        // Before anything is written: kanshi.prev, the marker and generated/
+        // are all the Apply's own doing.
+        s.refuse_read_only()?;
         if s.cfg.monitors.kept.is_some() {
             return Err("The monitor arrangement is a kanshi file written by hand; nothing was changed.".to_string());
         }
@@ -980,7 +992,7 @@ pub fn mon_apply(
     let old = crate::atomic::read(&k.config, crate::generated::MAX_BYTES)
         .map_err(|e| format!("Could not read {rel}: {e}"))?;
     let marker = &k.marker;
-    let marker_rel = crate::owned::home_relative(marker);
+    let marker_rel = crate::atomic::home_relative(marker);
     // An earlier Apply whose undo failed: its kanshi.prev is the real old
     // layout and must not be replaced. The next session undoes it. A marker
     // that cannot be checked may be one, too.
@@ -1004,7 +1016,7 @@ pub fn mon_apply(
     kept.map_err(|e| {
         format!(
             "Could not keep the old layout in {}: {e}",
-            crate::owned::home_relative(&prev)
+            crate::atomic::home_relative(&prev)
         )
     })?;
     if let Err(e) = write_new(marker, b"prev\n") {
@@ -1031,7 +1043,7 @@ fn restore_kanshi(k: &Kanshi, old: &Option<Vec<u8>>) -> Result<(), String> {
         Some(b) => crate::atomic::write(&k.config, b, crate::generated::mode_of("kanshi")),
         None => crate::atomic::remove(&k.config),
     }
-    .map_err(|e| format!("{} could not be restored: {e}", crate::owned::home_relative(&k.config)))
+    .map_err(|e| format!("{} could not be restored: {e}", crate::atomic::home_relative(&k.config)))
 }
 
 /// Put `old` back after a failed Apply: through `unstage` when the store
@@ -1088,7 +1100,7 @@ fn remove_marker(k: &Kanshi) -> Result<(), String> {
     remove_if_there(m).map_err(|e| {
         format!(
             "The undo marker {} could not be removed: {e}",
-            crate::owned::home_relative(m)
+            crate::atomic::home_relative(m)
         )
     })
 }
@@ -1102,7 +1114,7 @@ fn remove_marker(k: &Kanshi) -> Result<(), String> {
 /// layout that was on screen until the next start regenerates it.
 pub fn mon_revert(k: &Kanshi) -> Result<(), String> {
     let prev = k.prev();
-    let prev_rel = crate::owned::home_relative(&prev);
+    let prev_rel = crate::atomic::home_relative(&prev);
     let old = crate::atomic::read(&prev, crate::generated::MAX_BYTES)
         .map_err(|e| format!("Could not read {prev_rel}: {e}"))?
         .ok_or_else(|| format!("{prev_rel} is missing"))?;
@@ -2296,6 +2308,59 @@ mod tests {
         let e = status_save(&store, Some("clock 1x1\n")).unwrap_err();
         assert_eq!(e, "The settings are read-only.");
         assert!(!d.join("cfg/config.toml").exists());
+    }
+
+    #[test]
+    fn mon_apply_on_a_read_only_store_changes_nothing() {
+        use crate::heads::Rotation::Normal;
+        let d = dir("mon-apply-ro");
+        let (_, k) = mon_home(&d, &recording(&d));
+        let root = d.join("home/.config/thinfloe");
+        let ro = crate::store::open(
+            crate::config::ConfigDir { root: root.clone() },
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let store: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        // The directory does not exist and must not appear.
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            mon_apply(&store, &k, &[layout(Normal)], Some(&onscreen_body(Normal))),
+            Err("The settings are read-only.".to_string())
+        );
+        assert!(!root.exists(), "no config dir was created");
+        assert!(!k.prev().exists() && !k.marker.exists());
+        assert!(!d.join("started").exists(), "kanshi was not started");
+    }
+
+    #[test]
+    fn dismiss_report_clears_the_migration_notice() {
+        let d = dir("dismiss-report");
+        let store = crate::store::test_shared(&d.join("cfg"));
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Notice, |c| {
+                c.notice.migration = Some("3 files were moved".into());
+            })
+            .unwrap();
+        dismiss_report(&store).unwrap();
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().notice.migration, None);
+        assert!(!text.contains("migration"), "{text}");
+        // Read-only: the error, no file.
+        let ro = crate::store::open(
+            crate::config::ConfigDir { root: d.join("ro") },
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let ro: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        assert_eq!(dismiss_report(&ro), Err("The settings are read-only.".to_string()));
+        assert!(!d.join("ro").exists());
     }
 
     #[test]
