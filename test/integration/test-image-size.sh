@@ -2,7 +2,8 @@
 # Image size report and budget check.
 #
 # Prints the size of vmlinuz, initrd.img and ramroot.sqsh (MB = 10^6 bytes),
-# the uncompressed size of the trees the size reduction work cuts, and the
+# the uncompressed size of the trees the size reduction work cuts (regular
+# files only: links and directories count nothing), and the
 # three budgets. With a baseline directory it prints the delta of every
 # number against the same numbers computed from the baseline files.
 #
@@ -55,9 +56,13 @@ SQ_PATHS=(
 measure() {
     local dir="$1" out="$2" f p
     : >"$out"
+    local sum=0 size
     for f in vmlinuz initrd.img ramroot.sqsh; do
-        printf '%s\t%s\n' "$f" "$(stat -c %s "$dir/$f")" >>"$out"
+        size=$(stat -c %s "$dir/$f")
+        printf '%s\t%s\n' "$f" "$size" >>"$out"
+        sum=$((sum + size))
     done
+    printf 'sum\t%s\n' "$sum" >>"$out"
     unsquashfs -lls "$dir/ramroot.sqsh" 2>/dev/null >"$WORK/sq.lst" \
         || { echo "FAIL: cannot list $dir/ramroot.sqsh" >&2; exit 1; }
     for p in "${SQ_PATHS[@]}"; do
@@ -74,12 +79,14 @@ measure() {
     done
     lsinitramfs -l "$dir/initrd.img" 2>/dev/null >"$WORK/ird.lst" \
         || { echo "FAIL: cannot list $dir/initrd.img" >&2; exit 1; }
+    # lsinitramfs -l: mode, links, owner, group, size, then the date in three
+    # fields (month, day, time or year), then the path.
     awk '
         substr($1,1,1) == "-" {
             path = $0
-            sub(/^([^ ]+ +){5}/, "", path)
+            sub(/^([^ ]+ +){8}/, "", path)
             if (path ~ /\.ko(\.|$)/) ko += $5
-            if (path ~ /kernel\/x86\/microcode\//) uc += $5
+            if (path ~ /^kernel\/x86\/microcode\//) uc += $5
         }
         END {
             printf "initrd *.ko*\t%d\n", ko
@@ -108,18 +115,13 @@ report() {
 VMLINUZ=$(get "$WORK/now.tsv" vmlinuz)
 INITRD=$(get "$WORK/now.tsv" initrd.img)
 SQSH=$(get "$WORK/now.tsv" ramroot.sqsh)
-SUM=$((VMLINUZ + INITRD + SQSH))
+SUM=$(get "$WORK/now.tsv" sum)
 
 echo "== Image files =="
 report vmlinuz
 report initrd.img
 report ramroot.sqsh
-if [[ -n "$BASE" ]]; then
-    BSUM=$(( $(get "$WORK/base.tsv" vmlinuz) + $(get "$WORK/base.tsv" initrd.img) + $(get "$WORK/base.tsv" ramroot.sqsh) ))
-    printf '%-40s %10s MB  (delta %s MB)\n' sum "$(mb "$SUM")" "$(dmb $((SUM - BSUM)))"
-else
-    printf '%-40s %10s MB\n' sum "$(mb "$SUM")"
-fi
+report sum
 echo ""
 echo "== Uncompressed contents =="
 for p in "${SQ_PATHS[@]}"; do report "squashfs $p"; done

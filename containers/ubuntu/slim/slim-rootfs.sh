@@ -144,15 +144,23 @@ sys.stderr.write("%d %d %d %d\n" % (len(seed), closure_size, len(media), len(gpu
 PYEOF
     ) || { rm -f "$list"; die "cannot compute the media module set: $out"; }
     # out holds "<seed> <closure> <media> <gpu>"
-    read -r _ _ n m <<<"$out"
-    if [[ -z ${n:-} || $n -lt 100 ]]; then
+    local seed closure
+    read -r seed closure n m <<<"$out"
+    # 7.0.0-43 removes 259; a large shrink means the seed directories moved.
+    if [[ -z ${n:-} || $n -lt 200 ]]; then
         rm -f "$list"
-        die "only ${n:-0} media modules to remove, expected more than 100"
+        die "only ${n:-0} media modules to remove, expected at least 200 (259 in 7.0.0-43)"
     fi
-    (cd "/usr/lib/modules/$KVER" && xargs -d '\n' -r rm -f -- <"$list") \
-        || { rm -f "$list"; die "removing media modules failed"; }
+    # rm without -f: a listed path that is missing fails the build.
+    (cd "/usr/lib/modules/$KVER" && xargs -d '\n' -r rm -- <"$list") \
+        || { rm -f "$list"; die "removing media modules failed (a listed module is missing?)"; }
+    local left
+    left=$(cd "/usr/lib/modules/$KVER" && while IFS= read -r f; do if [[ -e $f ]]; then echo "$f"; fi; done <"$list")
+    [[ -z $left ]] || { rm -f "$list"; die "media modules still there after rm: $left"; }
+    [[ $(wc -l <"$list") -eq $((n + m)) ]] \
+        || { rm -f "$list"; die "removed $(wc -l <"$list") modules, expected $((n + m))"; }
     rm -f "$list"
-    echo "slim-rootfs: removed $n media modules, $m radeon modules" >&2
+    echo "slim-rootfs: media seed $seed, closure $closure; removed $n media modules, $m radeon modules" >&2
 }
 
 # The squashfs compresses better as a whole than the zstd files inside it.
@@ -198,7 +206,9 @@ remove_links_to() {
     while IFS= read -r link; do
         [[ -n $link ]] || continue
         target=$(readlink -m -- "$link")
-        grep -qxF -- "$target" "$gone" || continue
+        # The removed file may carry .zst while the link names it without,
+        # or the other way round.
+        grep -qxF -e "$target" -e "${target%.zst}" -e "$target.zst" "$gone" || continue
         rm -f -- "$link" || die "removing firmware symlink $link failed"
         sed -e "s#^$FW/##" -e 's/\.zst$//' <<<"$link" >>"$DROPPED"
         count=$((count + 1))
@@ -282,7 +292,9 @@ check_firmware_names() {
         [[ -e $FW/$name || -e $FW/$name.zst ]] && continue
         mod=unknown
         while IFS= read -r -d '' f; do
-            if modinfo -F firmware "$f" | grep -qxF -- "$name"; then
+            # No pipe: grep -q would end modinfo with SIGPIPE, pipefail would
+            # fail the test, and the message would name module "unknown".
+            if grep -qxF -- "$name" <<<"$(modinfo -F firmware "$f")"; then
                 mod=${f#/usr/lib/modules/"$KVER"/}
                 break
             fi
@@ -308,9 +320,10 @@ drop_intel_ucode() {
 # The locale archive is compiled; the sources are not read at run time.
 drop_i18n() {
     rm -rf /usr/share/i18n
-    local line name have
-    have=$(locale -a)
-    while read -r line; do
+    local line name have checked=0
+    have=$(locale -a) || die "locale -a failed after removing /usr/share/i18n"
+    # || [[ -n $line ]]: a last line without a newline is still read.
+    while read -r line || [[ -n $line ]]; do
         [[ -z $line || $line == \#* ]] && continue
         name=${line%% *}
         # de_CH.UTF-8 is listed as de_CH.utf8 by locale -a
@@ -319,7 +332,10 @@ drop_i18n() {
         fi
         grep -qxF -- "$name" <<<"$have" \
             || die "locale $name missing after removing /usr/share/i18n"
+        checked=$((checked + 1))
     done </etc/locale.gen
+    [[ $checked -gt 0 ]] || die "no locale in /etc/locale.gen to check after removing /usr/share/i18n"
+    echo "slim-rootfs: $checked locales checked" >&2
 }
 
 # hwdb.bin is prebuilt and systemd-hwdb-update.service is masked.

@@ -150,6 +150,11 @@ absent_except "no DVB, tuner or radio modules" \
 absent "no cx88-dvb"                  "${MODS}.*/cx88-dvb\\.ko\$"
 absent "no saa7134-dvb"               "${MODS}.*/saa7134-dvb\\.ko\$"
 absent "no em28xx-dvb"                "${MODS}.*/em28xx-dvb\\.ko\$"
+# DVB-only cards, removed through the closure (they depend on dvb-core).
+# ddbridge-dummy-fe depends on no seed module and stays by the rule.
+absent "no ttpci modules"             "${MODS}drivers/media/pci/ttpci/.*\\.ko\$"
+absent "no ddbridge module"           "${MODS}drivers/media/pci/ddbridge/ddbridge\\.ko\$"
+absent "no mantis modules"            "${MODS}drivers/media/pci/mantis/.*\\.ko\$"
 absent "no radeon modules"            "${MODS}drivers/gpu/drm/radeon/"
 for m in cx88xx cx8800 saa7134 em28xx em28xx-v4l uvcvideo ib_core comedi \
     industrialio can dsa_core mtd mlx5_core amdgpu nouveau iwlwifi snd-fm801 tea575x; do

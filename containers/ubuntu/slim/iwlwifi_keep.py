@@ -69,13 +69,14 @@ def _parse(names):
 
 
 def ceilings(names):
-    """Map (family, radio, c) and (family, c) to the highest numeric API
-    that modinfo names, or None when one of the entries is a macro."""
+    """Map ("stem", stem, c), (family, radio, c) and (family, c) to the
+    highest numeric API that modinfo names, or None when one of the entries
+    is a macro."""
     table = {}
     for m in _parse(names):
         stem, c, api = m["stem"], m["c"], m["api"]
         value = int(api) if api.isdigit() else None
-        keys = [(family(stem), c)]
+        keys = [("stem", stem, c), (family(stem), c)]
         if radio(stem) is not None:
             keys.append((family(stem), radio(stem), c))
         for key in keys:
@@ -89,7 +90,10 @@ def ceilings(names):
 
 
 def ceiling_for(stem, c, table):
-    """Radio ceiling first, then the family ceiling, else MISSING."""
+    """The ceiling of the exact stem first, then the radio ceiling, then the
+    family ceiling, else MISSING."""
+    if ("stem", stem, c) in table:
+        return table[("stem", stem, c)]
     r = radio(stem)
     if r is not None and (family(stem), r, c) in table:
         return table[(family(stem), r, c)]
