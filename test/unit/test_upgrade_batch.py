@@ -432,6 +432,31 @@ class TestExpectedDownloadSha(unittest.TestCase):
     def get(self, name="thinfloe-usb.img.zst"):
         return ui.expected_download_sha256(self.base, name)
 
+    def test_missing_checksum_note_names_what_was_missing(self):
+        # Neither file: the note said only "<name>.sha256 not found".
+        self.assertIsNone(self.get())
+        self.assertEqual(ui.missing_checksum_note(self.base, "thinfloe-usb.img.zst"),
+                         "neither SHA256SUMS nor thinfloe-usb.img.zst.sha256 was found")
+        # SHA256SUMS without the line.
+        other = Path(self._tmp.name) / "other"
+        other.mkdir()
+        (other / "SHA256SUMS").write_text(self.HEX + "  version\n")
+        base = "file://" + str(other)
+        self.assertIsNone(ui.expected_download_sha256(base, "thinfloe-usb.img.zst"))
+        self.assertEqual(ui.missing_checksum_note(base, "thinfloe-usb.img.zst"),
+                         "SHA256SUMS has no line for thinfloe-usb.img.zst, "
+                         "and thinfloe-usb.img.zst.sha256 was not found")
+
+    def test_sha256sums_is_fetched_once_per_run(self):
+        (self.dir / "SHA256SUMS").write_text(
+            "".join(f"{self.HEX}  {n}\n" for n in ("vmlinuz", "initrd.img", "ramroot.sqsh")))
+        real = ui._fetch_small
+        with mock.patch.object(ui, "_fetch_small", side_effect=real) as f:
+            for n in ("vmlinuz", "initrd.img", "ramroot.sqsh"):
+                self.assertEqual(ui.expected_download_sha256(self.base, n), self.HEX)
+        urls = [c.args[0] for c in f.call_args_list]
+        self.assertEqual(urls, [f"{self.base}/SHA256SUMS"])
+
     def test_two_space_format(self):
         self.put(self.HEX + "  thinfloe-usb.img.zst\n")
         self.assertEqual(self.get(), self.HEX)
@@ -569,8 +594,10 @@ class TestRedirects(unittest.TestCase):
                 body = files[name]
                 rng = self.headers.get("Range")
                 if rng:
+                    # bytes=N-M, or open-ended bytes=N- (to the end).
                     first, last = rng.split("=", 1)[1].split("-")
-                    body = body[int(first):int(last) + 1]
+                    end = int(last) + 1 if last else len(body)
+                    body = body[int(first):end]
                     self.send_response(206)
                 else:
                     self.send_response(200)
@@ -588,6 +615,11 @@ class TestRedirects(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls._tmp.cleanup()
+
+    def test_open_ended_range(self):
+        r = subprocess.run(["curl", "-fsSL", "-r", "2-", self.base + "/version"],
+                           capture_output=True, timeout=30, check=False)
+        self.assertEqual((r.returncode, r.stdout), (0, b"3.0\n"))
 
     def test_follows_redirect_chain(self):
         self.assertEqual(ui._fetch_version(self.base), ("4.3.0", ""))
@@ -697,6 +729,19 @@ class TestBatchRefusals(unittest.TestCase):
     def test_expect_id_mismatch_refuses(self):
         rc, out = self.run_write("/dev/sdb", "fresh", "WRONG:1:2")
         self.assertRefused(rc, out, "does not match", "/dev/sdb")
+
+    def test_local_refusals_come_before_the_release_is_read(self):
+        # No network: the newest release cannot be read. A write that is
+        # refused on this machine anyway says why, exit 2, not exit 1.
+        self.m_version.return_value = ("", "no network")
+        for device, mode, expect, words in (
+                ("/dev/sdb", "fresh", "WRONG:1:2", ("does not match",)),
+                ("/dev/nvme0n1", "fresh", None, ("/dev/nvme0n1",)),
+                ("/dev/sdc", "fresh", None, ("mounted",))):
+            with self.subTest(device=device):
+                rc, out = self.run_write(device, mode, expect)
+                self.assertRefused(rc, out, *words)
+        self.m_version.assert_not_called()
 
     def test_unlisted_device_refuses(self):
         rc, out = self.run_write("/dev/sdz", "fresh", "x")
@@ -1033,7 +1078,7 @@ class TestFreshInstall(unittest.TestCase):
         self.patches["expected_download_sha256"].return_value = None
         rc, out = self.run_fresh()
         self.assertEqual(rc, 0)
-        self.assertIn("checksum not checked: thinfloe-usb.img.zst.sha256 not found", out)
+        self.assertIn("checksum not checked: no checksum was found for thinfloe-usb.img.zst", out)
         self.assertNotWiped()
 
     def test_sigterm_during_write_wipes_and_gives_130(self):
@@ -1079,6 +1124,16 @@ class TestFreshInstall(unittest.TestCase):
         self.assertIn("@result failed", out)
         self.assertNotIn("@done save", out)
         self.assertNotWiped()
+
+    def test_cancel_during_the_checksum_fetch_leaves_the_stick(self):
+        # Nothing was written yet: the stick must stay as it was.
+        before = Path(self.dev).read_bytes()
+        self.patches["expected_download_sha256"].side_effect = ui.Cancelled()
+        rc, out = self.run_fresh()
+        self.assertEqual(rc, 130)
+        self.assertIn("@result failed cancelled", out)
+        self.patches["stream_image"].assert_not_called()
+        self.assertEqual(Path(self.dev).read_bytes(), before)
 
     def test_cancel_after_verify_does_not_wipe(self):
         self.patches["stamp_new_stick"].side_effect = ui.Cancelled()
@@ -1332,7 +1387,7 @@ class TestBatchUpgrade(unittest.TestCase):
     def test_missing_checksum_is_logged_not_fatal(self):
         rc, out = self.run_upgrade()
         self.assertEqual(rc, 0, out)
-        self.assertIn("checksum not checked: ramroot.sqsh.sha256 not found", out)
+        self.assertIn("checksum not checked: neither SHA256SUMS nor ramroot.sqsh.sha256 was found", out)
 
     def test_failed_save_stops_before_download(self):
         self.save.return_value = 5
@@ -2598,8 +2653,11 @@ class TestInteractiveLock(unittest.TestCase):
         ui.select_source.return_value = ui.DEFAULT_URL
         with mock.patch.object(ui, "_fetch_version",
                                return_value=("", "no version file at the source")):
-            with self.assertRaises(SystemExit):
-                self.run_main()
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                ui.main()
+        self.assertIn("no version file at the source", err.getvalue())
         self.assertNotIn("scan", [n for n, _ in self.seen])
 
     def test_a_drive_changed_during_the_prompts_is_not_written(self):

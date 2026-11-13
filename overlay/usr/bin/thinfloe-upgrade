@@ -1254,29 +1254,59 @@ def _fetch_small(url: str) -> Optional[str]:
     return r.stdout.decode("utf-8", "replace")
 
 
+# SHA256SUMS per source, fetched once per run: an A/B upgrade asked for it
+# once per file (three requests, and three 404s on a source without it).
+_SUMS: dict = {}
+# Why expected_download_sha256 found no checksum, per (source, name), for
+# the "checksum not checked" line.
+_NO_SUM: dict = {}
+
+
+def _sha256sums(base_url: str) -> Optional[str]:
+    if base_url not in _SUMS:
+        _SUMS[base_url] = _fetch_small(f"{base_url}/{CHECKSUM_ASSET}")
+    return _SUMS[base_url]
+
+
 def expected_download_sha256(base_url: str, name: str) -> Optional[str]:
     """The published SHA-256 of <base_url>/<name>, or None.
 
     Reads SHA256SUMS first. A custom source that lacks it, or lacks the
     line, falls back to <name>.sha256 (old server directories); a pinned
     release tag never does, so there None means the release has no checksum.
+    Why it is None is kept for `missing_checksum_note`.
     """
-    text = _fetch_small(f"{base_url}/{CHECKSUM_ASSET}")
+    text = _sha256sums(base_url)
     if text is not None:
         found = parse_sha256sums(text, name)
         if found is not None:
             return found
+    sums = (f"{CHECKSUM_ASSET} has no line for {name}" if text is not None
+            else f"neither {CHECKSUM_ASSET}")
     if checksum_required(base_url):
+        _NO_SUM[(base_url, name)] = (sums if text is not None
+                                     else f"{CHECKSUM_ASSET} was not found")
         return None
-    text = _fetch_small(f"{base_url}/{name}.sha256")
-    if text is None:
+    own = _fetch_small(f"{base_url}/{name}.sha256")
+    if own is None:
+        _NO_SUM[(base_url, name)] = (f"{sums}, and {name}.sha256 was not found"
+                                     if text is not None
+                                     else f"{sums} nor {name}.sha256 was found")
         return None
-    fields = text.split()
-    if len(fields) != 2 or not SHA256_RE.fullmatch(fields[0]):
-        return None
-    if fields[1].lstrip("*") != name:
+    fields = own.split()
+    if (len(fields) != 2 or not SHA256_RE.fullmatch(fields[0])
+            or fields[1].lstrip("*") != name):
+        _NO_SUM[(base_url, name)] = f"{name}.sha256 holds no checksum line for {name}"
         return None
     return fields[0].lower()
+
+
+def missing_checksum_note(base_url: str, name: str) -> str:
+    """What was missing when expected_download_sha256 gave None.
+
+    It said "<name>.sha256 not found" also when SHA256SUMS was missing.
+    """
+    return _NO_SUM.get((base_url, name), f"no checksum was found for {name}")
 
 
 # ============ Upgrade Operations ============
@@ -1728,7 +1758,7 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
             if expected is None and checksum_required(base_url):
                 raise WriteFailed(f"the release has no checksum for {filename}")
             if expected is None:
-                log(f"checksum not checked: {filename}.sha256 not found")
+                log(f"checksum not checked: {missing_checksum_note(base_url, filename)}")
             elif expected != _file_sha256(os.path.join(firmware_dir, filename)):
                 raise WriteFailed(
                     f"the download of {filename} was damaged; try again")
@@ -2225,6 +2255,10 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
     image_name = "thinfloe-usb.img.zst"
     image_url = f"{base_url}/{image_name}"
     stick_good = False
+    # Set before the first byte goes to the stick: a cancel during the
+    # checksum fetch wiped the chosen stick although nothing had been
+    # written to it.
+    writing = False
     try:
         progress.step("write", "Downloading and writing")
         # Before the first byte reaches the stick: a release without its
@@ -2234,8 +2268,9 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
             outcome.reason = f"the release has no checksum for {image_name}"
             return outcome
         if expected is None:
-            log(f"checksum not checked: {image_name}.sha256 not found")
+            log(f"checksum not checked: {missing_checksum_note(base_url, image_name)}")
         try:
+            writing = True
             result = stream_image(image_url, device, image_size(image_url), progress,
                                   fd=fd)
             if expected is not None and expected != result.download_sha256:
@@ -2304,7 +2339,7 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         # After verify passed: the stick is good, nothing to wipe.
         outcome.cancelled = True
         outcome.reason = "cancelled"
-        if not stick_good and held[0] is not None:
+        if writing and not stick_good and held[0] is not None:
             wipe_partition_tables(device, holder=held)
         return outcome
 
@@ -2626,8 +2661,13 @@ def _batch_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
-    """Why this write must not start, or None. Nothing is opened before."""
+def _write_refusal(args, drive: Optional[DriveInfo], with_size: bool = True) -> Optional[str]:
+    """Why this write must not start, or None. Nothing is opened before.
+
+    `with_size` False leaves out the one rule that reads the network (the
+    image size at `args.source`), for the check before the release is
+    pinned.
+    """
     if drive is None:
         return f"{args.device} is not a drive this tool may write"
     if drive_identity(drive) != args.expect_id:
@@ -2637,7 +2677,7 @@ def _write_refusal(args, drive: Optional[DriveInfo]) -> Optional[str]:
             return f"{args.device} is the boot drive and cannot be overwritten"
         if drive.mounted:
             return f"{args.device} is mounted and cannot be overwritten"
-        size = image_size(f"{args.source}/thinfloe-usb.img.zst")
+        size = image_size(f"{args.source}/thinfloe-usb.img.zst") if with_size else None
         if size is not None and drive.size_bytes < size:
             return f"{args.device} is too small for the image"
     else:
@@ -2765,6 +2805,8 @@ def batch_main(argv: List[str]) -> int:
     """The question-free commands `check`, `drives` and `write`."""
     global PROGRESS
     PROGRESS = Progress(sys.stdout, batch=True)
+    _SUMS.clear()
+    _NO_SUM.clear()
     try:
         args = _batch_parser().parse_args(argv)
     except UsageError as e:
@@ -2822,13 +2864,20 @@ def _batch_run(args) -> int:
     if not _take_lock(WRITE_LOCK_WAIT):
         PROGRESS.result(False, "another write is running; try again when it has finished")
         return 2
+    # What this machine refuses anyway is said before the release is
+    # pinned: without a network a wrong --expect-id or a mounted stick
+    # reported "the newest release could not be read", exit 1.
+    drives = enumerate_drives(include_internal=args.allow_internal)
+    drive = next((d for d in drives if d.device == args.device), None)
+    reason = _write_refusal(args, drive, with_size=False)
+    if reason is not None:
+        PROGRESS.result(False, reason)
+        return 2
     try:
         args.source = pin_source(args.source)
     except WriteFailed as e:
         PROGRESS.result(False, e.reason)
         return 1
-    drives = enumerate_drives(include_internal=args.allow_internal)
-    drive = next((d for d in drives if d.device == args.device), None)
     reason = _write_refusal(args, drive)
     if reason is not None:
         PROGRESS.result(False, reason)
@@ -2878,6 +2927,8 @@ def main() -> int:
     """Main entry point"""
     if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write", "check"):
         return batch_main(sys.argv[1:])
+    _SUMS.clear()
+    _NO_SUM.clear()
     try:
         ensure_root()
 
