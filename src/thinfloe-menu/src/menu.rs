@@ -645,7 +645,7 @@ impl Menu {
     }
 
     /// A change on the Status tab: taken at once and written. `Reset`
-    /// removes the file, so the shipped list counts again.
+    /// removes the `lines` key from `[status]`, so the shipped list counts again.
     pub fn status_event(&mut self, event: StatusEvent) -> Option<Effect> {
         if event == StatusEvent::Reset {
             self.status = crate::status::Area::shipped();

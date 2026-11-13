@@ -108,12 +108,15 @@ file is rewritten only when its content changes. Each starts with a header
 comment saying edits are lost.
 
 A `config.toml` the menu cannot parse is kept as `config.toml.broken-<epoch>`
-and rebuilt from `generated/`, never from defaults (a default `[network]`
-would write an empty `generated/wifi.yaml` and the next boot would be
-offline). When `generated/` cannot be read either, the store is read-only:
-changes are refused with "The settings are read-only." and a note on the
-Settings screen. An unreadable old generated file is put back as the committed
-settings render it, never removed.
+and the settings are rebuilt from the files in `generated/` (`[status]` and
+the migration report are not in them and fall back to their defaults). Only
+when `generated/` holds no file at all does the menu start from defaults and
+write them. When a file in `generated/` cannot be read, the store is
+read-only: changes are refused with "The settings are read-only." and a note
+on the Settings screen, because defaults would write an empty
+`generated/wifi.yaml` and the next boot would be offline. An unreadable old
+generated file is put back as the committed settings render it, never
+removed.
 
 A WiFi, wired or monitor file the menu could not fully read is kept verbatim
 in `config.toml` (`[network]` `kept_wifi` and `kept_wired`, `[monitors]`

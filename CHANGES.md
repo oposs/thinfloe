@@ -13,7 +13,6 @@
 - A WiFi, wired or monitor file the menu could not fully read, or a WiFi or wired file for another netplan version or renderer, is kept as it was and shown read-only, with "Let the menu manage it" to replace it.
 - When the move of the settings fails at boot, the Settings screen says they stay as they were until the next start, and its Network, Screen and Status tabs show them but take no changes. The move is tried again at every login.
 - A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
-- On the Status tab, "Reset to default" now removes the saved layout from `config.toml` instead of a file.
 
 ### Fixed
 
