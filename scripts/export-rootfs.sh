@@ -64,12 +64,21 @@ log_success "Version $TF_VERSION written"
 log_step "Creating squashfs..."
 SQSH_OUTPUT="${ARTIFACT_DIR}/ramroot.sqsh"
 
-# etc/hostname and etc/resolv.conf are excluded because podman bind-mounts
-# them (and /etc/hosts) into this container, so mksquashfs would read through
-# the mounts and pack the container's runtime files instead of the image's.
-# /etc/hosts and /etc/resolv.conf are replaced on every boot by
-# un-dockerize.service, and the initramfs writes /etc/hostname from the
-# machine-id; before this, every machine shipped the build container's ID.
+# etc/hostname is excluded because podman bind-mounts it (and /etc/hosts)
+# into this container, so mksquashfs would read through the mount and pack the
+# container's runtime file instead of the image's. The initramfs writes
+# /etc/hostname from the machine-id; before this, every machine shipped the
+# build container's ID. /etc/hosts is replaced on every boot by
+# un-dockerize.service.
+#
+# /etc/resolv.conf is the image's link to the systemd-resolved stub (the
+# Dockerfile installs systemd-resolved without a network for that); podman
+# mounts its resolv.conf at the link's target under /run, which is excluded.
+# Were it a plain file, podman would have mounted the build host's resolver
+# list over it and mksquashfs would pack that.
+RESOLV_LINK=../run/systemd/resolve/stub-resolv.conf
+[ -L /etc/resolv.conf ] && [ "$(readlink /etc/resolv.conf)" = "$RESOLV_LINK" ] ||
+    die "/etc/resolv.conf is not a link to $RESOLV_LINK"
 # scripts is excluded because the Makefile bind-mounts ./scripts at /scripts
 # for this export; 4.2.0 shipped /scripts/publish.sh and the smoke scripts.
 mksquashfs / "$SQSH_OUTPUT" \
@@ -80,7 +89,7 @@ mksquashfs / "$SQSH_OUTPUT" \
     -noappend \
     -no-progress \
     -e boot tmp var/tmp artifacts proc sys dev run scripts \
-       etc/hostname etc/resolv.conf || die "mksquashfs failed"
+       etc/hostname || die "mksquashfs failed"
 
 log_success "SquashFS created: $(format_bytes $(stat -c%s "$SQSH_OUTPUT"))"
 

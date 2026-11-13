@@ -108,10 +108,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # overlay/etc/thinfloe/labwc/environment is what actually selects
 # xcursor-themes' whiteglass theme; both the package and that setting are
 # required.
+#
+# systemd-resolved is only downloaded here and installed in the next RUN, see
+# there.
 RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     --no-install-recommends --no-install-suggests \
     systemd-sysv \
-    systemd-resolved \
     vim-tiny \
     wireguard \
     resolvconf-admin \
@@ -178,7 +180,20 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     python3 \
     vainfo \
     intel-media-va-driver \
-    i965-va-driver
+    i965-va-driver && \
+    apt-get install -yq --download-only --no-install-recommends systemd-resolved
+
+# The systemd-resolved postinst turns /etc/resolv.conf into a link to
+# ../run/systemd/resolve/stub-resolv.conf. In a networked RUN podman
+# bind-mounts its own resolv.conf there, so the postinst printed "mv: cannot
+# move '/etc/resolv.conf'" and "Cannot install symlink" and the image had no
+# /etc/resolv.conf until un-dockerize.service made one late in the boot.
+# Without a network podman mounts nothing, the postinst succeeds, and the
+# later RUNs get podman's resolv.conf at the link's target instead. The empty
+# backup of podman's placeholder file is removed.
+RUN --network=none apt-get install -yq --no-install-recommends systemd-resolved && \
+    test "$(readlink /etc/resolv.conf)" = ../run/systemd/resolve/stub-resolv.conf && \
+    rm -f /etc/.resolv.conf.systemd-resolved.bak
 
 # vim-tiny registers vi, view, ex and editor, but not vim. Admins type vim.
 RUN update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10
