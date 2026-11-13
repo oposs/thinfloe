@@ -293,10 +293,10 @@ fn flag(y: &Yaml) -> Option<bool> {
 }
 
 /// The file says another netplan version than 2, or another renderer than
-/// the image's networkd, for the whole file or one definition. Rewritten by the menu it would say `version: 2`
-/// and `renderer: networkd` and so do something else; it counts as by hand
-/// even under the menu's header. netplan takes both as these when they are
-/// left out.
+/// the image's networkd, for the whole file or one definition. Rewritten by
+/// the menu it would say `version: 2` and `renderer: networkd` and so do
+/// something else; it counts as by hand even under the menu's header.
+/// netplan takes both as these when they are left out.
 fn foreign_format(network: Option<&Hash>) -> bool {
     let other_renderer = |h: &Hash| get(h, "renderer").is_some_and(|r| text_of(r).as_deref() != Some("networkd"));
     network.is_some_and(|n| {
