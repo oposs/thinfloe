@@ -391,7 +391,7 @@ fn parse_output(t: &[String], line: &str) -> Result<OutputSet, String> {
 pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
     let mut lines = text.lines();
     let first = lines.next();
-    if first != Some(crate::owned::HEADER) && first != Some(crate::generated::HEADER) {
+    if first != Some(crate::migrate::LEGACY_MENU_HEADER) && first != Some(crate::generated::HEADER) {
         return Err("Not a file the menu wrote.".into());
     }
     let mut profiles = Vec::new();

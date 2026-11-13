@@ -23,11 +23,12 @@ use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config, ScreenFile};
 use thinfloe_menu::battery;
+use thinfloe_menu::generated::Inputs;
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{release, screentab, settings, status, tiles, ui, windows};
+use thinfloe_menu::{bounded, migrate, release, screentab, settings, status, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -268,6 +269,41 @@ fn unfold(what: Option<&str>) -> ExitCode {
     }
 }
 
+/// `--migrate-home`: the session profile runs it while `home-layout` says
+/// `legacy`. The summary or the reason goes to stderr (the session log).
+fn migrate_home() -> ExitCode {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map_or_else(|| PathBuf::from("/home/tfuser"), PathBuf::from);
+    let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
+    let default_wired = thinfloe_menu::netfiles::Homes::from_env().default_wired;
+    let inputs = Inputs {
+        // Unreadable: a fixed wired address cannot be converted, and the
+        // migration says so.
+        default_wired: bounded::read_bounded(&default_wired, MIGRATE_MAX_BYTES, true)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default(),
+        netboot: !usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    match migrate::migrate_home(&home, &state_dir, inputs, now) {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(report)) => {
+            eprintln!("thinfloe-menu: {}", report.summary());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("thinfloe-menu: the home was not migrated: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The shipped wired default is tiny.
+const MIGRATE_MAX_BYTES: u64 = 64 * 1024;
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == icons::RENDER_ICON_ARG) {
@@ -281,6 +317,9 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--unfold") {
         return unfold(args.get(2).and_then(|a| a.to_str()));
+    }
+    if args.get(1).is_some_and(|a| a == "--migrate-home") {
+        return migrate_home();
     }
     let (mut menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();

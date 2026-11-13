@@ -1,0 +1,5 @@
+# Commands run at the start of every session, for example wlr-randr, or
+# kanshi started by hand. This file is saved with the home.
+#
+# The monitor arrangement, the screen timeout and the network are set in
+# Settings; TF_IDLE_TIMEOUT is no longer read here.

@@ -22,6 +22,7 @@ pub mod kanshi;
 pub mod log;
 pub mod menu;
 pub mod menu_move;
+pub mod migrate;
 pub mod monitors;
 pub mod monitors_ui;
 pub mod netfiles;
