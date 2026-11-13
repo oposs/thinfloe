@@ -3,9 +3,17 @@
 ## [Unreleased]
 
 ### New
-- The Settings screen tells what happened to the settings files: a note when lines in `~/.config/thinfloe/environment` are ignored because the menu sets them, and the report of the move of the settings to `~/.config/thinfloe` with a "Dismiss" button. When that move failed at boot, the screen says the settings stay as they were until the next start, and the Network, Screen and Status tabs show them without taking changes.
 
 ### Changed
+- All settings the menu manages are now kept in `~/.config/thinfloe/config.toml`, and the first start after the upgrade moves the old files there by itself, WiFi included. The old files stay unchanged in `~/cfg-attic/`, with a README listing what was taken over, and the Settings screen says so once.
+- `~/.thinfloe-environment` and `~/.thinfloe-sessionrc` are no longer read: extra variables go in `~/.config/thinfloe/environment` and session commands in `~/.config/thinfloe/sessionrc`. `TF_IDLE_TIMEOUT` is no longer read from either; the screen timeout is set on the Screen tab.
+- `~/.thinfloe-password`, `~/.thinfloe-ssh-host-keys`, `~/wg0.conf` and `~/.save-home-exclude` moved to `password`, `ssh-host-keys`, `wg0.conf` and `save-home-exclude` in `~/.config/thinfloe/`. A new stick written from this machine still leaves out the host keys and `wg0.conf`, also their copies in `~/cfg-attic/`.
+- When the old keyboard settings named two layouts (`XKB_DEFAULT_LAYOUT=us,de`), only the first is kept; a keyboard model other than `pc105` and XKB options other than CapsLock as Ctrl and the Compose key are dropped. `~/cfg-attic/README` names what was dropped.
+- `XKB_DEFAULT_*` lines in `~/.config/thinfloe/environment` are ignored, and the Settings screen names each one.
+- A WiFi, wired or monitor file the menu could not fully read, or a WiFi or wired file for another netplan version or renderer, is kept as it was and shown read-only, with "Let the menu manage it" to replace it.
+- When the move of the settings fails at boot, the Settings screen says they stay as they were until the next start, and its Network, Screen and Status tabs show them but take no changes. The move is tried again at every login.
+- A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
+- On the Status tab, "Reset to default" now removes the saved layout from `config.toml` instead of a file.
 
 ### Fixed
 

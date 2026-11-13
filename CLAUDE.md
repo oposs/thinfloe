@@ -68,7 +68,8 @@ to 4.2 sticks still look, and adds `thinfloe-usb.img.zst.sha256` for 4.0 to
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
-- User defaults: `overlay/home/tfuser/` (`.thinfloe-environment`, `.thinfloe-sessionrc`, `.thinlinc/tlclient.conf`, `wifi.yaml`).
+- User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
+- Config store and migration: `src/thinfloe-menu/src/` (`config.rs` schema, `store.rs` the only writer, `generated.rs` derived files, `migrate.rs` the 4.x migration).
 - Tests: `test/integration/` (`make test`), `test/unit/` (`make test-unit`), `test/runtime/` (`make test-runtime`).
 
 ## Rules that are easy to break
@@ -93,12 +94,13 @@ Not standing constraints, but each has broken something or is guarded by a test.
 
 ### Home and session
 
-- The home restore runs in the initramfs, never in `thinfloe-session` or `10-thinfloe-session.sh`: `.thinfloe-environment` must be on disk before labwc reads `XKB_DEFAULT_*`, and `thinfloe-ssh-hostkeys` needs the home before `multi-user.target`.
-- `~/.thinfloe-environment` is sourced before labwc (startup variables: keyboard, cursor, `TZ=`, `LABWC_FULLSCREEN_SPAN_OUTPUTS`); `~/.thinfloe-sessionrc` inside the session (commands that need a compositor: `wlr-randr`, `kanshi`, `TF_IDLE_TIMEOUT`).
-- labwc runs with `-C` on a directory composed by `thinfloe-compose-labwc-config` (system files symlinked, `environment` = system defaults then the user's file). Pointing `-C` at `/etc/thinfloe/labwc` again makes labwc reset user keys to the system values. Guards: `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`. Story: [docs/notes/session.md](docs/notes/session.md).
+- The home restore runs in the initramfs, never in `thinfloe-session` or `10-thinfloe-session.sh`: `generated/environment` and `environment` must be on disk before labwc reads `XKB_DEFAULT_*`, and `thinfloe-ssh-hostkeys` needs the home before `multi-user.target`.
+- Everything the menu manages is in `~/.config/thinfloe/config.toml`, written only by the menu; readers that run before it use `generated/` and pick old or new paths from `/run/thinfloe/state/home-layout` (only `legacy` means old). Guards: `test-initramfs-home.sh`, `test-session-lifecycle.sh`, `migrate.rs` tests. Layout table, migration and attic: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
+- `~/.config/thinfloe/environment` is sourced before labwc (startup variables: cursor, `TZ=`, `LABWC_FULLSCREEN_SPAN_OUTPUTS`; `XKB_DEFAULT_*` lines are dropped); `~/.config/thinfloe/sessionrc` inside the session (commands that need a compositor: `wlr-randr`, `kanshi`).
+- labwc runs with `-C` on a directory composed by `thinfloe-compose-labwc-config` (system files symlinked, `environment` = system defaults, then `generated/environment`, then the user's file). Pointing `-C` at `/etc/thinfloe/labwc` again makes labwc reset user keys to the system values. Guards: `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`. Story: [docs/notes/session.md](docs/notes/session.md).
 - `thinfloe-save-home` takes the home from `getent passwd tfuser`, never `$HOME` (`sudo` sets `HOME=/root`), and every read under `/run/thinfloe/state` ends in `|| true` (`set -e`). On USB it writes only to the ESP mounted at `/run/thinfloe/storage/efi` (tested with `mountpoint -q`), atomically; the netboot upload uses `curl -f`. Exit codes 0 to 5 are a contract. Guard: `test-save-home.sh`.
-- The remote-access password hash (`~/.thinfloe-password`) and the SSH host keys (`~/.thinfloe-ssh-host-keys`) ride the home archive in the clear: on the FAT ESP, or POSTed over plain HTTP on netboot. Accepted; see [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
-- A fresh install's home copy always leaves out `~/.thinfloe-ssh-host-keys`, `~/.dbrrg-ssh-host-keys` and `~/wg0.conf` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
+- The remote-access password hash (`~/.config/thinfloe/password`) and the SSH host keys (`~/.config/thinfloe/ssh-host-keys`) ride the home archive in the clear: on the FAT ESP, or POSTed over plain HTTP on netboot. Accepted; see [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
+- A fresh install's home copy always leaves out `~/.config/thinfloe/ssh-host-keys` and `wg0.conf`, their 4.x paths, `~/.dbrrg-ssh-host-keys` and the attic copies in `~/cfg-attic/` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
 - Reboot and power off from the session need `sudo systemctl ...`: the image has no polkit.
 - Screen blanking uses `swayidle` and `wlopm`, never `wlr-randr --off`, which changes the monitor layout. No lock screen: tfuser has no password.
 - No keybinding for a terminal or screenshots (see zero keybindings); from a VT: `XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot` (or `grim`).
@@ -111,7 +113,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - The menu sends a running `thinfloe-upgrade write` SIGTERM, never SIGKILL (SIGKILL reaches only sudo and the lock stays held). Jobs run in their own process group.
 - A fullscreen window that leaves winit no monitor for the menu is not a move: the last known monitor counts (`seen_monitor` in `app.rs`). Taken as a move, it gave the largest mode's scale and the title bars grew (2026-10-30). See [docs/notes/menu.md](docs/notes/menu.md).
 - The scale file `$XDG_RUNTIME_DIR/thinfloe-scale` is written atomically (one number and a newline); `labwc-scale` and `thinfloe-terminal` read it.
-- Status area: an element is one module in `status/` plus a line in `status::ELEMENTS`; `draw` is pure and stays in its rect. The layout file `~/.config/thinfloe/status` is written only by the menu. Notes: [docs/notes/status-area.md](docs/notes/status-area.md).
+- Status area: an element is one module in `status/` plus a line in `status::ELEMENTS`; `draw` is pure and stays in its rect. The layout is `[status]` in `config.toml`, written only by the menu. Notes: [docs/notes/status-area.md](docs/notes/status-area.md).
 - The battery file `/run/thinfloe/peripherals/battery` is a contract between the root reader and the menu: one line per device, `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind`; the menu still reads a 4-field line (kind unknown). See [docs/notes/peripheral-battery.md](docs/notes/peripheral-battery.md).
 
 ### Boot screen
@@ -227,9 +229,9 @@ test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.
 
 ### Per-machine network config is installed by the initramfs, never by a unit
 
-`install_local_network()` copies `~/wifi.yaml`, `~/wg0.conf` (and creates the
+`install_local_network()` copies `~/.config/thinfloe/generated/wifi.yaml`, `generated/ethernet.yaml`, `~/.config/thinfloe/wg0.conf` (and creates the
 `wg-quick@wg0` link) before switch-root, so the netplan generator creates the
-WPA units. Guards: `test-field-report.sh` (no `thinfloe-local-network.service`),
+WPA units (a 4.x home gives `~/wifi.yaml` and `~/wg0.conf` until it is migrated). Guards: `test-field-report.sh` (no `thinfloe-local-network.service`),
 `test-session-packages.sh` (mode 600).
 [Story](docs/notes/history-of-constraints.md#per-machine-network-config-is-installed-by-the-initramfs-never-by-a-unit).
 

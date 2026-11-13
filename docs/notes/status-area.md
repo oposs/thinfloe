@@ -1,4 +1,4 @@
-This note covers the menu's status area as built on the status-area branch (design of 2026-11-10): elements, placement, the layout file, the Status tab, the samplers and what each element shows.
+This note covers the menu's status area as built on the status-area branch (design of 2026-11-10): elements, placement, the layout in `config.toml`, the Status tab, the samplers and what each element shows.
 
 The design is `docs/superpowers/specs/2026-11-10-status-area-design.md`. It
 replaces the drawing, configuration and elements of
@@ -85,46 +85,41 @@ Shipped elements:
 - The menu asks for a frame at the soonest `refresh` or `next_change` of the
   elements drawn (`Area::wake`).
 
-## Layout file
+## Layout in config.toml
 
-- `~/.config/thinfloe/status` (`status::FILE`; `TF_STATUS_FILE` moves it for
-  tests). One element per line, `<id> <w>x<h>`, or `-<id> <w>x<h>` when
-  hidden; `#` starts a comment anywhere on a line. The menu writes a header
-  comment and every element it knows, shown or hidden, so an unticked
-  element keeps its place and size.
-- Missing, or only comments: the shipped list.
-- Over 4 KiB, over 64 lines or not UTF-8: the shipped list, one note, and
-  the file stays as it is until the user changes something in the Status
-  tab. Reading stops one byte past 4 KiB.
-- Not a regular file (a FIFO, a device, a directory; a symlink counts by
-  its target), or unreadable: the same, with the note "it cannot be read".
-  The file is read through `bounded::read_bounded`, which looks at the type
-  before it opens anything: opening a FIFO blocked the menu's main thread,
-  at start, on every watch wake and in `--check`.
-- A line that is not `<id> <w>x<h>`: skipped, one note. A second line for an
-  id: skipped, one note.
-- An unknown id (a newer image wrote the file): kept, not drawn, written
+- `[status]` in `~/.config/thinfloe/config.toml`, written only by the menu:
+  `lines` holds the layout, one entry per line, `<id> <w>x<h>`, or
+  `-<id> <w>x<h>` when hidden. The menu writes every element it knows, shown
+  or hidden, so an unticked element keeps its place and size.
+- No `lines` key (or no `[status]`): the shipped list. "Reset to default"
+  removes the key. A missing or unreadable `config.toml` leaves the layout on
+  screen as it is.
+- Over 4 KiB or over 64 lines: the shipped list and one note; `config.toml`
+  stays as it is until the user changes something in the Status tab.
+- A line that is not `<id> <w>x<h>`: skipped, one note ("status line N").
+  A second line for an id: skipped, one note.
+- An unknown id (a newer image wrote the list): kept, not drawn, written
   back at its place, one note.
 - A size the element does not offer: its default size, one note.
-- An element the file does not name (a newer image added it): appended,
+- An element the list does not name (a newer image added it): appended,
   shown, at its default size. The packing places it only where room is
   left.
-- Each note opens the menu's log as a warning once; the same file read
-  again logs nothing new, nor does the menu's rewrite of a hand-edited file,
-  which moves the lines (notes are compared without their line number,
-  `layout::note_key`). `thinfloe-menu --check` prints `status: layout file
+- Each note opens the menu's log as a warning once; the same list read
+  again logs nothing new (notes are compared without their line number,
+  `layout::note_key`). `thinfloe-menu --check` prints `status: layout from
   <path>` (with `(missing: the shipped layout)` when there is none) and each
   note; a layout problem never fails `--check`.
-- Read at start and when the menu's once-a-second file watch sees it
-  change. Written only by the menu: `<file>.new` and a rename
+- Read at start and when the menu's once-a-second file watch sees
+  `config.toml` change. Written only by the menu through the settings store
   (`jobs::status_save`); a change while a write runs follows it, the last one
-  wins. A re-read while a write runs is ignored.
+  wins. A re-read while a write runs is ignored. A home in the 4.x layout
+  opens the store read-only and the Status tab is disabled.
 - It travels with the home archive; there is no exclude entry.
 
 ## Status tab
 
 - `SettingsTab::Status`, after Screen. One row per element this image knows,
-  in the file's order: a tick box, a size select offering only the
+  in the list's order: a tick box, a size select offering only the
   element's `sizes()`, and Up and Down buttons. Unknown ids get no row.
   A click on the name ticks the box too. The rows are as high as the small
   controls (shadcn-egui `layout::row`, 2 pt above and below), so all eight
@@ -141,10 +136,10 @@ Shipped elements:
   reading; `Samplers::copies` passes no copy before the first one).
   An element whose source has not read yet gets no note, so the hardware
   elements on a short screen, where the sampler rests, never say "nothing".
-- Every change writes the file at once, with no Apply. A failed write shows
+- Every change writes `config.toml` at once, with no Apply. A failed write shows
   in the tab in the warning colour and in the log, and the screen keeps the
   change.
-- "Reset to default" removes the file.
+- "Reset to default" removes the `lines` key from `[status]`.
 - Below the rows a preview draws the status area with the main screen's
   code at the main screen's cell size, for the current screen (short or
   not), scaled down only when the tab is narrower than the area. Code:
@@ -238,7 +233,7 @@ Shipped elements:
 
 ## Tests
 
-`status/` unit tests (packing, layout file, each element inside its rect at
+`status/` unit tests (packing, layout list, each element inside its rect at
 every size), the Status tab tests in `menu.rs` and `ui.rs`, the sampler
 tests in `netstat.rs` and `hardware.rs`, the covered test in
 `test/runtime/test-labwc-runtime.sh`, and in

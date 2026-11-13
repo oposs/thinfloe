@@ -4,12 +4,15 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   drive: `home.tar.gz` on its ESP, addressed by device node
   (`find_efi_partition(device)`), never by partlabel - the new stick carries
   the same `EFI-SYSTEM` label as the running one. It uses the save-home
-  exclude list and **always** leaves out `~/.thinfloe-ssh-host-keys` and
-  `~/wg0.conf` (`IDENTITY_EXCLUDES`, outside the user-editable list). Those
+  exclude list and **always** leaves out
+  `~/.config/thinfloe/ssh-host-keys` and `~/.config/thinfloe/wg0.conf`, their
+  4.x paths (`~/.thinfloe-ssh-host-keys`, `~/wg0.conf`) and the attic copies
+  of the host keys, `wg0.conf`, the password and the exclude list under
+  `~/cfg-attic/` (`IDENTITY_EXCLUDES`, outside the user-editable list). Those
   are machine identities: two machines would share one SSH host key or one
   WireGuard private key, which breaks both tunnels. `~/.dbrrg-ssh-host-keys`
   is left out too: a save on a 3.x fallback boot leaves the keys 3.x made
-  there. `~/.thinfloe-password` travels on purpose. Like `thinfloe-save-home`,
+  there. `~/.config/thinfloe/password` travels on purpose. Like `thinfloe-save-home`,
   it refuses when this boot's restore failed
   (`/run/thinfloe/state/home-restore` is `failed`), since the live home is
   then a default one. `test/unit/test_upgrade_image.py` guards this, run via
@@ -60,6 +63,14 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   boot server in a namespace: one write cancelled, one complete with
   `--verify`, then an upgrade of the boot disk from a stand-in release and
   a boot of the written stick.
+  `make qemu-smoke-upgrade` boots the upgraded stick twice
+  (`scripts/run-qemu-upgrade-smoke.sh`, with `scripts/smoke-home-report.sh`
+  in the VM). Boot 1 starts from a 4.x home, checks `thinfloe: home layout
+  legacy`, runs the migration and saves the home. Boot 2 checks layout `new`,
+  that `generated/wifi.yaml` is installed and the old `~/wifi.yaml` is not,
+  the keyboard layout in `generated/environment`, the old files in
+  `~/cfg-attic/`, and that neither a second 3.x rename nor a new 3.x marker
+  appears.
   `drives --no-size` sends no request and sets `fits` to null in every row.
   `check [--source URL]` reads `<source>/version` (one line `X.Y.Z`) and the
   size of `thinfloe-usb.img.zst`, prints `latest`, `image_bytes`, `checked`,

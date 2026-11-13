@@ -108,21 +108,27 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   **Monitor arrangement** (Settings → Screen). Apply is offered once the
   arrangement on the tab differs from the one it was made from (`changed`
   in `monitors.rs`); a Keep or a revert starts it anew. The menu reads the monitors
-  through `zwlr_output_manager_v1` and never sets them. It writes
-  `~/.config/kanshi/config` (an owned file with a header line; a hand-written
-  one is shown read-only until "Let the menu manage it", which keeps it as
-  `config.by-hand`) and reloads kanshi with SIGHUP. When no kanshi runs, the
-  menu starts `kanshi -c ~/.config/kanshi/config` itself, in a session of its own; that
-  kanshi is not in the session's `HELPER_PIDS` and ends when labwc's socket
-  goes. `thinfloe-session` starts `kanshi -c ~/.config/kanshi/config` when that
-  file is readable and no kanshi of this user runs (found through
-  `/proc/<pid>/comm` and the `Uid:` line of `/proc/<pid>/status`). Before that
-  it undoes an unconfirmed layout: the marker
-  `~/.config/kanshi/thinfloe-layout-unconfirmed` (in the home so that a home
-  save carries it) holds `prev` or `none`. `prev` restores `config.prev` over
-  `config`; with no `config.prev` it removes `config` and logs "thinfloe:
-  unconfirmed layout without config.prev: removing the kanshi config". `none`
-  removes `config` and `config.prev`. The monitor for the menu
+  through `zwlr_output_manager_v1` and never sets them. The arrangement is
+  `[monitors]` in `config.toml`, written when the arrangement is confirmed;
+  the menu writes `~/.config/thinfloe/generated/kanshi` and reloads kanshi
+  with SIGHUP. A legacy kanshi file the menu cannot fully read, or whose
+  profile names fail the name check, becomes `[monitors] kept`: shown
+  read-only with "Let the menu manage it" and left as it is until then. When
+  no kanshi runs, the menu starts `kanshi -c` on `generated/kanshi` itself, in
+  a session of its own; that kanshi is not in the session's `HELPER_PIDS` and
+  ends when labwc's socket goes. `thinfloe-session` starts `kanshi -c
+  generated/kanshi` when that file is readable and no kanshi of this user
+  runs (found through `/proc/<pid>/comm` and the `Uid:` line of
+  `/proc/<pid>/status`). Before that it undoes an unconfirmed layout: an Apply
+  keeps the previous file as `generated/kanshi.prev` and writes the marker
+  `generated/layout-unconfirmed` (in the home so that a home save carries it),
+  which holds `prev` or `none`. `prev` restores `kanshi.prev` over `kanshi`;
+  with no `kanshi.prev` it removes `kanshi` and logs "thinfloe: unconfirmed
+  layout without config.prev: removing the kanshi config". `none` removes
+  `kanshi` and `kanshi.prev`. At start the menu regenerates `generated/kanshi`
+  from `config.toml` and reloads kanshi when that changed it. A home in the
+  4.x layout keeps `~/.config/kanshi/config` and the markers beside it until
+  it is migrated. The monitor for the menu
   goes through `$XDG_RUNTIME_DIR/thinfloe-menu-output`: the menu writes the
   output name there (empty means no choice), `labwc-scale` writes a
   `MoveToOutput` window rule into the composed `rc.xml`, runs
@@ -135,60 +141,65 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   row, "DNS servers", in either wired mode; the Wired band keeps the
   address mode, address and gateway. Empty means the servers DHCP gives
   (none for a fixed address). Filled, up to three IPv4 addresses are one
-  setting for the whole machine: kept in `~/ethernet.yaml` and copied into
-  the WiFi definition of every `~/wifi.yaml` the menu writes, because
-  systemd-resolved queries the DNS servers of all links, and servers set on
-  the wired link alone would still send queries to the WiFi link's DHCP
-  servers. With DHCP both files carry `dhcp4-overrides: {use-dns: false}`
-  and `nameservers` (networkd: `UseDNS=false` and `DNS=` lines); address,
-  gateway and search domains still come from DHCP. A fixed address keeps
-  `dhcp4: false` with `nameservers`. DHCP without servers writes no
-  `~/ethernet.yaml`.
+  setting for the whole machine: kept in `[network]` of `config.toml` and
+  written into `generated/ethernet.yaml` and into the WiFi definition of
+  `generated/wifi.yaml`, because systemd-resolved queries the DNS servers of
+  all links, and servers set on the wired link alone would still send queries
+  to the WiFi link's DHCP servers. With DHCP both files carry
+  `dhcp4-overrides: {use-dns: false}` and `nameservers` (networkd:
+  `UseDNS=false` and `DNS=` lines); address, gateway and search domains still
+  come from DHCP. A fixed address keeps `dhcp4: false` with `nameservers`.
+  DHCP without servers writes no `generated/ethernet.yaml`. The initramfs
+  installs the generated files at every boot (`install_local_network()`);
+  `thinfloe-network apply` puts a change in force at once.
 
-  The servers come from a `~/ethernet.yaml` the menu owns (missing: none).
-  Beside one by hand or one that cannot be read, the row is greyed with that
-  file's servers and "Set by hand in ~/ethernet.yaml.", and `~/wifi.yaml`
-  keeps the servers it has. A menu `~/ethernet.yaml` edited by hand into a
-  form the menu cannot keep (a second address, servers added to DHCP's,
-  more than three servers) counts the same for WiFi; only an edit in the
-  form changes it. With more than three servers the row shows them all and
-  Apply says "DNS servers: up to three IPv4 addresses" until the row holds
-  three or fewer; a hand file with more than three is not offered for
-  take-over. A menu
-  `~/wifi.yaml` that the menu can keep, with networks that all pass the
-  input checks, whose servers differ from the wired ones (after a
-  take-over, or servers set before WiFi got them) makes the tab dirty, and
-  Apply writes the saved wired setting again to bring both in step; the
-  band then says "WiFi uses other DNS servers. Apply sets the ones above." A
-  change of the servers alone rewrites both files; a hand-written
-  `~/wifi.yaml` keeps its own ("WiFi keeps the DNS servers set in
-  ~/wifi.yaml."), as do the template and a file without networks. A
-  rewrite for the servers never drops a network: a saved network that
-  today's checks refuse stops it with that network named, and a menu
-  `~/wifi.yaml` the menu cannot keep stops it with "~/wifi.yaml has
-  settings the menu cannot keep, so the DNS servers cannot be set for
-  WiFi." Netboot shows "A netbooted machine always uses the DNS servers
-  DHCP sends." instead of the row and leaves the servers in `~/wifi.yaml`
-  as they are, since `~/ethernet.yaml` is not installed there.
+  A WiFi or wired file the menu could not fully read at migration (an EAP
+  entry, a form the menu cannot express) is kept verbatim in `[network]`
+  (`kept_wifi`, `kept_wired`). The tab shows it with "Kept from your old
+  settings; the menu cannot change it." and the DNS row is greyed;
+  "Let the menu manage it" replaces it with the menu's own settings when the
+  menu can keep everything in it (same networks, passwords and addressing,
+  with the input checks passed); otherwise it says the kept settings have
+  something the menu cannot keep. WiFi beside a kept wired file keeps the
+  servers it has ("WiFi keeps the DNS servers from your old settings."). An
+  unrenderable converted network file is kept verbatim in the same way.
+  With more than three servers the row shows them all and Apply says "DNS
+  servers: up to three IPv4 addresses" until the row holds three or fewer; a
+  kept file with more than three is not offered for take-over. When WiFi has
+  other servers than the wired connection (after a take-over, or servers set
+  before WiFi got them), the tab is dirty and Apply writes the saved wired
+  setting again to bring both in step; the band then says "WiFi uses other DNS
+  servers. Apply sets the ones above." A change of the servers alone rewrites
+  both files. A rewrite for the servers never drops a network: a saved network
+  that today's checks refuse stops it with that network named.
+
+  Netboot shows "A netbooted machine always uses the DNS servers DHCP sends."
+  instead of the row and "A netbooted machine always uses DHCP." for the wired
+  address. `generated/ethernet.yaml` is not installed there; a `[network]`
+  that carries a stick's fixed address still refuses WiFi changes ("A fixed
+  address cannot be set on netboot."). The menu writes `[network]` only after
+  `thinfloe-network apply` succeeded and puts the old generated files back
+  when it fails.
 
   The parser keeps a file manageable only with `dhcp4-overrides` exactly
   `{use-dns: false}` beside a non-empty `nameservers` on a `dhcp4: true`
   definition, or with neither key. The menu writes its WiFi definition
-  with `dhcp4: true` and `optional: true`, so a `~/wifi.yaml` is manageable
+  with `dhcp4: true` and `optional: true`, so a kept WiFi file is manageable
   only when `dhcp4` is a flag that is true and `optional` is missing or
   true (as `optional` on the wired `eth`); a take-over would otherwise turn
-  DHCP on, or stop boot waiting for the device. A `~/wifi.yaml` with no
-  `wifis` key (the file the menu writes with no adapter or no networks) is
-  manageable, with no device and no networks; a `wifis` key must hold
-  exactly one definition. A hand file without WiFi is so offered for
-  take-over, which writes the menu's file without WiFi. A file with another
-  `network.version` than 2 or another `renderer` than `networkd` counts as
-  by hand, under the menu's header too, and is not offered for take-over:
-  the menu would rewrite it as version 2 for networkd (netplan's defaults,
-  so either key may be left out). A `~/wifi.yaml` with more than three DNS
-  servers is not manageable, as the wired file. On 1080p a full tab scrolls; every
-  control scrolls into reach above the pinned Apply. Guards: the `netfiles`
-  and `network` tests, `every_network_control_scrolls_into_reach`,
+  DHCP on, or stop boot waiting for the device. A file with no `wifis` key
+  is manageable, with no device and no networks; a `wifis` key must hold
+  exactly one definition. Text with another `network.version` than 2 or
+  another `renderer` than `networkd` (for the file or one definition) is
+  not manageable, under the 4.x menu header too: the migration keeps such
+  an old file as written, and "Let the menu manage it" is not offered,
+  since the menu would render it as version 2 for networkd (netplan's
+  defaults, so either key may be left out). WiFi text with more than three
+  DNS servers is not manageable, as the wired one. On 1080p a full tab scrolls; every
+  control scrolls into reach above the pinned Apply. A home in the 4.x layout
+  opens Settings read-only: the Network, Screen and Status tabs are disabled.
+  Guards: the `netfiles` and `network` tests,
+  `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
 
 ## Known limits
