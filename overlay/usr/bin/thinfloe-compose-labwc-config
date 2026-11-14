@@ -118,15 +118,19 @@ merged_environment() {
 # menu would never start to repair it. So the values labwc will read are
 # checked here: "<checker> --check-keyboard <layout> <variant>" prints the
 # lines to append (later wins) or nothing; a failing or missing checker
-# changes nothing. The parse is labwc's (src/config/session.c,
-# process_line): the last line whose key, trimmed, is the name; the value is
-# the text after the first "=", trimmed, quotes kept.
+# changes nothing, and so does one that does not answer within
+# KB_CHECK_TIMEOUT seconds (the profile runs this before labwc: a hang
+# would leave tty1 without a session). The parse is labwc's
+# (src/config/session.c, process_line): the last line whose key, trimmed,
+# is the name; the value is the text after the first "=", trimmed, quotes
+# kept.
 KB_CHECK=${TF_KB_CHECK:-/usr/bin/thinfloe-menu}
+KB_CHECK_TIMEOUT=${TF_KB_CHECK_TIMEOUT:-5}
 check_keyboard() {
     [ -x "$KB_CHECK" ] || return 0
     _kb_l=$(env_value XKB_DEFAULT_LAYOUT "$1")
     _kb_v=$(env_value XKB_DEFAULT_VARIANT "$1")
-    _kb_fix=$("$KB_CHECK" --check-keyboard "$_kb_l" "$_kb_v") || return 0
+    _kb_fix=$(timeout -k 1 "$KB_CHECK_TIMEOUT" "$KB_CHECK" --check-keyboard "$_kb_l" "$_kb_v") || return 0
     [ -n "$_kb_fix" ] || return 0
     printf '# %s: XKB cannot build the keyboard above; replaced by\n%s\n' "$me" "$_kb_fix" >>"$1"
 }

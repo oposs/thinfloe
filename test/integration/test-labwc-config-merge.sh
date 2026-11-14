@@ -296,6 +296,23 @@ else
     bad "failing checker: rc=$rc env=$(cat "$OUT8/environment")"
 fi
 
+# A checker that hangs is stopped and changes nothing: the profile runs the
+# composer before labwc, and a hang would leave tty1 without a session.
+HANGER="$WORK/hanger"
+printf '#!/bin/sh\nexec sleep 8\n' >"$HANGER"
+chmod +x "$HANGER"
+printf 'XKB_DEFAULT_LAYOUT=hangs\n' >"$KBGEN"
+OUT9="$WORK/kb-hangs"
+start=$SECONDS
+TF_KB_CHECK="$HANGER" TF_KB_CHECK_TIMEOUT=1 "$HELPER" "$SYSDIR" "$KBGEN" "$USERENV" "$OUT9" 2>/dev/null; rc=$?
+took=$((SECONDS - start))
+if [[ $rc -eq 0 && $took -lt 5 &&
+      "$(grep XKB_DEFAULT_LAYOUT "$OUT9/environment" | tail -n 1)" == XKB_DEFAULT_LAYOUT=hangs ]]; then
+    ok "a hanging checker is stopped and leaves the environment as composed"
+else
+    bad "hanging checker: rc=$rc took=${took}s env=$(cat "$OUT9/environment" 2>/dev/null)"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - labwc config merge helper"

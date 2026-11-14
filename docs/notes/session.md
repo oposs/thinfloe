@@ -126,7 +126,9 @@ key and value trimmed, quotes kept) and runs
 `thinfloe-menu --check-keyboard <layout> <variant>` (`TF_KB_CHECK` overrides
 the program). It prints the two lines to append when XKB cannot build the
 pair, with the same repair as the menu, and the reason to stderr (the session
-log); a missing or failing checker changes nothing. Both the full composition
+log); a missing or failing checker changes nothing, and so does one that
+has not answered after 5 s (`timeout`; `TF_KB_CHECK_TIMEOUT` overrides the
+seconds). Both the full composition
 and `--env-only` run it. The check takes about 30 ms.
 `test-labwc-runtime.sh` starts labwc with `fr`/`de_nodeadkeys` in the start-up
 environment and asserts that the session runs with `fr` and no variant.
