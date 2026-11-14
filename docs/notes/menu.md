@@ -151,7 +151,10 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   come from DHCP. A fixed address keeps `dhcp4: false` with `nameservers`.
   DHCP without servers writes no `generated/ethernet.yaml`. The initramfs
   installs the generated files at every boot (`install_local_network()`);
-  `thinfloe-network apply` puts a change in force at once.
+  `thinfloe-network apply` puts a change in force at once. With no network
+  left there is no `generated/wifi.yaml`, and the tool removes
+  `/etc/netplan/wifi.yaml`, so the machine leaves the forgotten network at
+  once; an unedited template there still leaves the installed file as it is.
 
   A WiFi or wired file the menu could not fully read at migration (an EAP
   entry, a form the menu cannot express) is kept verbatim in `[network]`

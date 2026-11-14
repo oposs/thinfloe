@@ -12,7 +12,8 @@ Commands:
             "supported"}]}, strongest first, at most 64
   apply    {"result": "ok", "reason": ""}: checks wifi.yaml and
             ethernet.yaml in ~/.config/thinfloe/generated of the user,
-            installs them into /etc/netplan and runs netplan apply
+            installs them into /etc/netplan and runs netplan apply;
+            without a generated wifi.yaml the installed one is removed
 
 Exit 0 on success, 1 on a failure, 2 on misuse. A failure prints
 {"result": "failed", "reason": "..."}. Log lines go to stderr and the journal.
@@ -524,6 +525,18 @@ def install_files(files: dict) -> None:
                 pass
 
 
+def remove_files(names: list) -> None:
+    """Remove each installed file of names from ETC_NETPLAN."""
+    for name in names:
+        try:
+            os.unlink(os.path.join(ETC_NETPLAN, name))
+            log("removed %s" % name)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise NetworkError("cannot remove %s: %s" % (name, e.strerror or e))
+
+
 def apply() -> Tuple[int, str]:
     """(0, "") when installed and applied, else (1, reason). Nothing is
     installed unless the whole set passed netplan generate."""
@@ -539,7 +552,14 @@ def apply() -> Tuple[int, str]:
         wired = read_home_file(os.path.join(gen, "ethernet.yaml"))
         files = {}
         install = []
-        if wifi is not None and not is_template(wifi.decode("utf-8", "replace")):
+        remove = []
+        if wifi is None:
+            # The menu writes no wifi.yaml without networks (the last one
+            # was forgotten): the machine leaves the network it is on.
+            if os.path.lexists(os.path.join(ETC_NETPLAN, "wifi.yaml")):
+                remove.append("wifi.yaml")
+            log("wifi.yaml: none")
+        elif not is_template(wifi.decode("utf-8", "replace")):
             files["wifi.yaml"] = wifi
             install.append("wifi.yaml")
             log("wifi.yaml: from the home")
@@ -563,6 +583,7 @@ def apply() -> Tuple[int, str]:
         check_files(files)
         log("the files passed netplan generate")
         install_files({k: files[k] for k in install})
+        remove_files(remove)
         try:
             rc, out, err = run([NETPLAN, "apply"], APPLY_TIMEOUT)
         except subprocess.TimeoutExpired:

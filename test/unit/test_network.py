@@ -386,6 +386,23 @@ class ApplyTests(Env):
         self.assertEqual(rc, 0)
         self.assertEqual(self.snapshot(), {"ethernet.yaml": WIRED_DEFAULT.encode()})
 
+    def test_apply_without_a_wifi_file_removes_the_installed_one(self):
+        # The last network was forgotten: the menu removed generated/wifi.yaml.
+        (self.etc / "wifi.yaml").write_text(ETC_WIFI)
+        rc, out, _ = self.run_main("apply")
+        self.assertEqual((rc, json.loads(out)), (0, {"result": "ok", "reason": ""}))
+        self.assertEqual(self.snapshot(), {"ethernet.yaml": WIRED_DEFAULT.encode()})
+        # The checked set is the one in force: no WiFi.
+        self.assertEqual(sorted(os.listdir(self.dir / "seen")), ["ethernet.yaml"])
+        self.assertEqual(self.netplan_calls()[-1], "netplan apply")
+
+    def test_apply_keeps_the_installed_wifi_file_when_the_check_fails(self):
+        (self.etc / "wifi.yaml").write_text(ETC_WIFI)
+        (self.dir / "generate-fails").write_text("")
+        rc, _, _ = self.run_main("apply")
+        self.assertEqual(rc, 1)
+        self.assertEqual((self.etc / "wifi.yaml").read_text(), ETC_WIFI)
+
     def test_apply_dhcp_installs_default_copy(self):
         # Automatic: the menu removed ~/ethernet.yaml; an old static file is in /etc.
         (self.etc / "ethernet.yaml").write_text(WIRED_HOME)
