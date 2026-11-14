@@ -97,7 +97,10 @@ merged_environment() {
                     if (substr(k, 1, 1) != "#") {
                         sub(/^export[ \t]+/, "", k)
                         i = index(k, "=")
-                        if (i > 0 && (substr(k, 1, i - 1) in managed)) next
+                        # labwc trims the key: "KEY = v" sets KEY.
+                        key = substr(k, 1, i - 1)
+                        sub(/[ \t]+$/, "", key)
+                        if (i > 0 && (key in managed)) next
                     }
                     print
                 }

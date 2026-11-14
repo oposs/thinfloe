@@ -619,14 +619,18 @@ pub fn to_text(cfg: &ThinfloeConfig) -> String {
 // ---- environment file ----
 
 /// The key of an active `environment` line: after optional leading blanks
-/// and `export `, up to the `=`.
+/// and `export` with blanks, up to the `=`, trailing blanks removed (labwc
+/// trims the key). The rule of `thinfloe-compose-labwc-config`.
 fn env_key(line: &str) -> Option<&str> {
-    let l = line.trim_start();
+    let l = line.trim_start_matches([' ', '\t']);
     if l.starts_with('#') {
         return None;
     }
-    let l = l.strip_prefix("export ").map_or(l, str::trim_start);
-    l.split_once('=').map(|(k, _)| k.trim_end())
+    let l = match l.strip_prefix("export") {
+        Some(rest) if rest.starts_with([' ', '\t']) => rest.trim_start_matches([' ', '\t']),
+        _ => l,
+    };
+    l.split_once('=').map(|(k, _)| k.trim_end_matches([' ', '\t']))
 }
 
 /// The active lines of the user's `environment` whose key is managed.
@@ -638,11 +642,17 @@ pub fn dropped_env_lines(user_env: &str, managed: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Keys of the system `environment` file; the four keyboard keys when it is
-/// missing.
+/// The key names of `/etc/thinfloe/menu-managed-keys`, one per line,
+/// blanks around them removed, comments and empty lines skipped (as the
+/// composer reads it); the four keyboard keys when it is missing.
 pub fn read_managed_keys(path: &Path) -> Vec<String> {
     match crate::bounded::read_text(path, MAX_ENV_BYTES) {
-        Some(t) => t.lines().filter_map(env_key).map(str::to_string).collect(),
+        Some(t) => t
+            .lines()
+            .map(|l| l.trim_matches([' ', '\t', '\r']))
+            .filter(|k| !k.is_empty() && !k.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
         None => DEFAULT_MANAGED.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -934,10 +944,36 @@ mod tests {
     #[test]
     fn managed_keys_come_from_the_file_or_the_default() {
         let dir = crate::testdir::TestDir::new("config", "managed");
-        let f = dir.join("environment");
-        std::fs::write(&f, "# c\n\nXKB_DEFAULT_LAYOUT=us\nXCURSOR_SIZE=24\n").unwrap();
+        let f = dir.join("menu-managed-keys");
+        std::fs::write(&f, "# c\n\nXKB_DEFAULT_LAYOUT\n  XCURSOR_SIZE \t\n").unwrap();
         assert_eq!(read_managed_keys(&f), ["XKB_DEFAULT_LAYOUT", "XCURSOR_SIZE"]);
         assert_eq!(read_managed_keys(&dir.join("missing")), DEFAULT_MANAGED);
+        // The file the image ships, one name per line, as the composer reads it.
+        let shipped = dir.join("shipped");
+        std::fs::write(
+            &shipped,
+            include_str!("../../../overlay/etc/thinfloe/menu-managed-keys"),
+        )
+        .unwrap();
+        let mut got = read_managed_keys(&shipped);
+        got.sort();
+        let mut want = DEFAULT_MANAGED.map(String::from).to_vec();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn dropped_env_lines_trim_the_key_as_labwc_does() {
+        let managed: Vec<String> = DEFAULT_MANAGED.iter().map(|s| s.to_string()).collect();
+        let env = "XKB_DEFAULT_LAYOUT = fr\nexport\tXKB_DEFAULT_VARIANT=oss\nXKB_DEFAULT_OPTIONS\t=x\nexportXKB_DEFAULT_MODEL=y\n";
+        assert_eq!(
+            dropped_env_lines(env, &managed),
+            [
+                "XKB_DEFAULT_LAYOUT = fr",
+                "export\tXKB_DEFAULT_VARIANT=oss",
+                "XKB_DEFAULT_OPTIONS\t=x"
+            ]
+        );
     }
 
     #[test]

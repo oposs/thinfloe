@@ -74,6 +74,7 @@ USERENV="$WORK/user-environment"
 cat >"$USERENV" <<'EOF'
 # a comment line stays
 XKB_DEFAULT_LAYOUT=fr
+XKB_DEFAULT_LAYOUT = fr
   export XKB_DEFAULT_VARIANT=oss
 LABWC_FULLSCREEN_SPAN_OUTPUTS=0
 XCURSOR_THEME=redglass
@@ -151,6 +152,13 @@ if ! grep -q 'XKB_DEFAULT_LAYOUT=fr' "$MERGED_ENV" && ! grep -q 'XKB_DEFAULT_VAR
     ok "managed keys are dropped from the user file"
 else
     bad "a managed key from the user file reached the merged file"
+fi
+
+# labwc trims the key, so a blank before "=" is the same key.
+if ! grep -q 'XKB_DEFAULT_LAYOUT *= *fr' "$MERGED_ENV"; then
+    ok "a managed key with a blank before = is dropped too"
+else
+    bad "a managed key written 'KEY = value' reached the merged file"
 fi
 
 if [[ "$(grep '^XKB_DEFAULT_LAYOUT=' "$MERGED_ENV" | tail -1)" == "XKB_DEFAULT_LAYOUT=de" ]]; then
