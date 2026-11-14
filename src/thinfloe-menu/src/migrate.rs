@@ -583,7 +583,18 @@ pub fn migrate_home(home: &Path, state_dir: &Path, inputs: Inputs, now_epoch: i6
     // every old file in place and the layout legacy.
     atomic::write(&dir.home_version(), HOME_VERSION, 0o644)
         .map_err(|e| format!("{} could not be written: {e}", dir.home_version().display()))?;
-    set_new(state_dir).map_err(|e| format!("{} could not be written: {e}", state_dir.join(LAYOUT_FILE).display()))?;
+    if let Err(e) = set_new(state_dir) {
+        // This boot stays legacy, and the logout save must not archive a
+        // marker that makes the next boot new with the old files in place.
+        let mut why = format!("{} could not be written: {e}", state_dir.join(LAYOUT_FILE).display());
+        if let Err(r) = fs::remove_file(dir.home_version()) {
+            why.push_str(&format!(
+                "; {} could not be removed again: {r}",
+                dir.home_version().display()
+            ));
+        }
+        return Err(why);
+    }
 
     // Step 3: the home is migrated; a file that does not move stays
     // where it was and is no longer read.
@@ -987,6 +998,24 @@ mod tests {
         fs::create_dir_all(h.dir().home_version()).unwrap();
         let r = h.run();
         assert!(r.as_ref().is_err_and(|e| e.contains("home-version")), "{r:?}");
+        assert_eq!(h.text(".thinfloe-environment"), HAND_ENV);
+        assert_eq!(h.text("wifi.yaml"), HAND_WIFI);
+        assert!(!h.exists("cfg-attic"));
+        assert_eq!(h.layout_text(), "legacy\n");
+    }
+
+    #[test]
+    fn a_failed_layout_rewrite_leaves_no_marker() {
+        let h = Home::with_templates("layout-ro");
+        h.put(".thinfloe-environment", HAND_ENV, 0o644);
+        h.put("wifi.yaml", HAND_WIFI, 0o600);
+        // The initramfs could not hand home-layout to tfuser.
+        let layout = h.state.join("home-layout");
+        fs::set_permissions(&layout, fs::Permissions::from_mode(0o444)).unwrap();
+        let r = h.run();
+        fs::set_permissions(&layout, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(r.as_ref().is_err_and(|e| e.contains("home-layout")), "{r:?}");
+        assert!(!h.dir().home_version().exists());
         assert_eq!(h.text(".thinfloe-environment"), HAND_ENV);
         assert_eq!(h.text("wifi.yaml"), HAND_WIFI);
         assert!(!h.exists("cfg-attic"));
