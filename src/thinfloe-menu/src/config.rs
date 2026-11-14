@@ -552,10 +552,53 @@ impl NetworkCfg {
 
 // ---- text ----
 
+/// A TOML error as one line: the line number and the kind of error, never
+/// the text of the line, which can hold a WiFi password. The message goes
+/// to the Settings screen, the menu log and `~/cfg-attic/README`.
+fn parse_error(text: &str, e: &toml::de::Error) -> String {
+    let what = redact_values(&e.message().replace('\n', " "));
+    match e.span() {
+        Some(span) => {
+            let start = span.start.min(text.len());
+            let line = text.as_bytes()[..start].iter().filter(|b| **b == b'\n').count() + 1;
+            format!("config.toml: line {line}: {what}")
+        }
+        None => format!("config.toml: {what}"),
+    }
+}
+
+/// `msg` with the content of every `"…"` or `` `…` `` longer than one
+/// character replaced by `…`: serde names the value it refused there.
+/// Single characters (``expected `=` ``) stay.
+fn redact_values(msg: &str) -> String {
+    let chars: Vec<char> = msg.chars().collect();
+    let mut out = String::with_capacity(msg.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == '"' || c == '`')
+            && let Some(len) = chars[i + 1..].iter().position(|&d| d == c)
+        {
+            out.push(c);
+            if len <= 1 {
+                out.extend(&chars[i + 1..i + 1 + len]);
+            } else {
+                out.push('…');
+            }
+            out.push(c);
+            i += len + 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Reads `config.toml` text. Unknown keys are ignored; an unknown `version`
 /// or a layout or variant that is no XKB name is an error.
 pub fn parse(text: &str) -> Result<ThinfloeConfig, String> {
-    let mut cfg: ThinfloeConfig = toml::from_str(text).map_err(|e| format!("config.toml: {e}"))?;
+    let mut cfg: ThinfloeConfig = toml::from_str(text).map_err(|e| parse_error(text, &e))?;
     if cfg.version != VERSION {
         return Err(format!("config.toml: version {} is not supported", cfg.version));
     }
@@ -701,6 +744,30 @@ mod tests {
         let back = parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         assert_eq!(back, c);
         assert_eq!(back.network.networks[0].password.as_deref(), Some("00012345"));
+    }
+
+    #[test]
+    fn a_parse_error_names_the_line_never_its_text() {
+        let head = "version = 1\n\n[[network.networks]]\nssid = \"Office\"\n";
+        for (broken, line) in [
+            // Cut short inside the password.
+            (format!("{head}password = \"hunter2secret"), 5),
+            // A password written as a number: a type error.
+            (format!("{head}password = 98765432\n"), 5),
+            // A key without a value next to the password.
+            (format!("{head}password = \"hunter2secret\" hunter2secret\n"), 5),
+        ] {
+            let e = parse(&broken).unwrap_err();
+            assert!(!e.contains("hunter2secret"), "{e}");
+            assert!(!e.contains("98765432"), "{e}");
+            assert!(!e.contains('\n'), "{e}");
+            assert!(e.starts_with(&format!("config.toml: line {line}: ")), "{e}");
+        }
+        assert_eq!(redact_values("expected `=`, found `\"`"), "expected `=`, found `\"`");
+        assert_eq!(
+            redact_values("invalid type: string \"abc\""),
+            "invalid type: string \"…\""
+        );
     }
 
     #[test]
