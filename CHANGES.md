@@ -14,7 +14,7 @@
 - `XKB_DEFAULT_*` lines in `~/.config/thinfloe/environment` are ignored, and the Settings screen names each one.
 - A WiFi, wired or monitor file the menu could not fully read, or a WiFi or wired file for another netplan version or renderer, is kept as it was and shown read-only, with "Let the menu manage it" to replace it.
 - When the move of the settings fails at boot, the Settings screen says they stay as they were until the next start, and its Network, Screen and Status tabs show them but take no changes. The move is tried again at every login.
-- A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
+- A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, or reset to the defaults when that folder is empty, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
 
 ### Fixed
 - A keyboard layout and variant XKB cannot combine (for example `fr` with `de_nodeadkeys`) no longer leaves tty1 at "graphical session exited with status 139" after login. The session starts with the layout's default variant instead, or with `us` for a layout the image does not list, and the session log names the replaced value.

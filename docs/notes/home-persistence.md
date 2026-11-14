@@ -111,7 +111,7 @@ A `config.toml` the menu cannot parse is kept as `config.toml.broken-<epoch>`
 and the settings are rebuilt from the files in `generated/` (`[status]` and
 the migration report are not in them and fall back to their defaults). Only
 when `generated/` holds no file at all does the menu start from defaults and
-write them. When a file in `generated/` cannot be read, the store is
+write them; its note then says the settings were reset to the defaults. When a file in `generated/` cannot be read, the store is
 read-only: changes are refused with "The settings are read-only." and a note
 on the Settings screen, because defaults would write an empty
 `generated/wifi.yaml` and the next boot would be offline. An unreadable old

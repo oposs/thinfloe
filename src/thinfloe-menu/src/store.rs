@@ -130,13 +130,14 @@ pub fn open(dir: ConfigDir, inputs: Inputs, mode: OpenMode, now_epoch: i64) -> O
         };
     }
 
-    let (cfg, broken) = match read {
-        Ok(Some(c)) => (c, None),
+    // `rebuilt`: the settings came from generated/, not from defaults.
+    let (cfg, broken, rebuilt) = match read {
+        Ok(Some(c)) => (c, None, false),
         Ok(None) | Err(_) => {
             let broken = read.err();
             match convert::from_generated(&store.dir.generated()) {
-                Ok(Some(c)) => (c, broken),
-                Ok(None) => (ThinfloeConfig::default(), broken),
+                Ok(Some(c)) => (c, broken, true),
+                Ok(None) => (ThinfloeConfig::default(), broken, false),
                 Err(e) => {
                     // Defaults would erase what generated/ still holds
                     // (a default network writes no wifi.yaml): keep
@@ -156,12 +157,17 @@ pub fn open(dir: ConfigDir, inputs: Inputs, mode: OpenMode, now_epoch: i64) -> O
     };
     if let Some(why) = broken {
         let kept = format!("config.toml.broken-{now_epoch}");
+        let then = if rebuilt {
+            "the settings were rebuilt from generated/"
+        } else {
+            "generated/ held nothing to rebuild from, so the settings were reset to the defaults"
+        };
         match fs::rename(store.dir.config_toml(), store.dir.root.join(&kept)) {
             Ok(()) => notes.push(format!(
-                "config.toml could not be read ({why}) and was kept as {kept}; the settings were rebuilt from generated/"
+                "config.toml could not be read ({why}) and was kept as {kept}; {then}"
             )),
             Err(e) => notes.push(format!(
-                "config.toml could not be read ({why}) and could not be kept as {kept} ({e}); the settings were rebuilt from generated/"
+                "config.toml could not be read ({why}) and could not be kept as {kept} ({e}); {then}"
             )),
         }
     }
@@ -470,6 +476,36 @@ mod tests {
         assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
         assert!(o.notes[0].contains("config.toml.broken-1700000000"), "{:?}", o.notes);
         assert!(parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_broken_config_with_an_empty_generated_says_defaults_were_used() {
+        let d = TestDir::new("store", "broken-empty");
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), "garbage[").unwrap();
+        let o = open_session(&d);
+        assert_eq!(o.store.cfg, ThinfloeConfig::default());
+        assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+        assert!(o.notes[0].contains("config.toml.broken-1700000000"), "{:?}", o.notes);
+        assert!(o.notes[0].contains("reset to the defaults"), "{:?}", o.notes);
+        assert!(!o.notes[0].contains("rebuilt"), "{:?}", o.notes);
+    }
+
+    #[test]
+    fn a_broken_config_rebuilt_from_generated_says_so() {
+        let d = TestDir::new("store", "broken-says");
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), "garbage[").unwrap();
+        let body = crate::generated::render(&one_net(), "wifi.yaml", &inputs())
+            .unwrap()
+            .unwrap();
+        put_generated(&d, "wifi.yaml", &body);
+        let o = open_session(&d);
+        assert!(
+            o.notes[0].ends_with("the settings were rebuilt from generated/"),
+            "{:?}",
+            o.notes
+        );
     }
 
     #[test]
