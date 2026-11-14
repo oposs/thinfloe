@@ -170,6 +170,74 @@ else
     fail=1
 fi
 
+# A keyboard apply (the Keyboard tab): the menu rewrites generated/environment,
+# runs 'thinfloe-compose-labwc-config --env-only' and 'labwc --reconfigure'.
+# The session starts with layout us, the script applies ch/de_nodeadkeys with
+# the options of the tab, then prints the layout line of the merged file.
+# This rig has no keyboard device (see the Xwayland note above), so labwc may
+# build no keymap at all and "no keymap error" would pass whatever the menu
+# writes. A control run with a keymap XKB cannot build (fr/de_nodeadkeys)
+# decides: only when the control makes labwc print the error does the keymap
+# assertion count; otherwise it is reported as a skip.
+kb_run() {
+    local first_layout=$1 first_variant=$2 name=$3 out rc
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e KB_FIRST_LAYOUT="$first_layout" \
+        -e KB_FIRST_VARIANT="$first_variant" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               mkdir -p /tmp/kb/gen /tmp/kb/out && : >/tmp/kb/user &&
+               { echo "XKB_DEFAULT_LAYOUT=$KB_FIRST_LAYOUT";
+                 [ -z "$KB_FIRST_VARIANT" ] || echo "XKB_DEFAULT_VARIANT=$KB_FIRST_VARIANT"; } >/tmp/kb/gen/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out &&
+               cat >/tmp/kb/session.sh <<"EOS"
+sleep 2
+echo APPLY-START
+printf "%s\n" XKB_DEFAULT_LAYOUT=ch XKB_DEFAULT_VARIANT=de_nodeadkeys \
+    XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps >/tmp/kb/gen/environment
+thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out
+labwc --reconfigure
+sleep 1
+echo "MERGED $(grep "^XKB_DEFAULT_LAYOUT=" /tmp/kb/out/environment | tail -1)"
+EOS
+               labwc -C /tmp/kb/out -S "sh /tmp/kb/session.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during keyboard apply test)" >&2
+        echo "$out" >&2
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    printf '%s\n' "$out"
+}
+
+kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$") || exit 1
+kb_out=$(kb_run us "" "thinfloe-runtime-test-kb-$$") || exit 1
+
+if echo "$kb_out" | grep -qx 'MERGED XKB_DEFAULT_LAYOUT=ch'; then
+    echo "ok   - a keyboard apply reaches labwc's environment"
+else
+    echo "FAIL - the merged environment lacks XKB_DEFAULT_LAYOUT=ch after the apply"
+    echo "$kb_out"
+    fail=1
+fi
+if echo "$kb_control" | grep -q 'failed to create xkb keymap'; then
+    # Only output after the apply counts.
+    if echo "$kb_out" | sed -n '/^APPLY-START$/,$p' | grep -q 'failed to create xkb keymap'; then
+        echo "FAIL - labwc could not build the new keymap"
+        echo "$kb_out"
+        fail=1
+    else
+        echo "ok   - labwc built the new keymap"
+    fi
+else
+    echo "skip - labwc builds no keymap without a keyboard device (headless rig)"
+fi
+
 # thinfloe-menu is a native Wayland client, so x11-probe cannot see it; it
 # prints its own configure size under TF_MENU_DEBUG. One output, so the
 # maximized grid must get all of it. timeout ends the menu after 10s: exit
