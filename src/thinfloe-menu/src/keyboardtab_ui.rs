@@ -42,7 +42,7 @@ pub fn keyboard_tab(ui: &mut Ui, tab: &KeyboardTab, width: f32) -> Option<KbEven
             // The only place a failed apply shows: directly under the card.
             if let Some(note) = &tab.note {
                 ui.add_space(GAP / 2.0);
-                ui.add(egui::Label::new(RichText::new(note).color(t.palette().muted_foreground)).truncate());
+                ui.add(egui::Label::new(RichText::new(note).color(t.palette().muted_foreground)).wrap());
             }
             ui.add_space(GAP);
             card(ui, &mut |ui| {

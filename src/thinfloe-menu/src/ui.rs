@@ -3335,16 +3335,20 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
-                    crate::settings::SettingsTab::Keyboard => (
-                        (1920.0, 1080.0),
-                        &[
-                            "Layout",
-                            "Variant",
-                            "CapsLock acts as Ctrl",
-                            "Compose key",
-                            "Try it here",
-                        ],
-                    ),
+                    crate::settings::SettingsTab::Keyboard => {
+                        // With the layout list loaded, as on a real machine.
+                        menu.keyboard = keyboard_menu().keyboard;
+                        (
+                            (1280.0, 720.0),
+                            &[
+                                "Layout",
+                                "Variant",
+                                "CapsLock acts as Ctrl",
+                                "Compose key",
+                                "Try it here",
+                            ],
+                        )
+                    }
                     crate::settings::SettingsTab::Status => {
                         menu.set_status_layout(crate::status::Area::shipped().layout);
                         (
@@ -3528,10 +3532,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_tab_shows_its_rows() {
-        // The small size scrolls: only the first row is certain to show.
-        let small = text_rects(&settings_shapes(&keyboard_menu(), 1280.0, 720.0));
-        assert!(small.iter().any(|(t, _)| t == "Layout"), "{small:?}");
-        for size in [(1920.0, 1080.0)] {
+        for size in [(1920.0, 1080.0), (1280.0, 720.0)] {
             let texts = text_rects(&settings_shapes(&keyboard_menu(), size.0, size.1));
             let at = |what: &str| {
                 texts
@@ -3580,6 +3581,25 @@ mod tests {
             note.top() > compose.bottom() && note.bottom() < try_it.top(),
             "{note:?}"
         );
+    }
+
+    #[test]
+    fn a_long_keyboard_note_wraps_instead_of_being_cut() {
+        let error = "labwc --reconfigure failed (1): the compositor refused the new keyboard settings \
+                     and kept the old ones, so nothing changed on this machine until the next start";
+        let mut menu = keyboard_menu();
+        menu.keyboard.note = Some(error.into());
+        let texts = text_rects(&settings_shapes(&menu, 1280.0, 720.0));
+        // One galley holding the whole text, on more than one row.
+        let note = texts
+            .iter()
+            .find(|(t, _)| t == error)
+            .unwrap_or_else(|| panic!("the note is cut: {texts:?}"))
+            .1;
+        let line = texts.iter().find(|(t, _)| t == "Layout").unwrap().1.height();
+        assert!(note.height() > line * 1.5, "one line: {note:?}");
+        // Card 2 follows below the note (it scrolls into view at this size).
+        assert!(note.max.y < 720.0 && note.max.x <= 1280.0, "{note:?}");
     }
 
     #[test]
