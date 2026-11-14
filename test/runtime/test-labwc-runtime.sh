@@ -172,33 +172,36 @@ fi
 
 # A keyboard apply (the Keyboard tab): the menu rewrites generated/environment,
 # runs 'thinfloe-compose-labwc-config --env-only' and 'labwc --reconfigure'.
-# The session starts with layout us, the script applies ch/de_nodeadkeys with
-# the options of the tab, then prints the layout line of the merged file.
-# This rig has no keyboard device (see the Xwayland note above), so labwc may
-# build no keymap at all and "no keymap error" would pass whatever the menu
-# writes. A control run with a keymap XKB cannot build (fr/de_nodeadkeys)
-# decides: only when the control makes labwc print the error does the keymap
-# assertion count; otherwise it is reported as a skip.
+# The session starts with layout us, the script applies the given layout and
+# variant with the options of the tab, then prints the layout line of the
+# merged file. This rig has no keyboard device (see the Xwayland note above),
+# so labwc may build no keymap at all and "no keymap error" would pass whatever
+# the menu writes. A control run applies a keymap XKB cannot build
+# (fr/de_nodeadkeys) through the same sequence: only when labwc prints
+# 'failed to create xkb keymap' after the apply can the rig see keymap errors
+# and the keymap assertion counts; otherwise it is reported as a skip. (A bad
+# pair in the STARTUP environment would not do: labwc then dies before the
+# session script runs.)
 kb_run() {
-    local first_layout=$1 first_variant=$2 name=$3 out rc
+    local layout=$1 variant=$2 name=$3 out rc
     out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
         -e WLR_BACKENDS=headless \
         -e WLR_HEADLESS_OUTPUTS=1 \
         -e WLR_RENDERER=pixman \
         -e XDG_RUNTIME_DIR=/tmp/xdg \
-        -e KB_FIRST_LAYOUT="$first_layout" \
-        -e KB_FIRST_VARIANT="$first_variant" \
+        -e KB_LAYOUT="$layout" \
+        -e KB_VARIANT="$variant" \
         "$IMAGE" \
         sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
                mkdir -p /tmp/kb/gen /tmp/kb/out && : >/tmp/kb/user &&
-               { echo "XKB_DEFAULT_LAYOUT=$KB_FIRST_LAYOUT";
-                 [ -z "$KB_FIRST_VARIANT" ] || echo "XKB_DEFAULT_VARIANT=$KB_FIRST_VARIANT"; } >/tmp/kb/gen/environment &&
+               echo XKB_DEFAULT_LAYOUT=us >/tmp/kb/gen/environment &&
                thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out &&
                cat >/tmp/kb/session.sh <<"EOS"
 sleep 2
 echo APPLY-START
-printf "%s\n" XKB_DEFAULT_LAYOUT=ch XKB_DEFAULT_VARIANT=de_nodeadkeys \
-    XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps >/tmp/kb/gen/environment
+{ echo "XKB_DEFAULT_LAYOUT=$KB_LAYOUT"
+  echo "XKB_DEFAULT_VARIANT=$KB_VARIANT"
+  echo XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps; } >/tmp/kb/gen/environment
 thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out
 labwc --reconfigure
 sleep 1
@@ -213,10 +216,21 @@ EOS
         exit 1
     fi
     printf '%s\n' "$out"
+    return "$rc"
 }
 
-kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$") || exit 1
-kb_out=$(kb_run us "" "thinfloe-runtime-test-kb-$$") || exit 1
+# Output after the apply only: the lines before it belong to the start.
+after_apply() { sed -n '/^APPLY-START$/,$p'; }
+
+kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$")
+kb_control_rc=$?
+kb_out=$(kb_run ch de_nodeadkeys "thinfloe-runtime-test-kb-$$")
+kb_rc=$?
+for rc_name in kb_control_rc kb_rc; do
+    if [[ ${!rc_name} -ne 0 ]]; then
+        echo "info - ${rc_name#kb_} of the keyboard apply run: ${!rc_name} (labwc ended with a non-zero status)"
+    fi
+done
 
 if echo "$kb_out" | grep -qx 'MERGED XKB_DEFAULT_LAYOUT=ch'; then
     echo "ok   - a keyboard apply reaches labwc's environment"
@@ -225,9 +239,8 @@ else
     echo "$kb_out"
     fail=1
 fi
-if echo "$kb_control" | grep -q 'failed to create xkb keymap'; then
-    # Only output after the apply counts.
-    if echo "$kb_out" | sed -n '/^APPLY-START$/,$p' | grep -q 'failed to create xkb keymap'; then
+if echo "$kb_control" | after_apply | grep -q 'failed to create xkb keymap'; then
+    if echo "$kb_out" | after_apply | grep -q 'failed to create xkb keymap'; then
         echo "FAIL - labwc could not build the new keymap"
         echo "$kb_out"
         fail=1
