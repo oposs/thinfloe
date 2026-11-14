@@ -16,19 +16,24 @@ This note covers the running session: startup, the per-machine user files, the l
 ## Session startup and the per-machine user files
 
 - Session startup: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`
-- **Per-machine user customisation:** `overlay/home/tfuser/.thinfloe-sessionrc`: the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. The normal way to arrange monitors is Settings → Screen (see "Monitor arrangement" in [menu.md](menu.md)). For a layout the tab cannot express, **`wlr-randr` replaces `xrandr`** here (`--output DP-1 --transform 90 --pos 1920,0`), and `kanshi` is available for layouts that must survive hotplug or DPMS wake; a `kanshi` started here makes the session start no second one. It must run before `tlclient`, because the client reads the monitor layout once at startup.
-  It is also where screen blanking is tuned: `TF_IDLE_TIMEOUT=<seconds>` (default `300`, `0` disables blanking entirely) is read by `thinfloe-session` right after this file is sourced.
+- **Where the settings live:** everything the menu manages is in `~/.config/thinfloe/config.toml`, written only by the menu; the session reads the files the menu derives from it in `~/.config/thinfloe/generated/`. The layout table, the `home-layout` rule and the migration of a 4.x home are in [home-persistence.md](home-persistence.md). The two files below are the only ones a person edits by hand.
+- **Per-machine user customisation:** `~/.config/thinfloe/sessionrc` (a comment-only template in `overlay/home/tfuser/.config/thinfloe/sessionrc`): the Wayland replacement for `~/.xsessionrc`. Sourced by `thinfloe-session` after the home restore and before the menu, and so before any tile starts `tlclient`. Because it lives in `$HOME` it is captured by `save-home` and restored each boot, so a user can configure an individual machine without rebuilding the image. The monitor arrangement is set in Settings → Screen (see "Monitor arrangement" in [menu.md](menu.md)). For a layout the tab cannot express, **`wlr-randr` replaces `xrandr`** here (`--output DP-1 --transform 90 --pos 1920,0`); a `kanshi` started here makes the session start no second one. It must run before `tlclient`, because the client reads the monitor layout once at startup.
+  Screen blanking is not set here: `TF_IDLE_TIMEOUT` is no longer read from this file. The timeout is `[screen]` in `config.toml`, set on the Screen tab; `thinfloe-session` reads `generated/screen` (`idle_timeout=<seconds>`, default `300`, `0` never).
 
-- **Per-machine user environment:** `overlay/home/tfuser/.thinfloe-environment`: variables the compositor reads at **startup**: keyboard layout (`XKB_DEFAULT_*`) and cursor theme. Sourced by `overlay/etc/profile.d/10-thinfloe-session.sh` after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
+- **Per-machine user environment:** `~/.config/thinfloe/environment` (template in `overlay/home/tfuser/.config/thinfloe/environment`): variables the compositor reads at **startup**, such as the cursor theme, `TZ=` and `LABWC_FULLSCREEN_SPAN_OUTPUTS`. The keyboard (`XKB_DEFAULT_*`) comes from `generated/environment`, written by the menu; `XKB_DEFAULT_*` lines in the user file are dropped by the composer (the keys are listed in `/etc/thinfloe/menu-managed-keys`) and the Settings screen names each one. `overlay/etc/profile.d/10-thinfloe-session.sh` sources the merged result after `/etc/thinfloe/labwc/environment`, so the user's value wins. Also persisted via `save-home`.
 
   | variable | default | effect |
   | --- | --- | --- |
   | `LABWC_FULLSCREEN_SPAN_OUTPUTS` | `1` | fullscreen Xwayland windows (the ThinLinc client) span every monitor |
 
-  A per-machine override in `~/.thinfloe-environment` **works**, including for
+  A per-machine override in `~/.config/thinfloe/environment` **works**, including for
   keys also set in `/etc/thinfloe/labwc/environment` - `LABWC_FULLSCREEN_SPAN_OUTPUTS`
-  above and the pre-existing `XKB_DEFAULT_*` / `XCURSOR_*` keyboard and cursor
-  overrides. This is not as simple as it looks: labwc's
+  above and the `XCURSOR_*` cursor overrides.
+  A home still in the 4.x layout (`home-layout` says `legacy`, see
+  [home-persistence.md](home-persistence.md)) uses `~/.thinfloe-environment`
+  and `~/.thinfloe-sessionrc` as before until the migration has run.
+
+  This is not as simple as it looks: labwc's
   `session_environment_init()` (`src/config/session.c:77`) calls
   `setenv(key, value, 1)` - overwrite - and, run with `-C`, treats
   `<config_dir>/environment` as the *only* environment file it reads
@@ -39,7 +44,7 @@ This note covers the running session: startup, the per-machine user files, the l
   The fix, `overlay/usr/bin/thinfloe-compose-labwc-config`, composes a
   merged config directory at session start - the system dir's files
   symlinked in unchanged, plus an `environment` file that is the system
-  defaults followed by the user's file - and points `-C` at that instead, so
+  defaults, then `generated/environment`, then the user's file - and points `-C` at that instead, so
   the file labwc re-reads already has the user's values last (and therefore
   winning, since labwc's `setenv` on a later duplicate overwrites the
   earlier one - `test/runtime/test-labwc-runtime.sh` asserts this against
@@ -51,7 +56,7 @@ This note covers the running session: startup, the per-machine user files, the l
   real labwc).
 
   **Confirmed on hardware (2026-07-27):** an `XKB_DEFAULT_*` override in
-  `~/.thinfloe-environment` takes effect, which is what the merge exists to
+  the 4.x `~/.thinfloe-environment` took effect, which is what the merge exists to
   make possible - before it, that documented feature had never worked. The
   session also starts normally, i.e. the merged config dir is used without
   needing its fallback. Not separately exercised: setting
@@ -63,23 +68,77 @@ This note covers the running session: startup, the per-machine user files, the l
 
   | file | sourced | for |
   | --- | --- | --- |
-  | `~/.thinfloe-environment` | before the compositor starts | variables read at startup: keyboard, cursor |
-  | `~/.thinfloe-sessionrc` | inside the running session | commands needing a compositor: `wlr-randr`, `kanshi`, netplan |
+  | `~/.config/thinfloe/environment` | before the compositor starts | variables read at startup: cursor, `TZ=` |
+  | `~/.config/thinfloe/sessionrc` | inside the running session | commands needing a compositor: `wlr-randr`, `kanshi` |
 
   This is why the home restore happens in the **initramfs** rather than
-  inside the session: a user's saved `.thinfloe-environment` has to be on disk
+  inside the session: a user's saved `generated/environment` and `environment` have to be on disk
   before the compositor reads `XKB_DEFAULT_*`. Restoring home inside the
   session would make a user keyboard change take effect only on the *next*
   boot. Do not move the restore into `thinfloe-session`, and do not move it
   back into `10-thinfloe-session.sh` either: `thinfloe-ssh-hostkeys` now needs
   the home directory before `multi-user.target`.
 
-  Note the deliberate split from system config: user-editable settings live in `$HOME`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not**; see [Standing Constraints](../../CLAUDE.md#standing-constraints).
+  Note the deliberate split from system config: user settings live in `~/.config/thinfloe`, but `overlay/etc/thinfloe/labwc/rc.xml` does **not**; see [Standing Constraints](../../CLAUDE.md#standing-constraints).
 - Autologin: `overlay/etc/systemd/system/getty@tty1.service`, a whole unit
   running `login -f tfuser` (see [Standing Constraints](history-of-constraints.md#tty1-does-not-wait-for-plymouth-the-session-ends-it))
-- User defaults: `overlay/home/tfuser/`
+- User defaults: `overlay/home/tfuser/` (`.config/thinfloe/environment`, `sessionrc`, `home-version`, `.thinlinc/tlclient.conf`)
 
 After modifying overlay files, rebuild with `make image`.
+
+## Keyboard change in the running session
+
+The Keyboard tab of the Settings screen (`jobs::keyboard_apply`, in
+`src/thinfloe-menu/src/`) applies a change without a restart, in one job:
+`config.toml` (`[keyboard]`, written by the store) -> `generated/environment`
+(`XKB_DEFAULT_LAYOUT`, `_VARIANT`, `_OPTIONS`) ->
+`thinfloe-compose-labwc-config --env-only` (rewrites only the merged
+`environment` in `$XDG_RUNTIME_DIR/thinfloe-labwc`) -> `labwc --reconfigure`.
+Only one apply runs at a time.
+
+The full composition stays at session start. The composed directory holds
+copies that `labwc-scale` made of `rc.xml` and `themerc-override`; a full
+rebuild during the session would wipe the scaled copies, so `--env-only`
+leaves everything but `environment` alone.
+
+`test/runtime/test-labwc-runtime.sh` runs this sequence against the real
+labwc: start with `us`, apply `ch`/`de_nodeadkeys`, and assert the merged
+`environment` carries the new layout. It cannot show that labwc builds the
+keymap: the headless rig has no keyboard device (see the Xwayland note in that
+script), so labwc builds no keymap and prints no error whatever the menu
+writes. A control run applies a pair XKB cannot build (`fr`/`de_nodeadkeys`)
+through the same sequence, with the composer's keyboard check turned off
+(`TF_KB_CHECK=/nonexistent`); only if labwc then prints
+`failed to create xkb keymap` can the rig see keymap errors, and only then
+does the keymap assertion count. On this rig the control prints nothing, so
+the assertion is reported as a skip. (The bad pair must not go into the
+start-up environment: labwc then prints the error but crashes before the
+session script runs.)
+
+### Keyboard check before labwc starts
+
+labwc reads the composed `environment` before the menu runs, so a value the
+menu wrote when it was valid can still crash it (status 139) after an upgrade
+changes the XKB layout list, and the menu then never starts to repair it.
+`thinfloe-compose-labwc-config` therefore reads `XKB_DEFAULT_LAYOUT` and
+`XKB_DEFAULT_VARIANT` from the merged file the way labwc does (last line wins,
+key and value trimmed, quotes kept) and runs
+`thinfloe-menu --check-keyboard <layout> <variant>` (`TF_KB_CHECK` overrides
+the program). It prints the two lines to append when XKB cannot build the
+pair, with the same repair as the menu, and the reason to stderr (the session
+log); a missing or failing checker changes nothing, and so does one that
+has not answered after 5 s (`timeout`; `TF_KB_CHECK_TIMEOUT` overrides the
+seconds). Both the full composition
+and `--env-only` run it. The check takes about 30 ms.
+`test-labwc-runtime.sh` starts labwc with `fr`/`de_nodeadkeys` in the start-up
+environment and asserts that the session runs with `fr` and no variant.
+
+### Left to verify on hardware
+
+- The new keymap reaches the menu and other Wayland clients at once.
+- An open ThinLinc client follows the new layout. If it does not, the note on
+  the Keyboard tab becomes "ThinLinc picks up the change when it starts
+  again" and the result is recorded here.
 
 ## Screen blanking had to be rebuilt after the X11 removal
 
@@ -111,7 +170,7 @@ default. Two decisions are deliberate:
 Known consequence: the ThinLinc client is an X11 app under Xwayland and cannot
 send an idle inhibit, so a long video inside the remote session with no local
 input blanks the local screen. Any keypress restores it. Raise
-`TF_IDLE_TIMEOUT` in `~/.thinfloe-sessionrc` where that matters.
+the timeout on the Settings Screen tab where that matters.
 
 `test/integration/test-session-packages.sh` guards both halves - the two labwc
 protocols, the presence of `swayidle`/`wlopm`, that `thinfloe-session` starts the

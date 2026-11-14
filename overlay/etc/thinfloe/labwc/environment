@@ -20,7 +20,7 @@ XCURSOR_SIZE=24
 
 # Make fullscreen Xwayland windows (the ThinLinc client) cover every monitor
 # instead of one. Requires the local labwc patch; harmless on a stock labwc,
-# which ignores the variable. Set to 0 in ~/.thinfloe-environment for
+# which ignores the variable. Set to 0 in ~/.config/thinfloe/environment for
 # single-monitor fullscreen on a particular machine - that file is sourced
 # after this one and is persisted by save-home.
 #

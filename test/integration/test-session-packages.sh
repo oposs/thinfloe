@@ -5,6 +5,9 @@
 
 set -uo pipefail
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 SQSH="${1:-artifacts/rootfs/ramroot.sqsh}"
 
 if [[ ! -f "$SQSH" ]]; then
@@ -766,15 +769,34 @@ else
     fail=1
 fi
 
-# The default home must carry the 4.0 home marker. Without it a home saved
-# from it lists no marker, and every boot would treat it as a 3.x home.
-MARKER="$DPKG_TMP/hv/home/tfuser/.thinfloe-home-version"
+# The default home must carry the new-layout marker. Without it a home saved
+# from it lists no marker, and every boot would treat it as an old home.
+MARKER="$DPKG_TMP/hv/home/tfuser/.config/thinfloe/home-version"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/hv" "$SQSH" \
-        home/tfuser/.thinfloe-home-version >/dev/null 2>&1 &&
-   [[ -f "$MARKER" && "$(cat "$MARKER")" == "1" ]]; then
-    echo "ok   - the default home carries ~/.thinfloe-home-version 1"
+        home/tfuser/.config/thinfloe/home-version >/dev/null 2>&1 &&
+   [[ -f "$MARKER" && "$(cat "$MARKER")" == "2" ]]; then
+    echo "ok   - the default home carries ~/.config/thinfloe/home-version 2"
 else
-    echo "FAIL - the default home has no ~/.thinfloe-home-version holding 1"
+    echo "FAIL - the default home has no ~/.config/thinfloe/home-version holding 2"
+    fail=1
+fi
+
+# The rest of the default home is in the new layout too: the environment and
+# the sessionrc under ~/.config/thinfloe, and none of the 4.x files.
+present "default home environment"  'home/tfuser/\.config/thinfloe/environment$'
+present "default home sessionrc"    'home/tfuser/\.config/thinfloe/sessionrc$'
+for old in .thinfloe-environment .thinfloe-sessionrc .thinfloe-home-version wifi.yaml; do
+    absent "default home $old" "home/tfuser/${old//./\\.}\$"
+done
+
+# The keys the menu manages: the composer drops them from the user's file.
+MK="$DPKG_TMP/mk/etc/thinfloe/menu-managed-keys"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/mk" "$SQSH" etc/thinfloe/menu-managed-keys >/dev/null 2>&1 &&
+   [[ "$(grep -v '^#' "$MK" | grep -v '^$' | sort | tr '\n' ' ')" == \
+      "XKB_DEFAULT_LAYOUT XKB_DEFAULT_MODEL XKB_DEFAULT_OPTIONS XKB_DEFAULT_VARIANT " ]]; then
+    echo "ok   - /etc/thinfloe/menu-managed-keys lists the four XKB keys"
+else
+    echo "FAIL - /etc/thinfloe/menu-managed-keys does not list exactly the four XKB keys"
     fail=1
 fi
 
@@ -874,6 +896,17 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/upg" "$SQSH" usr/bin/thinfloe-upgrade >/d
         echo "FAIL - home copy does not exclude ./.thinfloe-ssh-host-keys (two machines would share a host key)"
         fail=1
     fi
+    for _p in './.config/thinfloe/ssh-host-keys' './.config/thinfloe/wg0.conf' \
+              './cfg-attic/.thinfloe-ssh-host-keys' './cfg-attic/.dbrrg-ssh-host-keys' \
+              './cfg-attic/wg0.conf' './cfg-attic/.thinfloe-password' \
+              './cfg-attic/.save-home-exclude'; do
+        if grep -qF "\"$_p\"" "$UPG"; then
+            echo "ok   - home copy excludes $_p"
+        else
+            echo "FAIL - home copy does not exclude $_p"
+            fail=1
+        fi
+    done
     if grep -q '"./wg0.conf"' "$UPG"; then
         echo "ok   - home copy excludes wg0.conf"
     else
@@ -1095,6 +1128,18 @@ if unsquashfs -no-xattrs -d "$PB" "$SQSH" \
     fi
 else
     echo "FAIL - cannot extract the battery units from $SQSH"
+    fail=1
+fi
+
+# The Keyboard tab reads the layout list from xkb-data; named in the Dockerfile.
+# usr/share/X11/xkb is a link to ../xkeyboard-config-2; without
+# -follow-symlinks unsquashfs extracts nothing and still exits 0.
+if unsquashfs -no-xattrs -follow-symlinks -d "$DPKG_TMP/xkb" "$SQSH" usr/share/X11/xkb/rules/evdev.xml >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml" ]] &&
+   [[ $(stat -c %s "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml") -gt 102400 ]]; then
+    echo "ok   - the image has the XKB registry"
+else
+    echo "FAIL - /usr/share/X11/xkb/rules/evdev.xml is missing or under 100 kB"
     fail=1
 fi
 

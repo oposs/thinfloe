@@ -53,7 +53,8 @@ setup() {
     mkdir -p "$WORK/run"
     : >"$WORK/calls"
     : >"$WORK/home-env"
-    "$COMPOSE" "$SYSDIR" "$WORK/home-env" "$WORK/run/thinfloe-labwc"
+    : >"$WORK/gen-env"
+    "$COMPOSE" "$SYSDIR" "$WORK/gen-env" "$WORK/home-env" "$WORK/run/thinfloe-labwc"
 }
 
 # run [--wait N]: run the helper once (--once); stderr in $WORK/err, status in $rc.
@@ -98,6 +99,16 @@ diff <(grep -v '<font' "$D/rc.xml") <(grep -v '<font' "$SYSDIR/rc.xml") >/dev/nu
     && ok "scale 2: only font lines differ" || bad "scale 2: other lines differ"
 [[ $(cksum "$SYSDIR/rc.xml" "$SYSDIR/themerc-override") == "$sums" ]] \
     && ok "system files untouched" || bad "system files changed"
+
+# A keyboard apply rewrites only environment: the scaled copies stay.
+theme_before=$(cksum <"$D/themerc-override")
+echo 'XKB_DEFAULT_LAYOUT=ch' >"$WORK/gen-env"
+"$COMPOSE" --env-only "$SYSDIR" "$WORK/gen-env" "$WORK/home-env" "$D"; erc=$?
+[[ $erc -eq 0 && -f $D/rc.xml && ! -L $D/rc.xml && ! -L $D/themerc-override &&
+   $(grep -c '<font place=.*size="20"' "$D/rc.xml") -eq 2 &&
+   $(cksum <"$D/themerc-override") == "$theme_before" &&
+   $(grep '^XKB_DEFAULT_LAYOUT=' "$D/environment" | tail -1) == "XKB_DEFAULT_LAYOUT=ch" ]] \
+    && ok "scale 2 survives a keyboard apply" || bad "scale 2 survives a keyboard apply (rc=$erc)"
 
 # --- 2.25 ----------------------------------------------------------------
 setup; echo 2.25 >"$WORK/scale"; run --wait 2

@@ -1,0 +1,6 @@
+# Set by the menu's Keyboard tab (Settings -> Keyboard). Lines for these
+# keys in ~/.config/thinfloe/environment are ignored.
+XKB_DEFAULT_LAYOUT
+XKB_DEFAULT_VARIANT
+XKB_DEFAULT_OPTIONS
+XKB_DEFAULT_MODEL

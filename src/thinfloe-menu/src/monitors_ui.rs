@@ -6,8 +6,7 @@
 use crate::brand::{self, role};
 use crate::heads::{Mode, Rotation};
 use crate::kanshi::{self, OutputSet, Place, Profile, Side};
-use crate::monitors::{MonEvent, MonTab};
-use crate::owned::Owner;
+use crate::monitors::{MonEvent, MonSource, MonTab};
 use crate::ui::{self, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT};
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, vec2};
 use shadcn_egui::Theme;
@@ -38,7 +37,7 @@ const ROTATIONS: [Rotation; 4] = [Rotation::Normal, Rotation::R90, Rotation::R18
 const ROTATION_LABELS: [&str; 4] = ["Normal", "90°", "180°", "270°"];
 const SIDES: [Side; 4] = [Side::LeftOf, Side::RightOf, Side::Above, Side::Below];
 const SIDE_LABELS: [&str; 4] = ["Left of", "Right of", "Above", "Below"];
-const HAND_LINE: &str = "The monitor arrangement is set by hand in ~/.config/kanshi/config.";
+const HAND_LINE: &str = "The monitor arrangement is a kanshi file written by hand, which the menu keeps as it is.";
 const THINLINC_NOTE: &str = "ThinLinc uses the new arrangement from its next start.";
 
 /// *Keep this arrangement?* is up; only it is drawn, over the frozen and
@@ -160,7 +159,7 @@ pub fn monitors_band(ui: &mut Ui, mon: &MonTab, now: Instant, width: f32) -> Opt
                 muted(ui, &t, "Looking for monitors…");
                 return;
             };
-            let hand = mon.owner() == Owner::ByHand;
+            let hand = mon.source() == MonSource::Kept;
             if let Some(c) = arrangement(ui, &t, mon, layout, !hand) {
                 event = Some(MonEvent::Select(c));
             }
@@ -189,7 +188,7 @@ pub fn monitors_footer(ui: &mut Ui, mon: &MonTab) -> Option<MonEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
     if let Some(layout) = mon.layout()
-        && mon.owner() != Owner::ByHand
+        && mon.source() != MonSource::Kept
     {
         if mon.thinlinc_note() {
             muted(ui, &t, THINLINC_NOTE);

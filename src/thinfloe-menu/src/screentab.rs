@@ -1,12 +1,9 @@
 //! The screen settings: how long the session idles before the displays
-//! power off, kept in `~/.config/thinfloe/screen`.
+//! power off, kept in the `[screen]` table of `config.toml`.
 
-use crate::owned::{self, Owner};
+use crate::config::ScreenCfg;
 use std::ffi::OsStr;
-use std::path::Path;
 
-/// Relative to $HOME.
-pub const SCREEN_FILE: &str = ".config/thinfloe/screen";
 /// Five minutes.
 pub const DEFAULT_IDLE: u32 = 300;
 /// A day; a bigger number is a typo, not a wish.
@@ -14,23 +11,9 @@ pub const MAX_IDLE: u32 = 86400;
 /// What the select offers, in seconds. 0 is never.
 pub const CHOICES: [u32; 8] = [0, 60, 120, 300, 600, 900, 1800, 3600];
 
-/// Who decides the idle time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdleSource {
-    /// The session profile sets it; the select is disabled.
-    Rc,
-    /// The menu wrote the file.
-    Menu,
-    /// Somebody wrote the file by hand; the menu leaves it alone.
-    ByHand,
-    /// No file yet.
-    Unset,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenTab {
     pub idle: u32,
-    pub source: IdleSource,
     pub error: Option<String>,
 }
 
@@ -38,9 +21,16 @@ impl Default for ScreenTab {
     fn default() -> ScreenTab {
         ScreenTab {
             idle: DEFAULT_IDLE,
-            source: IdleSource::Unset,
             error: None,
         }
+    }
+}
+
+/// The tab for the settings in `config.toml`.
+pub fn from_config(c: &ScreenCfg) -> ScreenTab {
+    ScreenTab {
+        idle: c.idle_timeout,
+        error: None,
     }
 }
 
@@ -56,49 +46,6 @@ pub fn parse_idle(text: &str) -> Option<u32> {
         return None;
     }
     value.parse().ok().filter(|&n| n <= MAX_IDLE)
-}
-
-/// The settings found at `path`. `rc` is the idle time the session profile
-/// sets; it wins over the file.
-pub fn load(path: &Path, rc: Option<u32>) -> ScreenTab {
-    let mut tab = ScreenTab::default();
-    if let Some(idle) = rc {
-        tab.source = IdleSource::Rc;
-        tab.idle = idle;
-        return tab;
-    }
-    let text = match owned::read(path) {
-        Ok(t) => t,
-        Err(e) => {
-            tab.error = Some(format!("Could not read {}: {e}", owned::home_relative(path)));
-            return tab;
-        }
-    };
-    tab.source = match owned::owner(text.as_deref()) {
-        Owner::Missing => IdleSource::Unset,
-        Owner::Menu => IdleSource::Menu,
-        Owner::ByHand => IdleSource::ByHand,
-    };
-    if let Some(idle) = text.as_deref().and_then(parse_idle) {
-        tab.idle = idle;
-    }
-    tab
-}
-
-/// The idle time the session profile sets, from `TF_IDLE_TIMEOUT_RC`
-/// (`flag`) and `TF_IDLE_TIMEOUT` (`value`); `None` when it sets none.
-/// thinfloe-session exports the value it uses, as plain digits; anything
-/// else, as in the session, turns blanking off. No `MAX_IDLE` cap: the
-/// session takes any positive number from the profile.
-pub fn rc_idle(flag: Option<&OsStr>, value: Option<&OsStr>) -> Option<u32> {
-    if flag? != "1" {
-        return None;
-    }
-    let v = value.and_then(OsStr::to_str).unwrap_or("");
-    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(0);
-    }
-    Some(v.parse().unwrap_or(u32::MAX))
 }
 
 /// The idle helper's PID from `TF_IDLE_PID`: plain digits above 1, so a
@@ -140,8 +87,6 @@ pub fn label(secs: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testdir::TestDir;
-    use std::fs;
 
     #[test]
     fn parse_idle_takes_the_last_valid_line() {
@@ -163,52 +108,6 @@ mod tests {
     }
 
     #[test]
-    fn load_without_file_is_default_unset() {
-        let d = TestDir::new("screentab", "none");
-        let t = load(&d.join("screen"), None);
-        assert_eq!((t.idle, t.source, t.error), (300, IdleSource::Unset, None));
-    }
-
-    #[test]
-    fn load_with_rc_shows_the_rc_value() {
-        let d = TestDir::new("screentab", "rc");
-        owned::write(&d.join("screen"), &body(60)).unwrap();
-        for v in [900, 0, 420] {
-            let t = load(&d.join("screen"), Some(v));
-            assert_eq!((t.idle, t.source, t.error), (v, IdleSource::Rc, None));
-        }
-    }
-
-    #[test]
-    fn rc_idle_reads_the_session_value() {
-        use std::ffi::OsStr;
-        let one = Some(OsStr::new("1"));
-        assert_eq!(rc_idle(one, Some(OsStr::new("900"))), Some(900));
-        assert_eq!(rc_idle(one, Some(OsStr::new("0"))), Some(0));
-        // No day cap: the sessionrc may say what it likes.
-        assert_eq!(rc_idle(one, Some(OsStr::new("172800"))), Some(172800));
-        // The session exports digits only; anything else is no blanking.
-        for v in ["", "-5", "+900", " 900", "9e2"] {
-            assert_eq!(rc_idle(one, Some(OsStr::new(v))), Some(0), "{v:?}");
-        }
-        assert_eq!(rc_idle(one, None), Some(0));
-        assert_eq!(rc_idle(one, Some(OsStr::new("99999999999"))), Some(u32::MAX));
-        for flag in [None, Some(OsStr::new("")), Some(OsStr::new("0"))] {
-            assert_eq!(rc_idle(flag, Some(OsStr::new("900"))), None, "{flag:?}");
-        }
-    }
-
-    #[test]
-    fn load_read_error_names_the_file() {
-        let d = TestDir::new("screentab", "read-error");
-        // A directory where the file belongs cannot be read as one.
-        fs::create_dir(d.join("screen")).unwrap();
-        let e = load(&d.join("screen"), None).error.unwrap();
-        let want = format!("Could not read {}: ", owned::home_relative(&d.join("screen")));
-        assert!(e.starts_with(&want), "{e}");
-    }
-
-    #[test]
     fn parse_idle_ignores_a_trailing_cr() {
         assert_eq!(parse_idle("idle_timeout=60\r"), Some(60));
         assert_eq!(parse_idle("idle_timeout=60\r\nidle_timeout=120\r\n"), Some(120));
@@ -218,19 +117,13 @@ mod tests {
     }
 
     #[test]
-    fn load_hand_file_shows_its_value() {
-        let d = TestDir::new("screentab", "hand");
-        fs::write(d.join("screen"), "idle_timeout=900\n").unwrap();
-        let t = load(&d.join("screen"), None);
-        assert_eq!((t.idle, t.source), (900, IdleSource::ByHand));
-    }
-
-    #[test]
-    fn load_menu_file_shows_its_value() {
-        let d = TestDir::new("screentab", "menu");
-        owned::write(&d.join("screen"), &body(120)).unwrap();
-        let t = load(&d.join("screen"), None);
-        assert_eq!((t.idle, t.source), (120, IdleSource::Menu));
+    fn from_config_shows_the_stored_idle_time() {
+        assert_eq!(
+            from_config(&ScreenCfg { idle_timeout: 120 }),
+            ScreenTab { idle: 120, error: None }
+        );
+        assert_eq!(from_config(&ScreenCfg::default()).idle, DEFAULT_IDLE);
+        assert_eq!(from_config(&ScreenCfg { idle_timeout: 0 }).idle, 0);
     }
 
     #[test]

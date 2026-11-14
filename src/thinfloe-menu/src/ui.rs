@@ -8,7 +8,7 @@ use crate::header::{Header, header_text, until_next_minute};
 use crate::icons::{self, IconJob, IconRoots};
 use crate::log::{Ansi, Kind, Line, Log, Run};
 use crate::menu::{Choice, Logout, Menu, Screen};
-use crate::screentab::{self, IdleSource};
+use crate::screentab;
 use crate::settings::{self, RowButton, SettingsEvent, SettingsTab};
 use crate::tiles::{Action, Origin, Tile};
 use crate::upgrade::UpgradeEvent;
@@ -936,6 +936,9 @@ fn show_settings(
         });
     });
     s_ui.add_space(GAP);
+    if let Some(e) = config_notes_band(&mut s_ui, menu, width) {
+        event = Some(e);
+    }
     let labels = SettingsTab::ALL.map(SettingsTab::label);
     let mut idx = SettingsTab::ALL
         .iter()
@@ -945,17 +948,82 @@ fn show_settings(
         event = Some(SettingsEvent::Tab(SettingsTab::ALL[idx]));
     }
     s_ui.add_space(GAP);
+    // A failed migration leaves the old settings in place: the tabs that
+    // would change them show them and take no click.
+    if menu.config_notes.legacy.is_some() && menu.settings_tab != SettingsTab::Packages {
+        s_ui.disable();
+    }
     let body = match menu.settings_tab {
         SettingsTab::Packages => packages_tab(&mut s_ui, menu, icons, width),
         SettingsTab::Screen => screen_tab(&mut s_ui, menu, width, now),
         SettingsTab::Network => {
             crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
         }
+        SettingsTab::Keyboard => {
+            crate::keyboardtab_ui::keyboard_tab(&mut s_ui, &menu.keyboard, width).map(SettingsEvent::Keyboard)
+        }
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
     };
     event.or(body)
+}
+
+/// Padding above and below the notes band.
+const NOTES_PAD: i8 = 12;
+
+/// What the config directory has to say, as one muted band under the title:
+/// the store's problems, the `environment` lines the menu overrides, the
+/// migration report (with Dismiss) and the legacy note. Nothing, no band.
+fn config_notes_band(ui: &mut Ui, menu: &Menu, width: f32) -> Option<SettingsEvent> {
+    let notes = &menu.config_notes;
+    if notes.broken.is_empty() && notes.dropped_env.is_empty() && notes.report.is_none() && notes.legacy.is_none() {
+        return None;
+    }
+    let t = Theme::current(ui.ctx());
+    let mut event = None;
+    egui::Frame::new()
+        .fill(t.palette().card)
+        .inner_margin(egui::Margin {
+            left: ROW_LEFT,
+            right: ROW_RIGHT,
+            top: NOTES_PAD,
+            bottom: NOTES_PAD,
+        })
+        .show(ui, |ui| {
+            // The frame's margins are part of the panel's width.
+            ui.set_width(width - ROW_MARGIN_X);
+            let muted = |text: &str| egui::RichText::new(text).color(t.palette().muted_foreground);
+            for line in &notes.broken {
+                ui.label(muted(line));
+            }
+            if !notes.dropped_env.is_empty() {
+                ui.label(muted(
+                    "These lines in ~/.config/thinfloe/environment are ignored because the menu sets them:",
+                ));
+                for line in &notes.dropped_env {
+                    ui.label(muted(line));
+                }
+            }
+            if let Some(report) = &notes.report {
+                ui.horizontal(|ui| {
+                    ui.label(muted(report));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(Button::new("Dismiss").variant(ButtonVariant::Secondary))
+                            .clicked()
+                        {
+                            event = Some(SettingsEvent::DismissReport);
+                        }
+                    });
+                });
+            }
+            if let Some(legacy) = &notes.legacy {
+                ui.label(egui::RichText::new(legacy).color(t.role(role::WARN)));
+            }
+        });
+    ui.add_space(GAP);
+    event
 }
 
 /// The Packages tab: when the add-ons were last checked, and one row each.
@@ -1057,8 +1125,7 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
     edit.or(apply.map(SettingsEvent::Monitors))
 }
 
-/// When the screen turns off, in one band. The select is disabled while
-/// the session profile or a file written by hand decides.
+/// When the screen turns off, in one band.
 fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let tab = &menu.screen_tab;
@@ -1067,8 +1134,6 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
     let texts: Vec<String> = values.iter().map(|&v| screentab::label(v)).collect();
     let labels: Vec<&str> = texts.iter().map(String::as_str).collect();
     let mut idx = values.iter().position(|&v| v == tab.idle).unwrap_or(0);
-    let managed = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
-    let muted = t.palette().muted_foreground;
     let inner_w = ui.available_width() - ROW_MARGIN_X;
     egui::Frame::new()
         .fill(t.palette().card)
@@ -1086,14 +1151,11 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
                     ui.set_max_width(brand::FORM_LABEL_W);
                     ui.label(egui::RichText::new("Turn the screen off after").color(t.palette().foreground));
                 });
-                if ui
-                    .add_enabled(managed, Select::new("tf-screen-idle", &mut idx, &labels))
-                    .changed()
-                {
+                if ui.add(Select::new("tf-screen-idle", &mut idx, &labels)).changed() {
                     event = values.get(idx).map(|&v| SettingsEvent::IdleTimeout(v));
                 }
             });
-            // The notes stand under the select, in the label column's shadow.
+            // The note stands under the select, in the label column's shadow.
             let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
             let note = |ui: &mut Ui, text: egui::RichText| {
                 ui.horizontal(|ui| {
@@ -1101,23 +1163,6 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
                     ui.add(egui::Label::new(text).truncate());
                 });
             };
-            match tab.source {
-                IdleSource::Rc => note(ui, egui::RichText::new("set in ~/.thinfloe-sessionrc").color(muted)),
-                IdleSource::ByHand => {
-                    let text = format!("This is set by hand in ~/{}", screentab::SCREEN_FILE);
-                    note(ui, egui::RichText::new(text).color(muted));
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        if ui
-                            .add(Button::new("Let the menu manage it").variant(ButtonVariant::Secondary))
-                            .clicked()
-                        {
-                            event = Some(SettingsEvent::ManageScreen);
-                        }
-                    });
-                }
-                IdleSource::Menu | IdleSource::Unset => {}
-            }
             if let Some(error) = &tab.error {
                 note(ui, egui::RichText::new(error).color(t.role(role::WARN)));
             }
@@ -3212,6 +3257,58 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_notes_are_one_band_under_the_title() {
+        let mut menu = open_settings();
+        menu.config_notes = crate::menu::ConfigNotes {
+            broken: vec!["config.toml could not be read (bad); defaults are shown.".into()],
+            dropped_env: vec!["XKB_DEFAULT_LAYOUT=de".into()],
+            report: Some("Moved 3 files.".into()),
+            legacy: Some("Your settings could not be moved.".into()),
+        };
+        let (w, h) = (1920.0, 1080.0);
+        let shapes = settings_shapes(&menu, w, h);
+        let texts = text_rects(&shapes);
+        let find = |what: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t == what)
+                .unwrap_or_else(|| panic!("{what} not drawn in {texts:?}"))
+                .1
+        };
+        let order = [
+            find("Settings"),
+            find("config.toml could not be read (bad); defaults are shown."),
+            find("These lines in ~/.config/thinfloe/environment are ignored because the menu sets them:"),
+            find("XKB_DEFAULT_LAYOUT=de"),
+            find("Moved 3 files."),
+            find("Dismiss"),
+            find("Your settings could not be moved."),
+            find("Packages"),
+        ];
+        // Title, broken, dropped heading, the line, the report, the legacy
+        // note, then the tabs: top to bottom (Dismiss sits beside the report).
+        for pair in order.windows(2) {
+            if pair[1] == order[5] {
+                continue;
+            }
+            assert!(pair[0].min.y <= pair[1].min.y + 1.0, "{order:?}");
+        }
+        assert!(order[6].min.y >= order[4].min.y, "legacy after the report");
+        assert!(order[7].min.y > order[6].max.y - 1.0, "the notes are before the tabs");
+        // All inside the panel, which is as wide as the tile group.
+        let panel_left = (w - crate::density::GROUP_W) / 2.0;
+        for r in &order {
+            assert!(
+                r.min.x >= panel_left - 1.0 && r.max.x <= panel_left + crate::density::GROUP_W + 1.0,
+                "{r:?}"
+            );
+        }
+        // No note, no band.
+        let plain = text_rects(&settings_shapes(&open_settings(), w, h));
+        assert!(!plain.iter().any(|(t, _)| t == "Dismiss"));
+    }
+
+    #[test]
     fn settings_draws_nothing_rounded() {
         // (name, menu, screen, texts that must be drawn): the Network
         // cases at 1080p, where every band is on screen, and each case
@@ -3238,6 +3335,20 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
+                    crate::settings::SettingsTab::Keyboard => {
+                        // With the layout list loaded, as on a real machine.
+                        menu.keyboard = keyboard_menu().keyboard;
+                        (
+                            (1280.0, 720.0),
+                            &[
+                                "Layout",
+                                "Variant",
+                                "CapsLock acts as Ctrl",
+                                "Compose key",
+                                "Try it here",
+                            ],
+                        )
+                    }
                     crate::settings::SettingsTab::Status => {
                         menu.set_status_layout(crate::status::Area::shipped().layout);
                         (
@@ -3409,6 +3520,107 @@ mod tests {
             .collect();
         assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
         assert!(heading.top() > *ys.last().unwrap(), "the preview stands below the list");
+    }
+
+    fn keyboard_menu() -> Menu {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Keyboard;
+        let reg = crate::kbregistry::parse(include_str!("testdata/evdev-small.xml")).unwrap();
+        menu.keyboard = crate::keyboard::KeyboardTab::new(crate::config::Keyboard::default(), Ok(reg));
+        menu
+    }
+
+    #[test]
+    fn the_keyboard_tab_shows_its_rows() {
+        for size in [(1920.0, 1080.0), (1280.0, 720.0)] {
+            let texts = text_rects(&settings_shapes(&keyboard_menu(), size.0, size.1));
+            let at = |what: &str| {
+                texts
+                    .iter()
+                    .find(|(t, _)| t == what)
+                    .unwrap_or_else(|| panic!("{what} not drawn in {texts:?}"))
+                    .1
+            };
+            let layout = at("Layout");
+            let variant = at("Variant");
+            let caps = at("CapsLock acts as Ctrl");
+            let compose = at("Compose key");
+            let try_it = at("Try it here");
+            // One column of rows, top to bottom.
+            let ys = [layout, variant, caps, compose, try_it].map(|r| r.top());
+            assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
+            // The labels share a left edge; the controls start one label
+            // column further right.
+            for r in [variant, caps, compose] {
+                assert!((r.left() - layout.left()).abs() < 1.0);
+            }
+            for (shown, label) in [("English (US)", layout), ("Default", variant), ("Right Alt", compose)] {
+                let r = at(shown);
+                assert!(r.left() >= label.left() + brand::FORM_LABEL_W, "{shown}: {r:?}");
+                assert!((r.center().y - label.center().y).abs() < 20.0, "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_keyboard_note_shows_an_error() {
+        let mut menu = keyboard_menu();
+        let none = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        assert!(!none.iter().any(|(t, _)| t.contains("labwc")));
+        menu.keyboard.note = Some("labwc --reconfigure failed (1)".into());
+        let texts = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        let note = texts
+            .iter()
+            .find(|(t, _)| t == "labwc --reconfigure failed (1)")
+            .expect("the note is drawn")
+            .1;
+        // Directly under the card with the selects, above the test field.
+        let compose = texts.iter().find(|(t, _)| t == "Compose key").unwrap().1;
+        let try_it = texts.iter().find(|(t, _)| t == "Try it here").unwrap().1;
+        assert!(
+            note.top() > compose.bottom() && note.bottom() < try_it.top(),
+            "{note:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_keyboard_note_wraps_instead_of_being_cut() {
+        let error = "labwc --reconfigure failed (1): the compositor refused the new keyboard settings \
+                     and kept the old ones, so nothing changed on this machine until the next start";
+        let mut menu = keyboard_menu();
+        menu.keyboard.note = Some(error.into());
+        let texts = text_rects(&settings_shapes(&menu, 1280.0, 720.0));
+        // One galley holding the whole text, on more than one row.
+        let note = texts
+            .iter()
+            .find(|(t, _)| t == error)
+            .unwrap_or_else(|| panic!("the note is cut: {texts:?}"))
+            .1;
+        let line = texts.iter().find(|(t, _)| t == "Layout").unwrap().1.height();
+        assert!(note.height() > line * 1.5, "one line: {note:?}");
+        // Card 2 follows below the note (it scrolls into view at this size).
+        assert!(note.max.y < 720.0 && note.max.x <= 1280.0, "{note:?}");
+    }
+
+    #[test]
+    fn the_keyboard_tab_takes_no_click_under_a_legacy_home() {
+        let click_caps = |menu: &Menu| {
+            let at = |t: &[(String, Rect)]| {
+                let r = t.iter().find(|(s, _)| s == "CapsLock acts as Ctrl")?.1;
+                Some(pos2(r.left() + brand::FORM_LABEL_W + 14.0, r.center().y))
+            };
+            status_clicks(menu, (1280.0, 720.0), &[&at]).remove(0)
+        };
+        let menu = keyboard_menu();
+        assert_eq!(
+            click_caps(&menu),
+            Some(UiEvent::Settings(SettingsEvent::Keyboard(
+                crate::keyboard::KbEvent::CapsAsCtrl(false)
+            )))
+        );
+        let mut legacy = keyboard_menu();
+        legacy.config_notes.legacy = Some("Your settings could not be moved.".into());
+        assert_eq!(click_caps(&legacy), None);
     }
 
     #[test]
@@ -3728,16 +3940,11 @@ mod tests {
         }
     }
 
-    /// The Settings menu of `four_addons()` on its Screen tab, 5 minutes
-    /// set from `source`.
-    fn screen_settings(source: crate::screentab::IdleSource) -> Menu {
+    /// The Settings menu of `four_addons()` on its Screen tab, 5 minutes set.
+    fn screen_settings() -> Menu {
         let mut menu = open_settings();
         menu.settings_tab = crate::settings::SettingsTab::Screen;
-        menu.screen_tab = crate::screentab::ScreenTab {
-            idle: 300,
-            source,
-            error: None,
-        };
+        menu.screen_tab = crate::screentab::ScreenTab { idle: 300, error: None };
         menu
     }
 
@@ -3762,8 +3969,7 @@ mod tests {
 
     #[test]
     fn the_screen_tab_shows_the_timeout() {
-        use crate::screentab::IdleSource;
-        let texts = settings_texts(&screen_settings(IdleSource::Menu));
+        let texts = settings_texts(&screen_settings());
         for want in ["Turn the screen off after", "5 minutes"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
@@ -3772,18 +3978,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_tab_says_sessionrc() {
-        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::Rc));
-        assert!(texts.iter().any(|t| t == "set in ~/.thinfloe-sessionrc"), "{texts:?}");
-        assert!(!texts.iter().any(|t| t == "Let the menu manage it"), "{texts:?}");
-    }
-
-    #[test]
-    fn the_screen_tab_shows_the_sessionrc_value() {
-        let d = crate::testdir::TestDir::new("ui", "rc-value");
-        for (rc, want) in [(0, "Never"), (900, "15 minutes"), (450, "450 seconds")] {
-            let mut menu = screen_settings(crate::screentab::IdleSource::Rc);
-            menu.screen_tab = crate::screentab::load(&d.join("screen"), Some(rc));
+    fn the_screen_tab_shows_the_stored_value() {
+        for (idle, want) in [(0, "Never"), (900, "15 minutes"), (450, "450 seconds")] {
+            let mut menu = screen_settings();
+            menu.screen_tab = crate::screentab::from_config(&crate::config::ScreenCfg { idle_timeout: idle });
             let texts = settings_texts(&menu);
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
             assert!(!texts.iter().any(|t| t == "5 minutes"), "{texts:?}");
@@ -3791,11 +3989,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_tab_offers_take_over() {
-        let texts = settings_texts(&screen_settings(crate::screentab::IdleSource::ByHand));
-        let by_hand = format!("This is set by hand in ~/{}", crate::screentab::SCREEN_FILE);
-        for want in [by_hand.as_str(), "Let the menu manage it"] {
-            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+    fn the_screen_tab_has_no_sessionrc_or_take_over_notes() {
+        let texts = settings_texts(&screen_settings());
+        for gone in ["set in ~/.thinfloe-sessionrc", "Let the menu manage it"] {
+            assert!(!texts.iter().any(|t| t == gone), "{gone} in {texts:?}");
         }
     }
 
@@ -3848,8 +4045,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_the_select_and_the_take_over_button_report_their_clicks() {
-        use crate::screentab::IdleSource;
+    fn the_tabs_and_the_select_report_their_clicks() {
         use crate::settings::SettingsTab;
         let s = |e| Some(UiEvent::Settings(e));
         assert_eq!(
@@ -3857,27 +4053,18 @@ mod tests {
             [s(SettingsEvent::Tab(SettingsTab::Screen))]
         );
         assert_eq!(
-            click_labels(&screen_settings(IdleSource::Menu), &["Packages"]).0,
+            click_labels(&screen_settings(), &["Packages"]).0,
             [s(SettingsEvent::Tab(SettingsTab::Packages))]
         );
-        assert_eq!(
-            click_labels(&screen_settings(IdleSource::ByHand), &["Let the menu manage it"]).0,
-            [s(SettingsEvent::ManageScreen)]
-        );
         // The open list offers the other times; a pick reports it.
-        let (events, drawn) = click_labels(&screen_settings(IdleSource::Unset), &["5 minutes", "10 minutes"]);
+        let (events, drawn) = click_labels(&screen_settings(), &["5 minutes", "10 minutes"]);
         assert_eq!(drawn, [true, true]);
         assert_eq!(events, [None, s(SettingsEvent::IdleTimeout(600))]);
-        // A disabled select opens no list.
-        for source in [IdleSource::Rc, IdleSource::ByHand] {
-            let (events, drawn) = click_labels(&screen_settings(source), &["5 minutes", "10 minutes"]);
-            assert_eq!((events, drawn), (vec![None, None], vec![true, false]), "{source:?}");
-        }
     }
 
     #[test]
     fn the_screen_tab_shows_its_error_in_warn() {
-        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        let mut menu = screen_settings();
         menu.screen_tab.error = Some("disk full".into());
         let shapes = settings_shapes(&menu, 1280.0, 720.0);
         let color = shapes.iter().find_map(|c| match &c.shape {
@@ -3967,7 +4154,7 @@ mod tests {
         net
     }
 
-    /// Menu-owned files: two saved networks (one secured, one open and
+    /// Menu-made settings: two saved networks (one secured, one open and
     /// hidden) and a fixed wired address.
     fn two_networks() -> crate::network::NetTab {
         use crate::netfiles::FileState;
@@ -4122,7 +4309,7 @@ mod tests {
         );
     }
 
-    const WIFI_KEEPS_DNS: &str = "WiFi keeps the DNS servers set in ~/wifi.yaml.";
+    const WIFI_KEEPS_DNS: &str = "WiFi keeps the DNS servers from your old settings.";
 
     #[test]
     fn the_network_tab_says_a_hand_wifi_file_keeps_its_dns() {
@@ -4172,7 +4359,7 @@ mod tests {
         for want in [
             "WiFi networks",
             "Home",
-            "This is set by hand in ~/wifi.yaml",
+            "Kept from your old settings; the menu cannot change it.",
             "Let the menu manage it",
         ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
@@ -4188,7 +4375,10 @@ mod tests {
             ))))]
         );
         let texts = net_texts(&network_settings(hand(false)));
-        assert!(has(&texts, "This is set by hand in ~/wifi.yaml"), "{texts:?}");
+        assert!(
+            has(&texts, "Kept from your old settings; the menu cannot change it."),
+            "{texts:?}"
+        );
         assert!(!has(&texts, "Let the menu manage it"), "{texts:?}");
     }
 
@@ -4218,7 +4408,7 @@ mod tests {
         menu.network.event(NetEvent::DnsText("8.8.8.8".into()), false);
         assert!(menu.network.dirty());
         assert!(has(&net_texts(&menu), "8.8.8.8"));
-        // A hand ~/ethernet.yaml: its servers, greyed, and why.
+        // A kept (hand-written) wired setting: its servers, greyed, and why.
         let hand = Wired::Dhcp {
             dns: vec!["8.8.4.4".parse().unwrap()],
         };
@@ -4227,7 +4417,11 @@ mod tests {
             (FileState::Menu, vec![], true),
             (FileState::Hand, hand),
         )));
-        for want in ["DNS servers", "8.8.4.4", "Set by hand in ~/ethernet.yaml."] {
+        for want in [
+            "DNS servers",
+            "8.8.4.4",
+            "Kept from your old settings; the menu cannot change it.",
+        ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
         }
         // Netboot: the line alone.
@@ -4286,7 +4480,7 @@ mod tests {
     }
 
     /// On 1080p the bands of a full Network tab outgrow the panel: a
-    /// hand ~/wifi.yaml beside a fixed address, both take-over buttons and
+    /// kept hand-written WiFi setting beside a fixed address, both take-over buttons and
     /// the DNS section. Every control scrolls into reach above the pinned
     /// Apply, and a click there lands.
     #[test]
@@ -4335,7 +4529,7 @@ mod tests {
             "Let the menu manage it",
             "DNS servers",
             "Used for wired and WiFi. Empty: the servers DHCP sends.",
-            "WiFi keeps the DNS servers set in ~/wifi.yaml.",
+            "WiFi keeps the DNS servers from your old settings.",
         ];
         // Before any scrolling something is out of reach: the tab does not
         // fit, so the scrolling below is what the test checks.
@@ -4383,7 +4577,7 @@ mod tests {
         for want in [
             "Fixed address",
             "192.168.1.10/24",
-            "This is set by hand in ~/ethernet.yaml",
+            "Kept from your old settings; the menu cannot change it.",
             "Let the menu manage it",
         ] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
@@ -5801,28 +5995,17 @@ mod tests {
         menu.activate(settings, Instant::now());
         shot(&menu, "settings-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-21in-4k.ppm", (3840, 2160), 2.25);
-        use crate::screentab::{IdleSource, ScreenTab};
+        use crate::screentab::ScreenTab;
         menu.settings_tab = crate::settings::SettingsTab::Screen;
-        for (idle, source, name) in [
-            (300, IdleSource::Menu, "settings-screen-1080.ppm"),
-            (900, IdleSource::Rc, "settings-screen-rc-1080.ppm"),
-            (300, IdleSource::ByHand, "settings-screen-byhand-1080.ppm"),
-        ] {
-            menu.screen_tab = ScreenTab {
-                idle,
-                source,
-                error: None,
-            };
-            shot(&menu, name, (1920, 1080), 1.0);
-        }
+        menu.screen_tab = ScreenTab { idle: 300, error: None };
+        shot(&menu, "settings-screen-1080.ppm", (1920, 1080), 1.0);
         menu.screen_tab = ScreenTab {
             idle: 420,
-            source: IdleSource::Menu,
-            error: Some("Could not write ~/.config/thinfloe/screen: No space left on device (os error 28)".into()),
+            error: Some("config.toml could not be written: No space left on device (os error 28)".into()),
         };
         shot(&menu, "settings-screen-error-1080.ppm", (1920, 1080), 1.0);
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
-        // The Network tab: menu-owned files, two networks, a fixed address.
+        // The Network tab: menu-made settings, two networks, a fixed address.
         let mut net = two_networks();
         net.status_done(Ok(vec![crate::nettab::Iface {
             name: "enp1s0".into(),
@@ -6039,12 +6222,12 @@ mod tests {
     fn two_monitors() -> MonTab {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
-        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
         mon
     }
 
     fn monitor_settings(mon: MonTab) -> Menu {
-        let mut menu = screen_settings(crate::screentab::IdleSource::Menu);
+        let mut menu = screen_settings();
         menu.monitors = mon;
         menu
     }
@@ -6230,7 +6413,7 @@ mod tests {
             h.enabled = false;
         }
         mon.heads_changed(heads);
-        mon.loaded(Ok(None), crate::owned::Owner::Missing);
+        mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
         assert!(mon.editable());
         assert_eq!(mon_clicks(&monitor_settings(mon), &["Apply"]), [None]);
     }
@@ -6289,13 +6472,10 @@ mod tests {
     fn a_hand_written_kanshi_file_is_shown_with_the_take_over() {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
-        mon.loaded(
-            Ok(Some("profile {\n  output * enable\n}\n".into())),
-            crate::owned::Owner::ByHand,
-        );
+        mon.loaded(Ok(None), crate::monitors::MonSource::Kept);
         let menu = monitor_settings(mon);
         let texts = mon_texts(&menu);
-        let line = "The monitor arrangement is set by hand in ~/.config/kanshi/config.";
+        let line = "The monitor arrangement is a kanshi file written by hand, which the menu keeps as it is.";
         assert!(has(&texts, line), "{texts:?}");
         // The monitors are shown, but nothing is offered to change them.
         assert!(has(&texts, "DP-1"), "{texts:?}");
@@ -6349,10 +6529,7 @@ mod tests {
         shot(&monitor_settings(keep), "screen-monitors-keep.ppm", (1920, 1080), 1.0);
         let mut hand = MonTab::default();
         hand.heads_changed(mon_heads());
-        hand.loaded(
-            Ok(Some("profile {\n  output * enable\n}\n".into())),
-            crate::owned::Owner::ByHand,
-        );
+        hand.loaded(Ok(None), crate::monitors::MonSource::Kept);
         shot(&monitor_settings(hand), "screen-monitors-hand.ppm", (1920, 1080), 1.0);
     }
 

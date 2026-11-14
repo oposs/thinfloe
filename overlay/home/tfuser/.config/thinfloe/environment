@@ -1,0 +1,8 @@
+# Variables for this machine, sourced before labwc starts.
+#
+# Variable assignments only, for example the cursor (XCURSOR_THEME,
+# XCURSOR_SIZE), the time zone (TZ=Europe/Zurich) or
+# LABWC_FULLSCREEN_SPAN_OUTPUTS. This file is saved with the home.
+#
+# The keyboard is set in Settings -> Keyboard; XKB_DEFAULT_* lines here are
+# ignored.

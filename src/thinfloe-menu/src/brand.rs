@@ -350,6 +350,7 @@ mod tests {
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
             ("network_ui.rs", include_str!("network_ui.rs")),
             ("monitors_ui.rs", include_str!("monitors_ui.rs")),
+            ("keyboardtab_ui.rs", include_str!("keyboardtab_ui.rs")),
             ("statustab.rs", include_str!("statustab.rs")),
             ("statustab_ui.rs", include_str!("statustab_ui.rs")),
             ("status/mod.rs", include_str!("status/mod.rs")),

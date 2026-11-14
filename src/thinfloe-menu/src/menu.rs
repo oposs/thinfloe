@@ -23,11 +23,12 @@
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
+use crate::keyboard::KeyboardTab;
 use crate::log::{Kind, Log};
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
 use crate::network::{NetRequest, NetTab};
-use crate::screentab::{self, IdleSource, ScreenTab};
+use crate::screentab::{self, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::statustab::StatusEvent;
 use crate::tiles::{Action, Grid, Origin, Tile};
@@ -158,24 +159,32 @@ pub enum Job {
     NetTakeOver {
         which: &'static str,
     },
-    /// Read `~/.config/kanshi/config`.
+    /// Read `[monitors]` from the settings.
     MonLoad,
     /// Write the monitor layout and let kanshi apply it, undoably.
     MonApply {
-        text: String,
+        profiles: Vec<crate::kanshi::Profile>,
         menu_output: Option<String>,
-        /// Kept as `config.prev` when there is no file.
+        /// Kept as `generated/kanshi.prev` when there is no file.
         prev: Option<String>,
     },
-    /// The new layout is confirmed.
-    MonKeep,
+    /// The new layout is confirmed: `profiles` go into `[monitors]`.
+    MonKeep {
+        profiles: Vec<crate::kanshi::Profile>,
+    },
     /// Put the layout before the Apply back.
     MonRevert,
-    /// Move a hand-written kanshi config aside.
-    MonTakeOver,
+    /// Replace a kept hand-written kanshi file by the layout on screen.
+    MonTakeOver {
+        heads: Vec<crate::heads::Head>,
+    },
     /// Write the status layout file with this text; `None` removes it, and
     /// the default list counts again.
     StatusSave(Option<String>),
+    /// Write the keyboard choice and tell the compositor.
+    KeyboardApply(crate::config::Keyboard),
+    /// Remove the migration report from `[notice]`.
+    DismissReport,
 }
 
 /// What fills the space above the log.
@@ -207,15 +216,30 @@ pub enum Effect {
     /// Send the signal to each of these process groups.
     Signal(Vec<i32>, Signal),
     Exit(i32),
-    /// Write the screen file with this idle time, then report with
+    /// Keep this idle time in the settings, then report with
     /// `screen_written`.
     WriteScreen {
         idle: u32,
     },
-    /// Put the menu's header on the screen file written by hand, then
-    /// report with `screen_written`.
-    TakeOverScreen,
 }
+
+/// What the Settings screen tells about the config directory, in the order
+/// it is shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigNotes {
+    /// Problems the settings store reported when it opened (a broken or
+    /// missing `config.toml`).
+    pub broken: Vec<String>,
+    /// Active lines of the user's `environment` that the menu overrides.
+    pub dropped_env: Vec<String>,
+    /// The migration report, until it is dismissed.
+    pub report: Option<String>,
+    /// The migration failed this boot: the settings are only read.
+    pub legacy: Option<String>,
+}
+
+/// `ConfigNotes::legacy` when the migration failed this boot.
+pub const LEGACY_NOTE: &str = "Your settings could not be moved to ~/.config/thinfloe; they stay as they were until the next start. See the session log.";
 
 pub struct Menu {
     pub tiles: Vec<Tile>,
@@ -291,6 +315,10 @@ pub struct Menu {
     pub network: NetTab,
     /// The monitors of the Screen tab, and the Apply it runs.
     pub monitors: MonTab,
+    /// The Keyboard tab, and the apply it runs.
+    pub keyboard: KeyboardTab,
+    /// What the config directory has to say, shown on the Settings screen.
+    pub config_notes: ConfigNotes,
 }
 
 impl Menu {
@@ -345,6 +373,12 @@ impl Menu {
             // Until `set_usb_boot` says otherwise: netboot offers less.
             network: NetTab::new(true),
             monitors: MonTab::default(),
+            // Until `build_menu` reads the config and the layout list.
+            keyboard: KeyboardTab::new(
+                crate::config::Keyboard::default(),
+                Err("The keyboard layout list is not loaded.".into()),
+            ),
+            config_notes: ConfigNotes::default(),
         }
     }
 
@@ -367,17 +401,17 @@ impl Menu {
         Effect::Start(match r {
             MonRequest::Load => Job::MonLoad,
             MonRequest::Apply {
-                text,
+                profiles,
                 menu_output,
                 prev,
             } => Job::MonApply {
-                text,
+                profiles,
                 menu_output,
                 prev,
             },
-            MonRequest::Keep => Job::MonKeep,
+            MonRequest::Keep { profiles } => Job::MonKeep { profiles },
             MonRequest::Revert => Job::MonRevert,
-            MonRequest::TakeOver => Job::MonTakeOver,
+            MonRequest::TakeOver { heads } => Job::MonTakeOver { heads },
         })
     }
 
@@ -621,7 +655,7 @@ impl Menu {
     }
 
     /// A change on the Status tab: taken at once and written. `Reset`
-    /// removes the file, so the shipped list counts again.
+    /// removes the `lines` key from `[status]`, so the shipped list counts again.
     pub fn status_event(&mut self, event: StatusEvent) -> Option<Effect> {
         if event == StatusEvent::Reset {
             self.status = crate::status::Area::shipped();
@@ -718,6 +752,21 @@ impl Menu {
         if self.logout.is_some() || self.screen != Screen::Settings {
             return None;
         }
+        // The migration failed this boot: Network, Screen, Keyboard and Status show the
+        // old state and take no change (their bodies are disabled, too).
+        if self.config_notes.legacy.is_some()
+            && matches!(
+                event,
+                SettingsEvent::IdleTimeout(_)
+                    | SettingsEvent::Network(_)
+                    | SettingsEvent::Monitors(_)
+                    | SettingsEvent::Status(_)
+                    | SettingsEvent::Keyboard(_)
+                    | SettingsEvent::DismissReport
+            )
+        {
+            return None;
+        }
         let (verb, id) = match event {
             SettingsEvent::Back => {
                 // Plan call 5: what was not applied goes with the screen.
@@ -733,12 +782,7 @@ impl Menu {
                 return None;
             }
             SettingsEvent::IdleTimeout(idle) => {
-                let tab = &self.screen_tab;
-                let open = matches!(tab.source, IdleSource::Menu | IdleSource::Unset);
-                return (open && idle != tab.idle).then_some(Effect::WriteScreen { idle });
-            }
-            SettingsEvent::ManageScreen => {
-                return (self.screen_tab.source == IdleSource::ByHand).then_some(Effect::TakeOverScreen);
+                return (idle != self.screen_tab.idle).then_some(Effect::WriteScreen { idle });
             }
             SettingsEvent::Network(e) => {
                 let r = self.network.event(e, self.remote_running())?;
@@ -746,6 +790,17 @@ impl Menu {
             }
             SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
             SettingsEvent::Status(e) => return self.status_event(e),
+            SettingsEvent::Keyboard(e) => {
+                let kb = self.keyboard.event(e)?;
+                return Some(Effect::Start(Job::KeyboardApply(kb)));
+            }
+            SettingsEvent::DismissReport => {
+                return self
+                    .config_notes
+                    .report
+                    .is_some()
+                    .then_some(Effect::Start(Job::DismissReport));
+            }
             // No ids: the tool then checks only the sources it may check by
             // itself. With ids it would also store what a manual-only source
             // offers, and the next boot would install that unattended.
@@ -1195,8 +1250,8 @@ impl Menu {
                 }
                 if save { self.net_changed_home() } else { None }
             }
-            JobResult::MonLoaded(text, owner) => {
-                self.monitors.loaded(text, owner);
+            JobResult::MonLoaded(profiles, source) => {
+                self.monitors.loaded(profiles, source);
                 None
             }
             JobResult::MonApplied(r) => {
@@ -1205,6 +1260,20 @@ impl Menu {
                         .note(Kind::Warn, format!("The monitor arrangement was not applied: {e}"));
                 }
                 self.monitors.applied(r).map(Menu::mon_request)
+            }
+            JobResult::KeyboardApplied { kb, result } => {
+                match &result {
+                    Err(e) => self
+                        .log
+                        .note(Kind::Warn, format!("The keyboard setting was not applied: {e}")),
+                    Ok(crate::keyboard::KbOutcome::Saved(why)) => self.log.note(
+                        Kind::Warn,
+                        format!("The keyboard setting was saved, labwc does not use it yet: {why}"),
+                    ),
+                    Ok(_) => {}
+                }
+                let next = self.keyboard.done(&kb, result)?;
+                Some(Effect::Start(Job::KeyboardApply(next)))
             }
             JobResult::MonKept(r) => {
                 let ok = r.is_ok();
@@ -1230,6 +1299,15 @@ impl Menu {
                 }
                 self.monitors.reverted(r).map(Menu::mon_request)
             }
+            JobResult::ReportDismissed(r) => {
+                match r {
+                    Ok(()) => self.config_notes.report = None,
+                    Err(e) => self
+                        .log
+                        .note(Kind::Warn, format!("The migration report could not be dismissed: {e}")),
+                }
+                None
+            }
             JobResult::StatusSaved(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1250,7 +1328,7 @@ impl Menu {
                 match &r {
                     Ok(()) => self
                         .log
-                        .note(Kind::Event, "~/.config/kanshi/config is now managed by the menu."),
+                        .note(Kind::Event, "The monitor arrangement is now managed by the menu."),
                     Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
                 }
                 if !self.monitors.taken_over(r) {
@@ -1262,11 +1340,11 @@ impl Menu {
                 if !self.network.taking_over() {
                     return None;
                 }
-                let which = self.network.taking_over_file();
+                let what = self.network.taking_over_name();
                 match &r {
                     Ok(()) => self
                         .log
-                        .note(Kind::Event, format!("~/{which} is now managed by the menu.")),
+                        .note(Kind::Event, format!("{what} are now managed by the menu.")),
                     Err(e) => self.log.note(Kind::Warn, format!("{e}.")),
                 }
                 if self.network.take_over_done(r) {
@@ -1441,7 +1519,7 @@ mod tests {
     use crate::desktop;
     use crate::jobs::{JobId, Signal};
     use crate::log::Kind;
-    use crate::screentab::{IdleSource, ScreenTab};
+    use crate::screentab::ScreenTab;
     use crate::settings::{RetryMarker, RowButton, SettingsEvent, SettingsTab};
     use crate::tiles::{SourceFile, merge};
     use std::os::unix::fs::PermissionsExt as _;
@@ -2416,12 +2494,8 @@ mod tests {
         assert!(m.visible(i));
     }
 
-    fn screen(idle: u32, source: IdleSource) -> ScreenTab {
-        ScreenTab {
-            idle,
-            source,
-            error: None,
-        }
+    fn screen(idle: u32) -> ScreenTab {
+        ScreenTab { idle, error: None }
     }
 
     #[test]
@@ -2439,46 +2513,28 @@ mod tests {
     #[test]
     fn idle_change_asks_for_a_write() {
         let (_d, mut m) = settings_menu("idle");
-        m.screen_tab = screen(300, IdleSource::Menu);
+        m.screen_tab = screen(300);
         assert_eq!(
-            m.settings(SettingsEvent::IdleTimeout(600)),
-            Some(Effect::WriteScreen { idle: 600 })
+            m.settings(SettingsEvent::IdleTimeout(120)),
+            Some(Effect::WriteScreen { idle: 120 })
         );
         assert_eq!(m.settings(SettingsEvent::IdleTimeout(300)), None, "unchanged");
-        m.screen_tab = screen(300, IdleSource::Unset);
         assert_eq!(
             m.settings(SettingsEvent::IdleTimeout(0)),
             Some(Effect::WriteScreen { idle: 0 })
         );
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "nothing to take over");
-    }
-
-    #[test]
-    fn idle_change_refused_when_rc_or_by_hand() {
-        let (_d, mut m) = settings_menu("idle-refused");
-        m.screen_tab = screen(300, IdleSource::Rc);
-        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None);
-        m.screen_tab = screen(300, IdleSource::ByHand);
-        assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), Some(Effect::TakeOverScreen));
         m.logout = Some(Logout::Confirm);
-        assert_eq!(m.settings(SettingsEvent::ManageScreen), None, "not during a logout");
-        m.screen_tab = screen(300, IdleSource::Menu);
         assert_eq!(m.settings(SettingsEvent::IdleTimeout(600)), None, "not during a logout");
     }
 
     #[test]
     fn screen_written_queues_one_save() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(600, IdleSource::Menu)), true),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(600)), true), Some(Effect::Start(Job::Save)));
         assert!(m.save.running && !m.save.again);
-        assert_eq!(m.screen_written(Ok(screen(0, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(0)), true), None);
         assert!(m.save.again);
-        assert_eq!(m.screen_tab, screen(0, IdleSource::Menu));
+        assert_eq!(m.screen_tab, screen(0));
         assert_eq!(
             log(&m),
             [
@@ -2492,7 +2548,7 @@ mod tests {
     #[test]
     fn screen_change_does_not_save_after_failed_restore() {
         let mut m = Menu::new(grid(), true);
-        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(300)), true), None);
         assert!(!m.save.running);
         assert_eq!(
             log(&m),
@@ -2506,10 +2562,7 @@ mod tests {
     #[test]
     fn screen_written_without_signal_says_next_session() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(60, IdleSource::Menu)), false),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(60)), false), Some(Effect::Start(Job::Save)));
         assert_eq!(
             log(&m),
             [
@@ -2523,14 +2576,14 @@ mod tests {
     #[test]
     fn screen_write_error_shows_on_the_tab() {
         let mut m = Menu::new(grid(), false);
-        m.screen_tab = screen(300, IdleSource::Menu);
+        m.screen_tab = screen(300);
         assert_eq!(m.screen_written(Err("disk full".into()), true), None);
         assert_eq!(m.screen_tab.error.as_deref(), Some("disk full"));
         assert_eq!(m.screen_tab.idle, 300);
         assert!(!m.save.running);
         assert_eq!(log(&m), [warn("disk full")]);
         // A later write that works clears it.
-        m.screen_written(Ok(screen(600, IdleSource::Menu)), true);
+        m.screen_written(Ok(screen(600)), true);
         assert_eq!(m.screen_tab.error, None);
     }
 
@@ -2826,17 +2879,99 @@ mod tests {
     }
 
     #[test]
-    fn settings_has_three_tabs() {
+    fn the_tabs_are_in_order() {
         assert_eq!(
             SettingsTab::ALL,
             [
                 SettingsTab::Packages,
                 SettingsTab::Network,
                 SettingsTab::Screen,
+                SettingsTab::Keyboard,
                 SettingsTab::Status
             ]
         );
         assert_eq!(SettingsTab::Network.label(), "Network");
+        assert_eq!(SettingsTab::Keyboard.label(), "Keyboard");
+    }
+
+    fn kb_menu() -> Menu {
+        let mut m = Menu::new(grid(), false);
+        m.screen = Screen::Settings;
+        m.keyboard = KeyboardTab::new(crate::config::Keyboard::default(), Err("no list".into()));
+        m
+    }
+
+    #[test]
+    fn a_keyboard_event_starts_the_job() {
+        use crate::config::Compose;
+        use crate::keyboard::KbEvent;
+        let mut m = kb_menu();
+        let Some(Effect::Start(Job::KeyboardApply(kb))) =
+            m.settings(SettingsEvent::Keyboard(KbEvent::Compose(Compose::Menu)))
+        else {
+            panic!("no job");
+        };
+        assert_eq!(kb.compose, Compose::Menu);
+        assert!(m.keyboard.applying);
+        // A second change waits; the result starts it.
+        assert_eq!(m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false))), None);
+        let r = JobResult::KeyboardApplied {
+            kb,
+            result: Ok(crate::keyboard::KbOutcome::Live),
+        };
+        let Some(Effect::Start(Job::KeyboardApply(next))) = m.finished(r, Instant::now()) else {
+            panic!("no second job");
+        };
+        assert!(!next.caps_as_ctrl);
+    }
+
+    #[test]
+    fn a_keyboard_event_is_ignored_after_a_failed_migration() {
+        use crate::keyboard::KbEvent;
+        let mut m = kb_menu();
+        m.config_notes.legacy = Some("old layout".into());
+        assert_eq!(m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false))), None);
+        assert!(!m.keyboard.applying);
+    }
+
+    #[test]
+    fn a_failed_keyboard_apply_is_logged() {
+        let mut m = kb_menu();
+        let kb = crate::config::Keyboard::default();
+        m.finished(
+            JobResult::KeyboardApplied {
+                kb,
+                result: Err("boom".into()),
+            },
+            Instant::now(),
+        );
+        assert_eq!(m.keyboard.note.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_saved_but_not_live_keyboard_apply_is_logged_as_saved() {
+        use crate::keyboard::{KbEvent, KbOutcome};
+        let mut m = kb_menu();
+        let Some(Effect::Start(Job::KeyboardApply(kb))) =
+            m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false)))
+        else {
+            panic!("no job");
+        };
+        let r = JobResult::KeyboardApplied {
+            kb,
+            result: Ok(KbOutcome::Saved("the composer failed".into())),
+        };
+        assert_eq!(m.finished(r, Instant::now()), None);
+        let lines = log(&m);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (kind, text) = &lines[0];
+        assert_eq!(*kind, Kind::Warn);
+        assert!(text.contains("saved"), "{text}");
+        assert!(!text.contains("not applied"), "{text}");
+        assert!(text.contains("the composer failed"), "{text}");
+        // Undoing the change writes the old value again.
+        let undo = m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(true)));
+        assert!(matches!(undo, Some(Effect::Start(Job::KeyboardApply(_)))), "{undo:?}");
     }
 
     #[test]
@@ -3017,7 +3152,7 @@ mod tests {
             [
                 ev("Network settings applied."),
                 ev("Saving the home directory…"),
-                ev("~/wifi.yaml is now managed by the menu."),
+                ev("The WiFi settings are now managed by the menu."),
             ]
         );
     }
@@ -3052,7 +3187,7 @@ mod tests {
         let now = Instant::now();
         net_apply(&mut m);
         let failed = ApplyFailed {
-            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            reason: "x; generated/wifi.yaml could not be restored: busy".into(),
             home_changed: true,
         };
         assert_eq!(
@@ -3062,7 +3197,7 @@ mod tests {
         assert_eq!(
             log(&m),
             [
-                warn("Network settings not applied: x; ~/wifi.yaml could not be put back: busy"),
+                warn("Network settings not applied: x; generated/wifi.yaml could not be restored: busy"),
                 ev("Saving the home directory…"),
             ]
         );
@@ -3087,12 +3222,9 @@ mod tests {
     #[test]
     fn screen_written_still_saves() {
         let mut m = Menu::new(grid(), false);
-        assert_eq!(
-            m.screen_written(Ok(screen(300, IdleSource::Menu)), true),
-            Some(Effect::Start(Job::Save))
-        );
+        assert_eq!(m.screen_written(Ok(screen(300)), true), Some(Effect::Start(Job::Save)));
         let mut m = Menu::new(grid(), true);
-        assert_eq!(m.screen_written(Ok(screen(300, IdleSource::Menu)), true), None);
+        assert_eq!(m.screen_written(Ok(screen(300)), true), None);
         assert_eq!(
             log(&m),
             [
@@ -3648,7 +3780,7 @@ mod tests {
         assert_eq!(m.heads_changed(heads), Some(Effect::Start(Job::MonLoad)));
         assert_eq!(
             m.finished(
-                JobResult::MonLoaded(Ok(None), crate::owned::Owner::Missing),
+                JobResult::MonLoaded(Ok(None), crate::monitors::MonSource::Missing),
                 Instant::now()
             ),
             None
@@ -3664,11 +3796,13 @@ mod tests {
         m.settings_tab = SettingsTab::Screen;
         m.monitors_event(MonEvent::Select("DP-2".into()), now);
         assert_eq!(m.monitors_event(MonEvent::MenuHere, now), None);
-        let Some(Effect::Start(Job::MonApply { text, menu_output, .. })) = m.monitors_event(MonEvent::Apply, now)
+        let Some(Effect::Start(Job::MonApply {
+            profiles, menu_output, ..
+        })) = m.monitors_event(MonEvent::Apply, now)
         else {
             panic!("no Apply job")
         };
-        assert!(text.contains("# thinfloe menu DP-2"), "{text}");
+        assert_eq!(profiles[0].menu_output.as_deref(), Some("DP-2"));
         assert_eq!(menu_output.as_deref(), Some("DP-2"));
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
         // The countdown runs on whatever the screen shows.
@@ -3692,7 +3826,10 @@ mod tests {
         let mut m = mon_menu();
         assert!(m.monitors_event(MonEvent::Apply, now).is_some());
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
-        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert!(matches!(
+            m.monitors_event(MonEvent::Keep, now),
+            Some(Effect::Start(Job::MonKeep { .. }))
+        ));
         assert_eq!(m.finished(JobResult::MonKept(Err("EISDIR".into())), now), None);
         assert!(m.log.last().unwrap().plain().contains("could not be confirmed: EISDIR"));
     }
@@ -3707,7 +3844,10 @@ mod tests {
             Some(Effect::Start(Job::MonApply { .. }))
         ));
         assert_eq!(m.finished(JobResult::MonApplied(Ok(())), now), None);
-        assert_eq!(m.monitors_event(MonEvent::Keep, now), Some(Effect::Start(Job::MonKeep)));
+        assert!(matches!(
+            m.monitors_event(MonEvent::Keep, now),
+            Some(Effect::Start(Job::MonKeep { .. }))
+        ));
         assert_eq!(
             m.finished(JobResult::MonKept(Ok(())), now),
             Some(Effect::Start(Job::Save))
@@ -3909,7 +4049,7 @@ mod tests {
 
     fn status_settings() -> Menu {
         let mut m = Menu::new(grid(), false);
-        m.set_status_layout(crate::status::read_layout(std::path::Path::new("/nonexistent/status")));
+        m.set_status_layout(crate::status::layout_from(&crate::config::StatusCfg::default()));
         m.screen = Screen::Settings;
         m.settings_tab = SettingsTab::Status;
         m
@@ -3995,5 +4135,68 @@ mod tests {
         m.finished(JobResult::StatusSaved(Ok(())), now);
         m.set_status_layout(crate::status::layout::parse(b"-clock 1x1\n", &crate::status::offered));
         assert!(!m.status.layout.choices[0].shown);
+    }
+
+    fn legacy_menu() -> Menu {
+        let (_d, mut m) = settings_menu("legacy-settings");
+        m.config_notes.legacy = Some("legacy".into());
+        m
+    }
+
+    #[test]
+    fn a_dismissed_report_is_cleared() {
+        let (_d, mut m) = settings_menu("dismiss-report");
+        assert_eq!(m.settings(SettingsEvent::DismissReport), None);
+        m.config_notes.report = Some("3 files were moved".into());
+        assert_eq!(
+            m.settings(SettingsEvent::DismissReport),
+            Some(Effect::Start(Job::DismissReport))
+        );
+        // The band stays until the job reports.
+        assert!(m.config_notes.report.is_some());
+        assert_eq!(m.finished(JobResult::ReportDismissed(Ok(())), Instant::now()), None);
+        assert_eq!(m.config_notes.report, None);
+    }
+
+    #[test]
+    fn a_report_that_could_not_be_dismissed_stays_and_is_logged() {
+        let (_d, mut m) = settings_menu("dismiss-report-fails");
+        m.config_notes.report = Some("3 files were moved".into());
+        assert_eq!(
+            m.finished(
+                JobResult::ReportDismissed(Err("The settings are read-only.".into())),
+                Instant::now()
+            ),
+            None
+        );
+        assert!(m.config_notes.report.is_some());
+        assert!(
+            m.log
+                .lines()
+                .any(|l| l.kind == Kind::Warn && crate::log::plain(&l.runs).contains("The settings are read-only."))
+        );
+    }
+
+    #[test]
+    fn the_legacy_layout_ignores_setting_changes() {
+        use crate::monitors::MonEvent;
+        use crate::network::NetEvent;
+        let mut m = legacy_menu();
+        m.settings_tab = SettingsTab::Screen;
+        assert_eq!(m.settings(SettingsEvent::IdleTimeout(60)), None);
+        assert_eq!(m.settings(SettingsEvent::Status(StatusEvent::Reset)), None);
+        assert_eq!(m.settings(SettingsEvent::Monitors(MonEvent::Apply)), None);
+        assert_eq!(m.settings(SettingsEvent::Network(NetEvent::WiredMode(true))), None);
+        assert_eq!(m.settings(SettingsEvent::DismissReport), None);
+        // Navigation and the packages still work.
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Packages)), None);
+        assert_eq!(m.settings_tab, SettingsTab::Packages);
+        assert!(m.settings(SettingsEvent::CheckNow).is_some());
+        // The same event on a menu without the note is taken.
+        let (_d, mut ok) = settings_menu("not-legacy");
+        assert_eq!(
+            ok.settings(SettingsEvent::IdleTimeout(60)),
+            Some(Effect::WriteScreen { idle: 60 })
+        );
     }
 }

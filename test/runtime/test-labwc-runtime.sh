@@ -170,6 +170,118 @@ else
     fail=1
 fi
 
+# A keyboard apply (the Keyboard tab): the menu rewrites generated/environment,
+# runs 'thinfloe-compose-labwc-config --env-only' and 'labwc --reconfigure'.
+# The session starts with layout us, the script applies the given layout and
+# variant with the options of the tab, then prints the layout line of the
+# merged file. This rig has no keyboard device (see the Xwayland note above),
+# so labwc may build no keymap at all and "no keymap error" would pass whatever
+# the menu writes. A control run applies a keymap XKB cannot build
+# (fr/de_nodeadkeys) through the same sequence: only when labwc prints
+# 'failed to create xkb keymap' after the apply can the rig see keymap errors
+# and the keymap assertion counts; otherwise it is reported as a skip. (A bad
+# pair in the STARTUP environment would not do: labwc then dies before the
+# session script runs.) The control turns the composer's keyboard check off
+# (TF_KB_CHECK, the 4th argument), which would repair the pair.
+kb_run() {
+    local layout=$1 variant=$2 name=$3 check=${4:-} out rc
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        ${check:+-e TF_KB_CHECK="$check"} \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e KB_LAYOUT="$layout" \
+        -e KB_VARIANT="$variant" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               mkdir -p /tmp/kb/gen /tmp/kb/out && : >/tmp/kb/user &&
+               echo XKB_DEFAULT_LAYOUT=us >/tmp/kb/gen/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out &&
+               cat >/tmp/kb/session.sh <<"EOS"
+sleep 2
+echo APPLY-START
+{ echo "XKB_DEFAULT_LAYOUT=$KB_LAYOUT"
+  echo "XKB_DEFAULT_VARIANT=$KB_VARIANT"
+  echo XKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps; } >/tmp/kb/gen/environment
+thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out
+labwc --reconfigure
+sleep 1
+echo "MERGED $(grep "^XKB_DEFAULT_LAYOUT=" /tmp/kb/out/environment | tail -1)"
+EOS
+               labwc -C /tmp/kb/out -S "sh /tmp/kb/session.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during keyboard apply test)" >&2
+        echo "$out" >&2
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    printf '%s\n' "$out"
+    return "$rc"
+}
+
+# Output after the apply only: the lines before it belong to the start.
+after_apply() { sed -n '/^APPLY-START$/,$p'; }
+
+kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$" /nonexistent)
+kb_control_rc=$?
+kb_out=$(kb_run ch de_nodeadkeys "thinfloe-runtime-test-kb-$$")
+kb_rc=$?
+for rc_name in kb_control_rc kb_rc; do
+    if [[ ${!rc_name} -ne 0 ]]; then
+        echo "info - ${rc_name#kb_} of the keyboard apply run: ${!rc_name} (labwc ended with a non-zero status)"
+    fi
+done
+
+if echo "$kb_out" | grep -qx 'MERGED XKB_DEFAULT_LAYOUT=ch'; then
+    echo "ok   - a keyboard apply reaches labwc's environment"
+else
+    echo "FAIL - the merged environment lacks XKB_DEFAULT_LAYOUT=ch after the apply"
+    echo "$kb_out"
+    fail=1
+fi
+if echo "$kb_control" | after_apply | grep -q 'failed to create xkb keymap'; then
+    if echo "$kb_out" | after_apply | grep -q 'failed to create xkb keymap'; then
+        echo "FAIL - labwc could not build the new keymap"
+        echo "$kb_out"
+        fail=1
+    else
+        echo "ok   - labwc built the new keymap"
+    fi
+else
+    echo "skip - labwc builds no keymap without a keyboard device (headless rig)"
+fi
+
+# labwc 0.9.3 segfaults at start on a pair XKB cannot build (fr with
+# de_nodeadkeys), before the session runs. The composer asks
+# 'thinfloe-menu --check-keyboard' about the values labwc will read and
+# appends a repair, so the session starts, with layout fr and no variant.
+KB_START_NAME="thinfloe-runtime-test-kbs-$$"
+kb_start=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$KB_START_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=1 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           mkdir -p /tmp/kb/gen /tmp/kb/out && : >/tmp/kb/user &&
+           printf "XKB_DEFAULT_LAYOUT=fr\nXKB_DEFAULT_VARIANT=de_nodeadkeys\n" >/tmp/kb/gen/environment &&
+           thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out &&
+           labwc -C /tmp/kb/out -S "sh -c \"echo SESSION-RAN \$XKB_DEFAULT_LAYOUT/\$XKB_DEFAULT_VARIANT/\""' 2>&1)
+kb_start_rc=$?
+if [[ $kb_start_rc -eq 124 || $kb_start_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang with a repaired keyboard)"
+    podman rm -f "$KB_START_NAME" >/dev/null 2>&1
+    fail=1
+elif echo "$kb_start" | grep -qx 'SESSION-RAN fr//'; then
+    echo "ok   - a keyboard pair XKB cannot build is repaired before labwc starts"
+else
+    echo "FAIL - labwc with fr/de_nodeadkeys at start: rc=$kb_start_rc, no session with layout fr and no variant"
+    echo "$kb_start"
+    fail=1
+fi
+
 # thinfloe-menu is a native Wayland client, so x11-probe cannot see it; it
 # prints its own configure size under TF_MENU_DEBUG. One output, so the
 # maximized grid must get all of it. timeout ends the menu after 10s: exit
@@ -325,16 +437,19 @@ fi
 # the other 3840x2160; a fullscreen foot covers the menu. The scale must stay.
 # The same run proves the signal the menu takes "covered" from, in both
 # directions: it looks for no monitor at the start of a frame and once a second
-# while covered. A layout file that shows only the network graph, which is
-# drawn again every second, gives it a frame a second to notice the cover in;
-# podman's default network gives the container the route the graph needs.
+# while covered. A layout (the [status] table of a config.toml) that shows
+# only the network graph, which is drawn again every second, gives it a frame
+# a second to notice the cover in; podman's default network gives the
+# container the route the graph needs.
 COVER_CONTAINER_NAME="thinfloe-runtime-test-cover-$$"
 
 COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0
 wlr-randr --output HEADLESS-2 --pos 0,0
-printf "%s\n" "-battery 1x1" "network 2x2" "-network-info 1x2" "-temperatures 1x1" \
-    "-cpu 1x1" "-memory 1x1" "-system 1x1" "-clock 1x1" >/tmp/cover-status
-TF_STATUS_FILE=/tmp/cover-status TF_MENU_DEBUG=1 \
+mkdir -p /tmp/cover-cfg
+printf "%s\n" "version = 1" "" "[status]" \
+    "lines = [\"-battery 1x1\", \"network 2x2\", \"-network-info 1x2\", \"-temperatures 1x1\"," \
+    "    \"-cpu 1x1\", \"-memory 1x1\", \"-system 1x1\", \"-clock 1x1\"]" >/tmp/cover-cfg/config.toml
+TF_CONFIG_DIR=/tmp/cover-cfg TF_MENU_DEBUG=1 \
     timeout 12 thinfloe-menu >/dev/null 2>/tmp/cover-menu.log &
 sleep 3
 echo "scale-before=$(cat "$XDG_RUNTIME_DIR/thinfloe-scale")"
@@ -572,7 +687,7 @@ true'
         "$IMAGE" \
         sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
                printf "%s\n" "$MM_SCRIPT" >/tmp/mm.sh &&
-               thinfloe-compose-labwc-config /etc/thinfloe/labwc /nonexistent /tmp/xdg/thinfloe-labwc &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /nonexistent /nonexistent /tmp/xdg/thinfloe-labwc &&
                labwc -C /tmp/xdg/thinfloe-labwc -S "bash /tmp/mm.sh"' 2>&1)
     rc=$?
     if [[ $rc -eq 124 || $rc -eq 137 ]]; then

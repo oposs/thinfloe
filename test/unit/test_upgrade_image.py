@@ -132,10 +132,22 @@ class TestSaveHomeBeforeFinish(unittest.TestCase):
         )
 
 
+def _pin_layout(self, layout=None):
+    """Point the layout reader at a fixture, never at the real /run state."""
+    state = tempfile.TemporaryDirectory()
+    self.addCleanup(state.cleanup)
+    if layout is not None:
+        Path(state.name, "home-layout").write_text(layout + "\n")
+    patcher = mock.patch.object(ui, "STATE_DIR", state.name)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+
 class TestHomeArchiveArgv(unittest.TestCase):
     """The tar command line that writes a new stick's home.tar.gz."""
 
     def setUp(self):
+        _pin_layout(self)
         patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -161,6 +173,7 @@ class TestHomeArchiveContents(unittest.TestCase):
     """Run the real tar and look inside the result."""
 
     def setUp(self):
+        _pin_layout(self)
         patcher = mock.patch.object(ui, "SAVE_HOME_EXCLUDE_DEFAULT", "/nonexistent")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -222,6 +235,7 @@ class TestHomeArchiveOldNames(unittest.TestCase):
     once, so no ~/.dbrrg-* link is made for the new stick."""
 
     def setUp(self):
+        _pin_layout(self)
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
         root = Path(self.work.name)
@@ -255,7 +269,10 @@ class TestHomeArchiveOldNames(unittest.TestCase):
 
     def test_a_pattern_over_the_old_names_applies(self):
         (self.home / ".dbrrg-environment").write_text("written on 3.x\n")
-        (self.home / ".save-home-exclude").write_text("./.dbrrg-*\n")
+        (self.home / ".config" / "thinfloe").mkdir(parents=True, exist_ok=True)
+        (self.home / ".config" / "thinfloe" / "save-home-exclude").write_text(
+            "./.dbrrg-*\n"
+        )
         members = self._members()
         self.assertNotIn("./.dbrrg-environment", members)
         self.assertIn("./.thinfloe-environment", members)
@@ -266,6 +283,7 @@ class TestHomeArchiveExcludes(unittest.TestCase):
     """The exclude list is the one thinfloe-save-home uses, plus machine identity."""
 
     def setUp(self):
+        _pin_layout(self)
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
         root = Path(self.work.name)
@@ -299,7 +317,10 @@ class TestHomeArchiveExcludes(unittest.TestCase):
 
     def test_a_user_file_replaces_the_default(self):
         self.default.write_text("./.cache\n")
-        (self.home / ".save-home-exclude").write_text("./.other-cache\n")
+        (self.home / ".config" / "thinfloe").mkdir(parents=True, exist_ok=True)
+        (self.home / ".config" / "thinfloe" / "save-home-exclude").write_text(
+            "./.other-cache\n"
+        )
         members = self._members()
         self.assertIn("./.cache/f", members)
         self.assertNotIn("./.other-cache/f", members)
@@ -313,7 +334,10 @@ class TestHomeArchiveExcludes(unittest.TestCase):
         self.assertIn("--exclude=./.cache", patterns)
 
     def test_identity_is_excluded_even_when_a_user_file_ignores_it(self):
-        (self.home / ".save-home-exclude").write_text("./.cache\n")
+        (self.home / ".config" / "thinfloe").mkdir(parents=True, exist_ok=True)
+        (self.home / ".config" / "thinfloe" / "save-home-exclude").write_text(
+            "./.cache\n"
+        )
         joined = "\n".join(self._members())
         self.assertNotIn(".thinfloe-ssh-host-keys", joined)
         self.assertNotIn("wg0.conf", joined)
@@ -321,6 +345,84 @@ class TestHomeArchiveExcludes(unittest.TestCase):
     def test_the_remote_access_password_is_in_the_archive(self):
         self.default.write_text("./.cache\n")
         self.assertIn("./.thinfloe-password", self._members())
+
+    def test_exclude_file_follows_the_layout(self):
+        self.default.write_text("./.cache\n")
+        (self.home / ".save-home-exclude").write_text("./.other-cache\n")
+        (self.home / ".config" / "thinfloe").mkdir(parents=True, exist_ok=True)
+        (self.home / ".config" / "thinfloe" / "save-home-exclude").write_text(
+            "./.keep\n"
+        )
+        self.assertEqual(
+            ui.load_exclude_patterns(str(self.home), "new"), ["./.keep"]
+        )
+        self.assertEqual(
+            ui.load_exclude_patterns(str(self.home), "legacy"), ["./.other-cache"]
+        )
+        # The old file is not read on the new layout: a setting is read from
+        # one place only, and the shipped default is the fallback.
+        (self.home / ".config" / "thinfloe" / "save-home-exclude").unlink()
+        self.assertEqual(
+            ui.load_exclude_patterns(str(self.home), "new"), ["./.cache"]
+        )
+
+    def test_the_archive_reads_the_state_dir_it_is_given(self):
+        # Without an explicit layout the state file decides; the tests pin
+        # it to a fixture so a legacy machine running them is not read.
+        _pin_layout(self, "legacy")
+        self.default.write_text("./.cache\n")
+        (self.home / ".save-home-exclude").write_text("./.other-cache\n")
+        members = self._members()
+        self.assertIn("./.cache/f", members)
+        self.assertNotIn("./.other-cache/f", members)
+
+    def test_home_layout_follows_the_menus_rule(self):
+        state = Path(self.work.name) / "state"
+        state.mkdir()
+        f = state / "home-layout"
+        cases = [
+            (None, "new"), (b"", "new"), (b"legacy", "legacy"),
+            (b"legacy\n", "legacy"), (b"legacy\n\n", "new"),
+            (b"legacy\nx", "new"), (b"legacy ", "new"), (b"new\n", "new"),
+            (b"Legacy\n", "new"),
+        ]
+        for content, want in cases:
+            if content is None:
+                f.unlink(missing_ok=True)
+            else:
+                f.write_bytes(content)
+            self.assertEqual(ui.home_layout(str(state)), want, content)
+
+    def test_identity_excludes_cover_new_and_attic_paths(self):
+        argv = ui.home_archive_argv(str(self.home), str(self.dest), "new")
+        for p in (
+            "./.config/thinfloe/ssh-host-keys", "./.config/thinfloe/wg0.conf",
+            "./.thinfloe-ssh-host-keys", "./.dbrrg-ssh-host-keys", "./wg0.conf",
+            "./cfg-attic/.thinfloe-ssh-host-keys",
+            "./cfg-attic/.dbrrg-ssh-host-keys", "./cfg-attic/wg0.conf",
+            "./cfg-attic/.thinfloe-password", "./cfg-attic/.save-home-exclude",
+        ):
+            self.assertIn("--exclude=" + p, argv)
+
+    def test_fresh_copy_leaves_out_the_attic_identity(self):
+        attic = self.home / "cfg-attic"
+        (attic / ".thinfloe-ssh-host-keys").mkdir(parents=True)
+        (attic / ".thinfloe-ssh-host-keys" / "k").write_text("PRIVATE")
+        (attic / "wg0.conf").write_text("PrivateKey = secret\n")
+        cfg = self.home / ".config" / "thinfloe"
+        (cfg / "ssh-host-keys").mkdir(parents=True)
+        (cfg / "ssh-host-keys" / "k").write_text("PRIVATE")
+        (cfg / "wg0.conf").write_text("PrivateKey = secret\n")
+        (cfg / "password").write_text("hash\n")
+        subprocess.run(
+            ui.home_archive_argv(str(self.home), str(self.dest), "new"), check=True
+        )
+        with tarfile.open(self.dest, "r:gz") as tf:
+            members = tf.getnames()
+        self.assertEqual(
+            [m for m in members if "ssh-host-keys" in m or "wg0.conf" in m], []
+        )
+        self.assertIn("./.config/thinfloe/password", members)
 
     def test_no_exclude_file_at_all_still_archives(self):
         self.assertIn("./.keep/f", self._members())

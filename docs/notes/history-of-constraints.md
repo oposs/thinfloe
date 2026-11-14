@@ -343,11 +343,15 @@ via `make test`.
 ## Per-machine network config is installed by the initramfs, never by a unit
 
 The netplan systemd generator creates `netplan-wpa-<if>.service` when the
-manager starts. A `~/wifi.yaml` or `~/wg0.conf` copied into place after that
+manager starts. A `wifi.yaml` or `wg0.conf` copied into place after that
 never gets a WPA unit, and WiFi never associates. `install_local_network()`
 in `thinfloe-lib.sh`, called from `setup-overlay.sh` after `restore_home`, does
 the copy (and creates the `wg-quick@wg0` wants link) before switch-root, so
-the generator sees the files. Netplan files are mode 0600 through a `chmod`
+the generator sees the files. Since the config directory move (2026-11) the
+sources are `~/.config/thinfloe/generated/wifi.yaml`, `generated/ethernet.yaml`
+and `~/.config/thinfloe/wg0.conf`; a 4.x home (`home-layout` says `legacy`)
+still gives `~/wifi.yaml`, `~/ethernet.yaml` and `~/wg0.conf` until the menu
+has migrated it. Netplan files are mode 0600 through a `chmod`
 in `containers/ubuntu/Dockerfile`, because git stores only 644 and 755.
 Do not move the copy into a `thinfloe-local-network.service`.
 `test/integration/test-field-report.sh` asserts that unit does not exist and
@@ -380,7 +384,7 @@ The initrd carries no WiFi drivers and no WiFi firmware (2026-10-24).
 from the squashfs after switch-root. `test-initramfs-commands.sh` fails
 on `iwlwifi.ko` or `firmware/intel/iwlwifi/` in the initrd. **Not
 verified on hardware** until a USB boot on an Intel WiFi machine (the
-8265) associates from `~/wifi.yaml`.
+8265) associates from `generated/wifi.yaml`.
 
 ## The ThinFloe pre-mount and mount hooks run after dracut-cmdline
 
@@ -678,6 +682,13 @@ the home is native and nothing reads or keeps the old names (owner,
   `DBRRG_IDLE_TIMEOUT` (`TF_IDLE_TIMEOUT` wins).
 - Shipped tile files keep their file names (`50-upgrade-image.desktop`),
   because a user file rewording a shipped tile matches by file name.
+
+The 4.x files themselves move once more, into `~/.config/thinfloe/`, with the
+old ones parked in `~/cfg-attic/` (see
+[home-persistence.md](home-persistence.md#migration-of-a-4x-home)); the
+listing check above counts `.config/thinfloe/home-version` as a marker too, so
+a migrated home is not renamed again. The names in this section are the 3.x to
+4.0 names, not the current paths.
 
 Guards: `test/integration/test-initramfs-home.sh` (the migration, also with
 only the initramfs's tools), `test/integration/test-session-packages.sh`

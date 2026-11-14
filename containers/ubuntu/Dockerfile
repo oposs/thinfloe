@@ -53,8 +53,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -yq --no-install-recommends rustup ca-certificates gcc libc6-dev
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
-COPY src/thinfloe-menu/ /build/thinfloe-menu/
-WORKDIR /build/thinfloe-menu
+# The tree mirrors the repository: migrate.rs embeds the home templates from
+# overlay/home/tfuser/.config/thinfloe by a path relative to its own file.
+COPY src/thinfloe-menu/ /build/src/thinfloe-menu/
+COPY overlay/home/tfuser/.config/thinfloe/ /build/overlay/home/tfuser/.config/thinfloe/
+WORKDIR /build/src/thinfloe-menu
 RUN set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     rustup toolchain install "$toolchain" --profile minimal; \
@@ -207,6 +210,8 @@ RUN chmod u+s /usr/bin/ping
 # OxuLnk's Depends: are listed here; libxrandr2 is for vncviewer, which
 # dlopens libXrandr.so.2 and so declares nothing.
 # test/integration/test-addon-deps.sh installs both clients and runs ldd.
+# xkb-data (last) is not an add-on library: it is the layout list of the
+# menu's Keyboard tab (/usr/share/X11/xkb/rules/evdev.xml).
 RUN apt-get install -yq --no-install-recommends \
     libasound2t64 \
     libva-drm2 \
@@ -218,7 +223,8 @@ RUN apt-get install -yq --no-install-recommends \
     libxi6 \
     libxkbcommon-x11-0 \
     libxkbcommon0 \
-    libxrandr2
+    libxrandr2 \
+    xkb-data
 
 # labwc comes from the local rebuild above, not the archive. apt resolves its
 # dependencies from the .deb's own control fields. 0.9.3-1+thinfloe1 sorts above

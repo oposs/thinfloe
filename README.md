@@ -137,7 +137,7 @@ Features:
 - **Drive selection**: Choose which USB to upgrade
 - **Boot USB detection**: Safe additive upgrade when running from the target USB
 - **A/B fallback**: Previous version kept as fallback (type `previous` at boot menu)
-- **Home copy**: A fresh install offers to copy this machine's home onto the new drive (SSH host keys and `wg0.conf` stay behind, so each machine keeps its own identity)
+- **Home copy**: A fresh install offers to copy this machine's home onto the new drive (SSH host keys and `wg0.conf` in `~/.config/thinfloe/` stay behind, so each machine keeps its own identity)
 
 Upgrade modes:
 - **Additive** (boot USB): Writes new firmware to `tl.new/`, keeps `tl/` as fallback
@@ -155,7 +155,7 @@ Below the tiles a status area shows the battery of keyboards and mice, network
 traffic, hardware sensors and the time, as far as the machine can report them.
 It takes no click and is hidden while a fullscreen window covers the menu. The
 Status tab of Settings chooses its parts, their size and their order, with a
-preview; the choice is kept in `~/.config/thinfloe/status` and travels with
+preview; the choice is kept in `~/.config/thinfloe/config.toml` and travels with
 the saved home.
 
 ThinLinc and OxuLnk are not in the image. Tick them in Settings: the image

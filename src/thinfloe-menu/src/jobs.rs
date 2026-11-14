@@ -152,14 +152,24 @@ pub enum JobResult {
     },
     NetApplied(Result<(), ApplyFailed>),
     NetTakenOver(Result<(), String>),
-    /// The monitor layout file, `None` when missing, and who wrote it.
-    MonLoaded(Result<Option<String>, String>, crate::owned::Owner),
+    /// The saved monitor profiles, `None` when there are none, and where
+    /// they come from.
+    MonLoaded(
+        Result<Option<Vec<crate::kanshi::Profile>>, String>,
+        crate::monitors::MonSource,
+    ),
     MonApplied(Result<(), String>),
     MonKept(Result<(), String>),
     MonReverted(Result<(), String>),
     MonTakenOver(Result<(), String>),
     /// The status layout file was written or removed.
     StatusSaved(Result<(), String>),
+    /// An apply of the Keyboard tab ended; `kb` is what it applied.
+    KeyboardApplied {
+        kb: crate::config::Keyboard,
+        result: Result<crate::keyboard::KbOutcome, String>,
+    },
+    ReportDismissed(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,8 +212,51 @@ pub struct Paths {
     pub homes: netfiles::Homes,
     /// The monitor layout file and the kanshi that applies it.
     pub kanshi: Kanshi,
-    /// The status layout file.
-    pub status_file: PathBuf,
+    /// The settings store, opened once for the whole menu.
+    pub config: crate::store::Shared,
+    /// Which layout this boot's home has.
+    pub layout: crate::migrate::HomeLayout,
+    /// The programs that hand a keyboard change to the running labwc.
+    pub labwc: LabwcCmds,
+}
+
+/// How a keyboard change reaches the running compositor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabwcCmds {
+    /// `thinfloe-compose-labwc-config` (`TF_COMPOSE_LABWC`).
+    pub compose: Vec<String>,
+    /// labwc itself (`TF_LABWC`).
+    pub labwc: Vec<String>,
+    /// The system defaults the composer merges from.
+    pub system_dir: PathBuf,
+    /// The directory labwc runs on (`TF_LABWC_CONFIG_DIR`); `None` when the
+    /// session did not compose one.
+    pub config_dir: Option<PathBuf>,
+    /// labwc's process id as labwc gave it to its children (`LABWC_PID`).
+    pub labwc_pid: Option<String>,
+}
+
+impl LabwcCmds {
+    /// Read from the environment; an empty variable counts as unset.
+    pub fn from_env() -> LabwcCmds {
+        fn var(name: &str) -> Option<String> {
+            std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+        }
+        let words = |name: &str, default: &str| -> Vec<String> {
+            var(name)
+                .unwrap_or_else(|| default.to_string())
+                .split_whitespace()
+                .map(String::from)
+                .collect()
+        };
+        LabwcCmds {
+            compose: words("TF_COMPOSE_LABWC", "/usr/bin/thinfloe-compose-labwc-config"),
+            labwc: words("TF_LABWC", "labwc"),
+            system_dir: PathBuf::from("/etc/thinfloe/labwc"),
+            config_dir: var("TF_LABWC_CONFIG_DIR").map(PathBuf::from),
+            labwc_pid: var("LABWC_PID"),
+        }
+    }
 }
 
 /// Like `default_addon_cmd`, for thinfloe-upgrade.
@@ -481,7 +534,24 @@ fn capture_as(
     source: &str,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(String, Option<i32>, String), String> {
-    let mut child = upgrade_command(cmd, args)
+    capture_env(cmd, args, &[], cap, timeout, feed, source, on_spawn)
+}
+
+/// `capture_as` with `envs` added to the tool's environment.
+#[allow(clippy::too_many_arguments)]
+fn capture_env(
+    cmd: &[String],
+    args: &[String],
+    envs: &[(&str, &str)],
+    cap: usize,
+    timeout: Duration,
+    feed: &Arc<Feed>,
+    source: &str,
+    on_spawn: impl FnOnce(i32),
+) -> Result<(String, Option<i32>, String), String> {
+    let mut command = upgrade_command(cmd, args);
+    command.envs(envs.iter().copied());
+    let mut child = command
         .spawn()
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]))?;
     on_spawn(child.id() as i32);
@@ -676,8 +746,36 @@ impl ApplyFailed {
     }
 }
 
-/// Save `change` into the home, then (only when that worked) let the root
-/// tool `apply` it, in a process group of its own that `on_spawn` gets.
+/// What the Network tab shows: the `[network]` table of the settings.
+pub fn net_load(paths: &Paths) -> (netfiles::WifiFile, netfiles::WiredFile) {
+    netfiles::view(&lock(&paths.config).cfg.network)
+}
+
+/// The settings as they are and the inputs rendering needs, copied so the
+/// store is not locked while netplan checks a candidate.
+fn net_snapshot(paths: &Paths) -> (crate::config::ThinfloeConfig, crate::generated::Inputs) {
+    let s = lock(&paths.config);
+    (s.cfg.clone(), s.inputs.clone())
+}
+
+/// *Let the menu manage it*: the kept text `which` becomes the menu's own
+/// settings, written through the store like any other change. A store that
+/// refuses writes refuses before netplan is asked.
+pub fn net_take_over(paths: &Paths, which: &str) -> Result<(), String> {
+    lock(&paths.config).refuse_read_only()?;
+    let (cfg, inputs) = net_snapshot(paths);
+    let net = netfiles::take_over(&cfg.network, which, &paths.homes, &inputs)?;
+    lock(&paths.config)
+        .update(crate::generated::Table::Network, |c| c.network = net)
+        .map(|_| ())
+}
+
+/// Plan `change`, stage the generated network files, then (only when that
+/// worked) let the root tool `apply` them, in a process group of its own
+/// that `on_spawn` gets. Success makes the candidate `[network]`; a failure
+/// puts back exactly the generated network files the stage replaced. The
+/// candidate is built on the settings as they are at that moment, so a
+/// keyboard or screen change made while the tool runs is kept.
 /// `netboot` is the caller's to know.
 pub fn network_apply(
     paths: &Paths,
@@ -686,56 +784,54 @@ pub fn network_apply(
     feed: &Arc<Feed>,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(), ApplyFailed> {
-    // Ruling 16: what the home held, so a failed apply can put it back.
-    // `save` writes only menu, template and missing files, all readable.
-    // Both files, whatever the change names: a wired change rewrites
-    // ~/wifi.yaml too when the DNS servers change.
-    let before: Vec<(&str, Option<Vec<u8>>)> = [netfiles::WIFI_FILE, netfiles::WIRED_FILE]
-        .iter()
-        .filter_map(|name| {
-            crate::owned::read_bytes(&paths.homes.home.join(name))
-                .ok()
-                .map(|b| (*name, b))
-        })
-        .collect();
-    // A save can fail after it wrote one file; that one goes back too.
-    netfiles::save(&paths.homes, change, netboot).map_err(|e| put_back(&paths.homes.home, &before, e))?;
+    lock(&paths.config).refuse_read_only().map_err(ApplyFailed::new)?;
+    let (cfg, inputs) = net_snapshot(paths);
+    let net = netfiles::plan(&cfg.network, change, netboot, &paths.homes, &inputs).map_err(ApplyFailed::new)?;
+    let staged = {
+        let s = lock(&paths.config);
+        let mut candidate = s.cfg.clone();
+        candidate.network = net.clone();
+        s.stage(crate::generated::Table::Network, &candidate)
+            .map_err(|e| ApplyFailed {
+                home_changed: e.restore.is_some(),
+                reason: e.to_string(),
+            })?
+    };
     let result = network_json(paths, &["apply"], NETWORK_APPLY_TIMEOUT, feed, on_spawn)
         .and_then(|text| nettab::parse_result(&text));
-    result.map_err(|reason| put_back(&paths.homes.home, &before, reason))
-}
-
-/// Put back each file of `before` that the save changed. A file that
-/// cannot be put back is named in the reason, and the home counts as
-/// changed.
-fn put_back(home: &Path, before: &[(&str, Option<Vec<u8>>)], reason: String) -> ApplyFailed {
-    let mut failed = ApplyFailed::new(reason);
-    for (name, old) in before {
-        let path = home.join(name);
-        // Unchanged: nothing to do. Anything else, a read that fails
-        // included, goes to `put_back`, which keeps a link or a hand file
-        // and says so.
-        let now = crate::owned::read_bytes(&path);
-        if now.as_ref().is_ok_and(|b| b == old) {
-            continue;
+    match result {
+        Ok(()) => {
+            let mut s = lock(&paths.config);
+            let mut candidate = s.cfg.clone();
+            candidate.network = net;
+            // The tool applied the staged files, so they stay. The
+            // settings that do not follow are told, and the home is saved
+            // with the files as they are.
+            s.commit(candidate).map_err(|e| ApplyFailed {
+                reason: format!("The network was applied, but the settings could not be saved: {e}"),
+                home_changed: true,
+            })
         }
-        if let Err(e) = crate::owned::put_back(&path, old.as_deref()) {
-            failed.reason = format!("{}; ~/{name} could not be put back: {e}", failed.reason);
-            failed.home_changed = true;
+        Err(reason) => {
+            let mut failed = ApplyFailed::new(reason);
+            if let Err(e) = lock(&paths.config).unstage(staged) {
+                failed.reason = format!("{}; {e}", failed.reason);
+                failed.home_changed = true;
+            }
+            Err(failed)
         }
     }
-    failed
 }
 
 /// The monitor layout: kanshi's config, the files that make an Apply
 /// undoable, and how kanshi is found and started.
 #[derive(Debug, Clone)]
 pub struct Kanshi {
-    /// `~/.config/kanshi/config`.
+    /// `generated/kanshi` in the config directory.
     pub config: PathBuf,
-    /// `~/.config/kanshi/thinfloe-layout-unconfirmed`; thinfloe-session
-    /// undoes the layout when it finds it. It sits next to the config so a
-    /// home save taken while the layout is unconfirmed carries it too.
+    /// `generated/layout-unconfirmed`; thinfloe-session undoes the layout
+    /// when it finds it. It sits beside the config so a home save taken
+    /// while the layout is unconfirmed carries it too.
     pub marker: PathBuf,
     /// kanshi, when none runs; `-c <config>` follows.
     pub cmd: Vec<String>,
@@ -749,18 +845,21 @@ pub const KANSHI_START_GRACE: Duration = Duration::from_millis(300);
 impl Kanshi {
     /// The session's files; `TF_KANSHI` replaces the kanshi program.
     pub fn from_env() -> Kanshi {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
-        let marker = home.join(".config/kanshi/thinfloe-layout-unconfirmed");
-        let cmd = match std::env::var("TF_KANSHI") {
-            Ok(v) if !v.trim().is_empty() => vec![v],
-            _ => vec!["kanshi".to_string()],
-        };
+        let mut k = Kanshi::from_dir(&crate::config::ConfigDir::from_env());
+        if let Ok(v) = std::env::var("TF_KANSHI")
+            && !v.trim().is_empty()
+        {
+            k.cmd = vec![v];
+        }
+        k
+    }
+
+    /// The layout files under `d`; kanshi is the one on the path.
+    pub fn from_dir(d: &crate::config::ConfigDir) -> Kanshi {
         Kanshi {
-            config: home.join(".config/kanshi/config"),
-            marker,
-            cmd,
+            config: d.generated_file("kanshi"),
+            marker: d.generated_file("layout-unconfirmed"),
+            cmd: vec!["kanshi".to_string()],
             proc_dir: PathBuf::from("/proc"),
         }
     }
@@ -805,14 +904,118 @@ fn write_via(path: &Path, suffix: &str, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Write the status layout file through `<file>.new` and a rename, or with
-/// `None` remove it.
-pub fn status_save(path: &Path, text: Option<&str>) -> Result<(), String> {
-    let r = match text {
-        Some(t) => write_via(path, ".new", t.as_bytes()),
-        None => remove_if_there(path),
+/// Keep `text`, the status layout as `layout::to_text` writes it, in the
+/// `[status]` table of `config.toml`, or with `None` go back to the default
+/// list. A refused update (read-only store, failed write) is the error.
+pub fn status_save(store: &crate::store::Shared, text: Option<&str>) -> Result<(), String> {
+    let lines = text.map(|t| {
+        t.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    });
+    let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store
+        .update(crate::generated::Table::Status, |c| c.status.lines = lines)
+        .map(|_| ())
+}
+
+/// How long the composer or labwc may take to answer a keyboard change.
+pub const KEYBOARD_TIMEOUT: Duration = Duration::from_secs(10);
+const KEYBOARD_BYTES: usize = 64 * 1024;
+const KEYBOARD_LOG_SOURCE: &str = "keyboard";
+
+/// Save the keyboard choice, then, when the session runs on a composed
+/// labwc directory, rewrite its `environment` and ask labwc to read it.
+/// Only a failed save is the error: once `config.toml` holds the choice,
+/// a failed hand-over is `KbOutcome::Saved` with the reason.
+pub fn keyboard_apply(
+    paths: &Paths,
+    kb: &crate::config::Keyboard,
+    feed: &Arc<Feed>,
+) -> Result<crate::keyboard::KbOutcome, String> {
+    use crate::keyboard::KbOutcome;
+    let (generated, user) = {
+        let mut store = lock(&paths.config);
+        store
+            .update(crate::generated::Table::Keyboard, |c| c.keyboard = kb.clone())
+            .map_err(|e| format!("Could not save the keyboard settings: {e}"))?;
+        (store.dir.generated_file("environment"), store.dir.environment())
     };
-    r.map_err(|e| format!("{}: {e}", path.display()))
+    let l = &paths.labwc;
+    let Some(config_dir) = l.config_dir.as_ref().filter(|d| **d != l.system_dir) else {
+        return Ok(KbOutcome::NextStart);
+    };
+    Ok(match keyboard_hand_over(l, config_dir, &generated, &user, feed) {
+        Ok(()) => KbOutcome::Live,
+        Err(why) => KbOutcome::Saved(why),
+    })
+}
+
+/// Compose labwc's `environment` in `config_dir` again and ask the running
+/// labwc to read it.
+fn keyboard_hand_over(
+    l: &LabwcCmds,
+    config_dir: &Path,
+    generated: &Path,
+    user: &Path,
+    feed: &Arc<Feed>,
+) -> Result<(), String> {
+    let path_arg = |p: &Path| p.to_string_lossy().into_owned();
+    let args = [
+        "--env-only".to_string(),
+        path_arg(&l.system_dir),
+        path_arg(generated),
+        path_arg(user),
+        path_arg(config_dir),
+    ];
+    let handed = |why: String| format!("The keyboard settings could not be handed to labwc: {why}");
+    let (_, status, stderr) = capture_as(
+        &l.compose,
+        &args,
+        KEYBOARD_BYTES,
+        KEYBOARD_TIMEOUT,
+        feed,
+        KEYBOARD_LOG_SOURCE,
+        |_| {},
+    )
+    .map_err(handed)?;
+    if status != Some(0) {
+        let first = stderr.lines().next().unwrap_or("").trim();
+        return Err(handed(match (first.is_empty(), status) {
+            (false, _) => first.to_string(),
+            (true, Some(n)) => format!("the composer failed with status {n}"),
+            (true, None) => "the composer was ended by a signal".to_string(),
+        }));
+    }
+    let Some(pid) = l.labwc_pid.as_deref().filter(|p| !p.trim().is_empty()) else {
+        return Err("labwc is not known to the menu (LABWC_PID is not set).".into());
+    };
+    let (_, status, _) = capture_env(
+        &l.labwc,
+        &["--reconfigure".to_string()],
+        &[("LABWC_PID", pid)],
+        KEYBOARD_BYTES,
+        KEYBOARD_TIMEOUT,
+        feed,
+        KEYBOARD_LOG_SOURCE,
+        |_| {},
+    )
+    .map_err(|e| format!("labwc --reconfigure failed ({e})"))?;
+    match status {
+        Some(0) => Ok(()),
+        Some(n) => Err(format!("labwc --reconfigure failed (status {n})")),
+        None => Err("labwc --reconfigure failed (ended by a signal)".into()),
+    }
+}
+
+/// Remove the migration report from the `[notice]` table.
+pub fn dismiss_report(store: &crate::store::Shared) -> Result<(), String> {
+    let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store
+        .update(crate::generated::Table::Notice, |c| c.notice.migration = None)
+        .map(|_| ())
 }
 
 fn remove_if_there(path: &Path) -> std::io::Result<()> {
@@ -822,20 +1025,28 @@ fn remove_if_there(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The text of the layout file and who wrote it.
-pub fn mon_load(k: &Kanshi) -> (Result<Option<String>, String>, crate::owned::Owner) {
-    match crate::owned::read(&k.config) {
-        Ok(t) => {
-            let owner = crate::owned::owner(t.as_deref());
-            (Ok(t), owner)
-        }
+/// The saved monitor arrangement from the settings, and where it comes
+/// from. A kept hand-written file has no profiles; settings that do not
+/// convert are an error and count as kept, so nothing overwrites them.
+pub fn mon_load(
+    store: &crate::store::Shared,
+) -> (
+    Result<Option<Vec<crate::kanshi::Profile>>, String>,
+    crate::monitors::MonSource,
+) {
+    use crate::monitors::MonSource;
+    let store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let monitors = &store.cfg.monitors;
+    if monitors.kept.is_some() {
+        return (Ok(None), MonSource::Kept);
+    }
+    match monitors.to_profiles() {
         Err(e) => (
-            Err(format!(
-                "Could not read {}: {e}",
-                crate::owned::home_relative(&k.config)
-            )),
-            crate::owned::Owner::ByHand,
+            Err(format!("The saved monitor arrangement could not be read: {e}")),
+            MonSource::Kept,
         ),
+        Ok(p) if p.is_empty() => (Ok(None), MonSource::Missing),
+        Ok(p) => (Ok(Some(p)), MonSource::Menu),
     }
 }
 
@@ -900,23 +1111,41 @@ pub fn kanshi_reload(k: &Kanshi) -> Result<(), String> {
     Ok(())
 }
 
-/// Write the new layout and let kanshi apply it. First the old file goes
-/// to `config.prev`, and the marker `prev` says so, so a crash at any
-/// later point is undone by the next session. Without a file, `prev_body`
-/// (the body of a file for the layout on screen) is kept instead: a revert
-/// needs a layout to go back to, since kanshi keeps the last one it set.
-/// The menu never writes the marker `none`. On a failure the old file is
-/// put back and both go.
-pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), String> {
-    let rel = crate::owned::home_relative(&k.config);
-    let old = crate::owned::read_bytes(&k.config).map_err(|e| format!("Could not read {rel}: {e}"))?;
-    let old_text = old.as_deref().map(String::from_utf8_lossy);
-    if crate::owned::owner(old_text.as_deref()) == crate::owned::Owner::ByHand {
-        return Err(format!("{rel} was written by hand"));
-    }
+fn lock(store: &crate::store::Shared) -> std::sync::MutexGuard<'_, crate::store::ConfigStore> {
+    store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Write the new layout and let kanshi apply it. First the old
+/// `generated/kanshi` goes to `kanshi.prev`, and the marker `prev` says so,
+/// so a crash at any later point is undone by the next session. Without a
+/// file, `prev_body` (the body of a file for the layout on screen) is kept
+/// instead: a revert needs a layout to go back to, since kanshi keeps the
+/// last one it set. The menu never writes the marker `none`. `[monitors]`
+/// stays as it is until `mon_keep`. On a failure (the store refusing
+/// included) the old file is put back and both marker and prev go.
+pub fn mon_apply(
+    store: &crate::store::Shared,
+    k: &Kanshi,
+    profiles: &[crate::kanshi::Profile],
+    prev_body: Option<&str>,
+) -> Result<(), String> {
+    let rel = crate::atomic::home_relative(&k.config);
+    let mut candidate = {
+        let s = lock(store);
+        // Before anything is written: kanshi.prev, the marker and generated/
+        // are all the Apply's own doing.
+        s.refuse_read_only()?;
+        if s.cfg.monitors.kept.is_some() {
+            return Err("The monitor arrangement is a kanshi file written by hand; nothing was changed.".to_string());
+        }
+        s.cfg.clone()
+    };
+    candidate.monitors = crate::config::MonitorsCfg::from_profiles(profiles);
+    let old = crate::atomic::read(&k.config, crate::generated::MAX_BYTES)
+        .map_err(|e| format!("Could not read {rel}: {e}"))?;
     let marker = &k.marker;
-    let marker_rel = crate::owned::home_relative(marker);
-    // An earlier Apply whose undo failed: its config.prev is the real old
+    let marker_rel = crate::atomic::home_relative(marker);
+    // An earlier Apply whose undo failed: its kanshi.prev is the real old
     // layout and must not be replaced. The next session undoes it. A marker
     // that cannot be checked may be one, too.
     match std::fs::symlink_metadata(marker) {
@@ -933,13 +1162,13 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
     let prev = k.prev();
     let kept = match (&old, prev_body) {
         (Some(b), _) => write_new(&prev, b),
-        (None, Some(body)) => write_new(&prev, format!("{}\n{body}", crate::owned::HEADER).as_bytes()),
+        (None, Some(body)) => write_new(&prev, format!("{}\n{body}", crate::generated::HEADER).as_bytes()),
         (None, None) => return Err("The layout on screen is not known; nothing was changed.".to_string()),
     };
     kept.map_err(|e| {
         format!(
             "Could not keep the old layout in {}: {e}",
-            crate::owned::home_relative(&prev)
+            crate::atomic::home_relative(&prev)
         )
     })?;
     if let Err(e) = write_new(marker, b"prev\n") {
@@ -948,20 +1177,43 @@ pub fn mon_apply(k: &Kanshi, text: &str, prev_body: Option<&str>) -> Result<(), 
         let _ = remove_if_there(&prev);
         return Err(format!("Could not write {marker_rel}: {e}"));
     }
-    crate::owned::write(&k.config, text)
-        .map_err(|e| format!("Could not write {rel}: {e}"))
-        .and_then(|()| kanshi_reload(k))
-        .map_err(|reason| mon_undo(k, old.as_deref(), reason))
+    let staged = match lock(store).stage(crate::generated::Table::Monitors, &candidate) {
+        Ok(s) => s,
+        Err(e) => return Err(mon_undo(store, k, &old, e.to_string(), None)),
+    };
+    kanshi_reload(k).map_err(|reason| mon_undo(store, k, &old, reason, Some(staged)))
 }
 
-/// Put `old` back after a failed Apply. Only when that worked do the
-/// marker and `config.prev` go: else the next session undoes it.
-fn mon_undo(k: &Kanshi, old: Option<&[u8]>, reason: String) -> String {
-    if let Err(e) = crate::owned::put_back(&k.config, old) {
-        return format!(
-            "{reason}; {} could not be put back: {e}",
-            crate::owned::home_relative(&k.config)
-        );
+/// Put `generated/kanshi` back to `old` (`None`: no file). A file that
+/// already holds `old` is left alone.
+fn restore_kanshi(k: &Kanshi, old: &Option<Vec<u8>>) -> Result<(), String> {
+    let now = crate::atomic::read(&k.config, crate::generated::MAX_BYTES);
+    if matches!(&now, Ok(n) if n == old) {
+        return Ok(());
+    }
+    match old {
+        Some(b) => crate::atomic::write(&k.config, b, crate::generated::mode_of("kanshi")),
+        None => crate::atomic::remove(&k.config),
+    }
+    .map_err(|e| format!("{} could not be restored: {e}", crate::atomic::home_relative(&k.config)))
+}
+
+/// Put `old` back after a failed Apply: through `unstage` when the store
+/// staged the file, else by hand. Only when that worked do the marker and
+/// `kanshi.prev` go: else the next session undoes it.
+fn mon_undo(
+    store: &crate::store::Shared,
+    k: &Kanshi,
+    old: &Option<Vec<u8>>,
+    reason: String,
+    staged: Option<crate::store::Staged>,
+) -> String {
+    let put_back = match staged {
+        Some(s) => lock(store).unstage(s),
+        None => restore_kanshi(k, old),
+    };
+    if let Err(e) = put_back {
+        return format!("{reason}; {e}");
     }
     // The marker first, and prev only once it is gone; see `mon_revert`.
     if let Err(e) = remove_marker(k) {
@@ -971,13 +1223,28 @@ fn mon_undo(k: &Kanshi, old: Option<&[u8]>, reason: String) -> String {
     reason
 }
 
-/// The new layout is confirmed: nothing is left to undo.
-/// A marker that stays means the next session goes back: that is an error.
-/// The marker goes first; see `mon_revert`.
-pub fn mon_keep(k: &Kanshi) -> Result<(), String> {
+/// The new layout is confirmed: `profiles` become `[monitors]` and nothing
+/// is left to undo. A marker that stays means the next session goes back:
+/// that is an error. The marker goes first; see `mon_revert`. When the
+/// store refuses the settings, `generated/kanshi` goes back to what they
+/// say, so the next start finds both alike; the person is told the layout
+/// goes back at the next login.
+pub fn mon_keep(store: &crate::store::Shared, k: &Kanshi, profiles: Vec<crate::kanshi::Profile>) -> Result<(), String> {
     remove_marker(k)?;
+    let committed = {
+        let mut s = lock(store);
+        let mut candidate = s.cfg.clone();
+        candidate.monitors = crate::config::MonitorsCfg::from_profiles(&profiles);
+        s.commit(candidate)
+    };
+    if committed.is_err() {
+        let s = lock(store);
+        if let Ok(body) = crate::generated::render(&s.cfg, "kanshi", &s.inputs) {
+            let _ = crate::generated::write_if_changed(&s.dir.generated(), "kanshi", body.as_deref());
+        }
+    }
     let _ = remove_if_there(&k.prev());
-    Ok(())
+    committed
 }
 
 fn remove_marker(k: &Kanshi) -> Result<(), String> {
@@ -985,35 +1252,48 @@ fn remove_marker(k: &Kanshi) -> Result<(), String> {
     remove_if_there(m).map_err(|e| {
         format!(
             "The undo marker {} could not be removed: {e}",
-            crate::owned::home_relative(m)
+            crate::atomic::home_relative(m)
         )
     })
 }
 
-/// Go back to the layout before the Apply: `config.prev` goes back over
-/// the config, and kanshi reads it again. Every Apply keeps a
-/// `config.prev`; without one nothing is changed and the marker stays, so
+/// Go back to the layout before the Apply: `kanshi.prev` goes back over
+/// `generated/kanshi`, and kanshi reads it again. Every Apply keeps a
+/// `kanshi.prev`; without one nothing is changed and the marker stays, so
 /// the next session undoes the Apply. The marker also stays when the file
-/// could not be put back, so the next session tries.
+/// could not be put back, so the next session tries. `[monitors]` was not
+/// touched by the Apply; after a first Apply `generated/kanshi` holds the
+/// layout that was on screen until the next start regenerates it.
 pub fn mon_revert(k: &Kanshi) -> Result<(), String> {
     let prev = k.prev();
-    let prev_rel = crate::owned::home_relative(&prev);
-    let old = crate::owned::read_bytes(&prev)
+    let prev_rel = crate::atomic::home_relative(&prev);
+    let old = crate::atomic::read(&prev, crate::generated::MAX_BYTES)
         .map_err(|e| format!("Could not read {prev_rel}: {e}"))?
         .ok_or_else(|| format!("{prev_rel} is missing"))?;
-    crate::owned::put_back(&k.config, Some(&old))
-        .map_err(|e| format!("{} could not be put back: {e}", crate::owned::home_relative(&k.config)))?;
+    restore_kanshi(k, &Some(old))?;
     // The marker before prev: thinfloe-session reads marker `prev` without
-    // config.prev as "remove the config", and would delete the layout just
+    // kanshi.prev as "remove the config", and would delete the layout just
     // put back if the menu died between the two.
     remove_marker(k)?;
     let _ = remove_if_there(&prev);
     kanshi_reload(k)
 }
 
-/// *Let the menu manage it*: the hand-written file goes to `config.by-hand`.
-pub fn mon_take_over(k: &Kanshi) -> Result<(), String> {
-    crate::owned::take_over(&k.config).map(|_| ())
+/// *Let the menu manage it*: the kept hand-written file is replaced by the
+/// layout on screen, which becomes the saved arrangement, and kanshi reads
+/// the new file. A refused update reloads nothing.
+pub fn mon_take_over(store: &crate::store::Shared, k: &Kanshi, heads: &[crate::heads::Head]) -> Result<(), String> {
+    let profiles = if heads.is_empty() {
+        Vec::new()
+    } else {
+        vec![crate::kanshi::from_heads(heads)]
+    };
+    lock(store)
+        .update(crate::generated::Table::Monitors, |c| {
+            c.monitors = crate::config::MonitorsCfg::from_profiles(&profiles);
+        })
+        .map(|_| ())?;
+    kanshi_reload(k)
 }
 
 #[cfg(test)]
@@ -1071,6 +1351,143 @@ mod tests {
         assert!(restore_failed(&d), "CRLF");
     }
 
+    /// A home with a store, and stub compose and labwc scripts that append
+    /// their arguments to `<d>/calls`.
+    fn kb_paths(d: &Path, compose: &str, labwc: &str, config_dir: Option<&Path>, pid: Option<&str>) -> Paths {
+        let mut p = net_paths(d, "/bin/true", "true");
+        p.config = crate::store::test_shared(&d.join("home/.config/thinfloe"));
+        let log = d.join("calls");
+        let wrap = |name: &str, body: &str| {
+            let script = format!("echo \"{name} $*\" >> {}; {body}", log.display());
+            ["/bin/sh", "-c", &script, "sh"].map(String::from).to_vec()
+        };
+        p.labwc = LabwcCmds {
+            compose: wrap("compose", compose),
+            labwc: wrap(
+                "labwc",
+                &format!("echo \"$LABWC_PID\" > {}; {labwc}", d.join("pid").display()),
+            ),
+            system_dir: PathBuf::from("/etc/thinfloe/labwc"),
+            config_dir: config_dir.map(Path::to_path_buf),
+            labwc_pid: pid.map(String::from),
+        };
+        p
+    }
+
+    fn de_kb() -> crate::config::Keyboard {
+        crate::config::Keyboard {
+            layout: "de".into(),
+            ..Default::default()
+        }
+    }
+
+    fn calls(d: &Path) -> Vec<String> {
+        fs::read_to_string(d.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn keyboard_apply_writes_config_then_composes_then_reconfigures() {
+        let d = dir("kb-apply");
+        let out = d.join("run/labwc");
+        let p = kb_paths(&d, "true", "true", Some(&out), Some("4242"));
+        let kb = de_kb();
+        let r = keyboard_apply(&p, &kb, &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::Live));
+        let root = d.join("home/.config/thinfloe");
+        assert_eq!(
+            calls(&d),
+            [
+                format!(
+                    "compose --env-only /etc/thinfloe/labwc {0}/generated/environment {0}/environment {1}",
+                    root.display(),
+                    out.display()
+                ),
+                "labwc --reconfigure".to_string(),
+            ]
+        );
+        assert_eq!(fs::read_to_string(d.join("pid")).unwrap().trim(), "4242");
+        let toml = fs::read_to_string(root.join("config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&toml).unwrap().keyboard, kb);
+        let env = fs::read_to_string(root.join("generated/environment")).unwrap();
+        assert!(env.lines().any(|l| l == "XKB_DEFAULT_VARIANT="), "{env}");
+        assert!(env.lines().any(|l| l == "XKB_DEFAULT_LAYOUT=de"), "{env}");
+    }
+
+    #[test]
+    fn the_plain_fallback_dir_means_next_start() {
+        let d = dir("kb-fallback");
+        let sys = PathBuf::from("/etc/thinfloe/labwc");
+        let p = kb_paths(&d, "true", "true", Some(&sys), Some("1"));
+        let r = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::NextStart));
+        assert!(calls(&d).is_empty());
+        assert!(d.join("home/.config/thinfloe/config.toml").exists());
+        let p = kb_paths(&d, "true", "true", None, Some("1"));
+        let r = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default()));
+        assert_eq!(r, Ok(crate::keyboard::KbOutcome::NextStart));
+        assert!(calls(&d).is_empty());
+    }
+
+    /// The why of a `Saved` outcome; panics on anything else.
+    fn saved_why(r: Result<crate::keyboard::KbOutcome, String>) -> String {
+        match r {
+            Ok(crate::keyboard::KbOutcome::Saved(why)) => why,
+            other => panic!("not saved-not-live: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failing_composer_is_reported_and_labwc_not_asked() {
+        let d = dir("kb-compose-fail");
+        let p = kb_paths(&d, "echo boom >&2; exit 1", "true", Some(&d.join("out")), Some("1"));
+        let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
+        assert!(e.contains("boom"), "{e}");
+        assert!(
+            e.starts_with("The keyboard settings could not be handed to labwc: "),
+            "{e}"
+        );
+        assert_eq!(calls(&d).len(), 1);
+        // The save happened before: the next start uses it.
+        let toml = fs::read_to_string(d.join("home/.config/thinfloe/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&toml).unwrap().keyboard, de_kb());
+    }
+
+    #[test]
+    fn a_missing_labwc_pid_is_reported() {
+        for pid in [None, Some("")] {
+            let d = dir("kb-no-pid");
+            let p = kb_paths(&d, "true", "true", Some(&d.join("out")), pid);
+            let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
+            assert!(e.contains("LABWC_PID is not set"), "{e}");
+            assert!(!calls(&d).iter().any(|c| c.starts_with("labwc")));
+        }
+    }
+
+    #[test]
+    fn a_failing_reconfigure_is_reported() {
+        let d = dir("kb-reconf-fail");
+        let p = kb_paths(&d, "true", "exit 3", Some(&d.join("out")), Some("1"));
+        let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
+        assert_eq!(e, "labwc --reconfigure failed (status 3)");
+    }
+
+    #[test]
+    fn a_failed_save_is_the_error_and_runs_nothing() {
+        let d = dir("kb-save-fail");
+        let mut p = kb_paths(&d, "true", "true", Some(&d.join("out")), Some("1"));
+        // The settings directory is a plain file: nothing can be written.
+        let root = d.join("blocked");
+        fs::write(&root, "").unwrap();
+        p.config = crate::store::test_shared(&root);
+        let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+        assert!(e.starts_with("Could not save the keyboard settings: "), "{e}");
+        assert!(calls(&d).is_empty());
+    }
+
     #[test]
     fn save_runs_the_command_and_maps_its_status() {
         let d = dir("save");
@@ -1082,7 +1499,9 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1093,7 +1512,9 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1104,7 +1525,9 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1332,7 +1755,9 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1344,7 +1769,9 @@ mod tests {
             network_cmd: default_network_cmd(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: crate::store::test_shared(&d.join("cfg")),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -1509,6 +1936,43 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     }
 
+    use crate::config::{NetCfg, NetworkCfg};
+    use crate::generated::{Inputs, Table};
+    use crate::store::{OpenMode, Shared};
+
+    const SHIPPED_WIRED: &str = include_str!("../../../overlay/etc/netplan/ethernet.yaml");
+
+    fn net_inputs() -> Inputs {
+        Inputs {
+            default_wired: SHIPPED_WIRED.into(),
+            netboot: false,
+            registry: None,
+        }
+    }
+
+    /// A session store under `d/cfg` holding `net`, its generated files
+    /// written as the menu writes them.
+    fn net_store(d: &Path, net: NetworkCfg) -> Shared {
+        let dir = crate::config::ConfigDir { root: d.join("cfg") };
+        let s = Arc::new(std::sync::Mutex::new(
+            crate::store::open(dir, net_inputs(), OpenMode::Session, 0).store,
+        ));
+        lock(&s).update(Table::Network, |c| c.network = net).unwrap();
+        s
+    }
+
+    fn home_net() -> NetworkCfg {
+        NetworkCfg {
+            wifi_device: Some("wlan0".into()),
+            networks: vec![NetCfg {
+                ssid: "home".into(),
+                hidden: false,
+                password: Some("secret123".into()),
+            }],
+            ..NetworkCfg::default()
+        }
+    }
+
     fn net_paths(d: &Path, netplan: &str, tool: &str) -> Paths {
         let mut p = Paths {
             save_home: PathBuf::from("/nonexistent/save-home"),
@@ -1518,17 +1982,41 @@ mod tests {
             network_cmd: ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec(),
             homes: netfiles::Homes::from_env(),
             kanshi: Kanshi::from_env(),
-            status_file: PathBuf::from("/nonexistent/status"),
+            config: net_store(d, NetworkCfg::default()),
+            layout: crate::migrate::HomeLayout::New,
+            labwc: LabwcCmds::from_env(),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
             sys_net: d.join("sys"),
             netplan: netplan.to_string(),
-            default_wired: d.join("missing-default"),
+            default_wired: d.join("default-ethernet.yaml"),
         };
+        std::fs::write(&p.homes.default_wired, SHIPPED_WIRED).unwrap();
         std::fs::create_dir_all(d.join("home")).unwrap();
         std::fs::create_dir_all(d.join("sys/eno1")).unwrap();
+        std::fs::create_dir_all(d.join("sys/wlan0/wireless")).unwrap();
         p
+    }
+
+    fn gen_file(p: &Paths, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(lock(&p.config).dir.generated_file(name)).ok()
+    }
+
+    fn generated_bytes(p: &Paths) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        (gen_file(p, "wifi.yaml"), gen_file(p, "ethernet.yaml"))
+    }
+
+    fn config_bytes(p: &Paths) -> Vec<u8> {
+        std::fs::read(lock(&p.config).dir.config_toml()).unwrap()
+    }
+
+    fn one_net(ssid: &str) -> Vec<netfiles::Net> {
+        vec![netfiles::Net {
+            ssid: ssid.into(),
+            hidden: false,
+            password: Some("secret123".into()),
+        }]
     }
 
     #[test]
@@ -1540,7 +2028,9 @@ mod tests {
             marker.display()
         );
         // The default wired file is missing, so no new set can be built.
-        let p = net_paths(&d, "/bin/true", &tool);
+        let mut p = net_paths(&d, "/bin/true", &tool);
+        p.homes.default_wired = d.join("missing-default");
+        let before = (generated_bytes(&p), config_bytes(&p));
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::dhcp()),
@@ -1552,13 +2042,14 @@ mod tests {
         assert!(!marker.exists(), "the root tool ran after a failed save");
         assert!(!spawned.get());
         // netplan refusing the set fails the save as well.
-        let p = net_paths(&d, "/bin/false", &tool);
+        let p2 = net_paths(&d, "/bin/false", &tool);
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("home")),
             wired: None,
         };
-        assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
+        assert!(network_apply(&p2, &change, false, &feed, |_| {}).is_err());
         assert!(!marker.exists());
+        assert_eq!((generated_bytes(&p), config_bytes(&p)), before);
     }
 
     #[test]
@@ -1572,10 +2063,28 @@ mod tests {
         let p = net_paths(&d, "/bin/true", &tool);
         let feed = Arc::new(Feed::default());
         let pgid = std::cell::Cell::new(0);
-        let r = network_apply(&p, &netfiles::Change::default(), false, &feed, |g| pgid.set(g));
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        let r = network_apply(&p, &change, false, &feed, |g| pgid.set(g));
         assert_eq!(r, Ok(()));
         assert!(marker.exists());
         assert!(pgid.get() > 1);
+        // The generated file is written, then [network] committed.
+        let wifi = String::from_utf8(gen_file(&p, "wifi.yaml").unwrap()).unwrap();
+        assert!(
+            wifi.starts_with(crate::generated::HEADER) && wifi.contains("secret123"),
+            "{wifi}"
+        );
+        let mode = std::fs::metadata(lock(&p.config).dir.generated_file("wifi.yaml"))
+            .unwrap()
+            .permissions();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o600);
+        assert_eq!(lock(&p.config).cfg.network.nets(), one_net("home"));
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk.network.nets(), one_net("home"));
+        // A tool that fails, or does not answer.
         let tool = "echo '{\"result\":\"failed\",\"reason\":\"no link\"}'; exit 1";
         let p = net_paths(&d, "/bin/true", tool);
         assert_eq!(
@@ -1586,40 +2095,11 @@ mod tests {
         assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
     }
 
-    /// `net_paths` with a shipped wired file, a menu ~/wifi.yaml and,
-    /// when `wired` is given, a menu ~/ethernet.yaml.
-    fn net_home(d: &Path, tool: &str, wired: Option<&str>) -> Paths {
+    /// `net_paths` with a shipped wired default and the settings `net`.
+    fn net_home(d: &Path, tool: &str, net: NetworkCfg) -> Paths {
         let mut p = net_paths(d, "/bin/true", tool);
-        let default = d.join("default-ethernet.yaml");
-        std::fs::write(
-            &default,
-            "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: 'en*'\n      dhcp4: true\n",
-        )
-        .unwrap();
-        p.homes.default_wired = default;
-        let home = d.join("home");
-        for f in ["wifi.yaml", "ethernet.yaml"] {
-            let path = home.join(f);
-            if path.is_dir() {
-                std::fs::remove_dir(&path).unwrap();
-            } else {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        std::fs::write(
-            home.join("wifi.yaml"),
-            format!("{}\nnetwork:\n  version: 2\n  # old\n", crate::owned::HEADER),
-        )
-        .unwrap();
-        if let Some(w) = wired {
-            std::fs::write(home.join("ethernet.yaml"), format!("{}\n{w}", crate::owned::HEADER)).unwrap();
-        }
+        p.config = net_store(d, net);
         p
-    }
-
-    fn home_bytes(p: &Paths) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-        let get = |f: &str| std::fs::read(p.homes.home.join(f)).ok();
-        (get("wifi.yaml"), get("ethernet.yaml"))
     }
 
     fn fixed_wired() -> netfiles::Wired {
@@ -1634,14 +2114,15 @@ mod tests {
     const FAILS: &str = r#"echo '{"result":"failed","reason":"x"}'; exit 1"#;
 
     #[test]
-    fn a_failed_network_apply_puts_the_home_back() {
+    fn a_failed_network_apply_puts_the_generated_files_back() {
         let d = dir("net-put-back");
         let feed = Arc::new(Feed::default());
         // A changed WiFi file and a new wired file.
-        let p = net_home(&d, FAILS, None);
-        let before = home_bytes(&p);
+        let p = net_home(&d, FAILS, home_net());
+        let before = (generated_bytes(&p), config_bytes(&p));
+        let cfg_before = lock(&p.config).cfg.clone();
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("cafe")),
             wired: Some(fixed_wired()),
         };
         let r = network_apply(&p, &change, false, &feed, |_| {});
@@ -1652,43 +2133,40 @@ mod tests {
                 home_changed: false
             })
         );
-        assert_eq!(home_bytes(&p), before);
-        assert!(before.1.is_none(), "the new wired file is removed");
+        assert_eq!((generated_bytes(&p), config_bytes(&p)), before);
+        assert_eq!(lock(&p.config).cfg, cfg_before, "[network] is unchanged");
+        assert!(before.0.1.is_none(), "the new wired file is removed");
         // A wired file that existed comes back after DHCP removed it.
-        let p = net_home(&d, FAILS, Some("network:\n  version: 2\n  # fixed\n"));
-        let before = home_bytes(&p);
+        let mut with_fixed = home_net();
+        with_fixed.set_wired(&fixed_wired());
+        let p = net_home(&d, FAILS, with_fixed);
+        let before = generated_bytes(&p);
+        assert!(before.1.is_some());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::dhcp()),
         };
         assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
-        assert_eq!(home_bytes(&p), before);
-        assert!(before.1.is_some());
+        assert_eq!(generated_bytes(&p), before);
         // The same change that works keeps the new files.
-        let p = net_home(&d, r#"echo '{"result":"ok","reason":""}'"#, None);
+        let p = net_home(&d, r#"echo '{"result":"ok","reason":""}'"#, home_net());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(fixed_wired()),
         };
         assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
-        assert!(home_bytes(&p).1.is_some());
+        assert!(generated_bytes(&p).1.is_some());
     }
 
-    /// A change of the DNS servers alone rewrites ~/wifi.yaml as well; a
+    /// A change of the DNS servers alone rewrites the WiFi file as well; a
     /// failed apply puts that one back too.
     #[test]
     fn a_failed_dns_change_puts_the_wifi_file_back() {
         let d = dir("net-put-back-dns");
         let feed = Arc::new(Feed::default());
-        let p = net_home(&d, FAILS, None);
-        let nets = [netfiles::Net {
-            ssid: "home".into(),
-            hidden: false,
-            password: Some("secret123".into()),
-        }];
-        let wifi = netfiles::render_wifi(Some("wlp58s0"), &nets, &[]);
-        std::fs::write(p.homes.home.join("wifi.yaml"), wifi).unwrap();
-        let before = home_bytes(&p);
+        let p = net_home(&d, FAILS, home_net());
+        let before = generated_bytes(&p);
+        assert!(before.0.is_some());
         let change = netfiles::Change {
             wifi: None,
             wired: Some(netfiles::Wired::Dhcp {
@@ -1696,29 +2174,30 @@ mod tests {
             }),
         };
         assert!(network_apply(&p, &change, false, &feed, |_| {}).is_err());
-        assert_eq!(home_bytes(&p), before);
+        assert_eq!(generated_bytes(&p), before);
     }
 
-    /// Ruling 16 for a save that fails halfway: ~/wifi.yaml is written,
-    /// then ~/ethernet.yaml cannot be, so ~/wifi.yaml goes back as it was.
+    /// A save that fails halfway: the WiFi file is written, then the wired
+    /// one cannot be, so the WiFi file goes back as it was.
     #[test]
-    fn a_save_that_fails_halfway_puts_the_home_back() {
+    fn a_save_that_fails_halfway_puts_the_generated_files_back() {
         let d = dir("net-save-halfway");
         let feed = Arc::new(Feed::default());
         let marker = d.join("called");
         let tool = format!("touch {}; {FAILS}", marker.display());
-        let p = net_home(&d, &tool, None);
+        let p = net_home(&d, &tool, home_net());
         // A directory where the wired write puts its temporary file.
-        std::fs::create_dir_all(p.homes.home.join("ethernet.yaml.tmp/x")).unwrap();
-        let before = home_bytes(&p);
+        let tmp = lock(&p.config).dir.generated().join("ethernet.yaml.tmp/x");
+        std::fs::create_dir_all(tmp).unwrap();
+        let before = generated_bytes(&p);
         let change = netfiles::Change {
-            wifi: Some(Vec::new()),
+            wifi: Some(one_net("cafe")),
             wired: Some(fixed_wired()),
         };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
         assert!(!r.home_changed, "{r:?}");
-        assert!(!r.reason.is_empty());
-        assert_eq!(home_bytes(&p), before, "~/wifi.yaml is put back");
+        assert!(r.reason.contains("ethernet.yaml"), "{r:?}");
+        assert_eq!(generated_bytes(&p), before, "the WiFi file is put back");
         assert!(!marker.exists(), "the root tool ran after a failed save");
     }
 
@@ -1726,70 +2205,219 @@ mod tests {
     fn a_home_that_cannot_be_put_back_says_so() {
         let d = dir("net-no-put-back");
         let feed = Arc::new(Feed::default());
-        // The tool fails and leaves a directory where ~/ethernet.yaml was.
-        let home = d.join("home");
+        // The tool fails and leaves generated/ unwritable.
         let tool = format!(
-            r#"rm -f {0}/ethernet.yaml; mkdir {0}/ethernet.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display()
+            r#"chmod 555 {}/cfg/generated; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            d.display()
         );
-        let p = net_home(&d, &tool, None);
+        let p = net_home(&d, &tool, home_net());
         let change = netfiles::Change {
-            wifi: None,
-            wired: Some(fixed_wired()),
+            wifi: Some(one_net("cafe")),
+            wired: None,
         };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        let dir = lock(&p.config).dir.generated();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert!(r.home_changed);
         assert!(
-            r.reason.starts_with("x; ~/ethernet.yaml could not be put back: "),
+            r.reason.starts_with("x; generated/wifi.yaml could not be restored: "),
             "{}",
             r.reason
         );
     }
 
     #[test]
-    fn putting_back_never_writes_over_a_link_or_a_hand_file() {
-        let d = dir("net-put-back-refused");
+    fn unstage_never_follows_a_link() {
+        let d = dir("net-unstage-link");
         let feed = Arc::new(Feed::default());
-        let home = d.join("home");
         let target = d.join("elsewhere.yaml");
-        let change = netfiles::Change {
-            wifi: Some(Vec::new()),
-            wired: None,
-        };
-        // (a) A link appears at ~/wifi.yaml during the apply.
+        // A link appears at generated/wifi.yaml during the apply.
+        let p0 = net_home(&d, "true", home_net());
+        let link = lock(&p0.config).dir.generated_file("wifi.yaml");
         let tool = format!(
-            r#"rm -f {0}/wifi.yaml; ln -s {1} {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display(),
+            r#"rm -f {0}; ln -s {1} {0}; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
+            link.display(),
             target.display()
         );
-        let p = net_home(&d, &tool, None);
+        let mut p = p0;
+        p.network_cmd = ["/bin/sh", "-c", &tool, "sh"].map(String::from).to_vec();
         std::fs::write(&target, "elsewhere: 1\n").unwrap();
+        let before = gen_file(&p, "wifi.yaml").unwrap();
+        let change = netfiles::Change {
+            wifi: Some(one_net("cafe")),
+            wired: None,
+        };
         let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
-        assert!(r.home_changed);
-        assert!(
-            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
-            "{}",
-            r.reason
-        );
-        let link = home.join("wifi.yaml");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(r.reason, "x");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), before);
         assert_eq!(std::fs::read(&target).unwrap(), b"elsewhere: 1\n");
-        std::fs::remove_file(&link).unwrap();
-        // (b) A hand file without the header appears.
+    }
+
+    /// A keyboard change while a network Apply runs: the Apply's files stay
+    /// out of its way, and its commit keeps the keyboard.
+    #[test]
+    fn a_keyboard_change_during_an_apply_is_kept() {
+        let d = dir("net-apply-keyboard");
+        let feed = Arc::new(Feed::default());
+        let (started, go) = (d.join("started"), d.join("go"));
         let tool = format!(
-            r#"printf 'hand: 1\n' > {0}/wifi.yaml; echo '{{"result":"failed","reason":"x"}}'; exit 1"#,
-            home.display()
+            r#"touch {}; while [ ! -e {} ]; do sleep 0.05; done; echo '{{"result":"ok","reason":""}}'"#,
+            started.display(),
+            go.display()
         );
-        let p = net_home(&d, &tool, None);
-        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
-        assert!(r.home_changed);
+        let p = net_home(&d, &tool, NetworkCfg::default());
+        let store = p.config.clone();
+        let (s2, g2) = (started.clone(), go.clone());
+        let helper = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !s2.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let r = lock(&store).update(Table::Keyboard, |c| c.keyboard.layout = "ch".into());
+            std::fs::write(g2, "").unwrap();
+            r
+        });
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        assert_eq!(network_apply(&p, &change, false, &feed, |_| {}), Ok(()));
+        assert!(helper.join().unwrap().is_ok());
+        let cfg = lock(&p.config).cfg.clone();
+        assert_eq!(
+            (cfg.keyboard.layout.as_str(), cfg.network.nets()),
+            ("ch", one_net("home"))
+        );
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk, cfg);
         assert!(
-            r.reason.starts_with("x; ~/wifi.yaml could not be put back: "),
-            "{}",
-            r.reason
+            String::from_utf8(gen_file(&p, "wifi.yaml").unwrap())
+                .unwrap()
+                .contains("home")
         );
-        assert_eq!(std::fs::read(home.join("wifi.yaml")).unwrap(), b"hand: 1\n");
+    }
+
+    /// The failure path of the same handshake: the keyboard change survives,
+    /// the generated network files and `[network]` are as they were.
+    #[test]
+    fn a_keyboard_change_during_an_apply_leaves_the_staged_files() {
+        let d = dir("net-apply-keyboard-fails");
+        let feed = Arc::new(Feed::default());
+        let (started, go) = (d.join("started"), d.join("go"));
+        let tool = format!(
+            r#"touch {}; while [ ! -e {} ]; do sleep 0.05; done; {FAILS}"#,
+            started.display(),
+            go.display()
+        );
+        let p = net_home(&d, &tool, home_net());
+        let before = generated_bytes(&p);
+        let net_before = lock(&p.config).cfg.network.clone();
+        let store = p.config.clone();
+        let (s2, g2) = (started.clone(), go.clone());
+        let helper = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !s2.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let staged_seen = std::fs::read(lock(&store).dir.generated_file("wifi.yaml")).unwrap();
+            let r = lock(&store).update(Table::Keyboard, |c| c.keyboard.layout = "ch".into());
+            std::fs::write(g2, "").unwrap();
+            (r, staged_seen)
+        });
+        let change = netfiles::Change {
+            wifi: Some(one_net("cafe")),
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        let (updated, staged_seen) = helper.join().unwrap();
+        assert!(updated.is_ok());
+        assert_eq!(r, ApplyFailed::new("x".into()));
+        assert!(
+            String::from_utf8(staged_seen).unwrap().contains("cafe"),
+            "the stage was in place"
+        );
+        assert_eq!(generated_bytes(&p), before);
+        let cfg = lock(&p.config).cfg.clone();
+        assert_eq!((cfg.keyboard.layout.as_str(), &cfg.network), ("ch", &net_before));
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk, cfg);
+    }
+
+    /// A rollback after a half-done stage that fails too names the file and
+    /// counts the home as changed.
+    #[test]
+    fn a_failed_rollback_after_a_half_done_stage_says_so() {
+        let d = dir("net-stage-rollback-fails");
+        let feed = Arc::new(Feed::default());
+        let p = net_home(&d, FAILS, home_net());
+        let g = lock(&p.config).dir.generated();
+        std::fs::create_dir_all(g.join("wifi.yaml.tmp/x")).unwrap();
+        std::fs::create_dir_all(g.join("ethernet.yaml/x")).unwrap();
+        // The WiFi file stays as rendered; the wired write meets the directory.
+        let change = netfiles::Change {
+            wifi: None,
+            wired: Some(fixed_wired()),
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.home_changed, "{r:?}");
+        assert!(r.reason.contains("ethernet.yaml"), "{r:?}");
+        assert!(r.reason.contains("generated/wifi.yaml could not be restored"), "{r:?}");
+    }
+
+    #[test]
+    fn a_read_only_store_refuses_before_anything_runs() {
+        let d = dir("net-read-only");
+        let feed = Arc::new(Feed::default());
+        let marker = d.join("called");
+        let tool = format!(
+            "touch {}; echo '{{\"result\":\"ok\",\"reason\":\"\"}}'",
+            marker.display()
+        );
+        let mut p = net_paths(&d, "/bin/true", &tool);
+        let dir = crate::config::ConfigDir { root: d.join("ro") };
+        p.config = Arc::new(std::sync::Mutex::new(
+            crate::store::open(dir, net_inputs(), OpenMode::ReadOnly, 0).store,
+        ));
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        let r = network_apply(&p, &change, false, &feed, |_| {}).unwrap_err();
+        assert!(r.reason.contains("read-only"), "{r:?}");
+        assert!(!r.home_changed);
+        assert!(!marker.exists());
+        assert!(!d.join("ro").exists(), "nothing was written");
+        let e = net_take_over(&p, "wifi").unwrap_err();
+        assert!(e.contains("read-only"), "{e}");
+    }
+
+    #[test]
+    fn a_kept_wifi_text_is_taken_over_through_the_store() {
+        let d = dir("net-take-over");
+        let mut p = net_paths(&d, "/bin/true", "true");
+        let hand = "network:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlp2s0:\n      dhcp4: true\n      access-points:\n        home:\n          password: secret123\n";
+        p.config = net_store(
+            &d,
+            NetworkCfg {
+                kept_wifi: Some(hand.into()),
+                ..NetworkCfg::default()
+            },
+        );
+        assert!(
+            String::from_utf8(gen_file(&p, "wifi.yaml").unwrap())
+                .unwrap()
+                .contains("wlp2s0")
+        );
+        let (w, _) = net_load(&p);
+        assert_eq!(w.state, netfiles::FileState::Hand);
+        assert_eq!(net_take_over(&p, "wifi"), Ok(()));
+        let (w, _) = net_load(&p);
+        assert_eq!((w.state, w.networks), (netfiles::FileState::Menu, one_net("home")));
+        assert!(lock(&p.config).cfg.network.kept_wifi.is_none());
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert!(on_disk.network.kept_wifi.is_none());
+        assert!(net_take_over(&p, "wifi").is_err(), "nothing kept any more");
     }
 
     #[test]
@@ -1831,114 +2459,292 @@ mod tests {
     }
 
     /// A layout home under `d`: no kanshi runs (an empty proc dir), and
-    /// starting one runs `start` with `-c <config>` as `$1 $2`.
-    fn kanshi_home(d: &Path, start: &str) -> Kanshi {
+    /// starting one runs `start` with `-c <config>` as `$1 $2`. The store
+    /// is a session store on the same config directory.
+    fn mon_home(d: &Path, start: &str) -> (crate::store::Shared, Kanshi) {
         fs::create_dir_all(d.join("proc")).unwrap();
-        Kanshi {
-            config: d.join("home/.config/kanshi/config"),
-            marker: d.join("home/.config/kanshi/thinfloe-layout-unconfirmed"),
-            cmd: ["/bin/sh", "-c", start, "sh"].map(String::from).to_vec(),
-            proc_dir: d.join("proc"),
-        }
+        let cd = crate::config::ConfigDir {
+            root: d.join("home/.config/thinfloe"),
+        };
+        let store = crate::store::test_shared(&cd.root);
+        let mut k = Kanshi::from_dir(&cd);
+        k.cmd = ["/bin/sh", "-c", start, "sh"].map(String::from).to_vec();
+        k.proc_dir = d.join("proc");
+        (store, k)
     }
 
     /// A start script that appends its arguments and what the three files
-    /// hold at that moment to `<d>/started`.
+    /// hold at that moment to `<d>/started`; of a layout it shows the
+    /// transform of its output.
     fn recording(d: &Path) -> String {
-        let log = d.join("started");
+        let cd = d.join("home/.config/thinfloe/generated");
+        let tag = |f: &str| format!("$(grep -o 'transform [0-9a-z]*' {} 2>/dev/null)", cd.join(f).display());
         format!(
-            "{{ echo \"args $*\"; echo \"marker $(cat {m} 2>/dev/null)\"; echo \"prev $(tail -n 1 {p} 2>/dev/null)\"; echo \"config $(tail -n 1 {c} 2>/dev/null)\"; }} >> {log}",
-            m = d.join("home/.config/kanshi/thinfloe-layout-unconfirmed").display(),
-            p = d.join("home/.config/kanshi/config.prev").display(),
-            c = d.join("home/.config/kanshi/config").display(),
-            log = log.display()
+            "{{ echo \"args $*\"; echo \"marker $(cat {m} 2>/dev/null)\"; echo \"prev {p}\"; echo \"config {c}\"; }} >> {log}",
+            m = cd.join("layout-unconfirmed").display(),
+            p = tag("kanshi.prev"),
+            c = tag("kanshi"),
+            log = d.join("started").display()
         )
     }
 
-    fn old_layout() -> String {
-        format!("{}\nold\n", crate::owned::HEADER)
+    /// One monitor, DP-1, turned by `rot`.
+    fn layout(rot: crate::heads::Rotation) -> crate::kanshi::Profile {
+        crate::kanshi::Profile {
+            outputs: vec![crate::kanshi::OutputSet {
+                criteria: "DP-1".into(),
+                enabled: true,
+                mode: crate::heads::Mode {
+                    w: 1920,
+                    h: 1080,
+                    refresh_mhz: 0,
+                    preferred: false,
+                },
+                rotation: rot,
+                place: crate::kanshi::Place::Origin,
+            }],
+            menu_output: None,
+        }
+    }
+
+    /// `generated/kanshi` as the menu writes it for `profiles`.
+    fn kanshi_text(profiles: &[crate::kanshi::Profile]) -> String {
+        format!("{}\n\n{}", crate::generated::HEADER, crate::kanshi::render(profiles))
+    }
+
+    /// The body `mon_apply` is given for the layout on screen.
+    fn onscreen_body(rot: crate::heads::Rotation) -> String {
+        format!("\n{}", crate::kanshi::render(&[layout(rot)]))
+    }
+
+    /// Make `profiles` the saved arrangement, as a kept Apply does.
+    fn save_profiles(store: &crate::store::Shared, profiles: &[crate::kanshi::Profile]) {
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Monitors, |c| {
+                c.monitors = crate::config::MonitorsCfg::from_profiles(profiles)
+            })
+            .unwrap();
+    }
+
+    fn saved(store: &crate::store::Shared) -> crate::config::MonitorsCfg {
+        store.lock().unwrap().cfg.monitors.clone()
+    }
+
+    /// `[monitors]` as `config.toml` holds it.
+    fn on_disk(d: &Path) -> crate::config::MonitorsCfg {
+        let text = fs::read_to_string(d.join("home/.config/thinfloe/config.toml")).unwrap();
+        crate::config::parse(&text).unwrap().monitors
+    }
+
+    fn generated_kanshi(k: &Kanshi) -> Option<String> {
+        read(&k.config)
     }
 
     fn read(p: &Path) -> Option<String> {
         fs::read_to_string(p).ok()
     }
 
+    /// A store on `d`'s config directory that refuses writes.
+    fn read_only_store(d: &Path) -> crate::store::Shared {
+        let cd = crate::config::ConfigDir {
+            root: d.join("home/.config/thinfloe"),
+        };
+        let ro = crate::store::open(
+            cd,
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        Arc::new(std::sync::Mutex::new(ro))
+    }
+
     #[test]
-    fn status_save_writes_through_a_new_file_and_none_removes_it() {
+    fn status_save_updates_the_status_table() {
         let d = dir("status-save");
-        // ~/.config/thinfloe/ is made when it is missing.
-        let file = d.join("config/thinfloe/status");
-        status_save(&file, Some("clock 1x1\n")).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "clock 1x1\n");
-        let new = d.join("config/thinfloe/status.new");
-        assert!(!new.exists(), "the new file is renamed over the old one");
-        // A stray link where the new file goes is replaced, not followed.
-        let target = d.join("target");
-        fs::write(&target, "keep").unwrap();
-        std::os::unix::fs::symlink(&target, &new).unwrap();
-        status_save(&file, Some("-clock 1x1\n")).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "-clock 1x1\n");
-        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
-        status_save(&file, None).unwrap();
-        assert!(!file.exists());
-        // Removing what is not there is no failure.
-        status_save(&file, None).unwrap();
-        // A directory in the way is.
-        fs::create_dir_all(&file).unwrap();
-        assert!(status_save(&file, Some("x\n")).is_err());
+        let store = crate::store::test_shared(&d.join("cfg"));
+        let lines = |s: &crate::store::Shared| s.lock().unwrap().cfg.status.lines.clone();
+        status_save(&store, Some("clock 1x1\n")).unwrap();
+        assert_eq!(lines(&store), Some(vec!["clock 1x1".to_string()]));
+        // The menu's own header comment is not a layout line.
+        status_save(
+            &store,
+            Some("# thinfloe status area, written by the menu\nclock 1x1\n-network 2x2\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            lines(&store),
+            Some(vec!["clock 1x1".to_string(), "-network 2x2".to_string()])
+        );
+        // It is on disk, and a fresh read gives the same.
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().status.lines, lines(&store));
+        status_save(&store, None).unwrap();
+        assert_eq!(lines(&store), None);
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().status.lines, None);
+        // The old file is not touched, nor made.
+        assert!(!d.join("cfg/status").exists());
+    }
+
+    #[test]
+    fn status_save_on_a_read_only_store_is_the_error() {
+        let d = dir("status-save-ro");
+        let dir_ = crate::config::ConfigDir { root: d.join("cfg") };
+        let ro = crate::store::open(
+            dir_,
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let store: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        let e = status_save(&store, Some("clock 1x1\n")).unwrap_err();
+        assert_eq!(e, "The settings are read-only.");
+        assert!(!d.join("cfg/config.toml").exists());
+    }
+
+    #[test]
+    fn mon_apply_on_a_read_only_store_changes_nothing() {
+        use crate::heads::Rotation::Normal;
+        let d = dir("mon-apply-ro");
+        let (_, k) = mon_home(&d, &recording(&d));
+        let root = d.join("home/.config/thinfloe");
+        let ro = crate::store::open(
+            crate::config::ConfigDir { root: root.clone() },
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let store: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        // The directory does not exist and must not appear.
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            mon_apply(&store, &k, &[layout(Normal)], Some(&onscreen_body(Normal))),
+            Err("The settings are read-only.".to_string())
+        );
+        assert!(!root.exists(), "no config dir was created");
+        assert!(!k.prev().exists() && !k.marker.exists());
+        assert!(!d.join("started").exists(), "kanshi was not started");
+    }
+
+    #[test]
+    fn dismiss_report_clears_the_migration_notice() {
+        let d = dir("dismiss-report");
+        let store = crate::store::test_shared(&d.join("cfg"));
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Notice, |c| {
+                c.notice.migration = Some("3 files were moved".into());
+            })
+            .unwrap();
+        dismiss_report(&store).unwrap();
+        let text = fs::read_to_string(d.join("cfg/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().notice.migration, None);
+        assert!(!text.contains("migration"), "{text}");
+        // Read-only: the error, no file.
+        let ro = crate::store::open(
+            crate::config::ConfigDir { root: d.join("ro") },
+            crate::generated::Inputs::default(),
+            crate::store::OpenMode::ReadOnly,
+            0,
+        )
+        .store;
+        let ro: crate::store::Shared = Arc::new(std::sync::Mutex::new(ro));
+        assert_eq!(dismiss_report(&ro), Err("The settings are read-only.".to_string()));
+        assert!(!d.join("ro").exists());
     }
 
     #[test]
     fn mon_apply_writes_prev_marker_and_config() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-apply");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        let old_text = kanshi_text(&[layout(Normal)]);
+        assert_eq!(generated_kanshi(&k), Some(old_text.clone()));
         // The layout on screen the menu always sends is not used: the file
         // is the old layout.
-        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
-        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
-        assert_eq!(read(&k.prev()), Some(old_layout()));
+        assert_eq!(
+            mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))),
+            Ok(())
+        );
+        let new_text = kanshi_text(&[layout(R90)]);
+        assert!(new_text.starts_with(crate::generated::HEADER));
+        assert_eq!(generated_kanshi(&k), Some(new_text));
+        assert_eq!(read(&k.prev()), Some(old_text));
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
+        // The settings stay as they were until the Apply is kept.
+        assert_eq!(
+            saved(&store),
+            crate::config::MonitorsCfg::from_profiles(&[layout(Normal)])
+        );
+        assert_eq!(on_disk(&d), saved(&store));
         // kanshi was started on the config, with marker and prev in place.
-        let want = format!("args -c {}\nmarker prev\nprev old\nconfig new\n", k.config.display());
+        let want = format!(
+            "args -c {}\nmarker prev\nprev transform normal\nconfig transform 90\n",
+            k.config.display()
+        );
         assert_eq!(read(&d.join("started")), Some(want));
 
         // No file before: the layout on screen is kept instead, over a
         // stale prev, and the marker still says prev.
         let d = dir("mon-apply-none");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
         fs::write(k.prev(), "stale").unwrap();
-        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
+        assert_eq!(
+            mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))),
+            Ok(())
+        );
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
-        assert_eq!(read(&k.prev()), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
+        assert_eq!(read(&k.prev()), Some(kanshi_text(&[layout(R180)])));
         assert!(
             read(&d.join("started"))
                 .unwrap()
-                .contains("marker prev\nprev onscreen\nconfig new\n")
+                .contains("marker prev\nprev transform 180\nconfig transform 90\n")
         );
 
         // Neither a file nor the layout on screen: nothing is written.
         let d = dir("mon-apply-unknown");
-        let k = kanshi_home(&d, &recording(&d));
-        assert!(mon_apply(&k, "\nnew\n", None).is_err());
+        let (store, k) = mon_home(&d, &recording(&d));
+        assert!(mon_apply(&store, &k, &[layout(R90)], None).is_err());
         assert!(!k.config.exists() && !k.prev().exists() && !k.marker.exists());
         assert!(!d.join("started").exists());
+        assert_eq!(saved(&store), crate::config::MonitorsCfg::default());
     }
 
     #[test]
     fn mon_apply_tells_a_running_kanshi_and_starts_none() {
         use std::os::unix::process::ExitStatusExt;
         let d = dir("mon-hup");
-        let k = kanshi_home(&d, &recording(&d));
+        let (store, k) = mon_home(&d, &recording(&d));
         // A child of this test stands in for kanshi in the fake proc dir.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // An ignored SIGHUP survives exec: a test run from a shell that
+        // ignores it (nohup, a background job) would leave sleep running.
+        use std::os::unix::process::CommandExt;
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        // SAFETY: signal is async-signal-safe and touches no memory.
+        unsafe {
+            sleep.pre_exec(|| {
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let mut child = sleep.spawn().unwrap();
         let entry = d.join("proc").join(child.id().to_string());
         fs::create_dir_all(&entry).unwrap();
         fs::write(entry.join("comm"), "kanshi\n").unwrap();
         assert_eq!(kanshi_pids(&k.proc_dir), vec![child.id() as i32]);
-        assert_eq!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")), Ok(()));
+        let on_screen = onscreen_body(crate::heads::Rotation::Normal);
+        assert_eq!(
+            mon_apply(&store, &k, &[layout(crate::heads::Rotation::R90)], Some(&on_screen)),
+            Ok(())
+        );
         let t0 = Instant::now();
         let status = loop {
             if let Some(s) = child.try_wait().unwrap() {
@@ -1975,73 +2781,117 @@ mod tests {
     }
 
     #[test]
+    fn the_layout_files_live_under_generated() {
+        let cd = crate::config::ConfigDir {
+            root: PathBuf::from("/h/.config/thinfloe"),
+        };
+        let k = Kanshi::from_dir(&cd);
+        assert_eq!(k.config, PathBuf::from("/h/.config/thinfloe/generated/kanshi"));
+        assert_eq!(
+            k.marker,
+            PathBuf::from("/h/.config/thinfloe/generated/layout-unconfirmed")
+        );
+        assert_eq!(k.prev(), PathBuf::from("/h/.config/thinfloe/generated/kanshi.prev"));
+    }
+
+    #[test]
     fn mon_apply_failure_puts_the_old_file_back() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-fail");
-        let k = kanshi_home(&d, "exit 3");
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
+        let (store, k) = mon_home(&d, "exit 3");
+        save_profiles(&store, &[layout(Normal)]);
+        let old_text = kanshi_text(&[layout(Normal)]);
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
         assert!(e.contains("stopped at once"), "{e}");
-        assert_eq!(read(&k.config), Some(old_layout()));
+        assert_eq!(generated_kanshi(&k), Some(old_text));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
+        assert_eq!(
+            saved(&store),
+            crate::config::MonitorsCfg::from_profiles(&[layout(Normal)])
+        );
 
         // No file before: none after.
-        fs::remove_file(&k.config).unwrap();
-        assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
+        let d = dir("mon-fail-none");
+        let (store, k) = mon_home(&d, "exit 3");
+        assert!(mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))).is_err());
         assert!(!k.prev().exists());
         assert!(!k.config.exists());
         assert!(!k.marker.exists());
 
-        // A file written by hand is not touched, and kanshi not started.
-        let k = kanshi_home(&d, &recording(&d));
-        fs::write(&k.config, "profile {\n\toutput * enable\n}\n").unwrap();
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
-        assert!(e.contains("written by hand"), "{e}");
-        assert_eq!(read(&k.config).as_deref(), Some("profile {\n\toutput * enable\n}\n"));
+        // A kept hand-written file is not touched, and kanshi not started.
+        let d = dir("mon-fail-kept");
+        let (store, k) = mon_home(&d, &recording(&d));
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Monitors, |c| {
+                c.monitors.kept = Some("profile {\n\toutput * enable\n}\n".into())
+            })
+            .unwrap();
+        let before = generated_kanshi(&k);
+        assert!(before.is_some());
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
+        assert!(e.contains("by hand"), "{e}");
+        assert_eq!(generated_kanshi(&k), before);
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
         assert!(!d.join("started").exists());
     }
 
     #[test]
+    fn a_read_only_store_refuses_the_apply_and_leaves_the_files_alone() {
+        use crate::heads::Rotation::{Normal, R90};
+        let d = dir("mon-ro");
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        let ro = read_only_store(&d);
+        let before = generated_kanshi(&k);
+        let e = mon_apply(&ro, &k, &[layout(R90)], None).unwrap_err();
+        assert!(e.contains("read-only"), "{e}");
+        assert_eq!(generated_kanshi(&k), before, "generated/kanshi is as it was");
+        assert!(!k.prev().exists());
+        assert!(!k.marker.exists());
+        assert!(!d.join("started").exists(), "kanshi was not asked");
+        // Taking over and loading go through the store, too.
+        assert!(mon_take_over(&ro, &k, &[]).unwrap_err().contains("read-only"));
+        assert!(!d.join("started").exists(), "a refused take-over reloads nothing");
+        assert_eq!(mon_load(&ro).1, crate::monitors::MonSource::Menu);
+    }
+
+    #[test]
     fn mon_revert_restores_prev() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-revert");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n", None).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
         assert_eq!(mon_revert(&k), Ok(()));
-        assert_eq!(read(&k.config), Some(old_layout()));
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
         // kanshi read the old file again.
         let log = read(&d.join("started")).unwrap();
-        assert!(log.ends_with("marker \nprev \nconfig old\n"), "{log}");
+        assert!(log.ends_with("marker \nprev \nconfig transform normal\n"), "{log}");
 
         // No file before: the layout on screen comes back, and kanshi
         // reads it.
-        fs::remove_file(&k.config).unwrap();
-        mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).unwrap();
+        let d = dir("mon-revert-none");
+        let (store, k) = mon_home(&d, &recording(&d));
+        mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))).unwrap();
         assert_eq!(mon_revert(&k), Ok(()));
-        assert_eq!(read(&k.config), Some(format!("{}\n\nonscreen\n", crate::owned::HEADER)));
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R180)])));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
         let log = read(&d.join("started")).unwrap();
-        assert!(log.ends_with("marker \nprev \nconfig onscreen\n"), "{log}");
-
-        // A file written by hand meanwhile is kept, and so is the marker.
-        mon_apply(&k, "\nnew\n", None).unwrap();
-        fs::write(&k.config, "by hand\n").unwrap();
-        assert!(mon_revert(&k).is_err());
-        assert_eq!(read(&k.config).as_deref(), Some("by hand\n"));
-        assert!(k.marker.exists());
+        assert!(log.ends_with("marker \nprev \nconfig transform 180\n"), "{log}");
+        assert_eq!(on_disk(&d), crate::config::MonitorsCfg::default());
     }
 
     #[test]
     fn a_first_apply_then_revert_leaves_the_layout_on_screen() {
         use crate::heads::{Head, Mode, Rotation};
-        use crate::monitors::{MonEvent, MonRequest, MonTab};
+        use crate::monitors::{MonEvent, MonRequest, MonSource, MonTab};
         let head = |name: &str, x: i32| Head {
             name: name.into(),
             make: "Dell".into(),
@@ -2061,55 +2911,84 @@ mod tests {
         };
         let heads = vec![head("DP-1", 0), head("DP-2", 1920)];
         let d = dir("mon-first");
-        let k = kanshi_home(&d, &recording(&d));
+        let (store, k) = mon_home(&d, &recording(&d));
         let now = Instant::now();
         let mut t = MonTab::default();
         t.heads_changed(heads.clone());
-        let (text, owner) = mon_load(&k);
-        t.loaded(text, owner);
+        let (profiles, source) = mon_load(&store);
+        t.loaded(profiles, source);
         t.event(MonEvent::Select("DP-2".into()), now);
         t.event(MonEvent::Rotation(Rotation::R90), now);
-        let Some(MonRequest::Apply { text, prev, .. }) = t.event(MonEvent::Apply, now) else {
+        let Some(MonRequest::Apply { profiles, prev, .. }) = t.event(MonEvent::Apply, now) else {
             panic!("no Apply")
         };
-        assert_eq!(mon_apply(&k, &text, prev.as_deref()), Ok(()));
+        assert_eq!(mon_apply(&store, &k, &profiles, prev.as_deref()), Ok(()));
         assert_eq!(t.event(MonEvent::GoBack, now), None, "the job has not ended yet");
         assert_eq!(t.applied(Ok(())), Some(MonRequest::Revert));
         assert_eq!(mon_revert(&k), Ok(()));
-        let want = format!(
-            "{}\n\n{}",
-            crate::owned::HEADER,
-            crate::kanshi::render(&[crate::kanshi::from_heads(&heads)])
+        assert_eq!(
+            generated_kanshi(&k),
+            Some(kanshi_text(&[crate::kanshi::from_heads(&heads)]))
         );
-        assert_eq!(read(&k.config), Some(want));
-        assert_eq!(mon_load(&k).1, crate::owned::Owner::Menu);
+        // Nothing was kept: the settings still hold no arrangement.
+        assert_eq!(mon_load(&store), (Ok(None), MonSource::Missing));
+        assert!(!k.prev().exists() && !k.marker.exists());
     }
 
     #[test]
     fn mon_keep_removes_marker_and_prev() {
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-keep");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n", None).unwrap();
-        assert_eq!(mon_keep(&k), Ok(()));
-        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
+        assert_eq!(mon_keep(&store, &k, vec![layout(R90)]), Ok(()));
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
+        // The settings hold the applied arrangement now, in memory and on disk.
+        let want = crate::config::MonitorsCfg::from_profiles(&[layout(R90)]);
+        assert_eq!(saved(&store), want);
+        assert_eq!(on_disk(&d), want);
     }
 
     #[test]
     fn a_marker_that_cannot_go_fails_the_keep() {
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-keep-fail");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n", None).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
         block(&k.marker);
-        let e = mon_keep(&k).unwrap_err();
+        let e = mon_keep(&store, &k, vec![layout(R90)]).unwrap_err();
         assert!(e.contains("undo marker"), "{e}");
-        // prev stays with the marker, so the next session's undo works.
-        assert_eq!(read(&k.prev()), Some(old_layout()));
+        // prev stays with the marker, so the next session's undo works, and
+        // the settings are not changed.
+        assert_eq!(read(&k.prev()), Some(kanshi_text(&[layout(Normal)])));
+        assert_eq!(
+            saved(&store),
+            crate::config::MonitorsCfg::from_profiles(&[layout(Normal)])
+        );
+    }
+
+    #[test]
+    fn a_keep_the_store_refuses_fails_and_generated_follows_the_settings() {
+        use crate::heads::Rotation::{Normal, R90};
+        let d = dir("mon-keep-ro");
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
+        let ro = read_only_store(&d);
+        let e = mon_keep(&ro, &k, vec![layout(R90)]).unwrap_err();
+        assert!(e.contains("read-only"), "{e}");
+        // The marker is gone, so this session does not undo it; the file
+        // matches config.toml, which is what the next start would make.
+        assert!(!k.marker.exists());
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
+        assert_eq!(
+            on_disk(&d),
+            crate::config::MonitorsCfg::from_profiles(&[layout(Normal)])
+        );
     }
 
     /// Put a directory with a file in it where `path` is: removing it as a
@@ -2122,52 +3001,56 @@ mod tests {
 
     #[test]
     fn mon_revert_removes_the_marker_before_prev() {
-        // thinfloe-session reads marker `prev` without config.prev as
+        // thinfloe-session reads marker `prev` without kanshi.prev as
         // "remove the config": the marker must never outlive prev.
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-revert-order");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n", None).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
         // The marker cannot be removed: the revert stops there.
         block(&k.marker);
         assert!(mon_revert(&k).is_err());
-        assert_eq!(read(&k.config), Some(old_layout()));
-        assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
+        assert_eq!(
+            read(&k.prev()),
+            Some(kanshi_text(&[layout(Normal)])),
+            "prev went before the marker"
+        );
     }
 
     #[test]
     fn a_marker_that_cannot_be_checked_stops_the_apply() {
-        // Not "no marker": an earlier config.prev may be the real old layout.
+        // Not "no marker": an earlier kanshi.prev may be the real old layout.
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-marker-unknown");
-        let mut k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
+        let (store, mut k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
         fs::write(k.prev(), "the real old layout\n").unwrap();
         // A file where the marker's directory should be: ENOTDIR, not ENOENT.
         let file = d.join("not-a-dir");
         fs::write(&file, "x").unwrap();
-        k.marker = file.join("thinfloe-layout-unconfirmed");
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
+        k.marker = file.join("layout-unconfirmed");
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
         assert!(e.contains("could not be checked"), "{e}");
         assert_eq!(read(&k.prev()).as_deref(), Some("the real old layout\n"));
-        assert_eq!(read(&k.config), Some(old_layout()));
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
         assert!(!d.join("started").exists(), "kanshi was not asked");
     }
 
     #[test]
     fn a_revert_without_prev_fails_and_keeps_the_marker() {
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-revert-noprev");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        mon_apply(&k, "\nnew\n", None).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
         let started = read(&d.join("started"));
         fs::remove_file(k.prev()).unwrap();
         let e = mon_revert(&k).unwrap_err();
-        assert!(e.contains("config.prev"), "{e}");
+        assert!(e.contains("kanshi.prev"), "{e}");
         // Nothing changed: the next session's undo still sees the marker.
-        assert_eq!(read(&k.config), Some(format!("{}\n\nnew\n", crate::owned::HEADER)));
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
         assert_eq!(read(&d.join("started")), started, "kanshi was not asked");
     }
@@ -2176,101 +3059,210 @@ mod tests {
     fn a_failed_apply_removes_the_marker_before_prev() {
         // The fake kanshi blocks the marker, then fails: the undo cannot
         // remove the marker, so prev must stay for the session's undo.
+        use crate::heads::Rotation::{Normal, R90};
         let d = dir("mon-undo-order");
-        let m = d.join("home/.config/kanshi/thinfloe-layout-unconfirmed");
+        let m = d.join("home/.config/thinfloe/generated/layout-unconfirmed");
         let start = format!("rm -f {m}; mkdir -p {m}; touch {m}/x; exit 3", m = m.display());
-        let k = kanshi_home(&d, &start);
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
-        assert_eq!(read(&k.prev()), Some(old_layout()), "prev went before the marker");
-        assert_eq!(read(&k.config), Some(old_layout()));
+        let (store, k) = mon_home(&d, &start);
+        save_profiles(&store, &[layout(Normal)]);
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
+        assert_eq!(
+            read(&k.prev()),
+            Some(kanshi_text(&[layout(Normal)])),
+            "prev went before the marker"
+        );
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
         assert!(e.contains("undo marker"), "{e}");
     }
 
     #[test]
     fn mon_apply_refuses_while_a_layout_is_unconfirmed() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-unconfirmed");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(
-            &k.config,
-            "# Written by the ThinFloe menu. Edits here are replaced.\nnew\n",
-        )
-        .unwrap();
-        fs::write(k.prev(), old_layout()).unwrap();
-        fs::create_dir_all(k.marker.parent().unwrap()).unwrap();
-        fs::write(&k.marker, "prev\n").unwrap();
-        let e = mon_apply(&k, "\nnewer\n", None).unwrap_err();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        mon_apply(&store, &k, &[layout(R90)], None).unwrap();
+        let started = read(&d.join("started"));
+        let e = mon_apply(&store, &k, &[layout(R180)], None).unwrap_err();
         assert!(e.contains("not confirmed"), "{e}");
-        assert_eq!(read(&k.prev()), Some(old_layout()), "the real old layout is kept");
-        assert!(read(&k.config).unwrap().ends_with("\nnew\n"));
-        assert!(!d.join("started").exists());
+        assert_eq!(
+            read(&k.prev()),
+            Some(kanshi_text(&[layout(Normal)])),
+            "the real old layout is kept"
+        );
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
+        assert_eq!(read(&d.join("started")), started, "kanshi was not asked again");
     }
 
     #[test]
     fn a_failed_marker_write_leaves_the_old_file() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-marker-fail");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
         // The marker's temp file cannot be made: a directory is in its way.
-        fs::create_dir_all(d.join("home/.config/kanshi/thinfloe-layout-unconfirmed.tmp")).unwrap();
-        assert!(mon_apply(&k, "\nnew\n", None).unwrap_err().contains("Could not write"));
-        assert_eq!(read(&k.config), Some(old_layout()));
+        fs::create_dir_all(d.join("home/.config/thinfloe/generated/layout-unconfirmed.tmp")).unwrap();
+        assert!(
+            mon_apply(&store, &k, &[layout(R90)], None)
+                .unwrap_err()
+                .contains("Could not write")
+        );
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
         assert!(!k.prev().exists());
         assert!(!d.join("started").exists());
         // Without a file, the kept layout on screen goes again.
-        fs::remove_file(&k.config).unwrap();
-        assert!(mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).is_err());
+        let d = dir("mon-marker-fail-none");
+        let (store, k) = mon_home(&d, &recording(&d));
+        fs::create_dir_all(d.join("home/.config/thinfloe/generated/layout-unconfirmed.tmp")).unwrap();
+        assert!(mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))).is_err());
         assert!(!k.config.exists() && !k.prev().exists());
     }
 
     #[test]
     fn a_failed_config_write_is_rolled_back() {
+        use crate::heads::Rotation::{Normal, R90, R180};
         let d = dir("mon-write-fail");
-        let k = kanshi_home(&d, &recording(&d));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
         let mut tmp = k.config.as_os_str().to_owned();
         tmp.push(".tmp");
-        // owned::write goes through config.tmp, which cannot be made.
+        // The store writes generated/kanshi through kanshi.tmp, which cannot be made.
         block(Path::new(&tmp));
-        let e = mon_apply(&k, "\nnew\n", Some("\nonscreen\n")).unwrap_err();
-        assert!(e.contains("Could not write"), "{e}");
+        let e = mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))).unwrap_err();
+        assert!(e.contains("could not be written"), "{e}");
         assert!(!k.config.exists());
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
         assert!(!d.join("started").exists());
-        // With an old file the put-back fails the same way: marker and
-        // prev stay, so the next session undoes it.
-        fs::write(&k.config, old_layout()).unwrap();
-        let e = mon_apply(&k, "\nnew\n", None).unwrap_err();
-        assert!(e.contains("could not be put back"), "{e}");
-        assert_eq!(read(&k.config), Some(old_layout()));
-        assert_eq!(read(&k.prev()), Some(old_layout()));
+        assert_eq!(saved(&store), crate::config::MonitorsCfg::default());
+
+        // With an old file the write fails the same way; the file was
+        // never replaced, so the undo has nothing to put back.
+        let d = dir("mon-write-fail-old");
+        let (store, k) = mon_home(&d, &recording(&d));
+        save_profiles(&store, &[layout(Normal)]);
+        let mut tmp = k.config.as_os_str().to_owned();
+        tmp.push(".tmp");
+        block(Path::new(&tmp));
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
+        assert!(e.contains("could not be written"), "{e}");
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
+        assert!(!k.prev().exists());
+        assert!(!k.marker.exists());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_put_back_keeps_marker_and_prev() {
+        // kanshi fails and leaves a directory where the restore writes:
+        // the next session undoes the Apply.
+        use crate::heads::Rotation::{Normal, R90};
+        let d = dir("mon-putback-fail");
+        let tmp = d.join("home/.config/thinfloe/generated/kanshi.tmp");
+        let start = format!("mkdir -p {t}; touch {t}/x; exit 3", t = tmp.display());
+        let (store, k) = mon_home(&d, &start);
+        save_profiles(&store, &[layout(Normal)]);
+        let e = mon_apply(&store, &k, &[layout(R90)], None).unwrap_err();
+        assert!(e.contains("could not be restored"), "{e}");
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
+        assert_eq!(read(&k.prev()), Some(kanshi_text(&[layout(Normal)])));
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
     }
 
     #[test]
+    fn a_name_kanshi_could_not_hold_is_refused() {
+        use crate::heads::Rotation::{Normal, R90};
+        for bad in ["a\"b", "a\nb", "a}b", "a{b"] {
+            let d = dir("mon-bad-name");
+            let (store, k) = mon_home(&d, &recording(&d));
+            save_profiles(&store, &[layout(Normal)]);
+            let mut p = layout(R90);
+            p.outputs[0].criteria = bad.into();
+            let e = mon_apply(&store, &k, &[p], None).unwrap_err();
+            assert!(e.contains("kanshi"), "{bad:?}: {e}");
+            assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])), "{bad:?}");
+            assert!(!k.prev().exists() && !k.marker.exists());
+            assert!(!d.join("started").exists());
+        }
+    }
+
+    #[test]
     fn mon_load_and_take_over() {
+        use crate::heads::{Head, Mode, Rotation};
+        use crate::monitors::MonSource;
         let d = dir("mon-load");
-        let k = kanshi_home(&d, "exit 0");
-        assert_eq!(mon_load(&k), (Ok(None), crate::owned::Owner::Missing));
-        fs::create_dir_all(k.config.parent().unwrap()).unwrap();
-        fs::write(&k.config, old_layout()).unwrap();
-        assert_eq!(mon_load(&k), (Ok(Some(old_layout())), crate::owned::Owner::Menu));
-        fs::write(&k.config, "by hand\n").unwrap();
+        let (store, k) = mon_home(&d, &recording(&d));
+        assert_eq!(mon_load(&store), (Ok(None), MonSource::Missing));
+        save_profiles(&store, &[layout(Rotation::R90)]);
         assert_eq!(
-            mon_load(&k),
-            (Ok(Some("by hand\n".into())), crate::owned::Owner::ByHand)
+            mon_load(&store),
+            (Ok(Some(vec![layout(Rotation::R90)])), MonSource::Menu)
         );
-        assert_eq!(mon_take_over(&k), Ok(()));
-        assert!(!k.config.exists());
-        assert_eq!(read(&crate::owned::aside(&k.config)).as_deref(), Some("by hand\n"));
-        // A link is not read through.
-        std::os::unix::fs::symlink(d.join("elsewhere"), &k.config).unwrap();
-        let (r, owner) = mon_load(&k);
-        assert!(r.unwrap_err().starts_with("Could not read"));
-        assert_eq!(owner, crate::owned::Owner::ByHand);
+
+        // A kept hand-written file: no profiles, read-only.
+        let hand = "profile {\n\toutput * enable\n}\n";
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Monitors, |c| {
+                c.monitors.kept = Some(hand.into())
+            })
+            .unwrap();
+        assert_eq!(mon_load(&store), (Ok(None), MonSource::Kept));
+        assert_eq!(
+            generated_kanshi(&k),
+            Some(format!("{}\n{hand}", crate::generated::HEADER))
+        );
+
+        // The take-over replaces it by the layout on screen.
+        let head = |name: &str, x: i32| Head {
+            name: name.into(),
+            make: "Dell".into(),
+            model: "U".into(),
+            serial: String::new(),
+            phys_mm: (0, 0),
+            enabled: true,
+            modes: vec![Mode {
+                w: 1920,
+                h: 1080,
+                refresh_mhz: 60_000,
+                preferred: true,
+            }],
+            current: Some(0),
+            pos: (x, 0),
+            rotation: Rotation::Normal,
+        };
+        let heads = vec![head("DP-1", 0), head("DP-2", 1920)];
+        assert_eq!(mon_take_over(&store, &k, &heads), Ok(()));
+        let want = crate::kanshi::from_heads(&heads);
+        // The settings keep no preferred flag, as the file never did.
+        let stored = crate::config::MonitorsCfg::from_profiles(std::slice::from_ref(&want))
+            .to_profiles()
+            .unwrap();
+        assert_eq!(mon_load(&store), (Ok(Some(stored)), MonSource::Menu));
+        assert_eq!(saved(&store).kept, None);
+        assert_eq!(on_disk(&d).kept, None);
+        assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[want])));
+
+        // kanshi was told to read the new file, with the settings written.
+        let log = read(&d.join("started")).unwrap();
+        assert!(
+            log.starts_with(&format!("args -c {}\nmarker \n", k.config.display())),
+            "{log}"
+        );
+        assert!(
+            log.contains("config transform normal"),
+            "the new file was already written: {log}"
+        );
+
+        // Settings that do not convert are an error, and read-only.
+        store
+            .lock()
+            .unwrap()
+            .update(crate::generated::Table::Screen, |c| {
+                c.monitors.profiles[0].outputs[0].mode = "bad".into()
+            })
+            .unwrap();
+        let (r, source) = mon_load(&store);
+        assert!(r.unwrap_err().contains("bad mode"));
+        assert_eq!(source, MonSource::Kept);
     }
 }

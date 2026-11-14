@@ -434,6 +434,14 @@ tf_restore_home_from_file() {
         warn "thinfloe: $_drhf_archive is not a usable tar archive"
         return 2
     fi
+    # tf_record_home_layout reads the listing; it stays in a global. A listing
+    # tar cut short (non-zero exit) may lack the marker, so it is not kept;
+    # the flag tells tf_record_home_layout to decide from the disk.
+    if [ "$_drhf_list_rc" -eq 0 ]; then
+        _TF_HOME_LIST="$_drhf_list"
+    else
+        _TF_HOME_LIST_PARTIAL=1
+    fi
 
     # tar's default as root is --same-owner, and that is REQUIRED here, not
     # incidental. thinfloe-save-home writes the archive as tfuser, so members
@@ -528,11 +536,22 @@ TF_HOME_RENAMES=".dbrrg-environment:.thinfloe-environment
 .dbrrg-ssh-host-keys:.thinfloe-ssh-host-keys
 .config/dbrrg:.config/thinfloe"
 
-# The marker of a home that has 4.0 names. Every default home ships it
-# (overlay/home/tfuser), and the migration writes it, so every home saved by
-# 4.0 lists it. An archive that does not is a 3.x home, migrated once.
+# The marker of a home that has 4.0 names. The migration writes it, so every
+# home saved by 4.0 lists it (the default home ships the new-layout marker below). An archive that
+# lists neither is a 3.x home, migrated once.
 TF_HOME_VERSION_FILE=".thinfloe-home-version"
 TF_HOME_VERSION=1
+
+# The marker of a home in the new layout (everything below ~/.config/thinfloe/).
+# An archive that lists it is new; one that does not is the old layout, which
+# the menu migrates after login. See tf_record_home_layout.
+TF_HOME_LAYOUT_MARKER=".config/thinfloe/home-version"
+
+# The tar listing of the last archive tf_restore_home_from_file accepted;
+# restore_home empties it before each restore.
+_TF_HOME_LIST=""
+# Set when that listing was incomplete and so is not kept in _TF_HOME_LIST.
+_TF_HOME_LIST_PARTIAL=""
 
 # _tf_archive_lists <listing> <name>
 #
@@ -630,6 +649,7 @@ tf_migrate_home_names() {
 
     [ -n "$_tmh_list" ] || return 1
     _tf_archive_lists "$_tmh_list" "$TF_HOME_VERSION_FILE" && return 0
+    _tf_archive_lists "$_tmh_list" "$TF_HOME_LAYOUT_MARKER" && return 0
 
     # Newline-separated pairs, split with parameter expansion: the shell
     # may be dash, which has no here-strings, and a pipe would run the loop
@@ -666,12 +686,44 @@ tf_migrate_home_names() {
     done
 
     # Into the existing file when there is one, so it keeps the owner the
-    # image gave it (tfuser); the initramfs has no chown.
+    # image gave it (tfuser).
     # 2>/dev/null first: it must be in place before the redirection that fails.
     if ! echo "$TF_HOME_VERSION" 2>/dev/null > "$_tmh_home/$TF_HOME_VERSION_FILE"; then
         warn "thinfloe: could not write ~/$TF_HOME_VERSION_FILE, the next boot migrates again"
     fi
 
+    return 0
+}
+
+# tf_record_home_layout <home> <state-dir>
+#
+# Write <state-dir>/home-layout: "legacy" when the restored archive does not
+# list TF_HOME_LAYOUT_MARKER (a 4.x home), "new" otherwise: a marked archive,
+# no archive, or no listing at all. The image ships the marker in the default
+# home, so for a legacy archive it is removed again; the menu writes it after
+# migrating. With a listing cut short the disk decides instead (marker present:
+# new) and nothing is removed. The file belongs to tfuser (1001) because the menu rewrites it in
+# place; the state directory itself stays root's. Always returns 0.
+tf_record_home_layout() {
+    _rhl_home="$1"
+    _rhl_state="$2"
+    _rhl_layout=new
+
+    if [ -n "$_TF_HOME_LIST_PARTIAL" ]; then
+        # The listing is incomplete: decide from the disk, remove nothing.
+        [ -e "$_rhl_home/$TF_HOME_LAYOUT_MARKER" ] || _rhl_layout=legacy
+    elif [ -n "$_TF_HOME_LIST" ] \
+       && ! _tf_archive_lists "$_TF_HOME_LIST" "$TF_HOME_LAYOUT_MARKER"; then
+        _rhl_layout=legacy
+        rm -f "$_rhl_home/$TF_HOME_LAYOUT_MARKER" 2>/dev/null || true
+    fi
+
+    if ! echo "$_rhl_layout" 2>/dev/null > "$_rhl_state/home-layout"; then
+        warn "thinfloe: could not record the home layout"
+    elif ! chown 1001:1001 "$_rhl_state/home-layout" 2>/dev/null; then
+        warn "thinfloe: could not give home-layout to tfuser"
+    fi
+    tf_log "thinfloe: home layout $_rhl_layout"
     return 0
 }
 
@@ -715,6 +767,8 @@ restore_home() {
 
     _rh_home="$_rh_newroot/home/tfuser"
     _TF_LINK_WARNED=""
+    _TF_HOME_LIST=""
+    _TF_HOME_LIST_PARTIAL=""
     tf_status "Restoring the home directory"
 
     if is_remote_url "$_rh_ramroot"; then
@@ -728,6 +782,7 @@ restore_home() {
             # save over whatever this default home ends up holding.
             warn "thinfloe: no boot MAC recorded, skipping home restore"
             echo failed > "$_rh_state/home-restore" 2>/dev/null || true
+            tf_record_home_layout "$_rh_home" "$_rh_state"
             return 0
         fi
 
@@ -735,6 +790,7 @@ restore_home() {
         if [ -z "$_rh_url" ]; then
             warn "thinfloe: could not build home archive URL, skipping home restore"
             echo failed > "$_rh_state/home-restore" 2>/dev/null || true
+            tf_record_home_layout "$_rh_home" "$_rh_state"
             return 0
         fi
 
@@ -768,12 +824,13 @@ restore_home() {
         *) echo failed > "$_rh_state/home-restore" 2>/dev/null || true ;;
     esac
 
+    tf_record_home_layout "$_rh_home" "$_rh_state"
     return 0
 }
 
-# install_local_network <newroot> [<ramroot-url>]
+# install_local_network <newroot> [<ramroot-url>] [<state-dir>]
 #
-# Copy the per-machine ~/wifi.yaml, ~/ethernet.yaml and ~/wg0.conf out of the
+# Copy the per-machine wifi.yaml, ethernet.yaml and wg0.conf out of the
 # restored home into the new root's /etc, and enable wg-quick@wg0. /etc is a fresh RAM
 # overlay every boot, so nothing else puts them there.
 #
@@ -786,7 +843,14 @@ restore_home() {
 # graphical session, which is how a machine with a broken session stays
 # reachable.
 #
-# ~/ethernet.yaml replaces the shipped DHCP file, except on netboot: a wrong
+# Where they come from depends on <state-dir>/home-layout. "legacy" (the exact
+# word) is the 4.x home: ~/wifi.yaml, ~/ethernet.yaml, ~/wg0.conf, and an
+# unedited ~/wifi.yaml template is skipped. Anything else, including a missing
+# file, is the new layout: ~/.config/thinfloe/generated/wifi.yaml,
+# generated/ethernet.yaml and ~/.config/thinfloe/wg0.conf, which the menu
+# writes, so there is no template to recognise.
+#
+# The ethernet file replaces the shipped DHCP file, except on netboot: a wrong
 # static address there would cut off the only way the machine gets its image
 # and its home, and nobody at the machine could repair it. A remote ramroot
 # URL means netboot.
@@ -801,34 +865,47 @@ install_local_network() {
     local _iln_root="$1"
     local _iln_ramroot="${2:-}"
     local _iln_home="$_iln_root/home/tfuser"
+    local _iln_state="${3:-}"
     local _iln_wants="$_iln_root/etc/systemd/system/multi-user.target.wants"
+    local _iln_wifi=".config/thinfloe/generated/wifi.yaml"
+    local _iln_eth=".config/thinfloe/generated/ethernet.yaml"
+    local _iln_wg=".config/thinfloe/wg0.conf"
+    local _iln_check_template=""
 
-    if [ -f "$_iln_home/wifi.yaml" ] && [ ! -L "$_iln_home/wifi.yaml" ] && \
-       grep -q -F 'device name of your wifi card' "$_iln_home/wifi.yaml"; then
+    if [ "$(cat "$_iln_state/home-layout" 2>/dev/null)" = legacy ]; then
+        _iln_wifi="wifi.yaml"
+        _iln_eth="ethernet.yaml"
+        _iln_wg="wg0.conf"
+        _iln_check_template=1
+    fi
+
+    if [ -n "$_iln_check_template" ] && \
+       [ -f "$_iln_home/$_iln_wifi" ] && [ ! -L "$_iln_home/$_iln_wifi" ] && \
+       grep -q -F 'device name of your wifi card' "$_iln_home/$_iln_wifi"; then
         # The image ships this placeholder; installing it would only make
         # netplan complain about an interface that does not exist.
-        tf_log "thinfloe: ~/wifi.yaml is the unedited template, skipping"
-    elif [ -f "$_iln_home/wifi.yaml" ] && [ ! -L "$_iln_home/wifi.yaml" ]; then
-        tf_log "thinfloe: installing wifi.yaml into /etc/netplan"
+        tf_log "thinfloe: ~/$_iln_wifi is the unedited template, skipping"
+    elif [ -f "$_iln_home/$_iln_wifi" ] && [ ! -L "$_iln_home/$_iln_wifi" ]; then
+        tf_log "thinfloe: installing ~/$_iln_wifi into /etc/netplan"
         # netplan ignores a file others can read, hence 600.
         if mkdir -p "$_iln_root/etc/netplan" && \
-           cp "$_iln_home/wifi.yaml" "$_iln_root/etc/netplan/wifi.yaml" && \
+           cp "$_iln_home/$_iln_wifi" "$_iln_root/etc/netplan/wifi.yaml" && \
            chmod 600 "$_iln_root/etc/netplan/wifi.yaml"; then
             :
         else
             warn "thinfloe: could not install wifi.yaml"
         fi
     else
-        tf_log "thinfloe: no usable ~/wifi.yaml, skipping"
+        tf_log "thinfloe: no usable ~/$_iln_wifi, skipping"
     fi
 
-    if [ -f "$_iln_home/ethernet.yaml" ] && [ ! -L "$_iln_home/ethernet.yaml" ]; then
+    if [ -f "$_iln_home/$_iln_eth" ] && [ ! -L "$_iln_home/$_iln_eth" ]; then
         if is_remote_url "$_iln_ramroot"; then
-            tf_log "thinfloe: netboot, ~/ethernet.yaml not installed"
+            tf_log "thinfloe: netboot, ~/$_iln_eth not installed"
         else
-            tf_log "thinfloe: installing ethernet.yaml into /etc/netplan"
+            tf_log "thinfloe: installing ~/$_iln_eth into /etc/netplan"
             if mkdir -p "$_iln_root/etc/netplan" && \
-               cp "$_iln_home/ethernet.yaml" "$_iln_root/etc/netplan/ethernet.yaml" && \
+               cp "$_iln_home/$_iln_eth" "$_iln_root/etc/netplan/ethernet.yaml" && \
                chmod 600 "$_iln_root/etc/netplan/ethernet.yaml"; then
                 :
             else
@@ -836,14 +913,14 @@ install_local_network() {
             fi
         fi
     else
-        tf_log "thinfloe: no usable ~/ethernet.yaml, skipping"
+        tf_log "thinfloe: no usable ~/$_iln_eth, skipping"
     fi
 
-    if [ -f "$_iln_home/wg0.conf" ] && [ ! -L "$_iln_home/wg0.conf" ]; then
-        tf_log "thinfloe: installing wg0.conf into /etc/wireguard"
+    if [ -f "$_iln_home/$_iln_wg" ] && [ ! -L "$_iln_home/$_iln_wg" ]; then
+        tf_log "thinfloe: installing ~/$_iln_wg into /etc/wireguard"
         if mkdir -p "$_iln_root/etc/wireguard" && \
            chmod 700 "$_iln_root/etc/wireguard" && \
-           cp "$_iln_home/wg0.conf" "$_iln_root/etc/wireguard/wg0.conf" && \
+           cp "$_iln_home/$_iln_wg" "$_iln_root/etc/wireguard/wg0.conf" && \
            chmod 600 "$_iln_root/etc/wireguard/wg0.conf" && \
            mkdir -p "$_iln_wants" && \
            ln -sf /usr/lib/systemd/system/wg-quick@.service \
@@ -853,7 +930,7 @@ install_local_network() {
             warn "thinfloe: could not install wg0.conf"
         fi
     else
-        tf_log "thinfloe: no usable ~/wg0.conf, skipping"
+        tf_log "thinfloe: no usable ~/$_iln_wg, skipping"
     fi
 
     return 0

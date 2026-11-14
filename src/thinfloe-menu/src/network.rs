@@ -88,7 +88,7 @@ impl WiredForm {
 
     /// The setting with the DNS servers field `dns`. On netboot DHCP keeps
     /// the servers it gives: the tab has no DNS row there, and
-    /// ~/ethernet.yaml is not installed.
+    /// generated/ethernet.yaml is not installed.
     fn wired(&self, dns: &str, netboot: bool) -> Result<Wired, String> {
         if self.fixed {
             nettab::parse_wired_form(&self.address, &self.gateway, dns)
@@ -262,7 +262,7 @@ impl NetTab {
                 None
             }
             NetEvent::DnsText(dns) => {
-                // The servers live in ~/ethernet.yaml; netboot has no row.
+                // The servers live in [network] (generated/ethernet.yaml); netboot has no row.
                 if !self.wired_editable() || self.netboot {
                     return None;
                 }
@@ -413,7 +413,7 @@ impl NetTab {
             Some(self.wired_form().wired(&self.dns_text(), self.netboot)?)
         } else if self.wifi_dns_out_of_step() {
             // Nothing typed, but WiFi has other servers: the saved wired
-            // setting goes out again and carries them to ~/wifi.yaml.
+            // setting goes out again and carries them to generated/wifi.yaml.
             self.wired.as_ref().map(|w| w.wired.clone())
         } else {
             None
@@ -581,11 +581,11 @@ impl NetTab {
         self.taking_over.is_some()
     }
 
-    /// The home file the running take-over is for.
-    pub fn taking_over_file(&self) -> &'static str {
+    /// The settings the running take-over is for.
+    pub fn taking_over_name(&self) -> &'static str {
         match self.taking_over {
-            Some("wired") => netfiles::WIRED_FILE,
-            _ => netfiles::WIFI_FILE,
+            Some("wired") => "The wired settings",
+            _ => "The WiFi settings",
         }
     }
 
@@ -678,10 +678,10 @@ impl NetTab {
             .is_some_and(|w| nettab::adapter_changed(w, &self.devices))
     }
 
-    /// The menu's ~/wifi.yaml, which it can rewrite, carries other DNS
+    /// The menu's WiFi setting (generated/wifi.yaml), which it can rewrite, carries other DNS
     /// servers than the wired setting gives it (after a take-over, or
     /// servers set before WiFi got them): Apply brings it back in step.
-    /// Not on netboot, nor beside a ~/ethernet.yaml by hand or one the
+    /// Not on netboot, nor beside a wired setting kept as written (a hand ethernet.yaml) or one the
     /// menu cannot keep (see `netfiles::machine_dns`).
     pub fn wifi_dns_out_of_step(&self) -> bool {
         let (Some(w), Some(e)) = (&self.wifi, &self.wired) else {
@@ -748,7 +748,7 @@ mod tests {
         }
     }
 
-    /// A tab on a stick-booted machine with menu-owned files: one saved
+    /// A tab on a stick-booted machine with menu-made settings: one saved
     /// network on adapter `wlp1`, wired by DHCP.
     fn tab() -> NetTab {
         let mut t = NetTab::new(false);
@@ -923,7 +923,7 @@ mod tests {
         );
     }
 
-    /// A menu ~/wifi.yaml whose servers differ from the wired ones (after a
+    /// A menu-made WiFi setting whose servers differ from the wired ones (after a
     /// take-over, or a fixed address with servers from before WiFi got
     /// them): Apply brings the files back in step.
     #[test]
@@ -949,7 +949,7 @@ mod tests {
                 wired: Some(fixed_dns.clone())
             }))
         );
-        // No ~/ethernet.yaml: WiFi loses its servers.
+        // No wired setting (no generated/ethernet.yaml): WiFi loses its servers.
         let mut t = load(false, menu_wifi(one.clone()), wired(FileState::Missing, Wired::dhcp()));
         assert!(t.dirty());
         assert_eq!(
@@ -972,7 +972,7 @@ mod tests {
         let mut empty = menu_wifi(one.clone());
         empty.networks.clear();
         assert!(!load(false, empty, wired(FileState::Missing, Wired::dhcp())).dirty());
-        // A menu ~/ethernet.yaml the menu cannot keep (a second address
+        // A menu-made wired setting the menu cannot keep (a second address
         // reads as DHCP, added servers as DHCP with servers) is not a
         // source: no Apply that would delete it or turn it into DHCP.
         for parsed in [Wired::dhcp(), Wired::Dhcp { dns: one.clone() }] {
@@ -1302,8 +1302,8 @@ mod tests {
             t.event(NetEvent::TakeOver("wifi"), false),
             Some(NetRequest::TakeOver("wifi"))
         );
-        assert!(!t.take_over_done(Err("~/wifi.yaml: busy".into())));
-        assert_eq!(t.error(), Some("~/wifi.yaml: busy"));
+        assert!(!t.take_over_done(Err("generated/wifi.yaml: busy".into())));
+        assert_eq!(t.error(), Some("generated/wifi.yaml: busy"));
         // A failed take-over may have changed the files: read them again.
         assert!(t.load_due);
         // A menu file or an unknown name is not taken over.
@@ -1429,7 +1429,7 @@ mod tests {
         // The home could not be put back: it changed, and is saved.
         t.event(NetEvent::Apply, false);
         assert!(t.apply_done(Err(ApplyFailed {
-            reason: "x; ~/wifi.yaml could not be put back: busy".into(),
+            reason: "x; generated/wifi.yaml could not be restored: busy".into(),
             home_changed: true
         })));
         assert_eq!(t.poll(now, true), Some(NetRequest::Load));

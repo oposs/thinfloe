@@ -193,16 +193,16 @@ else
     bad "Dockerfile must chmod 600 /etc/netplan/*.yaml (netplan: permissions too open)"
 fi
 
-RC=overlay/home/tfuser/.thinfloe-sessionrc
+RC=overlay/home/tfuser/.config/thinfloe/sessionrc
 if ! grep -q 'sudo netplan apply' "$RC"; then
-    ok ".thinfloe-sessionrc no longer tells the user to run netplan apply"
+    ok "sessionrc no longer tells the user to run netplan apply"
 else
-    bad ".thinfloe-sessionrc still contains sudo netplan apply"
+    bad "sessionrc still contains sudo netplan apply"
 fi
-if grep -q 'wifi.yaml' "$RC" && grep -q 'wg0.conf' "$RC"; then
-    ok ".thinfloe-sessionrc mentions wifi.yaml and wg0.conf"
+if grep -q 'network' "$RC"; then
+    ok "sessionrc says the network is set in Settings"
 else
-    bad ".thinfloe-sessionrc must mention wifi.yaml and wg0.conf"
+    bad "sessionrc must say the network is set in Settings"
 fi
 
 # A unit that copies the files cannot work: the netplan systemd generator

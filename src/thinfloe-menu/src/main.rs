@@ -23,16 +23,29 @@ use std::process::ExitCode;
 use thinfloe_menu::addons;
 use thinfloe_menu::app::{self, Config, ScreenFile};
 use thinfloe_menu::battery;
+use thinfloe_menu::config::{self, ConfigDir};
+use thinfloe_menu::generated::Inputs;
 use thinfloe_menu::header;
 use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
-use thinfloe_menu::menu::Menu;
-use thinfloe_menu::{release, screentab, settings, status, tiles, ui, windows};
+use thinfloe_menu::log::Kind;
+use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
+use thinfloe_menu::store::{self, OpenMode};
+use thinfloe_menu::{bounded, keyboard, migrate, release, screentab, settings, status, tiles, ui, windows};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default))
+}
+
+/// The XKB registry file: `TF_XKB_REGISTRY` when set and not empty (tests),
+/// else the image's. Read-only on the environment.
+fn registry_path() -> PathBuf {
+    match std::env::var_os("TF_XKB_REGISTRY") {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(thinfloe_menu::kbregistry::REGISTRY_PATH),
+    }
 }
 
 fn user_dir() -> PathBuf {
@@ -43,36 +56,6 @@ fn user_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
     home.join(".config/thinfloe/menu")
-}
-
-/// `$HOME/.config/thinfloe/screen`; `TF_SCREEN_FILE` moves it for tests.
-pub fn screen_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("TF_SCREEN_FILE") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
-    home.join(screentab::SCREEN_FILE)
-}
-
-/// `$HOME/.config/thinfloe/status`; `TF_STATUS_FILE` moves it for tests.
-fn status_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("TF_STATUS_FILE") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/tfuser"));
-    home.join(status::FILE)
-}
-
-/// The idle time the session profile sets, as thinfloe-session exports it.
-fn idle_rc() -> Option<u32> {
-    screentab::rc_idle(
-        std::env::var_os("TF_IDLE_TIMEOUT_RC").as_deref(),
-        std::env::var_os("TF_IDLE_TIMEOUT").as_deref(),
-    )
 }
 
 fn program_path() -> OsString {
@@ -116,24 +99,143 @@ fn addon_last_check_path() -> PathBuf {
     env_path("TF_ADDON_LAST_CHECK", addons::LAST_CHECK_PATH)
 }
 
+/// What rendering the generated files needs besides the settings: the
+/// shipped wired default (unreadable: empty, and a fixed wired address then
+/// fails to render with its message), whether this is a netboot, and the
+/// XKB layout list (unreadable: only the names of a keyboard are checked).
+fn config_inputs(registry: Option<&thinfloe_menu::kbregistry::Registry>) -> Inputs {
+    let default_wired = thinfloe_menu::netfiles::Homes::from_env().default_wired;
+    Inputs {
+        registry: registry.cloned().map(std::sync::Arc::new),
+        default_wired: bounded::read_bounded(&default_wired, MIGRATE_MAX_BYTES, true)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default(),
+        netboot: !usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")),
+    }
+}
+
+fn epoch_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// What `build_menu` hands the caller besides the menu.
+struct Built {
+    menu: Menu,
+    paths: Paths,
+    roots: IconRoots,
+    /// Starting up regenerated `generated/kanshi`: the running kanshi must
+    /// read it again.
+    kanshi_changed: bool,
+    /// What the store says about the settings files, for `--check` to print;
+    /// a session menu has them in its log.
+    notes: Vec<String>,
+}
+
+/// A home still in the old layout is only read, whatever was asked.
+fn open_mode(requested: OpenMode, layout: migrate::HomeLayout) -> OpenMode {
+    if layout == migrate::HomeLayout::Legacy {
+        OpenMode::ReadOnly
+    } else {
+        requested
+    }
+}
+
+/// Open the settings store as the home layout in `state_dir` allows.
+fn open_settings(
+    state_dir: &Path,
+    dir: ConfigDir,
+    inputs: Inputs,
+    requested: OpenMode,
+    now: i64,
+) -> (store::Opened, migrate::HomeLayout) {
+    let layout = migrate::home_layout(state_dir);
+    (store::open(dir, inputs, open_mode(requested, layout), now), layout)
+}
+
+/// What the Settings screen says about the config directory. On a legacy
+/// home the store's own notes (it reads a `config.toml` that is not the
+/// truth there) and the environment lines give way to the one legacy note.
+fn collect_notes(
+    layout: migrate::HomeLayout,
+    store_notes: Vec<String>,
+    user_env: Option<&str>,
+    managed: &[String],
+    report: Option<String>,
+) -> ConfigNotes {
+    if layout == migrate::HomeLayout::Legacy {
+        return ConfigNotes {
+            legacy: Some(LEGACY_NOTE.to_string()),
+            ..ConfigNotes::default()
+        };
+    }
+    ConfigNotes {
+        broken: store_notes,
+        dropped_env: user_env.map_or_else(Vec::new, |t| config::dropped_env_lines(t, managed)),
+        report,
+        legacy: None,
+    }
+}
+
 /// `marker` remembers the add-ons offered a retry; `--check` passes one in
-/// memory, so that listing the tiles asks nothing away.
-fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
+/// memory, so that listing the tiles asks nothing away. `mode` is how the
+/// settings store is opened: the one open of the whole run. A home still in
+/// the old layout (its migration failed) is only read, never rebuilt into
+/// the new one.
+fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     let shipped = env_path("TF_MENU_SHIPPED_DIR", "/etc/thinfloe/menu");
+    let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
+    let session = mode == OpenMode::Session;
+    let dir = ConfigDir::from_env();
+    let registry = thinfloe_menu::kbregistry::read(&registry_path());
+    let (opened, layout) = open_settings(
+        &state_dir,
+        dir.clone(),
+        config_inputs(registry.as_ref().ok()),
+        mode,
+        epoch_now(),
+    );
+    let config_notes = collect_notes(
+        layout,
+        opened.notes,
+        bounded::read_text(&dir.environment(), ENV_MAX_BYTES).as_deref(),
+        &config::read_managed_keys(&env_path("TF_MANAGED_KEYS", "/etc/thinfloe/menu-managed-keys")),
+        opened.store.cfg.notice.migration.clone(),
+    );
+    // What `--check` prints and the session log keeps.
+    let notes: Vec<String> = config_notes
+        .broken
+        .iter()
+        .chain(&config_notes.legacy)
+        .cloned()
+        .collect();
+    let keyboard_cfg = opened.store.cfg.keyboard.clone();
+    let (screen_tab, status_layout) = (
+        screentab::from_config(&opened.store.cfg.screen),
+        status::layout_from(&opened.store.cfg.status),
+    );
     let paths = Paths {
         save_home: env_path("TF_SAVE_HOME", "/usr/bin/thinfloe-save-home"),
-        state_dir: env_path("TF_STATE_DIR", "/run/thinfloe/state"),
+        state_dir,
         addon_cmd: jobs::default_addon_cmd(),
         upgrade_cmd: jobs::default_upgrade_cmd(),
         network_cmd: network_cmd(),
         homes: thinfloe_menu::netfiles::Homes::from_env(),
         kanshi: jobs::Kanshi::from_env(),
-        status_file: status_path(),
+        config: std::sync::Arc::new(std::sync::Mutex::new(opened.store)),
+        layout,
+        labwc: jobs::LabwcCmds::from_env(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
     tiles::mark_missing_programs(&mut grid.tiles, &path);
     let mut menu = Menu::new(grid, jobs::restore_failed(&paths.state_dir));
+    if session {
+        for note in &notes {
+            menu.log.note(Kind::Warn, note.clone());
+        }
+    }
     menu.set_retry_marker(marker);
     // The app lets it go once the grid is on screen.
     menu.hold_retry(true);
@@ -146,10 +248,18 @@ fn build_menu(marker: settings::RetryMarker) -> (Menu, Paths, IconRoots) {
     // no stick of its own to upgrade.
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
-    menu.screen_tab = screentab::load(&screen_path(), idle_rc());
+    menu.screen_tab = screen_tab;
+    menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, registry);
+    menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
-    menu.set_status_layout(status::read_layout(&paths.status_file));
-    (menu, paths, IconRoots::system())
+    menu.set_status_layout(status_layout);
+    Built {
+        menu,
+        paths,
+        roots: IconRoots::system(),
+        kanshi_changed: opened.kanshi_changed,
+        notes,
+    }
 }
 
 /// Whether `--check` fails for a tile. An add-on's program and icon arrive
@@ -169,15 +279,15 @@ fn check_line(t: &tiles::Tile, state: &str, icon_text: &str) -> String {
     line
 }
 
-/// What `--check` says about the status layout: the file, then each line
-/// that was skipped or changed. A layout problem does not fail the check:
-/// the menu runs with the shipped layout.
-fn status_lines(path: &Path, layout: &status::layout::Layout) -> Vec<String> {
-    let missing = !layout.refused && std::fs::symlink_metadata(path).is_err();
+/// What `--check` says about the status layout: where it comes from, then
+/// each line that was skipped or changed. A layout problem does not fail the
+/// check: the menu runs with the shipped layout.
+fn status_lines(config_toml: &Path, layout: &status::layout::Layout) -> Vec<String> {
+    let missing = std::fs::symlink_metadata(config_toml).is_err();
     let mut lines = vec![if missing {
-        format!("layout file {} (missing: the shipped layout)", path.display())
+        format!("layout from {} (missing: the shipped layout)", config_toml.display())
     } else {
-        format!("layout file {}", path.display())
+        format!("layout from {}", config_toml.display())
     }];
     for note in &layout.notes {
         lines.push(if layout.refused {
@@ -193,12 +303,27 @@ fn status_lines(path: &Path, layout: &status::layout::Layout) -> Vec<String> {
 /// if a shipped tile is unusable or draws its letter. For the image tests,
 /// and for an operator at a VT asking why a tile is grey.
 fn check() -> ExitCode {
-    let (menu, paths, roots) = build_menu(settings::RetryMarker::memory());
+    let Built {
+        menu,
+        paths,
+        roots,
+        notes,
+        ..
+    } = build_menu(settings::RetryMarker::memory(), OpenMode::ReadOnly);
+    let config_toml = paths
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .dir
+        .config_toml();
     let mut bad = false;
     for line in &menu.banner {
         println!("banner: {line}");
     }
-    for line in status_lines(&paths.status_file, &menu.status.layout) {
+    for note in &notes {
+        println!("config: {note}");
+    }
+    for line in status_lines(&config_toml, &menu.status.layout) {
         println!("status: {line}");
     }
     let icons = ui::render_icons(&menu.tiles, &roots, ui::render_side(1.0));
@@ -268,6 +393,56 @@ fn unfold(what: Option<&str>) -> ExitCode {
     }
 }
 
+/// `--check-keyboard <layout> <variant>`: `thinfloe-compose-labwc-config`
+/// runs it on the values labwc will read. Prints the
+/// `XKB_DEFAULT_LAYOUT=`/`XKB_DEFAULT_VARIANT=` lines to append when labwc
+/// could not build the pair (the reason to stderr), nothing when it can.
+/// An unreadable layout list checks the names only.
+fn check_keyboard(args: &[OsString]) -> ExitCode {
+    let arg = |i: usize| {
+        args.get(i)
+            .map(|a| a.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let registry = thinfloe_menu::kbregistry::read(&registry_path());
+    if let Err(e) = &registry {
+        eprintln!("thinfloe-menu: the keyboard names alone are checked: {e}");
+    }
+    if let Some((layout, variant, why)) = keyboard::repair_env(&arg(0), &arg(1), registry.as_ref().ok()) {
+        eprintln!("thinfloe-menu: {why}");
+        println!("XKB_DEFAULT_LAYOUT={layout}\nXKB_DEFAULT_VARIANT={variant}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `--migrate-home`: the session profile runs it while `home-layout` says
+/// `legacy`. The summary or the reason goes to stderr (the session log).
+fn migrate_home() -> ExitCode {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map_or_else(|| PathBuf::from("/home/tfuser"), PathBuf::from);
+    let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
+    let inputs = config_inputs(thinfloe_menu::kbregistry::read(&registry_path()).ok().as_ref());
+    let now = epoch_now();
+    match migrate::migrate_home(&home, &state_dir, inputs, now) {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(report)) => {
+            eprintln!("thinfloe-menu: {}", report.summary());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("thinfloe-menu: the home was not migrated: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The shipped wired default is tiny.
+const MIGRATE_MAX_BYTES: u64 = 64 * 1024;
+/// The user's `environment` is a few lines; this bounds the read for the
+/// notes about ignored ones.
+const ENV_MAX_BYTES: u64 = 64 * 1024;
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == icons::RENDER_ICON_ARG) {
@@ -282,7 +457,23 @@ fn main() -> ExitCode {
     if args.get(1).is_some_and(|a| a == "--unfold") {
         return unfold(args.get(2).and_then(|a| a.to_str()));
     }
-    let (mut menu, paths, icon_roots) = build_menu(settings::RetryMarker::load(&settings::retry_marker_path()));
+    if args.get(1).is_some_and(|a| a == "--migrate-home") {
+        return migrate_home();
+    }
+    if args.get(1).is_some_and(|a| a == "--check-keyboard") {
+        return check_keyboard(&args[2..]);
+    }
+    let Built {
+        mut menu,
+        paths,
+        roots: icon_roots,
+        kanshi_changed,
+        ..
+    } = build_menu(
+        settings::RetryMarker::load(&settings::retry_marker_path()),
+        OpenMode::Session,
+    );
+    let config_toml = ConfigDir::from_env().config_toml();
     let debug = std::env::var_os("TF_MENU_DEBUG").is_some();
     if debug {
         eprintln!("thinfloe-menu: {} tiles", menu.tiles.len());
@@ -298,16 +489,15 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         battery_file: battery_file(),
-        status_file: status_path(),
+        config_toml,
+        kanshi_changed,
         network_roots: thinfloe_menu::netstat::Roots::system(),
         hardware_roots: thinfloe_menu::hardware::Roots::system(),
         program_path: program_path(),
         header,
         upgrade_status: upgrade_status_path(),
         screen: ScreenFile {
-            path: screen_path(),
             idle_pid: screentab::idle_pid(std::env::var_os("TF_IDLE_PID").as_deref()),
-            rc: idle_rc(),
         },
         debug_move: std::env::var("TF_MENU_DEBUG_MOVE").ok().filter(|n| !n.is_empty()),
     }) {
@@ -329,11 +519,109 @@ mod tests {
     use crate::testdir::TestDir;
 
     #[test]
+    fn the_registry_path_is_the_override_or_the_image_file() {
+        // The environment is read only, never set (no set_var under src/).
+        let p = registry_path();
+        match std::env::var_os("TF_XKB_REGISTRY").filter(|v| !v.is_empty()) {
+            Some(v) => assert_eq!(p, PathBuf::from(v)),
+            None => assert_eq!(p, PathBuf::from(thinfloe_menu::kbregistry::REGISTRY_PATH)),
+        }
+    }
+
+    #[test]
     fn usb_boot_is_a_mount_point_test() {
         assert!(usb_boot(Path::new("/proc")));
         let d = TestDir::new("main", "usb-boot");
         assert!(!usb_boot(&d));
         assert!(!usb_boot(&d.join("missing")));
+    }
+
+    fn settings_in(layout_word: Option<&str>, tag: &str) -> (TestDir, TestDir, store::Opened) {
+        let state = TestDir::new("main", &format!("{tag}-state"));
+        let cfg = TestDir::new("main", &format!("{tag}-cfg"));
+        if let Some(w) = layout_word {
+            std::fs::write(state.join("home-layout"), w).unwrap();
+        }
+        let (opened, _) = open_settings(
+            &state,
+            ConfigDir {
+                root: cfg.to_path_buf(),
+            },
+            Inputs::default(),
+            OpenMode::Session,
+            0,
+        );
+        (state, cfg, opened)
+    }
+
+    #[test]
+    fn a_legacy_home_opens_read_only_and_leaves_the_directory_empty() {
+        let (_s, cfg, mut opened) = settings_in(Some("legacy\n"), "legacy");
+        assert_eq!(
+            opened
+                .store
+                .update(thinfloe_menu::generated::Table::Screen, |c| c.screen.idle_timeout = 60),
+            Err("The settings are read-only.".to_string())
+        );
+        assert_eq!(opened.store.cfg.screen.idle_timeout, screentab::DEFAULT_IDLE);
+        assert_eq!(std::fs::read_dir(&*cfg).unwrap().count(), 0, "nothing was created");
+    }
+
+    #[test]
+    fn a_new_or_unrecorded_home_opens_as_a_session() {
+        for (word, tag) in [(Some("new\n"), "new"), (None, "none"), (Some("lega"), "torn")] {
+            let (_s, cfg, mut opened) = settings_in(word, tag);
+            assert!(cfg.join("config.toml").exists(), "{tag}: config.toml is made");
+            opened
+                .store
+                .update(thinfloe_menu::generated::Table::Screen, |c| c.screen.idle_timeout = 60)
+                .unwrap();
+            assert!(cfg.join("generated/screen").exists(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn open_mode_only_lowers_a_legacy_home() {
+        use migrate::HomeLayout::{Legacy, New};
+        assert_eq!(open_mode(OpenMode::Session, Legacy), OpenMode::ReadOnly);
+        assert_eq!(open_mode(OpenMode::ReadOnly, Legacy), OpenMode::ReadOnly);
+        assert_eq!(open_mode(OpenMode::Session, New), OpenMode::Session);
+        assert_eq!(open_mode(OpenMode::ReadOnly, New), OpenMode::ReadOnly);
+    }
+
+    #[test]
+    fn a_legacy_home_shows_the_legacy_note_instead_of_the_store_notes() {
+        let notes = collect_notes(
+            migrate::HomeLayout::Legacy,
+            vec!["config.toml is missing; defaults are shown.".into()],
+            Some("XKB_DEFAULT_LAYOUT=de\n"),
+            &["XKB_DEFAULT_LAYOUT".to_string()],
+            Some("ignored".into()),
+        );
+        assert_eq!(
+            notes,
+            ConfigNotes {
+                legacy: Some(LEGACY_NOTE.to_string()),
+                ..ConfigNotes::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_home_shows_the_store_notes_the_ignored_lines_and_the_report() {
+        let notes = collect_notes(
+            migrate::HomeLayout::New,
+            vec!["config.toml could not be read (x).".into()],
+            Some("# c\nXKB_DEFAULT_LAYOUT=de\nXCURSOR_SIZE=32\n"),
+            &["XKB_DEFAULT_LAYOUT".to_string()],
+            Some("Moved 3 files.".into()),
+        );
+        assert_eq!(notes.broken, ["config.toml could not be read (x)."]);
+        assert_eq!(notes.dropped_env, ["XKB_DEFAULT_LAYOUT=de"]);
+        assert_eq!(notes.report.as_deref(), Some("Moved 3 files."));
+        assert_eq!(notes.legacy, None);
+        let none = collect_notes(migrate::HomeLayout::New, vec![], None, &[], None);
+        assert_eq!(none, ConfigNotes::default());
     }
 
     fn tile(addon: bool, problem: Option<&str>) -> tiles::Tile {

@@ -5,7 +5,7 @@
 //! paints it and reports clicks.
 
 use crate::brand::{self, role};
-use crate::netfiles::{self, FileState};
+use crate::netfiles::FileState;
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
 use crate::ui::{self, GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
@@ -170,7 +170,7 @@ fn connections(ui: &mut Ui, t: &Theme, net: &NetTab) {
 }
 
 /// The wired address: the select and, for a fixed address, its fields.
-/// A file written by hand shows them greyed.
+/// Kept text shows them greyed.
 fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     let Some(file) = net.wired_file() else {
         return;
@@ -225,16 +225,7 @@ fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     });
     let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
     if !editable {
-        by_hand(
-            ui,
-            t,
-            indent,
-            netfiles::WIRED_FILE,
-            file.manageable,
-            "wired",
-            net,
-            event,
-        );
+        by_hand(ui, t, indent, file.manageable, "wired", net, event);
     }
     if let Some(e) = &file.error {
         note(ui, indent, RichText::new(e).color(t.role(role::WARN)));
@@ -242,7 +233,7 @@ fn wired(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
 }
 
 /// The machine's DNS servers, for wired and WiFi in every wired mode. They
-/// are kept in ~/ethernet.yaml, so a file by hand there shows them greyed.
+/// are kept with the wired settings, so kept wired text shows them greyed.
 fn dns(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     let Some(file) = net.wired_file() else {
         return;
@@ -261,16 +252,16 @@ fn dns(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     let line = |ui: &mut Ui, text: &str| note(ui, indent, RichText::new(text).color(t.palette().muted_foreground));
     line(ui, "Used for wired and WiFi. Empty: the servers DHCP sends.");
     if !editable {
-        line(ui, "Set by hand in ~/ethernet.yaml.");
+        line(ui, "Kept from your old settings; the menu cannot change it.");
     }
     // Why Apply is on when nothing was typed.
     if net.wifi_dns_out_of_step() {
         line(ui, "WiFi uses other DNS servers. Apply sets the ones above.");
     }
-    // The menu writes the servers into ~/wifi.yaml too, never into one
-    // written by hand.
+    // The menu writes the servers into the WiFi settings too, never into
+    // kept text.
     if net.wifi_file().is_some_and(|w| w.state == FileState::Hand) {
-        line(ui, "WiFi keeps the DNS servers set in ~/wifi.yaml.");
+        line(ui, "WiFi keeps the DNS servers from your old settings.");
     }
 }
 
@@ -307,7 +298,7 @@ fn wifi(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
         warn(ui, t, "WiFi adapter changed");
     }
     if hand {
-        by_hand(ui, t, 0.0, netfiles::WIFI_FILE, file.manageable, "wifi", net, event);
+        by_hand(ui, t, 0.0, file.manageable, "wifi", net, event);
     } else {
         let adapter = !net.devices().is_empty();
         ui.horizontal(|ui| {
@@ -329,19 +320,20 @@ fn wifi(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
 
 /// The hand line, and the take-over button when the menu can take the
 /// file over without losing a setting.
-#[allow(clippy::too_many_arguments)]
 fn by_hand(
     ui: &mut Ui,
     t: &Theme,
     indent: f32,
-    file: &str,
     manageable: bool,
     which: &'static str,
     net: &NetTab,
     event: &mut Option<NetEvent>,
 ) {
-    let text = format!("This is set by hand in ~/{file}");
-    note(ui, indent, RichText::new(text).color(t.palette().muted_foreground));
+    note(
+        ui,
+        indent,
+        RichText::new("Kept from your old settings; the menu cannot change it.").color(t.palette().muted_foreground),
+    );
     if !manageable {
         return;
     }

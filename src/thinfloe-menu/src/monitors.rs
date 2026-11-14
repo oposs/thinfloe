@@ -4,12 +4,24 @@
 //! Nothing here is slow and nothing touches a file: what has to be done
 //! comes back as a `MonRequest`, which the menu runs as a job, and the
 //! job's result comes back through `loaded`, `applied`, `kept`, `reverted`
-//! and `taken_over`. kanshi sets the monitors; this only writes its file.
+//! and `taken_over`. kanshi sets the monitors; this only saves the arrangement
+//! it reads, in `[monitors]` and `generated/kanshi`.
 
 use crate::heads::{Head, Mode, Rotation};
 use crate::kanshi::{self, Place, Profile, Side};
-use crate::owned::Owner;
 use std::time::{Duration, Instant};
+
+/// Who owns the saved monitor arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonSource {
+    /// `[monitors]` holds no arrangement yet.
+    Missing,
+    /// `[monitors]` holds profiles the menu wrote.
+    Menu,
+    /// `[monitors] kept` holds a hand-written kanshi file: read-only here,
+    /// until the person lets the menu manage it.
+    Kept,
+}
 
 /// How long *Keep this arrangement?* waits before it goes back.
 pub const KEEP_SECS: u64 = 15;
@@ -36,25 +48,26 @@ pub enum MonEvent {
 /// The work the tab asks for; the menu turns each into a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MonRequest {
-    /// Read `~/.config/kanshi/config`.
+    /// Read `[monitors]` from the settings.
     Load,
-    /// Write `text` as the file's body and let kanshi apply it.
+    /// Render `profiles` into `generated/kanshi` and let kanshi apply it.
     /// `menu_output` is the connector name the arrangement puts the menu on.
     /// `prev` is the body of a file for the layout on screen now, always
     /// sent: the job keeps it when there is no file (the file may have gone
     /// while the menu runs), and the revert puts it back, so going back
     /// works on the first Apply too.
     Apply {
-        text: String,
+        profiles: Vec<Profile>,
         menu_output: Option<String>,
         prev: Option<String>,
     },
-    /// The person kept the new arrangement.
-    Keep,
+    /// The person kept the new arrangement: `profiles` go into `[monitors]`.
+    Keep { profiles: Vec<Profile> },
     /// Put the arrangement before the Apply back.
     Revert,
-    /// Move a hand-written file aside.
-    TakeOver,
+    /// Replace the kept hand-written file by the layout on screen, which
+    /// the job reads from `heads`.
+    TakeOver { heads: Vec<Head> },
 }
 
 /// What the tab waits for.
@@ -87,9 +100,9 @@ enum Answer {
 #[derive(Debug, Clone)]
 pub struct MonTab {
     heads: Vec<Head>,
-    /// The file as loaded: who wrote it and its profiles.
-    owner: Owner,
-    /// The file could not be read: nothing is written.
+    /// Where the saved arrangement comes from.
+    source: MonSource,
+    /// The settings could not be read: nothing is written.
     unreadable: bool,
     profiles: Vec<Profile>,
     /// What the file holds once the Apply is kept.
@@ -114,7 +127,7 @@ impl Default for MonTab {
     fn default() -> MonTab {
         MonTab {
             heads: Vec::new(),
-            owner: Owner::Missing,
+            source: MonSource::Missing,
             unreadable: false,
             profiles: Vec::new(),
             pending: None,
@@ -169,27 +182,20 @@ impl MonTab {
         self.menu_now = connector.map(String::from);
     }
 
-    /// The file was read: `text` is its content, `None` when missing.
-    pub fn loaded(&mut self, text: Result<Option<String>, String>, owner: Owner) {
+    /// `[monitors]` was read: the saved profiles, `None` when there are
+    /// none.
+    pub fn loaded(&mut self, profiles: Result<Option<Vec<Profile>>, String>, source: MonSource) {
         self.phase = Phase::Idle;
         self.profiles.clear();
-        match text {
+        self.source = source;
+        match profiles {
             Err(e) => {
                 self.unreadable = true;
-                self.owner = owner;
                 self.error = Some(e);
             }
-            Ok(text) => {
+            Ok(p) => {
                 self.unreadable = false;
-                self.owner = owner;
-                if owner == Owner::Menu
-                    && let Some(t) = text.as_deref()
-                {
-                    match kanshi::parse(t) {
-                        Ok(p) => self.profiles = p,
-                        Err(e) => self.error = Some(format!("The saved arrangement could not be read: {e}")),
-                    }
-                }
+                self.profiles = p.unwrap_or_default();
             }
         }
         self.rebuild();
@@ -209,7 +215,7 @@ impl MonTab {
         match answer {
             Some(Answer::Keep) => {
                 self.phase = Phase::Keeping;
-                Some(MonRequest::Keep)
+                Some(self.keep_request())
             }
             Some(Answer::GoBack) => {
                 self.phase = Phase::Reverting;
@@ -237,8 +243,8 @@ impl MonTab {
         if let Some(p) = self.pending.take() {
             self.profiles = p;
         }
-        if self.owner == Owner::Missing {
-            self.owner = Owner::Menu;
+        if self.source == MonSource::Missing {
+            self.source = MonSource::Menu;
         }
         self.phase = Phase::Idle;
         self.rebuild();
@@ -266,9 +272,9 @@ impl MonTab {
         }
     }
 
-    /// The hand-written file was moved aside to `config.by-hand`: there is
-    /// none now, and the tab starts from the monitors as they are. Returns
-    /// whether the tab waited for this.
+    /// The kept hand-written file was replaced by the layout on screen: the
+    /// tab shows that arrangement as the saved one. Returns whether the tab
+    /// waited for this.
     pub fn taken_over(&mut self, r: Result<(), String>) -> bool {
         if self.phase != Phase::TakingOver {
             return false;
@@ -277,8 +283,12 @@ impl MonTab {
         match r {
             Ok(()) => {
                 self.error = None;
-                self.owner = Owner::Missing;
-                self.profiles.clear();
+                self.source = MonSource::Menu;
+                self.profiles = if self.heads.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![kanshi::from_heads(&self.heads)]
+                };
                 self.rebuild();
             }
             Err(e) => self.error = Some(format!("Could not take over the file: {e}")),
@@ -309,11 +319,13 @@ impl MonTab {
             MonEvent::Keep => self.answer(Answer::Keep),
             MonEvent::GoBack => self.answer(Answer::GoBack),
             MonEvent::TakeOver => {
-                if self.phase != Phase::Idle || self.owner != Owner::ByHand || self.unreadable {
+                if self.phase != Phase::Idle || self.source != MonSource::Kept || self.unreadable {
                     return None;
                 }
                 self.phase = Phase::TakingOver;
-                Some(MonRequest::TakeOver)
+                Some(MonRequest::TakeOver {
+                    heads: self.heads.clone(),
+                })
             }
             MonEvent::Apply => {
                 if !self.editable() {
@@ -350,6 +362,13 @@ impl MonTab {
         }
     }
 
+    /// The Keep job writes what the Apply put on screen.
+    fn keep_request(&self) -> MonRequest {
+        MonRequest::Keep {
+            profiles: self.pending.clone().unwrap_or_else(|| self.profiles.clone()),
+        }
+    }
+
     fn answer(&mut self, a: Answer) -> Option<MonRequest> {
         match self.phase {
             Phase::Applying { deadline, answer: None } => {
@@ -362,7 +381,7 @@ impl MonTab {
             Phase::Asking { .. } => match a {
                 Answer::Keep => {
                     self.phase = Phase::Keeping;
-                    Some(MonRequest::Keep)
+                    Some(self.keep_request())
                 }
                 Answer::GoBack => {
                     self.phase = Phase::Reverting;
@@ -448,9 +467,8 @@ impl MonTab {
             Some(i) => profiles[i] = draft.clone(),
             None => profiles.push(draft.clone()),
         }
-        let text = format!("\n{}", kanshi::render(&profiles));
         let prev = Some(format!("\n{}", kanshi::render(&[kanshi::from_heads(&self.heads)])));
-        self.pending = Some(profiles);
+        self.pending = Some(profiles.clone());
         self.error = None;
         self.phase = Phase::Applying {
             deadline: now + Duration::from_secs(KEEP_SECS),
@@ -462,7 +480,7 @@ impl MonTab {
             .and_then(|c| self.connector(c))
             .map(String::from);
         Some(MonRequest::Apply {
-            text,
+            profiles,
             menu_output,
             prev,
         })
@@ -641,12 +659,12 @@ impl MonTab {
     /// The file is the menu's, or there is none: the arrangement can be
     /// changed, unless a job runs or the question is up.
     pub fn editable(&self) -> bool {
-        self.phase == Phase::Idle && !self.unreadable && self.owner != Owner::ByHand && self.draft.is_some()
+        self.phase == Phase::Idle && !self.unreadable && self.source != MonSource::Kept && self.draft.is_some()
     }
 
-    /// Who wrote `~/.config/kanshi/config`.
-    pub fn owner(&self) -> Owner {
-        self.owner
+    /// Where the saved arrangement comes from.
+    pub fn source(&self) -> MonSource {
+        self.source
     }
 
     /// A job for the tab runs.
@@ -668,7 +686,6 @@ impl MonTab {
 mod tests {
     use super::*;
     use crate::kanshi::OutputSet;
-    use crate::owned::HEADER;
 
     fn mode(w: u32, h: u32, preferred: bool) -> Mode {
         Mode {
@@ -726,15 +743,19 @@ mod tests {
         }
     }
 
-    fn file(profiles: &[Profile]) -> String {
-        format!("{HEADER}\n\n{}", kanshi::render(profiles))
+    fn file(profiles: &[Profile]) -> Vec<Profile> {
+        profiles.to_vec()
     }
 
-    fn tab(heads: Vec<Head>, text: Option<String>) -> MonTab {
+    fn tab(heads: Vec<Head>, saved: Option<Vec<Profile>>) -> MonTab {
         let mut t = MonTab::default();
         assert_eq!(t.heads_changed(heads), Some(MonRequest::Load));
-        let owner = crate::owned::owner(text.as_deref());
-        t.loaded(Ok(text), owner);
+        let source = if saved.is_some() {
+            MonSource::Menu
+        } else {
+            MonSource::Missing
+        };
+        t.loaded(Ok(saved), source);
         t
     }
 
@@ -838,8 +859,9 @@ mod tests {
         let now = Instant::now();
         let mut p = saved_two();
         p.outputs[1].enabled = false;
+        p.outputs[1].mode = mode(0, 0, false);
         let mut t = tab(two(), Some(file(&[p])));
-        // Read back from the file, an off monitor has no mode.
+        // A saved monitor that is off may hold no mode.
         assert_eq!((output(&t, "DP-1").mode.w, output(&t, "DP-1").mode.h), (0, 0));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
         ev(&mut t, MonEvent::Enabled(true), now);
@@ -872,11 +894,11 @@ mod tests {
         want.menu_output = Some("DP-2".into());
         assert_eq!(t.layout(), Some(&want));
         // The profile of the other set of monitors stays in the file.
-        let text = format!("\n{}", kanshi::render(&[only_dp1, want]));
+        let profiles = vec![only_dp1, want];
         assert_eq!(
             ev(&mut t, MonEvent::Apply, now),
             Some(MonRequest::Apply {
-                text,
+                profiles,
                 menu_output: Some("DP-2".into()),
                 prev: Some(format!("\n{}", kanshi::render(&[kanshi::from_heads(&two())]))),
             })
@@ -902,7 +924,7 @@ mod tests {
         // Once kept, the file is the menu's, and the job uses it. The file
         // may still go while the menu runs: the layout on screen goes along.
         assert_eq!(t.applied(Ok(())), None);
-        assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
+        assert!(matches!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep { .. })));
         assert!(t.kept(Ok(())));
         let Some(MonRequest::Apply { prev, .. }) = ev(&mut t, MonEvent::Apply, now) else {
             panic!("no Apply")
@@ -940,14 +962,23 @@ mod tests {
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
         ev(&mut t, MonEvent::Rotation(Rotation::R180), now);
         applied_tab(&mut t, now);
+        let Some(MonRequest::Keep { profiles }) = ev(&mut t, MonEvent::Keep, now + Duration::from_secs(5)) else {
+            panic!("no Keep")
+        };
+        assert_eq!(profiles.len(), 1, "the applied arrangement goes to the settings");
         assert_eq!(
-            ev(&mut t, MonEvent::Keep, now + Duration::from_secs(5)),
-            Some(MonRequest::Keep)
+            profiles[0]
+                .outputs
+                .iter()
+                .find(|o| o.criteria == "DP-2")
+                .unwrap()
+                .rotation,
+            Rotation::R180
         );
         assert_eq!(t.tick(now + Duration::from_secs(20)), None);
         assert!(t.kept(Ok(())));
         assert_eq!(output(&t, "DP-2").rotation, Rotation::R180);
-        assert_eq!(t.owner(), Owner::Menu);
+        assert_eq!(t.source(), MonSource::Menu);
         assert_eq!(t.countdown(now + Duration::from_secs(5)), None);
 
         // The Apply job outlives the deadline: go back once it ends.
@@ -964,7 +995,7 @@ mod tests {
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
         ev(&mut t, MonEvent::Rotation(Rotation::R90), now);
         applied_tab(&mut t, now);
-        assert_eq!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep));
+        assert!(matches!(ev(&mut t, MonEvent::Keep, now), Some(MonRequest::Keep { .. })));
         assert!(t.kept(Err("busy".into())));
         assert!(t.error().unwrap().contains("goes back at the next login"));
         assert_eq!(
@@ -1042,10 +1073,9 @@ mod tests {
     #[test]
     fn a_hand_file_is_read_only() {
         let now = Instant::now();
-        let text = "profile {\n\toutput * enable\n}\n".to_string();
         let mut t = MonTab::default();
         t.heads_changed(two());
-        t.loaded(Ok(Some(text)), Owner::ByHand);
+        t.loaded(Ok(None), MonSource::Kept);
         assert!(!t.editable());
         let before = t.layout().cloned();
         assert_eq!(before, Some(kanshi::from_heads(&two())), "the monitors still show");
@@ -1064,24 +1094,28 @@ mod tests {
         }
         assert_eq!(t.layout().cloned(), before);
         assert_eq!(t.selected(), Some("DP-2"), "selecting is only looking");
-        assert_eq!(ev(&mut t, MonEvent::TakeOver, now), Some(MonRequest::TakeOver));
+        assert_eq!(
+            ev(&mut t, MonEvent::TakeOver, now),
+            Some(MonRequest::TakeOver { heads: two() })
+        );
         assert_eq!(ev(&mut t, MonEvent::TakeOver, now), None, "once");
         assert!(t.taken_over(Ok(())));
-        assert_eq!(t.owner(), Owner::Missing);
+        assert_eq!(t.source(), MonSource::Menu);
         assert!(t.editable());
+        assert_eq!(t.layout().cloned(), Some(kanshi::from_heads(&two())));
         assert!(!t.taken_over(Ok(())), "nothing was asked");
 
         // A file that cannot be read is not written either, nor taken over.
         let mut t = MonTab::default();
         t.heads_changed(two());
         t.loaded(
-            Err("Could not read ~/.config/kanshi/config: link".into()),
-            Owner::ByHand,
+            Err("The monitor settings could not be read: bad".into()),
+            MonSource::Kept,
         );
         assert!(!t.editable());
         assert_eq!(ev(&mut t, MonEvent::Apply, now), None);
         assert_eq!(ev(&mut t, MonEvent::TakeOver, now), None);
-        assert!(t.error().unwrap().contains("Could not read"));
+        assert!(t.error().unwrap().contains("could not be read"));
     }
 
     #[test]

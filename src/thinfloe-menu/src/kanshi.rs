@@ -238,7 +238,7 @@ fn quoted(criteria: &str) -> String {
     }
 }
 
-/// The body of the file (`owned::write` adds the header): one kanshi
+/// The body of the file (`generated::render` adds the header): one kanshi
 /// profile per entry. Callers check `positions` first; a layout that
 /// cannot be placed renders its outputs at 0,0.
 pub fn render(profiles: &[Profile]) -> String {
@@ -313,7 +313,8 @@ fn bad<T>(line: &str) -> Result<T, String> {
     Err(format!("Not a line the menu wrote: {line}"))
 }
 
-fn parse_mode(text: &str) -> Option<Mode> {
+/// The mode from kanshi's text (`WxH` or `WxH@R.RRRHz`); `preferred` is false.
+pub fn parse_mode(text: &str) -> Option<Mode> {
     let (size, rate) = match text.split_once('@') {
         Some((s, r)) => (s, Some(r)),
         None => (text, None),
@@ -389,7 +390,8 @@ fn parse_output(t: &[String], line: &str) -> Result<OutputSet, String> {
 /// are not read; they follow from the place lines.
 pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
     let mut lines = text.lines();
-    if lines.next() != Some(crate::owned::HEADER) {
+    let first = lines.next();
+    if first != Some(crate::migrate::LEGACY_MENU_HEADER) && first != Some(crate::generated::HEADER) {
         return Err("Not a file the menu wrote.".into());
     }
     let mut profiles = Vec::new();
@@ -578,7 +580,7 @@ mod tests {
             ],
             menu_output: Some("HEADLESS-1".into()),
         };
-        let text = format!("{}\n\n{}", crate::owned::HEADER, render(&[p]));
+        let text = format!("{}\n\n{}", crate::migrate::LEGACY_MENU_HEADER, render(&[p]));
         assert_eq!(text, include_str!("../../../test/runtime/kanshi-two.conf"));
     }
 
@@ -703,8 +705,20 @@ mod tests {
 
     #[test]
     fn parse_round_trips_render() {
-        let text = format!("{}\n\n{}", crate::owned::HEADER, render(&sample()));
+        let text = format!("{}\n\n{}", crate::migrate::LEGACY_MENU_HEADER, render(&sample()));
         assert_eq!(parse(&text).unwrap(), sample());
+    }
+
+    #[test]
+    fn parse_reads_the_generated_header_too() {
+        let text = format!("{}\n\n{}", crate::generated::HEADER, render(&sample()));
+        assert_eq!(parse(&text).unwrap(), sample());
+    }
+
+    #[test]
+    fn parse_refuses_a_kept_hand_file_under_the_generated_header() {
+        let text = format!("{}\nprofile {{\n\toutput * enable\n}}\n", crate::generated::HEADER);
+        assert!(parse(&text).is_err());
     }
 
     #[test]
@@ -712,7 +726,7 @@ mod tests {
         assert!(parse("profile { output * enable }\n").is_err());
         let bad = format!(
             "{}\n\nprofile {{\n\toutput A enable mode 1x1 position 0,0 transform normal scale 2\n}}\n",
-            crate::owned::HEADER
+            crate::migrate::LEGACY_MENU_HEADER
         );
         assert!(parse(&bad).is_err());
     }

@@ -10,9 +10,10 @@ Commands:
             "ssid", "signal_dbm", "handshake_age_s"}]}
   scan     {"device", "networks": [{"ssid", "signal_dbm", "secured",
             "supported"}]}, strongest first, at most 64
-  apply    {"result": "ok", "reason": ""}: checks ~/wifi.yaml and
-            ~/ethernet.yaml of the user, installs them into /etc/netplan and
-            runs netplan apply
+  apply    {"result": "ok", "reason": ""}: checks wifi.yaml and
+            ethernet.yaml in ~/.config/thinfloe/generated of the user,
+            installs them into /etc/netplan and runs netplan apply;
+            without a generated wifi.yaml the installed one is removed
 
 Exit 0 on success, 1 on a failure, 2 on misuse. A failure prints
 {"result": "failed", "reason": "..."}. Log lines go to stderr and the journal.
@@ -412,6 +413,24 @@ def read_system_file(path: str) -> Optional[bytes]:
         raise NetworkError("cannot read %s: %s" % (path, e.strerror))
 
 
+def generated_dir() -> str:
+    """The directory of the files the menu generated, in the home of tfuser.
+
+    The home belongs to tfuser and this runs as root. O_NOFOLLOW in
+    read_home_file guards only the last component, so a link planted at
+    .config/thinfloe or at generated would redirect the read to any
+    directory; both are refused here. (tfuser could still swap a component
+    between this check and the read; what that reads is a file of a
+    directory it chose, which it could have written into the home anyway,
+    and netplan generate checks it before it is installed.)"""
+    path = home_dir()
+    for part in (".config", "thinfloe", "generated"):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            raise NetworkError("%s is a link" % part)
+    return path
+
+
 def home_dir() -> str:
     if HOME_DIR:
         return HOME_DIR
@@ -506,6 +525,18 @@ def install_files(files: dict) -> None:
                 pass
 
 
+def remove_files(names: list) -> None:
+    """Remove each installed file of names from ETC_NETPLAN."""
+    for name in names:
+        try:
+            os.unlink(os.path.join(ETC_NETPLAN, name))
+            log("removed %s" % name)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise NetworkError("cannot remove %s: %s" % (name, e.strerror or e))
+
+
 def apply() -> Tuple[int, str]:
     """(0, "") when installed and applied, else (1, reason). Nothing is
     installed unless the whole set passed netplan generate."""
@@ -516,12 +547,19 @@ def apply() -> Tuple[int, str]:
     except OSError as e:
         return 1, "cannot take the lock: %s" % (e.strerror or e)
     try:
-        home = home_dir()
-        wifi = read_home_file(os.path.join(home, "wifi.yaml"))
-        wired = read_home_file(os.path.join(home, "ethernet.yaml"))
+        gen = generated_dir()
+        wifi = read_home_file(os.path.join(gen, "wifi.yaml"))
+        wired = read_home_file(os.path.join(gen, "ethernet.yaml"))
         files = {}
         install = []
-        if wifi is not None and not is_template(wifi.decode("utf-8", "replace")):
+        remove = []
+        if wifi is None:
+            # The menu writes no wifi.yaml without networks (the last one
+            # was forgotten): the machine leaves the network it is on.
+            if os.path.lexists(os.path.join(ETC_NETPLAN, "wifi.yaml")):
+                remove.append("wifi.yaml")
+            log("wifi.yaml: none")
+        elif not is_template(wifi.decode("utf-8", "replace")):
             files["wifi.yaml"] = wifi
             install.append("wifi.yaml")
             log("wifi.yaml: from the home")
@@ -545,6 +583,7 @@ def apply() -> Tuple[int, str]:
         check_files(files)
         log("the files passed netplan generate")
         install_files({k: files[k] for k in install})
+        remove_files(remove)
         try:
             rc, out, err = run([NETPLAN, "apply"], APPLY_TIMEOUT)
         except subprocess.TimeoutExpired:

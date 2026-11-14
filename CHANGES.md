@@ -3,10 +3,22 @@
 ## [Unreleased]
 
 ### New
+- The Settings screen has a Keyboard tab: pick the layout and its variant from the full list, CapsLock as Ctrl on or off, and the Compose key (Right Alt by default). A change applies at once to the running session, with a line to try it right there, and is kept with the home directory.
 
 ### Changed
+- All settings the menu manages are now kept in `~/.config/thinfloe/config.toml`, and the first start after the upgrade moves the old files there by itself, WiFi included. The old files stay unchanged in `~/cfg-attic/`, with a README listing what was taken over, and the Settings screen says so once.
+- `~/.thinfloe-environment` and `~/.thinfloe-sessionrc` are no longer read: extra variables go in `~/.config/thinfloe/environment` and session commands in `~/.config/thinfloe/sessionrc`. `TF_IDLE_TIMEOUT` is no longer read from either; the screen timeout is set on the Screen tab.
+- `~/.thinfloe-password`, `~/.thinfloe-ssh-host-keys`, `~/wg0.conf` and `~/.save-home-exclude` moved to `password`, `ssh-host-keys`, `wg0.conf` and `save-home-exclude` in `~/.config/thinfloe/`. A new stick written from this machine still leaves out the host keys and `wg0.conf`, also their copies in `~/cfg-attic/`.
+- The previous version, started from the boot menu after the upgrade (`current` at the boot prompt), no longer finds the WiFi, wired and WireGuard settings, the remote-access password or the SSH host keys: it comes up without WiFi, with DHCP on the wired link, without WireGuard and remote password, and with new host keys. The settings are in `~/.config/thinfloe/`, the old files in `~/cfg-attic/`, and changes made while the previous version runs are not carried back.
+- When the old keyboard settings named two layouts (`XKB_DEFAULT_LAYOUT=us,de`), only the first is kept; a keyboard model other than `pc105` and XKB options other than CapsLock as Ctrl and the Compose key are dropped. `~/cfg-attic/README` names what was dropped.
+- `XKB_DEFAULT_*` lines in `~/.config/thinfloe/environment` are ignored, and the Settings screen names each one.
+- A WiFi, wired or monitor file the menu could not fully read, or a WiFi or wired file for another netplan version or renderer, is kept as it was and shown read-only, with "Let the menu manage it" to replace it.
+- When the move of the settings fails, the Settings screen says they stay as they were until the next start, and its Network, Keyboard, Screen and Status tabs take no changes. The move is tried again at every login.
+- A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, or reset to the defaults when that folder is empty, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
 
 ### Fixed
+- A keyboard layout and variant XKB cannot combine (for example `fr` with `de_nodeadkeys`) no longer leaves tty1 at "graphical session exited with status 139" after login. The session starts with the layout's default variant instead, or with `us` for a layout the image does not list, and the session log names the replaced value.
+- The menu repairs such a value in `[keyboard]` of `config.toml` the same way when it starts and names it in its log; the move of the 4.x settings repairs it too and lists it in `~/cfg-attic/README`.
 
 ## 4.3.0 - 2026-11-13
 ### New

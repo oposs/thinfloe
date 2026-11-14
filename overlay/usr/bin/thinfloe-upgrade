@@ -117,15 +117,30 @@ HOME_ARCHIVE_NAME = "home.tar.gz"
 # The shipped default exclude list; thinfloe-save-home reads the same file.
 SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
 # Per-machine identity, always left out of the copy (appended outside the
-# user-editable exclude list so a ~/.save-home-exclude cannot drop them):
+# user-editable exclude list so a save-home-exclude file cannot drop them):
 #  - the SSH host keys: two machines with one host key is a real problem; a
-#    stick without them generates its own on first boot. Both names: a save
-#    on a 3.x fallback boot leaves a real ~/.dbrrg-ssh-host-keys in the home.
+#    stick without them generates its own on first boot. Both layouts and
+#    both 3.x names: a save on a 3.x fallback boot leaves a real
+#    ~/.dbrrg-ssh-host-keys in the home.
 #  - the WireGuard config: it holds the machine's private key, and two peers
 #    sharing one key break both tunnels.
-# ~/.thinfloe-password is deliberately NOT here: the user set it for remote
-# access and it travels with the home on purpose.
-IDENTITY_EXCLUDES = ("./.thinfloe-ssh-host-keys", "./.dbrrg-ssh-host-keys", "./wg0.conf")
+#  - the same files inside ~/cfg-attic, where the migration to the
+#    ~/.config/thinfloe layout keeps the old files. The attic's old password
+#    and exclude list stay with the machine too.
+# ~/.config/thinfloe/password is deliberately NOT here: the user set it for
+# remote access and it travels with the home on purpose.
+IDENTITY_EXCLUDES = (
+    "./.config/thinfloe/ssh-host-keys",
+    "./.config/thinfloe/wg0.conf",
+    "./.thinfloe-ssh-host-keys",
+    "./.dbrrg-ssh-host-keys",
+    "./wg0.conf",
+    "./cfg-attic/.thinfloe-ssh-host-keys",
+    "./cfg-attic/.dbrrg-ssh-host-keys",
+    "./cfg-attic/wg0.conf",
+    "./cfg-attic/.thinfloe-password",
+    "./cfg-attic/.save-home-exclude",
+)
 # The home archive carries configuration, not data. A file above this size is
 # a download or a binary left in the home; thinfloe-save-home uses the same limit.
 SAVE_HOME_MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -1845,13 +1860,36 @@ def do_ab_upgrade(drive: DriveInfo, base_url: str,
         log("Upgrade complete! Previous version saved as fallback.")
 
 
-def load_exclude_patterns(home_dir: str) -> List[str]:
+def home_layout(state_dir: Optional[str] = None) -> str:
+    """"legacy" or "new", by the menu's rule: the whole file is "legacy" or
+    "legacy\\n"; anything else, a missing or unreadable file included, is
+    "new". The state file is tfuser's to change, so the answer only picks
+    between two paths inside tfuser's home."""
+    path = os.path.join(STATE_DIR if state_dir is None else state_dir, "home-layout")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            data = os.read(fd, 16)
+        finally:
+            os.close(fd)
+    except OSError:
+        return "new"
+    return "legacy" if data in (b"legacy", b"legacy\n") else "new"
+
+
+def load_exclude_patterns(home_dir: str, layout: Optional[str] = None) -> List[str]:
     """Read the save-home exclude list the way thinfloe-save-home does.
 
-    ~/.save-home-exclude replaces the shipped default (it does not extend it).
-    Blank lines and lines starting with # are skipped.
+    ~/.config/thinfloe/save-home-exclude (legacy layout: ~/.save-home-exclude)
+    replaces the shipped default (it does not extend it). Blank lines and
+    lines starting with # are skipped.
     """
-    path = os.path.join(home_dir, ".save-home-exclude")
+    if layout is None:
+        layout = home_layout()
+    if layout == "legacy":
+        path = os.path.join(home_dir, ".save-home-exclude")
+    else:
+        path = os.path.join(home_dir, ".config", "thinfloe", "save-home-exclude")
     if not os.access(path, os.R_OK):
         path = SAVE_HOME_EXCLUDE_DEFAULT
     try:
@@ -1906,7 +1944,7 @@ def tar_literal(name: str) -> str:
     return re.sub(r"([\\*?\[\]])", r"\\\1", name)
 
 
-def home_archive_argv(home_dir: str, dest: str) -> List[str]:
+def home_archive_argv(home_dir: str, dest: str, layout: Optional[str] = None) -> List[str]:
     """Build the tar command line for a new stick's home.tar.gz.
 
     restore_home() in the initramfs unpacks this archive into the home
@@ -1914,7 +1952,7 @@ def home_archive_argv(home_dir: str, dest: str) -> List[str]:
     ".". The excludes are the save-home list plus IDENTITY_EXCLUDES, plus
     every file above SAVE_HOME_MAX_FILE_BYTES, each one named in the log.
     """
-    patterns = load_exclude_patterns(home_dir) + list(IDENTITY_EXCLUDES)
+    patterns = load_exclude_patterns(home_dir, layout) + list(IDENTITY_EXCLUDES)
     excludes = [f"--exclude={p}" for p in patterns]
     limit_mb = SAVE_HOME_MAX_FILE_BYTES // (1024 * 1024)
     for size, rel in large_files(home_dir, patterns):

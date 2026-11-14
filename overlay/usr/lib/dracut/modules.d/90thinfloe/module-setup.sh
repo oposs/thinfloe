@@ -57,7 +57,7 @@ install() {
     inst_multiple mkfs.ext4 fsck.fat
     # Also install fsck.vfat symlink
     inst /sbin/fsck.vfat
-    inst_multiple stat dd od tr mkdir mount umount cp ln chmod
+    inst_multiple stat dd od tr mkdir mount umount cp ln chmod chown
     # finalize-upgrade.sh and tf_finalize_upgrade(): sync orders the FAT
     # directory updates of the tl.new -> tl rotation, rmdir removes its
     # temporary mount point. Neither is in dracut's base set.

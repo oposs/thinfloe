@@ -10,6 +10,9 @@
 
 set -uo pipefail
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 SQSH="${1:-artifacts/rootfs/ramroot.sqsh}"
 
 if [[ ! -f "$SQSH" ]]; then

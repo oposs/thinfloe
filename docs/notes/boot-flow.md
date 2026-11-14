@@ -59,7 +59,7 @@ The boot process involves several interconnected components:
 ## Key Configuration Files
 
 - **configs/syslinux.cfg** - Boot menu and kernel parameters. The `ramroot=` parameter determines boot source (local: `tl/ramroot.sqsh`, network: `http://server/path/ramroot.sqsh`)
-- **overlay/home/tfuser/wifi.yaml** - WiFi configuration template for netplan
+- **overlay/home/tfuser/.config/thinfloe/** - the home templates: `environment`, `sessionrc` and `home-version`; see [home-persistence.md](home-persistence.md)
 - **overlay/usr/lib/dracut/modules.d/90thinfloe/** - Dracut module for boot process
 
 ## Container Build Best Practices
@@ -68,7 +68,7 @@ The containers/ubuntu/Dockerfile follows several important patterns:
 
 1. **SSH Host Keys**: Host keys are removed at build time. On first boot
    `thinfloe-ssh-hostkeys.service` generates them and stages them into
-   `~tfuser/.thinfloe-ssh-host-keys`, from where `thinfloe-save-home` captures them
+   `~tfuser/.config/thinfloe/ssh-host-keys`, from where `thinfloe-save-home` captures them
    into the home archive at logout; the initramfs restores them on every
    subsequent boot. `ssh.socket` is **masked**; see Standing Constraints.
    Keys do not persist until the first clean logout: a machine hard-powered
