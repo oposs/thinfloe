@@ -2238,8 +2238,20 @@ esac"#;
         use std::os::unix::process::ExitStatusExt;
         let d = TestDir::new("app", "write-screen");
         let store = crate::store::test_shared(&d);
-        // sleep traps nothing, so SIGUSR1 ends it.
-        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        // sleep traps nothing, so SIGUSR1 ends it. An ignored SIGUSR1
+        // survives exec: a test binary started from a shell that ignores
+        // it would leave sleep running.
+        use std::os::unix::process::CommandExt;
+        let mut sleep = std::process::Command::new("sleep");
+        sleep.arg("5");
+        // SAFETY: signal is async-signal-safe and touches no memory.
+        unsafe {
+            sleep.pre_exec(|| {
+                libc::signal(libc::SIGUSR1, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let mut child = sleep.spawn().unwrap();
         let pid = i32::try_from(child.id()).unwrap();
         let screen = screen_file(Some(pid));
         let mut menu = screen_menu();
