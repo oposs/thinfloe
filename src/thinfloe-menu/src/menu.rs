@@ -752,7 +752,7 @@ impl Menu {
         if self.logout.is_some() || self.screen != Screen::Settings {
             return None;
         }
-        // The migration failed this boot: Network, Screen and Status show the
+        // The migration failed this boot: Network, Screen, Keyboard and Status show the
         // old state and take no change (their bodies are disabled, too).
         if self.config_notes.legacy.is_some()
             && matches!(

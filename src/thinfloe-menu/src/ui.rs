@@ -959,8 +959,9 @@ fn show_settings(
         SettingsTab::Network => {
             crate::network_ui::network_tab(&mut s_ui, &menu.network, width).map(SettingsEvent::Network)
         }
-        // The pickers arrive with Task B4.
-        SettingsTab::Keyboard => None,
+        SettingsTab::Keyboard => {
+            crate::keyboardtab_ui::keyboard_tab(&mut s_ui, &menu.keyboard, width).map(SettingsEvent::Keyboard)
+        }
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
@@ -3334,8 +3335,16 @@ mod tests {
                         )
                     }
                     crate::settings::SettingsTab::Packages => ((1280.0, 720.0), &["Check now"]),
-                    // Task B4 draws the pickers and lists their texts here.
-                    crate::settings::SettingsTab::Keyboard => ((1280.0, 720.0), &[]),
+                    crate::settings::SettingsTab::Keyboard => (
+                        (1920.0, 1080.0),
+                        &[
+                            "Layout",
+                            "Variant",
+                            "CapsLock acts as Ctrl",
+                            "Compose key",
+                            "Try it here",
+                        ],
+                    ),
                     crate::settings::SettingsTab::Status => {
                         menu.set_status_layout(crate::status::Area::shipped().layout);
                         (
@@ -3507,6 +3516,91 @@ mod tests {
             .collect();
         assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
         assert!(heading.top() > *ys.last().unwrap(), "the preview stands below the list");
+    }
+
+    fn keyboard_menu() -> Menu {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Keyboard;
+        let reg = crate::kbregistry::parse(include_str!("testdata/evdev-small.xml")).unwrap();
+        menu.keyboard = crate::keyboard::KeyboardTab::new(crate::config::Keyboard::default(), Ok(reg));
+        menu
+    }
+
+    #[test]
+    fn the_keyboard_tab_shows_its_rows() {
+        // The small size scrolls: only the first row is certain to show.
+        let small = text_rects(&settings_shapes(&keyboard_menu(), 1280.0, 720.0));
+        assert!(small.iter().any(|(t, _)| t == "Layout"), "{small:?}");
+        for size in [(1920.0, 1080.0)] {
+            let texts = text_rects(&settings_shapes(&keyboard_menu(), size.0, size.1));
+            let at = |what: &str| {
+                texts
+                    .iter()
+                    .find(|(t, _)| t == what)
+                    .unwrap_or_else(|| panic!("{what} not drawn in {texts:?}"))
+                    .1
+            };
+            let layout = at("Layout");
+            let variant = at("Variant");
+            let caps = at("CapsLock acts as Ctrl");
+            let compose = at("Compose key");
+            let try_it = at("Try it here");
+            // One column of rows, top to bottom.
+            let ys = [layout, variant, caps, compose, try_it].map(|r| r.top());
+            assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
+            // The labels share a left edge; the controls start one label
+            // column further right.
+            for r in [variant, caps, compose] {
+                assert!((r.left() - layout.left()).abs() < 1.0);
+            }
+            for (shown, label) in [("English (US)", layout), ("Default", variant), ("Right Alt", compose)] {
+                let r = at(shown);
+                assert!(r.left() >= label.left() + brand::FORM_LABEL_W, "{shown}: {r:?}");
+                assert!((r.center().y - label.center().y).abs() < 20.0, "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_keyboard_note_shows_an_error() {
+        let mut menu = keyboard_menu();
+        let none = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        assert!(!none.iter().any(|(t, _)| t.contains("labwc")));
+        menu.keyboard.note = Some("labwc --reconfigure failed (1)".into());
+        let texts = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        let note = texts
+            .iter()
+            .find(|(t, _)| t == "labwc --reconfigure failed (1)")
+            .expect("the note is drawn")
+            .1;
+        // Directly under the card with the selects, above the test field.
+        let compose = texts.iter().find(|(t, _)| t == "Compose key").unwrap().1;
+        let try_it = texts.iter().find(|(t, _)| t == "Try it here").unwrap().1;
+        assert!(
+            note.top() > compose.bottom() && note.bottom() < try_it.top(),
+            "{note:?}"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_tab_takes_no_click_under_a_legacy_home() {
+        let click_caps = |menu: &Menu| {
+            let at = |t: &[(String, Rect)]| {
+                let r = t.iter().find(|(s, _)| s == "CapsLock acts as Ctrl")?.1;
+                Some(pos2(r.left() + brand::FORM_LABEL_W + 14.0, r.center().y))
+            };
+            status_clicks(menu, (1280.0, 720.0), &[&at]).remove(0)
+        };
+        let menu = keyboard_menu();
+        assert_eq!(
+            click_caps(&menu),
+            Some(UiEvent::Settings(SettingsEvent::Keyboard(
+                crate::keyboard::KbEvent::CapsAsCtrl(false)
+            )))
+        );
+        let mut legacy = keyboard_menu();
+        legacy.config_notes.legacy = Some("Your settings could not be moved.".into());
+        assert_eq!(click_caps(&legacy), None);
     }
 
     #[test]

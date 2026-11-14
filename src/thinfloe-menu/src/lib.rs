@@ -21,6 +21,7 @@ pub mod jobs;
 pub mod kanshi;
 pub mod kbregistry;
 pub mod keyboard;
+pub mod keyboardtab_ui;
 pub mod log;
 pub mod menu;
 pub mod menu_move;
