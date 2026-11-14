@@ -46,12 +46,6 @@ set only by the release pull request; local builds are `X.Y.Z-dev+<sha>`
 (`.dirty` for a changed tree); `make … TF_VERSION=X.Y.Z` reproduces a
 release.
 
-`scripts/publish.sh <release-dir>` is the one-time bridge mirror: it copies
-one downloaded GitHub release to `https://tobi.oetiker.ch/dbrrg`, where 3.x
-to 4.2 sticks still look, and adds `thinfloe-usb.img.zst.sha256` for 4.0 to
-4.2, and `dbrrg-usb.img.zst` (a hard link) with its
-`dbrrg-usb.img.zst.sha256` for the 3.x `upgrade-image`.
-
 ## Where code lives
 
 - Build: `containers/ubuntu/Dockerfile` (rootfs, labwc rebuild, `menu-build` stage with Rust 1.96.0), `containers/ipxe/`, `containers/image-builder/`, `scripts/` (export, image, QEMU smoke tests), `Makefile`.
