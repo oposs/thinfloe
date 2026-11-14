@@ -1129,7 +1129,9 @@ else
 fi
 
 # The Keyboard tab reads the layout list from xkb-data; named in the Dockerfile.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/xkb" "$SQSH" usr/share/X11/xkb/rules/evdev.xml >/dev/null 2>&1 &&
+# usr/share/X11/xkb is a link to ../xkeyboard-config-2; without
+# -follow-symlinks unsquashfs extracts nothing and still exits 0.
+if unsquashfs -no-xattrs -follow-symlinks -d "$DPKG_TMP/xkb" "$SQSH" usr/share/X11/xkb/rules/evdev.xml >/dev/null 2>&1 &&
    [[ -f "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml" ]] &&
    [[ $(stat -c %s "$DPKG_TMP/xkb/usr/share/X11/xkb/rules/evdev.xml") -gt 102400 ]]; then
     echo "ok   - the image has the XKB registry"
