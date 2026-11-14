@@ -197,7 +197,7 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   defaults, so either key may be left out). WiFi text with more than three
   DNS servers is not manageable, as the wired one. On 1080p a full tab scrolls; every
   control scrolls into reach above the pinned Apply. A home in the 4.x layout
-  opens Settings read-only: the Network, Screen and Status tabs are disabled.
+  opens Settings read-only: the Network, Screen, Status and Keyboard tabs are disabled.
   Guards: the `netfiles` and `network` tests,
   `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
@@ -211,8 +211,12 @@ the image); CapsLock as Ctrl is on or off; the Compose key is Right Alt by
 default. A change is written to `[keyboard]` of `config.toml` and applied to
 the running session at once (see [session.md](session.md)), one apply at a
 time; "Try it here" is a text field to test the layout right there. A failed
-apply or an unreadable registry shows a note on the tab. With a legacy
-(unmigrated) home the tab is read-only like Network, Screen and Status.
+apply or an unreadable registry shows a note on the tab: the error text, or
+"Takes effect at the next start." when labwc runs without the composed
+directory (the change is saved, only the live apply is skipped). The menu's
+log gets "The keyboard setting was not applied: ..." for a failed apply. When
+the move of the settings failed at this boot, the tab is read-only like
+Network, Screen and Status.
 
 ## Known limits
 

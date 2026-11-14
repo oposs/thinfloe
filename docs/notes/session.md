@@ -102,11 +102,17 @@ rebuild during the session would wipe the scaled copies, so `--env-only`
 leaves everything but `environment` alone.
 
 `test/runtime/test-labwc-runtime.sh` runs this sequence against the real
-labwc and asserts the merged file carries the new layout. Whether labwc then
-builds the keymap cannot be shown in the headless rig (no keyboard device, see
-the Xwayland note in that script): a control run with a layout and variant XKB
-cannot build (`fr`/`de_nodeadkeys`) decides. If the control prints no
-`failed to create xkb keymap`, the keymap assertion is reported as a skip.
+labwc: start with `us`, apply `ch`/`de_nodeadkeys`, and assert the merged
+`environment` carries the new layout. It cannot show that labwc builds the
+keymap: the headless rig has no keyboard device (see the Xwayland note in that
+script), so labwc builds no keymap and prints no error whatever the menu
+writes. A control run applies a pair XKB cannot build (`fr`/`de_nodeadkeys`)
+through the same sequence; only if labwc then prints
+`failed to create xkb keymap` can the rig see keymap errors, and only then
+does the keymap assertion count. On this rig the control prints nothing, so
+the assertion is reported as a skip. (The bad pair must not go into the
+start-up environment: labwc then prints the error but crashes before the
+session script runs.)
 
 ### Left to verify on hardware
 
