@@ -143,8 +143,9 @@ Readers that run before the menu read the new path and, when the layout is
 `thinfloe-session`, the session profile, `thinfloe-save-home`,
 `thinfloe-upgrade`, `thinfloe-password`, `thinfloe-ssh-hostkeys`. Root tools
 use the file only to choose between two paths inside tfuser's home. A legacy
-home opens Settings read-only even in the session: the Network, Screen and
-Status tabs are disabled and a note says the settings could not be moved.
+home opens Settings read-only even in the session: the Network, Keyboard,
+Screen and Status tabs are disabled and a note says the settings could not be
+moved. The move runs at login, from the session profile.
 
 ## Migration of a 4.x home
 

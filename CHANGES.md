@@ -13,7 +13,7 @@
 - When the old keyboard settings named two layouts (`XKB_DEFAULT_LAYOUT=us,de`), only the first is kept; a keyboard model other than `pc105` and XKB options other than CapsLock as Ctrl and the Compose key are dropped. `~/cfg-attic/README` names what was dropped.
 - `XKB_DEFAULT_*` lines in `~/.config/thinfloe/environment` are ignored, and the Settings screen names each one.
 - A WiFi, wired or monitor file the menu could not fully read, or a WiFi or wired file for another netplan version or renderer, is kept as it was and shown read-only, with "Let the menu manage it" to replace it.
-- When the move of the settings fails at boot, the Settings screen says they stay as they were until the next start, and its Network, Screen and Status tabs show them but take no changes. The move is tried again at every login.
+- When the move of the settings fails, the Settings screen says they stay as they were until the next start, and its Network, Keyboard, Screen and Status tabs take no changes. The move is tried again at every login.
 - A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, or reset to the defaults when that folder is empty, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
 
 ### Fixed
