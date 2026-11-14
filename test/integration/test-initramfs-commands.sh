@@ -36,6 +36,9 @@ for tool in lsinitramfs unmkinitramfs unsquashfs python3; do
     fi
 done
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

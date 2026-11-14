@@ -31,6 +31,9 @@ if ! command -v unsquashfs >/dev/null 2>&1; then
     exit 1
 fi
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 WORK=$(mktemp -d)
 trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 LIST="$WORK/list.txt"

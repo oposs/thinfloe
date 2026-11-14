@@ -39,6 +39,9 @@ for tool in unsquashfs lsinitramfs; do
     fi
 done
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 WORK=$(mktemp -d)
 trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 

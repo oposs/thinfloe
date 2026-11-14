@@ -36,6 +36,9 @@ if ! command -v unsquashfs >/dev/null 2>&1; then
     exit 1
 fi
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 if ! command -v modinfo >/dev/null 2>&1; then
     echo "FAIL: modinfo not installed (apt install kmod)" >&2
     exit 1

@@ -11,6 +11,9 @@
 
 set -uo pipefail
 
+# unsquashfs starts a thread per core; the build box is shared.
+unsquashfs() { command unsquashfs -processors "${BUILD_JOBS:-4}" "$@"; }
+
 INITRD="${1:-artifacts/rootfs/initrd.img}"
 SQSH="${2:-$(dirname "$INITRD")/ramroot.sqsh}"
 
@@ -117,7 +120,7 @@ absent "none of the ${#OMITTED[@]} server and data-centre modules is in the init
 # Each omitted name must be a module of the running system. A module renamed
 # in a later kernel would pass the check above without testing anything,
 # and the driver would come back into the initrd unnoticed.
-if [[ ! -f $SQSH ]] || ! command -v unsquashfs >/dev/null 2>&1; then
+if [[ ! -f $SQSH ]] || ! type -P unsquashfs >/dev/null 2>&1; then
     echo "FAIL - every omitted name is a module in ramroot.sqsh ($SQSH or unsquashfs missing; run 'make rootfs' first)"
     fail=1
 else
