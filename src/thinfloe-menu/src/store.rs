@@ -166,6 +166,13 @@ pub fn open(dir: ConfigDir, inputs: Inputs, mode: OpenMode, now_epoch: i64) -> O
         }
     }
     store.cfg = cfg;
+    // A value from outside the Keyboard tab (a rebuilt or older file, a
+    // layout list that changed with an upgrade) must not reach
+    // generated/environment unchecked: labwc does not start on it.
+    if let Some((fixed, why)) = crate::keyboard::repair(&store.cfg.keyboard, store.inputs.registry.as_deref()) {
+        notes.push(format!("config.toml: {why}"));
+        store.cfg.keyboard = fixed;
+    }
 
     let mut kanshi_changed = false;
     for name in ALL_FILES {
@@ -328,6 +335,7 @@ mod tests {
         Inputs {
             default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
             netboot: false,
+            registry: None,
         }
     }
 
@@ -379,6 +387,54 @@ mod tests {
         assert!(gen_text(&d, "screen").is_some());
         assert!(gen_text(&d, "wifi.yaml").is_none());
         assert!(gen_text(&d, "ethernet.yaml").is_none());
+    }
+
+    fn with_registry() -> Inputs {
+        Inputs {
+            registry: Some(std::sync::Arc::new(
+                crate::kbregistry::parse(include_str!("testdata/evdev-small.xml")).unwrap(),
+            )),
+            ..inputs()
+        }
+    }
+
+    #[test]
+    fn a_keymap_not_in_the_layout_list_is_repaired_at_open() {
+        let d = TestDir::new("store", "kb-repair");
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.layout = "de".into();
+        c.keyboard.variant = "fr".into();
+        c.keyboard.caps_as_ctrl = false;
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), to_text(&c)).unwrap();
+        let o = open(cdir(&d), with_registry(), OpenMode::Session, NOW);
+        let want = crate::config::Keyboard {
+            variant: String::new(),
+            ..c.keyboard.clone()
+        };
+        assert_eq!(o.store.cfg.keyboard, want);
+        assert!(
+            o.notes
+                .iter()
+                .any(|n| n.starts_with("config.toml: ") && n.contains("\"fr\"")),
+            "{:?}",
+            o.notes
+        );
+        let back = parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).unwrap();
+        assert_eq!(back.keyboard, want);
+        let env = gen_text(&d, "environment").unwrap();
+        assert!(env.contains("XKB_DEFAULT_LAYOUT=de\nXKB_DEFAULT_VARIANT=\n"), "{env}");
+    }
+
+    #[test]
+    fn read_only_open_does_not_repair_the_keymap() {
+        let d = TestDir::new("store", "kb-readonly");
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.layout = "zz".into();
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), to_text(&c)).unwrap();
+        let o = open(cdir(&d), with_registry(), OpenMode::ReadOnly, NOW);
+        assert_eq!(o.store.cfg.keyboard.layout, "zz");
     }
 
     #[test]

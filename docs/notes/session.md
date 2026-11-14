@@ -107,12 +107,29 @@ labwc: start with `us`, apply `ch`/`de_nodeadkeys`, and assert the merged
 keymap: the headless rig has no keyboard device (see the Xwayland note in that
 script), so labwc builds no keymap and prints no error whatever the menu
 writes. A control run applies a pair XKB cannot build (`fr`/`de_nodeadkeys`)
-through the same sequence; only if labwc then prints
+through the same sequence, with the composer's keyboard check turned off
+(`TF_KB_CHECK=/nonexistent`); only if labwc then prints
 `failed to create xkb keymap` can the rig see keymap errors, and only then
 does the keymap assertion count. On this rig the control prints nothing, so
 the assertion is reported as a skip. (The bad pair must not go into the
 start-up environment: labwc then prints the error but crashes before the
 session script runs.)
+
+### Keyboard check before labwc starts
+
+labwc reads the composed `environment` before the menu runs, so a value the
+menu wrote when it was valid can still crash it (status 139) after an upgrade
+changes the XKB layout list, and the menu then never starts to repair it.
+`thinfloe-compose-labwc-config` therefore reads `XKB_DEFAULT_LAYOUT` and
+`XKB_DEFAULT_VARIANT` from the merged file the way labwc does (last line wins,
+key and value trimmed, quotes kept) and runs
+`thinfloe-menu --check-keyboard <layout> <variant>` (`TF_KB_CHECK` overrides
+the program). It prints the two lines to append when XKB cannot build the
+pair, with the same repair as the menu, and the reason to stderr (the session
+log); a missing or failing checker changes nothing. Both the full composition
+and `--env-only` run it. The check takes about 30 ms.
+`test-labwc-runtime.sh` starts labwc with `fr`/`de_nodeadkeys` in the start-up
+environment and asserts that the session runs with `fr` and no variant.
 
 ### Left to verify on hardware
 

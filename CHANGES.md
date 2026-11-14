@@ -16,6 +16,8 @@
 - A `config.toml` the menu cannot read is kept as `config.toml.broken-<time>` and the settings are rebuilt from the files in `~/.config/thinfloe/generated/`, as the Settings screen says. When that fails too, changes are refused with "The settings are read-only."
 
 ### Fixed
+- A keyboard layout and variant XKB cannot combine (for example `fr` with `de_nodeadkeys`) no longer leaves tty1 at "graphical session exited with status 139" after login. The session starts with the layout's default variant instead, or with `us` for a layout the image does not list, and the session log names the replaced value.
+- The menu repairs such a value in `[keyboard]` of `config.toml` the same way when it starts and names it in its log; the move of the 4.x settings repairs it too and lists it in `~/cfg-attic/README`.
 
 ## 4.3.0 - 2026-11-13
 ### New

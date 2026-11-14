@@ -1909,6 +1909,7 @@ mod tests {
         Inputs {
             default_wired: SHIPPED_WIRED.into(),
             netboot: false,
+            registry: None,
         }
     }
 

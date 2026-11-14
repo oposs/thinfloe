@@ -218,6 +218,18 @@ log gets "The keyboard setting was not applied: ..." for a failed apply. When
 the move of the settings failed at this boot, the tab is read-only like
 Network, Screen and Status.
 
+labwc 0.9.3 segfaults at start (status 139, before the session runs) on a
+layout and variant XKB cannot build, so no value reaches
+`generated/environment` unchecked. The render of that file refuses a
+`[keyboard]` that `keyboard::validate` rejects against the layout list.
+Values from outside the tab are repaired by `keyboard::repair` (a variant the
+layout lacks is dropped, an unknown layout becomes `us`): the store does it
+when it opens `config.toml` (a rebuilt file, an upgrade that changed the
+list), the migration when it converts a 4.x `~/.thinfloe-environment`. A
+value already on disk when the list changes is caught by the composer, see
+[session.md](session.md). Guards: the `keyboard`, `generated`, `store` and
+`migrate` tests, `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are

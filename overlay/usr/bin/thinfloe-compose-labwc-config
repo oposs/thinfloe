@@ -108,6 +108,42 @@ merged_environment() {
     fi
 }
 
+# labwc 0.9.3 segfaults at start, before the session runs, when XKB cannot
+# build the layout and variant in its environment; a reconfigure then
+# keeps the old keymap. The menu checks every value it writes, but a value
+# already on disk can go bad (an upgrade changes the layout list) and the
+# menu would never start to repair it. So the values labwc will read are
+# checked here: "<checker> --check-keyboard <layout> <variant>" prints the
+# lines to append (later wins) or nothing; a failing or missing checker
+# changes nothing. The parse is labwc's (src/config/session.c,
+# process_line): the last line whose key, trimmed, is the name; the value is
+# the text after the first "=", trimmed, quotes kept.
+KB_CHECK=${TF_KB_CHECK:-/usr/bin/thinfloe-menu}
+check_keyboard() {
+    [ -x "$KB_CHECK" ] || return 0
+    _kb_l=$(env_value XKB_DEFAULT_LAYOUT "$1")
+    _kb_v=$(env_value XKB_DEFAULT_VARIANT "$1")
+    _kb_fix=$("$KB_CHECK" --check-keyboard "$_kb_l" "$_kb_v") || return 0
+    [ -n "$_kb_fix" ] || return 0
+    printf '# %s: XKB cannot build the keyboard above; replaced by\n%s\n' "$me" "$_kb_fix" >>"$1"
+}
+env_value() {
+    awk -v want="$1" '
+        substr($0, 1, 1) == "#" { next }
+        {
+            i = index($0, "=")
+            if (i == 0) next
+            k = substr($0, 1, i - 1)
+            gsub(/^[ \t\r]+|[ \t\r]+$/, "", k)
+            if (k != want) next
+            v = substr($0, i + 1)
+            gsub(/^[ \t\r]+|[ \t\r]+$/, "", v)
+            last = v
+        }
+        END { printf "%s", last }
+    ' "$2"
+}
+
 if [ "$ENV_ONLY" -eq 1 ]; then
     [ -d "$OUT_DIR" ] || {
         echo "$me: no composed dir '$OUT_DIR'" >&2
@@ -117,7 +153,8 @@ if [ "$ENV_ONLY" -eq 1 ]; then
         echo "$me: cannot write into '$OUT_DIR'" >&2
         exit 1
     }
-    if merged_environment >"$TMP_ENV" && mv -f "$TMP_ENV" "$OUT_DIR/environment"; then
+    if merged_environment >"$TMP_ENV" && check_keyboard "$TMP_ENV" &&
+        mv -f "$TMP_ENV" "$OUT_DIR/environment"; then
         exit 0
     fi
     rm -f "$TMP_ENV"
@@ -145,3 +182,4 @@ for entry in "$SYSTEM_DIR"/*; do
 done
 
 merged_environment >"$OUT_DIR/environment"
+check_keyboard "$OUT_DIR/environment"

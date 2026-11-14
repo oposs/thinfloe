@@ -237,8 +237,14 @@ fn convert_old(old: &OldFiles, start: &ThinfloeConfig, inputs: &Inputs, r: &mut 
 
     let mut env_lines = Vec::new();
     if let Some(t) = &old.environment {
-        let (kb, other, notes) = convert::keyboard_from_env(t);
+        let (mut kb, other, notes) = convert::keyboard_from_env(t);
         if sets_keyboard(t) {
+            // labwc does not start on a pair XKB cannot build, and the
+            // render refuses it: repair it rather than refuse the move.
+            if let Some((fixed, why)) = crate::keyboard::repair(&kb, inputs.registry.as_deref()) {
+                r.dropped.push(tag(ENVIRONMENT, &why));
+                kb = fixed;
+            }
             r.converted.push(format!(
                 "~/{ENVIRONMENT}: the keyboard (layout {}{}) is now set in Settings, Keyboard.",
                 kb.layout,
@@ -630,6 +636,7 @@ mod tests {
         Inputs {
             default_wired: DEFAULT_WIRED.into(),
             netboot: false,
+            registry: None,
         }
     }
 
@@ -1090,6 +1097,7 @@ mod tests {
         let netboot = Inputs {
             default_wired: DEFAULT_WIRED.into(),
             netboot: true,
+            registry: None,
         };
         let r = migrate_home(&h.home, &h.state, netboot, NOW)
             .unwrap()
@@ -1109,6 +1117,36 @@ mod tests {
         );
         assert_eq!(h.layout_text(), "new\n");
         assert!(r.not_moved.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn a_keymap_not_in_the_layout_list_is_migrated_repaired() {
+        let h = Home::with_templates("env-bad-variant");
+        h.put(
+            ".thinfloe-environment",
+            "XKB_DEFAULT_LAYOUT=de\nXKB_DEFAULT_VARIANT=fr\n",
+            0o644,
+        );
+        let with_list = Inputs {
+            registry: Some(std::sync::Arc::new(
+                crate::kbregistry::parse(include_str!("testdata/evdev-small.xml")).unwrap(),
+            )),
+            ..inputs()
+        };
+        migrate_home(&h.home, &h.state, with_list, NOW)
+            .unwrap()
+            .expect("a report");
+        let c = h.cfg();
+        assert_eq!((c.keyboard.layout.as_str(), c.keyboard.variant.as_str()), ("de", ""));
+        let readme = h.text("cfg-attic/README");
+        assert!(!readme.contains("variant fr)"), "{readme}");
+        assert!(
+            readme
+                .lines()
+                .any(|l| l.contains(".thinfloe-environment") && l.contains("\"fr\"")),
+            "{readme}"
+        );
+        assert_eq!(h.layout_text(), "new\n");
     }
 
     #[test]

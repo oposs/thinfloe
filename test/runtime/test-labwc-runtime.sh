@@ -181,10 +181,12 @@ fi
 # 'failed to create xkb keymap' after the apply can the rig see keymap errors
 # and the keymap assertion counts; otherwise it is reported as a skip. (A bad
 # pair in the STARTUP environment would not do: labwc then dies before the
-# session script runs.)
+# session script runs.) The control turns the composer's keyboard check off
+# (TF_KB_CHECK, the 4th argument), which would repair the pair.
 kb_run() {
-    local layout=$1 variant=$2 name=$3 out rc
+    local layout=$1 variant=$2 name=$3 check=${4:-} out rc
     out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        ${check:+-e TF_KB_CHECK="$check"} \
         -e WLR_BACKENDS=headless \
         -e WLR_HEADLESS_OUTPUTS=1 \
         -e WLR_RENDERER=pixman \
@@ -222,7 +224,7 @@ EOS
 # Output after the apply only: the lines before it belong to the start.
 after_apply() { sed -n '/^APPLY-START$/,$p'; }
 
-kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$")
+kb_control=$(kb_run fr de_nodeadkeys "thinfloe-runtime-test-kbc-$$" /nonexistent)
 kb_control_rc=$?
 kb_out=$(kb_run ch de_nodeadkeys "thinfloe-runtime-test-kb-$$")
 kb_rc=$?
@@ -249,6 +251,35 @@ if echo "$kb_control" | after_apply | grep -q 'failed to create xkb keymap'; the
     fi
 else
     echo "skip - labwc builds no keymap without a keyboard device (headless rig)"
+fi
+
+# labwc 0.9.3 segfaults at start on a pair XKB cannot build (fr with
+# de_nodeadkeys), before the session runs. The composer asks
+# 'thinfloe-menu --check-keyboard' about the values labwc will read and
+# appends a repair, so the session starts, with layout fr and no variant.
+KB_START_NAME="thinfloe-runtime-test-kbs-$$"
+kb_start=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$KB_START_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=1 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           mkdir -p /tmp/kb/gen /tmp/kb/out && : >/tmp/kb/user &&
+           printf "XKB_DEFAULT_LAYOUT=fr\nXKB_DEFAULT_VARIANT=de_nodeadkeys\n" >/tmp/kb/gen/environment &&
+           thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/kb/gen/environment /tmp/kb/user /tmp/kb/out &&
+           labwc -C /tmp/kb/out -S "sh -c \"echo SESSION-RAN \$XKB_DEFAULT_LAYOUT/\$XKB_DEFAULT_VARIANT/\""' 2>&1)
+kb_start_rc=$?
+if [[ $kb_start_rc -eq 124 || $kb_start_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang with a repaired keyboard)"
+    podman rm -f "$KB_START_NAME" >/dev/null 2>&1
+    fail=1
+elif echo "$kb_start" | grep -qx 'SESSION-RAN fr//'; then
+    echo "ok   - a keyboard pair XKB cannot build is repaired before labwc starts"
+else
+    echo "FAIL - labwc with fr/de_nodeadkeys at start: rc=$kb_start_rc, no session with layout fr and no variant"
+    echo "$kb_start"
+    fail=1
 fi
 
 # thinfloe-menu is a native Wayland client, so x11-probe cannot see it; it

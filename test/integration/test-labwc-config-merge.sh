@@ -67,6 +67,8 @@ XKB_DEFAULT_OPTIONS
 XKB_DEFAULT_MODEL
 EOF
 export TF_MANAGED_KEYS="$MANAGED"
+# No keyboard check unless a case sets one (the host may have a menu).
+export TF_KB_CHECK="$WORK/no-checker"
 
 USERENV="$WORK/user-environment"
 cat >"$USERENV" <<'EOF'
@@ -222,6 +224,68 @@ if [[ $rc -eq 1 && "$msg" == *"$OUT5"* && ! -e "$OUT5" ]]; then
     ok "--env-only without a composed dir fails"
 else
     bad "--env-only without a composed dir: rc=$rc msg=$msg"
+fi
+
+# --- the keyboard check ---------------------------------------------------
+# labwc 0.9.3 segfaults at start on a layout/variant pair XKB cannot build,
+# so the composer asks the menu (--check-keyboard) about the values labwc
+# will read and appends the repaired ones.
+
+CHECKER="$WORK/checker"
+cat >"$CHECKER" <<'EOF'
+#!/bin/sh
+printf '%s|%s|%s\n' "$1" "$2" "$3" >>"$CHECK_LOG"
+case "$2" in
+    bad) echo "checker: bad is no layout" >&2
+         printf 'XKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=\n' ;;
+    broken) exit 3 ;;
+esac
+EOF
+chmod +x "$CHECKER"
+export CHECK_LOG="$WORK/check.log"
+
+# Last assignment wins, as in labwc; key and value trimmed, quotes kept.
+KBGEN="$WORK/kb-generated"
+printf 'XKB_DEFAULT_LAYOUT=ch\nXKB_DEFAULT_VARIANT=fr\n  XKB_DEFAULT_LAYOUT = "de" \n' >"$KBGEN"
+OUT6="$WORK/kb-good"
+: >"$CHECK_LOG"
+err=$(TF_KB_CHECK="$CHECKER" "$HELPER" "$SYSDIR" "$KBGEN" "$USERENV" "$OUT6" 2>&1); rc=$?
+if [[ $rc -eq 0 && "$(cat "$CHECK_LOG")" == '--check-keyboard|"de"|fr' && -z "$err" ]] &&
+   diff -q <(cat "$SYSDIR/environment" "$KBGEN" <(grep -v -e XKB_DEFAULT_LAYOUT -e XKB_DEFAULT_VARIANT "$USERENV")) \
+        "$OUT6/environment" >/dev/null; then
+    ok "the checker gets the values labwc reads; a good pair changes nothing"
+else
+    bad "keyboard check of a good pair: rc=$rc log=$(cat "$CHECK_LOG") err=$err"
+fi
+
+printf 'XKB_DEFAULT_LAYOUT=bad\nXKB_DEFAULT_VARIANT=x\n' >"$KBGEN"
+OUT7="$WORK/kb-bad"
+err=$(TF_KB_CHECK="$CHECKER" "$HELPER" "$SYSDIR" "$KBGEN" "$USERENV" "$OUT7" 2>&1); rc=$?
+last=$(grep -v '^#' "$OUT7/environment" | tail -n 2)
+if [[ $rc -eq 0 && "$last" == $'XKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=' && "$err" == *"bad is no layout"* ]] &&
+   grep -q '^XKB_DEFAULT_LAYOUT=bad$' "$OUT7/environment"; then
+    ok "a pair labwc cannot build is overridden at the end, with the reason on stderr"
+else
+    bad "keyboard check of a bad pair: rc=$rc err=$err env=$(cat "$OUT7/environment")"
+fi
+
+err=$(TF_KB_CHECK="$CHECKER" "$HELPER" --env-only "$SYSDIR" "$KBGEN" "$USERENV" "$OUT6" 2>&1); rc=$?
+last=$(grep -v '^#' "$OUT6/environment" | tail -n 2)
+if [[ $rc -eq 0 && "$last" == $'XKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=' ]] &&
+   [[ -z "$(find "$OUT6" -name '.environment.*')" ]]; then
+    ok "--env-only checks the keyboard too"
+else
+    bad "--env-only keyboard check: rc=$rc err=$err env=$(cat "$OUT6/environment")"
+fi
+
+# A checker that fails says nothing about the keyboard: the file stays.
+printf 'XKB_DEFAULT_LAYOUT=broken\n' >"$KBGEN"
+OUT8="$WORK/kb-broken"
+TF_KB_CHECK="$CHECKER" "$HELPER" "$SYSDIR" "$KBGEN" "$USERENV" "$OUT8" 2>/dev/null; rc=$?
+if [[ $rc -eq 0 && "$(grep XKB_DEFAULT_LAYOUT "$OUT8/environment" | tail -n 1)" == XKB_DEFAULT_LAYOUT=broken ]]; then
+    ok "a failing checker leaves the environment as composed"
+else
+    bad "failing checker: rc=$rc env=$(cat "$OUT8/environment")"
 fi
 
 if [[ $fail -ne 0 ]]; then

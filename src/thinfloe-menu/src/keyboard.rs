@@ -63,6 +63,93 @@ pub fn validate(kb: &Keyboard, reg: Option<&Registry>) -> Result<(), String> {
     Ok(())
 }
 
+/// `kb` made valid for `reg`, with the reason, or `None` when it is valid.
+/// labwc 0.9.3 cannot start on a layout and variant XKB cannot build (it
+/// segfaults before the session runs), so a value that came from outside
+/// the tab (the migration, a rebuilt config.toml, a layout list that changed
+/// with an upgrade) is repaired before it is written: a variant not in the
+/// layout's list is dropped, a layout not in the list becomes the default.
+pub fn repair(kb: &Keyboard, reg: Option<&Registry>) -> Option<(Keyboard, String)> {
+    validate(kb, reg).err()?;
+    let layout_ok =
+        !kb.layout.is_empty() && xkb_name_ok(&kb.layout) && reg.is_none_or(|r| r.layout(&kb.layout).is_some());
+    let mut fixed = kb.clone();
+    fixed.variant = String::new();
+    let why = if layout_ok {
+        format!(
+            "The keyboard variant \"{}\" is not a variant of the layout {} in the layout list; the layout's default variant is used.",
+            kb.variant, kb.layout
+        )
+    } else {
+        fixed.layout = Keyboard::default().layout;
+        format!(
+            "The keyboard layout \"{}\" is not in the layout list; the layout {} is used.",
+            kb.layout, fixed.layout
+        )
+    };
+    Some((fixed, why))
+}
+
+/// The `XKB_DEFAULT_LAYOUT` and `XKB_DEFAULT_VARIANT` labwc gets from its
+/// environment file, made valid for `reg`: `Some((layout, variant, why))`
+/// when they must be replaced, `None` when labwc can use them. The values
+/// are the raw text after `=` (labwc removes no quotes); comma lists are
+/// checked pair by pair, an empty layout is XKB's default `us`.
+pub fn repair_env(layout: &str, variant: &str, reg: Option<&Registry>) -> Option<(String, String, String)> {
+    let layouts: Vec<&str> = layout.split(',').collect();
+    let variants: Vec<&str> = variant.split(',').collect();
+    let n = layouts.len().max(variants.len());
+    let (mut out_l, mut out_v) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let mut why = Vec::new();
+    let mut unquoted = false;
+    for i in 0..n {
+        let raw_l = layouts.get(i).copied().unwrap_or("");
+        let raw_v = variants.get(i).copied().unwrap_or("");
+        let (l, v) = (unquote(raw_l.trim()), unquote(raw_v.trim()));
+        unquoted |= l != raw_l || v != raw_v;
+        let kb = Keyboard {
+            layout: if l.is_empty() { "us".into() } else { l.into() },
+            variant: v.into(),
+            ..Keyboard::default()
+        };
+        let kb = match repair(&kb, reg) {
+            Some((fixed, w)) => {
+                why.push(w);
+                fixed
+            }
+            None => kb,
+        };
+        out_l.push(kb.layout);
+        out_v.push(kb.variant);
+    }
+    if why.is_empty() && !unquoted {
+        return None;
+    }
+    if why.is_empty() {
+        why.push(format!(
+            "The keyboard layout {layout} with variant {variant} has quotes or blanks labwc passes on to XKB."
+        ));
+    }
+    let out_v = out_v.join(",");
+    // A list of empty entries is no variant.
+    let out_v = if out_v.chars().all(|c| c == ',') {
+        String::new()
+    } else {
+        out_v
+    };
+    Some((out_l.join(","), out_v, why.join(" ")))
+}
+
+/// `s` without one pair of matching quotes around it.
+fn unquote(s: &str) -> &str {
+    for q in ['"', '\''] {
+        if let Some(inner) = s.strip_prefix(q).and_then(|t| t.strip_suffix(q)) {
+            return inner;
+        }
+    }
+    s
+}
+
 impl KeyboardTab {
     pub fn new(kb: Keyboard, registry: Result<Registry, String>) -> KeyboardTab {
         let note = registry.as_ref().err().cloned();
@@ -188,6 +275,93 @@ mod tests {
 
     fn tab(layout: &str, variant: &str) -> KeyboardTab {
         KeyboardTab::new(kb(layout, variant), Ok(reg()))
+    }
+
+    #[test]
+    fn repair_leaves_a_valid_choice_alone() {
+        assert_eq!(repair(&kb("ch", "fr"), Some(&reg())), None);
+        assert_eq!(repair(&kb("us", ""), Some(&reg())), None);
+        // Without a list only the names are judged.
+        assert_eq!(repair(&kb("xx", "yy"), None), None);
+    }
+
+    #[test]
+    fn repair_drops_a_variant_the_layout_does_not_have() {
+        let k = Keyboard {
+            caps_as_ctrl: false,
+            compose: Compose::None,
+            ..kb("de", "fr")
+        };
+        let (fixed, why) = repair(&k, Some(&reg())).unwrap();
+        assert_eq!(
+            fixed,
+            Keyboard {
+                variant: String::new(),
+                ..k.clone()
+            }
+        );
+        assert!(why.contains("\"fr\"") && why.contains(" de "), "{why}");
+    }
+
+    #[test]
+    fn repair_replaces_a_layout_not_in_the_list() {
+        let k = Keyboard {
+            caps_as_ctrl: false,
+            ..kb("zz", "fr")
+        };
+        let (fixed, why) = repair(&k, Some(&reg())).unwrap();
+        assert_eq!((fixed.layout.as_str(), fixed.variant.as_str()), ("us", ""));
+        // The options are the person's and stay.
+        assert!(!fixed.caps_as_ctrl);
+        assert!(why.contains("zz"), "{why}");
+        assert_eq!(validate(&fixed, Some(&reg())), Ok(()));
+    }
+
+    #[test]
+    fn repair_replaces_a_name_xkb_does_not_accept() {
+        for k in [kb("", ""), kb("a b", ""), kb("us", "a b")] {
+            let (fixed, _) = repair(&k, None).unwrap();
+            assert_eq!(validate(&fixed, None), Ok(()), "{k:?}");
+        }
+        let (fixed, _) = repair(&kb("us", "a b"), None).unwrap();
+        assert_eq!((fixed.layout.as_str(), fixed.variant.as_str()), ("us", ""));
+    }
+
+    #[test]
+    fn repair_env_keeps_what_labwc_can_use() {
+        let r = reg();
+        for (l, v) in [
+            ("us", ""),
+            ("ch", "fr"),
+            ("", ""),
+            ("ch,de", "fr,"),
+            ("ch,us", "de_nodeadkeys"),
+        ] {
+            assert_eq!(repair_env(l, v, Some(&r)), None, "{l:?} {v:?}");
+        }
+    }
+
+    #[test]
+    fn repair_env_fixes_each_pair_it_cannot_build() {
+        let r = reg();
+        let (l, v, why) = repair_env("de", "fr", Some(&r)).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("de", ""));
+        assert!(why.contains("\"fr\""), "{why}");
+        let (l, v, _) = repair_env("zz", "fr", Some(&r)).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("us", ""));
+        let (l, v, _) = repair_env("ch,de", "fr,fr", Some(&r)).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("ch,de", "fr,"));
+        // An empty layout is us, and us has no variant fr.
+        let (l, v, _) = repair_env("", "fr", Some(&r)).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("us", ""));
+    }
+
+    #[test]
+    fn repair_env_removes_quotes_labwc_would_keep() {
+        let (l, v, _) = repair_env("\"ch\"", "'fr'", Some(&reg())).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("ch", "fr"));
+        let (l, v, _) = repair_env("\"a b\"", "", None).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("us", ""));
     }
 
     #[test]

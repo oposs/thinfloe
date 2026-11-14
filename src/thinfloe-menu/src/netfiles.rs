@@ -1541,6 +1541,7 @@ exit 0
         Inputs {
             default_wired: SHIPPED_WIRED.to_string(),
             netboot,
+            registry: None,
         }
     }
 

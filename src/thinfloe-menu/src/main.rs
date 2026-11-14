@@ -101,10 +101,12 @@ fn addon_last_check_path() -> PathBuf {
 
 /// What rendering the generated files needs besides the settings: the
 /// shipped wired default (unreadable: empty, and a fixed wired address then
-/// fails to render with its message) and whether this is a netboot.
-fn config_inputs() -> Inputs {
+/// fails to render with its message), whether this is a netboot, and the
+/// XKB layout list (unreadable: only the names of a keyboard are checked).
+fn config_inputs(registry: Option<&thinfloe_menu::kbregistry::Registry>) -> Inputs {
     let default_wired = thinfloe_menu::netfiles::Homes::from_env().default_wired;
     Inputs {
+        registry: registry.cloned().map(std::sync::Arc::new),
         default_wired: bounded::read_bounded(&default_wired, MIGRATE_MAX_BYTES, true)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default(),
@@ -186,7 +188,14 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
     let session = mode == OpenMode::Session;
     let dir = ConfigDir::from_env();
-    let (opened, layout) = open_settings(&state_dir, dir.clone(), config_inputs(), mode, epoch_now());
+    let registry = thinfloe_menu::kbregistry::read(&registry_path());
+    let (opened, layout) = open_settings(
+        &state_dir,
+        dir.clone(),
+        config_inputs(registry.as_ref().ok()),
+        mode,
+        epoch_now(),
+    );
     let config_notes = collect_notes(
         layout,
         opened.notes,
@@ -240,7 +249,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
-    menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, thinfloe_menu::kbregistry::read(&registry_path()));
+    menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, registry);
     menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
     menu.set_status_layout(status_layout);
@@ -384,6 +393,28 @@ fn unfold(what: Option<&str>) -> ExitCode {
     }
 }
 
+/// `--check-keyboard <layout> <variant>`: `thinfloe-compose-labwc-config`
+/// runs it on the values labwc will read. Prints the
+/// `XKB_DEFAULT_LAYOUT=`/`XKB_DEFAULT_VARIANT=` lines to append when labwc
+/// could not build the pair (the reason to stderr), nothing when it can.
+/// An unreadable layout list checks the names only.
+fn check_keyboard(args: &[OsString]) -> ExitCode {
+    let arg = |i: usize| {
+        args.get(i)
+            .map(|a| a.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let registry = thinfloe_menu::kbregistry::read(&registry_path());
+    if let Err(e) = &registry {
+        eprintln!("thinfloe-menu: the keyboard names alone are checked: {e}");
+    }
+    if let Some((layout, variant, why)) = keyboard::repair_env(&arg(0), &arg(1), registry.as_ref().ok()) {
+        eprintln!("thinfloe-menu: {why}");
+        println!("XKB_DEFAULT_LAYOUT={layout}\nXKB_DEFAULT_VARIANT={variant}");
+    }
+    ExitCode::SUCCESS
+}
+
 /// `--migrate-home`: the session profile runs it while `home-layout` says
 /// `legacy`. The summary or the reason goes to stderr (the session log).
 fn migrate_home() -> ExitCode {
@@ -391,7 +422,7 @@ fn migrate_home() -> ExitCode {
         .filter(|h| !h.is_empty())
         .map_or_else(|| PathBuf::from("/home/tfuser"), PathBuf::from);
     let state_dir = env_path("TF_STATE_DIR", "/run/thinfloe/state");
-    let inputs = config_inputs();
+    let inputs = config_inputs(thinfloe_menu::kbregistry::read(&registry_path()).ok().as_ref());
     let now = epoch_now();
     match migrate::migrate_home(&home, &state_dir, inputs, now) {
         Ok(None) => ExitCode::SUCCESS,
@@ -428,6 +459,9 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--migrate-home") {
         return migrate_home();
+    }
+    if args.get(1).is_some_and(|a| a == "--check-keyboard") {
+        return check_keyboard(&args[2..]);
     }
     let Built {
         mut menu,

@@ -1619,6 +1619,7 @@ esac"#;
                 crate::generated::Inputs {
                     default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
                     netboot: false,
+                    registry: None,
                 },
                 crate::store::OpenMode::Session,
                 0,

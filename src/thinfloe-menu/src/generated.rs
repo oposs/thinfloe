@@ -6,8 +6,10 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::{ThinfloeConfig, xkb_options};
+use crate::kbregistry::Registry;
 use crate::netfiles::{Wired, render_wifi, render_wired, without_menu_header};
 use crate::{atomic, kanshi, screentab};
 
@@ -47,6 +49,9 @@ pub struct Inputs {
     /// The text of the shipped `netfiles::DEFAULT_WIRED`.
     pub default_wired: String,
     pub netboot: bool,
+    /// The XKB layout list; `None` when it could not be read, and then
+    /// only the names of a keyboard choice are checked.
+    pub registry: Option<Arc<Registry>>,
 }
 
 fn ipv4_list(v: &[String]) -> Result<Vec<Ipv4Addr>, String> {
@@ -65,6 +70,8 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
     match name {
         "environment" => {
             let kb = &cfg.keyboard;
+            // labwc does not start on a keymap XKB cannot build.
+            crate::keyboard::validate(kb, inp.registry.as_deref()).map_err(|e| format!("Keyboard: {e}"))?;
             Ok(Some(with_header(&format!(
                 "XKB_DEFAULT_LAYOUT={}\nXKB_DEFAULT_VARIANT={}\nXKB_DEFAULT_OPTIONS={}\n",
                 kb.layout,
@@ -160,6 +167,7 @@ mod tests {
         Inputs {
             default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
             netboot: false,
+            registry: None,
         }
     }
 
@@ -177,6 +185,31 @@ mod tests {
             },
         ];
         cfg.network.wifi_device = Some("wlan0".into());
+    }
+
+    #[test]
+    fn environment_refuses_a_keymap_the_layout_list_does_not_have() {
+        let with_list = Inputs {
+            registry: Some(Arc::new(
+                crate::kbregistry::parse(include_str!("testdata/evdev-small.xml")).unwrap(),
+            )),
+            ..inp()
+        };
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.layout = "de".into();
+        c.keyboard.variant = "fr".into();
+        let e = render(&c, "environment", &with_list).unwrap_err();
+        assert!(e.starts_with("Keyboard: ") && e.contains("fr"), "{e}");
+        c.keyboard.layout = "zz".into();
+        c.keyboard.variant = String::new();
+        assert!(render(&c, "environment", &with_list).is_err());
+        // Without a list only the names count.
+        assert!(render(&c, "environment", &inp()).is_ok());
+        c.keyboard.layout = "a b".into();
+        assert!(render(&c, "environment", &inp()).is_err());
+        c.keyboard.layout = "ch".into();
+        c.keyboard.variant = "fr".into();
+        assert!(render(&c, "environment", &with_list).unwrap().is_some());
     }
 
     #[test]
