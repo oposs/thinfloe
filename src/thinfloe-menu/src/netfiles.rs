@@ -1693,15 +1693,15 @@ exit 0
         );
         assert_eq!(plan_in(&f, &cfg, &wired_change(Wired::dhcp()), true), Ok(cfg.clone()));
         // Wired settings left from a stick boot are not installed on
-        // netboot, but the generated files are still rendered from them,
-        // and that refuses: the WiFi change waits for a stick boot.
+        // netboot: a WiFi change goes through and keeps them for the
+        // next stick boot.
         let mut stick = net_cfg(&[net("home", Some("secret123"), false)]);
         stick.set_wired(&fixed());
         stick.wifi_dns = strs(fixed().dns());
-        assert_eq!(
-            plan_in(&f, &stick, &wifi_change(vec![net("lab", None, false)]), true),
-            Err("A fixed address cannot be set on netboot.".into())
-        );
+        let got = plan_in(&f, &stick, &wifi_change(vec![net("lab", None, false)]), true).unwrap();
+        assert_eq!(got.nets(), [net("lab", None, false)]);
+        assert_eq!(got.wired().unwrap(), fixed());
+        assert_eq!(got.wifi_dns, stick.wifi_dns);
         // Going back from a fixed address leaves the WiFi servers.
         let got = plan_in(&f, &stick, &wired_change(Wired::dhcp()), true).unwrap();
         assert_eq!(got.wired, NetworkCfg::default().wired);

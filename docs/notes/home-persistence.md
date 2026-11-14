@@ -123,8 +123,8 @@ in `config.toml` (`[network]` `kept_wifi` and `kept_wired`, `[monitors]`
 `kept`), written under the generated header and shown read-only with "Let the
 menu manage it". A kept file is also what an unrenderable converted network
 file becomes, and a legacy kanshi file whose profile names fail the name
-check. On netboot, a `[network]` with a stick's fixed address still refuses
-WiFi changes.
+check. A stick's fixed address renders on netboot too (netboot installs no
+wired file), so it converts and stays in `[network]` for the next stick boot.
 
 ## Which layout a home has
 

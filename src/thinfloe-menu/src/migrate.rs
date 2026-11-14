@@ -378,7 +378,8 @@ fn convert_old(old: &OldFiles, start: &ThinfloeConfig, inputs: &Inputs, r: &mut 
 }
 
 /// A converted network file the menu cannot write back (a fixed address
-/// on netboot, say) is kept as written instead: the migration must finish,
+/// with a shipped wired default it cannot fill in, say) is kept as
+/// written instead: the migration must finish,
 /// and the machine keeps its file. Kept text renders without those checks.
 fn keep_what_does_not_render(
     cfg: &mut ThinfloeConfig,
@@ -1090,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_netboot_fixed_address_is_kept_not_fatal() {
+    fn a_netboot_fixed_address_is_converted() {
         let h = Home::with_templates("netboot-fixed");
         let fixed = "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: \"en*\"\n      addresses: [10.0.0.5/24]\n";
         h.put("ethernet.yaml", fixed, 0o600);
@@ -1102,8 +1103,34 @@ mod tests {
         let r = migrate_home(&h.home, &h.state, netboot, NOW)
             .unwrap()
             .expect("a report");
+        // Netboot installs no wired file, so the stick's address converts
+        // and stays in the settings for the next stick boot.
         let c = h.cfg();
-        assert_eq!(c.network.kept_wired.as_deref(), Some(fixed));
+        assert_eq!(c.network.kept_wired, None);
+        assert!(matches!(c.network.wired().unwrap(), Wired::Static { .. }));
+        assert!(
+            h.text(".config/thinfloe/generated/ethernet.yaml")
+                .contains("10.0.0.5/24")
+        );
+        let readme = h.text("cfg-attic/README");
+        assert!(!readme.contains("netboot"), "{readme}");
+        assert_eq!(h.layout_text(), "new\n");
+        assert!(r.not_moved.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn an_unrenderable_wired_file_is_kept_not_fatal() {
+        let h = Home::with_templates("wired-kept");
+        let fixed = "network:\n  version: 2\n  ethernets:\n    eth:\n      match:\n        name: \"en*\"\n      addresses: [10.0.0.5/24]\n";
+        h.put("ethernet.yaml", fixed, 0o600);
+        // A shipped default without network.ethernets.eth cannot be filled in.
+        let broken = Inputs {
+            default_wired: "network:\n  version: 2\n".into(),
+            netboot: false,
+            registry: None,
+        };
+        let r = migrate_home(&h.home, &h.state, broken, NOW).unwrap().expect("a report");
+        assert_eq!(h.cfg().network.kept_wired.as_deref(), Some(fixed));
         assert!(
             h.text(".config/thinfloe/generated/ethernet.yaml")
                 .contains("10.0.0.5/24")
@@ -1112,7 +1139,7 @@ mod tests {
         assert!(
             readme
                 .lines()
-                .any(|l| l.contains("~/ethernet.yaml") && l.contains("netboot")),
+                .any(|l| l.contains("~/ethernet.yaml") && l.contains("kept as written")),
             "{readme}"
         );
         assert_eq!(h.layout_text(), "new\n");

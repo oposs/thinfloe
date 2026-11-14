@@ -178,9 +178,11 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
 
   Netboot shows "A netbooted machine always uses the DNS servers DHCP sends."
   instead of the row and "A netbooted machine always uses DHCP." for the wired
-  address. `generated/ethernet.yaml` is not installed there; a `[network]`
-  that carries a stick's fixed address still refuses WiFi changes ("A fixed
-  address cannot be set on netboot."). The menu writes `[network]` only after
+  address. `generated/ethernet.yaml` is not installed there. A new fixed
+  address or DNS servers are refused when the change is planned ("A fixed
+  address cannot be set on netboot."); a `[network]` that carries a stick's
+  fixed address keeps it, still renders it into `generated/ethernet.yaml` for
+  the next stick boot, and takes WiFi changes. The menu writes `[network]` only after
   `thinfloe-network apply` succeeded and puts the old generated files back
   when it fails.
 

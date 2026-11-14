@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::config::{ThinfloeConfig, xkb_options};
 use crate::kbregistry::Registry;
-use crate::netfiles::{Wired, render_wifi, render_wired, without_menu_header};
+use crate::netfiles::{render_wifi, render_wired, without_menu_header};
 use crate::{atomic, kanshi, screentab};
 
 /// First line of every generated file.
@@ -108,14 +108,10 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             if let Some(kept) = &n.kept_wired {
                 return Ok(Some(with_header(kept)));
             }
+            // Rendered on netboot too: netboot installs no wired file, and
+            // a stick's address stays here for the next stick boot. A new
+            // fixed address on netboot is refused where it is planned.
             let wired = n.wired()?;
-            if inp.netboot {
-                match &wired {
-                    Wired::Static { .. } => return Err("A fixed address cannot be set on netboot.".into()),
-                    w if !w.dns().is_empty() => return Err("DNS servers cannot be set on netboot.".into()),
-                    _ => {}
-                }
-            }
             Ok(render_wired(&inp.default_wired, &wired)?.map(|t| with_header(without_menu_header(&t))))
         }
         other => Err(format!("No generated file named {other}")),
@@ -159,6 +155,7 @@ pub fn write_if_changed(dir: &Path, name: &str, body: Option<&str>) -> io::Resul
 mod tests {
     use super::*;
     use crate::config::NetCfg;
+    use crate::netfiles::Wired;
     use crate::testdir::TestDir;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -292,17 +289,20 @@ mod tests {
     }
 
     #[test]
-    fn netboot_refuses_a_fixed_address() {
+    fn netboot_renders_a_fixed_address_it_does_not_install() {
+        // A stick's fixed address stays in the settings and in generated/
+        // for the next stick boot; netboot installs no wired file.
         let mut cfg = ThinfloeConfig::default();
         cfg.network.set_wired(&Wired::Static {
             address: "10.0.0.5".parse().unwrap(),
             prefix: 24,
             gateway: None,
-            dns: vec![],
+            dns: vec!["1.1.1.1".parse().unwrap()],
         });
         let mut i = inp();
         i.netboot = true;
-        assert!(render(&cfg, "ethernet.yaml", &i).is_err());
+        let e = render(&cfg, "ethernet.yaml", &i).unwrap().unwrap();
+        assert!(e.contains("10.0.0.5/24"), "{e}");
     }
 
     #[test]
