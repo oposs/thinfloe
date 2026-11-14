@@ -99,16 +99,16 @@ pub fn repair(kb: &Keyboard, reg: Option<&Registry>) -> Option<(Keyboard, String
 /// environment file, made valid for `reg`: `Some((layout, variant, why))`
 /// when they must be replaced, `None` when labwc can use them. The values
 /// are the raw text after `=` (labwc removes no quotes); comma lists are
-/// checked pair by pair, an empty layout is XKB's default `us`.
+/// checked pair by pair, an empty layout is XKB's default `us`. A repair
+/// keeps the number of layouts; variants beyond the last layout are dropped.
 pub fn repair_env(layout: &str, variant: &str, reg: Option<&Registry>) -> Option<(String, String, String)> {
     let layouts: Vec<&str> = layout.split(',').collect();
     let variants: Vec<&str> = variant.split(',').collect();
-    let n = layouts.len().max(variants.len());
+    let n = layouts.len();
     let (mut out_l, mut out_v) = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut why = Vec::new();
     let mut unquoted = false;
-    for i in 0..n {
-        let raw_l = layouts.get(i).copied().unwrap_or("");
+    for (i, raw_l) in layouts.iter().copied().enumerate() {
         let raw_v = variants.get(i).copied().unwrap_or("");
         let (l, v) = (unquote(raw_l.trim()), unquote(raw_v.trim()));
         unquoted |= l != raw_l || v != raw_v;
@@ -361,6 +361,16 @@ mod tests {
         // An empty layout is us, and us has no variant fr.
         let (l, v, _) = repair_env("", "fr", Some(&r)).unwrap();
         assert_eq!((l.as_str(), v.as_str()), ("us", ""));
+    }
+
+    #[test]
+    fn repair_env_adds_no_layout_for_surplus_variants() {
+        let r = reg();
+        let (l, v, _) = repair_env("de", "fr,", Some(&r)).unwrap();
+        assert_eq!((l.as_str(), v.as_str()), ("de", ""));
+        let (l, v, _) = repair_env("ch", "de_nodeadkeys,fr,x", Some(&r)).unwrap_or_default();
+        assert_eq!(l.split(',').count(), 1, "{l}");
+        assert_eq!(v.split(',').count(), 1, "{v}");
     }
 
     #[test]
