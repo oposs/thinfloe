@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### New
+
+### Changed
+
+### Fixed
+
+## 4.4.0 - 2026-11-14
+### New
 - The Settings screen has a Keyboard tab: pick the layout and its variant from the full list, CapsLock as Ctrl on or off, and the Compose key (Right Alt by default). A change applies at once to the running session, with a line to try it right there, and is kept with the home directory.
 
 ### Changed
