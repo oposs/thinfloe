@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### New
+- The Settings screen has a Keyboard tab: pick the layout and its variant from the full list, CapsLock as Ctrl on or off, and the Compose key (Right Alt by default). A change applies at once to the running session, with a line to try it right there, and is kept with the home directory.
 
 ### Changed
 - All settings the menu manages are now kept in `~/.config/thinfloe/config.toml`, and the first start after the upgrade moves the old files there by itself, WiFi included. The old files stay unchanged in `~/cfg-attic/`, with a README listing what was taken over, and the Settings screen says so once.

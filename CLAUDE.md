@@ -69,6 +69,7 @@ to 4.2 sticks still look, and adds `thinfloe-usb.img.zst.sha256` for 4.0 to
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
 - User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
+- Keyboard tab: `src/thinfloe-menu/src/` (`kbregistry.rs` layout list, `keyboard.rs` state, `keyboardtab_ui.rs` drawing, `jobs::keyboard_apply` the live apply).
 - Config store and migration: `src/thinfloe-menu/src/` (`config.rs` schema, `store.rs` the only writer, `generated.rs` derived files, `migrate.rs` the 4.x migration).
 - Tests: `test/integration/` (`make test`), `test/unit/` (`make test-unit`), `test/runtime/` (`make test-runtime`).
 

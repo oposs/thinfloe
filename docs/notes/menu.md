@@ -202,6 +202,18 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
 
+## Keyboard tab
+
+Settings -> Keyboard (`keyboard.rs` state, `keyboardtab_ui.rs` drawing,
+`kbregistry.rs` the layout list). The layout and its variant are chosen from
+the full list of `/usr/share/X11/xkb/rules/evdev.xml` (package `xkb-data`, in
+the image); CapsLock as Ctrl is on or off; the Compose key is Right Alt by
+default. A change is written to `[keyboard]` of `config.toml` and applied to
+the running session at once (see [session.md](session.md)), one apply at a
+time; "Try it here" is a text field to test the layout right there. A failed
+apply or an unreadable registry shows a note on the tab. With a legacy
+(unmigrated) home the tab is read-only like Network, Screen and Status.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are

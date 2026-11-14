@@ -86,6 +86,35 @@ This note covers the running session: startup, the per-machine user files, the l
 
 After modifying overlay files, rebuild with `make image`.
 
+## Keyboard change in the running session
+
+The Keyboard tab of the Settings screen (`jobs::keyboard_apply`, in
+`src/thinfloe-menu/src/`) applies a change without a restart, in one job:
+`config.toml` (`[keyboard]`, written by the store) -> `generated/environment`
+(`XKB_DEFAULT_LAYOUT`, `_VARIANT`, `_OPTIONS`) ->
+`thinfloe-compose-labwc-config --env-only` (rewrites only the merged
+`environment` in `$XDG_RUNTIME_DIR/thinfloe-labwc`) -> `labwc --reconfigure`.
+Only one apply runs at a time.
+
+The full composition stays at session start. The composed directory holds
+copies that `labwc-scale` made of `rc.xml` and `themerc-override`; a full
+rebuild during the session would wipe the scaled copies, so `--env-only`
+leaves everything but `environment` alone.
+
+`test/runtime/test-labwc-runtime.sh` runs this sequence against the real
+labwc and asserts the merged file carries the new layout. Whether labwc then
+builds the keymap cannot be shown in the headless rig (no keyboard device, see
+the Xwayland note in that script): a control run with a layout and variant XKB
+cannot build (`fr`/`de_nodeadkeys`) decides. If the control prints no
+`failed to create xkb keymap`, the keymap assertion is reported as a skip.
+
+### Left to verify on hardware
+
+- The new keymap reaches the menu and other Wayland clients at once.
+- An open ThinLinc client follows the new layout. If it does not, the note on
+  the Keyboard tab becomes "ThinLinc picks up the change when it starts
+  again" and the result is recorded here.
+
 ## Screen blanking had to be rebuilt after the X11 removal
 
 Nothing blanked the screen between the move to Wayland and its fix. On X11 the
