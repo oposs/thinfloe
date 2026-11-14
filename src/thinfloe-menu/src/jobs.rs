@@ -928,6 +928,8 @@ const KEYBOARD_LOG_SOURCE: &str = "keyboard";
 
 /// Save the keyboard choice, then, when the session runs on a composed
 /// labwc directory, rewrite its `environment` and ask labwc to read it.
+/// Only a failed save is the error: once `config.toml` holds the choice,
+/// a failed hand-over is `KbOutcome::Saved` with the reason.
 pub fn keyboard_apply(
     paths: &Paths,
     kb: &crate::config::Keyboard,
@@ -945,12 +947,27 @@ pub fn keyboard_apply(
     let Some(config_dir) = l.config_dir.as_ref().filter(|d| **d != l.system_dir) else {
         return Ok(KbOutcome::NextStart);
     };
+    Ok(match keyboard_hand_over(l, config_dir, &generated, &user, feed) {
+        Ok(()) => KbOutcome::Live,
+        Err(why) => KbOutcome::Saved(why),
+    })
+}
+
+/// Compose labwc's `environment` in `config_dir` again and ask the running
+/// labwc to read it.
+fn keyboard_hand_over(
+    l: &LabwcCmds,
+    config_dir: &Path,
+    generated: &Path,
+    user: &Path,
+    feed: &Arc<Feed>,
+) -> Result<(), String> {
     let path_arg = |p: &Path| p.to_string_lossy().into_owned();
     let args = [
         "--env-only".to_string(),
         path_arg(&l.system_dir),
-        path_arg(&generated),
-        path_arg(&user),
+        path_arg(generated),
+        path_arg(user),
         path_arg(config_dir),
     ];
     let handed = |why: String| format!("The keyboard settings could not be handed to labwc: {why}");
@@ -973,9 +990,7 @@ pub fn keyboard_apply(
         }));
     }
     let Some(pid) = l.labwc_pid.as_deref().filter(|p| !p.trim().is_empty()) else {
-        return Err(
-            "labwc is not known to the menu (LABWC_PID is not set); the change takes effect at the next start.".into(),
-        );
+        return Err("labwc is not known to the menu (LABWC_PID is not set).".into());
     };
     let (_, status, _) = capture_env(
         &l.labwc,
@@ -989,7 +1004,7 @@ pub fn keyboard_apply(
     )
     .map_err(|e| format!("labwc --reconfigure failed ({e})"))?;
     match status {
-        Some(0) => Ok(KbOutcome::Live),
+        Some(0) => Ok(()),
         Some(n) => Err(format!("labwc --reconfigure failed (status {n})")),
         None => Err("labwc --reconfigure failed (ended by a signal)".into()),
     }
@@ -1417,17 +1432,28 @@ mod tests {
         assert!(calls(&d).is_empty());
     }
 
+    /// The why of a `Saved` outcome; panics on anything else.
+    fn saved_why(r: Result<crate::keyboard::KbOutcome, String>) -> String {
+        match r {
+            Ok(crate::keyboard::KbOutcome::Saved(why)) => why,
+            other => panic!("not saved-not-live: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_failing_composer_is_reported_and_labwc_not_asked() {
         let d = dir("kb-compose-fail");
         let p = kb_paths(&d, "echo boom >&2; exit 1", "true", Some(&d.join("out")), Some("1"));
-        let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+        let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
         assert!(e.contains("boom"), "{e}");
         assert!(
             e.starts_with("The keyboard settings could not be handed to labwc: "),
             "{e}"
         );
         assert_eq!(calls(&d).len(), 1);
+        // The save happened before: the next start uses it.
+        let toml = fs::read_to_string(d.join("home/.config/thinfloe/config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&toml).unwrap().keyboard, de_kb());
     }
 
     #[test]
@@ -1435,9 +1461,8 @@ mod tests {
         for pid in [None, Some("")] {
             let d = dir("kb-no-pid");
             let p = kb_paths(&d, "true", "true", Some(&d.join("out")), pid);
-            let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
+            let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
             assert!(e.contains("LABWC_PID is not set"), "{e}");
-            assert!(e.contains("next start"), "{e}");
             assert!(!calls(&d).iter().any(|c| c.starts_with("labwc")));
         }
     }
@@ -1446,9 +1471,21 @@ mod tests {
     fn a_failing_reconfigure_is_reported() {
         let d = dir("kb-reconf-fail");
         let p = kb_paths(&d, "true", "exit 3", Some(&d.join("out")), Some("1"));
+        let e = saved_why(keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())));
+        assert_eq!(e, "labwc --reconfigure failed (status 3)");
+    }
+
+    #[test]
+    fn a_failed_save_is_the_error_and_runs_nothing() {
+        let d = dir("kb-save-fail");
+        let mut p = kb_paths(&d, "true", "true", Some(&d.join("out")), Some("1"));
+        // The settings directory is a plain file: nothing can be written.
+        let root = d.join("blocked");
+        fs::write(&root, "").unwrap();
+        p.config = crate::store::test_shared(&root);
         let e = keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())).unwrap_err();
-        assert!(e.starts_with("labwc --reconfigure failed ("), "{e}");
-        assert!(e.contains('3'), "{e}");
+        assert!(e.starts_with("Could not save the keyboard settings: "), "{e}");
+        assert!(calls(&d).is_empty());
     }
 
     #[test]

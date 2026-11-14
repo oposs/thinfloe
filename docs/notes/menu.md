@@ -213,8 +213,13 @@ the running session at once (see [session.md](session.md)), one apply at a
 time; "Try it here" is a text field to test the layout right there. A failed
 apply or an unreadable registry shows a note on the tab: the error text, or
 "Takes effect at the next start." when labwc runs without the composed
-directory (the change is saved, only the live apply is skipped). The menu's
-log gets "The keyboard setting was not applied: ..." for a failed apply. When
+directory (the change is saved, only the live apply is skipped). Only a
+failed save is a failed apply ("The keyboard setting was not applied: ..."
+in the menu's log); when the save worked but the composer or `labwc
+--reconfigure` failed, the tab counts the choice as applied, so choosing the
+old value again writes it back, and the note gives the reason plus "The
+setting is saved and takes effect at the next start." (log: "The keyboard
+setting was saved, labwc does not use it yet: ..."). When
 the move of the settings failed at this boot, the tab is read-only like
 Network, Screen and Status.
 

@@ -1262,9 +1262,15 @@ impl Menu {
                 self.monitors.applied(r).map(Menu::mon_request)
             }
             JobResult::KeyboardApplied { kb, result } => {
-                if let Err(e) = &result {
-                    self.log
-                        .note(Kind::Warn, format!("The keyboard setting was not applied: {e}"));
+                match &result {
+                    Err(e) => self
+                        .log
+                        .note(Kind::Warn, format!("The keyboard setting was not applied: {e}")),
+                    Ok(crate::keyboard::KbOutcome::Saved(why)) => self.log.note(
+                        Kind::Warn,
+                        format!("The keyboard setting was saved, labwc does not use it yet: {why}"),
+                    ),
+                    Ok(_) => {}
                 }
                 let next = self.keyboard.done(&kb, result)?;
                 Some(Effect::Start(Job::KeyboardApply(next)))
@@ -2940,6 +2946,32 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(m.keyboard.note.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_saved_but_not_live_keyboard_apply_is_logged_as_saved() {
+        use crate::keyboard::{KbEvent, KbOutcome};
+        let mut m = kb_menu();
+        let Some(Effect::Start(Job::KeyboardApply(kb))) =
+            m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(false)))
+        else {
+            panic!("no job");
+        };
+        let r = JobResult::KeyboardApplied {
+            kb,
+            result: Ok(KbOutcome::Saved("the composer failed".into())),
+        };
+        assert_eq!(m.finished(r, Instant::now()), None);
+        let lines = log(&m);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (kind, text) = &lines[0];
+        assert_eq!(*kind, Kind::Warn);
+        assert!(text.contains("saved"), "{text}");
+        assert!(!text.contains("not applied"), "{text}");
+        assert!(text.contains("the composer failed"), "{text}");
+        // Undoing the change writes the old value again.
+        let undo = m.settings(SettingsEvent::Keyboard(KbEvent::CapsAsCtrl(true)));
+        assert!(matches!(undo, Some(Effect::Start(Job::KeyboardApply(_)))), "{undo:?}");
     }
 
     #[test]

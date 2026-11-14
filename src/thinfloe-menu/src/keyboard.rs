@@ -17,13 +17,18 @@ pub enum KbEvent {
 }
 
 /// How an apply took effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KbOutcome {
     /// The running compositor uses it now.
     Live,
     /// Saved; the compositor reads it at the next start.
     NextStart,
+    /// Saved, but handing it to the running compositor failed: why.
+    Saved(String),
 }
+
+/// Said after the reason when a saved setting did not reach labwc.
+pub const SAVED_NOT_LIVE: &str = "The setting is saved and takes effect at the next start.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyboardTab {
@@ -211,10 +216,12 @@ impl KeyboardTab {
         self.applying = false;
         match r {
             Ok(outcome) => {
+                // Saved, live or not: the disk holds `kb` now.
                 self.applied = kb.clone();
                 self.note = match outcome {
                     KbOutcome::Live => None,
                     KbOutcome::NextStart => Some("Takes effect at the next start.".into()),
+                    KbOutcome::Saved(why) => Some(format!("{why} {SAVED_NOT_LIVE}")),
                 };
             }
             Err(e) => self.note = Some(e),
@@ -436,6 +443,22 @@ mod tests {
         assert_eq!(t.applied.layout, "us");
         assert_eq!(t.note.as_deref(), Some("disk full"));
         assert!(!t.applying);
+    }
+
+    #[test]
+    fn a_saved_but_not_live_apply_counts_as_applied() {
+        let mut t = tab("us", "");
+        let first = t.event(KbEvent::Layout("de".into())).unwrap();
+        let r = Ok(KbOutcome::Saved("the composer failed".into()));
+        assert_eq!(t.done(&first, r), None);
+        assert_eq!(t.applied.layout, "de");
+        let note = t.note.clone().unwrap();
+        assert!(note.contains("the composer failed"), "{note}");
+        assert!(note.contains("next start"), "{note}");
+        // Going back to the old layout writes it again.
+        let back = t.event(KbEvent::Layout("us".into())).unwrap();
+        assert_eq!(back.layout, "us");
+        assert!(t.applying);
     }
 
     #[test]
