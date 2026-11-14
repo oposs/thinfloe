@@ -378,9 +378,9 @@ fn convert_old(old: &OldFiles, start: &ThinfloeConfig, inputs: &Inputs, r: &mut 
 }
 
 /// A converted network file the menu cannot write back (a fixed address
-/// with a shipped wired default it cannot fill in, say) is kept as
-/// written instead: the migration must finish,
-/// and the machine keeps its file. Kept text renders without those checks.
+/// with a shipped wired default it cannot fill in, say) is kept as written
+/// instead: the migration must finish, and the machine keeps its file.
+/// Kept text renders without those checks.
 fn keep_what_does_not_render(
     cfg: &mut ThinfloeConfig,
     wifi: Option<&str>,
