@@ -2685,7 +2685,19 @@ mod tests {
         let d = dir("mon-hup");
         let (store, k) = mon_home(&d, &recording(&d));
         // A child of this test stands in for kanshi in the fake proc dir.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // An ignored SIGHUP survives exec: a test run from a shell that
+        // ignores it (nohup, a background job) would leave sleep running.
+        use std::os::unix::process::CommandExt;
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        // SAFETY: signal is async-signal-safe and touches no memory.
+        unsafe {
+            sleep.pre_exec(|| {
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let mut child = sleep.spawn().unwrap();
         let entry = d.join("proc").join(child.id().to_string());
         fs::create_dir_all(&entry).unwrap();
         fs::write(entry.join("comm"), "kanshi\n").unwrap();
