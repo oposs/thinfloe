@@ -360,6 +360,34 @@ pub fn save(paths: &Paths, feed: &Arc<Feed>) -> SaveOutcome {
     }
 }
 
+/// Give the program the default action for the signals the menu sends its
+/// children: SIGTERM (`stop`) and SIGHUP (kanshi). An ignored signal
+/// survives fork and exec, and a shell cannot trap one that was ignored when
+/// it started, so a menu started with SIGTERM ignored would start programs
+/// that `stop` cannot end: tiles that outlive the logout, a write job that
+/// cannot be cancelled.
+pub(crate) fn default_signals(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: reset_signals only calls signal, which is async-signal-safe
+    // and touches no memory.
+    unsafe {
+        cmd.pre_exec(|| {
+            reset_signals();
+            Ok(())
+        });
+    }
+}
+
+/// The body of `default_signals`, for a caller with a `pre_exec` of its own.
+/// Async-signal-safe.
+pub(crate) fn reset_signals() {
+    // SAFETY: signal with SIG_DFL takes no pointers of ours.
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+    }
+}
+
 /// Run a tile's program and wait for it; its output goes to the log under
 /// the tile's name. The program gets a process group of its own, whose id
 /// `on_spawn` receives before the wait, so a logout can stop it together
@@ -368,6 +396,7 @@ pub fn run(id: JobId, name: &str, argv: &[String], feed: &Arc<Feed>, on_spawn: i
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).process_group(0);
+    default_signals(&mut cmd);
     let status = run_logged(cmd, name, feed, false, |pid| on_spawn(pid as i32))
         .map(|st| st.code())
         .map_err(|e| format!("{} could not be started: {e}", argv[0]));
@@ -385,6 +414,7 @@ pub fn addon(cmd: &[String], args: &[String], feed: &Arc<Feed>, on_spawn: impl F
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..]).args(args).process_group(0);
+    default_signals(&mut c);
     let status = run_logged(c, crate::addons::LOG_SOURCE, feed, true, |pid| on_spawn(pid as i32))
         .map(|st| st.code())
         .map_err(|e| format!("{} could not be started: {e}", cmd[0]));
@@ -400,6 +430,7 @@ fn upgrade_command(cmd: &[String], args: &[String]) -> Command {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..]).args(args).process_group(0).stdin(Stdio::null());
+    default_signals(&mut c);
     c.stdout(Stdio::piped()).stderr(Stdio::piped());
     c
 }
@@ -1087,10 +1118,12 @@ pub fn kanshi_reload(k: &Kanshi) -> Result<(), String> {
     let (prog, args) = k.cmd.split_first().ok_or("no kanshi program")?;
     let mut cmd = Command::new(prog);
     cmd.args(args).arg("-c").arg(&k.config).stdin(Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches no memory.
+    // SAFETY: setsid and reset_signals are async-signal-safe and touch no
+    // memory. The signals: a kanshi that ignores SIGHUP never reloads.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
+            reset_signals();
             Ok(())
         });
     }
@@ -1655,6 +1688,30 @@ mod tests {
         assert_eq!(stop_target(1), None);
         assert_eq!(stop_target(-5), None);
         assert_eq!(stop_target(4242), Some(-4242));
+    }
+
+    // The three tests that stop a program fail when the test binary's
+    // parent ignores SIGTERM and the programs inherit that; this one shows
+    // the reset itself, whatever the parent does.
+    #[test]
+    fn a_program_gets_the_default_action_for_an_ignored_sigterm() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "kill -TERM $$; kill -HUP $$; exit 0"]);
+        // What the menu's parent could have left it with. pre_exec closures
+        // run in the order they were added.
+        // SAFETY: signal is async-signal-safe and touches no memory.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let ignoring = cmd.status().unwrap();
+        assert_eq!(ignoring.code(), Some(0), "the shell inherits the ignored signals");
+        default_signals(&mut cmd);
+        assert_eq!(cmd.status().unwrap().signal(), Some(libc::SIGTERM));
     }
 
     #[test]

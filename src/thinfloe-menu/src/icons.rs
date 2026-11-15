@@ -431,6 +431,9 @@ fn limit_renderer(menu: u32) -> io::Result<()> {
     if unsafe { libc::getppid() } as u32 != menu {
         return Err(io::ErrorKind::Interrupted.into());
     }
+    // The menu ends a renderer with SIGKILL; SIGTERM from anyone else must
+    // end it too, also when the menu was started with SIGTERM ignored.
+    crate::jobs::reset_signals();
     set_limit(libc::RLIMIT_AS, ICON_MEMORY)?;
     set_limit(libc::RLIMIT_STACK, ICON_STACK)?;
     set_limit(libc::RLIMIT_CPU, ICON_CPU_SECONDS)?;
@@ -993,6 +996,15 @@ esac
         assert!(out[0].as_ref().unwrap_err().starts_with("cannot start the renderer"));
     }
 
+    /// The bounds of the two tests that do meet a deadline. Wall-clock
+    /// time on a loaded host: the deadlines leave a shell-script renderer
+    /// seconds to start (to answer, or to leave its pid), and the tests
+    /// only ask that the wait ended long before the hanging renderers'
+    /// `sleep 60` did. With 200 to 500 ms deadlines and bounds below one
+    /// second, both tests failed on a busy core.
+    const SHORT_ICON: Duration = Duration::from_secs(2);
+    const FAR_BELOW_THE_SLEEP: Duration = Duration::from_secs(30);
+
     // The hanging renderers sleep far past every deadline here, so the test
     // only passes when the deadline killed them.
     #[test]
@@ -1002,17 +1014,17 @@ esac
         let out = render_all(
             &fake_renderer(&dir),
             &fake_jobs(&dir, &["ok", "hang", "closed", "ok"]),
-            Duration::from_millis(200),
-            Duration::from_secs(2),
+            SHORT_ICON,
+            PATIENT_BUDGET,
         );
-        assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+        assert!(start.elapsed() < FAR_BELOW_THE_SLEEP, "{:?}", start.elapsed());
         let errors: Vec<_> = out.into_iter().map(|r| r.map(|_| ())).collect();
         assert_eq!(
             errors,
             vec![
                 Ok(()),
-                Err("took longer than 200ms".to_string()),
-                Err("took longer than 200ms".to_string()),
+                Err("took longer than 2s".to_string()),
+                Err("took longer than 2s".to_string()),
                 Ok(()),
             ],
             "the icons after a slow one still render"
@@ -1028,12 +1040,13 @@ esac
         let out = render_all(
             &fake_renderer(&dir),
             &fake_jobs(&dir, &["1-hang", "2-hang", "3-hang", "4-hang"]),
-            Duration::from_millis(300),
-            Duration::from_millis(500),
+            SHORT_ICON,
+            // Ends in the middle of the second renderer's time.
+            SHORT_ICON + SHORT_ICON / 2,
         );
-        assert!(start.elapsed() < Duration::from_millis(800), "{:?}", start.elapsed());
+        assert!(start.elapsed() < FAR_BELOW_THE_SLEEP, "{:?}", start.elapsed());
         let errors: Vec<_> = out.into_iter().map(|r| r.map(|_| ())).collect();
-        assert_eq!(errors[0], Err("took longer than 300ms".to_string()));
+        assert_eq!(errors[0], Err("took longer than 2s".to_string()));
         assert_eq!(errors[1..], vec![Err("no time left at startup".to_string()); 3]);
         assert_reaped(&dir, "1-hang");
         assert_reaped(&dir, "2-hang");
