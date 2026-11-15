@@ -296,6 +296,52 @@ for layout in new legacy; do
     fi
 done
 
+# ---------------------------------------------------------------- test 14b
+# The 4.x migration moved ~/.thinfloe-password into ~/cfg-attic/, which rides
+# every home archive. --clear removes that copy too, and the stamped ones a
+# repeated migration leaves beside it; the other attic files stay.
+setup
+ATTIC="$WORK/home/tfuser/cfg-attic"
+mkdir -p "$ATTIC"
+echo "$FAKE_HASH" >"$ATTIC/.thinfloe-password"
+echo "$FAKE_HASH" >"$ATTIC/.thinfloe-password.1700000000"
+echo "$FAKE_HASH" >"$ATTIC/.thinfloe-password.1700000000.1"
+echo "keep" >"$ATTIC/wifi.yaml"
+echo "keep" >"$ATTIC/README"
+rc=$(run_password "$WORK/root" '' --clear)
+left=$(ls -A "$ATTIC" | tr '\n' ' ')
+if [[ "$rc" == "0" && "$left" == "README wifi.yaml " ]]; then
+    ok "--clear removes the hash copies in ~/cfg-attic and nothing else there"
+else
+    bad "--clear removes the hash copies in ~/cfg-attic and nothing else there (exit $rc, left: $left)"
+fi
+
+# A link at ~/cfg-attic is not followed: root deletes nothing outside the home.
+setup
+mkdir -p "$WORK/elsewhere"
+echo "not yours" >"$WORK/elsewhere/.thinfloe-password"
+ln -s "$WORK/elsewhere" "$WORK/home/tfuser/cfg-attic"
+rc=$(run_password "$WORK/root" '' --clear)
+if [[ "$rc" == "0" && -f "$WORK/elsewhere/.thinfloe-password" ]] &&
+   grep -q '^passwd -l' "$WORK/calls.log"; then
+    ok "--clear does not follow a link at ~/cfg-attic"
+else
+    bad "--clear does not follow a link at ~/cfg-attic (exit $rc)"
+fi
+
+# An attic copy that cannot be removed (a directory under that name) must not
+# stop the account from being locked; the exit status still reports it.
+setup
+mkdir -p "$WORK/home/tfuser/cfg-attic/.thinfloe-password/x"
+rc=$(run_password "$WORK/root" '' --clear)
+order=$(grep '^passwd ' "$WORK/calls.log" | tr '\n' ' ')
+if [[ "$rc" != "0" && "$order" == "passwd -d tfuser passwd -l tfuser " ]] &&
+   grep -q 'cfg-attic/.thinfloe-password' "$WORK/err"; then
+    ok "--clear locks the account even when an attic copy cannot be removed"
+else
+    bad "--clear locks the account even when an attic copy cannot be removed (exit $rc, passwd calls: '$order', stderr: $(cat "$WORK/err"))"
+fi
+
 # ---------------------------------------------------------------- test 15
 # The layout file is tfuser's to flip, so it may only choose between two
 # paths in tfuser's home. A symlinked ~/.config/thinfloe (or ~/.config, or

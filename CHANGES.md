@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- `sudo thinfloe-password --clear` now also removes the old password hash that the 4.4.0 move of the settings left in `~/cfg-attic/.thinfloe-password`. Before, that copy stayed in the saved home on the stick, or on the boot server, after the password was cleared.
 
 ## 4.4.0 - 2026-11-14
 ### New

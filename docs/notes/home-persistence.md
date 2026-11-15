@@ -43,8 +43,8 @@ The system implements home directory persistence across reboots:
   archived; until 2026-10 the netboot path ran tar as tluser (the account's name before 4.0), and one such
   file failed every netboot save with exit 5.
   `thinfloe-password.service`, ordered `Before=ssh.service`, reinstalls it on
-  every boot with `chpasswd -e`. `--clear` removes it and locks the account
-  again. `thinfloe-password`, `thinfloe-ssh-hostkeys` and `thinfloe-network`
+  every boot with `chpasswd -e`. `--clear` removes it, the 4.x and 3.x files and the
+  copies of the 4.x file in `~/cfg-attic/`, and locks the account again. `thinfloe-password`, `thinfloe-ssh-hostkeys` and `thinfloe-network`
   run as root inside tfuser's home and refuse a symlink at any path they use
   under `~/.config/thinfloe`.
 
