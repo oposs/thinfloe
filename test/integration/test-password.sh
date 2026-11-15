@@ -342,6 +342,31 @@ else
     bad "--clear locks the account even when an attic copy cannot be removed (exit $rc, passwd calls: '$order', stderr: $(cat "$WORK/err"))"
 fi
 
+# The same for the three stores themselves: a directory under one of their
+# names made rm fail, and `set -e` ended --clear before the account was
+# locked. The stores that can be removed still go.
+for name in "$OLD_STORE_NAME" "$STORE_NAME" ".dbrrg-password"; do
+    setup
+    mkdir -p "$WORK/home/tfuser/.config/thinfloe"
+    echo "$FAKE_HASH" >"$STORE"
+    echo "$FAKE_HASH" >"$WORK/home/tfuser/$OLD_STORE_NAME"
+    echo "3x-hash" >"$WORK/home/tfuser/.dbrrg-password"
+    rm -f "$WORK/home/tfuser/$name"
+    mkdir -p "$WORK/home/tfuser/$name/x"
+    rc=$(run_password "$WORK/root" '' --clear)
+    order=$(grep '^passwd ' "$WORK/calls.log" 2>/dev/null | tr '\n' ' ')
+    others=0
+    for other in "$OLD_STORE_NAME" "$STORE_NAME" ".dbrrg-password"; do
+        [[ "$other" == "$name" ]] || [[ ! -e "$WORK/home/tfuser/$other" ]] || others=1
+    done
+    if [[ "$rc" != "0" && "$order" == "passwd -d tfuser passwd -l tfuser " && "$others" == 0 ]] &&
+       grep -qF "$name" "$WORK/err"; then
+        ok "--clear locks the account when ~/$name cannot be removed"
+    else
+        bad "--clear locks the account when ~/$name cannot be removed (exit $rc, passwd calls: '$order', others left: $others, stderr: $(cat "$WORK/err"))"
+    fi
+done
+
 # ---------------------------------------------------------------- test 15
 # The layout file is tfuser's to flip, so it may only choose between two
 # paths in tfuser's home. A symlinked ~/.config/thinfloe (or ~/.config, or
