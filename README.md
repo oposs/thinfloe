@@ -9,7 +9,9 @@ Modern diskless Linux system using SquashFS + OverlayFS + ZRAM + Dracut.
 
 Features A/B firmware updates with automatic fallback support.
 
-![The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Settings, Restart and Power off; below them the status area with keyboard and mouse batteries, a network traffic graph, network details, temperatures, CPU, memory, uptime and model, and the clock; at the bottom the log with add-on checks](docs/screenshot-menu.png)
+![The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Restart and Power off; below them the status area with keyboard and mouse batteries, a network traffic graph, network details, CPU load, memory, uptime and model, and the clock; at the bottom the log with add-on installs and checks](docs/screenshot-menu.png)
+
+The [ThinFloe page](https://oposs.github.io/thinfloe/) shows the boot and the Settings screen.
 
 ## Install
 
