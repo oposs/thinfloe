@@ -1,0 +1,444 @@
+/* The palette and the fonts are the menu's own (src/thinfloe-menu/src/brand.rs)
+   and the boot screen's (brand/boot-glow.svg, brand/boot-bar-*.svg).
+   index.html and ad.html both use this file. */
+@font-face {
+  font-family: "Geo";
+  src: url("fonts/geo-oblique.woff2") format("woff2");
+  font-style: oblique;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Ubuntu Light";
+  src: url("fonts/ubuntu-light.woff2") format("woff2");
+  font-weight: 300;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Ubuntu Mono";
+  src: url("fonts/ubuntu-mono.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --bg: #05070a;
+  --tile: #0d1218;
+  --tile-hover: #131c26;
+  --line: #151b22;
+  --track: #1e2630;
+  --glow: #12324a;
+  --ice: #7cc4ff;
+  --text: #e6eaee;
+  --soft: #b4bcc5;
+  --muted: #7d8996;
+  --time: #5d6976;
+  --good: #98c379;
+
+  --geo: "Geo", "Ubuntu Light", system-ui, sans-serif;
+  --sans: "Ubuntu Light", "Ubuntu", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Ubuntu Mono", ui-monospace, "DejaVu Sans Mono", monospace;
+
+  --col: 66rem;
+  --gutter: clamp(1rem, 4vw, 2.5rem);
+  --gap: 3px; /* the gap between the menu's tiles */
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-weight: 300;
+  font-size: 1.0625rem;
+  line-height: 1.55;
+}
+a { color: var(--ice); text-underline-offset: 0.2em; }
+a:hover { color: #fff; }
+:focus-visible { outline: 2px solid var(--ice); outline-offset: 3px; }
+h1, h2, h3, p, figure { margin: 0; }
+img, video, canvas { max-width: 100%; display: block; }
+
+.wrap {
+  width: 100%;
+  max-width: calc(var(--col) + 2 * var(--gutter));
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* Header: the menu's own, logo left and the host line right. */
+.top { padding-block: 1.5rem; }
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.mark { display: flex; align-items: center; gap: 0.9rem; color: inherit; text-decoration: none; }
+.mark svg { width: 3.4rem; height: auto; fill: #a7a7a7; }
+.mark-name { font-family: var(--geo); font-size: 1.75rem; line-height: 1; color: #b9bfc6; display: block; }
+.mark-by { font-family: var(--geo); font-size: 0.8rem; color: var(--muted); display: block; margin-top: 0.3rem; }
+.host { font-family: var(--geo); font-size: 0.95rem; color: var(--muted); white-space: nowrap; display: flex; gap: 1.4rem; }
+.host a { color: inherit; text-decoration: none; }
+.host a:hover { color: var(--ice); }
+
+/* The floe: the product's screen above a waterline, its reflection below.
+   The waterline is the boot screen's slanted bar. */
+.floe { position: relative; }
+.floe::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 46% -32% -24%;
+  background: radial-gradient(closest-side, var(--glow) 0%, rgba(18, 50, 74, 0.5) 45%, rgba(18, 50, 74, 0) 100%);
+  pointer-events: none;
+}
+.screen {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  background: var(--bg);
+  outline: 1px solid #1f2a36;
+}
+.screen picture { display: contents; }
+.screen img, .screen video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.water {
+  height: 6px;
+  margin: 0.9rem -7% 0;
+  background: var(--track);
+  clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+}
+.water i { display: block; height: 100%; background: var(--ice); transform-origin: left; }
+.mirror {
+  position: relative;
+  margin-top: 0.9rem;
+  aspect-ratio: 3 / 0.78;
+  overflow: hidden;
+  opacity: 0.7;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.35) 45%, transparent 96%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.35) 45%, transparent 96%);
+}
+.mirror > * {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  transform: scaleY(-1);
+  filter: blur(1.5px);
+}
+
+/* Hero */
+.hero { position: relative; overflow: hidden; isolation: isolate; }
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: clamp(1.5rem, 4vw, 4rem);
+  align-items: start;
+  padding-block: clamp(1.5rem, 5vh, 4rem) 4.5rem;
+}
+.pitch { padding-top: clamp(0rem, 4vh, 3rem); }
+.pitch h1 {
+  font-family: var(--geo);
+  font-weight: 400;
+  font-size: clamp(2.9rem, 5.2vw, 4.6rem);
+  line-height: 0.98;
+  text-wrap: balance;
+  letter-spacing: 0.005em;
+  color: #fff;
+}
+.pitch p {
+  max-width: 27rem;
+  margin-top: 1.6rem;
+  font-size: 1.2rem;
+  color: #c3cad2;
+  text-wrap: pretty;
+  hyphens: manual;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 2rem; }
+.btn {
+  display: inline-block;
+  font-family: var(--geo);
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0.85rem 1.4rem;
+  text-decoration: none;
+  border: 1px solid var(--ice);
+}
+.btn-main { background: var(--ice); color: var(--bg); }
+.btn-main:hover { background: #fff; border-color: #fff; color: var(--bg); }
+.btn-side { color: var(--ice); border-color: #2a4763; }
+.btn-side:hover { border-color: var(--ice); color: #fff; }
+.floe-note {
+  margin-top: -1rem;
+  position: relative;
+  font-size: 0.9rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+/* The floe drifts a little; the video is the page's one moment of motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .hero .screen { animation: drift 7s ease-in-out infinite alternate; }
+  .hero .mirror > * { animation: drift-mirror 7s ease-in-out infinite alternate; }
+}
+@keyframes drift { from { transform: translateY(0); } to { transform: translateY(-5px); } }
+@keyframes drift-mirror { from { transform: scaleY(-1) translateY(0); } to { transform: scaleY(-1) translateY(-5px); } }
+@media (prefers-reduced-motion: reduce) {
+  .screen video, .mirror canvas { display: none; }
+}
+.still .screen video, .still .mirror canvas { display: none; }
+
+/* Sections */
+.band { padding-block: clamp(3rem, 8vw, 6rem) 0; }
+.band:last-of-type { padding-bottom: clamp(3.5rem, 9vw, 6.5rem); }
+.band h2 {
+  font-family: var(--geo);
+  font-weight: 400;
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  line-height: 1.1;
+  color: #fff;
+}
+.lede { max-width: 40rem; margin-top: 0.8rem; color: var(--soft); }
+
+/* Pictures of the product */
+.shot { margin-top: 2.2rem; border: 1px solid var(--line); background: var(--bg); }
+.shot img { width: 100%; height: auto; }
+.parts {
+  margin: var(--gap) 0 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap);
+}
+.parts div { background: var(--tile); padding: 1.1rem 1.3rem 1.3rem; }
+.parts dt { font-family: var(--geo); font-size: 1.3rem; color: #fff; }
+.parts dd { margin: 0.35rem 0 0; font-size: 0.98rem; line-height: 1.5; color: #aab3bd; }
+
+/* Settings: the menu's tab bar. Radio buttons, so it works without script. */
+.tabs { margin-top: 2.2rem; }
+.tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+.tabbar {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--gap);
+  padding: var(--gap);
+  background: #1c2026;
+}
+.tabbar label {
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1;
+  text-align: center;
+  padding: 0.7rem 0.3rem;
+  color: var(--muted);
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.tabbar label:hover { color: #fff; }
+.panel { display: none; margin-top: var(--gap); border: 1px solid var(--line); background: var(--bg); }
+.panel img { width: 100%; height: auto; }
+.panel figcaption { padding: 0.9rem 1.3rem 1rem; color: var(--soft); border-top: 1px solid var(--line); background: var(--tile); }
+.panel figcaption b { font-family: var(--geo); font-weight: 400; font-size: 1.15rem; color: #fff; margin-right: 0.6rem; }
+#st-packages:checked ~ .tabbar label[for="st-packages"],
+#st-network:checked ~ .tabbar label[for="st-network"],
+#st-screen:checked ~ .tabbar label[for="st-screen"],
+#st-keyboard:checked ~ .tabbar label[for="st-keyboard"],
+#st-status:checked ~ .tabbar label[for="st-status"] { color: #fff; background: #2a2f36; border-color: #4a525c; }
+#st-packages:focus-visible ~ .tabbar label[for="st-packages"],
+#st-network:focus-visible ~ .tabbar label[for="st-network"],
+#st-screen:focus-visible ~ .tabbar label[for="st-screen"],
+#st-keyboard:focus-visible ~ .tabbar label[for="st-keyboard"],
+#st-status:focus-visible ~ .tabbar label[for="st-status"] { outline: 2px solid var(--ice); outline-offset: 2px; }
+#st-packages:checked ~ .p-packages,
+#st-network:checked ~ .p-network,
+#st-screen:checked ~ .p-screen,
+#st-keyboard:checked ~ .p-keyboard,
+#st-status:checked ~ .p-status { display: block; }
+
+/* The tile grid, as in the menu: square, 3px apart. */
+.tiles {
+  list-style: none;
+  margin: 2.2rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap);
+}
+.tiles li {
+  background: var(--tile);
+  padding: 1.4rem 1.3rem 1.5rem;
+  transition: background 0.15s;
+}
+.tiles li:hover { background: var(--tile-hover); }
+.tiles svg {
+  width: 2.4rem; height: 2.4rem;
+  fill: none; stroke: #fff; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.tiles h3 {
+  font-family: var(--geo);
+  font-weight: 400;
+  font-size: 1.4rem;
+  line-height: 1.15;
+  color: #fff;
+  margin-top: 1rem;
+}
+.tiles p { margin-top: 0.5rem; font-size: 0.98rem; line-height: 1.5; color: #aab3bd; }
+
+/* The status area: label in Geo, value in mono. */
+.status {
+  margin: var(--gap) 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap);
+}
+.status div {
+  background: var(--tile);
+  padding: 0.9rem 1.3rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+.status dt { font-family: var(--geo); color: var(--muted); }
+.status dd { margin: 0; font-family: var(--mono); font-size: 0.95rem; color: #fff; text-align: right; }
+
+/* Install: the menu's log panel. */
+.log {
+  margin-top: 2.2rem;
+  background: var(--tile);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+.log ol { list-style: none; margin: 0; padding: 0.6rem 0; counter-reset: n; }
+.log li {
+  counter-increment: n;
+  display: grid;
+  grid-template-columns: 2.2rem minmax(0, 1fr);
+  gap: 0 0.6rem;
+  padding: 0.55rem 1.1rem;
+}
+.log li::before { content: counter(n); color: var(--time); }
+.log .what { color: var(--text); font-family: var(--sans); font-size: 1.02rem; }
+.log .what a { white-space: nowrap; }
+.log .what code { font-family: var(--mono); font-size: 0.95em; color: #fff; }
+.cmd {
+  grid-column: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+.cmd code { flex: 1; min-width: 0; font-family: var(--mono); color: var(--ice); overflow-x: auto; white-space: pre; }
+.cmd button {
+  flex: none;
+  font-family: var(--geo);
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--track);
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+.cmd button:hover { color: #fff; border-color: var(--muted); }
+.cmd button.done { color: var(--good); border-color: var(--good); }
+.aside { margin-top: 1.2rem; max-width: 44rem; font-size: 0.98rem; color: var(--muted); }
+
+/* Footer */
+.foot { border-top: 1px solid var(--line); padding-block: 2rem 3rem; font-size: 0.92rem; color: var(--muted); }
+.foot .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.8rem 2rem; }
+.foot nav { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; }
+.foot a { color: #aab3bd; }
+.foot a:hover { color: #fff; }
+
+@media (max-width: 62rem) {
+  .tiles, .status { grid-template-columns: repeat(2, 1fr); }
+  .hero-grid { grid-template-columns: minmax(0, 1fr); }
+  .pitch { padding-top: 0; }
+  .pitch p { max-width: 36rem; }
+  .hero .floe { margin-inline: 6%; margin-top: 1rem; }
+  .floe-note { margin-top: -0.6rem; margin-inline: 6%; }
+}
+@media (max-width: 34rem) {
+  .tiles, .status, .parts { grid-template-columns: 1fr; }
+  .host > span { display: none; }
+  .mark svg { width: 2.6rem; }
+  .mark-name { font-size: 1.45rem; }
+  .log li { grid-template-columns: 1.4rem minmax(0, 1fr); padding-inline: 0.8rem; }
+  .tabbar label { font-size: 0.82rem; padding-inline: 0; }
+  .panel figcaption b { display: block; margin-bottom: 0.2rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tiles li { transition: none; }
+}
+
+/* ad.html: one screen, composed for a screenshot (tools/screenshots.sh --ads).
+   Sizes are in vmin and vw so the three formats share one set of rules. */
+.ad { height: 100vh; overflow: hidden; }
+.ad-page {
+  height: 100vh;
+  display: grid;
+  padding: 5.2vmin 5.6vmin 4.6vmin;
+  gap: 0 5vmin;
+  isolation: isolate;
+}
+.ad-mark { display: flex; align-items: center; gap: 1.6vmin; grid-area: mark; }
+.ad-mark svg { height: 5.4vmin; width: auto; fill: #fff; }
+.ad-head {
+  grid-area: head;
+  font-family: var(--geo);
+  font-weight: 400;
+  color: #fff;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+.ad-line { grid-area: line; color: #c3cad2; line-height: 1.4; text-wrap: pretty; }
+.ad-url { grid-area: url; font-family: var(--mono); color: var(--ice); white-space: nowrap; }
+.ad-floe { grid-area: floe; align-self: center; }
+.ad .water { height: 0.9vmin; margin-top: 1.6vmin; clip-path: polygon(0.9vmin 0, 100% 0, calc(100% - 0.9vmin) 100%, 0 100%); }
+.ad .mirror { margin-top: 1.6vmin; }
+
+/* Link preview, 1200 x 630: words left, the floe right. */
+@media (min-aspect-ratio: 3/2) {
+  .ad-page {
+    grid-template-columns: minmax(0, 43fr) minmax(0, 57fr);
+    grid-template-rows: auto 1fr auto auto;
+    grid-template-areas: "mark floe" "head floe" "line floe" "url floe";
+  }
+  .ad-head { font-size: 12.6vmin; align-self: center; }
+  .ad-line { font-size: 3.5vmin; max-width: 34em; margin-bottom: 3.4vmin; }
+  .ad-url { font-size: 3.5vmin; }
+  .ad-floe { margin-right: 6%; margin-top: 2vmin; }
+  .ad .mirror { aspect-ratio: 3 / 0.5; }
+}
+/* Square and portrait posts: words above, the floe below. */
+@media (max-aspect-ratio: 3/2) {
+  .ad-page {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto 1fr auto;
+    grid-template-areas: "mark url" "head head" "floe floe" "line line";
+  }
+  .ad-url { font-size: 2.9vmin; align-self: center; }
+  .ad-head { font-size: 10.4vmin; margin-top: 4vmin; }
+  .ad-line { font-size: 3.4vmin; }
+  .ad-floe { width: 57vw; justify-self: center; }
+  .ad .mirror { aspect-ratio: 3 / 0.3; }
+}
+@media (max-aspect-ratio: 9/10) {
+  .ad-head { font-size: 12vmin; margin-top: 6vmin; }
+  .ad-line { font-size: 3.7vmin; }
+  .ad-floe { width: 74vw; }
+  .ad .mirror { aspect-ratio: 3 / 0.6; }
+}

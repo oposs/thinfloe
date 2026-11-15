@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThinFloe: a thin client that floats in RAM</title>
+<meta name="description" content="ThinFloe boots a PC from a USB stick or the network, runs entirely in memory and is gone at power-off. Your home comes back at the next boot.">
+<meta name="theme-color" content="#05070a">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://oposs.github.io/thinfloe/">
+<meta property="og:title" content="ThinFloe: a thin client that floats in RAM">
+<meta property="og:description" content="Boots a PC from a USB stick or the network, runs entirely in memory and is gone at power-off. Your home comes back at the next boot.">
+<meta property="og:image" content="https://oposs.github.io/thinfloe/ad/thinfloe-1200x630.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The ThinFloe menu on a dark screen above an ice-blue line, beside the words: A thin client that floats in RAM.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ThinFloe: a thin client that floats in RAM">
+<meta name="twitter:description" content="Boots a PC from a USB stick or the network, runs entirely in memory and is gone at power-off. Your home comes back at the next boot.">
+<meta name="twitter:image" content="https://oposs.github.io/thinfloe/ad/thinfloe-1200x630.png">
+<link rel="preload" href="fonts/geo-oblique.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/ubuntu-light.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+<script>
+document.documentElement.classList.add("js");
+// ?still shows the picture in place of the boot movie (for screenshots).
+if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add("still");
+</script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="mark" href="https://github.com/oposs/thinfloe" aria-label="ThinFloe on GitHub">
+      <svg viewBox="270 380 370 262" aria-hidden="true"><g transform="translate(0 632) skewX(-9) translate(0 -632)"><path d="M278 388H625V447H433V632H360V447H278Z"/><path d="M498 502H624V562H570V632H498Z"/></g></svg>
+      <span><span class="mark-name">ThinFloe</span><span class="mark-by">by oetiker.ai</span></span>
+    </a>
+    <p class="host"><span>github.com/oposs/thinfloe</span><a href="https://github.com/oposs/thinfloe/releases/latest">release <span data-version>4.4.0</span></a></p>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="pitch">
+      <h1>A thin client that floats in RAM</h1>
+      <p>ThinFloe boots a PC from a USB stick or the network and runs entirely in memory. At power&#8209;off it is gone. Your home comes back at the next boot.</p>
+      <div class="actions">
+        <a class="btn btn-main" href="https://github.com/oposs/thinfloe/releases/latest">Download the stick image</a>
+        <a class="btn btn-side" href="https://github.com/oposs/thinfloe">Read the source</a>
+      </div>
+    </div>
+
+    <div>
+      <div class="floe">
+        <div class="screen">
+          <picture>
+            <source srcset="img/menu.webp" type="image/webp">
+            <img src="img/menu.png" width="2880" height="1920"
+                 alt="The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Restart and Power off, the status area and the log.">
+          </picture>
+          <video id="boot" autoplay muted loop playsinline preload="auto" poster="img/boot-poster.webp" width="1440" height="960"
+                 aria-label="ThinFloe boots: the logo above a bar that fills while the steps of the boot are named, then the menu.">
+            <source src="boot.webm" type="video/webm">
+            <source src="boot.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div class="water" aria-hidden="true"><i id="water"></i></div>
+        <div class="mirror" aria-hidden="true">
+          <img src="img/menu.webp" width="2880" height="1920" alt="">
+          <canvas id="mirror" width="480" height="320"></canvas>
+        </div>
+      </div>
+      <p class="floe-note">Release 4.4.0 boots in a virtual machine, shown four times as fast as it ran.</p>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2>This is the whole desktop</h2>
+    <p class="lede">One menu. Tiles start the remote desktop, a terminal or a home backup; below them the machine reports on itself, and the log says what the system did.</p>
+    <figure class="shot">
+      <img src="img/menu.webp" width="2880" height="1920" loading="lazy"
+           alt="The ThinFloe menu on a 3:2 screen. Eight tiles: ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Restart, Power off. Below them the status area: batteries of keyboard and mouse, a network traffic graph, network details, CPU load, memory, uptime and model, time and date. At the bottom the log, with lines of the add-on checks.">
+    </figure>
+    <dl class="parts">
+      <div><dt>Tiles</dt><dd>ThinLinc, OxuLnk, a terminal, a home backup, upgrades, settings. Add your own with one small file.</dd></div>
+      <div><dt>Status area</dt><dd>The machine reports on itself: batteries of keyboard and mouse, network traffic, addresses, load, memory.</dd></div>
+      <div><dt>Log</dt><dd>What the system did and when, such as the daily look for new add-on versions.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="band" id="settings">
+  <div class="wrap">
+    <h2>Settings on the screen</h2>
+    <p class="lede">WiFi and wired network, monitors, keyboard and the status area are set in the menu. A change applies at once and travels with the home.</p>
+
+    <div class="tabs">
+      <input type="radio" name="st" id="st-packages" checked>
+      <input type="radio" name="st" id="st-network">
+      <input type="radio" name="st" id="st-screen">
+      <input type="radio" name="st" id="st-keyboard">
+      <input type="radio" name="st" id="st-status">
+      <div class="tabbar">
+        <label for="st-packages">Packages</label>
+        <label for="st-network">Network</label>
+        <label for="st-screen">Screen</label>
+        <label for="st-keyboard">Keyboard</label>
+        <label for="st-status">Status</label>
+      </div>
+      <figure class="panel p-packages">
+        <img src="img/settings-packages.webp" width="1872" height="858" loading="lazy"
+             alt="The Packages tab: ThinLinc 4.21.0 and OxuLnk, both ticked and up to date, each with the address it comes from.">
+        <figcaption><b>Packages</b>Tick ThinLinc or OxuLnk. ThinFloe fetches it from its source, keeps it on the stick and looks for a new version every day.</figcaption>
+      </figure>
+      <figure class="panel p-network">
+        <img src="img/settings-network.webp" width="1872" height="858" loading="lazy"
+             alt="The Network tab: the wired connection with a fixed address and gateway, and two saved WiFi networks, one of them hidden.">
+        <figcaption><b>Network</b>Wired with DHCP or a fixed address, the WiFi networks this machine knows, and the DNS servers.</figcaption>
+      </figure>
+      <figure class="panel p-screen">
+        <img src="img/settings-screen.webp" width="1872" height="858" loading="lazy"
+             alt="The Screen tab: two monitors side by side, the right one selected and showing the menu, with its resolution and rotation.">
+        <figcaption><b>Screen</b>Place the monitors, set resolution and rotation, choose which one shows the menu and when the screen turns off.</figcaption>
+      </figure>
+      <figure class="panel p-keyboard">
+        <img src="img/settings-keyboard.webp" width="1872" height="858" loading="lazy"
+             alt="The Keyboard tab with the list of layouts open: Dari, Dhivehi, Dutch, Dzongkha and several English layouts. Below it Variant, CapsLock acts as Ctrl, Compose key and a field to try the keys.">
+        <figcaption><b>Keyboard</b>New in 4.4.0. Layout and variant, CapsLock as Ctrl, the Compose key, and a field to try them in.</figcaption>
+      </figure>
+      <figure class="panel p-status">
+        <img src="img/settings-status.webp" width="1872" height="858" loading="lazy"
+             alt="The Status tab: a list of status elements with tick boxes, sizes and Up and Down buttons, above a preview of the status area.">
+        <figcaption><b>Status</b>Choose what the status area shows, in which order and how large. The preview shows the result.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2>What you get</h2>
+    <p class="lede">A small Ubuntu system for machines that only have to reach a remote desktop. It keeps nothing on the PC and asks for no care between upgrades.</p>
+
+    <ul class="tiles">
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></svg>
+        <h3>Runs in RAM</h3>
+        <p>The whole system loads into memory. The disk inside the PC is never written, and every boot starts from the same clean image.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="7" r="1"/><circle cx="4" cy="20" r="1"/><path d="M4.7 19.3 19 5"/><path d="m21 3-3 1 2 2Z"/><path d="M9.26 7.68 5 12l2 5"/><path d="m10 14 5 2 3.5-3.5"/><path d="m18 12 1-1 1 1-1 1Z"/></svg>
+        <h3>Stick or network</h3>
+        <p>Boot from a USB stick, or from a boot server over the network with no stick at all. Both run the same image.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        <h3>Upgrades with a way back</h3>
+        <p>A new release lands beside the running one, checked against its checksums. The previous version stays on the stick and starts from the boot prompt.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v8"/><path d="m16 6-4 4-4-4"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/></svg>
+        <h3>Your home comes back</h3>
+        <p>Restart and Power off save the home directory to the stick, or to the boot server. The next boot restores it before the session starts.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
+        <h3>Settings on the screen</h3>
+        <p>WiFi and wired network, keyboard layout, monitors and the status area are set in the menu. A change applies at once and travels with the home.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/></svg>
+        <h3>Add-ons you tick</h3>
+        <p>ThinLinc and OxuLnk are not in the image. Tick one and ThinFloe fetches it from its source, keeps it on the stick and looks for a new version every day.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+        <h3>No password ships</h3>
+        <p>The image holds no login password and no root login. Nobody gets in over SSH until you set a password on that machine.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></svg>
+        <h3>Ubuntu underneath</h3>
+        <p>Ubuntu 26.04 with a Wayland session, a terminal, SSH and WireGuard. Add your own tile to the menu with one small file.</p>
+      </li>
+    </ul>
+
+    <dl class="status">
+      <div><dt>Download</dt><dd>493 MB</dd></div>
+      <div><dt>RAM in use</dt><dd>0.7 to 1.3 GiB</dd></div>
+      <div><dt>Boot</dt><dd>UEFI and BIOS</dd></div>
+      <div><dt>Licence</dt><dd>MIT</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="band" id="install">
+  <div class="wrap">
+    <h2>Put it on a stick</h2>
+    <p class="lede">Any USB stick with 4 GB or more will do. Writing the image erases the stick.</p>
+
+    <div class="log">
+      <ol>
+        <li>
+          <span class="what">Download <code>thinfloe-usb.img.zst</code> from the <a href="https://github.com/oposs/thinfloe/releases/latest">latest release</a>.</span>
+        </li>
+        <li>
+          <span class="what">Find the stick. Run this before and after you plug it in; the new disk is yours.</span>
+          <div class="cmd"><code>lsblk</code><button type="button" data-copy>Copy</button></div>
+        </li>
+        <li>
+          <span class="what">Write the image. Put the name of your stick in place of <code>sdX</code>.</span>
+          <div class="cmd"><code>zstd -dc thinfloe-usb.img.zst | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</code><button type="button" data-copy>Copy</button></div>
+        </li>
+        <li>
+          <span class="what">Boot the PC from the stick. Later upgrades come from the Upgrade tile.</span>
+        </li>
+      </ol>
+    </div>
+    <p class="aside">For network boot, building the image yourself and everything else, read the <a href="https://github.com/oposs/thinfloe#readme">README</a>. What changed in each release is in the <a href="https://github.com/oposs/thinfloe/blob/main/CHANGES.md">changelog</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>ThinFloe is free software under the MIT licence, made by <a href="https://www.oetiker.ch">OETIKER+PARTNER AG</a>.</p>
+    <nav aria-label="Links">
+      <a href="https://github.com/oposs/thinfloe">GitHub</a>
+      <a href="https://github.com/oposs/thinfloe/releases">Releases</a>
+      <a href="https://github.com/oposs/thinfloe/issues">Issues</a>
+      <a href="fonts/Geo-OFL.txt">Geo font licence</a>
+      <a href="fonts/Ubuntu-UFL.txt">Ubuntu font licence</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var video = document.getElementById("boot");
+  var water = document.getElementById("water");
+  var canvas = document.getElementById("mirror");
+  var still = document.documentElement.classList.contains("still") ||
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (still) {
+    // The picture stands in for the movie; do not fetch it.
+    video.removeAttribute("autoplay");
+    video.pause();
+    video.preload = "none";
+  } else if (video.play && canvas.getContext) {
+    // The waterline is the boot bar: it fills as the movie runs. The
+    // reflection under it is the movie's own picture.
+    var ctx = canvas.getContext("2d");
+    var last = 0;
+    var tick = function (now) {
+      if (now - last > 60 && video.readyState >= 2) {
+        last = now;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        if (video.duration) water.style.transform = "scaleX(" + (video.currentTime / video.duration) + ")";
+      }
+      requestAnimationFrame(tick);
+    };
+    canvas.style.visibility = "hidden";
+    video.addEventListener("playing", function () { canvas.style.visibility = ""; }, { once: true });
+    requestAnimationFrame(tick);
+  }
+
+  // Copy buttons
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = b.previousElementSibling.textContent;
+      var ok = function () {
+        b.textContent = "Copied"; b.classList.add("done");
+        setTimeout(function () { b.textContent = "Copy"; b.classList.remove("done"); }, 1600);
+      };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok);
+    });
+  });
+})();
+</script>
+</body>
+</html>

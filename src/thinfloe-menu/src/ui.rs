@@ -6533,6 +6533,30 @@ mod tests {
         shot(&monitor_settings(hand), "screen-monitors-hand.ppm", (1920, 1080), 1.0);
     }
 
+    /// The Network and Screen tabs as the web page shows them, at the size
+    /// and scale of its pictures from a running system (site/README.md).
+    #[test]
+    #[ignore]
+    fn shot_page_pictures() {
+        let mut two = two_monitors();
+        two.event(MonEvent::Select("DP-1".into()), Instant::now());
+        two.event(MonEvent::MenuHere, Instant::now());
+        shot(&monitor_settings(two), "page-screen.ppm", (2880, 1920), 2.0);
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Network;
+        menu.network = two_networks();
+        menu.network.status_done(Ok(vec![crate::nettab::Iface {
+            name: "enp1s0".into(),
+            kind: crate::nettab::IfKind::Wired,
+            state: crate::nettab::IfState::Connected,
+            addresses: vec!["192.168.1.10/24".into()],
+            ssid: None,
+            signal_dbm: None,
+            handshake_age_s: None,
+        }]));
+        shot(&menu, "page-network.ppm", (2880, 1920), 2.0);
+    }
+
     /// One element by itself at twice its size, cells `cell_h` high.
     fn shot_element(
         name: &str,
