@@ -133,12 +133,11 @@ and `--env-only` run it. The check takes about 30 ms.
 `test-labwc-runtime.sh` starts labwc with `fr`/`de_nodeadkeys` in the start-up
 environment and asserts that the session runs with `fr` and no variant.
 
-### Left to verify on hardware
+### Verified on hardware
 
-- The new keymap reaches the menu and other Wayland clients at once.
-- An open ThinLinc client follows the new layout. If it does not, the note on
-  the Keyboard tab becomes "ThinLinc picks up the change when it starts
-  again" and the result is recorded here.
+The owner tested the live apply on hardware on 2026-11-15: the new keymap
+reaches the menu and other Wayland clients at once, and an open ThinLinc
+client follows the new layout.
 
 ## Screen blanking had to be rebuilt after the X11 removal
 
