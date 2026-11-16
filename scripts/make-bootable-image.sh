@@ -80,5 +80,10 @@ $MD ::tl
 $CP "$ROOTFS_DIR/vmlinuz" ::tl/vmlinuz
 $CP "$ROOTFS_DIR/initrd.img" ::tl/initrd.img
 $CP "$ROOTFS_DIR/ramroot.sqsh" ::tl/ramroot.sqsh
+# The release on the stick, read by the Upgrade screen of another
+# ThinFloe; thinfloe-upgrade writes it again with every upgrade.
+if [[ -r "$ROOTFS_DIR/version" ]]; then
+    $CP "$ROOTFS_DIR/version" ::tl/version
+fi
 
 log_success "Bootable image created: $(format_bytes "$(stat -c%s "$IMG")")"

@@ -212,7 +212,7 @@ class TestDriveList(unittest.TestCase):
         self.assertEqual(set(rows[0]), {
             "device", "model", "size_bytes", "serial", "transport", "removable",
             "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
-            "efi_partition", "examined", "id", "fits"})
+            "efi_partition", "examined", "id", "fits", "version"})
 
 class TestStreamImage(unittest.TestCase):
     SIZE = 70 * MIB
@@ -1826,6 +1826,20 @@ class TestNonBootRotation(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             ui._switch_release(self.drive, str(self.esp), str(self.fw))
 
+    def test_switch_release_writes_version(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            ui._switch_release(self.drive, str(self.esp), str(self.fw), version="4.5.0")
+        self.assertEqual((self.esp / "tl" / "version").read_text(), "4.5.0\n")
+
+    def test_switch_release_without_version_writes_none(self):
+        self.switch()
+        self.assertFalse((self.esp / "tl" / "version").exists())
+
+    def test_pinned_version(self):
+        self.assertEqual(ui.pinned_version(f"{ui.RELEASE_DOWNLOAD}/v4.5.0"), "4.5.0")
+        self.assertIsNone(ui.pinned_version("https://example.org/thinfloe"))
+        self.assertIsNone(ui.pinned_version(f"{ui.RELEASE_DOWNLOAD}/v4.5.0/x y"))
+
     def test_copy_failure_leaves_tl(self):
         copy = ui._copy_one
         def fake(src, *a, **kw):
@@ -1967,6 +1981,64 @@ class TestExamineMounted(unittest.TestCase):
         self.assertTrue(d.is_thinfloe)
         self.assertTrue(d.mounted)
         self.assertEqual([c for c in self.mount_calls if c[0] == "mount"], [])
+
+    def mounted_sdb(self, files):
+        esp = os.path.join(self.tmp.name, "media")
+        make_thinfloe_esp(esp)
+        for rel, data in files.items():
+            path = Path(esp) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return self.enum([self.disk("sdb", None, esp)], boot=None,
+                         efi={"/dev/sdb": "/dev/sdb1"})["/dev/sdb"]
+
+    def test_drives_reports_stick_version(self):
+        d = self.mounted_sdb({"tl/version": b"4.5.0\n"})
+        self.assertEqual(d.version, "4.5.0")
+        row = json.loads(ui.drives_json([d], None))[0]
+        self.assertEqual(row["version"], "4.5.0")
+
+    def test_drives_prefers_tl_new_version(self):
+        d = self.mounted_sdb({"tl/version": b"4.4.0\n", "tl.new/version": b"4.5.0\n"})
+        self.assertEqual(d.version, "4.5.0")
+
+    def test_drives_without_version_file_is_null(self):
+        d = self.mounted_sdb({})
+        self.assertIsNone(d.version)
+        self.assertIsNone(json.loads(ui.drives_json([d], None))[0]["version"])
+
+    def test_drives_version_junk_is_null(self):
+        for junk in (b"\xff\x00garbage\n", b"4" * (10 * MIB), b"\n", b"4.5.0 extra\n"):
+            with self.subTest(junk=junk[:12]):
+                self.tmp.cleanup()
+                self.tmp = tempfile.TemporaryDirectory()
+                self.assertIsNone(self.mounted_sdb({"tl/version": junk}).version)
+
+    def test_drives_boot_stick_falls_back_to_installed(self):
+        esp = os.path.join(self.tmp.name, "efi")
+        make_thinfloe_esp(esp)
+        installed = os.path.join(self.tmp.name, "installed")
+        Path(installed).write_text("4.4.0\n")
+        with mock.patch.object(ui, "BOOT_EFI_MOUNT", esp), \
+             mock.patch.object(ui, "INSTALLED_VERSION_FILE", installed), \
+             mock.patch.object(ui.os.path, "ismount", side_effect=lambda p: p == esp):
+            d = self.enum([self.disk("vda", None, esp, tran=None)],
+                          efi={"/dev/vda": "/dev/vda1"})["/dev/vda"]
+        self.assertEqual(d.version, "4.4.0")
+
+    def test_boot_stick_file_wins_over_installed(self):
+        esp = os.path.join(self.tmp.name, "efi")
+        make_thinfloe_esp(esp)
+        (Path(esp) / "tl.new").mkdir()
+        (Path(esp) / "tl.new" / "version").write_text("4.5.0\n")
+        installed = os.path.join(self.tmp.name, "installed")
+        Path(installed).write_text("4.4.0\n")
+        with mock.patch.object(ui, "BOOT_EFI_MOUNT", esp), \
+             mock.patch.object(ui, "INSTALLED_VERSION_FILE", installed), \
+             mock.patch.object(ui.os.path, "ismount", side_effect=lambda p: p == esp):
+            d = self.enum([self.disk("vda", None, esp, tran=None)],
+                          efi={"/dev/vda": "/dev/vda1"})["/dev/vda"]
+        self.assertEqual(d.version, "4.5.0")
 
     def test_failed_umount_keeps_the_cleanup_entry(self):
         # F8: atexit must try the umount again.
@@ -2343,6 +2415,7 @@ class TestLock(TestBatchRefusals):
         self.assertEqual(rows[0]["device"], "/dev/sdb")
         self.assertFalse(rows[0]["examined"])
         self.assertEqual(mounts, [])
+        self.assertIsNone(rows[0]["version"])
 
     def test_own_check_mounts_are_not_mounted(self):
         node = {"mountpoints": [None], "children": [

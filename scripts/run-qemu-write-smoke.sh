@@ -284,6 +284,15 @@ fi
 
 # Console options and the stick id, as the two-sticks smoke does for LABEL current.
 ESP_A=$(esp_of "$DISK_A") || exit 2
+
+# The release next to the kernel, which the Upgrade screen reads.
+A_VERSION=$(mtype -i "$ESP_A" ::tl/version 2>/dev/null | tr -d '\r\n')
+BOOT_VERSION=$(mtype -i "$ESP" ::tl/version 2>/dev/null | tr -d '\r\n')
+if [[ -n "$A_VERSION" && "$A_VERSION" == "$BOOT_VERSION" ]]; then
+    ok "the written stick carries tl/version $A_VERSION"
+else
+    bad "tl/version: written '$A_VERSION', boot disk '$BOOT_VERSION' (need one and the same)"
+fi
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
     mtype -i "$ESP_A" "$cfg" | tr -d '\r' >"$tmp/cfg" || { bad "cannot read $cfg on the written stick"; continue; }
     # The tool's own stamp, before this script edits the file.
