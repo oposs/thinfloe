@@ -214,6 +214,111 @@ class TestDriveList(unittest.TestCase):
             "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
             "efi_partition", "examined", "id", "fits", "version"})
 
+CHANGES = (REPO / "CHANGES.md").read_text()
+
+
+class TestNotes(unittest.TestCase):
+    """thinfloe-upgrade notes: the CHANGES.md sections of a version range."""
+
+    def run_notes(self, argv, text=CHANGES, error=""):
+        out, err = io.StringIO(), io.StringIO()
+        urls = []
+
+        def fetch(url):
+            urls.append(url)
+            return (text, error)
+        with mock.patch.object(ui, "_fetch_notes", side_effect=fetch), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ui.batch_main(["notes"] + argv)
+        return rc, out.getvalue(), err.getvalue(), urls
+
+    def test_cut_notes_range(self):
+        cut = ui.cut_notes(CHANGES, "4.2.0", "4.4.0")
+        self.assertIn("## 4.4.0", cut)
+        self.assertIn("## 4.3.0", cut)
+        self.assertNotIn("## 4.2.0", cut)
+        self.assertNotIn("Unreleased", cut)
+        self.assertTrue(cut.startswith("## 4.4.0"))
+
+    def test_cut_notes_without_from_takes_all_up_to_target(self):
+        cut = ui.cut_notes(CHANGES, None, "4.3.0")
+        self.assertTrue(cut.startswith("## 4.3.0"))
+        self.assertIn("## 4.2.0", cut)
+        self.assertNotIn("## 4.4.0", cut)
+
+    def test_cut_notes_target_only(self):
+        cut = ui.cut_notes(CHANGES, None, "4.3.0", only=True)
+        self.assertTrue(cut.startswith("## 4.3.0"))
+        self.assertNotIn("## 4.4.0", cut)
+        self.assertNotIn("## 4.2.0", cut)
+
+    def test_cut_notes_dev_from(self):
+        cut = ui.cut_notes(CHANGES, "4.3.0-dev+abc1234.dirty", "4.4.0")
+        self.assertTrue(cut.startswith("## 4.4.0"))
+        self.assertNotIn("## 4.3.0", cut)
+
+    def test_cut_notes_old_from_takes_all(self):
+        cut = ui.cut_notes(CHANGES, "3.9.1", "4.4.0")
+        self.assertIn("## 4.2.0", cut)
+
+    def test_cut_notes_without_target_heading_is_none(self):
+        self.assertIsNone(ui.cut_notes(CHANGES, None, "9.9.9"))
+        self.assertIsNone(ui.cut_notes("<html>Not Found</html>", None, "4.4.0"))
+
+    def test_notes_prints_the_range(self):
+        rc, out, err, urls = self.run_notes(["--from", "4.3.0", "--to", "4.4.0"])
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(out.startswith("## 4.4.0"))
+        self.assertNotIn("## 4.3.0", out)
+
+    def test_notes_only_prints_the_target(self):
+        rc, out, err, _ = self.run_notes(["--to", "4.3.0", "--only"])
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(out.startswith("## 4.3.0"))
+        self.assertNotIn("## 4.2.0", out)
+
+    def test_notes_only_and_from_conflict(self):
+        rc, _, _, urls = self.run_notes(["--to", "4.3.0", "--only", "--from", "4.2.0"])
+        self.assertEqual((rc, urls), (2, []))
+
+    def test_notes_fetch_url_pins_tag(self):
+        _, _, _, urls = self.run_notes(["--to", "4.4.0"])
+        self.assertEqual(urls, ["https://raw.githubusercontent.com/oposs/thinfloe/v4.4.0/CHANGES.md"])
+
+    def test_notes_empty_range_exits_3(self):
+        rc, out, _, _ = self.run_notes(["--from", "4.4.0", "--to", "4.4.0"])
+        self.assertEqual((rc, out), (3, ""))
+        rc, out, _, _ = self.run_notes(["--from", "4.5.0", "--to", "4.4.0"])
+        self.assertEqual((rc, out), (3, ""))
+
+    def test_notes_no_sections_fails(self):
+        rc, out, err, _ = self.run_notes(["--to", "4.4.0"], text="<html>Not Found</html>")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("4.4.0", err)
+
+    def test_notes_fetch_failure_fails(self):
+        rc, out, err, _ = self.run_notes(["--to", "4.4.0"], text=None, error="could not connect")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("could not connect", err)
+
+    def test_notes_too_big_fails(self):
+        rc, out, err, _ = self.run_notes(["--to", "4.4.0"], text="x" * (ui.NOTES_BYTES + 1))
+        self.assertEqual((rc, out), (1, ""))
+        self.assertTrue(err.strip())
+
+    def test_notes_rejects_bad_version(self):
+        for argv in (["--to", "x y"], ["--to", "4.4.0", "--from", "-rf"], []):
+            with self.subTest(argv=argv):
+                rc, _, _, urls = self.run_notes(argv)
+                self.assertEqual(rc, 2)
+                self.assertEqual(urls, [])
+
+    def test_notes_needs_no_root(self):
+        with mock.patch.object(ui, "ensure_root", side_effect=AssertionError("root")):
+            rc, _, err, _ = self.run_notes(["--to", "4.4.0"])
+        self.assertEqual(rc, 0, err)
+
+
 class TestStreamImage(unittest.TestCase):
     SIZE = 70 * MIB
 
