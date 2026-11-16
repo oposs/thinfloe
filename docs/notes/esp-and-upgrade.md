@@ -75,7 +75,9 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   Each row also has `version`: `tl.new/version` while an upgrade is staged,
   else `tl/version`, else `/etc/thinfloe/version` for the boot stick, else
   null; a value outside `VERSION_RE` (up to 32 letters, digits, `.`, `+`
-  and `-`) is null.
+  and `-`), or one that does not start with `X.Y.Z`, is null: `notes
+  --from foo` stops with a usage error, and the menu showed its usage line
+  as the reason.
   `scripts/make-bootable-image.sh` copies the rootfs `version` to
   `::tl/version`, and an upgrade from a release writes the pinned tag's
   version into `tl.new/version`, which `tf_finalize_upgrade` rotates with

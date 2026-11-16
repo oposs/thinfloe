@@ -32,7 +32,9 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   known version gives `--from <version>`; a stick without one gives every
   release up to the target and the line "The version on this stick is not
   known"; Erase and install, or no drive chosen, gives `--only` (the target
-  alone). There is no button while an address is entered under Advanced:
+  alone). A stick version or target that does not start with `X.Y.Z`
+  counts as unknown, or gives no button, since `notes` refuses it. There is
+  no button while an address is entered under Advanced:
   the notes are fetched from the tag of the default release only. Exit 3
   shows "No changes between A and B.", a failure the tool's last stderr line.
   The dialog is modal, closes with Close or Escape, and its list scrolls

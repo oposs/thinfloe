@@ -599,7 +599,14 @@ def _read_version_file(path: str) -> Optional[str]:
     if len(data) > STICK_VERSION_BYTES:
         return None
     line = data.decode("utf-8", "replace").split("\n", 1)[0].strip()
-    return line if re.fullmatch(VERSION_RE, line) else None
+    return line if _stick_version_ok(line) else None
+
+
+def _stick_version_ok(version: str) -> bool:
+    """A version the menu can pass to notes --from: VERSION_RE alone let
+    "foo" through, and notes then failed with a usage line instead of
+    showing every release as for an unknown version."""
+    return bool(re.fullmatch(VERSION_RE, version)) and _version_key(version) is not None
 
 
 def read_stick_version(root: str) -> Optional[str]:
@@ -830,6 +837,8 @@ def enumerate_drives(include_internal: bool = False,
             # A stick written before the file existed: the running system
             # is the one on it.
             version = read_installed_version() or None
+            if version is not None and not _stick_version_ok(version):
+                version = None
 
         drives.append(DriveInfo(
             device=device,

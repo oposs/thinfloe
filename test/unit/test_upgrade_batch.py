@@ -2117,7 +2117,9 @@ class TestExamineMounted(unittest.TestCase):
         self.assertIsNone(json.loads(ui.drives_json([d], None))[0]["version"])
 
     def test_drives_version_junk_is_null(self):
-        for junk in (b"\xff\x00garbage\n", b"4" * (10 * MIB), b"\n", b"4.5.0 extra\n"):
+        # foo and 4.5 pass VERSION_RE, but notes --from refuses them.
+        for junk in (b"\xff\x00garbage\n", b"4" * (10 * MIB), b"\n", b"4.5.0 extra\n",
+                     b"foo\n", b"4.5\n"):
             with self.subTest(junk=junk[:12]):
                 self.tmp.cleanup()
                 self.tmp = tempfile.TemporaryDirectory()
@@ -2134,6 +2136,18 @@ class TestExamineMounted(unittest.TestCase):
             d = self.enum([self.disk("vda", None, esp, tran=None)],
                           efi={"/dev/vda": "/dev/vda1"})["/dev/vda"]
         self.assertEqual(d.version, "4.4.0")
+
+    def test_boot_stick_installed_not_comparable_is_null(self):
+        esp = os.path.join(self.tmp.name, "efi")
+        make_thinfloe_esp(esp)
+        installed = os.path.join(self.tmp.name, "installed")
+        Path(installed).write_text("foo\n")
+        with mock.patch.object(ui, "BOOT_EFI_MOUNT", esp), \
+             mock.patch.object(ui, "INSTALLED_VERSION_FILE", installed), \
+             mock.patch.object(ui.os.path, "ismount", side_effect=lambda p: p == esp):
+            d = self.enum([self.disk("vda", None, esp, tran=None)],
+                          efi={"/dev/vda": "/dev/vda1"})["/dev/vda"]
+        self.assertIsNone(d.version)
 
     def test_boot_stick_file_wins_over_installed(self):
         esp = os.path.join(self.tmp.name, "efi")
