@@ -306,6 +306,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
   then a solid scroll bar shows (egui's floating default drew none until
   hovered). `the_choose_blocks_fit_above_the_footer` and
   `the_footer_follows_the_page_and_is_pinned_only_on_overflow` guard this.
+  On opening with nothing chosen, the screen chooses this machine's stick
+  (Upgrade) as soon as a drive list shows it examined; a click on a drive
+  ends that for the opening (`prefer_boot` in `upgrade.rs`).
   After an upgrade of this machine's stick the outcome stays when the screen
   is opened again, for Restart now; Write another stick goes back to Choose
   with no drive chosen. Any other outcome resets to Choose on opening.
