@@ -92,7 +92,7 @@ cannot parse TOML, read files the menu derives from it into `generated/`.
 | Path | Written by | Read by | Holds |
 |---|---|---|---|
 | `config.toml` | the menu | the menu | `[keyboard]`, `[screen]`, `[status]`, `[monitors]`, `[network]`, and the migration report until dismissed |
-| `generated/environment` | the menu | the session profile, the labwc config composer | `XKB_DEFAULT_*` |
+| `generated/environment` | the menu | the session profile, the labwc config composer | `XKB_DEFAULT_*`, `THINFLOE_NUMLOCK=on\|off` |
 | `generated/screen` | the menu | `thinfloe-session` | `idle_timeout=<seconds>` |
 | `generated/kanshi`, `kanshi.prev`, `layout-unconfirmed` | the menu | `thinfloe-session`, kanshi | the monitor arrangement and the undo state of an unconfirmed one |
 | `generated/wifi.yaml`, `ethernet.yaml` | the menu | the initramfs (`install_local_network()`), `thinfloe-network` | netplan, mode 600 |

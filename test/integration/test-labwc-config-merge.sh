@@ -313,6 +313,70 @@ else
     bad "hanging checker: rc=$rc took=${took}s env=$(cat "$OUT9/environment" 2>/dev/null)"
 fi
 
+# --- Num Lock ----------------------------------------------------------------
+# THINFLOE_NUMLOCK=off in generated/environment: rc.xml links a copy that
+# says off; on, missing, or set only in the user's file: the system link.
+NLSYS="$WORK/nl-system"
+mkdir -p "$NLSYS"
+cp "$SYSDIR/environment" "$SYSDIR/themerc-override" "$NLSYS/"
+printf '%s\n' '<labwc_config>' '  <keyboard>' '    <numlock>on</numlock>' \
+    '    <repeatDelay>500</repeatDelay>' '  </keyboard>' '</labwc_config>' >"$NLSYS/rc.xml"
+NLGEN="$WORK/nl-gen"
+NLUSER="$WORK/nl-user"
+: >"$NLUSER"
+NLMANAGED="$WORK/nl-managed"
+printf 'XKB_DEFAULT_LAYOUT\nTHINFLOE_NUMLOCK\n' >"$NLMANAGED"
+nl_compose() { TF_MANAGED_KEYS="$NLMANAGED" "$HELPER" "$@"; }
+
+printf 'XKB_DEFAULT_LAYOUT=de\nTHINFLOE_NUMLOCK=off\n' >"$NLGEN"
+OUTN="$WORK/nl-off"
+if nl_compose "$NLSYS" "$NLGEN" "$NLUSER" "$OUTN" &&
+    [[ -L "$OUTN/rc.xml" && "$(readlink "$OUTN/rc.xml")" == "$OUTN/.numlock/rc.xml" ]] &&
+    grep -q '<numlock>off</numlock>' "$OUTN/rc.xml" &&
+    ! grep -q '<numlock>on' "$OUTN/rc.xml" &&
+    diff <(grep -v numlock "$OUTN/rc.xml") <(grep -v numlock "$NLSYS/rc.xml") >/dev/null; then
+    ok "Num Lock off: rc.xml links a copy that says off, otherwise unchanged"
+else
+    bad "Num Lock off: rc.xml is $(readlink "$OUTN/rc.xml"): $(cat "$OUTN/rc.xml" 2>/dev/null)"
+fi
+
+# A system rc.xml without a <numlock> line gets one in <keyboard>.
+NLSYS2="$WORK/nl-system2"
+mkdir -p "$NLSYS2"
+cp "$NLSYS/environment" "$NLSYS/themerc-override" "$NLSYS2/"
+grep -v numlock "$NLSYS/rc.xml" >"$NLSYS2/rc.xml"
+OUTN2="$WORK/nl-insert"
+if nl_compose "$NLSYS2" "$NLGEN" "$NLUSER" "$OUTN2" &&
+    [[ "$(sed -n '/<keyboard>/,/<\/keyboard>/p' "$OUTN2/rc.xml" | grep -c '<numlock>off</numlock>')" -eq 1 ]]; then
+    ok "Num Lock off: a missing <numlock> line is added to <keyboard>"
+else
+    bad "Num Lock off without a system line: $(cat "$OUTN2/rc.xml" 2>/dev/null)"
+fi
+
+for v in on missing user; do
+    case $v in
+        on) printf 'THINFLOE_NUMLOCK=on\n' >"$NLGEN"; : >"$NLUSER" ;;
+        missing) printf 'XKB_DEFAULT_LAYOUT=de\n' >"$NLGEN"; : >"$NLUSER" ;;
+        user) printf 'XKB_DEFAULT_LAYOUT=de\n' >"$NLGEN"; printf 'THINFLOE_NUMLOCK=off\n' >"$NLUSER" ;;
+    esac
+    OUTV="$WORK/nl-$v"
+    if nl_compose "$NLSYS" "$NLGEN" "$NLUSER" "$OUTV" &&
+        [[ "$(readlink "$OUTV/rc.xml")" == "$NLSYS/rc.xml" && ! -e "$OUTV/.numlock" ]]; then
+        ok "Num Lock $v: rc.xml links the system file"
+    else
+        bad "Num Lock $v: rc.xml is $(readlink "$OUTV/rc.xml")"
+    fi
+done
+
+# --env-only never touches rc.xml, even when the value changed to off.
+printf 'THINFLOE_NUMLOCK=off\n' >"$NLGEN"; : >"$NLUSER"
+if nl_compose --env-only "$NLSYS" "$NLGEN" "$NLUSER" "$WORK/nl-on" &&
+    [[ "$(readlink "$WORK/nl-on/rc.xml")" == "$NLSYS/rc.xml" ]]; then
+    ok "Num Lock: --env-only leaves rc.xml alone"
+else
+    bad "Num Lock: --env-only changed rc.xml to $(readlink "$WORK/nl-on/rc.xml")"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - labwc config merge helper"

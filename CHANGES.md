@@ -4,6 +4,8 @@
 
 ### New
 
+- Settings -> Keyboard has a switch "Num Lock on at start". Turn it off for a small keyboard with a number pad over the letter keys, where Num Lock on types digits instead of letters. It takes effect at the next start; until now Num Lock was always on.
+
 ### Changed
 
 ### Fixed
