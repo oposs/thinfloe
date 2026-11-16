@@ -25,6 +25,22 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   again; before that byte a cancel says "Cancelled before anything was
   written. The stick is as it was." After a successful write, a step the tool
   skipped is left out and one it began without `@done` is drawn done.
+- What's new: a button left of Check now runs `thinfloe-upgrade notes` and
+  opens a dialog with the notes as headings (`4.4.0 · New`, one per `###`
+  group) and bullets, backticks removed (`notes.rs`, no Markdown renderer).
+  The range comes from `Upgrade::notes_range`: Upgrade of a stick with a
+  known version gives `--from <version>`; a stick without one gives every
+  release up to the target and the line "The version on this stick is not
+  known"; Erase and install, or no drive chosen, gives `--only` (the target
+  alone). There is no button while an address is entered under Advanced:
+  the notes are fetched from the tag of the default release only. Exit 3
+  shows "No changes between A and B.", a failure the tool's last stderr line.
+  The dialog is modal, closes with Close or Escape, and its list scrolls
+  inside 1280x720. A result is dropped unless it answers the load that runs
+  now (same from, to and `--only`), so a late answer after Close is ignored.
+  The list's ScrollArea sets `min_scrolled_height` as well as `max_height`:
+  without it the anchored dialog grew a few points each frame, and a click
+  on Close missed for the first frames.
 - Tiles: the shipped tiles are `.desktop` files in `overlay/etc/thinfloe/menu/`,
   outside `$HOME` for the reason `rc.xml` is. Per-machine tiles go in
   `~/.config/thinfloe/menu/*.desktop`: at most 32 files, and they may only `run`

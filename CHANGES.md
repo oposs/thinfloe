@@ -4,6 +4,7 @@
 
 ### New
 
+- The Upgrade screen has a "What's new" button beside Check now. It shows the release notes of every version after the one on the chosen stick up to the release that will be written, or for a fresh install the notes of that release alone; with an address entered under Advanced there is no button. Sticks written or upgraded from now on keep their version in `tl/version`, and for an older stick the notes of all releases up to the new one are shown.
 - Settings -> Keyboard has a switch "Num Lock on at start". Turn it off for a small keyboard with a number pad over the letter keys, where Num Lock on types digits instead of letters. It takes effect at the next start; until now Num Lock was always on.
 
 ### Changed
