@@ -228,6 +228,17 @@ setting was saved, labwc does not use it yet: ..."). When
 the move of the settings failed at this boot, the tab is read-only like
 Network, Screen and Status.
 
+"Num Lock on at start" (default on; off suits small keyboards with a number
+pad over the letter keys) is `numlock` in `[keyboard]` and
+`THINFLOE_NUMLOCK=on|off` in `generated/environment`. labwc 0.9.3 sets Num
+Lock from `<numlock>` in `rc.xml` only when a keyboard appears (at start and
+on hot-plug, `new_keyboard()` in `src/seat.c`), never on `--reconfigure`, so
+a live apply that changed it says "Num Lock follows at the next start." At
+session start, `thinfloe-compose-labwc-config` links `rc.xml` to a copy in
+`.numlock/` of the composed directory that says off; `labwc-scale` scales
+that copy. Guards: `test-labwc-config-merge.sh`, `test-labwc-scale.sh`, the
+`keyboard`, `generated` and `convert` tests.
+
 labwc 0.9.3 segfaults at start (status 139, before the session runs) on a
 layout and variant XKB cannot build, so no value reaches
 `generated/environment` unchecked. The render of that file refuses a

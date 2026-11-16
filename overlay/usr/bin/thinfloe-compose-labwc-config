@@ -190,3 +190,27 @@ done
 
 merged_environment >"$OUT_DIR/environment"
 check_keyboard "$OUT_DIR/environment"
+
+# Num Lock: labwc sets it from <numlock> in rc.xml only when a keyboard
+# appears (at start, on hot-plug), never on --reconfigure, so only the full
+# compose at session start acts on it. THINFLOE_NUMLOCK=off (the menu's
+# Keyboard tab, a managed key) links rc.xml to a copy in .numlock/ that says
+# off; labwc-scale reads its source through that link. Any other value
+# keeps the system link. A copy that cannot be written keeps it too.
+if [ "$(env_value THINFLOE_NUMLOCK "$OUT_DIR/environment")" = off ] && [ -r "$SYSTEM_DIR/rc.xml" ]; then
+    nl_dir=$OUT_DIR/.numlock
+    if mkdir -p "$nl_dir" 2>/dev/null &&
+        awk '
+            /<numlock>/ { sub(/<numlock>[^<]*<\/numlock>/, "<numlock>off</numlock>"); seen = 1 }
+            /<\/keyboard>/ && !seen { match($0, /^[ \t]*/); print substr($0, 1, RLENGTH) "  <numlock>off</numlock>"; seen = 1 }
+            { print }
+        ' "$SYSTEM_DIR/rc.xml" >"$nl_dir/.rc.xml.tmp" &&
+        mv -f "$nl_dir/.rc.xml.tmp" "$nl_dir/rc.xml" &&
+        ln -sfn "$nl_dir/rc.xml" "$OUT_DIR/rc.xml"; then
+        :
+    else
+        echo "$me: cannot write the Num Lock rc.xml; Num Lock stays as the system file says" >&2
+        rm -rf "$nl_dir"
+        ln -sfn "$SYSTEM_DIR/rc.xml" "$OUT_DIR/rc.xml"
+    fi
+fi

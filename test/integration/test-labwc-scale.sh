@@ -368,4 +368,19 @@ waitfor "retry: .applied holds the name after the retry" applied_is HDMI-A-1
 rule_has HDMI-A-1 && ok "retry: rule in place" || bad "retry: rule wrong"
 stop
 
+# Num Lock off in the composed dir: the scaled copy keeps it.
+setup
+printf 'THINFLOE_NUMLOCK=off\n' >"$WORK/gen-env"
+rm -rf "$D"
+"$COMPOSE" "$SYSDIR" "$WORK/gen-env" "$WORK/home-env" "$D"
+echo 2 >"$WORK/scale"
+run
+if [[ $rc -eq 0 && -f $D/rc.xml && ! -L $D/rc.xml ]] &&
+    grep -q '<numlock>off</numlock>' "$D/rc.xml" &&
+    [[ $(grep -c '<font place=.*size="20"' "$D/rc.xml") -eq 2 ]]; then
+    ok "Num Lock off: the scaled rc.xml keeps it"
+else
+    bad "Num Lock off: scaled rc.xml: $(grep -n numlock "$D/rc.xml")"
+fi
+
 exit $fail
