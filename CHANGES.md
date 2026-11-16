@@ -8,6 +8,8 @@
 
 ### Changed
 
+- The Upgrade screen now opens with this machine's stick already chosen and Upgrade selected, so the confirm button is ready without a click on the drive. A click on another drive still picks that one, and after Write another stick nothing is chosen.
+
 ### Fixed
 - `sudo thinfloe-password --clear` now also removes the old password hash that the 4.4.0 move of the settings left in `~/cfg-attic/.thinfloe-password`. Before, that copy stayed in the saved home on the stick, or on the boot server, after the password was cleared.
 - `sudo thinfloe-password --clear` stopped with "rm: cannot remove ... Is a directory" and left the password in force when a folder had the name of one of the password files. It now locks the account in every case and names what it could not remove.

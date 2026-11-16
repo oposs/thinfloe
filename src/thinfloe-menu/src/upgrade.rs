@@ -159,6 +159,10 @@ pub struct Upgrade {
     job: Option<Job>,
     /// The version the finished write installed.
     done_version: Option<String>,
+    /// Choose this machine's stick when a list shows it: set when the
+    /// screen opens with nothing chosen, cleared once it is chosen or the
+    /// person chooses a drive.
+    prefer_boot: bool,
 }
 
 impl Default for Upgrade {
@@ -198,6 +202,7 @@ impl Upgrade {
             check_source: None,
             job: None,
             done_version: None,
+            prefer_boot: false,
         }
     }
 
@@ -211,6 +216,7 @@ impl Upgrade {
             self.reset_finished(now);
         }
         self.next_poll = Some(now);
+        self.prefer_boot = self.stage == Stage::Choose && self.chosen.is_none();
         self.check()
     }
 
@@ -255,6 +261,7 @@ impl Upgrade {
         match e {
             UpgradeEvent::Choose(device) => {
                 if self.stage == Stage::Choose {
+                    self.prefer_boot = false;
                     self.choose(&device);
                 }
                 None
@@ -336,6 +343,7 @@ impl Upgrade {
                     self.reset_finished(now);
                     // The stick just upgraded is not the next one to write.
                     self.clear_choice();
+                    self.prefer_boot = false;
                 }
                 None
             }
@@ -391,6 +399,7 @@ impl Upgrade {
                     self.mode = None;
                     self.typed.clear();
                 }
+                self.choose_boot();
                 None
             }
         }
@@ -777,6 +786,24 @@ impl Upgrade {
         self.chosen = Some(c);
         self.mode = first;
         self.typed.clear();
+    }
+
+    /// Chooses this machine's stick while `prefer_boot` holds, once the
+    /// tool has examined it, so Upgrade is offered at once.
+    fn choose_boot(&mut self) {
+        if !self.prefer_boot || self.stage != Stage::Choose || self.chosen.is_some() {
+            return;
+        }
+        let Some(device) = self
+            .drives
+            .iter()
+            .find(|d| d.is_boot && d.examined)
+            .map(|d| d.device.clone())
+        else {
+            return;
+        };
+        self.prefer_boot = false;
+        self.choose(&device);
     }
 
     fn clear_choice(&mut self) {
@@ -1601,6 +1628,57 @@ mod tests {
     }
 
     #[test]
+    fn the_boot_stick_is_chosen_when_the_screen_opens() {
+        let (u, _) = ready(vec![stick("/dev/sdc", "sn-C:1:1"), boot("/dev/sda", "sn-A:1:1")]);
+        assert_eq!(u.chosen_drive().map(|d| d.device.as_str()), Some("/dev/sda"));
+        assert_eq!(u.mode, Some(Mode::Upgrade));
+        // No boot stick in the list: nothing is chosen.
+        let (u, _) = ready(vec![stick("/dev/sdc", "sn-C:1:1")]);
+        assert!(u.chosen.is_none() && u.mode.is_none());
+    }
+
+    #[test]
+    fn the_person_s_choice_wins_over_the_boot_stick() {
+        let list = vec![stick("/dev/sdc", "sn-C:1:1"), boot("/dev/sda", "sn-A:1:1")];
+        let (mut u, t) = ready(list.clone());
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdc".into()), t);
+        u.drives_listed(false, Ok(list.clone()), t + POLL);
+        assert_eq!(u.chosen_drive().map(|d| d.device.as_str()), Some("/dev/sdc"));
+        // The chosen stick is pulled: the boot stick is not chosen in its place.
+        u.drives_listed(false, Ok(vec![boot("/dev/sda", "sn-A:1:1")]), t + POLL * 2);
+        assert!(u.chosen.is_none());
+        // Opening the screen again with nothing chosen chooses it again.
+        u.open(t + POLL * 3);
+        u.poll(t + POLL * 3);
+        u.drives_listed(false, Ok(list), t + POLL * 3);
+        assert_eq!(u.chosen_drive().map(|d| d.device.as_str()), Some("/dev/sda"));
+    }
+
+    #[test]
+    fn a_boot_stick_under_a_running_write_is_chosen_once_examined() {
+        let busy = Drive {
+            examined: false,
+            ..boot("/dev/sda", "sn-A:1:1")
+        };
+        let (mut u, t) = ready(vec![busy]);
+        assert!(u.chosen.is_none());
+        u.drives_listed(false, Ok(vec![boot("/dev/sda", "sn-A:1:1")]), t + POLL);
+        assert_eq!(u.chosen_drive().map(|d| d.device.as_str()), Some("/dev/sda"));
+        assert_eq!(u.mode, Some(Mode::Upgrade));
+    }
+
+    #[test]
+    fn write_another_after_a_boot_stick_upgrade_does_not_choose_it_again() {
+        let (mut u, t) = running_upgrade(boot("/dev/sda", "sn-B:1:1"));
+        u.message(result(true, ""), t);
+        u.ended(Ok(Some(0)));
+        ev(&mut u, UpgradeEvent::WriteAnother, t);
+        u.poll(t);
+        u.drives_listed(false, Ok(vec![boot("/dev/sda", "sn-B:1:1")]), t);
+        assert!(u.chosen.is_none());
+    }
+
+    #[test]
     fn write_another_stick_after_a_boot_stick_upgrade() {
         let (mut u, t) = running_upgrade(Drive {
             is_boot: true,
@@ -1754,9 +1832,11 @@ mod tests {
 
     #[test]
     fn summary_and_confirm_label() {
-        let (mut u, t) = ready(vec![stick("/dev/sdb", "sn-A:1:1"), boot("/dev/sda", "sn-B:1:1")]);
+        // Nothing chosen: no summary, no button label.
+        let (u, _) = ready(vec![stick("/dev/sdb", "sn-A:1:1")]);
         assert_eq!(u.summary(), None);
         assert_eq!(u.confirm_label(), None);
+        let (mut u, t) = ready(vec![stick("/dev/sdb", "sn-A:1:1"), boot("/dev/sda", "sn-B:1:1")]);
         ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
         assert_eq!(
             u.summary().as_deref(),
