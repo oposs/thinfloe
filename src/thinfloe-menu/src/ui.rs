@@ -5603,13 +5603,30 @@ mod tests {
 
     #[test]
     fn notes_failed_text() {
-        let menu = notes_answered(Err("could not fetch the release notes: timeout".into()));
+        let mut menu = notes_answered(Err("could not fetch the release notes: timeout".into()));
         assert_texts(
             &upgrade_shapes(&menu, 1280.0, 2000.0),
             &[
+                "What's new from 3.9.2 to 4.5.0",
                 "The release notes could not be fetched",
                 "could not fetch the release notes: timeout",
             ],
+        );
+        // The stick is pulled behind the dialog: the title keeps the range
+        // that failed.
+        let later = Instant::now() + std::time::Duration::from_secs(5);
+        menu.tick(later);
+        menu.finished(
+            crate::jobs::JobResult::Drives {
+                all: false,
+                result: Ok(vec![]),
+            },
+            later,
+        );
+        assert!(menu.upgrade.chosen_drive().is_none());
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &["What's new from 3.9.2 to 4.5.0"],
         );
     }
 

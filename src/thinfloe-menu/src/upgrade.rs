@@ -126,7 +126,14 @@ pub enum Notes {
         from: String,
         to: String,
     },
-    Failed(String),
+    /// The range asked for stays with the reason: the drive poll can
+    /// change the choice behind the open dialog.
+    Failed {
+        from: Option<String>,
+        to: String,
+        unknown_from: bool,
+        reason: String,
+    },
 }
 
 /// The chosen drive: both its id and its device must still match.
@@ -915,9 +922,14 @@ impl Upgrade {
         if self.source() != Ok(None) {
             return None;
         }
-        let to = self.version()?.to_string();
+        // `notes` refuses a version it cannot compare as X.Y.Z (exit 2).
+        let to = self.version().filter(|v| comparable(v))?.to_string();
         match (self.mode, self.chosen_drive()) {
-            (Some(Mode::Upgrade), Some(d)) => Some((d.version.clone(), to, d.version.is_none())),
+            (Some(Mode::Upgrade), Some(d)) => {
+                let from = d.version.clone().filter(|v| comparable(v));
+                let unknown = from.is_none();
+                Some((from, to, unknown))
+            }
             _ => Some((None, to, false)),
         }
     }
@@ -960,13 +972,36 @@ impl Upgrade {
                 from: from.unwrap_or_default(),
                 to,
             },
-            Err(e) => Notes::Failed(e),
+            Err(reason) => Notes::Failed {
+                unknown_from: from.is_none() && !only,
+                from,
+                to,
+                reason,
+            },
         };
     }
 
     pub fn image_bytes(&self) -> Option<u64> {
         self.target_release()?.image_bytes
     }
+}
+
+/// `X.Y.Z` at the start, not followed by a digit or a dot: what
+/// `thinfloe-upgrade notes` compares (`4.5.0-dev+abc` as 4.5.0).
+fn comparable(v: &str) -> bool {
+    let mut rest = v;
+    for i in 0..3 {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[digits..];
+        if i < 2 {
+            let Some(r) = rest.strip_prefix('.') else { return false };
+            rest = r;
+        }
+    }
+    !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.')
 }
 
 /// `^https?://\S+$`.
@@ -2311,7 +2346,39 @@ mod tests {
         u.on_notes(None, "4.5.0".into(), false, Ok(Some("## 4.5.0\n- a\n".into())));
         assert!(matches!(u.notes, Notes::Loading { from: None, .. }), "{:?}", u.notes);
         u.on_notes(None, "4.5.0".into(), true, Err("timeout".into()));
-        assert_eq!(u.notes, Notes::Failed("timeout".into()));
+        assert_eq!(
+            u.notes,
+            Notes::Failed {
+                from: None,
+                to: "4.5.0".into(),
+                unknown_from: false,
+                reason: "timeout".into()
+            }
+        );
+    }
+
+    #[test]
+    fn notes_need_versions_that_compare() {
+        // A target the tool cannot compare: no range, no button.
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Upgrade);
+        u.release_file(Release {
+            latest: Some("4.5".into()),
+            ..release()
+        });
+        assert_eq!(u.notes_range(), None);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), None);
+        // A dev target compares as its release.
+        u.release_file(Release {
+            latest: Some("4.5.0-dev+abc".into()),
+            ..release()
+        });
+        assert_eq!(
+            u.notes_range(),
+            Some((Some("4.3.0".into()), "4.5.0-dev+abc".into(), false))
+        );
+        // A stick version the tool cannot compare counts as unknown.
+        let (u, _) = notes_ready(Some("foo"), Mode::Upgrade);
+        assert_eq!(u.notes_range(), Some((None, "4.5.0".into(), true)));
     }
 
     #[test]

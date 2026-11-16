@@ -38,7 +38,8 @@ pub fn parse(text: &str) -> Vec<Line> {
             p.joinable = false;
         } else if trimmed.is_empty() || line.starts_with('#') {
             p.in_item = false;
-        } else if let Some(item) = trimmed.strip_prefix("- ").filter(|_| !line.starts_with(' ')) {
+        } else if let Some(item) = trimmed.strip_prefix("- ") {
+            // A nested item is an item of its own, never part of its parent.
             p.heading(&mut out);
             out.push(Line::Bullet(squash(item)));
             p.in_item = true;
@@ -165,6 +166,12 @@ mod tests {
     fn parse_joins_continuation_lines() {
         let text = "## 4.5.0 - 2026-12-01\n### Fixed\n- one\n  two   three\n- four\nfive\n";
         assert_eq!(parse(text), [h("4.5.0 · Fixed"), b("one two three"), b("four five")]);
+    }
+
+    #[test]
+    fn parse_keeps_a_nested_item_apart() {
+        let text = "## 4.5.0\n### New\n- one\n  - two\n    more\n- three\n";
+        assert_eq!(parse(text), [h("4.5.0 · New"), b("one"), b("two more"), b("three")]);
     }
 
     #[test]

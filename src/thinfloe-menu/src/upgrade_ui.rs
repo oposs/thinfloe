@@ -133,9 +133,6 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
 /// The release notes over the screen; Close and Escape close it.
 fn notes_dialog(ui: &Ui, u: &Upgrade) -> Option<UpgradeEvent> {
     let mut event = None;
-    // A failure names no versions: the title keeps the range asked for,
-    // which cannot change while the dialog is open.
-    let asked = u.notes_range();
     let (from, to, unknown_from) = match &u.notes {
         Notes::Closed => return None,
         Notes::Loading { from, to, only } => (from.clone(), to.clone(), from.is_none() && !only),
@@ -143,10 +140,11 @@ fn notes_dialog(ui: &Ui, u: &Upgrade) -> Option<UpgradeEvent> {
             from, to, unknown_from, ..
         } => (from.clone(), to.clone(), *unknown_from),
         Notes::Empty { from, to } => (Some(from.clone()).filter(|f| !f.is_empty()), to.clone(), false),
-        Notes::Failed(_) => asked.unwrap_or_default(),
+        Notes::Failed {
+            from, to, unknown_from, ..
+        } => (from.clone(), to.clone(), *unknown_from),
     };
     let title = match (from, unknown_from) {
-        _ if to.is_empty() => "What's new".to_string(),
         (Some(f), _) => format!("What's new from {f} to {to}"),
         (None, true) => format!("What's new up to {to}"),
         (None, false) => format!("What's new in {to}"),
@@ -206,7 +204,7 @@ fn notes_dialog(ui: &Ui, u: &Upgrade) -> Option<UpgradeEvent> {
                     muted(ui, t, format!("No changes between {from} and {to}."));
                 }
             }
-            Notes::Failed(reason) => {
+            Notes::Failed { reason, .. } => {
                 warn(ui, t, "The release notes could not be fetched");
                 muted(ui, t, reason.as_str());
             }
