@@ -72,6 +72,23 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   `~/cfg-attic/`, and that neither a second 3.x rename nor a new 3.x marker
   appears.
   `drives --no-size` sends no request and sets `fits` to null in every row.
+  Each row also has `version`: `tl.new/version` while an upgrade is staged,
+  else `tl/version`, else `/etc/thinfloe/version` for the boot stick, else
+  null; a value outside `VERSION_RE` (up to 32 letters, digits, `.`, `+`
+  and `-`) is null.
+  `scripts/make-bootable-image.sh` copies the rootfs `version` to
+  `::tl/version`, and an upgrade from a release writes the pinned tag's
+  version into `tl.new/version`, which `tf_finalize_upgrade` rotates with
+  the folder. An upgrade from an address entered under Advanced writes no
+  file. `make qemu-smoke-write` checks that a written stick carries it.
+  `notes --to X.Y.Z [--from A.B.C | --only]` fetches
+  `https://raw.githubusercontent.com/oposs/thinfloe/vX.Y.Z/CHANGES.md` (at
+  most 512 KiB, curl `--max-time 30`) and prints its `## A.B.C` sections
+  with `from < version <= to`, every one up to the target without `--from`,
+  the target's alone with `--only`. Dev versions compare as `X.Y.Z`, and
+  `[Unreleased]` never counts. Exit 0 printed, 3 no release in the range, 1
+  not fetched or not usable (one `thinfloe-upgrade: <reason>` line on
+  stderr), 2 usage.
   `check [--source URL]` reads `<source>/version` (one line `X.Y.Z`) and the
   size of `thinfloe-usb.img.zst`, prints `latest`, `image_bytes`, `checked`,
   `source` and `error` as `key=value` lines and exits 0, or 1 when a request
