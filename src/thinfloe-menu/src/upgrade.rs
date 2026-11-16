@@ -886,6 +886,12 @@ impl Upgrade {
         }
     }
 
+    /// An address is entered under Advanced (valid or not): the default
+    /// release is not used.
+    pub fn custom_source(&self) -> bool {
+        self.source() != Ok(None)
+    }
+
     /// The release the write would install: the checked address's when one
     /// is entered, else the default one.
     pub fn target_release(&self) -> Option<&Release> {

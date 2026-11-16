@@ -166,6 +166,14 @@ pub const NET_FIELD_W: f32 = 320.0;
 /// (points); a longer list scrolls.
 pub const NET_LIST_H: f32 = 240.0;
 
+/// The width of the What's new dialog (points).
+pub const NOTES_DIALOG_W: f32 = 640.0;
+/// The tallest its list of notes gets (points); a longer list scrolls.
+pub const NOTES_LIST_MAX_H: f32 = 560.0;
+/// What the dialog needs on the screen beside its list: margins, title,
+/// the unknown-version line and the Close button (points).
+pub const NOTES_DIALOG_RESERVE: f32 = 240.0;
+
 /// The Upgrade screen's Choose page puts the drives beside Action and
 /// Options when its panel is at least this wide (points); narrower, they
 /// stack in one column.
