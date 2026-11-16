@@ -22,11 +22,12 @@ const MAX_ENV_BYTES: u64 = 64 * 1024;
 
 /// Keys of the `environment` file the menu owns when the system file is
 /// missing.
-const DEFAULT_MANAGED: [&str; 4] = [
+const DEFAULT_MANAGED: [&str; 5] = [
     "XKB_DEFAULT_MODEL",
     "XKB_DEFAULT_LAYOUT",
     "XKB_DEFAULT_VARIANT",
     "XKB_DEFAULT_OPTIONS",
+    "THINFLOE_NUMLOCK",
 ];
 
 /// The per-user config directory and the paths in it.
@@ -193,6 +194,9 @@ pub struct Keyboard {
     pub variant: String,
     pub caps_as_ctrl: bool,
     pub compose: Compose,
+    /// Num Lock on when labwc starts or a keyboard is plugged in; off
+    /// suits small keyboards with a number pad over the letter keys.
+    pub numlock: bool,
 }
 
 impl Default for Keyboard {
@@ -202,6 +206,7 @@ impl Default for Keyboard {
             variant: String::new(),
             caps_as_ctrl: true,
             compose: Compose::RightAlt,
+            numlock: true,
         }
     }
 }
@@ -728,6 +733,7 @@ mod tests {
                 variant: "de_nodeadkeys".into(),
                 caps_as_ctrl: false,
                 compose: Compose::Menu,
+                numlock: false,
             },
             ..ThinfloeConfig::default()
         };
@@ -939,6 +945,13 @@ mod tests {
             dropped_env_lines(env, &managed),
             ["XKB_DEFAULT_LAYOUT=de", "  export XKB_DEFAULT_MODEL=pc104"]
         );
+    }
+
+    #[test]
+    fn a_keyboard_table_without_numlock_keeps_it_on() {
+        let c: ThinfloeConfig = toml::from_str("[keyboard]\nlayout = \"de\"\n").unwrap();
+        assert!(c.keyboard.numlock);
+        assert!(DEFAULT_MANAGED.contains(&"THINFLOE_NUMLOCK"));
     }
 
     #[test]

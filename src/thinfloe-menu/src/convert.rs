@@ -80,11 +80,12 @@ fn assignment(line: &str) -> Option<(&str, Value)> {
     Some((k.trim_end(), shell_word(v)))
 }
 
-const KB_KEYS: [&str; 4] = [
+const KB_KEYS: [&str; 5] = [
     "XKB_DEFAULT_MODEL",
     "XKB_DEFAULT_LAYOUT",
     "XKB_DEFAULT_VARIANT",
     "XKB_DEFAULT_OPTIONS",
+    "THINFLOE_NUMLOCK",
 ];
 
 /// The first entry of a comma list; a longer list is noted.
@@ -183,6 +184,14 @@ pub fn keyboard_from_env(text: &str) -> (Keyboard, Vec<String>, Vec<String>) {
                 ));
             }
         }
+    }
+
+    match last.get("THINFLOE_NUMLOCK").map(String::as_str) {
+        None | Some("on") => {}
+        Some("off") => kb.numlock = false,
+        Some(v) => notes.push(format!(
+            "environment: THINFLOE_NUMLOCK={v} is not on or off; Num Lock stays on."
+        )),
     }
     (kb, other, notes)
 }
@@ -371,7 +380,20 @@ mod tests {
             variant: variant.into(),
             caps_as_ctrl: caps,
             compose,
+            numlock: true,
         }
+    }
+
+    #[test]
+    fn numlock_from_environment() {
+        let (k, other, notes) = keyboard_from_env("XKB_DEFAULT_LAYOUT=de\nTHINFLOE_NUMLOCK=off\n");
+        assert!(!k.numlock);
+        assert!(other.is_empty() && notes.is_empty(), "{other:?} {notes:?}");
+        let (k, _, notes) = keyboard_from_env("XKB_DEFAULT_LAYOUT=de\n");
+        assert!(k.numlock && notes.is_empty());
+        let (k, _, notes) = keyboard_from_env("THINFLOE_NUMLOCK=maybe\n");
+        assert!(k.numlock);
+        assert!(notes.iter().any(|n| n.contains("THINFLOE_NUMLOCK")), "{notes:?}");
     }
 
     #[test]

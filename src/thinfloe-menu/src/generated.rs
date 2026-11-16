@@ -73,10 +73,11 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             // labwc does not start on a keymap XKB cannot build.
             crate::keyboard::validate(kb, inp.registry.as_deref()).map_err(|e| format!("Keyboard: {e}"))?;
             Ok(Some(with_header(&format!(
-                "XKB_DEFAULT_LAYOUT={}\nXKB_DEFAULT_VARIANT={}\nXKB_DEFAULT_OPTIONS={}\n",
+                "XKB_DEFAULT_LAYOUT={}\nXKB_DEFAULT_VARIANT={}\nXKB_DEFAULT_OPTIONS={}\nTHINFLOE_NUMLOCK={}\n",
                 kb.layout,
                 kb.variant,
-                xkb_options(kb)
+                xkb_options(kb),
+                if kb.numlock { "on" } else { "off" }
             ))))
         }
         "screen" => Ok(Some(with_header(&screentab::body(cfg.screen.idle_timeout)))),
@@ -217,9 +218,13 @@ mod tests {
         assert_eq!(
             t,
             format!(
-                "{HEADER}\nXKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps\n"
+                "{HEADER}\nXKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps\nTHINFLOE_NUMLOCK=on\n"
             )
         );
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.numlock = false;
+        let t = render(&c, "environment", &inp()).unwrap().unwrap();
+        assert!(t.ends_with("\nTHINFLOE_NUMLOCK=off\n"), "{t}");
     }
 
     #[test]

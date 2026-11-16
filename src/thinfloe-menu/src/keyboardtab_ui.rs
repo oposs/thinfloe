@@ -1,4 +1,5 @@
-//! The Keyboard tab: layout, variant, CapsLock, compose key and a test field.
+//! The Keyboard tab: layout, variant, CapsLock, compose key, Num Lock and a
+//! test field.
 
 use crate::brand;
 use crate::config::Compose;
@@ -70,7 +71,7 @@ fn row(ui: &mut Ui, t: &Theme, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// Card 1: the four settings.
+/// Card 1: the five settings.
 fn pickers(ui: &mut Ui, t: &Theme, tab: &KeyboardTab) -> Option<KbEvent> {
     let mut event = None;
 
@@ -96,6 +97,13 @@ fn pickers(ui: &mut Ui, t: &Theme, tab: &KeyboardTab) -> Option<KbEvent> {
     row(ui, t, "CapsLock acts as Ctrl", |ui| {
         if ui.add(Switch::new(&mut caps)).changed() {
             event = Some(KbEvent::CapsAsCtrl(caps));
+        }
+    });
+
+    let mut numlock = tab.shown.numlock;
+    row(ui, t, "Num Lock on at start", |ui| {
+        if ui.add(Switch::new(&mut numlock)).changed() {
+            event = Some(KbEvent::NumLock(numlock));
         }
     });
 

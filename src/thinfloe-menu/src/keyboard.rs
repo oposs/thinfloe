@@ -12,6 +12,7 @@ pub enum KbEvent {
     Variant(String),
     CapsAsCtrl(bool),
     Compose(Compose),
+    NumLock(bool),
     /// The test field: text typed to try the layout. Applies nothing.
     TryText(String),
 }
@@ -26,6 +27,10 @@ pub enum KbOutcome {
     /// Saved, but handing it to the running compositor failed: why.
     Saved(String),
 }
+
+/// Said after a live apply that changed Num Lock: labwc sets it only when
+/// a keyboard appears.
+pub const NUMLOCK_NEXT_START: &str = "Num Lock follows at the next start.";
 
 /// Said after the reason when a saved setting did not reach labwc.
 pub const SAVED_NOT_LIVE: &str = "The setting is saved and takes effect at the next start.";
@@ -184,6 +189,7 @@ impl KeyboardTab {
             KbEvent::Variant(v) => next.variant = v,
             KbEvent::CapsAsCtrl(on) => next.caps_as_ctrl = on,
             KbEvent::Compose(c) => next.compose = c,
+            KbEvent::NumLock(on) => next.numlock = on,
         }
         let checked = match &self.registry {
             Ok(reg) => validate(&next, Some(reg)),
@@ -217,8 +223,10 @@ impl KeyboardTab {
         match r {
             Ok(outcome) => {
                 // Saved, live or not: the disk holds `kb` now.
+                let numlock_changed = self.applied.numlock != kb.numlock;
                 self.applied = kb.clone();
                 self.note = match outcome {
+                    KbOutcome::Live if numlock_changed => Some(NUMLOCK_NEXT_START.into()),
                     KbOutcome::Live => None,
                     KbOutcome::NextStart => Some("Takes effect at the next start.".into()),
                     KbOutcome::Saved(why) => Some(format!("{why} {SAVED_NOT_LIVE}")),
@@ -400,6 +408,19 @@ mod tests {
         let mut t = tab("us", "");
         assert_eq!(t.event(KbEvent::CapsAsCtrl(true)), None);
         assert!(!t.applying);
+    }
+
+    #[test]
+    fn a_numlock_change_says_next_start() {
+        let mut t = tab("us", "");
+        let next = t.event(KbEvent::NumLock(false)).unwrap();
+        assert!(!next.numlock);
+        assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
+        assert_eq!(t.note.as_deref(), Some(NUMLOCK_NEXT_START));
+        // A later change that leaves Num Lock alone and goes live clears it.
+        let next = t.event(KbEvent::Layout("de".into())).unwrap();
+        assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
+        assert_eq!(t.note, None);
     }
 
     #[test]
