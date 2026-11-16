@@ -21,8 +21,11 @@
 # "<that file>.applied" (temp file and rename; empty for no choice), so the
 # menu knows labwc has it. A name that is not 1 to 64 characters of
 # A-Z a-z 0-9 . _ - is refused: stderr gets
-# "thinfloe: menu output not applied: <why>", nothing else changes. The helper
-# is the only program that writes the composed rc.xml.
+# "thinfloe: menu output not applied: <why>", nothing else changes. Once the
+# session runs, the helper is the only program that writes the composed
+# rc.xml. Its source is whatever the rc.xml link pointed at when the helper
+# started: the system file, or the composer's .numlock/rc.xml copy when Num
+# Lock is off.
 #
 #   rc.xml           the size="10" of each <font place=...> line becomes
 #                    round(10 * scale), in points (<theme><font size>)
@@ -40,8 +43,8 @@
 # window moves to another monitor and when the scale changes. The helper
 # therefore keeps running for the whole session (thinfloe-session stops it at
 # the end) and reads the file once a second (TF_SCALE_POLL overrides). Each
-# change is applied again, always from the system files the symlinks pointed
-# at, never from the copies of the last run; a change to a scale that rounds
+# change is applied again, always from the files the symlinks pointed at
+# when the helper started, never from the copies of the last run; a change to a scale that rounds
 # to 1 with no output name puts the symlinks back. labwc is reconfigured after each change. An
 # unchanged file, or one that holds no valid scale, causes nothing.
 #

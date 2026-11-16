@@ -368,6 +368,33 @@ for v in on missing user; do
     fi
 done
 
+# A quoted "off" counts, as the menu's rebuild reads it.
+printf 'THINFLOE_NUMLOCK="off"\n' >"$NLGEN"; : >"$NLUSER"
+OUTQ="$WORK/nl-quoted"
+if nl_compose "$NLSYS" "$NLGEN" "$NLUSER" "$OUTQ" &&
+    grep -q '<numlock>off</numlock>' "$OUTQ/rc.xml"; then
+    ok "Num Lock: a quoted \"off\" counts"
+else
+    bad "Num Lock: quoted off: $(cat "$OUTQ/rc.xml" 2>/dev/null)"
+fi
+
+# A <numlock> mention in a comment outside <keyboard> is left alone; the
+# element is still added to <keyboard>.
+NLSYS3="$WORK/nl-system3"
+mkdir -p "$NLSYS3"
+cp "$NLSYS/environment" "$NLSYS/themerc-override" "$NLSYS3/"
+printf '%s\n' '<labwc_config>' '  <!-- was <numlock>on</numlock> -->' '  <keyboard>' \
+    '    <repeatDelay>500</repeatDelay>' '  </keyboard>' '</labwc_config>' >"$NLSYS3/rc.xml"
+printf 'THINFLOE_NUMLOCK=off\n' >"$NLGEN"
+OUTC="$WORK/nl-comment"
+if nl_compose "$NLSYS3" "$NLGEN" "$NLUSER" "$OUTC" &&
+    grep -q '<!-- was <numlock>on</numlock> -->' "$OUTC/rc.xml" &&
+    [[ "$(sed -n '/<keyboard>/,/<\/keyboard>/p' "$OUTC/rc.xml" | grep -c '<numlock>off</numlock>')" -eq 1 ]]; then
+    ok "Num Lock off: a comment is left alone and the element is added"
+else
+    bad "Num Lock off with a comment: $(cat "$OUTC/rc.xml" 2>/dev/null)"
+fi
+
 # --env-only never touches rc.xml, even when the value changed to off.
 printf 'THINFLOE_NUMLOCK=off\n' >"$NLGEN"; : >"$NLUSER"
 if nl_compose --env-only "$NLSYS" "$NLGEN" "$NLUSER" "$WORK/nl-on" &&

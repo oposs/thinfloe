@@ -197,12 +197,30 @@ check_keyboard "$OUT_DIR/environment"
 # Keyboard tab, a managed key) links rc.xml to a copy in .numlock/ that says
 # off; labwc-scale reads its source through that link. Any other value
 # keeps the system link. A copy that cannot be written keeps it too.
-if [ "$(env_value THINFLOE_NUMLOCK "$OUT_DIR/environment")" = off ] && [ -r "$SYSTEM_DIR/rc.xml" ]; then
+# The value may be quoted, as a shell or the menu's rebuild reads it.
+case $(env_value THINFLOE_NUMLOCK "$OUT_DIR/environment") in
+    off | '"off"' | "'off'") nl_off=1 ;;
+    *) nl_off=0 ;;
+esac
+if [ "$nl_off" -eq 1 ] && [ -r "$SYSTEM_DIR/rc.xml" ]; then
     nl_dir=$OUT_DIR/.numlock
     if mkdir -p "$nl_dir" 2>/dev/null &&
         awk '
-            /<numlock>/ { sub(/<numlock>[^<]*<\/numlock>/, "<numlock>off</numlock>"); seen = 1 }
-            /<\/keyboard>/ && !seen { match($0, /^[ \t]*/); print substr($0, 1, RLENGTH) "  <numlock>off</numlock>"; seen = 1 }
+            # Only the element inside <keyboard> counts, not a mention in
+            # a comment elsewhere; without one, it is added.
+            /<keyboard>/ { in_kb = 1 }
+            in_kb && /^[ \t]*<numlock>[^<]*<\/numlock>/ {
+                sub(/<numlock>[^<]*<\/numlock>/, "<numlock>off</numlock>")
+                seen = 1
+            }
+            in_kb && /<\/keyboard>/ {
+                if (!seen) {
+                    match($0, /^[ \t]*/)
+                    print substr($0, 1, RLENGTH) "  <numlock>off</numlock>"
+                    seen = 1
+                }
+                in_kb = 0
+            }
             { print }
         ' "$SYSTEM_DIR/rc.xml" >"$nl_dir/.rc.xml.tmp" &&
         mv -f "$nl_dir/.rc.xml.tmp" "$nl_dir/rc.xml" &&
