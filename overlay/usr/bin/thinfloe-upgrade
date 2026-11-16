@@ -22,6 +22,15 @@ of its own and cancels it with SIGTERM to that group:
       has examined false, and its is_thinfloe, has_tl_old and has_tl_new
       say nothing.
 
+  thinfloe-upgrade notes --to X.Y.Z [--from A.B.C | --only]
+      Prints the release notes from CHANGES.md at tag vX.Y.Z on
+      raw.githubusercontent.com: every `## ` section after A.B.C up to
+      X.Y.Z, all up to X.Y.Z without --from, X.Y.Z's alone with --only.
+      Dev versions compare as their X.Y.Z. Exit 0 with the sections on
+      stdout; 3 when the range holds no release; 1 when the file cannot be
+      fetched, is over NOTES_BYTES or has no section for X.Y.Z (one line
+      on stderr); 2 for a usage error. Needs no root.
+
   thinfloe-upgrade check [--source URL]
       Asks the source for its release: <source>/version (one line X.Y.Z)
       and the size of thinfloe-usb.img.zst. Prints key=value lines on
@@ -2756,6 +2765,104 @@ class _BatchArgumentParser(argparse.ArgumentParser):
         raise UsageError(message)
 
 
+# ============ Release Notes ============
+
+# The changelog of a release, at its tag: one file, no GitHub API.
+NOTES_URL = "https://raw.githubusercontent.com/oposs/thinfloe/v{version}/CHANGES.md"
+NOTES_BYTES = 512 * 1024
+NOTES_TIMEOUT = 30
+_NOTES_HEADING = re.compile(r"^## (\d+)\.(\d+)\.(\d+)(?![\d.])")
+
+
+def _version_key(version: str) -> Optional[Tuple[int, int, int]]:
+    """(X, Y, Z) of X.Y.Z, also of a dev version X.Y.Z-dev+sha; else None."""
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)(?![\d.])", version)
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def _notes_version(value: str) -> str:
+    """argparse type of --to and --from: a version that compares as X.Y.Z."""
+    if not re.fullmatch(VERSION_RE, value) or _version_key(value) is None:
+        raise argparse.ArgumentTypeError(f"not a version: {value!r}")
+    return value
+
+
+def cut_notes(text: str, from_v: Optional[str], to_v: str,
+              only: bool = False) -> Optional[str]:
+    """The `## X.Y.Z` sections of text with from_v < X.Y.Z <= to_v (every
+    one up to to_v without from_v, to_v's alone with only), in the file's
+    order; "" when none is in range; None when text has no section for to_v
+    (not ThinFloe's changelog at that tag)."""
+    to_key = _version_key(to_v)
+    from_key = _version_key(from_v) if from_v else None
+    sections: List[Tuple[Tuple[int, int, int], List[str]]] = []
+    for line in text.splitlines():
+        m = _NOTES_HEADING.match(line)
+        if m:
+            sections.append(((int(m[1]), int(m[2]), int(m[3])), [line]))
+        elif line.startswith("## "):
+            sections.append((None, [line]))  # [Unreleased] and the like
+        elif sections:
+            sections[-1][1].append(line)
+    if not any(key == to_key for key, _ in sections):
+        return None
+    kept = []
+    for key, lines in sections:
+        if key is None or key > to_key or (from_key is not None and key <= from_key):
+            continue
+        if only and key != to_key:
+            continue
+        while lines and not lines[-1].strip():
+            lines.pop()
+        kept.append("\n".join(lines))
+    return "\n\n".join(kept) + "\n" if kept else ""
+
+
+def _fetch_notes(url: str) -> Tuple[Optional[str], str]:
+    """(text, "") or (None, why it could not be fetched)."""
+    try:
+        r = subprocess.run(
+            ["curl", "-fsSL", "--max-filesize", str(NOTES_BYTES),
+             "--max-time", str(NOTES_TIMEOUT), "--", url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=NOTES_TIMEOUT + 10, **SPAWN)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"the release notes could not be fetched: {e}"
+    if r.returncode == 63:
+        return None, "the release notes are larger than expected"
+    if r.returncode != 0:
+        why = r.stderr.decode("utf-8", "replace").strip().splitlines()
+        return None, ("the release notes could not be fetched: "
+                      + (why[-1] if why else f"curl exit {r.returncode}"))
+    return r.stdout.decode("utf-8", "replace"), ""
+
+
+def notes_command(from_v: Optional[str], to_v: str, only: bool = False) -> int:
+    """Print the notes after from_v up to to_v. 0: printed; 3: no release in
+    the range; 1: not fetched or not usable (one line on stderr)."""
+    to_key = _version_key(to_v)
+    if from_v and _version_key(from_v) >= to_key:
+        return 3
+    target = "%d.%d.%d" % to_key
+    text, error = _fetch_notes(NOTES_URL.format(version=target))
+    if text is None:
+        print(f"thinfloe-upgrade: {error}", file=sys.stderr)
+        return 1
+    if len(text.encode("utf-8", "replace")) > NOTES_BYTES:
+        print("thinfloe-upgrade: the release notes are larger than expected",
+              file=sys.stderr)
+        return 1
+    cut = cut_notes(text, from_v, target, only)
+    if cut is None:
+        print(f"thinfloe-upgrade: the changelog of {target} has no section for {target}",
+              file=sys.stderr)
+        return 1
+    if not cut:
+        return 3
+    sys.stdout.write(cut)
+    return 0
+
+
 def _batch_parser() -> argparse.ArgumentParser:
     parser = _BatchArgumentParser(prog="thinfloe-upgrade", allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2767,6 +2874,13 @@ def _batch_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("check", help="ask the source for its release",
                        allow_abbrev=False)
     c.add_argument("--source", default=DEFAULT_URL)
+    n = sub.add_parser("notes", help="print the release notes of a version range",
+                       allow_abbrev=False)
+    n.add_argument("--to", required=True, type=_notes_version)
+    group = n.add_mutually_exclusive_group()
+    group.add_argument("--from", dest="from_", type=_notes_version)
+    group.add_argument("--only", action="store_true",
+                       help="the target's own section, for a fresh install")
     w = sub.add_parser("write", help="write or upgrade a stick without questions",
                        allow_abbrev=False)
     w.add_argument("--device", required=True)
@@ -2920,7 +3034,7 @@ def release_check(source: str) -> int:
 
 
 def batch_main(argv: List[str]) -> int:
-    """The question-free commands `check`, `drives` and `write`."""
+    """The question-free commands `check`, `drives`, `notes` and `write`."""
     global PROGRESS
     PROGRESS = Progress(sys.stdout, batch=True)
     _SUMS.clear()
@@ -2961,6 +3075,10 @@ def batch_main(argv: List[str]) -> int:
 
 
 def _batch_run(args) -> int:
+    if args.command == "notes":
+        # Reads the network only; root is not needed.
+        return notes_command(args.from_, args.to, args.only)
+
     ensure_root(batch=True)
 
     if args.command == "check":
@@ -3043,7 +3161,7 @@ def _lock_for_write(drive: DriveInfo, operation: str, base_url: str,
 
 def main() -> int:
     """Main entry point"""
-    if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write", "check"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("drives", "write", "check", "notes"):
         return batch_main(sys.argv[1:])
     _SUMS.clear()
     _NO_SUM.clear()
