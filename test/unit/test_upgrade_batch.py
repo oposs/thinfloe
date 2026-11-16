@@ -220,6 +220,10 @@ CHANGES = (REPO / "CHANGES.md").read_text()
 class TestNotes(unittest.TestCase):
     """thinfloe-upgrade notes: the CHANGES.md sections of a version range."""
 
+    def setUp(self):
+        # batch_main sets the module's PROGRESS; later tests expect the default.
+        self.addCleanup(setattr, ui, "PROGRESS", ui.PROGRESS)
+
     def run_notes(self, argv, text=CHANGES, error=""):
         out, err = io.StringIO(), io.StringIO()
         urls = []
