@@ -3344,8 +3344,8 @@ mod tests {
                                 "Layout",
                                 "Variant",
                                 "CapsLock acts as Ctrl",
+                                "Num Lock on at start",
                                 "Compose key",
-                                "Try it here",
                             ],
                         )
                     }
@@ -3544,14 +3544,19 @@ mod tests {
             let layout = at("Layout");
             let variant = at("Variant");
             let caps = at("CapsLock acts as Ctrl");
+            let numlock = at("Num Lock on at start");
             let compose = at("Compose key");
-            let try_it = at("Try it here");
-            // One column of rows, top to bottom.
-            let ys = [layout, variant, caps, compose, try_it].map(|r| r.top());
+            // One column of rows, top to bottom. At 1280x720 the test field
+            // is below the fold and reached by scrolling.
+            let mut ys = vec![layout, variant, caps, numlock, compose];
+            if size.1 > 720.0 {
+                ys.push(at("Try it here"));
+            }
+            let ys: Vec<f32> = ys.iter().map(|r| r.top()).collect();
             assert!(ys.windows(2).all(|w| w[0] < w[1]), "{ys:?}");
             // The labels share a left edge; the controls start one label
             // column further right.
-            for r in [variant, caps, compose] {
+            for r in [variant, caps, numlock, compose] {
                 assert!((r.left() - layout.left()).abs() < 1.0);
             }
             for (shown, label) in [("English (US)", layout), ("Default", variant), ("Right Alt", compose)] {

@@ -774,6 +774,7 @@ mod tests {
                 variant: "de_nodeadkeys".into(),
                 caps_as_ctrl: true,
                 compose: Compose::Menu,
+                numlock: true,
             }
         );
         assert_eq!(c.screen.idle_timeout, 900);
