@@ -2,7 +2,8 @@
 # Render the page and the ad with headless Chrome.
 #
 #   screenshots.sh OUTDIR        review pictures of index.html (desktop, phone)
-#   screenshots.sh --ads         the three ad pictures, written to ../ad/
+#   screenshots.sh --ads         the ad pictures and the GitHub social preview,
+#                                written to ../ad/
 #
 # Chrome's profile goes to $TMPDIR (set it; never /tmp on a shared machine).
 set -euo pipefail
@@ -18,6 +19,7 @@ if [[ ${1:-} == --ads ]]; then
     for size in 1200x630 1080x1080 1080x1350; do
         shoot "file://$site/ad.html" "${size%x*}" "${size#*x}" "$site/ad/thinfloe-$size.png"
     done
+    shoot "file://$site/social.html" 1280 640 "$site/ad/thinfloe-social-1280x640.png"
 else
     out=$(realpath "${1:?usage: screenshots.sh OUTDIR | --ads}")
     shoot "file://$site/index.html?still" 1440 900 "$out/desktop.png"

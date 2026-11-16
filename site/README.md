@@ -80,7 +80,11 @@ itself is not written) and gives the machine the demo model name
 
    The movie runs four times as fast as the boot did, which the page says.
    The poster is the first frame of the boot screen.
-5. **Ads** (`ad/thinfloe-1200x630.png`, `-1080x1080`, `-1080x1350`):
+5. **Ads** (`ad/thinfloe-1200x630.png`, `-1080x1080`, `-1080x1350`, `-social-1280x640`):
    `TMPDIR=$W tools/screenshots.sh --ads`, then `oxipng -o 4 --strip safe ad/*.png`.
    `tools/screenshots.sh DIR` renders `index.html` for a look at desktop and
    phone width. The link preview (`og:image`) is the 1200x630 one.
+   `ad/thinfloe-social-1280x640.png` (from `social.html`) is the repository's
+   social preview, uploaded by hand under Settings, General, Social preview
+   (GitHub has no API for it). Topic pages show it as a 725x275 card, so its
+   content stays in the 1280x485 band in the middle.
