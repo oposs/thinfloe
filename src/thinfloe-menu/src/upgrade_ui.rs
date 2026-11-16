@@ -7,10 +7,11 @@ use crate::brand::{self, role};
 use crate::density::GROUP_W;
 use crate::drives::{self, Drive, Mode};
 use crate::menu::Menu;
+use crate::notes::Line;
 use crate::settings::{self, Tone};
 use crate::speed;
 use crate::ui;
-use crate::upgrade::{self, Outcome, Stage, StepMark, StepView, Upgrade, UpgradeEvent};
+use crate::upgrade::{self, Notes, Outcome, Stage, StepMark, StepView, Upgrade, UpgradeEvent};
 use egui::text::LayoutJob;
 use egui::{Color32, FontId, Rect, Sense, Stroke, StrokeKind, TextFormat, Ui, UiBuilder, Vec2, vec2};
 use shadcn_egui::Theme;
@@ -79,6 +80,13 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
     let inner = area.shrink(PAD);
     let width = GROUP_W.min(inner.width());
     let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
+    // The What's new dialog is modal: the screen under it takes no clicks.
+    let open = u.notes != Notes::Closed;
+    let mut base = ui.new_child(UiBuilder::new().max_rect(ui.max_rect()));
+    if open {
+        base.disable();
+    }
+    let ui = &mut base;
     let mut p_ui = ui.new_child(UiBuilder::new().max_rect(panel));
     p_ui.horizontal(|ui| {
         ui.label(
@@ -118,7 +126,102 @@ pub fn show(ui: &mut Ui, menu: &Menu, area: Rect) -> Option<UpgradeEvent> {
             Stage::Finished(o) => finished(ui, u, o, &t, block_w),
         },
     );
-    page.or(footer).or(event)
+    let notes = open.then(|| notes_dialog(ui, u)).flatten();
+    notes.or(page).or(footer).or(event)
+}
+
+/// The release notes over the screen; Close and Escape close it.
+fn notes_dialog(ui: &Ui, u: &Upgrade) -> Option<UpgradeEvent> {
+    let mut event = None;
+    // A failure names no versions: the title keeps the range asked for,
+    // which cannot change while the dialog is open.
+    let asked = u.notes_range();
+    let (from, to, unknown_from) = match &u.notes {
+        Notes::Closed => return None,
+        Notes::Loading { from, to, only } => (from.clone(), to.clone(), from.is_none() && !only),
+        Notes::Shown {
+            from, to, unknown_from, ..
+        } => (from.clone(), to.clone(), *unknown_from),
+        Notes::Empty { from, to } => (Some(from.clone()).filter(|f| !f.is_empty()), to.clone(), false),
+        Notes::Failed(_) => asked.unwrap_or_default(),
+    };
+    let title = match (from, unknown_from) {
+        _ if to.is_empty() => "What's new".to_string(),
+        (Some(f), _) => format!("What's new from {f} to {to}"),
+        (None, true) => format!("What's new up to {to}"),
+        (None, false) => format!("What's new in {to}"),
+    };
+    let screen_h = ui.ctx().content_rect().height();
+    let list_h = (screen_h - brand::NOTES_DIALOG_RESERVE).clamp(0.0, brand::NOTES_LIST_MAX_H);
+    ui::dialog_w(ui, &title, brand::NOTES_DIALOG_W, |ui, t| {
+        ui.spacing_mut().item_spacing.y = LINE_GAP;
+        if unknown_from {
+            muted(
+                ui,
+                t,
+                format!("The version on this stick is not known: all releases up to {to} are shown."),
+            );
+        }
+        match &u.notes {
+            Notes::Closed => {}
+            Notes::Loading { .. } => muted(ui, t, "Loading…"),
+            Notes::Shown { lines, .. } => {
+                egui::ScrollArea::vertical()
+                    .id_salt("notes")
+                    // Both: the area under an anchored dialog is what the
+                    // last frame left free, so without a minimum the list
+                    // grows a little each frame.
+                    .max_height(list_h)
+                    .min_scrolled_height(list_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, line) in lines.iter().enumerate() {
+                            match line {
+                                Line::Heading(h) => {
+                                    if i > 0 {
+                                        ui.add_space(LINE_GAP);
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(h)
+                                            .font(brand::geo(brand::SECTION_PT))
+                                            .color(t.palette().foreground),
+                                    );
+                                }
+                                Line::Bullet(b) => {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("• {b}")).color(t.palette().foreground),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                            }
+                        }
+                    });
+            }
+            Notes::Empty { from, to } => {
+                if from.is_empty() {
+                    muted(ui, t, format!("No changes are listed for {to}."));
+                } else {
+                    muted(ui, t, format!("No changes between {from} and {to}."));
+                }
+            }
+            Notes::Failed(reason) => {
+                warn(ui, t, "The release notes could not be fetched");
+                muted(ui, t, reason.as_str());
+            }
+        }
+        ui.add_space(LINE_GAP);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(Button::new("Close").variant(ButtonVariant::Secondary)).clicked() {
+                event = Some(UpgradeEvent::CloseNotes);
+            }
+        });
+    });
+    event.or_else(|| {
+        ui.input(|i| i.key_pressed(egui::Key::Escape))
+            .then_some(UpgradeEvent::CloseNotes)
+    })
 }
 
 /// A TILE-coloured block, with a heading when `title` is given and a
@@ -425,6 +528,16 @@ fn release(ui: &mut Ui, u: &Upgrade, t: &Theme, event: &mut Option<UpgradeEvent>
                 .clicked()
             {
                 *event = Some(UpgradeEvent::CheckNow);
+            }
+            // No notes for an address entered by hand.
+            if !u.custom_source() {
+                let can = u.notes_range().is_some() && !matches!(u.notes, Notes::Loading { .. });
+                if ui
+                    .add_enabled(can, Button::new("What's new").variant(ButtonVariant::Secondary))
+                    .clicked()
+                {
+                    *event = Some(UpgradeEvent::WhatsNew);
+                }
             }
         });
     });

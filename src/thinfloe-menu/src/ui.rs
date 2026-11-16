@@ -1595,6 +1595,14 @@ pub(crate) fn page_with_footer<F, P>(
 
 /// A centred card over the frozen grid.
 pub(crate) fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
+    dialog_w(ui, title, DIALOG_W, body);
+}
+
+/// The width of a dialog's content (points).
+const DIALOG_W: f32 = 460.0;
+
+/// `dialog` with its content `width` wide.
+pub(crate) fn dialog_w(ui: &Ui, title: &str, width: f32, body: impl FnOnce(&mut Ui, &Theme)) {
     let t = Theme::current(ui.ctx());
     egui::Area::new(egui::Id::unique("dialog"))
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1604,7 +1612,7 @@ pub(crate) fn dialog(ui: &Ui, title: &str, body: impl FnOnce(&mut Ui, &Theme)) {
                 .stroke(Stroke::new(1.0, t.palette().border))
                 .inner_margin(24.0)
                 .show(ui, |ui| {
-                    ui.set_width(460.0);
+                    ui.set_width(width);
                     ui.label(egui::RichText::new(title).font(brand::geo(brand::DIALOG_TITLE_PT)));
                     body(ui, &t);
                 });
@@ -5444,6 +5452,193 @@ mod tests {
         // The same click on a usable row chooses it.
         let (_, ev) = upgrade_frame(&menu, 1280.0, 2000.0, click_at(centre("SanDisk Cruzer")));
         assert_eq!(ev, Some(UiEvent::Upgrade(UpgradeEvent::Choose("/dev/sdb".into()))));
+    }
+
+    /// The Upgrade screen with 4.5.0 checked and the second stick (3.9.2)
+    /// chosen for an upgrade.
+    fn notes_menu() -> Menu {
+        let now = Instant::now();
+        let release = crate::release::Release {
+            latest: Some("4.5.0".into()),
+            ..unknown_release()
+        };
+        let mut menu = upgrade_open(release, three_drives(), false, now);
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Upgrade), now);
+        menu
+    }
+
+    /// `notes_menu` with What's new pressed and `result` answered.
+    fn notes_answered(result: Result<Option<String>, String>) -> Menu {
+        let now = Instant::now();
+        let mut menu = notes_menu();
+        menu.upgrade_event(UpgradeEvent::WhatsNew, now);
+        menu.finished(
+            crate::jobs::JobResult::Notes {
+                from: Some("3.9.2".into()),
+                to: "4.5.0".into(),
+                only: false,
+                result,
+            },
+            now,
+        );
+        menu
+    }
+
+    fn click_text(menu: &Menu, w: f32, h: f32, label: &str) -> Option<UiEvent> {
+        let shapes = upgrade_shapes(menu, w, h);
+        let at = text_rects(&shapes)
+            .into_iter()
+            .rfind(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("{label:?} not drawn"))
+            .1
+            .center();
+        upgrade_frame(menu, w, h, click_at(at)).1
+    }
+
+    #[test]
+    fn whats_new_button_sends_event() {
+        let menu = notes_menu();
+        assert_eq!(
+            click_text(&menu, 1280.0, 2000.0, "What's new"),
+            Some(UiEvent::Upgrade(UpgradeEvent::WhatsNew))
+        );
+        // While the notes load, the button takes no click.
+        let mut menu = notes_menu();
+        menu.upgrade_event(UpgradeEvent::WhatsNew, Instant::now());
+        assert_ne!(
+            click_text(&menu, 1280.0, 2000.0, "What's new"),
+            Some(UiEvent::Upgrade(UpgradeEvent::WhatsNew))
+        );
+    }
+
+    #[test]
+    fn whats_new_button_hidden_for_custom_source() {
+        let now = Instant::now();
+        let mut menu = notes_menu();
+        menu.upgrade_event(UpgradeEvent::Advanced(true), now);
+        menu.upgrade_event(UpgradeEvent::Source("https://example.org/r".into()), now);
+        let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 2000.0));
+        assert!(!texts.iter().any(|t| t == "What's new"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Check now"), "{texts:?}");
+    }
+
+    #[test]
+    fn notes_dialog_shows_heading_and_bullet() {
+        let mut menu = notes_menu();
+        menu.upgrade_event(UpgradeEvent::WhatsNew, Instant::now());
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &["What's new from 3.9.2 to 4.5.0", "Loading…"],
+        );
+        let menu = notes_answered(Ok(Some("## 4.5.0 - 2026-12-01\n### New\n- One `thing` more\n".into())));
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &["What's new from 3.9.2 to 4.5.0", "4.5.0 · New", "• One thing more"],
+        );
+        assert_eq!(
+            click_text(&menu, 1280.0, 2000.0, "Close"),
+            Some(UiEvent::Upgrade(UpgradeEvent::CloseNotes))
+        );
+        // The screen under the dialog takes no clicks.
+        assert_eq!(click_text(&menu, 1280.0, 2000.0, "Check now"), None);
+        let escape = vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        assert_eq!(
+            upgrade_frame(&menu, 1280.0, 2000.0, escape.clone()).1,
+            Some(UiEvent::Upgrade(UpgradeEvent::CloseNotes))
+        );
+        // Without the dialog, Escape does nothing on the screen.
+        assert_eq!(upgrade_frame(&notes_menu(), 1280.0, 2000.0, escape).1, None);
+    }
+
+    #[test]
+    fn notes_titles_for_fresh_and_unknown_versions() {
+        let now = Instant::now();
+        let mut menu = notes_menu();
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
+        menu.upgrade_event(UpgradeEvent::WhatsNew, now);
+        assert_texts(&upgrade_shapes(&menu, 1280.0, 2000.0), &["What's new in 4.5.0"]);
+        let mut drives = three_drives();
+        drives[1].version = None;
+        let release = crate::release::Release {
+            latest: Some("4.5.0".into()),
+            ..unknown_release()
+        };
+        let mut menu = upgrade_open(release, drives, false, now);
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Upgrade), now);
+        menu.upgrade_event(UpgradeEvent::WhatsNew, now);
+        menu.finished(
+            crate::jobs::JobResult::Notes {
+                from: None,
+                to: "4.5.0".into(),
+                only: false,
+                result: Ok(Some("## 4.5.0\n- a\n".into())),
+            },
+            now,
+        );
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &[
+                "What's new up to 4.5.0",
+                "The version on this stick is not known: all releases up to 4.5.0 are shown.",
+            ],
+        );
+    }
+
+    #[test]
+    fn notes_empty_range_text() {
+        let menu = notes_answered(Ok(None));
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &["No changes between 3.9.2 and 4.5.0."],
+        );
+    }
+
+    #[test]
+    fn notes_failed_text() {
+        let menu = notes_answered(Err("could not fetch the release notes: timeout".into()));
+        assert_texts(
+            &upgrade_shapes(&menu, 1280.0, 2000.0),
+            &[
+                "The release notes could not be fetched",
+                "could not fetch the release notes: timeout",
+            ],
+        );
+    }
+
+    #[test]
+    fn notes_dialog_fits_1280x720() {
+        let mut text = String::from("## 4.5.0 - 2026-12-01\n### New\n");
+        for i in 0..200 {
+            text.push_str(&format!(
+                "- Change number {i} of the release, with a line long enough to wrap once.\n"
+            ));
+        }
+        let menu = notes_answered(Ok(Some(text)));
+        let shapes = upgrade_shapes(&menu, 1280.0, 720.0);
+        let rects = text_rects(&shapes);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 720.0));
+        for label in ["What's new from 3.9.2 to 4.5.0", "Close"] {
+            let r = rects
+                .iter()
+                .rfind(|(t, _)| t == label)
+                .unwrap_or_else(|| panic!("{label:?} not drawn"))
+                .1;
+            assert!(screen.contains_rect(r), "{label:?} at {r:?}");
+        }
+        // It scrolls: the last bullet is not drawn.
+        assert!(!rects.iter().any(|(t, _)| t.contains("number 199")));
+        assert_eq!(
+            click_text(&menu, 1280.0, 720.0, "Close"),
+            Some(UiEvent::Upgrade(UpgradeEvent::CloseNotes))
+        );
     }
 
     /// The track of a progress bar: its fill and height, from one drawn alone.
