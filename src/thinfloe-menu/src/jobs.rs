@@ -142,6 +142,13 @@ pub enum JobResult {
         custom: bool,
         result: Result<Release, String>,
     },
+    /// The release notes of `notes`, for the range it was asked for.
+    Notes {
+        from: Option<String>,
+        to: String,
+        only: bool,
+        result: Result<Option<String>, String>,
+    },
     /// The network files as read, and the machine's WiFi adapters.
     NetLoaded(netfiles::WifiFile, netfiles::WiredFile, Vec<String>),
     NetStatus(Result<Vec<Iface>, String>),
@@ -692,6 +699,43 @@ pub fn upgrade_check(cmd: &[String], source: Option<&str>, feed: &Arc<Feed>) -> 
         Some(0) | Some(1) => Err("the release check printed nothing".to_string()),
         Some(n) => Err(format!("the release check failed with status {n}")),
         None => Err("the release check was ended by a signal".to_string()),
+    }
+}
+
+/// Output limit and longest wait of `notes`: the tool fetches one
+/// `CHANGES.md` of at most 512 KiB, with a curl timeout of 30 s.
+pub const NOTES_BYTES: usize = 512 * 1024;
+pub const NOTES_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// The release notes after `from` up to `to`: `notes --to X [--from A |
+/// --only]`. `Ok(None)` when no release is in the range (exit 3); else an
+/// error with the tool's last stderr line.
+pub fn upgrade_notes(
+    cmd: &[String],
+    from: Option<&str>,
+    to: &str,
+    only: bool,
+    feed: &Arc<Feed>,
+) -> Result<Option<String>, String> {
+    let mut args = vec!["notes".to_string(), "--to".to_string(), to.to_string()];
+    if let Some(f) = from {
+        args.push("--from".to_string());
+        args.push(f.to_string());
+    } else if only {
+        args.push("--only".to_string());
+    }
+    let (text, status, stderr) = capture_as(cmd, &args, NOTES_BYTES, NOTES_TIMEOUT, feed, UPGRADE_LOG_SOURCE, |_| {})?;
+    match status {
+        Some(0) => Ok(Some(text)),
+        Some(3) => Ok(None),
+        _ => {
+            let last = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty());
+            Err(match (last, status) {
+                (Some(l), _) => l.strip_prefix("thinfloe-upgrade: ").unwrap_or(l).to_string(),
+                (None, Some(n)) => format!("the release notes could not be fetched (status {n})"),
+                (None, None) => "the release notes could not be fetched (ended by a signal)".to_string(),
+            })
+        }
     }
 }
 
@@ -1952,6 +1996,40 @@ mod tests {
         assert!(upgrade_check(&sh("exit 2"), None, &feed).is_err());
         assert!(upgrade_check(&sh("exit 0"), None, &feed).is_err(), "no lines");
         assert_eq!(default_upgrade_cmd(), ["sudo", "-n", "/usr/bin/thinfloe-upgrade"]);
+    }
+
+    #[test]
+    fn upgrade_notes_maps_exit_codes() {
+        let feed = Arc::new(Feed::default());
+        // The arguments reach the tool.
+        let echo: Vec<String> = ["/bin/sh", "-c", "echo \"$*\"", "sh"].map(String::from).to_vec();
+        assert_eq!(
+            upgrade_notes(&echo, Some("4.3.0"), "4.5.0", false, &feed),
+            Ok(Some("notes --to 4.5.0 --from 4.3.0\n".to_string()))
+        );
+        assert_eq!(
+            upgrade_notes(&echo, None, "4.5.0", true, &feed),
+            Ok(Some("notes --to 4.5.0 --only\n".to_string()))
+        );
+        assert_eq!(
+            upgrade_notes(&echo, None, "4.5.0", false, &feed),
+            Ok(Some("notes --to 4.5.0\n".to_string()))
+        );
+        assert_eq!(upgrade_notes(&sh("exit 3"), None, "4.5.0", false, &feed), Ok(None));
+        assert_eq!(
+            upgrade_notes(
+                &sh("echo noise >&2; echo 'thinfloe-upgrade: could not fetch the release notes: timeout' >&2; exit 1"),
+                None,
+                "4.5.0",
+                false,
+                &feed
+            ),
+            Err("could not fetch the release notes: timeout".to_string())
+        );
+        assert_eq!(
+            upgrade_notes(&sh("exit 1"), None, "4.5.0", false, &feed),
+            Err("the release notes could not be fetched (status 1)".to_string())
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::drives::{self, Drive, Mode};
+use crate::notes::Line;
 use crate::release::Release;
 use crate::settings::Tone;
 use crate::speed::Speed;
@@ -81,6 +82,8 @@ pub enum UpgradeEvent {
     WriteAnother,
     RestartNow,
     Back,
+    WhatsNew,
+    CloseNotes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +101,32 @@ pub enum Request {
     Stop,
     Restart,
     Leave,
+    Notes {
+        from: Option<String>,
+        to: String,
+        only: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notes {
+    Closed,
+    Loading {
+        from: Option<String>,
+        to: String,
+        only: bool,
+    },
+    Shown {
+        from: Option<String>,
+        to: String,
+        lines: Vec<Line>,
+        unknown_from: bool,
+    },
+    Empty {
+        from: String,
+        to: String,
+    },
+    Failed(String),
 }
 
 /// The chosen drive: both its id and its device must still match.
@@ -163,6 +192,7 @@ pub struct Upgrade {
     /// screen opens with nothing chosen, cleared once it is chosen or the
     /// person chooses a drive.
     prefer_boot: bool,
+    pub notes: Notes,
 }
 
 impl Default for Upgrade {
@@ -203,6 +233,7 @@ impl Upgrade {
             job: None,
             done_version: None,
             prefer_boot: false,
+            notes: Notes::Closed,
         }
     }
 
@@ -352,6 +383,12 @@ impl Upgrade {
                 _ => None,
             },
             UpgradeEvent::Back => Some(Request::Leave),
+            UpgradeEvent::WhatsNew => self.whats_new(),
+            UpgradeEvent::CloseNotes => {
+                // A load still running is dropped when it answers.
+                self.notes = Notes::Closed;
+                None
+            }
         }
     }
 
@@ -861,6 +898,64 @@ impl Upgrade {
 
     fn version(&self) -> Option<&str> {
         self.target_release()?.latest.as_deref()
+    }
+
+    /// The versions What's new covers: (from, to, the stick's version is
+    /// unknown). None without a target version or for an address entered
+    /// under Advanced. An upgrade starts after the stick's version, or at
+    /// the first release when it is unknown; a fresh install, or no drive
+    /// chosen, shows the target alone.
+    pub fn notes_range(&self) -> Option<(Option<String>, String, bool)> {
+        if self.source() != Ok(None) {
+            return None;
+        }
+        let to = self.version()?.to_string();
+        match (self.mode, self.chosen_drive()) {
+            (Some(Mode::Upgrade), Some(d)) => Some((d.version.clone(), to, d.version.is_none())),
+            _ => Some((None, to, false)),
+        }
+    }
+
+    fn whats_new(&mut self) -> Option<Request> {
+        let (from, to, unknown_from) = self.notes_range()?;
+        // Without `from`, `only` tells the target alone from every release.
+        let only = from.is_none() && !unknown_from;
+        let loading = Notes::Loading {
+            from: from.clone(),
+            to: to.clone(),
+            only,
+        };
+        if self.notes == loading {
+            return None;
+        }
+        self.notes = loading;
+        Some(Request::Notes { from, to, only })
+    }
+
+    /// The answer to a `Notes` request. Dropped unless it answers the load
+    /// that runs now: the dialog was closed or asks for other versions.
+    pub fn on_notes(&mut self, from: Option<String>, to: String, only: bool, r: Result<Option<String>, String>) {
+        let asked = Notes::Loading {
+            from: from.clone(),
+            to: to.clone(),
+            only,
+        };
+        if self.notes != asked {
+            return;
+        }
+        self.notes = match r {
+            Ok(Some(text)) => Notes::Shown {
+                unknown_from: from.is_none() && !only,
+                from,
+                to,
+                lines: crate::notes::parse(&text),
+            },
+            Ok(None) => Notes::Empty {
+                from: from.unwrap_or_default(),
+                to,
+            },
+            Err(e) => Notes::Failed(e),
+        };
     }
 
     pub fn image_bytes(&self) -> Option<u64> {
@@ -2093,5 +2188,157 @@ mod tests {
         u.released(false, Ok(release()));
         assert_eq!(u.release.latest.as_deref(), Some("4.1.0"));
         assert_eq!(u.open(t), Some(Request::Check { source: None }));
+    }
+
+    /// A ThinFloe stick carrying `version`, chosen, target release 4.5.0.
+    fn notes_ready(version: Option<&str>, mode: Mode) -> (Upgrade, Instant) {
+        let d = Drive {
+            is_thinfloe: true,
+            version: version.map(String::from),
+            ..stick("/dev/sdb", "sn-A:1:1")
+        };
+        let (mut u, t) = ready(vec![d]);
+        u.release_file(Release {
+            latest: Some("4.5.0".into()),
+            ..release()
+        });
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        ev(&mut u, UpgradeEvent::Mode(mode), t);
+        assert_eq!(u.mode, Some(mode));
+        (u, t)
+    }
+
+    fn notes_req(from: Option<&str>, only: bool) -> Option<Request> {
+        Some(Request::Notes {
+            from: from.map(String::from),
+            to: "4.5.0".into(),
+            only,
+        })
+    }
+
+    #[test]
+    fn whats_new_requests_notes_for_the_stick_version() {
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Upgrade);
+        assert_eq!(u.notes_range(), Some((Some("4.3.0".into()), "4.5.0".into(), false)));
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(Some("4.3.0"), false));
+        assert!(matches!(&u.notes, Notes::Loading { from: Some(f), to, .. } if f == "4.3.0" && to == "4.5.0"));
+        // A second press while it loads starts nothing.
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), None);
+        u.on_notes(
+            Some("4.3.0".into()),
+            "4.5.0".into(),
+            false,
+            Ok(Some("## 4.5.0 - x\n### New\n- a\n".into())),
+        );
+        match &u.notes {
+            Notes::Shown {
+                from,
+                to,
+                lines,
+                unknown_from,
+            } => {
+                assert_eq!(from.as_deref(), Some("4.3.0"));
+                assert_eq!(to, "4.5.0");
+                assert!(!unknown_from);
+                assert_eq!(lines.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn whats_new_fresh_asks_for_the_target_only() {
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Fresh);
+        assert_eq!(u.notes_range(), Some((None, "4.5.0".into(), false)));
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(None, true));
+        // No drive chosen: the target alone too.
+        let (mut u, t) = ready(vec![]);
+        u.release_file(Release {
+            latest: Some("4.5.0".into()),
+            ..release()
+        });
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(None, true));
+    }
+
+    #[test]
+    fn whats_new_unknown_version_flags_unknown_from() {
+        let (mut u, t) = notes_ready(None, Mode::Upgrade);
+        assert_eq!(u.notes_range(), Some((None, "4.5.0".into(), true)));
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(None, false));
+        u.on_notes(None, "4.5.0".into(), false, Ok(Some("## 4.5.0 - x\n- a\n".into())));
+        assert!(
+            matches!(u.notes, Notes::Shown { unknown_from: true, .. }),
+            "{:?}",
+            u.notes
+        );
+    }
+
+    #[test]
+    fn no_notes_range_for_a_custom_source() {
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Upgrade);
+        ev(&mut u, UpgradeEvent::Advanced(true), t);
+        ev(&mut u, UpgradeEvent::Source("https://example.org/r".into()), t);
+        assert_eq!(u.notes_range(), None);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), None);
+        assert_eq!(u.notes, Notes::Closed);
+        // No target version known: no range either.
+        let mut u = Upgrade::new();
+        assert_eq!(u.notes_range(), None);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), None);
+    }
+
+    #[test]
+    fn late_notes_for_another_range_are_dropped() {
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Upgrade);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(Some("4.3.0"), false));
+        ev(&mut u, UpgradeEvent::CloseNotes, t);
+        ev(&mut u, UpgradeEvent::Mode(Mode::Fresh), t);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), notes_req(None, true));
+        u.on_notes(
+            Some("4.3.0".into()),
+            "4.5.0".into(),
+            false,
+            Ok(Some("## 4.5.0\n- a\n".into())),
+        );
+        assert!(matches!(u.notes, Notes::Loading { from: None, .. }), "{:?}", u.notes);
+        // Nor does a result for the same versions but the other range kind.
+        u.on_notes(None, "4.5.0".into(), false, Ok(Some("## 4.5.0\n- a\n".into())));
+        assert!(matches!(u.notes, Notes::Loading { from: None, .. }), "{:?}", u.notes);
+        u.on_notes(None, "4.5.0".into(), true, Err("timeout".into()));
+        assert_eq!(u.notes, Notes::Failed("timeout".into()));
+    }
+
+    #[test]
+    fn close_notes_returns_to_closed() {
+        let (mut u, t) = notes_ready(Some("4.3.0"), Mode::Upgrade);
+        ev(&mut u, UpgradeEvent::WhatsNew, t);
+        assert_eq!(ev(&mut u, UpgradeEvent::CloseNotes, t), None);
+        assert_eq!(u.notes, Notes::Closed);
+        // The result of the closed load is dropped.
+        u.on_notes(
+            Some("4.3.0".into()),
+            "4.5.0".into(),
+            false,
+            Ok(Some("## 4.5.0\n- a\n".into())),
+        );
+        assert_eq!(u.notes, Notes::Closed);
+        ev(&mut u, UpgradeEvent::WhatsNew, t);
+        u.on_notes(Some("4.3.0".into()), "4.5.0".into(), false, Err("x".into()));
+        ev(&mut u, UpgradeEvent::CloseNotes, t);
+        assert_eq!(u.notes, Notes::Closed);
+    }
+
+    #[test]
+    fn notes_exit_3_is_empty() {
+        let (mut u, t) = notes_ready(Some("4.5.0"), Mode::Upgrade);
+        ev(&mut u, UpgradeEvent::WhatsNew, t);
+        u.on_notes(Some("4.5.0".into()), "4.5.0".into(), false, Ok(None));
+        assert_eq!(
+            u.notes,
+            Notes::Empty {
+                from: "4.5.0".into(),
+                to: "4.5.0".into()
+            }
+        );
     }
 }
