@@ -14,10 +14,13 @@ of its own and cancels it with SIGTERM to that group:
       One JSON list on stdout, one object per drive (device, model,
       size_bytes, serial, transport, removable, mounted, is_boot,
       is_thinfloe, has_tl_old, has_tl_new, efi_partition, examined, id,
-      fits). While a write runs, drives waits at most DRIVES_LOCK_WAIT
-      seconds for it and then lists the drives without mounting any ESP:
-      a row whose ESP was not looked at has examined false, and its
-      is_thinfloe, has_tl_old and has_tl_new say nothing.
+      fits, version). version is the release in tl.new/version while an
+      upgrade is staged, else tl/version, else (boot stick only) the
+      running system's; null when unknown. While a write runs, drives
+      waits at most DRIVES_LOCK_WAIT seconds for it and then lists the
+      drives without mounting any ESP: a row whose ESP was not looked at
+      has examined false, and its is_thinfloe, has_tl_old and has_tl_new
+      say nothing.
 
   thinfloe-upgrade check [--source URL]
       Asks the source for its release: <source>/version (one line X.Y.Z)
@@ -330,6 +333,7 @@ class DriveInfo:
     mounted: bool = False    # the disk or any partition has a mountpoint
     fingerprint: str = "-"   # hash of the partition table, "-" if unreadable
     examined: bool = True    # False: the ESP was not looked at (a write runs)
+    version: Optional[str] = None  # the stick's release, None when unknown
 
 
 # ============ Global State ============
@@ -571,20 +575,47 @@ def find_efi_partition(device: str) -> Optional[str]:
     return None
 
 
-def _examine_tree(root: str) -> Tuple[bool, bool, bool]:
-    """(is_thinfloe, has_tl_old, has_tl_new) of an ESP mounted at root."""
+# The release a stick carries, next to its kernel: one line X.Y.Z.
+STICK_VERSION_NAME = "version"
+STICK_VERSION_BYTES = 64
+
+
+def _read_version_file(path: str) -> Optional[str]:
+    """The first line of path when it is a version, else None."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(STICK_VERSION_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > STICK_VERSION_BYTES:
+        return None
+    line = data.decode("utf-8", "replace").split("\n", 1)[0].strip()
+    return line if re.fullmatch(VERSION_RE, line) else None
+
+
+def read_stick_version(root: str) -> Optional[str]:
+    """The release on the ESP mounted at root: tl.new/ while an upgrade is
+    staged there (the next boot starts it), else tl/; None when unknown."""
+    tl_new = os.path.join(root, "tl.new")
+    tree = tl_new if os.path.isdir(tl_new) else os.path.join(root, "tl")
+    return _read_version_file(os.path.join(tree, STICK_VERSION_NAME))
+
+
+def _examine_tree(root: str) -> Tuple[bool, bool, bool, Optional[str]]:
+    """(is_thinfloe, has_tl_old, has_tl_new, version) of an ESP mounted at root."""
     tl_path = os.path.join(root, "tl")
     is_thinfloe = (os.path.isfile(os.path.join(tl_path, "vmlinuz"))
                    and os.path.isfile(os.path.join(tl_path, "ramroot.sqsh")))
     return (is_thinfloe, os.path.isdir(os.path.join(root, "tl.old")),
-            os.path.isdir(os.path.join(root, "tl.new")))
+            os.path.isdir(os.path.join(root, "tl.new")), read_stick_version(root))
 
 
 def examine_efi_partition(efi_partition: str,
-                          mounted_at: Optional[str] = None) -> Tuple[bool, bool, bool]:
+                          mounted_at: Optional[str] = None
+                          ) -> Tuple[bool, bool, bool, Optional[str]]:
     """
     Examine EFI partition to determine if it's a ThinFloe drive.
-    Returns: (is_thinfloe, has_tl_old, has_tl_new)
+    Returns: (is_thinfloe, has_tl_old, has_tl_new, version)
 
     A partition that is mounted already (the boot ESP, rw) is read where it
     is: the kernel refuses a second, read-only mount of the same filesystem,
@@ -598,16 +629,17 @@ def examine_efi_partition(efi_partition: str,
     is_thinfloe = False
     has_tl_old = False
     has_tl_new = False
+    version = None
 
     try:
         result = run_cmd(["mount", "-o", "ro", efi_partition, tmp_mount], check=False, capture=True)
         if result.returncode == 0:
             _register_cleanup("mount", tmp_mount)
-            is_thinfloe, has_tl_old, has_tl_new = _examine_tree(tmp_mount)
+            is_thinfloe, has_tl_old, has_tl_new, version = _examine_tree(tmp_mount)
             umount = run_cmd(["umount", tmp_mount], check=False, capture=True)
             if umount.returncode != 0:
                 # Keep both entries: the atexit cleanup tries again.
-                return is_thinfloe, has_tl_old, has_tl_new
+                return is_thinfloe, has_tl_old, has_tl_new, version
             _unregister_cleanup("mount", tmp_mount)
     except Exception:
         pass
@@ -619,7 +651,7 @@ def examine_efi_partition(efi_partition: str,
         pass
     _unregister_cleanup("dir", tmp_mount)
 
-    return is_thinfloe, has_tl_old, has_tl_new
+    return is_thinfloe, has_tl_old, has_tl_new, version
 
 
 PTABLE_BYTES = 17408  # LBA 0 to 33: MBR, GPT header and entries
@@ -767,6 +799,7 @@ def enumerate_drives(include_internal: bool = False,
         part_size_mb = 0
         label = ""
         examined = True
+        version = None
 
         if efi_part:
             part_size_str = get_cmd_output(["lsblk", "-bno", "SIZE", efi_part])
@@ -780,10 +813,14 @@ def enumerate_drives(include_internal: bool = False,
             else:
                 mounted_at = _mountpoint_of(node, efi_part)
             if mounted_at or examine:
-                is_thinfloe, has_tl_old, has_tl_new = examine_efi_partition(
+                is_thinfloe, has_tl_old, has_tl_new, version = examine_efi_partition(
                     efi_part, mounted_at)
             else:
                 examined = False
+        if is_boot and version is None:
+            # A stick written before the file existed: the running system
+            # is the one on it.
+            version = read_installed_version() or None
 
         drives.append(DriveInfo(
             device=device,
@@ -803,6 +840,7 @@ def enumerate_drives(include_internal: bool = False,
             mounted=_any_mounted(node),
             fingerprint=ptable_fingerprint(device),
             examined=examined,
+            version=version,
         ))
 
     return drives
@@ -828,6 +866,7 @@ def drives_json(drives: List[DriveInfo], image_bytes: Optional[int]) -> str:
             "examined": d.examined,
             "id": drive_identity(d),
             "fits": None if image_bytes is None else d.size_bytes >= image_bytes,
+            "version": d.version,
         })
     return json.dumps(rows)
 
@@ -892,6 +931,15 @@ def _content_length(url: str) -> Optional[int]:
             except ValueError:
                 return None
     return None
+
+
+def pinned_version(base_url: str) -> Optional[str]:
+    """X.Y.Z of a source pin_source pinned to a release tag, else None."""
+    prefix = f"{RELEASE_DOWNLOAD}/v"
+    if not base_url.startswith(prefix):
+        return None
+    version = base_url[len(prefix):]
+    return version if re.fullmatch(VERSION_RE, version) else None
 
 
 def download_file(url: str, dest: str, on_bytes=None) -> None:
@@ -1661,7 +1709,7 @@ def copy_firmware(firmware_dir: str, dest_dir: str, progress: Progress) -> None:
 
 
 def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str,
-                    progress: Progress = None) -> None:
+                    progress: Progress = None, version: Optional[str] = None) -> None:
     """Replace the stick's release; the boot label is the last write.
 
     Whatever fails, tl/ stays whole and DEFAULT keeps pointing at something
@@ -1706,6 +1754,10 @@ def _switch_release(drive: DriveInfo, efi_mount: str, firmware_dir: str,
             # save waits only 30 s for the lock. The sync writes the
             # directory entries.
             copy_firmware(firmware_dir, tl_new_path, progress)
+            if version:
+                # The release on the stick, for the Upgrade screen's notes.
+                _write_replace(os.path.join(tl_new_path, STICK_VERSION_NAME),
+                               version + "\n")
             run_cmd(["sync"])
         # Only after tl.new is complete.
         with _boot_lock(drive, "The new release is copied but not switched "
@@ -1816,7 +1868,8 @@ def _ab_upgrade(drive: DriveInfo, base_url: str, progress: Progress,
                 f"made free. Nothing was changed.")
 
         progress.step("switch", "Copying the new release to the stick")
-        _switch_release(drive, efi_mount, firmware_dir, progress)
+        _switch_release(drive, efi_mount, firmware_dir, progress,
+                        pinned_version(base_url))
         progress.done("switch")
     finally:
         if work_dir:
