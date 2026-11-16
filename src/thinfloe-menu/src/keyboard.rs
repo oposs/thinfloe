@@ -28,8 +28,8 @@ pub enum KbOutcome {
     Saved(String),
 }
 
-/// Said after a live apply that changed Num Lock: labwc sets it only when
-/// a keyboard appears.
+/// Said after a live apply while Num Lock differs from the session's start
+/// value: labwc sets it only when a keyboard appears.
 pub const NUMLOCK_NEXT_START: &str = "Num Lock follows at the next start.";
 
 /// Said after the reason when a saved setting did not reach labwc.
@@ -47,6 +47,9 @@ pub struct KeyboardTab {
     pending: Option<Keyboard>,
     pub note: Option<String>,
     pub try_text: String,
+    /// Num Lock as the session started: labwc read it then and applies no
+    /// later change before the next start (or a keyboard plugged in).
+    session_numlock: bool,
 }
 
 /// Whether `kb` may be applied. Names must be XKB names and the layout
@@ -164,6 +167,7 @@ impl KeyboardTab {
     pub fn new(kb: Keyboard, registry: Result<Registry, String>) -> KeyboardTab {
         let note = registry.as_ref().err().cloned();
         KeyboardTab {
+            session_numlock: kb.numlock,
             shown: kb.clone(),
             applied: kb,
             registry,
@@ -223,10 +227,9 @@ impl KeyboardTab {
         match r {
             Ok(outcome) => {
                 // Saved, live or not: the disk holds `kb` now.
-                let numlock_changed = self.applied.numlock != kb.numlock;
                 self.applied = kb.clone();
                 self.note = match outcome {
-                    KbOutcome::Live if numlock_changed => Some(NUMLOCK_NEXT_START.into()),
+                    KbOutcome::Live if kb.numlock != self.session_numlock => Some(NUMLOCK_NEXT_START.into()),
                     KbOutcome::Live => None,
                     KbOutcome::NextStart => Some("Takes effect at the next start.".into()),
                     KbOutcome::Saved(why) => Some(format!("{why} {SAVED_NOT_LIVE}")),
@@ -417,8 +420,13 @@ mod tests {
         assert!(!next.numlock);
         assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
         assert_eq!(t.note.as_deref(), Some(NUMLOCK_NEXT_START));
-        // A later change that leaves Num Lock alone and goes live clears it.
+        // A layout change goes live, but Num Lock still waits for the next
+        // start: the note stays.
         let next = t.event(KbEvent::Layout("de".into())).unwrap();
+        assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
+        assert_eq!(t.note.as_deref(), Some(NUMLOCK_NEXT_START));
+        // Back to the value the session started with: nothing waits.
+        let next = t.event(KbEvent::NumLock(true)).unwrap();
         assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
         assert_eq!(t.note, None);
     }
