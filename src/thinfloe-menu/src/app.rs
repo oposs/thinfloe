@@ -486,6 +486,12 @@ fn panic_result(job: &Job) -> JobResult {
             custom: source.is_some(),
             result: Err(e),
         },
+        Job::UpgradeNotes { from, to, only } => JobResult::Notes {
+            from: from.clone(),
+            to: to.clone(),
+            only: *only,
+            result: Err(e),
+        },
         Job::NetLoad | Job::NetStatus | Job::NetScan | Job::NetApply { .. } | Job::NetTakeOver { .. } => {
             net_failed(job, e)
         }
@@ -577,6 +583,12 @@ fn job_result(
         Job::UpgradeCheck { source } => JobResult::Release {
             custom: source.is_some(),
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
+        },
+        Job::UpgradeNotes { from, to, only } => JobResult::Notes {
+            result: jobs::upgrade_notes(&paths.upgrade_cmd, from.as_deref(), &to, only, feed),
+            from,
+            to,
+            only,
         },
         Job::NetLoad => {
             let (wifi, wired) = jobs::net_load(paths);

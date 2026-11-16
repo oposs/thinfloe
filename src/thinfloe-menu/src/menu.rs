@@ -144,6 +144,12 @@ pub enum Job {
     UpgradeCheck {
         source: Option<String>,
     },
+    /// `thinfloe-upgrade notes --to TO [--from FROM | --only]`.
+    UpgradeNotes {
+        from: Option<String>,
+        to: String,
+        only: bool,
+    },
     /// Read the network files of the home and the machine's WiFi adapters.
     NetLoad,
     /// `thinfloe-network status`.
@@ -484,6 +490,7 @@ impl Menu {
             Request::Check { source } => Some(Effect::Start(Job::UpgradeCheck { source })),
             Request::Drives { all } => Some(Effect::Start(Job::Drives { all })),
             Request::Write { args } => Some(Effect::Start(Job::UpgradeWrite { args })),
+            Request::Notes { from, to, only } => Some(Effect::Start(Job::UpgradeNotes { from, to, only })),
             // Not known yet: the signal goes out with UpgradeStarted.
             Request::Stop => self.upgrade.pgid().map(|p| Effect::Signal(vec![p], Signal::Term)),
             Request::Restart => self.begin_ending(Action::Reboot, now),
@@ -1210,6 +1217,13 @@ impl Menu {
             }
             JobResult::Release { custom, result } => {
                 self.upgrade.released(custom, result);
+                None
+            }
+            JobResult::Notes { from, to, only, result } => {
+                if let Err(e) = &result {
+                    self.log.note(Kind::Warn, format!("release notes failed: {e}"));
+                }
+                self.upgrade.on_notes(from, to, only, result);
                 None
             }
             JobResult::NetLoaded(wifi, wired, devices) => {

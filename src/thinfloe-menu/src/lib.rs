@@ -33,6 +33,7 @@ pub mod netstat;
 pub mod nettab;
 pub mod network;
 pub mod network_ui;
+pub mod notes;
 pub mod outputs;
 pub mod raster;
 pub mod release;
