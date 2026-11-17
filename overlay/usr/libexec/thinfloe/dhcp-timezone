@@ -15,7 +15,8 @@
 # made while a read runs waits in the watch's queue, so none is lost (a path
 # unit stops watching while its service runs). If the directory is not there
 # yet, it waits for networkd to create it; it never creates it itself. It
-# exits 1 when inotifywait ends, so systemd starts it again.
+# exits 1 when inotifywait ends or the directory goes, so systemd starts it
+# again; a stop (SIGTERM) exits 0.
 #
 # THINFLOE_LEASE_DIR and THINFLOE_ZONEINFO_DIR exist for the offline test.
 set -u
@@ -24,9 +25,10 @@ export LC_ALL=C
 LEASE_DIR=${THINFLOE_LEASE_DIR:-/run/systemd/netif/leases}
 ZONEINFO=${THINFLOE_ZONEINFO_DIR:-/usr/share/zoneinfo}
 
-# The value as one printable, cut line: no control characters reach the journal.
+# The value as one printable line cut to $2 (default 64) characters: no
+# control characters reach the journal.
 safe() {
-    printf '%s' "${1:0:64}" | tr -c '[:print:]' '?'
+    printf '%s' "${1:0:${2:-64}}" | tr -c '[:print:]' '?'
 }
 
 ignored() {
@@ -60,9 +62,11 @@ check() {
 # The zone this process set last; scan logs only a different one.
 LAST=
 
-# Read every lease and apply its TIMEZONE=.
+# Read every lease and set the zone of the last one, in glob order, that
+# carries a valid zone: with two links that disagree, that zone is the one
+# left set, so it is the only one set and logged.
 scan() {
-    local lease value line why
+    local lease value line why zone=
     for lease in "$LEASE_DIR"/*; do
         [ -f "$lease" ] || continue
         value=
@@ -73,31 +77,34 @@ scan() {
         done <"$lease"
         [ -n "$value" ] || continue
         if why=$(check "$value"); then
-            if timedatectl set-timezone -- "$value"; then
-                # A renewal repeats the zone every few hours: log changes only.
-                [ "$value" = "$LAST" ] || echo "thinfloe: time zone $value from DHCP"
-                LAST=$value
-            else
-                echo "thinfloe: could not set DHCP time zone '$value'"
-            fi
+            zone=$value
         else
             ignored "$value" "$why"
         fi
     done
+    [ -n "$zone" ] || return 0
+    if timedatectl set-timezone -- "$zone"; then
+        # A renewal repeats the zone every few hours: log changes only.
+        [ "$zone" = "$LAST" ] || echo "thinfloe: time zone $zone from DHCP"
+        LAST=$zone
+    else
+        echo "thinfloe: could not set DHCP time zone '$zone'"
+    fi
 }
 
 WATCH_PID=
-# watch_start EVENTS DIR: run inotifywait -m on DIR as the coprocess W and
-# return once its watch is armed; fail when inotifywait ends before that.
+WATCH_FD=
+# watch_start EVENTS DIR: run inotifywait -m on DIR, its output on WATCH_FD,
+# and return once its watch is armed; fail when inotifywait ends before that.
 watch_start() {
     local line
-    coproc W (exec inotifywait -m -e "$1" --format '%e %f' -- "$2" 2>&1)
-    WATCH_PID=$W_PID
-    while IFS= read -r line <&"${W[0]}"; do
+    exec {WATCH_FD}< <(exec inotifywait -m -e "$1" --format '%e %f' -- "$2" 2>&1)
+    WATCH_PID=$!
+    while IFS= read -r line <&"$WATCH_FD"; do
         case $line in
             "Watches established.") return 0 ;;
             "Setting up watches.") ;;
-            *) printf 'thinfloe: dhcp-timezone: %s\n' "$(safe "$line")" ;;
+            *) printf 'thinfloe: dhcp-timezone: %s\n' "$(safe "$line" 200)" ;;
         esac
     done
     return 1
@@ -106,29 +113,46 @@ watch_start() {
 watch_stop() {
     [ -n "$WATCH_PID" ] || return 0
     kill "$WATCH_PID" 2>/dev/null
+    exec {WATCH_FD}<&-
     wait "$WATCH_PID" 2>/dev/null
     WATCH_PID=
 }
 
+# next_event [-t SECONDS]: read one event line. Exits 1 when the watched
+# directory itself is removed or moved: the watch is gone with it, and the
+# restart starts over.
+next_event() {
+    local event
+    IFS= read -r "$@" event <&"$WATCH_FD" || return 1
+    case $event in
+        DELETE_SELF*|MOVE_SELF*) exit 1 ;;
+    esac
+}
+
 watch() {
+    local parent=${LEASE_DIR%/*}
     trap watch_stop EXIT
-    trap 'exit 143' TERM
-    trap 'exit 130' INT
+    # A stop is a clean exit: systemd counts status 143 as a failure.
+    trap 'exit 0' TERM INT
     if [ ! -d "$LEASE_DIR" ]; then
+        if [ ! -d "$parent" ]; then
+            echo "thinfloe: dhcp-timezone: no directory $(safe "$parent" 200) to wait in for the leases"
+            exit 1
+        fi
         # Arm on the parent, then look, so a directory made in between is
         # not missed.
-        watch_start create,moved_to "${LEASE_DIR%/*}" || exit 1
+        watch_start create,moved_to,delete_self,move_self "$parent" || exit 1
         while [ ! -d "$LEASE_DIR" ]; do
-            IFS= read -r _ <&"${W[0]}" || exit 1
+            next_event || exit 1
         done
         watch_stop
     fi
-    watch_start close_write,moved_to,create,delete "$LEASE_DIR" || exit 1
+    watch_start close_write,moved_to,create,delete,delete_self,move_self "$LEASE_DIR" || exit 1
     scan
-    while IFS= read -r _ <&"${W[0]}"; do
+    while next_event; do
         # One lease write is several events: wait for 0.5 s of quiet, then
         # read the leases once for all of them.
-        while IFS= read -r -t 0.5 _ <&"${W[0]}"; do :; done
+        while next_event -t 0.5; do :; done
         scan
     done
     exit 1
