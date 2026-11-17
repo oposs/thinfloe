@@ -1,6 +1,7 @@
 //! What the status area's hardware tiles draw from: temperatures, CPU load
-//! and clock, RAM and zram use, fan speed, uptime, maker and model of the
-//! machine.
+//! and clock, RAM and zram use and fan speed. The uptime and the machine's
+//! maker and model are read here too (`parse_uptime`, `machine`), but not by
+//! the sampler: no tile shows them.
 //!
 //! A thread of the menu (`spawn`) reads these every `EVERY` from /sys and
 //! /proc, without root and without a subprocess, and rests while the element
@@ -613,10 +614,6 @@ pub struct Snapshot {
     pub zram: Option<Usage>,
     /// Revolutions a minute, at most `MAX_FANS`.
     pub fans: Vec<u32>,
-    /// Seconds since boot.
-    pub uptime: Option<u64>,
-    pub maker: Option<String>,
-    pub model: Option<String>,
 }
 
 impl Snapshot {
@@ -633,8 +630,6 @@ pub struct Sampler {
     /// The last CPU counters and when they were read.
     last: Option<(Instant, CpuTimes)>,
     last_load: Option<u8>,
-    /// Maker and model do not change while the machine runs: read once.
-    machine: Option<(Option<String>, Option<String>)>,
 }
 
 impl Sampler {
@@ -643,7 +638,6 @@ impl Sampler {
             roots,
             last: None,
             last_load: None,
-            machine: None,
         }
     }
 
@@ -665,7 +659,6 @@ impl Sampler {
             (_, None) => self.last_load = None,
         }
         self.last = stat.map(|s| (now, s));
-        let (maker, model) = self.machine.get_or_insert_with(|| machine(&self.roots)).clone();
         let r = &self.roots;
         let snap = Snapshot {
             temps,
@@ -674,9 +667,6 @@ impl Sampler {
             ram: read_text(&r.proc_.join("meminfo"), MAX_PROC).and_then(|t| parse_meminfo(&t)),
             zram: zram(r),
             fans,
-            uptime: read_text(&r.proc_.join("uptime"), MAX_ATTR).and_then(|t| parse_uptime(&t)),
-            maker,
-            model,
         };
         (snap, next)
     }
@@ -761,7 +751,9 @@ mod tests {
     #[test]
     fn a_sampler_turned_off_reads_no_further_until_it_is_on_again() {
         let d = TestDir::new("hardware", "gated");
-        put(&d, "proc/uptime", "100.00 100.00\n");
+        let mem = |kb: u64| format!("MemTotal: {kb} kB\nMemAvailable: 0 kB\n");
+        let total = |s: Snapshot| s.ram.map(|u| u.total / 1024);
+        put(&d, "proc/meminfo", &mem(100));
         put(&d, "proc/stat", "cpu  1 2 3 4 5 6 7 8\n");
         let t0 = Instant::now();
         let mut gated = Gated {
@@ -769,21 +761,20 @@ mod tests {
             due: t0,
         };
         // A read leaves its mark in the sampler: the CPU counters and when
-        // they came, and the machine's names. Off from the start: none.
+        // they came. Off from the start: none.
         assert!(gated.poll(false, t0).is_none());
         assert!(gated.sampler.last.is_none(), "a read while off");
-        assert!(gated.sampler.machine.is_none(), "a read while off");
-        assert_eq!(gated.poll(true, t0).and_then(|s| s.uptime), Some(100));
+        assert_eq!(gated.poll(true, t0).and_then(total), Some(100));
         let read_at = gated.sampler.last.map(|(at, _)| at);
         assert_eq!(read_at, Some(t0));
         // On, but its time has not come.
         assert!(gated.poll(true, t0).is_none());
         let later = t0 + EVERY + EVERY;
-        put(&d, "proc/uptime", "200.00 200.00\n");
+        put(&d, "proc/meminfo", &mem(200));
         // Off, with its time long come.
         assert!(gated.poll(false, later).is_none());
         assert_eq!(gated.sampler.last.map(|(at, _)| at), read_at, "a read while off");
-        assert_eq!(gated.poll(true, later).and_then(|s| s.uptime), Some(200));
+        assert_eq!(gated.poll(true, later).and_then(total), Some(200));
         assert_eq!(gated.sampler.last.map(|(at, _)| at), Some(later));
     }
 
@@ -1287,9 +1278,6 @@ mod tests {
             "meminfo",
             "MemTotal: 8000000 kB\nMemAvailable: 6000000 kB\n",
         );
-        put(&d.join("proc"), "uptime", "3700.5 1.0\n");
-        put(&d.join("sys/class/dmi/id"), "sys_vendor", "HP\n");
-        put(&d.join("sys/class/dmi/id"), "product_name", "t640\n");
         put(
             &d.join("sys/devices/system/cpu/cpu0/cpufreq"),
             "scaling_cur_freq",
@@ -1308,16 +1296,11 @@ mod tests {
         let (first, next) = s.sample(t0);
         assert_eq!(next, SOON);
         assert_eq!(first.load, None);
-        assert_eq!(first.uptime, Some(3700));
         assert_eq!(first.clock_mhz, Some(1500));
         assert_eq!(first.ram.unwrap().total, 8_000_000 * 1024);
         assert_eq!(first.zram, Some(Usage { used: 500, total: 1000 }));
         assert_eq!(first.fans, [1234]);
         assert_eq!(first.temps[0].label, "CPU");
-        assert_eq!(
-            (first.maker.as_deref(), first.model.as_deref()),
-            (Some("HP"), Some("t640"))
-        );
         assert!(first.any());
         put(&d.join("proc"), "stat", "cpu 150 0 150 900 0 0 0 0\n");
         let (second, next) = s.sample(t0 + SOON);
@@ -1346,17 +1329,6 @@ mod tests {
         let (c, next) = s.sample(later + SOON);
         assert_eq!(c.load, Some(40));
         assert_eq!(next, EVERY);
-    }
-
-    #[test]
-    fn maker_and_model_are_read_once() {
-        let d = TestDir::new("hardware", "once");
-        whole_machine(&d);
-        let mut s = Sampler::new(Roots::under(&d));
-        let now = Instant::now();
-        let a = s.sample(now).0;
-        put(&d.join("sys/class/dmi/id"), "product_name", "changed\n");
-        assert_eq!(s.sample(now).0.model, a.model);
     }
 
     #[test]
