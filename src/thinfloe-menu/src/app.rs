@@ -1843,7 +1843,7 @@ esac"#;
         let tall = ui::SHORT_SCREEN_H;
         let none = area(
             b"-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n\
-              -cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+              -cpu 1x1\n-memory 1x1\n-clock 1x1\n",
         );
         s.sync(&none, false, tall);
         assert_eq!((nets.get(), hws.get()), (0, 0), "nothing ticked: nothing starts");
@@ -1905,7 +1905,7 @@ esac"#;
         // still needs its data, but nothing is read for it.
         let cpu_only = area(
             b"-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n\
-              cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+              cpu 1x1\n-memory 1x1\n-clock 1x1\n",
         );
         s.sync(&cpu_only, false, ui::SHORT_SCREEN_H - 1.0);
         assert_eq!(hws.get(), 1);
@@ -2049,21 +2049,18 @@ esac"#;
         let none = crate::status::Area::default();
         assert!(!hardware_wanted(&none, false, tall), "no element");
         // Hardware elements hidden: the rest of the list does not ask.
-        let hidden = crate::status::layout::parse(
-            b"-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
-            &crate::status::offered,
-        );
+        let hidden =
+            crate::status::layout::parse(b"-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n", &crate::status::offered);
         let mut layout = hidden;
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         let hidden = crate::status::Area { layout };
-        assert!(!hardware_wanted(&hidden, false, tall), "all four hidden");
+        assert!(!hardware_wanted(&hidden, false, tall), "all three hidden");
         // One shown is enough.
-        let mut layout =
-            crate::status::layout::parse(b"-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n", &crate::status::offered);
+        let mut layout = crate::status::layout::parse(b"-temperatures 1x1\n-cpu 1x1\n", &crate::status::offered);
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         assert!(
             hardware_wanted(&crate::status::Area { layout }, false, tall),
-            "system shown"
+            "memory shown"
         );
     }
 

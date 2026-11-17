@@ -1,11 +1,11 @@
-//! The hardware elements, one sampler and four elements: `temperatures`,
-//! `cpu` (load and clock), `memory` (RAM and zram) and `system` (fans, uptime
-//! and the machine's model). One line per value, the label in Geo on the
+//! The hardware elements, one sampler and three elements: `temperatures`
+//! (the sensors, then one line for the fans), `cpu` (load and clock) and
+//! `memory` (RAM and zram). One line per value, the label in Geo on the
 //! left, the value in the monospace font on the right; a value the machine
 //! does not provide drops out, and an element left with nothing is not shown.
-//! Nothing pages: sensors that do not fit the temperature element drop the
-//! least important first. A hot temperature has its line in the warning
-//! colour, a critical one in the alert colour. The data is a
+//! Nothing pages: when the temperature element runs out of lines the fans go
+//! first, then the least important sensors. A hot temperature has its line in
+//! the warning colour, a critical one in the alert colour. The data is a
 //! `hardware::Snapshot` the menu copies from the sampler thread.
 
 use super::battery::{cut, per_page};
@@ -23,17 +23,15 @@ pub enum Show {
     Temperatures,
     Cpu,
     Memory,
-    System,
 }
 
 impl Show {
-    pub const ALL: [Show; 4] = [Show::Temperatures, Show::Cpu, Show::Memory, Show::System];
+    pub const ALL: [Show; 3] = [Show::Temperatures, Show::Cpu, Show::Memory];
 }
 
 pub struct Temperatures;
 pub struct Cpu;
 pub struct Memory;
-pub struct System;
 
 /// A colour by what it says; the theme gives the colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,32 +137,35 @@ fn temperatures(snap: &Snapshot, per: usize) -> Vec<Line> {
         .collect()
 }
 
-const MODEL: &str = "Model";
-const MAKER: &str = "Maker";
-
 /// The speeds and the unit, as one value.
 fn fan_value(speeds: &[u32]) -> String {
     let list: Vec<String> = speeds.iter().map(u32::to_string).collect();
     format!("{} rpm", list.join(" "))
 }
 
-/// The label and value of the machine's line: its model, or its maker on a
-/// machine that names no model. Both on one line did not fit the 220 points of
-/// a cell: `Gigabyte Technology GB-BXi3-5010` was cut at the padding.
-fn machine(snap: &Snapshot) -> Option<(&'static str, String)> {
-    match (&snap.model, &snap.maker) {
-        (Some(model), _) => Some((MODEL, model.clone())),
-        (None, Some(maker)) => Some((MAKER, maker.clone())),
-        (None, None) => None,
+/// The one line of all fans, `None` on a machine without a turning fan.
+fn fans(snap: &Snapshot) -> Option<Line> {
+    match snap.fans.len() {
+        0 => None,
+        1 => Some(line("Fan", fan_value(&snap.fans))),
+        _ => Some(line("Fans", fan_value(&snap.fans))),
     }
 }
 
 /// The lines of an element in a room of `per` lines; empty when the machine
 /// has none of its values. Only the temperatures can be more than the three
-/// lines that fit the smallest cell.
+/// lines that fit the smallest cell. The fan line comes after the sensors
+/// and only into a line no sensor needs: a temperature can warn, a fan
+/// speed cannot.
 pub fn lines(snap: &Snapshot, show: Show, per: usize) -> Vec<Line> {
     match show {
-        Show::Temperatures => temperatures(snap, per),
+        Show::Temperatures => {
+            let mut out = temperatures(snap, per);
+            if out.len() < per {
+                out.extend(fans(snap));
+            }
+            out
+        }
         Show::Cpu => {
             let load = snap.load.map(|l| line("CPU load", format!("{l} %")));
             let speed = snap.clock_mhz.map(|m| line("CPU clock", clock(m)));
@@ -174,16 +175,6 @@ pub fn lines(snap: &Snapshot, show: Show, per: usize) -> Vec<Line> {
             let ram = snap.ram.map(|u| line("RAM", usage(u)));
             let zram = snap.zram.map(|u| line("zram", usage(u)));
             ram.into_iter().chain(zram).collect()
-        }
-        Show::System => {
-            let fans = match snap.fans.len() {
-                0 => None,
-                1 => Some(line("Fan", fan_value(&snap.fans))),
-                _ => Some(line("Fans", fan_value(&snap.fans))),
-            };
-            let up = snap.uptime.map(|s| line("Up", uptime(s)));
-            let name = machine(snap).map(|(label, value)| line(label, value));
-            fans.into_iter().chain(up).chain(name).collect()
         }
     }
 }
@@ -196,12 +187,11 @@ pub struct Measure<'a> {
 
 /// The lines of an element in `per` lines with `free` points between the
 /// paddings, less the gap between label and value: `lines`, with the fans of
-/// the system element cut to as many as fit beside their label with the unit
-/// still showing, and a long model cut at its end, because a value is
-/// right-aligned and would run over its label. The first fans stay; a single
-/// fan always stays.
+/// the temperature element cut to as many as fit beside their label with the
+/// unit still showing, because a value is right-aligned and would run over its
+/// label. The first fans stay; a single fan always stays.
 pub fn lines_in(snap: &Snapshot, show: Show, per: usize, free: f32, w: &Measure) -> Vec<Line> {
-    if show != Show::System {
+    if show != Show::Temperatures {
         return lines(snap, show, per);
     }
     let fits = |n: usize| {
@@ -216,13 +206,7 @@ pub fn lines_in(snap: &Snapshot, show: Show, per: usize, free: f32, w: &Measure)
         fans: snap.fans[..n].to_vec(),
         ..snap.clone()
     };
-    let mut out = lines(&cut_fans, show, per);
-    let em = (w.value)("M").max(0.01);
-    for l in out.iter_mut().filter(|l| l.label == MODEL || l.label == MAKER) {
-        let chars = ((free - (w.label)(&l.label)) / em).max(0.0) as usize;
-        l.value = l.value.chars().take(chars).collect();
-    }
-    out
+    lines(&cut_fans, show, per)
 }
 
 fn show_in(snap: &Snapshot, show: Show) -> bool {
@@ -266,7 +250,7 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, show: Show) {
     }
 }
 
-/// The part of `Element` the four share.
+/// The part of `Element` the three share.
 fn draw(ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, show: Show) {
     background(ui, rect);
     if let Some(snap) = data.hardware {
@@ -319,18 +303,16 @@ macro_rules! element {
 
 const ONE: Size = Size { w: 1, h: 1 };
 const TALL: Size = Size { w: 1, h: 2 };
-const WIDE: Size = Size { w: 2, h: 1 };
 
 element!(
     Temperatures,
     Show::Temperatures,
     "temperatures",
-    "Temperatures",
+    "Temperatures and fans",
     &[ONE, TALL]
 );
 element!(Cpu, Show::Cpu, "cpu", "CPU", &[ONE]);
 element!(Memory, Show::Memory, "memory", "Memory", &[ONE]);
-element!(System, Show::System, "system", "Fans, uptime, model", &[ONE, WIDE]);
 
 /// A machine as the owner might have one: for the tests and the pictures.
 #[cfg(test)]
@@ -360,9 +342,6 @@ pub fn sample() -> Snapshot {
             total: 2 * GIB,
         }),
         fans: vec![2400],
-        uptime: Some(3 * 86_400 + 4 * 3600 + 120),
-        maker: Some("Lenovo".into()),
-        model: Some("ThinkCentre M75q Gen 2".into()),
     }
 }
 
@@ -388,7 +367,6 @@ mod tests {
             Show::Temperatures => &Temperatures,
             Show::Cpu => &Cpu,
             Show::Memory => &Memory,
-            Show::System => &System,
         }
     }
 
@@ -404,7 +382,7 @@ mod tests {
         crate::brand::theme()
     }
 
-    /// Twelve sensors, eight fans and a model of 60 characters.
+    /// Twelve sensors and eight fans.
     fn crowded() -> Snapshot {
         Snapshot {
             temps: (0..12)
@@ -419,7 +397,6 @@ mod tests {
                 })
                 .collect(),
             fans: vec![11111, 2222, 3333, 4444, 5555, 6666, 7777, 8888],
-            model: Some("M".repeat(60)),
             ..sample()
         }
     }
@@ -470,29 +447,17 @@ mod tests {
     }
 
     #[test]
-    fn system_draws_inside_its_rect_at_every_size() {
-        let hostile = Snapshot {
-            model: Some("A&B\x01<x>\n\u{202e}".repeat(5)),
-            ..crowded()
-        };
-        for snap in [sample(), crowded(), hostile] {
-            testing::assert_inside(&System, &data(&snap), Instant::now());
-        }
-    }
-
-    #[test]
     fn the_elements_are_what_the_spec_says() {
         let size = |w, h| Size { w, h };
-        let want: [(Show, &str, &str, &[Size]); 4] = [
+        let want: [(Show, &str, &str, &[Size]); 3] = [
             (
                 Show::Temperatures,
                 "temperatures",
-                "Temperatures",
+                "Temperatures and fans",
                 &[size(1, 1), size(1, 2)],
             ),
             (Show::Cpu, "cpu", "CPU", &[size(1, 1)]),
             (Show::Memory, "memory", "Memory", &[size(1, 1)]),
-            (Show::System, "system", "Fans, uptime, model", &[size(1, 1), size(2, 1)]),
         ];
         for (show, id, name, sizes) in want {
             let e = element_of(show);
@@ -515,10 +480,6 @@ mod tests {
         assert_eq!(
             text(&s, Show::Memory, FOUR),
             ["RAM 3.1 / 8.0 GiB", "zram 0.5 / 2.0 GiB"]
-        );
-        assert_eq!(
-            text(&s, Show::System, FOUR),
-            ["Fan 2400 rpm", "Up 3 d 4 h", "Model ThinkCentre M75q Gen 2"]
         );
     }
 
@@ -606,19 +567,7 @@ mod tests {
         assert!(lines(&vm, Show::Temperatures, FOUR).is_empty());
         assert_eq!(text(&vm, Show::Cpu, FOUR), ["CPU clock 2.4 GHz"]);
         assert_eq!(text(&vm, Show::Memory, FOUR), ["RAM 3.1 / 8.0 GiB"]);
-        assert_eq!(
-            text(&vm, Show::System, FOUR),
-            ["Up 3 d 4 h", "Model ThinkCentre M75q Gen 2"]
-        );
-        let bare = Snapshot {
-            uptime: Some(59),
-            ..Snapshot::default()
-        };
-        assert_eq!(text(&bare, Show::System, FOUR), ["Up 0 m"]);
-        for show in [Show::Temperatures, Show::Cpu, Show::Memory] {
-            assert!(!element_of(show).has_content(&data(&bare)), "{show:?}");
-        }
-        assert!(element_of(Show::System).has_content(&data(&bare)));
+        assert!(!Temperatures.has_content(&data(&vm)));
         // No placeholder text anywhere.
         let size = Size { w: 1, h: 1 };
         let drawn = texts(&shapes(
@@ -646,32 +595,41 @@ mod tests {
     }
 
     #[test]
-    fn the_system_element_has_one_line_for_the_fans_and_one_for_the_machine() {
-        let many = Snapshot {
-            fans: vec![12000, 1800, 900, 600],
-            maker: Some("Gigabyte Technology".into()),
-            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
-            ..sample()
+    fn the_fans_follow_the_sensors_and_drop_first() {
+        let snap = Snapshot {
+            temps: sample().temps[..2].to_vec(),
+            fans: vec![1200, 900],
+            ..Snapshot::default()
         };
         assert_eq!(
-            text(&many, Show::System, THREE),
-            [
-                "Fans 12000 1800 900 600 rpm",
-                "Up 3 d 4 h",
-                "Model GB-BXi3-5010 Some Long Board Name"
-            ]
+            text(&snap, Show::Temperatures, THREE),
+            ["CPU 52 °C", "GPU 97 °C", "Fans 1200 900 rpm"]
         );
-        let same = Snapshot {
-            maker: Some("QEMU".into()),
-            model: Some("QEMU".into()),
+        assert_eq!(text(&snap, Show::Temperatures, 2), ["CPU 52 °C", "GPU 97 °C"]);
+        let one = Snapshot {
+            fans: vec![1200],
+            ..snap.clone()
+        };
+        assert_eq!(
+            text(&one, Show::Temperatures, THREE),
+            ["CPU 52 °C", "GPU 97 °C", "Fan 1200 rpm"]
+        );
+    }
+
+    #[test]
+    fn an_element_with_only_fans_or_only_sensors_has_content() {
+        let fans = Snapshot {
+            fans: vec![1200],
             ..Snapshot::default()
         };
-        assert_eq!(text(&same, Show::System, THREE), ["Model QEMU"]);
-        let only_maker = Snapshot {
-            maker: Some("Acme".into()),
+        assert!(Temperatures.has_content(&data(&fans)));
+        assert_eq!(text(&fans, Show::Temperatures, 1), ["Fan 1200 rpm"]);
+        let sensors = Snapshot {
+            temps: sample().temps[..1].to_vec(),
             ..Snapshot::default()
         };
-        assert_eq!(text(&only_maker, Show::System, THREE), ["Maker Acme"]);
+        assert!(Temperatures.has_content(&data(&sensors)));
+        assert_eq!(text(&sensors, Show::Temperatures, THREE), ["CPU 52 °C"]);
     }
 
     #[test]
@@ -747,7 +705,9 @@ mod tests {
     fn the_fans_that_fit_stay_with_their_unit_and_never_reach_the_label() {
         let mut kept = Vec::new();
         for n in 1..=6usize {
+            // One sensor, so the fan line has a line of its own in one cell.
             let snap = Snapshot {
+                temps: sample().temps[..1].to_vec(),
                 fans: [12000, 1800, 900, 600, 450, 300][..n].to_vec(),
                 ..sample()
             };
@@ -755,7 +715,7 @@ mod tests {
                 let size = Size { w: 1, h: 1 };
                 let rect = rect_of(size, h);
                 let m = sizes_for(h);
-                let boxes = text_boxes(&shapes(&System, rect, size, &data(&snap), Instant::now()));
+                let boxes = text_boxes(&shapes(&Temperatures, rect, size, &data(&snap), Instant::now()));
                 let fan = boxes
                     .iter()
                     .find(|(t, _, _)| t.ends_with("rpm"))
@@ -776,12 +736,13 @@ mod tests {
     #[test]
     fn the_first_fans_stay_and_one_more_would_not_fit() {
         let snap = Snapshot {
+            temps: sample().temps[..1].to_vec(),
             fans: vec![1111, 2222, 3333, 4444, 5555, 6666, 7777, 8888],
             ..sample()
         };
         let m = sizes_for(STATUS_CELL_LARGE_H);
         let free = 220.0 - 2.0 * m.pad_x - m.gap;
-        let got = widths(STATUS_CELL_LARGE_H, |w| lines_in(&snap, Show::System, 3, free, w));
+        let got = widths(STATUS_CELL_LARGE_H, |w| lines_in(&snap, Show::Temperatures, 3, free, w));
         let value = got
             .iter()
             .find(|l| l.value.ends_with("rpm"))
@@ -802,38 +763,6 @@ mod tests {
             "{} fans would have fit too",
             n + 1
         );
-    }
-
-    #[test]
-    fn a_model_has_its_label_on_the_left_and_a_long_one_stops_short_of_it() {
-        let short = Snapshot {
-            model: Some("NUC8i3BEK".into()),
-            ..Snapshot::default()
-        };
-        let long = Snapshot {
-            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
-            ..sample()
-        };
-        for h in CELL_HEIGHTS {
-            let m = sizes_for(h);
-            let free = 220.0 - 2.0 * m.pad_x - m.gap;
-            let got = widths(h, |w| lines_in(&short, Show::System, 3, free, w));
-            assert_eq!((got[0].label.as_str(), got[0].value.as_str()), ("Model", "NUC8i3BEK"));
-            let got = widths(h, |w| lines_in(&long, Show::System, 3, free, w));
-            let model = got.iter().find(|l| l.label == "Model").unwrap();
-            assert!(
-                model.value.starts_with("GB-BXi3") && model.value.len() < 33,
-                "{}",
-                model.value
-            );
-            let size = Size { w: 1, h: 1 };
-            let rect = rect_of(size, h);
-            let boxes = text_boxes(&shapes(&System, rect, size, &data(&long), Instant::now()));
-            let label = boxes.iter().find(|(t, _, _)| t == "Model").unwrap();
-            let value = boxes.iter().find(|(t, _, _)| t.starts_with("GB-")).unwrap();
-            assert!(label.1.right() < value.1.left(), "at {h}");
-            assert!(value.1.right() <= rect.right() - m.pad_x + 0.5, "at {h}");
-        }
     }
 
     /// Wider than any 40 glyphs of the label font could be cut to.
@@ -880,7 +809,7 @@ mod tests {
             if let Shape::Text(t) = sh {
                 let family = t.galley.job.sections[0].format.font_id.family.clone();
                 let text = t.galley.text();
-                let want = if text.ends_with("°C") {
+                let want = if text.ends_with("°C") || text.ends_with("rpm") {
                     FontFamily::Monospace
                 } else {
                     crate::brand::geo(10.0).family
@@ -889,7 +818,7 @@ mod tests {
                 seen += 1;
             }
         }
-        assert_eq!(seen, 10, "five labels and five values");
+        assert_eq!(seen, 12, "five sensors and the fan, a label and a value each");
     }
 
     #[test]

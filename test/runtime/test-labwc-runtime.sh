@@ -447,8 +447,8 @@ COVER_SCRIPT='wlr-randr --output HEADLESS-1 --custom-mode 3840x2160 --pos 1280,0
 wlr-randr --output HEADLESS-2 --pos 0,0
 mkdir -p /tmp/cover-cfg
 printf "%s\n" "version = 1" "" "[status]" \
-    "lines = [\"-battery 1x1\", \"network 2x2\", \"-network-info 1x2\", \"-temperatures 1x1\"," \
-    "    \"-cpu 1x1\", \"-memory 1x1\", \"-system 1x1\", \"-clock 1x1\"]" >/tmp/cover-cfg/config.toml
+    "lines = [\"-battery 1x1\", \"network 2x2\", \"-connection 1x2\", \"-clock 1x1\"," \
+    "    \"-temperatures 1x1\", \"-cpu 1x1\", \"-memory 1x1\"]" >/tmp/cover-cfg/config.toml
 TF_CONFIG_DIR=/tmp/cover-cfg TF_MENU_DEBUG=1 \
     timeout 12 thinfloe-menu >/dev/null 2>/tmp/cover-menu.log &
 sleep 3

@@ -6,7 +6,7 @@
 //! menu copies from the sampler thread; it is drawn again every second while
 //! the menu shows.
 //!
-//! In a single row of cells (`3x1`, its size on a short screen, or `2x1`) it
+//! In a single row of cells (`3x1`, or `2x1`, its size on a short screen) it
 //! is the graph alone, edge to edge across the element: grid and curves, with
 //! the rate labels (none for 0), the unit and the legend inside the plot, each
 //! on a backing so a curve does not run through it.
@@ -351,7 +351,7 @@ impl Element for Network {
     }
 
     fn short_size(&self) -> Option<Size> {
-        Some(SIZES[1])
+        Some(SIZES[2])
     }
 
     fn sources(&self) -> &'static [Source] {
@@ -414,7 +414,7 @@ mod tests {
     use crate::netstat::Info;
 
     const TWO_BY_TWO: Size = Size { w: 2, h: 2 };
-    const THREE_BY_ONE: Size = Size { w: 3, h: 1 };
+    const TWO_BY_ONE: Size = Size { w: 2, h: 1 };
 
     fn theme() -> Theme {
         crate::brand::theme()
@@ -588,7 +588,7 @@ mod tests {
     fn short_network_is_the_graph_alone() {
         let t = theme();
         for h in CELL_HEIGHTS {
-            for size in [THREE_BY_ONE, Size { w: 2, h: 1 }] {
+            for size in [Size { w: 3, h: 1 }, TWO_BY_ONE] {
                 let rect = rect_of(size, h);
                 let m = sizes_for(h);
                 let f = frame(rect, size, &m);
@@ -686,7 +686,7 @@ mod tests {
         let highest = rx.iter().map(|q| q.y).fold(f32::MAX, f32::min);
         assert!((highest - p.top()).abs() < 1.0, "{highest} vs {}", p.top());
         // The same on every size.
-        for size in [THREE_BY_ONE, Size { w: 2, h: 1 }] {
+        for size in [Size { w: 3, h: 1 }, TWO_BY_ONE] {
             for h in CELL_HEIGHTS {
                 let q = frame(rect_of(size, h), size, &sizes_for(h)).plot;
                 let out = shapes(&Network, rect_of(size, h), size, &data(&on_top), Instant::now());
@@ -753,8 +753,8 @@ mod tests {
         assert_eq!(Network.next_change(&data(&snap()), rect, now), None);
         assert_eq!(Network.refresh(), Some(Duration::from_secs(1)));
         assert_eq!(Network.sources(), [Source::Network]);
-        assert_eq!(Network.sizes(), [TWO_BY_TWO, THREE_BY_ONE, Size { w: 2, h: 1 }]);
-        assert_eq!(Network.short_size(), Some(THREE_BY_ONE));
+        assert_eq!(Network.sizes(), [TWO_BY_TWO, Size { w: 3, h: 1 }, TWO_BY_ONE]);
+        assert_eq!(Network.short_size(), Some(TWO_BY_ONE));
     }
 
     #[test]

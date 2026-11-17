@@ -22,10 +22,10 @@ pub struct Descriptor {
     pub shown: bool,
 }
 
-/// Ids an older image wrote and this one no longer has (`parse` applies an
-/// entry only while the image really has no such element), with the id that
-/// replaced them (`None`: the element is gone). Without this a saved layout
-/// would keep the old line as an unknown element forever.
+/// Ids an older image wrote and this one no longer has, with the id that
+/// replaced them (`None`: the element is gone). `parse` maps them before it
+/// asks which elements exist. Without this a saved layout would keep the old
+/// line as an unknown element forever.
 pub const RETIRED: [(&str, Option<&str>); 2] = [("network-info", Some("connection")), ("system", None)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,9 +90,7 @@ pub fn parse(text: &[u8], known: &dyn Fn(&str) -> Option<&'static [Size]>) -> La
             ));
             continue;
         };
-        // Only an id this image no longer has is retired: while `known` still
-        // offers it, the element is alive and its line stays as it is.
-        let retired = RETIRED.iter().find(|(old, _)| *old == id && known(id).is_none());
+        let retired = RETIRED.iter().find(|(old, _)| *old == id);
         let id = match retired {
             Some((_, Some(new))) => new,
             Some((_, None)) => continue,
@@ -254,7 +252,7 @@ mod tests {
     const ELEMS: [Descriptor; 2] = [d("battery", sz(1, 1), true), d("clock", sz(1, 1), true)];
 
     #[test]
-    fn the_default_list_packs_to_the_pr6_layout() {
+    fn first_fit_packs_eight_items_into_three_rows() {
         let items = [
             sz(1, 1),
             sz(2, 2),

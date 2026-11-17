@@ -1869,7 +1869,7 @@ mod tests {
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
-            b"clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            b"clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n",
             &crate::status::offered,
         );
         menu.set_status_layout(parsed);
@@ -1905,7 +1905,7 @@ mod tests {
         let full = (1920.0, 1080.0);
         let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
         assert!(text_rect(&shapes, "-5m").is_some() && text_rect(&shapes, "IPv4").is_some());
-        // A short one: one row, the graph alone at 3 x 1 (the unit inside its
+        // A short one: one row, the graph alone at 2 x 1 (the unit inside its
         // plot, no time axis), and the connection, which has no short size, left out.
         let short = short_screen(720.0);
         assert!(short);
@@ -1913,13 +1913,13 @@ mod tests {
         assert_eq!(menu.status.rows(&menu.status_sources(), short), 1);
         let l = layout(screen(1280.0, 720.0), n, 0, 1, 1);
         let shapes = status_frame(&new_ctx(), &menu, t0, false).0;
-        let graph = cell_rect(&l, 0, 0, 3, 1);
+        let graph = cell_rect(&l, 0, 0, 2, 1);
         let unit = text_rect(&shapes, "bit/s").expect("the graph is drawn");
         assert!(graph.contains_rect(unit), "{unit:?} in {graph:?}");
         assert!(text_rect(&shapes, "-5m").is_none(), "no time axis in one row");
         assert!(text_rect(&shapes, "IPv4").is_none() && text_rect(&shapes, "VPN").is_none());
         // Where the cell after the graph would be, nothing is drawn.
-        let after = cell_rect(&l, 3, 0, 1, 1);
+        let after = cell_rect(&l, 2, 0, 1, 1);
         assert!(
             shapes.iter().all(
                 |c| !after.contains_rect(c.shape.visual_bounding_rect()) || matches!(c.shape, egui::Shape::Rect(_))
@@ -2022,14 +2022,14 @@ mod tests {
         assert_eq!(menu.status.rows(&menu.status_sources(), false), 3);
         let all = status_frame_on(&new_ctx(), &menu, t0, full);
         let got = element_rects(&all, &l);
-        assert_eq!(got.len(), 8, "{got:?}");
+        assert_eq!(got.len(), 7, "{got:?}");
         for cells in [
-            "0,0,1,1", "1,0,2,2", "3,0,1,2", "0,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1", "3,2,1,1",
+            "0,0,1,1", "1,0,2,2", "3,0,1,2", "0,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1",
         ] {
             assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
         }
         // Their text is inside their cells.
-        for (name, cells) in [("CPU load", (0, 2)), ("RAM", (1, 2)), ("Fan", (2, 2)), ("GPU", (0, 1))] {
+        for (name, cells) in [("GPU", (0, 2)), ("CPU load", (1, 2)), ("RAM", (2, 2))] {
             let r = text_rect(&all, name).unwrap_or_else(|| panic!("{name}"));
             let cell = cell_rect(&l, cells.0, cells.1, 1, 1);
             assert!(cell.contains_rect(r), "{name} {r:?} in {cell:?}");
@@ -2040,21 +2040,19 @@ mod tests {
         no_battery.set_hardware(crate::status::hardware::sample());
         let shapes = status_frame_on(&new_ctx(), &no_battery, t0, full);
         let got = element_rects(&shapes, &l);
-        assert_eq!(got.len(), 7, "{got:?}");
-        for cells in [
-            "0,0,2,2", "2,0,1,2", "3,0,1,1", "3,1,1,1", "0,2,1,1", "1,2,1,1", "2,2,1,1",
-        ] {
+        assert_eq!(got.len(), 6, "{got:?}");
+        for cells in ["0,0,2,2", "2,0,1,2", "3,0,1,1", "3,1,1,1", "0,2,1,1", "1,2,1,1"] {
             assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
         }
-        assert!(!drawn_on(&got, &l, "3,2,1,1"), "{got:?}");
+        assert!(!drawn_on(&got, &l, "2,2,1,1"), "{got:?}");
         assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
         // No network: the rest closes up into two rows, tiles unmoved.
         let mut no_net = status_menu(five(), t0);
         no_net.set_hardware(crate::status::hardware::sample());
         let shapes = status_frame_on(&new_ctx(), &no_net, t0, full);
         let got = element_rects(&shapes, &l);
-        assert_eq!(got.len(), 6, "{got:?}");
-        for cells in ["0,0,1,1", "1,0,1,1", "2,0,1,1", "3,0,1,1", "0,1,1,1", "1,1,1,1"] {
+        assert_eq!(got.len(), 5, "{got:?}");
+        for cells in ["0,0,1,1", "1,0,1,1", "2,0,1,1", "3,0,1,1", "0,1,1,1"] {
             assert!(drawn_on(&got, &l, cells), "{cells} in {got:?}");
         }
         assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
@@ -2075,13 +2073,13 @@ mod tests {
         // Nothing yet from the sampler: the same place again.
         let shapes = status_frame_on(&new_ctx(), &net_menu(five(), t0), t0, full);
         assert_eq!(tile_name_top(&shapes, "Terminal"), tile_name_top(&all, "Terminal"));
-        // A short screen: battery and the 3 x 1 graph, nothing else.
+        // A short screen: battery and the 2 x 1 graph, nothing else.
         let small = (1280.0, 720.0);
         let l = layout(screen(small.0, small.1), n, 0, 1, 1);
         let got = element_rects(&status_frame_on(&new_ctx(), &menu, t0, small), &l);
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(menu.status.rows(&menu.status_sources(), true), 1);
-        assert!(drawn_on(&got, &l, "1,0,3,1"), "{got:?}");
+        assert!(drawn_on(&got, &l, "1,0,2,1"), "{got:?}");
     }
 
     #[test]
@@ -2092,7 +2090,7 @@ mod tests {
         let n = menu.visible_tiles().len();
         for (w, h, _) in SHIPPED_SCREENS {
             let short = short_screen(h);
-            // Short: one row, the battery and the graph at 3 x 1. Otherwise
+            // Short: one row, the battery and the graph at 2 x 1. Otherwise
             // the graph is 2 x 2, the connection stands right of it and the
             // hardware elements fill the third row.
             let planned = menu.status.planned_rows(short);
@@ -2114,8 +2112,9 @@ mod tests {
             if let Some(r) = text_rect(&shapes, "IPv4") {
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
             }
-            // The hardware elements only where the screen is not short.
-            for name in ["CPU load", "RAM", "Fan", "GPU"] {
+            // The hardware elements only where the screen is not short. The
+            // sample's five sensors fill the temperature cell: no fan line.
+            for name in ["CPU load", "RAM", "GPU"] {
                 assert_eq!(text_rect(&shapes, name).is_some(), !short, "{w}x{h}: {name}");
                 if let Some(r) = text_rect(&shapes, name) {
                     assert!(st.contains_rect(r), "{w}x{h}: {name} {r:?} in {st:?}");
@@ -3647,7 +3646,7 @@ mod tests {
             size,
             &[
                 &|t| in_row(t, "Network traffic", "Up"),
-                &|t| in_row(t, "Clock", "Down"),
+                &|t| in_row(t, "Memory", "Down"),
                 &|t| tick_of(t, "Clock"),
                 // The select shows the size; its list offers the others.
                 &|t| in_row(t, "Keyboard and mouse batteries", "1x1"),
@@ -3697,7 +3696,7 @@ mod tests {
         // would need a third row, which was never reserved.
         let t0 = Instant::now();
         let mut menu = net_menu(vec![], t0);
-        let text = "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n";
+        let text = "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n";
         let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         menu.set_status_layout(layout);
@@ -3726,8 +3725,7 @@ mod tests {
         // "no room" for the rest.
         let t0 = Instant::now();
         let mut menu = status_menu(vec![], t0);
-        let text =
-            "network 3x1\nconnection 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\nsystem 1x1\n";
+        let text = "network 3x1\nconnection 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\n";
         let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         menu.set_status_layout(layout);
@@ -6825,12 +6823,6 @@ mod tests {
         ];
         let net = crate::status::network::sample(300);
         let hardware = crate::status::hardware::sample();
-        let crowded = crate::hardware::Snapshot {
-            fans: vec![12000, 1800, 900, 600],
-            maker: Some("Gigabyte Technology".into()),
-            model: Some("GB-BXi3-5010 Some Long Board Name".into()),
-            ..crate::status::hardware::sample()
-        };
         let data = Data {
             battery: &devices,
             battery_since: Some(Instant::now()),
@@ -6844,21 +6836,6 @@ mod tests {
                 for h in [TILE_H, TILE_H_MIN] {
                     shot_element(&format!("{}-{size}-{h}", e.id()), *e, *size, h, &data);
                 }
-            }
-        }
-        let busy = Data {
-            hardware: Some(&crowded),
-            ..data
-        };
-        for size in crate::status::Element::sizes(&crate::status::hardware::System) {
-            for h in [TILE_H, TILE_H_MIN] {
-                shot_element(
-                    &format!("system-crowded-{size}-{h}"),
-                    &crate::status::hardware::System,
-                    *size,
-                    h,
-                    &busy,
-                );
             }
         }
     }

@@ -211,11 +211,10 @@ pub static ELEMENTS: &[&dyn Element] = &[
     &battery::Battery,
     &network::Network,
     &connection::Connection,
+    &clock::Clock,
     &hardware::Temperatures,
     &hardware::Cpu,
     &hardware::Memory,
-    &hardware::System,
-    &clock::Clock,
 ];
 
 pub fn element(id: &str) -> Option<&'static dyn Element> {
@@ -584,11 +583,10 @@ mod tests {
                 "battery",
                 "network",
                 "connection",
+                "clock",
                 "temperatures",
                 "cpu",
-                "memory",
-                "system",
-                "clock"
+                "memory"
             ]
         );
     }
@@ -649,9 +647,8 @@ mod tests {
         );
         assert_eq!(a.rows(&with_net, false), 2);
         // A hidden element takes no part, planned or drawn.
-        let hidden = area(
-            "-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
-        );
+        let hidden =
+            area("-battery 1x1\n-network 2x2\n-connection 1x2\n-clock 1x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n");
         assert_eq!(hidden.planned_rows(false), 0);
         assert_eq!(hidden.rows(&with, false), 0);
         assert!(!hidden.needs(Source::Battery) && !hidden.needs(Source::Network));
@@ -703,10 +700,10 @@ mod tests {
             ids(&a.shown(&with, false)),
             [("network", cells(0, 0, 2, 2)), ("connection", cells(2, 0, 1, 2))]
         );
-        // The graph takes its short size, 3x1; the connection has none.
+        // The graph takes its short size, 2x1; the connection has none.
         let short = a.shown(&with, true);
-        assert_eq!(ids(&short), [("network", cells(0, 0, 3, 1))]);
-        assert_eq!(short[0].1, Size { w: 3, h: 1 });
+        assert_eq!(ids(&short), [("network", cells(0, 0, 2, 1))]);
+        assert_eq!(short[0].1, Size { w: 2, h: 1 });
         assert_eq!(a.planned_rows(true), 1);
         assert_eq!(a.rows(&with, true), 1);
         // The connection alone has nowhere to go on a short screen.
@@ -748,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_list_built_from_the_elements_packs_to_the_pr6_layout() {
+    fn the_default_list_packs_to_the_redesign_layout() {
         let ids: Vec<&str> = ELEMENTS.iter().map(|e| e.id()).collect();
         assert_eq!(
             ids,
@@ -756,11 +753,10 @@ mod tests {
                 "battery",
                 "network",
                 "connection",
+                "clock",
                 "temperatures",
                 "cpu",
-                "memory",
-                "system",
-                "clock"
+                "memory"
             ]
         );
         let sizes: Vec<Size> = ELEMENTS.iter().filter_map(|e| e.sizes().first().copied()).collect();
@@ -781,11 +777,22 @@ mod tests {
                 (0, 1, 1, 1),
                 (0, 2, 1, 1),
                 (1, 2, 1, 1),
-                (2, 2, 1, 1),
-                (3, 2, 1, 1)
+                (2, 2, 1, 1)
             ]
         );
         assert_eq!(Area::shipped().planned_rows(false), 3);
+    }
+
+    #[test]
+    fn a_short_screen_holds_battery_and_the_traffic_graph() {
+        // Every element with content: on a short screen only the two with a
+        // short size get cells, side by side in the one row.
+        let got = Area::shipped().shown_where(&|_| true, true);
+        assert_eq!(
+            ids(&got),
+            [("battery", cells(0, 0, 1, 1)), ("network", cells(1, 0, 2, 1))]
+        );
+        assert_eq!(Area::shipped().planned_rows(true), 1);
     }
 
     #[test]
@@ -810,13 +817,35 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_system_line_is_dropped_through_the_real_elements() {
+        // Its fans moved into `temperatures`, so the line goes without a
+        // note and the lines around it keep their order and sizes.
+        assert!(offered("system").is_none());
+        let saved = "battery 1x1\nnetwork 2x2\nsystem 2x1\ntemperatures 1x2\nclock 1x1\n";
+        let l = layout::parse(saved.as_bytes(), &offered);
+        let got: Vec<(&str, Size)> = l.choices.iter().map(|c| (c.id.as_str(), c.size)).collect();
+        assert_eq!(
+            got,
+            [
+                ("battery", Size { w: 1, h: 1 }),
+                ("network", Size { w: 2, h: 2 }),
+                ("temperatures", Size { w: 1, h: 2 }),
+                ("clock", Size { w: 1, h: 1 }),
+            ]
+        );
+        assert!(l.choices.iter().all(|c| c.known && c.shown));
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+        assert!(!layout::to_text(&l).contains("system"));
+    }
+
+    #[test]
     fn a_source_is_placed_only_where_an_element_of_it_gets_cells() {
         let shipped = Area::shipped();
         assert!(shipped.places(Source::Hardware, false));
         // On a short screen the hardware elements have no size.
         assert!(!shipped.places(Source::Hardware, true));
         assert!(shipped.places(Source::Network, true), "the graph has a short size");
-        let hidden = area("-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n");
+        let hidden = area("-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n");
         assert!(!hidden.places(Source::Hardware, false));
         assert!(!hidden.needs(Source::Hardware));
         assert!(!Area::default().places(Source::Hardware, false));
@@ -827,9 +856,7 @@ mod tests {
     fn sample_layouts() -> Vec<Area> {
         let mut out = vec![
             Area::shipped(),
-            area(
-                "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
-            ),
+            area("clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n"),
         ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
         let mut next = move |n: usize| {
