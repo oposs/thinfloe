@@ -105,6 +105,26 @@ rm -f "$WORK"/leases/*
 PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$WORK/leases" THINFLOE_ZONEINFO_DIR="$WORK/zi" "$SCRIPT" >"$WORK/out" 2>&1
 [[ $? -eq 0 && ! -s "$WORK/out" ]] || fail "no lease at all must be silent"
 
+# Two leases with different zones: the last lease in glob order wins, and
+# only that zone is set and logged.
+rm -f "$WORK"/leases/* "$WORK/calls"
+printf 'TIMEZONE=Europe/Zurich\n' >"$WORK/leases/2"
+printf 'TIMEZONE=Europe/Inside\n' >"$WORK/leases/3"
+PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$WORK/leases" THINFLOE_ZONEINFO_DIR="$WORK/zi" "$SCRIPT" >"$WORK/out" 2>&1
+[[ "$(cat "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] \
+    || fail "two leases: not only the last zone set: $(cat "$WORK/calls" 2>/dev/null)"
+[[ "$(cat "$WORK/out")" == "thinfloe: time zone Europe/Inside from DHCP" ]] \
+    || fail "two leases: wrong output: $(cat "$WORK/out")"
+# A valid zone in an earlier lease wins over an invalid one in a later lease.
+printf 'TIMEZONE=Mars/Olympus\n' >"$WORK/leases/4"
+rm -f "$WORK/calls"
+PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$WORK/leases" THINFLOE_ZONEINFO_DIR="$WORK/zi" "$SCRIPT" >"$WORK/out" 2>&1
+[[ "$(cat "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] \
+    || fail "invalid last lease: wrong calls: $(cat "$WORK/calls" 2>/dev/null)"
+grep -q "^thinfloe: ignored DHCP time zone 'Mars/Olympus'" "$WORK/out" \
+    || fail "invalid last lease: no ignored line: $(cat "$WORK/out")"
+rm -f "$WORK"/leases/*
+
 # --watch: the service's mode. It must arm its watch before it reads the
 # leases and keep it armed while it reads, so no lease write is lost.
 # It needs inotifywait (inotify-tools) on the host, as in the image.
@@ -230,11 +250,79 @@ else
     [[ $rc -ne 0 ]] || fail "watch: exit 0 after inotifywait ended"
 fi
 
+# watch_exit_rc: wait up to 10 s for the watcher to end; rc holds its status,
+# or 999 if it is still running (then it is stopped).
+watch_exit_rc() {
+    local i
+    for ((i = 0; i < 100; i++)); do
+        kill -0 "$WATCHER" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$WATCHER" 2>/dev/null; then
+        rc=999
+        watch_stop
+    else
+        wait "$WATCHER"
+        rc=$?
+        WATCHER=
+    fi
+}
+
+# systemctl stop (SIGTERM) is a clean exit, or the unit ends up failed at
+# every shutdown.
+mkdir -p "$WORK/w5"
+watch_start "$WORK/w5"
+sleep 0.5
+kill -TERM "$WATCHER"
+watch_exit_rc
+[[ $rc -eq 0 ]] || fail "watch: SIGTERM gave exit $rc, not 0"
+
+# The lease directory removed: the watch is gone, so the watcher fails and
+# systemd starts it again on the new directory.
+mkdir -p "$WORK/w6"
+watch_start "$WORK/w6"
+sleep 0.5
+rmdir "$WORK/w6"
+watch_exit_rc
+[[ $rc -ne 0 && $rc -ne 999 ]] || fail "watch: removed lease directory, watcher rc $rc (999: still running)"
+
+# Two leases with different zones under --watch: a renewal of either logs
+# nothing new, as the zone left set does not change.
+mkdir -p "$WORK/w7"
+printf 'TIMEZONE=Europe/Zurich\n' >"$WORK/w7/2"
+printf 'TIMEZONE=Europe/Inside\n' >"$WORK/w7/3"
+watch_start "$WORK/w7"
+wait_for "$WORK/calls" "Europe/Inside" || fail "watch, two leases: zone not set"
+printf 'TIMEZONE=Europe/Zurich\n' >"$WORK/w7/2"
+for ((i = 0; i < 100; i++)); do
+    [[ $(lines "$WORK/calls") -ge 2 ]] && break
+    sleep 0.1
+done
+[[ $(lines "$WORK/calls") -ge 2 ]] || fail "watch, two leases: renewal did not rescan"
+[[ $(lines "$WORK/watch.log") -eq 1 ]] || fail "watch, two leases: logged more than once: $(cat "$WORK/watch.log")"
+watch_stop
+
+# No parent directory to wait in: one clear line naming it, a failed exit.
+watch_start "$WORK/nowhere/leases"
+watch_exit_rc
+[[ $rc -ne 0 && $rc -ne 999 ]] || fail "watch, no parent: rc $rc (999: still running)"
+grep -qF "$WORK/nowhere" "$WORK/watch.log" || fail "watch, no parent: missing directory not named: $(cat "$WORK/watch.log")"
+if grep -q "unbound variable" "$WORK/watch.log"; then fail "watch, no parent: unbound variable"; fi
+[[ $(lines "$WORK/watch.log") -eq 1 ]] || fail "watch, no parent: not one line: $(cat "$WORK/watch.log")"
+
+# The parent removed while the watcher waits in it for the lease directory.
+mkdir -p "$WORK/gone"
+watch_start "$WORK/gone/leases"
+sleep 0.5
+rmdir "$WORK/gone"
+watch_exit_rc
+[[ $rc -ne 0 && $rc -ne 999 ]] || fail "watch, parent removed: rc $rc (999: still running)"
+if grep -q "unbound variable" "$WORK/watch.log"; then fail "watch, parent removed: unbound variable"; fi
+
 # Stopping the watcher leaves no inotifywait behind.
 mkdir -p "$WORK/w4"
 watch_start "$WORK/w4"
 sleep 0.5
-pid=$WATCHER
 watch_stop
 sleep 0.2
 if pgrep -f "inotifywait.*$WORK/w4" >/dev/null; then fail "watch: inotifywait left running after stop"; fi
