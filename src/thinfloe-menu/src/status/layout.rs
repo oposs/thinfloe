@@ -459,6 +459,30 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_line_after_network_info_is_skipped_as_already_listed() {
+        let l = p("network-info 2x1\nconnection 1x2\n");
+        assert_eq!(l.choices.len(), 1);
+        assert_eq!((l.choices[0].id.as_str(), l.choices[0].size), ("connection", sz(2, 1)));
+        assert_eq!(l.notes, ["status line 2 skipped: 'connection' is already listed"]);
+    }
+
+    // Temporary: delete with the network-info element. Until then `known`
+    // still offers it and its line must not be mapped to connection.
+    #[test]
+    fn temporary_guard_a_network_info_line_stays_while_the_element_exists() {
+        let with_old = |id: &str| match id {
+            "network-info" => Some(&ALL[..]),
+            other => known(other),
+        };
+        let l = parse(b"network-info 1x1\n", &with_old);
+        assert_eq!(
+            (l.choices[0].id.as_str(), l.choices[0].size),
+            ("network-info", sz(1, 1))
+        );
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+    }
+
+    #[test]
     fn a_network_info_line_beside_connection_is_dropped() {
         let l = p("connection 1x2\nnetwork-info 2x1\n");
         assert_eq!(l.choices.len(), 1);
