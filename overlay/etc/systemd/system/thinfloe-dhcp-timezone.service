@@ -1,23 +1,26 @@
 [Unit]
-Description=Set the time zone the DHCP server sent
-# Deliberately no Before= on anything in sysinit.target. This unit is started
-# by a path unit that is WantedBy=multi-user.target and so is implicitly
-# After=basic.target; see CLAUDE.md, "A multi-user.target unit must never
-# declare Before= on a sysinit.target unit".
-After=systemd-networkd.service thinfloe-dhcp-timezone.path
-# A burst of lease writes must not trip the default start limit (5 starts in
-# 10 s): the path unit would fail and stop triggering for the rest of the boot.
+Description=Set the time zone the DHCP server sends
+# Deliberately no Before= on anything in sysinit.target. This unit is
+# WantedBy=multi-user.target and so implicitly After=basic.target; see
+# CLAUDE.md, "A multi-user.target unit must never declare Before= on a
+# sysinit.target unit".
+After=systemd-networkd.service
+# Restarts after a failure must never hit the start limit and stop for the
+# rest of the boot.
 StartLimitIntervalSec=0
-# Also started once at boot (WantedBy below), because the path unit only sees
-# changes made after it is armed and a fast lease, or the initramfs lease on
-# netboot, can already be there. Ordered after the path unit so a lease that
-# lands between this run and the arming is not missed either. No PathExistsGlob
-# or DirectoryNotEmpty: those retrigger in a loop.
+# One long-running watcher and no path unit: a PathChanged= path unit stops
+# watching while its service runs and does not look again when it re-arms,
+# so a lease written during a run was lost until the next renewal. The
+# script arms its inotify watch before it reads the leases that are already
+# there (a fast lease, or the initramfs lease on netboot) and keeps it armed
+# while it reads.
 
 [Service]
-Type=oneshot
+Type=simple
+ExecStart=/usr/libexec/thinfloe/dhcp-timezone --watch
+Restart=on-failure
+RestartSec=2
 StandardOutput=journal+console
-ExecStart=/usr/libexec/thinfloe/dhcp-timezone
 
 [Install]
 WantedBy=multi-user.target

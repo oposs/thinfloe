@@ -70,8 +70,11 @@ present "save-home"         'usr/bin/thinfloe-save-home$'
 # validates and sets it (polkit is missing, so networkd cannot).
 present "DHCP time zone option" 'etc/systemd/network/10-netplan-eth\.network\.d/50-timezone\.conf$'
 present "DHCP time zone script" 'usr/libexec/thinfloe/dhcp-timezone$'
-present "DHCP time zone path unit enabled" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.path$'
-present "DHCP time zone service enabled (boot-time run)" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.service$'
+# One long-running watcher, no path unit: a path unit stops watching while
+# its service runs and loses a lease written meanwhile.
+absent  "DHCP time zone path unit" 'thinfloe-dhcp-timezone\.path$'
+present "DHCP time zone watcher enabled" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.service$'
+present "inotifywait"       'usr/bin/inotifywait$'
 present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
 present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'

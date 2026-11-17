@@ -131,6 +131,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     less \
     chrony \
     tzdata \
+    inotify-tools \
     joe \
     net-tools \
     pciutils \
@@ -424,7 +425,7 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
     systemctl enable thinfloe-upgrade-boot-check.timer && \
     systemctl enable thinfloe-upgrade-check.timer && \
     systemctl enable thinfloe-peripheral-battery.timer thinfloe-peripheral-battery.service && \
-    systemctl enable thinfloe-dhcp-timezone.path thinfloe-dhcp-timezone.service && \
+    systemctl enable thinfloe-dhcp-timezone.service && \
     systemctl mask systemd-hwdb-update.service && \
     systemctl enable thinfloe-plymouth-fallback.timer && \
     systemctl mask plymouth-quit.service
