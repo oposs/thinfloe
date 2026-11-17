@@ -2083,6 +2083,34 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_temperature_element_draws_the_fan_line_below_the_sensors() {
+        // At 1x2 the sample's five sensors leave a line free: the fan line
+        // takes it, inside the element's cell.
+        let t0 = Instant::now();
+        let mut menu = net_menu(Vec::new(), t0);
+        menu.set_hardware(crate::status::hardware::sample());
+        let mut parsed = crate::status::layout::parse(
+            b"temperatures 1x2\n-battery 1x1\n-network 2x2\n-connection 1x2\n-clock 1x1\n-cpu 1x1\n-memory 1x1\n",
+            &crate::status::offered,
+        );
+        crate::status::layout::complete(&mut parsed, &crate::status::descriptors());
+        menu.set_status_layout(parsed);
+        let full = (1920.0, 1080.0);
+        let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
+        let n = menu.visible_tiles().len();
+        let l = layout(screen(full.0, full.1), n, 0, 2, 2);
+        let cell = cell_rect(&l, 0, 0, 1, 2);
+        let label = text_rect(&shapes, "Fan").expect("the fan label is drawn");
+        let value = text_rect(&shapes, "2400 rpm").expect("the fan speed is drawn");
+        let lowest_sensor = text_rect(&shapes, "Board").expect("the last sensor is drawn");
+        assert!(
+            cell.contains_rect(label) && cell.contains_rect(value),
+            "{label:?} {value:?} in {cell:?}"
+        );
+        assert!(value.top() > lowest_sensor.top(), "the fans follow the sensors");
+    }
+
+    #[test]
     fn the_shipped_status_area_covers_no_tile_on_any_screen() {
         let t0 = Instant::now();
         let mut menu = net_menu(five(), t0);

@@ -606,6 +606,13 @@ mod tests {
             ["CPU 52 °C", "GPU 97 °C", "Fans 1200 900 rpm"]
         );
         assert_eq!(text(&snap, Show::Temperatures, 2), ["CPU 52 °C", "GPU 97 °C"]);
+        // Three sensors in two lines: the sensor cut comes first, the fans
+        // find no line left.
+        let three = Snapshot {
+            temps: sample().temps[..3].to_vec(),
+            ..snap.clone()
+        };
+        assert_eq!(text(&three, Show::Temperatures, 2), ["CPU 52 °C", "GPU 97 °C"]);
         let one = Snapshot {
             fans: vec![1200],
             ..snap.clone()
