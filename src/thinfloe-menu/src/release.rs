@@ -124,6 +124,11 @@ pub fn parses(v: &str) -> bool {
     parse_version(v).is_some()
 }
 
+/// X.Y.Z of a version, without its pre-release and build parts.
+pub fn core(v: &str) -> Option<[u64; 3]> {
+    parse_version(v).map(|p| p.core)
+}
+
 /// True when `latest` is a higher version than `installed`. Either side
 /// that does not parse gives false.
 pub fn newer(latest: &str, installed: &str) -> bool {

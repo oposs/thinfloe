@@ -156,6 +156,8 @@ struct Job {
     /// `@touched` came: a fresh install has changed the stick.
     touched: bool,
     result: Option<(bool, String)>,
+    /// `Upgrade::not_older` when the write started.
+    not_older: Option<NotOlder>,
 }
 
 #[derive(Debug)]
@@ -607,21 +609,33 @@ impl Upgrade {
         let size = drives::format_size(d.size_bytes);
         if let Some(on) = self.not_older() {
             let to = self.version()?;
-            let (who, after) = if d.is_boot {
+            // The switch drops tl.old: with the same release on tl, no
+            // older one is left to fall back to.
+            let (end, tail) = if d.has_tl_old {
                 (
-                    "This machine's stick".to_string(),
-                    "; it becomes active after a restart.",
+                    " The older release kept as fallback is dropped.",
+                    "; the older release kept as fallback is dropped",
                 )
             } else {
-                (format!("{}, {size},", name(d)), ".")
+                ("", "")
             };
-            return Some(if on.equal {
-                format!("{who} already has ThinFloe {to}. Write again copies it anew{after}")
-            } else {
-                format!(
-                    "{who} has ThinFloe {}, newer than {to}. Go back writes {to}{after}",
+            return Some(match (d.is_boot, on.equal) {
+                (true, true) => format!(
+                    "Write ThinFloe {to} again to this machine's stick, which already has it. It becomes active after a restart.{end}"
+                ),
+                (true, false) => format!(
+                    "Downgrade this machine's stick from ThinFloe {} to {to}. It becomes active after a restart.{end}",
                     on.stick
-                )
+                ),
+                (false, true) => format!(
+                    "Write ThinFloe {to} again to {}, {size}, which already has it{tail}",
+                    name(d)
+                ),
+                (false, false) => format!(
+                    "Downgrade {}, {size}, from ThinFloe {} to {to}{tail}",
+                    name(d),
+                    on.stick
+                ),
             });
         }
         Some(match self.mode? {
@@ -639,17 +653,21 @@ impl Upgrade {
             Mode::Fresh => format!("Erase {}", drives::confirm_text(d)),
             Mode::Upgrade => match self.not_older() {
                 Some(on) if on.equal => "Write again".to_string(),
-                Some(_) => "Go back".to_string(),
+                Some(_) => "Downgrade".to_string(),
                 None => "Upgrade".to_string(),
             },
         })
     }
 
-    /// While a write is being chosen: the chosen stick already has the
-    /// target release or a newer one. None when either version is unknown
-    /// or does not parse, or for a fresh install.
+    /// The chosen stick already has the target release or a newer one: as
+    /// chosen, and for a running write as it was when the write started (a
+    /// list read during the write may show the new version). None when
+    /// either version is unknown or does not parse, or for a fresh install.
     fn not_older(&self) -> Option<NotOlder> {
-        if self.stage != Stage::Choose || self.job.is_some() || self.mode != Some(Mode::Upgrade) {
+        if let Some(j) = &self.job {
+            return j.not_older.clone();
+        }
+        if self.stage != Stage::Choose || self.mode != Some(Mode::Upgrade) {
             return None;
         }
         let stick = self.chosen_drive()?.version.as_deref()?;
@@ -837,7 +855,9 @@ impl Upgrade {
         self.speed = Speed::new();
         self.cancel_asked = false;
         self.cancelling = false;
+        let not_older = self.not_older();
         self.job = Some(Job {
+            not_older,
             version: self.version().map(String::from),
             verify: mode == Mode::Fresh && self.verify,
             drive: d,
@@ -965,8 +985,14 @@ impl Upgrade {
         }
         // `notes` refuses a version it cannot compare as X.Y.Z (exit 2).
         let to = self.version().filter(|v| comparable(v))?.to_string();
-        // Nothing to list from a version to itself or to an older one.
-        if self.not_older().is_some() {
+        // Nothing to list from a version to itself or to an older one. A
+        // dev build X.Y.Z-dev+sha is made after release X.Y.Z, so it has
+        // that release's changes: its X.Y.Z decides here, not `newer`.
+        if self.mode == Some(Mode::Upgrade)
+            && let Some(stick) = self.chosen_drive().and_then(|d| d.version.as_deref())
+            && let (Some(a), Some(b)) = (crate::release::core(stick), crate::release::core(&to))
+            && a >= b
+        {
             return None;
         }
         match (self.mode, self.chosen_drive()) {
@@ -1108,6 +1134,7 @@ fn planned(mode: Mode, verify: bool, copy_home: bool, boot_stick: bool) -> Vec<S
 }
 
 /// The chosen stick's version when it is not older than the target.
+#[derive(Debug, Clone, PartialEq)]
 struct NotOlder {
     stick: String,
     equal: bool,
@@ -2488,7 +2515,7 @@ mod tests {
         assert_eq!(
             u.summary().as_deref(),
             Some(
-                "This machine's stick already has ThinFloe 4.5.0. Write again copies it anew; it becomes active after a restart."
+                "Write ThinFloe 4.5.0 again to this machine's stick, which already has it. It becomes active after a restart."
             )
         );
         assert_eq!(u.confirm_label().as_deref(), Some("Write again"));
@@ -2498,23 +2525,22 @@ mod tests {
         // Writing it again stays possible.
         assert!(u.can_confirm());
         write_of(ev(&mut u, UpgradeEvent::Confirm, t));
-        // While it writes, the title names the write, not the old state.
-        assert_eq!(
-            u.summary().as_deref(),
-            Some("Upgrade this machine's stick to ThinFloe 4.5.0. It becomes active after a restart.")
-        );
+        // While it writes, the title stays, also when a list read meanwhile
+        // shows the new version.
+        let title = "Write ThinFloe 4.5.0 again to this machine's stick, which already has it. It becomes active after a restart.";
+        assert_eq!(u.summary().as_deref(), Some(title));
+        u.drives[0].version = Some("4.5.0".into());
+        assert_eq!(u.summary().as_deref(), Some(title));
     }
 
     #[test]
-    fn a_stick_newer_than_the_release_goes_back() {
+    fn a_stick_newer_than_the_release_is_a_downgrade() {
         let (u, _) = boot_with("4.6.0");
         assert_eq!(
             u.summary().as_deref(),
-            Some(
-                "This machine's stick has ThinFloe 4.6.0, newer than 4.5.0. Go back writes 4.5.0; it becomes active after a restart."
-            )
+            Some("Downgrade this machine's stick from ThinFloe 4.6.0 to 4.5.0. It becomes active after a restart.")
         );
-        assert_eq!(u.confirm_label().as_deref(), Some("Go back"));
+        assert_eq!(u.confirm_label().as_deref(), Some("Downgrade"));
         assert_eq!(u.notes_range(), None);
         // Another stick: named with its size.
         let d = Drive {
@@ -2529,10 +2555,42 @@ mod tests {
         });
         ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
         ev(&mut u, UpgradeEvent::Mode(Mode::Upgrade), t);
+        assert_eq!(
+            u.summary().as_deref(),
+            Some("Write ThinFloe 4.5.0 again to SanDisk Cruzer, 16 GB, which already has it")
+        );
+    }
+
+    #[test]
+    fn writing_the_same_release_again_names_the_lost_fallback() {
+        let d = Drive {
+            version: Some("4.5.0".into()),
+            has_tl_old: true,
+            ..boot("/dev/sda", "sn-A:1:1")
+        };
+        let (mut u, _) = ready(vec![d]);
+        u.release_file(Release {
+            latest: Some("4.5.0".into()),
+            ..release()
+        });
         let s = u.summary().unwrap();
         assert!(
-            s.ends_with("already has ThinFloe 4.5.0. Write again copies it anew."),
+            s.ends_with("after a restart. The older release kept as fallback is dropped."),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn a_dev_stick_of_the_target_release_has_no_notes() {
+        // 4.5.0-dev+sha is built after 4.5.0: still offered the release,
+        // but there is nothing new to list.
+        let (u, _) = boot_with("4.5.0-dev+abc1234");
+        assert_eq!(u.confirm_label().as_deref(), Some("Upgrade"));
+        assert_eq!(u.notes_range(), None);
+        let (u, _) = boot_with("4.4.0-dev+abc1234.dirty");
+        assert_eq!(
+            u.notes_range(),
+            Some((Some("4.4.0-dev+abc1234.dirty".into()), "4.5.0".into(), false))
         );
     }
 

@@ -25,13 +25,21 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   again; before that byte a cancel says "Cancelled before anything was
   written. The stick is as it was." After a successful write, a step the tool
   skipped is left out and one it began without `@done` is drawn done.
-- A stick that already has the target release, or a newer one, is
-  named so in the footer ("already has ThinFloe 4.5.0", "has ThinFloe
-  4.6.0, newer than 4.5.0"), the confirm button reads Write again or Go
-  back, and What's new is disabled (`Upgrade::not_older`, compared with
-  `release::newer`, so a `-dev` stick counts as older). Writing again stays
-  possible: it repairs a damaged `tl/`. An unknown stick version is an
-  ordinary upgrade.
+- A stick that already has the target release, or a newer one, is named
+  so in the footer ("Write ThinFloe 4.5.0 again to this machine's stick,
+  which already has it", "Downgrade this machine's stick from ThinFloe 4.6.0
+  to 4.5.0") and the confirm button reads Write again or Downgrade (not "Go
+  back", one click from the screen's Back). With a `tl.old/` on the stick
+  the footer adds that the older fallback release is dropped: the switch
+  removes `tl.old/` and the same release becomes the fallback. Writing
+  again stays possible: it repairs a damaged `tl/`. `Upgrade::not_older`
+  compares with `release::newer`, so a `-dev` stick is an ordinary upgrade
+  (the Makefile sorts it below its release); the running write keeps the
+  wording it started with. An unknown stick version is an ordinary upgrade.
+- What's new is disabled when the stick's X.Y.Z is not below the target's.
+  A dev build `4.5.0-dev+sha` is made after release 4.5.0 and has its
+  changes, so it gets no button for 4.5.0; `4.4.0-dev+sha` gets the notes
+  after 4.4.0.
 - What's new: a button left of Check now runs `thinfloe-upgrade notes` and
   opens a dialog with the notes as headings (`4.4.0 · New`, one per `###`
   group) and bullets, backticks removed (`notes.rs`, no Markdown renderer).
