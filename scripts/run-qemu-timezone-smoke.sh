@@ -1,8 +1,8 @@
 #!/bin/bash
 # Headless USB-style boot whose DHCP server sends a time zone (option 101).
 # Requires the guest to log `thinfloe: time zone Europe/Zurich from DHCP`
-# (dhcp-timezone, started by thinfloe-dhcp-timezone.path when networkd writes
-# the lease) and the boot log to hold no ordering cycle.
+# (dhcp-timezone --watch, run by thinfloe-dhcp-timezone.service, reads the
+# lease when networkd writes it) and the boot log to hold no ordering cycle.
 #
 # The DHCP server is the host's dnsmasq, run unprivileged. The script
 # re-executes itself under `podman unshare unshare --net` (a user and network
