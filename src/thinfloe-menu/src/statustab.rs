@@ -324,7 +324,7 @@ mod tests {
         }
         assert_eq!(note(&full, "system"), Some(Note::NoRoom));
         assert_eq!(note(&full, "clock"), Some(Note::NoRoom));
-        // Without a network the graph and the list say so, and their cells
+        // Without a network the graph and the connection say so, and their cells
         // go to the elements behind them.
         let none = crate::netstat::Snapshot::default();
         let no_net = Data {

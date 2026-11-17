@@ -458,14 +458,6 @@ fn peak(v: &[f64]) -> f64 {
 }
 
 impl Snapshot {
-    /// The newest rates, 0 before the first.
-    pub fn current(&self) -> (f64, f64) {
-        (
-            self.rx.last().copied().unwrap_or(0.0),
-            self.tx.last().copied().unwrap_or(0.0),
-        )
-    }
-
     /// The highest rates in the window.
     pub fn peak(&self) -> (f64, f64) {
         (peak(&self.rx), peak(&self.tx))
@@ -850,7 +842,6 @@ mod tests {
         s.push(at(3_602_000), rd("eth0", 1_000_000, 50_000));
         let snap = s.snapshot();
         assert!(snap.rx.is_empty() && snap.tx.is_empty(), "{snap:?}");
-        assert_eq!(snap.current(), (0.0, 0.0));
         // The next second draws again, from the reading after the rest.
         s.push(at(3_603_000), rd("eth0", 1_001_000, 50_100));
         assert_eq!(s.snapshot().rx, [8000.0]);
@@ -878,8 +869,7 @@ mod tests {
         s.push(at(3050), rd("eth0", 4100, 200));
         assert_eq!(s.snapshot().rx.len(), 2);
         s.push(at(4000), rd("eth0", 5000, 300));
-        assert_eq!(s.snapshot().rx[2], 8000.0);
-        assert_eq!(s.snapshot().current(), (8000.0, 800.0));
+        assert_eq!((s.snapshot().rx[2], s.snapshot().tx[2]), (8000.0, 800.0));
         assert_eq!(s.snapshot().peak(), (8000.0, 800.0));
     }
 

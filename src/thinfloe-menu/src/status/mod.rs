@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(ids(&a.shown(&Data::EMPTY, false)), [("clock", cells(0, 0, 1, 1))]);
         assert_eq!(a.rows(&Data::EMPTY, false), 1);
         assert_eq!(a.planned_rows(false), 3);
-        // A network with a route brings the graph and the list in, and the
+        // A network with a route brings the graph and the connection in, and the
         // clock goes down to the second row.
         let net = crate::status::network::sample(10);
         let with_net = Data {
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_screen_gives_the_chosen_network_its_short_size_and_leaves_the_list_out() {
+    fn a_short_screen_gives_the_chosen_network_its_short_size_and_leaves_the_connection_out() {
         let net = crate::status::network::sample(10);
         let with = Data {
             network: Some(&net),
@@ -703,16 +703,16 @@ mod tests {
             ids(&a.shown(&with, false)),
             [("network", cells(0, 0, 2, 2)), ("connection", cells(2, 0, 1, 2))]
         );
-        // The graph takes its short size, 3x1; the list has none.
+        // The graph takes its short size, 3x1; the connection has none.
         let short = a.shown(&with, true);
         assert_eq!(ids(&short), [("network", cells(0, 0, 3, 1))]);
         assert_eq!(short[0].1, Size { w: 3, h: 1 });
         assert_eq!(a.planned_rows(true), 1);
         assert_eq!(a.rows(&with, true), 1);
-        // The list alone has nowhere to go on a short screen.
-        let list = area("-network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n");
-        assert_eq!(list.planned_rows(true), 0);
-        assert_eq!(list.rows(&with, true), 0);
+        // The connection alone has nowhere to go on a short screen.
+        let connection = area("-network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n");
+        assert_eq!(connection.planned_rows(true), 0);
+        assert_eq!(connection.rows(&with, true), 0);
     }
 
     #[test]

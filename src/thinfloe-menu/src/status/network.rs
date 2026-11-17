@@ -2,7 +2,7 @@
 //! the last five minutes across the element's full width, with a rate axis
 //! (two to four round ticks with k/M/G, the unit `bit/s` above them), a time
 //! axis (`-5m` to `now`), light grid lines and a legend. The numbers are in
-//! the list beside it (`connection`). Its data is a `netstat::Snapshot` the
+//! the connection element beside it (`connection`). Its data is a `netstat::Snapshot` the
 //! menu copies from the sampler thread; it is drawn again every second while
 //! the menu shows.
 //!
