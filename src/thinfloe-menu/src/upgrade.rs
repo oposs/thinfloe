@@ -605,6 +605,25 @@ impl Upgrade {
             None => "the newest ThinFloe".to_string(),
         };
         let size = drives::format_size(d.size_bytes);
+        if let Some(on) = self.not_older() {
+            let to = self.version()?;
+            let (who, after) = if d.is_boot {
+                (
+                    "This machine's stick".to_string(),
+                    "; it becomes active after a restart.",
+                )
+            } else {
+                (format!("{}, {size},", name(d)), ".")
+            };
+            return Some(if on.equal {
+                format!("{who} already has ThinFloe {to}. Write again copies it anew{after}")
+            } else {
+                format!(
+                    "{who} has ThinFloe {}, newer than {to}. Go back writes {to}{after}",
+                    on.stick
+                )
+            });
+        }
         Some(match self.mode? {
             Mode::Fresh => format!("Erase {}, {size}, and install {to}", name(d)),
             Mode::Upgrade if d.is_boot => {
@@ -618,7 +637,29 @@ impl Upgrade {
         let d = self.chosen_drive()?;
         Some(match self.mode? {
             Mode::Fresh => format!("Erase {}", drives::confirm_text(d)),
-            Mode::Upgrade => "Upgrade".to_string(),
+            Mode::Upgrade => match self.not_older() {
+                Some(on) if on.equal => "Write again".to_string(),
+                Some(_) => "Go back".to_string(),
+                None => "Upgrade".to_string(),
+            },
+        })
+    }
+
+    /// While a write is being chosen: the chosen stick already has the
+    /// target release or a newer one. None when either version is unknown
+    /// or does not parse, or for a fresh install.
+    fn not_older(&self) -> Option<NotOlder> {
+        if self.stage != Stage::Choose || self.job.is_some() || self.mode != Some(Mode::Upgrade) {
+            return None;
+        }
+        let stick = self.chosen_drive()?.version.as_deref()?;
+        let to = self.version()?;
+        if crate::release::newer(to, stick) || !crate::release::parses(to) || !crate::release::parses(stick) {
+            return None;
+        }
+        Some(NotOlder {
+            stick: stick.to_string(),
+            equal: !crate::release::newer(stick, to),
         })
     }
 
@@ -924,6 +965,10 @@ impl Upgrade {
         }
         // `notes` refuses a version it cannot compare as X.Y.Z (exit 2).
         let to = self.version().filter(|v| comparable(v))?.to_string();
+        // Nothing to list from a version to itself or to an older one.
+        if self.not_older().is_some() {
+            return None;
+        }
         match (self.mode, self.chosen_drive()) {
             (Some(Mode::Upgrade), Some(d)) => {
                 let from = d.version.clone().filter(|v| comparable(v));
@@ -1060,6 +1105,12 @@ fn planned(mode: Mode, verify: bool, copy_home: bool, boot_stick: bool) -> Vec<S
             mark: StepMark::Waiting,
         })
         .collect()
+}
+
+/// The chosen stick's version when it is not older than the target.
+struct NotOlder {
+    stick: String,
+    equal: bool,
 }
 
 #[cfg(test)]
@@ -2403,15 +2454,101 @@ mod tests {
 
     #[test]
     fn notes_exit_3_is_empty() {
-        let (mut u, t) = notes_ready(Some("4.5.0"), Mode::Upgrade);
+        let (mut u, t) = notes_ready(Some("4.4.0"), Mode::Upgrade);
         ev(&mut u, UpgradeEvent::WhatsNew, t);
-        u.on_notes(Some("4.5.0".into()), "4.5.0".into(), false, Ok(None));
+        u.on_notes(Some("4.4.0".into()), "4.5.0".into(), false, Ok(None));
         assert_eq!(
             u.notes,
             Notes::Empty {
-                from: "4.5.0".into(),
+                from: "4.4.0".into(),
                 to: "4.5.0".into()
             }
         );
+    }
+
+    /// The boot stick with `version` on it, chosen when the screen opens,
+    /// and 4.5.0 as the newest release.
+    fn boot_with(version: &str) -> (Upgrade, Instant) {
+        let d = Drive {
+            version: Some(version.into()),
+            ..boot("/dev/sda", "sn-A:1:1")
+        };
+        let (mut u, t) = ready(vec![d]);
+        u.release_file(Release {
+            latest: Some("4.5.0".into()),
+            ..release()
+        });
+        assert_eq!(u.mode, Some(Mode::Upgrade));
+        (u, t)
+    }
+
+    #[test]
+    fn a_stick_with_the_newest_release_says_so() {
+        let (mut u, t) = boot_with("4.5.0");
+        assert_eq!(
+            u.summary().as_deref(),
+            Some(
+                "This machine's stick already has ThinFloe 4.5.0. Write again copies it anew; it becomes active after a restart."
+            )
+        );
+        assert_eq!(u.confirm_label().as_deref(), Some("Write again"));
+        // Nothing to list between a version and itself.
+        assert_eq!(u.notes_range(), None);
+        assert_eq!(ev(&mut u, UpgradeEvent::WhatsNew, t), None);
+        // Writing it again stays possible.
+        assert!(u.can_confirm());
+        write_of(ev(&mut u, UpgradeEvent::Confirm, t));
+        // While it writes, the title names the write, not the old state.
+        assert_eq!(
+            u.summary().as_deref(),
+            Some("Upgrade this machine's stick to ThinFloe 4.5.0. It becomes active after a restart.")
+        );
+    }
+
+    #[test]
+    fn a_stick_newer_than_the_release_goes_back() {
+        let (u, _) = boot_with("4.6.0");
+        assert_eq!(
+            u.summary().as_deref(),
+            Some(
+                "This machine's stick has ThinFloe 4.6.0, newer than 4.5.0. Go back writes 4.5.0; it becomes active after a restart."
+            )
+        );
+        assert_eq!(u.confirm_label().as_deref(), Some("Go back"));
+        assert_eq!(u.notes_range(), None);
+        // Another stick: named with its size.
+        let d = Drive {
+            is_thinfloe: true,
+            version: Some("4.5.0".into()),
+            ..stick("/dev/sdb", "sn-B:1:1")
+        };
+        let (mut u, t) = ready(vec![d]);
+        u.release_file(Release {
+            latest: Some("4.5.0".into()),
+            ..release()
+        });
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        ev(&mut u, UpgradeEvent::Mode(Mode::Upgrade), t);
+        let s = u.summary().unwrap();
+        assert!(
+            s.ends_with("already has ThinFloe 4.5.0. Write again copies it anew."),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn an_older_or_dev_stick_is_an_ordinary_upgrade() {
+        for v in ["4.4.0", "4.5.0-dev+abc1234"] {
+            let (u, _) = boot_with(v);
+            assert_eq!(
+                u.summary().as_deref(),
+                Some("Upgrade this machine's stick to ThinFloe 4.5.0. It becomes active after a restart."),
+                "{v}"
+            );
+            assert_eq!(u.confirm_label().as_deref(), Some("Upgrade"));
+        }
+        // An older stick lists the releases after its own.
+        let (u, _) = boot_with("4.4.0");
+        assert_eq!(u.notes_range(), Some((Some("4.4.0".into()), "4.5.0".into(), false)));
     }
 }

@@ -119,6 +119,11 @@ fn cmp_pre(a: &[&str], b: &[&str]) -> Ordering {
     a.len().cmp(&b.len())
 }
 
+/// True when `v` is a version `newer` can compare.
+pub fn parses(v: &str) -> bool {
+    parse_version(v).is_some()
+}
+
 /// True when `latest` is a higher version than `installed`. Either side
 /// that does not parse gives false.
 pub fn newer(latest: &str, installed: &str) -> bool {
