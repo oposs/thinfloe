@@ -13,8 +13,20 @@ pub const MAX_BYTES: usize = 4096;
 const MAX_LINES: usize = 64;
 const HEADER: &str = "# thinfloe status area, written by the menu";
 
-/// An element as `default_layout` and `complete` see it: id and default size.
-pub type Descriptor = (&'static str, Size);
+/// An element as `default_layout` and `complete` see it: id, default size and
+/// whether a layout without a line for it shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Descriptor {
+    pub id: &'static str,
+    pub size: Size,
+    pub shown: bool,
+}
+
+/// Ids an older image wrote and this one no longer has (`parse` applies an
+/// entry only while the image really has no such element), with the id that
+/// replaced them (`None`: the element is gone). Without this a saved layout
+/// would keep the old line as an unknown element forever.
+pub const RETIRED: [(&str, Option<&str>); 2] = [("network-info", Some("connection")), ("system", None)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
@@ -78,6 +90,17 @@ pub fn parse(text: &[u8], known: &dyn Fn(&str) -> Option<&'static [Size]>) -> La
             ));
             continue;
         };
+        // Only an id this image no longer has is retired: while `known` still
+        // offers it, the element is alive and its line stays as it is.
+        let retired = RETIRED.iter().find(|(old, _)| *old == id && known(id).is_none());
+        let id = match retired {
+            Some((_, Some(new))) => new,
+            Some((_, None)) => continue,
+            None => id,
+        };
+        if retired.is_some() && seen.contains(id) {
+            continue;
+        }
         if !seen.insert(id.to_string()) {
             out.notes
                 .push(format!("status line {n} skipped: '{id}' is already listed"));
@@ -124,16 +147,16 @@ pub fn note_key(note: &str) -> String {
     }
 }
 
-fn choice_of((id, size): &Descriptor) -> Choice {
+fn choice_of(d: &Descriptor) -> Choice {
     Choice {
-        id: (*id).into(),
-        size: *size,
-        shown: true,
+        id: d.id.into(),
+        size: d.size,
+        shown: d.shown,
         known: true,
     }
 }
 
-/// Every element, shown, at its default size.
+/// Every element at its default size, shown unless it is hidden by default.
 pub fn default_layout(elements: &[Descriptor]) -> Layout {
     Layout {
         choices: elements.iter().map(choice_of).collect(),
@@ -141,10 +164,11 @@ pub fn default_layout(elements: &[Descriptor]) -> Layout {
     }
 }
 
-/// Append the elements the file does not name: shown, default size.
+/// Append the elements the file does not name: default size, shown unless
+/// hidden by default.
 pub fn complete(layout: &mut Layout, elements: &[Descriptor]) {
     for e in elements {
-        if !layout.choices.iter().any(|c| c.id == e.0) {
+        if !layout.choices.iter().any(|c| c.id == e.id) {
             layout.choices.push(choice_of(e));
         }
     }
@@ -209,7 +233,15 @@ mod tests {
     }
     static ALL: [Size; 3] = [sz(1, 1), sz(2, 1), sz(3, 1)];
     fn known(id: &str) -> Option<&'static [Size]> {
-        matches!(id, "battery" | "clock" | "net").then_some(&ALL[..])
+        match id {
+            "battery" | "clock" | "net" | "history-temp" => Some(&ALL[..]),
+            "connection" => Some(&CONN[..]),
+            _ => None,
+        }
+    }
+    static CONN: [Size; 2] = [sz(1, 2), sz(2, 1)];
+    const fn d(id: &'static str, size: Size, shown: bool) -> Descriptor {
+        Descriptor { id, size, shown }
     }
     fn p(t: &str) -> Layout {
         parse(t.as_bytes(), &known)
@@ -219,7 +251,7 @@ mod tests {
             .map(|c| c.map_or((9, 9, 9, 9), |c| (c.col, c.row, c.w, c.h)))
             .collect()
     }
-    const ELEMS: [Descriptor; 2] = [("battery", sz(1, 1)), ("clock", sz(1, 1))];
+    const ELEMS: [Descriptor; 2] = [d("battery", sz(1, 1), true), d("clock", sz(1, 1), true)];
 
     #[test]
     fn the_default_list_packs_to_the_pr6_layout() {
@@ -373,9 +405,64 @@ mod tests {
 
     #[test]
     fn new_elements_are_appended_shown() {
+        let elems = [
+            d("battery", sz(1, 1), true),
+            d("clock", sz(1, 1), true),
+            d("history-temp", sz(2, 1), false),
+        ];
         let mut l = p("-clock 2x1\n");
-        complete(&mut l, &ELEMS);
+        complete(&mut l, &elems);
         let c = &l.choices[1];
         assert_eq!((c.id.as_str(), c.size, c.shown), ("battery", sz(1, 1), true));
+        let c = &l.choices[2];
+        assert_eq!((c.id.as_str(), c.size, c.shown), ("history-temp", sz(2, 1), false));
+        assert!(!default_layout(&elems).choices[2].shown);
+    }
+
+    #[test]
+    fn a_network_info_line_becomes_connection_at_its_place_and_size() {
+        let l = p("battery 1x1\nnetwork-info 2x1\nclock 1x1\n");
+        assert_eq!(
+            l.choices[1],
+            Choice {
+                id: "connection".into(),
+                size: sz(2, 1),
+                shown: true,
+                known: true
+            }
+        );
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+        assert!(!to_text(&l).contains("network-info"));
+    }
+
+    #[test]
+    fn a_hidden_network_info_line_stays_hidden_as_connection() {
+        let l = p("-network-info 1x2\n");
+        assert_eq!(
+            l.choices,
+            [Choice {
+                id: "connection".into(),
+                size: sz(1, 2),
+                shown: false,
+                known: true
+            }]
+        );
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+    }
+
+    #[test]
+    fn a_system_line_is_dropped_without_a_note() {
+        let l = p("battery 1x1\nsystem 2x1\n");
+        let ids: Vec<_> = l.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["battery"]);
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+    }
+
+    #[test]
+    fn a_network_info_line_beside_connection_is_dropped() {
+        let l = p("connection 1x2\nnetwork-info 2x1\n");
+        assert_eq!(l.choices.len(), 1);
+        assert_eq!((l.choices[0].id.as_str(), l.choices[0].size), ("connection", sz(1, 2)));
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
     }
 }

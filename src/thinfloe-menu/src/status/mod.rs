@@ -203,6 +203,11 @@ pub trait Element: Sync {
     fn next_change(&self, data: &Data, rect: Rect, now: Instant) -> Option<Duration>;
     /// How often it is drawn again besides; `None`: when its data changes.
     fn refresh(&self) -> Option<Duration>;
+    /// Whether a layout without a line for it shows it. `false`: it waits,
+    /// hidden, in Settings until the user turns it on.
+    fn shown_by_default(&self) -> bool {
+        true
+    }
 }
 
 /// Every element there is, in the default order. One line per element.
@@ -231,7 +236,13 @@ pub fn offered(id: &str) -> Option<&'static [Size]> {
 pub fn descriptors() -> Vec<layout::Descriptor> {
     ELEMENTS
         .iter()
-        .filter_map(|e| e.sizes().first().map(|s| (e.id(), *s)))
+        .filter_map(|e| {
+            e.sizes().first().map(|s| layout::Descriptor {
+                id: e.id(),
+                size: *s,
+                shown: e.shown_by_default(),
+            })
+        })
         .collect()
 }
 
