@@ -958,7 +958,7 @@ impl App {
         let now = Instant::now();
         let mut event = None;
         // One reading of the wall clock and one look at the zone per frame,
-        // for the header, the clock element and the network total's label.
+        // for the header and the clock element.
         let wall = std::time::SystemTime::now();
         let zone = crate::log::current_zone(std::path::Path::new("/etc/localtime"));
         live.chrome.wall = Some(wall);
@@ -969,7 +969,7 @@ impl App {
         // copy of 600 numbers takes.
         let (network, hardware) = self.samplers.copies();
         if let Some(snap) = network {
-            self.cfg.menu.set_network(snap, now, wall);
+            self.cfg.menu.set_network(snap);
         }
         if let Some(snap) = hardware {
             self.cfg.menu.set_hardware(snap);
@@ -1842,7 +1842,7 @@ esac"#;
         };
         let tall = ui::SHORT_SCREEN_H;
         let none = area(
-            b"-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n\
+            b"-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n\
               -cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
         );
         s.sync(&none, false, tall);
@@ -1904,7 +1904,7 @@ esac"#;
         // Only cpu is ticked, on a short screen, where it has no size: it
         // still needs its data, but nothing is read for it.
         let cpu_only = area(
-            b"-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n\
+            b"-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n\
               cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
         );
         s.sync(&cpu_only, false, ui::SHORT_SCREEN_H - 1.0);
@@ -1955,7 +1955,7 @@ esac"#;
             menu.status.needs(crate::status::Source::Network),
             "no file: the default"
         );
-        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
+        write_status(&file, Some(&["-network 2x2", "-connection 1x2"]));
         assert_eq!(is_status(&w.tick()), 1);
         assert_eq!(is_status(&w.tick()), 0);
         reread(&mut menu, &file);
@@ -1985,7 +1985,7 @@ esac"#;
         let refresh = |menu: &mut Menu, s: &mut Samplers| reload_status(menu, s, &file, false, tall);
         refresh(&mut menu, &mut s);
         assert!(s.network.is_some() && s.network_on.load(Ordering::Relaxed));
-        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
+        write_status(&file, Some(&["-network 2x2", "-connection 1x2"]));
         refresh(&mut menu, &mut s);
         assert!(!s.network_on.load(Ordering::Relaxed), "unticked: it rests");
         assert!(s.hardware_on.load(Ordering::Relaxed), "the rest still reads");
@@ -2005,7 +2005,7 @@ esac"#;
             },
             false,
         );
-        write_status(&file, Some(&["-network 2x2", "-network-info 1x2"]));
+        write_status(&file, Some(&["-network 2x2", "-connection 1x2"]));
         reread(&mut menu, &file);
         assert!(!menu.status.needs(crate::status::Source::Network));
         let mut s = Samplers::new(Box::new(|_| Arc::default()), Box::new(|_| Arc::default()));

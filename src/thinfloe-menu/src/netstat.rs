@@ -4,10 +4,10 @@
 //! A thread of the menu (`spawn`) reads, once a second and without root,
 //! `/proc/net/route` (default route, gateway), the interface's
 //! `statistics/{rx,tx}_bytes`, `speed` and `/proc/net/wireless` (link),
-//! the addresses through `getifaddrs`, the DNS servers from systemd-resolved's
-//! `resolv.conf` (else `/etc/resolv.conf`) and whether `wg0` is up. It keeps
-//! the last `WINDOW` rates per direction; the menu copies a `Snapshot` before
-//! each frame. Every path starts at a `Roots`, so tests read a directory.
+//! the addresses through `getifaddrs` and whether `wg0` is up. It keeps the
+//! last `WINDOW` rates per direction; the menu copies a `Snapshot` before
+//! each frame. The DNS servers in use (`dns_in_use`) are read on demand, not
+//! every second. Every path starts at a `Roots`, so tests read a directory.
 
 use std::collections::VecDeque;
 use std::ffi::CStr;
@@ -145,6 +145,17 @@ fn wireless_line<'a>(text: &'a str, iface: &str) -> Option<Vec<&'a str>> {
     })
 }
 
+/// The DNS servers the machine uses: systemd-resolved's upstream servers
+/// (`/run/systemd/resolve/resolv.conf`), else those of `/etc/resolv.conf`,
+/// which under resolved names only its stub `127.0.0.53`.
+pub fn dns_in_use(roots: &Roots) -> Vec<String> {
+    read(&roots.run.join("systemd/resolve/resolv.conf"))
+        .map(|t| nameservers(&t))
+        .filter(|d| !d.is_empty())
+        .or_else(|| read(&roots.etc.join("resolv.conf")).map(|t| nameservers(&t)))
+        .unwrap_or_default()
+}
+
 /// The `nameserver` lines of a resolv.conf, at most `MAX_DNS`.
 pub fn nameservers(text: &str) -> Vec<String> {
     text.lines()
@@ -280,7 +291,6 @@ pub struct Info {
     /// The first IPv4 address of `iface` and its prefix.
     pub ipv4: Option<(Ipv4Addr, u8)>,
     pub gateway: Option<Ipv4Addr>,
-    pub dns: Vec<String>,
     pub vpn: Vpn,
     /// Some interface but `lo` has an address that is not link-local.
     pub addressed: bool,
@@ -322,16 +332,10 @@ pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
             names.first().map(|s| s.to_string())
         }
     };
-    let dns = read(&roots.run.join("systemd/resolve/resolv.conf"))
-        .map(|t| nameservers(&t))
-        .filter(|d| !d.is_empty())
-        .or_else(|| read(&roots.etc.join("resolv.conf")).map(|t| nameservers(&t)))
-        .unwrap_or_default();
     let mut info = Info {
         iface: iface.clone(),
         default_route: route.is_some(),
         gateway: route.as_ref().and_then(|r| r.gateway),
-        dns,
         vpn: vpn(roots),
         addressed,
         ..Info::default()
@@ -361,8 +365,7 @@ pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
     Reading { info, counters }
 }
 
-/// The rates of the last `WINDOW` seconds and the totals, fed one reading
-/// at a time.
+/// The rates of the last `WINDOW` seconds, fed one reading at a time.
 #[derive(Debug, Default)]
 pub struct Series {
     /// Bits per second, oldest first.
@@ -370,9 +373,6 @@ pub struct Series {
     tx: VecDeque<f64>,
     /// The last counters, when, and of which interface.
     last: Option<(Instant, String, u64, u64)>,
-    /// Bytes counted since the series began, over every interface it
-    /// followed: never smaller than before.
-    total: (u64, u64),
     info: Info,
     /// A reading was taken: the element's data is known, if empty.
     read: bool,
@@ -388,8 +388,7 @@ impl Series {
     /// interface; a new interface (the default route moved) or a counter
     /// that went back (the interface was reset or replaced) starts the
     /// graph again instead of drawing a spike, and so does a reading more
-    /// than `GAP` after the last (the sampler rested), whose bytes still
-    /// count in the total.
+    /// than `GAP` after the last (the sampler rested).
     pub fn push(&mut self, now: Instant, r: Reading) {
         self.read = true;
         let iface = r.info.iface.clone();
@@ -406,20 +405,18 @@ impl Series {
                 if dt < MIN_STEP {
                     return;
                 }
-                let (drx, dtx) = (rx - lrx, tx - ltx);
                 if dt > GAP {
                     // The sampler rested (a window covered the menu): one
                     // rate over the rest would show its average as now, and
                     // the samples before it are no longer the last minutes.
-                    // The graph starts again; the bytes still count.
+                    // The graph starts again.
                     self.rx.clear();
                     self.tx.clear();
                 } else {
+                    let (drx, dtx) = (rx - lrx, tx - ltx);
                     let secs = dt.as_secs_f64();
                     self.add(drx as f64 * 8.0 / secs, dtx as f64 * 8.0 / secs);
                 }
-                self.total.0 = self.total.0.saturating_add(drx);
-                self.total.1 = self.total.1.saturating_add(dtx);
             }
             _ => {
                 self.rx.clear();
@@ -442,7 +439,6 @@ impl Series {
         Snapshot {
             rx: self.rx.iter().copied().collect(),
             tx: self.tx.iter().copied().collect(),
-            total: self.total,
             info: self.info.clone(),
         }
     }
@@ -454,8 +450,6 @@ pub struct Snapshot {
     /// Bits per second, oldest first, at most `WINDOW`, same length.
     pub rx: Vec<f64>,
     pub tx: Vec<f64>,
-    /// Bytes since the menu started.
-    pub total: (u64, u64),
     pub info: Info,
 }
 
@@ -484,27 +478,6 @@ impl Snapshot {
     }
 }
 
-/// Where the session total counts from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Since {
-    /// The Save-On-Exit program counted from; `None`: from the menu start.
-    pub job: Option<crate::jobs::JobId>,
-    /// `since 14:02` or `since menu start`.
-    pub label: String,
-    /// `Snapshot::total` when counting began.
-    pub base: (u64, u64),
-}
-
-impl Default for Since {
-    fn default() -> Since {
-        Since {
-            job: None,
-            label: "since menu start".into(),
-            base: (0, 0),
-        }
-    }
-}
-
 /// Whether the element's visibility changed, with `was` the last value.
 pub fn flipped(was: &mut bool, now: bool) -> bool {
     std::mem::replace(was, now) != now
@@ -513,8 +486,7 @@ pub fn flipped(was: &mut bool, now: bool) -> bool {
 /// A sampler thread for the menu. It reads only while `on` is set (the app
 /// clears it while no ticked element needs it or a window covers the menu),
 /// outside the lock, so a frame never waits for the files. After a rest the
-/// graph starts again (`Series::push`), and the session total keeps the bytes
-/// of the rest. It calls `wake` only when
+/// graph starts again (`Series::push`). It calls `wake` only when
 /// `Snapshot::visible` changes: a hidden element asks for no frames, so it
 /// would appear only with the next minute's. While it shows, the element's
 /// one-second refresh asks for the frames.
@@ -549,11 +521,6 @@ pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static
 /// `12.3 kbit/s`, `1.20 Mbit/s`.
 pub fn bits(rate: f64) -> String {
     scaled(rate, "bit/s")
-}
-
-/// `n` bytes the same way: `512 B`, `45.6 MB`, `1.23 GB`.
-pub fn bytes(n: u64) -> String {
-    scaled(n as f64, "B")
 }
 
 fn scaled(v: f64, unit: &str) -> String {
@@ -740,18 +707,32 @@ mod tests {
                 link: Link::Wired(Some(1000)),
                 ipv4: Some((Ipv4Addr::new(192, 168, 1, 23), 24)),
                 gateway: gw(192, 168, 1, 1),
-                dns: vec!["192.168.1.1".into()],
                 vpn: Vpn::Absent,
                 addressed: true,
             }
         );
-        // An unknown speed (-1) is no speed; resolved's file missing, the
-        // stub's resolv.conf is used.
+        // An unknown speed (-1) is no speed.
         write(&d.join("sys/class/net/eth0/speed"), "-1\n");
-        fs::remove_file(d.join("run/systemd/resolve/resolv.conf")).unwrap();
         let r = reading(&roots, &addrs);
         assert_eq!(r.info.link, Link::Wired(None));
-        assert_eq!(r.info.dns, ["127.0.0.53"]);
+    }
+
+    #[test]
+    fn dns_in_use_prefers_resolved_then_etc() {
+        let d = TestDir::new("network", "dns");
+        let roots = Roots::under(&d);
+        let resolved = d.join("run/systemd/resolve/resolv.conf");
+        // Both files: resolved's upstream servers, not the stub in /etc.
+        write(&resolved, "nameserver 192.168.1.1\nnameserver 9.9.9.9\n");
+        write(&d.join("etc/resolv.conf"), "nameserver 127.0.0.53\n");
+        assert_eq!(dns_in_use(&roots), ["192.168.1.1", "9.9.9.9"]);
+        // resolved's file without a server: /etc's.
+        write(&resolved, "# no servers\n");
+        assert_eq!(dns_in_use(&roots), ["127.0.0.53"]);
+        // Neither file: none.
+        fs::remove_file(&resolved).unwrap();
+        fs::remove_file(d.join("etc/resolv.conf")).unwrap();
+        assert!(dns_in_use(&roots).is_empty());
     }
 
     #[test]
@@ -857,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_after_a_rest_restarts_the_graph_and_keeps_the_total() {
+    fn a_gap_after_a_rest_restarts_the_graph() {
         let t0 = Instant::now();
         let at = |ms| t0 + Duration::from_millis(ms);
         let mut s = Series::default();
@@ -865,17 +846,14 @@ mod tests {
         s.push(at(1000), rd("eth0", 2000, 200));
         s.push(at(2000), rd("eth0", 3000, 300));
         assert_eq!(s.snapshot().rx.len(), 2);
-        // An hour of rest: no rate spans it, the old graph is gone, the
-        // bytes of the rest still count.
+        // An hour of rest: no rate spans it, the old graph is gone.
         s.push(at(3_602_000), rd("eth0", 1_000_000, 50_000));
         let snap = s.snapshot();
         assert!(snap.rx.is_empty() && snap.tx.is_empty(), "{snap:?}");
-        assert_eq!(snap.total, (999_000, 49_900));
         assert_eq!(snap.current(), (0.0, 0.0));
         // The next second draws again, from the reading after the rest.
         s.push(at(3_603_000), rd("eth0", 1_001_000, 50_100));
         assert_eq!(s.snapshot().rx, [8000.0]);
-        assert_eq!(s.snapshot().total, (1_000_000, 50_000));
         // A late sample within the gap is still a rate.
         s.push(at(3_605_500), rd("eth0", 1_003_500, 50_100));
         assert_eq!(s.snapshot().rx, [8000.0, 8000.0]);
@@ -896,12 +874,11 @@ mod tests {
         s.push(at(3000), rd("eth0", 4000, 200));
         assert_eq!(s.snapshot().rx, [8000.0, 8000.0]);
         assert_eq!(s.snapshot().tx, [800.0, 0.0]);
-        // Too soon after the last: not taken, and not lost from the total.
+        // Too soon after the last: not taken; the next rate spans it.
         s.push(at(3050), rd("eth0", 4100, 200));
         assert_eq!(s.snapshot().rx.len(), 2);
         s.push(at(4000), rd("eth0", 5000, 300));
         assert_eq!(s.snapshot().rx[2], 8000.0);
-        assert_eq!(s.snapshot().total, (4000, 200));
         assert_eq!(s.snapshot().current(), (8000.0, 800.0));
         assert_eq!(s.snapshot().peak(), (8000.0, 800.0));
     }
@@ -919,19 +896,15 @@ mod tests {
         assert!(s.snapshot().rx.is_empty());
         s.push(at(3), rd("eth0", 1010, 10));
         assert_eq!(s.snapshot().rx, [8000.0]);
-        // The total keeps what was counted.
-        assert_eq!(s.snapshot().total, (1_001_000, 1000));
         // The default route moved to WiFi: its counters are not compared
         // with the cable's.
         s.push(at(4), rd("wlan0", 5, 5));
         assert!(s.snapshot().rx.is_empty());
         s.push(at(5), rd("wlan0", 1005, 5));
         assert_eq!(s.snapshot().rx, [8000.0]);
-        assert_eq!(s.snapshot().total, (1_002_000, 1000));
         // The interface is gone: nothing to draw.
         s.push(at(6), Reading::default());
         assert!(s.snapshot().rx.is_empty());
-        assert_eq!(s.snapshot().total, (1_002_000, 1000));
     }
 
     #[test]
@@ -964,9 +937,6 @@ mod tests {
         assert_eq!(bits(4.0e12), "4000 Gbit/s", "G is the largest");
         assert_eq!(bits(f64::NAN), "0 bit/s");
         assert_eq!(bits(-5.0), "0 bit/s");
-        assert_eq!(bytes(512), "512 B");
-        assert_eq!(bytes(45_600_000), "45.6 MB");
-        assert_eq!(bytes(1_234_000_000), "1.23 GB");
         assert_eq!(speed(100), "100 Mbit/s");
         assert_eq!(speed(1000), "1 Gbit/s");
         assert_eq!(speed(2500), "2.5 Gbit/s");

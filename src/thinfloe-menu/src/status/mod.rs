@@ -18,10 +18,10 @@
 
 pub mod battery;
 pub mod clock;
+pub mod connection;
 pub mod hardware;
 pub mod layout;
 pub mod network;
-pub mod network_info;
 
 use crate::brand::{self, StatusSizes};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
@@ -145,9 +145,6 @@ pub struct Data<'a> {
     /// The network sampler's last copy; `None` while no network element
     /// samples.
     pub network: Option<&'a crate::netstat::Snapshot>,
-    /// Where the network element's session total counts from; `None`: the
-    /// menu start.
-    pub network_since: Option<&'a crate::netstat::Since>,
     /// The hardware sampler's last copy; `None` while no hardware element
     /// samples.
     pub hardware: Option<&'a crate::hardware::Snapshot>,
@@ -176,7 +173,6 @@ impl Data<'_> {
         battery: &[],
         battery_since: None,
         network: None,
-        network_since: None,
         hardware: None,
         wall: None,
         zone: None,
@@ -214,7 +210,7 @@ pub trait Element: Sync {
 pub static ELEMENTS: &[&dyn Element] = &[
     &battery::Battery,
     &network::Network,
-    &network_info::NetworkInfo,
+    &connection::Connection,
     &hardware::Temperatures,
     &hardware::Cpu,
     &hardware::Memory,
@@ -587,7 +583,7 @@ mod tests {
             [
                 "battery",
                 "network",
-                "network-info",
+                "connection",
                 "temperatures",
                 "cpu",
                 "memory",
@@ -647,14 +643,14 @@ mod tests {
             [
                 ("battery", cells(0, 0, 1, 1)),
                 ("network", cells(1, 0, 2, 2)),
-                ("network-info", cells(3, 0, 1, 2)),
+                ("connection", cells(3, 0, 1, 2)),
                 ("clock", cells(0, 1, 1, 1)),
             ]
         );
         assert_eq!(a.rows(&with_net, false), 2);
         // A hidden element takes no part, planned or drawn.
         let hidden = area(
-            "-battery 1x1\n-network 2x2\n-network-info 1x2\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
+            "-battery 1x1\n-network 2x2\n-connection 1x2\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n-clock 1x1\n",
         );
         assert_eq!(hidden.planned_rows(false), 0);
         assert_eq!(hidden.rows(&with, false), 0);
@@ -690,7 +686,7 @@ mod tests {
         // The battery's short size is 1x1; the clock has none.
         assert_eq!(ids(&a.shown(&with, true)), [("battery", cells(0, 0, 1, 1))]);
         assert_eq!(a.planned_rows(true), 1);
-        let clock_only = area("-battery 1x1\n-network 2x2\n-network-info 1x2\nclock 1x1\n");
+        let clock_only = area("-battery 1x1\n-network 2x2\n-connection 1x2\nclock 1x1\n");
         assert_eq!(clock_only.planned_rows(true), 0);
         assert_eq!(clock_only.rows(&with, true), 0);
     }
@@ -702,10 +698,10 @@ mod tests {
             network: Some(&net),
             ..Data::EMPTY
         };
-        let a = area("network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n");
+        let a = area("network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n");
         assert_eq!(
             ids(&a.shown(&with, false)),
-            [("network", cells(0, 0, 2, 2)), ("network-info", cells(2, 0, 1, 2))]
+            [("network", cells(0, 0, 2, 2)), ("connection", cells(2, 0, 1, 2))]
         );
         // The graph takes its short size, 3x1; the list has none.
         let short = a.shown(&with, true);
@@ -714,7 +710,7 @@ mod tests {
         assert_eq!(a.planned_rows(true), 1);
         assert_eq!(a.rows(&with, true), 1);
         // The list alone has nowhere to go on a short screen.
-        let list = area("-network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n");
+        let list = area("-network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n");
         assert_eq!(list.planned_rows(true), 0);
         assert_eq!(list.rows(&with, true), 0);
     }
@@ -759,7 +755,7 @@ mod tests {
             [
                 "battery",
                 "network",
-                "network-info",
+                "connection",
                 "temperatures",
                 "cpu",
                 "memory",
@@ -793,6 +789,27 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_network_info_line_becomes_connection_through_the_real_elements() {
+        // The app parses with `offered`; `network-info` is no element any
+        // more, so the retired map gives its place and size to `connection`.
+        assert!(offered("network-info").is_none());
+        let saved = "battery 1x1\nnetwork 2x2\nnetwork-info 2x1\nclock 1x1\n";
+        let l = layout::parse(saved.as_bytes(), &offered);
+        let got: Vec<(&str, Size)> = l.choices.iter().map(|c| (c.id.as_str(), c.size)).collect();
+        assert_eq!(
+            got,
+            [
+                ("battery", Size { w: 1, h: 1 }),
+                ("network", Size { w: 2, h: 2 }),
+                ("connection", Size { w: 2, h: 1 }),
+                ("clock", Size { w: 1, h: 1 }),
+            ]
+        );
+        assert!(l.choices.iter().all(|c| c.known && c.shown));
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+    }
+
+    #[test]
     fn a_source_is_placed_only_where_an_element_of_it_gets_cells() {
         let shipped = Area::shipped();
         assert!(shipped.places(Source::Hardware, false));
@@ -811,7 +828,7 @@ mod tests {
         let mut out = vec![
             Area::shipped(),
             area(
-                "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+                "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
             ),
         ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;

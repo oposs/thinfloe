@@ -1714,7 +1714,7 @@ mod tests {
     /// have something to show.
     fn net_menu(devices: Vec<battery::Device>, t0: Instant) -> Menu {
         let mut m = status_menu(devices, t0);
-        m.set_network(crate::status::network::sample(120), t0, std::time::SystemTime::now());
+        m.set_network(crate::status::network::sample(120));
         m
     }
 
@@ -1869,7 +1869,7 @@ mod tests {
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
-            b"clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            b"clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
             &crate::status::offered,
         );
         menu.set_status_layout(parsed);
@@ -1895,7 +1895,7 @@ mod tests {
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
-            b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
+            b"network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n",
             &crate::status::offered,
         );
         menu.set_status_layout(parsed);
@@ -1904,7 +1904,7 @@ mod tests {
         assert_eq!(menu.status.planned_rows(false), 2);
         let full = (1920.0, 1080.0);
         let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
-        assert!(text_rect(&shapes, "-5m").is_some() && text_rect(&shapes, "Gateway").is_some());
+        assert!(text_rect(&shapes, "-5m").is_some() && text_rect(&shapes, "IPv4").is_some());
         // A short one: one row, the graph alone at 3 x 1 (the unit inside its
         // plot, no time axis), and the list, which has no short size, left out.
         let short = short_screen(720.0);
@@ -1917,7 +1917,7 @@ mod tests {
         let unit = text_rect(&shapes, "bit/s").expect("the graph is drawn");
         assert!(graph.contains_rect(unit), "{unit:?} in {graph:?}");
         assert!(text_rect(&shapes, "-5m").is_none(), "no time axis in one row");
-        assert!(text_rect(&shapes, "Gateway").is_none() && text_rect(&shapes, "Down").is_none());
+        assert!(text_rect(&shapes, "IPv4").is_none() && text_rect(&shapes, "VPN").is_none());
         // Where the cell after the graph would be, nothing is drawn.
         let after = cell_rect(&l, 3, 0, 1, 1);
         assert!(
@@ -1933,7 +1933,7 @@ mod tests {
         // No battery device and no clock: only the network elements ask.
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
-            b"network 2x2\nnetwork-info 1x2\n-battery 1x1\n-clock 1x1\n",
+            b"network 2x2\nconnection 1x2\n-battery 1x1\n-clock 1x1\n",
             &crate::status::offered,
         );
         menu.set_status_layout(parsed);
@@ -2109,9 +2109,9 @@ mod tests {
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
             }
             // The list and the clock only where the screen is not short.
-            assert_eq!(text_rect(&shapes, "Gateway").is_some(), !short, "{w}x{h}");
+            assert_eq!(text_rect(&shapes, "IPv4").is_some(), !short, "{w}x{h}");
             assert_eq!(text_rect(&shapes, "Time").is_some(), !short, "{w}x{h}");
-            if let Some(r) = text_rect(&shapes, "Gateway") {
+            if let Some(r) = text_rect(&shapes, "IPv4") {
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
             }
             // The hardware elements only where the screen is not short.
@@ -3697,7 +3697,7 @@ mod tests {
         // would need a third row, which was never reserved.
         let t0 = Instant::now();
         let mut menu = net_menu(vec![], t0);
-        let text = "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n";
+        let text = "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n";
         let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         menu.set_status_layout(layout);
@@ -3710,10 +3710,10 @@ mod tests {
             .iter()
             .map(|(e, _, _)| e.id())
             .collect();
-        assert!(!placed.contains(&"network-info"), "{placed:?}");
+        assert!(!placed.contains(&"connection"), "{placed:?}");
         let texts = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
         assert!(
-            in_row(&texts, "Network details", "no room").is_some(),
+            in_row(&texts, "Connection", "no room").is_some(),
             "no note in {texts:?}"
         );
     }
@@ -3726,11 +3726,12 @@ mod tests {
         // "no room" for the rest.
         let t0 = Instant::now();
         let mut menu = status_menu(vec![], t0);
-        let text = "network 3x1\nnetwork-info 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\nsystem 1x1\n";
+        let text =
+            "network 3x1\nconnection 1x1\nclock 1x1\nbattery 1x1\ntemperatures 1x1\ncpu 1x1\nmemory 1x1\nsystem 1x1\n";
         let mut layout = crate::status::layout::parse(text.as_bytes(), &crate::status::offered);
         crate::status::layout::complete(&mut layout, &crate::status::descriptors());
         menu.set_status_layout(layout);
-        menu.set_network(crate::status::network::sample(120), t0, std::time::SystemTime::now());
+        menu.set_network(crate::status::network::sample(120));
         menu.screen = Screen::Settings;
         menu.settings_tab = crate::settings::SettingsTab::Status;
         let sources = menu.status_sources();
@@ -6190,22 +6191,14 @@ mod tests {
             ],
             Instant::now(),
         );
-        net.set_network(
-            crate::status::network::sample(300),
-            Instant::now(),
-            std::time::SystemTime::now(),
-        );
+        net.set_network(crate::status::network::sample(300));
         shot(&net, "desktop-1080-status.ppm", (1920, 1080), 1.0);
         shot(&net, "desktop-4k-status.ppm", (3840, 2160), 2.0);
         shot(&net, "desktop-1366x768-status.ppm", (1366, 768), 1.0);
         shot(&net, "desktop-1280x720-status.ppm", (1280, 720), 1.0);
         shot(&net, "desktop-1440x900-status.ppm", (1440, 900), 1.0);
         let mut no_battery = status_menu(Vec::new(), Instant::now());
-        no_battery.set_network(
-            crate::status::network::sample(300),
-            Instant::now(),
-            std::time::SystemTime::now(),
-        );
+        no_battery.set_network(crate::status::network::sample(300));
         shot(&no_battery, "desktop-1080-no-battery.ppm", (1920, 1080), 1.0);
         let (mut menu, _) = four_addons();
         let settings = menu.tiles.iter().position(|t| t.name == "Settings").unwrap();
@@ -6831,11 +6824,6 @@ mod tests {
             dev("Pen", 7, "discharging"),
         ];
         let net = crate::status::network::sample(300);
-        let since = crate::netstat::Since {
-            job: Some(1),
-            label: "since 14:02".into(),
-            base: (1_000_000_000, 600_000),
-        };
         let hardware = crate::status::hardware::sample();
         let crowded = crate::hardware::Snapshot {
             fans: vec![12000, 1800, 900, 600],
@@ -6847,7 +6835,6 @@ mod tests {
             battery: &devices,
             battery_since: Some(Instant::now()),
             network: Some(&net),
-            network_since: Some(&since),
             hardware: Some(&hardware),
             wall: Some(std::time::SystemTime::now()),
             zone: None,

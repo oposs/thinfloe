@@ -64,9 +64,6 @@ pub struct Running {
     pub name: String,
     /// Known once the worker reports the start.
     pub pgid: Option<i32>,
-    /// When the tile was clicked: a Save-On-Exit program's start begins
-    /// the network element's session total.
-    pub started: Instant,
 }
 
 /// The background save: one at a time, and one more at most queued.
@@ -276,8 +273,6 @@ pub struct Menu {
     pub status: crate::status::Area,
     /// The network sampler's last copy, set by the app before each frame.
     pub netstat: Option<crate::netstat::Snapshot>,
-    /// Where the network element's session total counts from.
-    pub netstat_since: crate::netstat::Since,
     /// The hardware sampler's last copy, set by the app before each frame.
     pub hardware: Option<crate::hardware::Snapshot>,
     /// The frame's time on the wall clock and the machine's zone, set by the
@@ -293,10 +288,6 @@ pub struct Menu {
     /// The write to start when the running one ends: the newest text, or
     /// `Some(None)` to remove the file.
     status_next: Option<Option<String>>,
-    /// `Snapshot::total` at each running session program's first copy, so
-    /// that when the oldest ends, the next one's total starts where its own
-    /// label says.
-    network_bases: Vec<(JobId, (u64, u64))>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -359,14 +350,12 @@ impl Menu {
             battery_since: None,
             status: crate::status::Area::default(),
             netstat: None,
-            netstat_since: crate::netstat::Since::default(),
             hardware: None,
             wall: None,
             zone: jiff::tz::TimeZone::UTC,
             status_error: None,
             status_writing: false,
             status_next: None,
-            network_bases: Vec::new(),
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -686,7 +675,6 @@ impl Menu {
             battery: &self.battery,
             battery_since: self.battery_since,
             network: self.netstat.as_ref(),
-            network_since: Some(&self.netstat_since),
             hardware: self.hardware.as_ref(),
             wall: self.wall,
             zone: Some(&self.zone),
@@ -698,45 +686,8 @@ impl Menu {
         self.hardware = Some(snap);
     }
 
-    /// Take the network sampler's copy made at `now` (`wall` on the clock).
-    /// The session total counts from the oldest Save-On-Exit program that
-    /// runs (ThinLinc, OxuLnk), from its first frame after the click; with
-    /// none running, from the menu start.
-    pub fn set_network(&mut self, snap: crate::netstat::Snapshot, now: Instant, wall: std::time::SystemTime) {
-        let session = self
-            .jobs
-            .iter()
-            .filter(|j| self.tiles.get(j.tile).is_some_and(|t| t.save_on_exit))
-            .min_by_key(|j| (j.started, j.id));
-        self.network_bases
-            .retain(|(id, _)| self.jobs.iter().any(|j| j.id == *id));
-        for j in self
-            .jobs
-            .iter()
-            .filter(|j| self.tiles.get(j.tile).is_some_and(|t| t.save_on_exit))
-        {
-            if !self.network_bases.iter().any(|(id, _)| *id == j.id) {
-                self.network_bases.push((j.id, snap.total));
-            }
-        }
-        match session {
-            Some(j) if self.netstat_since.job != Some(j.id) => {
-                let at = wall
-                    .checked_sub(now.saturating_duration_since(j.started))
-                    .unwrap_or(wall);
-                self.netstat_since = crate::netstat::Since {
-                    job: Some(j.id),
-                    label: format!("since {}", crate::header::clock_text(at)),
-                    base: self
-                        .network_bases
-                        .iter()
-                        .find(|(id, _)| *id == j.id)
-                        .map_or(snap.total, |(_, base)| *base),
-                };
-            }
-            Some(_) => {}
-            None => self.netstat_since = crate::netstat::Since::default(),
-        }
+    /// Take the network sampler's copy.
+    pub fn set_network(&mut self, snap: crate::netstat::Snapshot) {
         self.netstat = Some(snap);
     }
 
@@ -1001,7 +952,6 @@ impl Menu {
                     tile: index,
                     name: tile.name.clone(),
                     pgid: None,
-                    started: now,
                 });
                 self.monitors.set_thinlinc(self.thinlinc_running());
                 Some(Effect::Start(Job::Run {
@@ -3963,91 +3913,6 @@ mod tests {
         assert_eq!(m.status_error.as_deref(), Some("disk full"));
         m.finished(JobResult::StatusSaved(Ok(())), now);
         assert_eq!(m.status_error, None);
-    }
-
-    #[test]
-    fn the_network_total_counts_from_the_running_session_program() {
-        use crate::netstat::{Since, Snapshot};
-        let mut m = Menu::new(grid(), false);
-        // Tile 0 is ThinLinc (Save-On-Exit), tile 1 the Terminal.
-        let sx = 0;
-        let t0 = Instant::now();
-        let wall = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
-        let snap = |rx: u64| Snapshot {
-            total: (rx, rx / 10),
-            ..Snapshot::default()
-        };
-        m.set_network(snap(100), t0, wall);
-        assert_eq!(m.netstat_since, Since::default());
-        assert_eq!(m.status_sources().network.unwrap().total, (100, 10));
-        // A program without Save-On-Exit is no session.
-        let other = started(&mut m, 1, t0);
-        m.set_network(snap(200), t0, wall);
-        assert_eq!(m.netstat_since.label, "since menu start");
-        // The session program starts; the first copy after it is the base,
-        // the label is the click's time on the clock.
-        let id = started(&mut m, sx, t0);
-        let later = t0 + std::time::Duration::from_secs(1);
-        m.set_network(snap(300), later, wall);
-        let since = m.netstat_since.clone();
-        assert_eq!(since.job, Some(id));
-        assert_eq!(since.base, (300, 30));
-        assert_eq!(
-            since.label,
-            format!(
-                "since {}",
-                crate::header::clock_text(wall - std::time::Duration::from_secs(1))
-            )
-        );
-        // Later copies keep the base.
-        m.set_network(snap(900), later + std::time::Duration::from_secs(60), wall);
-        assert_eq!(m.netstat_since, since);
-        assert_eq!(m.status_sources().network_since, Some(&since));
-        // It ends: back to the menu start.
-        ran(&mut m, id, 0, later);
-        ran(&mut m, other, 0, later);
-        m.set_network(snap(1000), later, wall);
-        assert_eq!(m.netstat_since, Since::default());
-    }
-
-    #[test]
-    fn the_network_total_of_two_sessions_counts_from_the_one_that_remains() {
-        use crate::netstat::{Since, Snapshot};
-        use std::time::Duration;
-        let mut m = Menu::new(grid(), false);
-        // Tile 0 runs once; tile 1 is made a second session program.
-        m.tiles[1].save_on_exit = true;
-        let t0 = Instant::now();
-        let wall = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let snap = |rx: u64| Snapshot {
-            total: (rx, rx / 10),
-            ..Snapshot::default()
-        };
-        let first = started(&mut m, 0, t0);
-        m.set_network(snap(100), t0, wall);
-        assert_eq!((m.netstat_since.job, m.netstat_since.base), (Some(first), (100, 10)));
-        // A second session starts: the oldest keeps the total.
-        let t1 = t0 + Duration::from_secs(60);
-        let second = started(&mut m, 1, t1);
-        m.set_network(snap(500), t1, wall);
-        assert_eq!((m.netstat_since.job, m.netstat_since.base), (Some(first), (100, 10)));
-        // The oldest ends: label and base are both the second's.
-        let t2 = t1 + Duration::from_secs(5);
-        ran(&mut m, first, 0, t2);
-        m.set_network(snap(900), t2, wall);
-        assert_eq!(
-            m.netstat_since,
-            Since {
-                job: Some(second),
-                label: format!("since {}", crate::header::clock_text(wall - Duration::from_secs(5))),
-                base: (500, 50),
-            }
-        );
-        // The second ends too: nothing is kept.
-        ran(&mut m, second, 0, t2);
-        m.set_network(snap(1000), t2, wall);
-        assert_eq!(m.netstat_since, Since::default());
-        assert!(m.network_bases.is_empty(), "{:?}", m.network_bases);
     }
 
     #[test]
