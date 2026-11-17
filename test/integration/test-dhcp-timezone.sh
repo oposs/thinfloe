@@ -8,7 +8,8 @@
 # the value cut and printable, and changes nothing.
 #
 # Runs without root: both directories come from environment variables and
-# timedatectl is a stub on PATH that records its arguments.
+# timedatectl is a stub on PATH that records its arguments (and sleeps for
+# STUB_SLEEP seconds). The --watch cases need inotifywait on the host.
 #
 # Usage: test/integration/test-dhcp-timezone.sh
 
@@ -23,7 +24,13 @@ if [[ ! -x "$SCRIPT" ]]; then
 fi
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+WATCHER=
+# Stop a --watch run left by a failed case before the directory goes.
+cleanup() {
+    [[ -n "$WATCHER" ]] && kill "$WATCHER" 2>/dev/null && wait "$WATCHER" 2>/dev/null
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 mkdir -p "$WORK/zi/Europe" "$WORK/leases" "$WORK/bin"
 printf 'TZif2xxxxxxxx' >"$WORK/zi/Europe/Zurich"
 ln -s Zurich "$WORK/zi/Europe/Inside"
@@ -35,6 +42,7 @@ ln -s ../../outside "$WORK/zi/Europe/Outside"
 cat >"$WORK/bin/timedatectl" <<STUB
 #!/bin/bash
 printf '%s\n' "\$*" >>"$WORK/calls"
+sleep "\${STUB_SLEEP:-0}"
 STUB
 chmod +x "$WORK/bin/timedatectl"
 
@@ -96,6 +104,140 @@ run
 rm -f "$WORK"/leases/*
 PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$WORK/leases" THINFLOE_ZONEINFO_DIR="$WORK/zi" "$SCRIPT" >"$WORK/out" 2>&1
 [[ $? -eq 0 && ! -s "$WORK/out" ]] || fail "no lease at all must be silent"
+
+# --watch: the service's mode. It must arm its watch before it reads the
+# leases and keep it armed while it reads, so no lease write is lost.
+# It needs inotifywait (inotify-tools) on the host, as in the image.
+if ! command -v inotifywait >/dev/null; then
+    fail "inotifywait not found: install inotify-tools to test --watch"
+    echo "$fails check(s) failed" >&2
+    exit 1
+fi
+
+# wait_for FILE TEXT: poll every 0.1 s, at most 10 s, for TEXT in FILE.
+wait_for() {
+    local i
+    for ((i = 0; i < 100; i++)); do
+        grep -qF -- "$2" "$1" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# watch_start LEASE_DIR: start the watcher on LEASE_DIR, output in watch.log.
+watch_start() {
+    rm -f "$WORK/calls" "$WORK/watch.log"
+    PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$1" THINFLOE_ZONEINFO_DIR="$WORK/zi" \
+        "$SCRIPT" --watch >"$WORK/watch.log" 2>&1 &
+    WATCHER=$!
+}
+
+watch_stop() {
+    [[ -n "$WATCHER" ]] || return 0
+    kill "$WATCHER" 2>/dev/null
+    wait "$WATCHER" 2>/dev/null
+    WATCHER=
+}
+
+# lines FILE: the number of non-empty lines, 0 for a missing file.
+lines() {
+    local n=0
+    [[ -f "$1" ]] && n=$(grep -c . "$1")
+    echo "${n:-0}"
+}
+
+lease() {
+    printf 'ADDRESS=10.0.0.5\nTIMEZONE=%s\nDNS=10.0.0.1\n' "$2" >"$1"
+}
+
+# A lease that is there before the watcher starts (the boot-time case).
+mkdir -p "$WORK/w1"
+lease "$WORK/w1/2" Europe/Zurich
+watch_start "$WORK/w1"
+wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: lease present at start not applied"
+watch_stop
+
+# A lease written while a scan runs: timedatectl takes 1 s, the second lease
+# comes in during it and must still be applied.
+mkdir -p "$WORK/w2"
+STUB_SLEEP=1 watch_start "$WORK/w2"
+sleep 0.5
+lease "$WORK/w2/2" Europe/Zurich
+wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: first lease not applied"
+lease "$WORK/w2/.tmp" Europe/Inside && mv "$WORK/w2/.tmp" "$WORK/w2/2"
+for ((i = 0; i < 100; i++)); do
+    [[ "$(tail -n 1 "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] && break
+    sleep 0.1
+done
+[[ "$(tail -n 1 "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] \
+    || fail "watch: lease written during a scan lost: $(cat "$WORK/calls" 2>/dev/null)"
+watch_stop
+
+# The lease directory does not exist yet when the watcher starts.
+mkdir -p "$WORK/late"
+watch_start "$WORK/late/leases"
+sleep 0.5
+mkdir "$WORK/late/leases"
+lease "$WORK/late/leases/3" Europe/Zurich
+wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: lease in a late directory not applied"
+[[ -d "$WORK/late/leases" ]] || fail "watch: lease directory gone"
+watch_stop
+
+# The watcher never creates the lease directory itself.
+mkdir -p "$WORK/nocreate"
+watch_start "$WORK/nocreate/leases"
+sleep 1
+[[ ! -e "$WORK/nocreate/leases" ]] || fail "watch: the watcher created the lease directory"
+watch_stop
+
+# A renewal with the same zone: timedatectl again, but one log line only.
+mkdir -p "$WORK/w3"
+watch_start "$WORK/w3"
+sleep 0.5
+lease "$WORK/w3/2" Europe/Zurich
+wait_for "$WORK/calls" "Europe/Zurich" || fail "watch: renewal case, first lease not applied"
+sleep 1
+lease "$WORK/w3/2" Europe/Zurich
+for ((i = 0; i < 100; i++)); do
+    [[ $(lines "$WORK/calls") -ge 2 ]] && break
+    sleep 0.1
+done
+[[ $(lines "$WORK/calls") -ge 2 ]] || fail "watch: renewal did not rescan"
+[[ $(grep -c 'time zone Europe/Zurich from DHCP' "$WORK/watch.log") -eq 1 ]] \
+    || fail "watch: same zone logged more than once: $(cat "$WORK/watch.log")"
+
+# A removed lease (link down): nothing set, nothing logged.
+before_calls=$(lines "$WORK/calls")
+before_log=$(lines "$WORK/watch.log")
+rm -f "$WORK/w3/2"
+sleep 1.5
+[[ $(lines "$WORK/calls") -eq $before_calls ]] || fail "watch: removed lease called timedatectl"
+[[ $(lines "$WORK/watch.log") -eq $before_log ]] || fail "watch: removed lease logged: $(cat "$WORK/watch.log")"
+
+# inotifywait ends: the watcher fails, so systemd restarts it.
+pkill -P "$WATCHER" inotifywait || fail "watch: no inotifywait child"
+for ((i = 0; i < 100; i++)); do
+    kill -0 "$WATCHER" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$WATCHER" 2>/dev/null; then
+    fail "watch: still running after inotifywait ended"
+    watch_stop
+else
+    wait "$WATCHER"
+    rc=$?
+    WATCHER=
+    [[ $rc -ne 0 ]] || fail "watch: exit 0 after inotifywait ended"
+fi
+
+# Stopping the watcher leaves no inotifywait behind.
+mkdir -p "$WORK/w4"
+watch_start "$WORK/w4"
+sleep 0.5
+pid=$WATCHER
+watch_stop
+sleep 0.2
+if pgrep -f "inotifywait.*$WORK/w4" >/dev/null; then fail "watch: inotifywait left running after stop"; fi
 
 if [[ $fails -ne 0 ]]; then
     echo "$fails check(s) failed" >&2

@@ -47,7 +47,7 @@ sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     qemu-system-x86 qemu-utils ovmf mtools gdisk dnsmasq-base \
     squashfs-tools zstd dosfstools file shellcheck uidmap iproute2 \
-    curl python3 openssh-client
+    curl python3 openssh-client inotify-tools
 
 # 4. The Containerfiles use short image names (ubuntu:26.04, ubuntu:24.04).
 echo "ci-runner-setup: podman short names"
