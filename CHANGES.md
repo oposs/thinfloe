@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- The Upgrade screen offered to upgrade a stick to the release it already had ("Upgrade this machine's stick to ThinFloe 4.5.0" on a 4.5.0 stick), and What's new then said "No changes between 4.5.0 and 4.5.0". It now says the stick already has that release, the button reads Write again (Go back for a stick with a newer release), and What's new is off.
+
 ## 4.5.0 - 2026-11-17
 ### New
 - The Upgrade screen has a "What's new" button beside Check now. It shows the release notes of every version after the one on the chosen stick up to the release that will be written, or for a fresh install the notes of that release alone; with an address entered under Advanced there is no button. Sticks written or upgraded from now on keep their version in `tl/version`, and the drive list names it beside each ThinFloe stick; for an older stick the notes of all releases up to the new one are shown.

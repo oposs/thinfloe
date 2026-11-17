@@ -25,6 +25,13 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   again; before that byte a cancel says "Cancelled before anything was
   written. The stick is as it was." After a successful write, a step the tool
   skipped is left out and one it began without `@done` is drawn done.
+- A stick that already has the target release, or a newer one, is
+  named so in the footer ("already has ThinFloe 4.5.0", "has ThinFloe
+  4.6.0, newer than 4.5.0"), the confirm button reads Write again or Go
+  back, and What's new is disabled (`Upgrade::not_older`, compared with
+  `release::newer`, so a `-dev` stick counts as older). Writing again stays
+  possible: it repairs a damaged `tl/`. An unknown stick version is an
+  ordinary upgrade.
 - What's new: a button left of Check now runs `thinfloe-upgrade notes` and
   opens a dialog with the notes as headings (`4.4.0 · New`, one per `###`
   group) and bullets, backticks removed (`notes.rs`, no Markdown renderer).
