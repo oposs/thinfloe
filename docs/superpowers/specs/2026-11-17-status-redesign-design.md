@@ -43,7 +43,7 @@ and adds a Response tile and history graphs.
 - Every rule of `docs/notes/status-area.md` holds: `draw` is pure and stays in
   its rect, colours from the theme, sizes from `brand.rs`,
   `ui_code_has_no_style_literals` covers new code, samplers rest while a
-  window covers the menu.
+  window covers the menu (one exception: the Response sampler, part 2).
 - `config.toml` is written only by the menu through the settings store.
 - OxuLnk connects over WebSocket (`oxulnk-desktop/src/ws_connect.rs`) and
   ThinLinc over SSH, both TCP, so the kernel's TCP RTT covers both.
@@ -66,7 +66,7 @@ and adds a Response tile and history graphs.
 | id | name | sizes (first = default) | short size | change |
 |---|---|---|---|---|
 | `battery` | Keyboard and mouse batteries | 1x1, 2x1 | 1x1 | none |
-| `network` | Network traffic | 2x2, 3x1, 2x1 | 3x1 | none |
+| `network` | Network traffic | 2x2, 3x1, 2x1 | 2x1 | short size 3x1 -> 2x1 |
 | `connection` | Connection | 1x2, 2x1 | none | new |
 | `clock` | Clock | 1x1 | none | adds the zone |
 | `temperatures` | Temperatures and fans | 1x1, 1x2 | none | adds fans |
@@ -75,6 +75,10 @@ and adds a Response tile and history graphs.
 | `network-info` | | | | removed |
 | `system` | | | | removed |
 
+- The traffic graph's short size becomes 2x1 (call, from the pushback): the
+  short screen's one row of 4 cells then holds battery 1x1, traffic 2x1 and,
+  from part 2, response 1x1. With 3x1 a machine with a wireless keyboard or
+  mouse never shows the Response tile on a short screen.
 - Ids that keep their meaning keep their id, so a saved layout keeps its
   places and sizes (call).
 - `connection` rows: `Link` (`eth0 1 Gbit/s`, `wlan0 WiFi -56 dBm`), `IPv4`,
@@ -86,9 +90,11 @@ and adds a Response tile and history graphs.
   (owner). Rows are left out from the bottom when the rect is short:
   `Public`, then `VPN`; `Link` and `IPv4` stay (call). Content: as
   `network-info` today (an address other than loopback and link-local).
-- `clock`: a third line `Zone Europe/Zurich` (the zone name the clock already
-  uses; `UTC` when none is set). When the name is too long for the cell it is
-  cut at the start, keeping the city (call).
+- `clock`: a third line `Zone Europe/Zurich` (call): the IANA name of the zone
+  the clock already uses (`log::current_zone`); when that zone has no IANA
+  name (a POSIX `TZ=CET-1CEST`, a copied `/etc/localtime`), its current
+  abbreviation (`CET`); `UTC` only for the UTC zone. A name too long for the
+  cell is cut at the start, keeping the city.
 - `temperatures`: the fans follow the sensors, one row `Fans 1200 900 rpm`,
   dropped first when rows run out; a fan at 0 rpm drops out as today. An
   element with sensors but no fans, or fans but no sensors, has content.
@@ -125,17 +131,25 @@ and adds a Response tile and history graphs.
   short screen, not when unticked): once when these first hold, when the
   sampler's default route or IPv4 address changes, and every 15 minutes. The
   last answer is kept and shown until the next lookup replaces it. Answer: the body trimmed, accepted only when it parses as
-  an IPv4 or IPv6 address, at most 64 bytes read, 5 s timeout. A failure
+  an IPv4 or IPv6 address, at most 64 bytes read, 5 s timeout. The lookup
+  checks the scheme itself before each request (`config.toml` can be edited
+  by hand and travels with the home) and follows no redirects (call). A failure
   shows `Public –` and one log line per change from success to failure.
 - How the HTTP request is made (subprocess `curl -fsS --max-time 5` or a
   crate) is the builder's choice; the menu has no HTTP crate today.
 
 ### Network tab additions
 
-- Per interface in the existing Connections band: MAC address, gateway (for
-  the interface holding the default route), and for WiFi the chip and driver
-  (`/sys/class/net/<if>/device/driver` link name and the PCI or USB ids).
-  DNS servers stay where the tab already lists them.
+- Per interface in the existing "Connections now" band (`network_ui.rs`): MAC
+  address, gateway (for the interface holding the default route), and for
+  WiFi the chip and driver (`/sys/class/net/<if>/device/driver` link name and
+  the PCI or USB ids).
+- A row "DNS in use" in the same band: the servers the machine uses now, read
+  from `/run/systemd/resolve/resolv.conf` (else `/etc/resolv.conf`) as
+  `netstat.rs` reads them (call, from the pushback). The "DNS servers" edit
+  field further down holds only configured servers and is empty with DHCP and
+  absent on netboot, so without this row a DHCP machine would show its DNS
+  servers nowhere.
 - Read when the tab opens and on each refresh the tab already does; no new
   sampler.
 
@@ -165,15 +179,21 @@ and adds a Response tile and history graphs.
 
 - Element `response`, name "Session response", sizes 1x1, 2x1; short size
   1x1 (call: it is the value the user most wants during a session).
-- Source: a new `Rtt` sampler, every 1 s while a Save-On-Exit job runs and the
+- Source: a new `Rtt` sampler, every 1 s while a client job runs and the
   `response` element is ticked, also while a window covers the menu (call).
   This is the first sampler exempt from the rest-while-covered rule: a
   fullscreen client covers the menu for the whole session, and the user who
   leaves fullscreen because the session feels slow then sees the last 5
   minutes. One netlink query per second costs nothing worth saving. The
-  3 s gap rule does not apply; a gap only happens between sessions.
-- Sockets: the processes in the process group of each running Save-On-Exit
-  job (the menu has the pgid), and their descendants (builder checks whether
+  graph clears when a new session starts (no client job ran at the last
+  reading); there is no time-gap rule.
+- Clients (call, from the pushback): only jobs of the shipped tiles
+  `10-thinlinc.desktop` and `20-oxulnk.desktop` count, whatever a user tile
+  sets; `X-TF-Save-On-Exit` is also allowed on user run tiles, and a browser
+  tile with it would otherwise get a "Session response". The client name
+  shown is the shipped tile's.
+- Sockets: the processes in the process group of each running client job
+  (the menu has the pgid), and their descendants (builder checks whether
   `ssh` under `tlclient` keeps the group). Their TCP sockets come from
   `/proc/<pid>/fd` inodes; tfuser owns the processes, so no root.
 - RTT: `NETLINK_SOCK_DIAG` with `INET_DIAG_INFO` (`tcp_info.tcpi_rtt`,
@@ -184,22 +204,32 @@ and adds a Response tile and history graphs.
   `± 4 ms`. 2x1: the same on the left, the RTT of the last 5 minutes as a
   line graph on the right, axis as the traffic graph's style. Colours: warning
   at 100 ms, alert at 250 ms (call).
-- Content: only while a matching socket exists. A reading more than 3 s after
-  the last clears the graph, as the network sampler does.
+- Content: only while a matching socket exists.
+- Status tab (call, from the pushback): while no client job runs, the
+  Response row's note says "shows during a session", never "nothing to show
+  on this machine".
 
 ## Part 3: History tiles
 
 - One element per metric, so the layout format stays `<id> <w>x<h>` (call):
-  `history-temp` (the first CPU sensor, the one `temperatures` always keeps),
-  `history-fan` (the first fan), `history-clock` (CPU clock), `history-wifi`
+  `history-temp`, `history-fan`, `history-clock` (CPU clock), `history-wifi`
   (signal of the measured interface, from the network sampler).
+- A series keeps one device (call, from the pushback): keyed by hwmon chip
+  and index, chosen at the first reading. `history-temp` takes the first CPU
+  sensor, else the first sensor in `sensor_name` order; `history-fan` the
+  first fan seen. A stopped fan is recorded as 0 rpm in the series (the
+  sampler today drops a fan at 0, so the snapshot gains the fan's key and
+  keeps stopped fans for the history; the `temperatures` tile still hides
+  them). A device that disappears ends the series; the tile has no content
+  until it returns.
 - Sizes 2x1, 2x2, 1x1; short size none. Off in the default list.
 - The last 5 minutes: 60 points from the 5 s hardware sampler, 300 from the
   1 s network sampler for WiFi. Line graph, a value axis in the traffic
   graph's style, the current value as text in the corner; temperature uses
   the `temperatures` heat colours.
-- Content: when the metric has at least one reading. Gaps after a covered
-  period clear the graph as the traffic graph does.
+- Content: when the metric has at least one reading. A gap longer than two
+  sampling intervals (10 s hardware, 2 s network) since the last reading
+  clears the graph (call; the hardware sampler has no gap rule today).
 - The hardware sampler keeps the series; it runs when a hardware or history
   element has cells (`hardware_wanted` extends).
 
@@ -207,10 +237,14 @@ and adds a Response tile and history graphs.
 
 - Every new element inside its rect at every size and both cell heights.
 - Default list packing test; retired ids dropped from a layout.
-- Public IP: parser, refusal of non-`https:`, no request while off (a test
-  that counts lookups).
+- Public IP: parser, refusal of non-`https:` in the field and at lookup time,
+  no redirect followed, no request while off or while `connection` has no
+  cells (a test that counts lookups).
 - Response: socket selection against a fake `/proc` and canned diag replies;
-  loopback excluded.
+  loopback excluded; a user tile with `X-TF-Save-On-Exit` ignored.
+- Network tab: "DNS in use" from a fake resolv.conf.
+- Clock: zone line for an IANA zone, a POSIX `TZ=`, and UTC.
+- History: series stays on its device when another fan stops; 0 rpm kept.
 - History: series length, gap handling.
 - `docs/notes/status-area.md` updated per part; CHANGES entries per part.
 
