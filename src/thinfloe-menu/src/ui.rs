@@ -1710,7 +1710,7 @@ mod tests {
         m
     }
 
-    /// `status_menu` with a network that has a route: the graph and the list
+    /// `status_menu` with a network that has a route: the graph and the connection
     /// have something to show.
     fn net_menu(devices: Vec<battery::Device>, t0: Instant) -> Menu {
         let mut m = status_menu(devices, t0);
@@ -1865,7 +1865,7 @@ mod tests {
     #[test]
     fn an_element_with_no_room_in_the_planned_rows_stays_out_and_off_the_log() {
         // Found by the final review: with no battery the graph went to row 0
-        // and the list to a third row the layout never reserved.
+        // and the connection to a third row the layout never reserved.
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
@@ -1891,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_screen_gives_a_chosen_two_by_two_graph_its_short_size_and_drops_the_list() {
+    fn a_short_screen_gives_a_chosen_two_by_two_graph_its_short_size_and_drops_the_connection() {
         let t0 = Instant::now();
         let mut menu = net_menu(Vec::new(), t0);
         let parsed = crate::status::layout::parse(
@@ -1900,13 +1900,13 @@ mod tests {
         );
         menu.set_status_layout(parsed);
         let n = menu.visible_tiles().len();
-        // A screen that is not short: the graph two rows high, the list beside it.
+        // A screen that is not short: the graph two rows high, the connection beside it.
         assert_eq!(menu.status.planned_rows(false), 2);
         let full = (1920.0, 1080.0);
         let shapes = status_frame_on(&new_ctx(), &menu, t0, full);
         assert!(text_rect(&shapes, "-5m").is_some() && text_rect(&shapes, "IPv4").is_some());
         // A short one: one row, the graph alone at 3 x 1 (the unit inside its
-        // plot, no time axis), and the list, which has no short size, left out.
+        // plot, no time axis), and the connection, which has no short size, left out.
         let short = short_screen(720.0);
         assert!(short);
         assert_eq!(menu.status.planned_rows(short), 1);
@@ -2093,7 +2093,7 @@ mod tests {
         for (w, h, _) in SHIPPED_SCREENS {
             let short = short_screen(h);
             // Short: one row, the battery and the graph at 3 x 1. Otherwise
-            // the graph is 2 x 2, the list stands right of it and the
+            // the graph is 2 x 2, the connection stands right of it and the
             // hardware elements fill the third row.
             let planned = menu.status.planned_rows(short);
             assert_eq!(planned, if short { 1 } else { 3 }, "{w}x{h}");
@@ -2108,7 +2108,7 @@ mod tests {
                 let r = text_rect(&shapes, name).unwrap_or_else(|| panic!("{w}x{h}: {name}"));
                 assert!(st.contains_rect(r), "{w}x{h}: {r:?} in {st:?}");
             }
-            // The list and the clock only where the screen is not short.
+            // The connection and the clock only where the screen is not short.
             assert_eq!(text_rect(&shapes, "IPv4").is_some(), !short, "{w}x{h}");
             assert_eq!(text_rect(&shapes, "Time").is_some(), !short, "{w}x{h}");
             if let Some(r) = text_rect(&shapes, "IPv4") {
@@ -3416,7 +3416,7 @@ mod tests {
     }
 
     /// The Settings screen on its Status tab, with the shipped layout, two
-    /// devices and a network: the battery, the graph, the list and the clock
+    /// devices and a network: the battery, the graph, the connection and the clock
     /// have something to show, the hardware tiles have not.
     fn status_tab_menu() -> Menu {
         let t0 = Instant::now();
@@ -3500,8 +3500,8 @@ mod tests {
         let menu = status_tab_menu();
         // A screen tall enough that no row scrolls away.
         let shapes = settings_shapes(&menu, 1920.0, 2000.0);
-        // The list: what stands above the preview (whose network list has an
-        // `Up` row of its own).
+        // The rows: what stands above the preview, whose elements draw
+        // words of their own.
         let all = text_rects(&shapes);
         assert_eq!(all.iter().filter(|(t, _)| t == "Reset to default").count(), 1);
         let heading = all.iter().find(|(t, _)| t == "Preview").expect("a preview heading").1;
@@ -3693,7 +3693,7 @@ mod tests {
 
     #[test]
     fn an_element_the_row_limit_leaves_out_says_no_room_in_its_row() {
-        // statustab.rs's layout: with the battery read and empty, the list
+        // statustab.rs's layout: with the battery read and empty, the connection
         // would need a third row, which was never reserved.
         let t0 = Instant::now();
         let mut menu = net_menu(vec![], t0);
