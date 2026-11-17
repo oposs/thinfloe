@@ -2,7 +2,7 @@
 //! the last five minutes across the element's full width, with a rate axis
 //! (two to four round ticks with k/M/G, the unit `bit/s` above them), a time
 //! axis (`-5m` to `now`), light grid lines and a legend. The numbers are in
-//! the list beside it (`network_info`). Its data is a `netstat::Snapshot` the
+//! the list beside it (`connection`). Its data is a `netstat::Snapshot` the
 //! menu copies from the sampler thread; it is drawn again every second while
 //! the menu shows.
 //!
@@ -394,14 +394,12 @@ pub(crate) fn sample(n: usize) -> Snapshot {
     Snapshot {
         rx: curve(4.0e6),
         tx: curve(6.0e5),
-        total: (1_234_000_000, 98_700_000),
         info: Info {
             iface: Some("eth0".into()),
             default_route: true,
             link: Link::Wired(Some(1000)),
             ipv4: Some((std::net::Ipv4Addr::new(192, 168, 1, 23), 24)),
             gateway: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
-            dns: vec!["192.168.1.1".into(), "9.9.9.9".into()],
             vpn: Vpn::Up,
             addressed: true,
         },

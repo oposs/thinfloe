@@ -202,7 +202,7 @@ mod tests {
         let rows = rows(&a, &Data::EMPTY, false);
         let mut want = vec!["clock", "battery"];
         // The elements the file does not name follow, in their default order.
-        want.extend(["network", "network-info", "temperatures", "cpu", "memory", "system"]);
+        want.extend(["network", "connection", "temperatures", "cpu", "memory", "system"]);
         assert_eq!(row_ids(&rows), want);
         assert_eq!(rows.len(), status::ELEMENTS.len());
         let battery = &rows[1];
@@ -315,11 +315,11 @@ mod tests {
         };
         // The first six fill all twelve cells; system and clock get none.
         let a = area(
-            "battery 2x1\nnetwork 2x2\nnetwork-info 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\nsystem 2x1\nclock 1x1\n",
+            "battery 2x1\nnetwork 2x2\nconnection 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\nsystem 2x1\nclock 1x1\n",
         );
         let note = |rows: &[Row], id: &str| rows.iter().find(|r| r.id == id).unwrap().note;
         let full = rows(&a, &data, false);
-        for id in ["battery", "network", "network-info", "temperatures", "cpu", "memory"] {
+        for id in ["battery", "network", "connection", "temperatures", "cpu", "memory"] {
             assert_eq!(note(&full, id), None, "{id}");
         }
         assert_eq!(note(&full, "system"), Some(Note::NoRoom));
@@ -333,12 +333,12 @@ mod tests {
         };
         let rows_no_net = rows(&a, &no_net, false);
         assert_eq!(note(&rows_no_net, "network"), Some(Note::Nothing));
-        assert_eq!(note(&rows_no_net, "network-info"), Some(Note::Nothing));
+        assert_eq!(note(&rows_no_net, "connection"), Some(Note::Nothing));
         assert_eq!(note(&rows_no_net, "system"), None);
         assert_eq!(note(&rows_no_net, "clock"), None);
         // A hidden element has no note, though it would have no room either.
         let hidden = area(
-            "battery 2x1\nnetwork 2x2\nnetwork-info 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\n-system 2x1\n-clock 1x1\n",
+            "battery 2x1\nnetwork 2x2\nconnection 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\n-system 2x1\n-clock 1x1\n",
         );
         assert_eq!(note(&rows(&hidden, &data, false), "system"), None);
         assert_eq!(Note::NoRoom.text(), "no room");
@@ -358,7 +358,7 @@ mod tests {
         let note = |rows: &[Row], id: &str| rows.iter().find(|r| r.id == id).unwrap().note;
         // The hardware sampler rests on a short screen and has read nothing:
         // that is no reason to say "nothing to show".
-        for id in ["network-info", "temperatures", "cpu", "memory", "system", "clock"] {
+        for id in ["connection", "temperatures", "cpu", "memory", "system", "clock"] {
             assert_eq!(note(&rows(&a, &data, false), id), None, "{id} tall");
             assert_eq!(
                 note(&rows(&a, &data, true), id),
@@ -394,7 +394,7 @@ mod tests {
         for id in [
             "battery",
             "network",
-            "network-info",
+            "connection",
             "temperatures",
             "cpu",
             "memory",
@@ -415,13 +415,13 @@ mod tests {
         // The planned packing gives system no cell; with no hardware read
         // yet it still says "no room", not nothing.
         let crowded = area(
-            "battery 2x1\nnetwork 2x2\nnetwork-info 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\nsystem 2x1\nclock 1x1\n",
+            "battery 2x1\nnetwork 2x2\nconnection 1x2\ntemperatures 1x2\ncpu 1x1\nmemory 1x1\nsystem 2x1\nclock 1x1\n",
         );
         assert_eq!(note(&rows(&crowded, &Data::EMPTY, false), "system"), Some(Note::NoRoom));
         // The final review's layout: with the battery read and empty, the
         // list would need a third row, which was never reserved.
         let a = area(
-            "clock 1x1\nbattery 1x1\nnetwork 2x2\nnetwork-info 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
+            "clock 1x1\nbattery 1x1\nnetwork 2x2\nconnection 2x1\n-temperatures 1x1\n-cpu 1x1\n-memory 1x1\n-system 1x1\n",
         );
         let net = crate::status::network::sample(10);
         let data = Data {
@@ -433,7 +433,7 @@ mod tests {
         let r = rows(&a, &data, false);
         assert_eq!(note(&r, "battery"), Some(Note::Nothing));
         assert_eq!(note(&r, "network"), None);
-        assert_eq!(note(&r, "network-info"), Some(Note::NoRoom));
+        assert_eq!(note(&r, "connection"), Some(Note::NoRoom));
         assert_eq!(note(&r, "clock"), None);
     }
 }

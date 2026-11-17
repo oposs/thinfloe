@@ -366,7 +366,7 @@ mod tests {
             ("status/clock.rs", include_str!("status/clock.rs")),
             ("status/hardware.rs", include_str!("status/hardware.rs")),
             ("status/network.rs", include_str!("status/network.rs")),
-            ("status/network_info.rs", include_str!("status/network_info.rs")),
+            ("status/connection.rs", include_str!("status/connection.rs")),
             ("status/layout.rs", include_str!("status/layout.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
