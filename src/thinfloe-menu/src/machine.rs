@@ -57,19 +57,6 @@ pub fn read(roots: &Roots) -> Facts {
     }
 }
 
-/// `7.7 GiB`, or `512 MiB` below 1 GiB: the RAM line of the status area
-/// without its used part.
-fn size(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * MIB;
-    let b = bytes as f64;
-    if b >= GIB {
-        format!("{:.1} GiB", b / GIB)
-    } else {
-        format!("{:.0} MiB", b / MIB)
-    }
-}
-
 /// The tab's rows, label and value, in the order shown; what is unknown is
 /// left out. `uptime_now` is the uptime counted on to this frame.
 pub fn rows(
@@ -86,7 +73,7 @@ pub fn rows(
         ("Model", f.model.clone()),
         ("CPU model", f.cpu_model.clone()),
         ("Cores", f.cores.map(|c| c.to_string())),
-        ("RAM", f.ram_total.map(size)),
+        ("RAM", f.ram_total.map(crate::status::hardware::size)),
         ("ThinFloe version", header.version.clone()),
         ("Kernel", f.kernel.clone()),
         ("Boot", Some(boot.to_string())),
@@ -115,6 +102,8 @@ pub struct MachineTab {
     facts: Option<(Facts, Instant)>,
     /// How the last copy went, until the tab opens again.
     pub copied: Option<Result<(), String>>,
+    /// A copy job runs: Copy is off until it answers.
+    copying: bool,
 }
 
 impl MachineTab {
@@ -159,7 +148,18 @@ impl MachineTab {
         Some(Duration::from_millis(60_000 - ms % 60_000 + 20))
     }
 
+    /// A copy job was started; `false` when one runs already, and no
+    /// second may start.
+    pub fn start_copy(&mut self) -> bool {
+        !std::mem::replace(&mut self.copying, true)
+    }
+
+    pub fn copying(&self) -> bool {
+        self.copying
+    }
+
     pub fn copy_done(&mut self, r: Result<(), String>) {
+        self.copying = false;
         self.copied = Some(r);
     }
 }
