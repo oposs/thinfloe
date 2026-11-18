@@ -503,6 +503,7 @@ fn panic_result(job: &Job) -> JobResult {
         Job::MonRevert => JobResult::MonReverted(Err(e)),
         Job::MonTakeOver { .. } => JobResult::MonTakenOver(Err(e)),
         Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
+        Job::PublicIpSave(_) => JobResult::PublicIpSaved(Err(e)),
         Job::KeyboardApply(kb) => JobResult::KeyboardApplied {
             kb: kb.clone(),
             result: Err(e),
@@ -621,6 +622,7 @@ fn job_result(
             JobResult::MonTakenOver(jobs::mon_take_over(&paths.config, &paths.kanshi, &heads))
         }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
+        Job::PublicIpSave(prefs) => JobResult::PublicIpSaved(jobs::public_ip_save(paths, &prefs)),
         Job::KeyboardApply(kb) => {
             let result = jobs::keyboard_apply(paths, &kb, feed);
             JobResult::KeyboardApplied { kb, result }

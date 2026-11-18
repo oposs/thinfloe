@@ -184,6 +184,8 @@ pub enum Job {
     /// Write the status layout file with this text; `None` removes it, and
     /// the default list counts again.
     StatusSave(Option<String>),
+    /// Write the public IP switch and lookup address.
+    PublicIpSave(crate::publicip::PublicIpPrefs),
     /// Write the keyboard choice and tell the compositor.
     KeyboardApply(crate::config::Keyboard),
     /// Remove the migration report from `[notice]`.
@@ -288,6 +290,11 @@ pub struct Menu {
     /// The write to start when the running one ends: the newest text, or
     /// `Some(None)` to remove the file.
     status_next: Option<Option<String>>,
+    /// A public IP write runs; one at a time, so the last click is the one
+    /// that stays.
+    public_ip_writing: bool,
+    /// The public IP write for when the running one ends.
+    public_ip_next: Option<crate::publicip::PublicIpPrefs>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -356,6 +363,8 @@ impl Menu {
             status_error: None,
             status_writing: false,
             status_next: None,
+            public_ip_writing: false,
+            public_ip_next: None,
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -379,17 +388,33 @@ impl Menu {
 
     pub fn set_usb_boot(&mut self, usb: bool) {
         self.usb_boot = usb;
+        let public_ip = self.network.public_ip().clone();
         self.network = NetTab::new(!usb);
+        self.network.set_public_ip(public_ip);
     }
 
-    fn net_request(&self, r: NetRequest) -> Effect {
-        Effect::Start(match r {
+    /// Start a public IP write, or keep it for when the running one ends;
+    /// a later one replaces it. Two writes at once could end in either
+    /// order, and the older click would stay in the file.
+    fn write_public_ip(&mut self, prefs: crate::publicip::PublicIpPrefs) -> Option<Effect> {
+        if self.public_ip_writing {
+            self.public_ip_next = Some(prefs);
+            return None;
+        }
+        self.public_ip_writing = true;
+        Some(Effect::Start(Job::PublicIpSave(prefs)))
+    }
+
+    fn net_request(&mut self, r: NetRequest) -> Option<Effect> {
+        let job = match r {
             NetRequest::Load => Job::NetLoad,
             NetRequest::Status => Job::NetStatus,
             NetRequest::Scan => Job::NetScan,
             NetRequest::Apply(change) => Job::NetApply { change },
             NetRequest::TakeOver(which) => Job::NetTakeOver { which },
-        })
+            NetRequest::SavePublicIp(prefs) => return self.write_public_ip(prefs),
+        };
+        Some(Effect::Start(job))
     }
 
     fn mon_request(r: MonRequest) -> Effect {
@@ -744,7 +769,7 @@ impl Menu {
             }
             SettingsEvent::Network(e) => {
                 let r = self.network.event(e, self.remote_running())?;
-                return Some(self.net_request(r));
+                return self.net_request(r);
             }
             SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
             SettingsEvent::Status(e) => return self.status_event(e),
@@ -1056,7 +1081,7 @@ impl Menu {
             self.logout = Some(Logout::Failed { message });
             return None;
         }
-        if self.save.running || self.status_writing {
+        if self.save.running || self.status_writing || self.public_ip_writing {
             // The logout save follows; a queued one would only repeat it.
             // A status layout write still running (or queued behind one)
             // ends first: the save started beside it and the menu exited
@@ -1287,6 +1312,21 @@ impl Menu {
                     _ => None,
                 }
             }
+            JobResult::PublicIpSaved(r) => {
+                if let Err(e) = &r {
+                    self.log
+                        .note(Kind::Warn, format!("The public IP setting could not be saved: {e}."));
+                }
+                self.network.public_ip_saved(r);
+                self.public_ip_writing = false;
+                if let Some(next) = self.public_ip_next.take() {
+                    return self.write_public_ip(next);
+                }
+                match self.logout {
+                    Some(Logout::WaitSave) if !self.save.running => self.logout_after_jobs(now),
+                    _ => None,
+                }
+            }
             JobResult::MonTakenOver(r) => {
                 let ok = r.is_ok();
                 match &r {
@@ -1424,7 +1464,7 @@ impl Menu {
         let net_open =
             self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
         if let Some(r) = self.network.poll(now, net_open) {
-            return Some(self.net_request(r));
+            return self.net_request(r);
         }
         if self.logout.is_none() && self.screen == Screen::Upgrade {
             let r = self.upgrade.poll(now)?;
@@ -1877,6 +1917,45 @@ mod tests {
         );
         m.finished(JobResult::Saved(SaveOutcome::Saved), now);
         assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn public_ip_saves_run_one_at_a_time_and_a_restart_waits_for_them() {
+        use crate::publicip::PublicIpPrefs;
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        let save = |on: bool| {
+            Some(Effect::Start(Job::PublicIpSave(PublicIpPrefs {
+                on,
+                url: String::new(),
+            })))
+        };
+        assert_eq!(net(&mut m, NetEvent::PublicIp(true)), save(true));
+        // Two more flips while the first write runs: the last one follows it.
+        assert_eq!(net(&mut m, NetEvent::PublicIp(false)), None);
+        assert_eq!(net(&mut m, NetEvent::PublicIp(true)), None);
+        assert_eq!(m.finished(JobResult::PublicIpSaved(Ok(())), now), save(true));
+        // Restart while that one runs: the home is saved after it.
+        m.screen = Screen::Grid;
+        assert_eq!(m.activate(4, now), None);
+        assert_eq!(
+            m.finished(JobResult::PublicIpSaved(Err("disk full".into())), now),
+            Some(Effect::Start(Job::Save))
+        );
+        assert_eq!(m.network.error(), Some("disk full"));
+    }
+
+    #[test]
+    fn the_public_ip_settings_survive_the_boot_kind() {
+        use crate::publicip::PublicIpPrefs;
+        let mut m = Menu::new(grid(), false);
+        let prefs = PublicIpPrefs {
+            on: true,
+            url: "https://ip.example.net".into(),
+        };
+        m.network.set_public_ip(prefs.clone());
+        m.set_usb_boot(true);
+        assert_eq!(m.network.public_ip(), &prefs);
     }
 
     #[test]

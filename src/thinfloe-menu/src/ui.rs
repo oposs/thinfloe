@@ -4480,6 +4480,38 @@ mod tests {
 
     const DNS_NOTE: &str = "Used for wired and WiFi. Empty: the servers DHCP sends.";
 
+    const PUBLIC_IP_NOTE: &str = "Only https:// addresses are used.";
+
+    /// The public IP band follows DNS, takes a refused address with a
+    /// note, and is drawn before the network files are read.
+    #[test]
+    fn the_public_ip_band_follows_dns() {
+        use crate::network::NetEvent;
+        let mut net = two_networks();
+        let texts = net_texts(&network_settings(two_networks()));
+        let at = |texts: &[String], name: &str| {
+            texts
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("{name} not in {texts:?}"))
+        };
+        assert!(at(&texts, "DNS") < at(&texts, "Public IP address"), "{texts:?}");
+        assert!(has(&texts, "Show the public IP address"), "{texts:?}");
+        assert!(has(&texts, "Lookup address"), "{texts:?}");
+        assert!(has(&texts, crate::publicip::DEFAULT_URL), "the hint: {texts:?}");
+        assert!(!has(&texts, PUBLIC_IP_NOTE), "{texts:?}");
+        // One line: the label fits its column.
+        let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 1600.0);
+        let rects = text_rects(&shapes);
+        let height = |name: &str| rects.iter().find(|(t, _)| t == name).unwrap().1.height();
+        assert!(height("Show the public IP address") < 1.5 * height("Lookup address"));
+        net.event(NetEvent::PublicIpUrlText("http://ip.example.net".into()), false);
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, PUBLIC_IP_NOTE), "{texts:?}");
+        let texts = net_texts(&network_settings(crate::network::NetTab::new(false)));
+        assert!(has(&texts, "Show the public IP address"), "{texts:?}");
+    }
+
     /// WiFi with other servers than the wired setting: the DNS band says
     /// why Apply is on.
     #[test]
@@ -4700,8 +4732,8 @@ mod tests {
     #[test]
     fn apply_follows_the_bands_on_a_tall_screen() {
         let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 2400.0);
-        // The DNS band is the last one.
-        let band = card_of(&shapes, "DNS servers");
+        // The public IP band is the last one.
+        let band = card_of(&shapes, "Lookup address");
         let apply = text_rects(&shapes)
             .into_iter()
             .rfind(|(t, _)| t == "Apply")

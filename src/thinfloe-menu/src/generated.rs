@@ -27,6 +27,8 @@ pub enum Table {
     Status,
     Monitors,
     Network,
+    /// `public_ip` and `public_ip_url` of `[network]`; they feed no file.
+    PublicIp,
     Notice,
 }
 
@@ -36,7 +38,7 @@ impl Table {
         match self {
             Table::Keyboard => &["environment"],
             Table::Screen => &["screen"],
-            Table::Status | Table::Notice => &[],
+            Table::Status | Table::Notice | Table::PublicIp => &[],
             Table::Monitors => &["kanshi"],
             Table::Network => &["wifi.yaml", "ethernet.yaml"],
         }
@@ -393,5 +395,6 @@ mod tests {
     fn tables_name_their_files() {
         assert_eq!(Table::Network.files(), ["wifi.yaml", "ethernet.yaml"]);
         assert!(Table::Status.files().is_empty());
+        assert!(Table::PublicIp.files().is_empty());
     }
 }

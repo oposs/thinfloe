@@ -171,6 +171,8 @@ pub enum JobResult {
     MonTakenOver(Result<(), String>),
     /// The status layout file was written or removed.
     StatusSaved(Result<(), String>),
+    /// The public IP switch and lookup address were written.
+    PublicIpSaved(Result<(), String>),
     /// An apply of the Keyboard tab ended; `kb` is what it applied.
     KeyboardApplied {
         kb: crate::config::Keyboard,
@@ -840,8 +842,12 @@ pub fn net_take_over(paths: &Paths, which: &str) -> Result<(), String> {
     lock(&paths.config).refuse_read_only()?;
     let (cfg, inputs) = net_snapshot(paths);
     let net = netfiles::take_over(&cfg.network, which, &paths.homes, &inputs)?;
+    // The public IP keys as they are now: a switch flipped while netplan
+    // checked the candidate is kept.
     lock(&paths.config)
-        .update(crate::generated::Table::Network, |c| c.network = net)
+        .update(crate::generated::Table::Network, |c| {
+            c.network = net.with_public_ip_of(&c.network)
+        })
         .map(|_| ())
 }
 
@@ -865,7 +871,7 @@ pub fn network_apply(
     let staged = {
         let s = lock(&paths.config);
         let mut candidate = s.cfg.clone();
-        candidate.network = net.clone();
+        candidate.network = net.clone().with_public_ip_of(&s.cfg.network);
         s.stage(crate::generated::Table::Network, &candidate)
             .map_err(|e| ApplyFailed {
                 home_changed: e.restore.is_some(),
@@ -878,7 +884,10 @@ pub fn network_apply(
         Ok(()) => {
             let mut s = lock(&paths.config);
             let mut candidate = s.cfg.clone();
-            candidate.network = net;
+            // The public IP switch may have been flipped while the tool
+            // ran (the store is not locked then); the plan's copy of it
+            // is older.
+            candidate.network = net.with_public_ip_of(&s.cfg.network);
             // The tool applied the staged files, so they stay. The
             // settings that do not follow are told, and the home is saved
             // with the files as they are.
@@ -993,6 +1002,18 @@ pub fn status_save(store: &crate::store::Shared, text: Option<&str>) -> Result<(
     let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     store
         .update(crate::generated::Table::Status, |c| c.status.lines = lines)
+        .map(|_| ())
+}
+
+/// Keep the public IP switch and lookup address in `[network]` of
+/// `config.toml`; no generated file depends on them. A refused update
+/// (read-only store, failed write) is the error.
+pub fn public_ip_save(paths: &Paths, prefs: &crate::publicip::PublicIpPrefs) -> Result<(), String> {
+    lock(&paths.config)
+        .update(crate::generated::Table::PublicIp, |c| {
+            c.network.public_ip = prefs.on;
+            c.network.public_ip_url = prefs.url.clone();
+        })
         .map(|_| ())
 }
 
@@ -2073,6 +2094,7 @@ mod tests {
 
     use crate::config::{NetCfg, NetworkCfg};
     use crate::generated::{Inputs, Table};
+    use crate::publicip::PublicIpPrefs;
     use crate::store::{OpenMode, Shared};
 
     const SHIPPED_WIRED: &str = include_str!("../../../overlay/etc/netplan/ethernet.yaml");
@@ -2228,6 +2250,54 @@ mod tests {
         );
         let p = net_paths(&d, "/bin/true", "exit 2");
         assert!(network_apply(&p, &netfiles::Change::default(), false, &feed, |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_network_apply_keeps_the_public_ip_settings_set_while_it_ran() {
+        let d = dir("net-apply-public-ip");
+        let p = net_paths(&d, "/bin/true", r#"echo '{"result":"ok","reason":""}'"#);
+        let feed = Arc::new(Feed::default());
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        let prefs = PublicIpPrefs {
+            on: true,
+            url: "https://ip.example.net".into(),
+        };
+        // The switch is flipped while the root tool runs: the store is
+        // not locked then, and the Apply's commit must not undo it.
+        let saved = std::cell::Cell::new(None);
+        let r = network_apply(&p, &change, false, &feed, |_| {
+            saved.set(Some(public_ip_save(&p, &prefs)))
+        });
+        assert_eq!(r, Ok(()));
+        assert_eq!(saved.take(), Some(Ok(())));
+        let net = lock(&p.config).cfg.network.clone();
+        assert_eq!(net.nets(), one_net("home"));
+        assert!(net.public_ip);
+        assert_eq!(net.public_ip_url, "https://ip.example.net");
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert!(on_disk.network.public_ip);
+        assert_eq!(on_disk.network.public_ip_url, "https://ip.example.net");
+    }
+
+    #[test]
+    fn a_public_ip_save_writes_only_config_toml() {
+        let d = dir("public-ip-save");
+        let p = net_home(&d, FAILS, home_net());
+        let generated = generated_bytes(&p);
+        let before = config_bytes(&p);
+        let prefs = PublicIpPrefs {
+            on: true,
+            url: String::new(),
+        };
+        assert_eq!(public_ip_save(&p, &prefs), Ok(()));
+        assert_eq!(generated_bytes(&p), generated);
+        assert_ne!(config_bytes(&p), before);
+        let net = lock(&p.config).cfg.network.clone();
+        assert!(net.public_ip);
+        assert_eq!(net.nets(), home_net().nets(), "the rest of [network] stays");
     }
 
     /// `net_paths` with a shipped wired default and the settings `net`.
