@@ -48,11 +48,17 @@ pub enum NetEvent {
     TakeOver(&'static str),
     /// The public IP switch; saved at once.
     PublicIp(bool),
-    /// The lookup address field was typed in.
-    PublicIpUrlText(String),
-    /// The lookup address field lost focus or took Enter: the typed
-    /// address is saved, unless it is refused.
-    PublicIpUrlCommit,
+    /// The lookup address field as typed. `commit`: it lost focus or took
+    /// Enter, and the address is saved unless it is refused. The text
+    /// rides along so a change and a commit of the same frame are one
+    /// event.
+    PublicIpUrl {
+        text: String,
+        commit: bool,
+    },
+    /// Escape in the lookup address field: the typed address goes, the
+    /// saved one is shown again, nothing is saved.
+    PublicIpUrlCancel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,8 +185,12 @@ pub struct NetTab {
     pgid: Option<i32>,
     /// The file a take-over runs for: `"wifi"` or `"wired"`.
     taking_over: Option<&'static str>,
-    /// The public IP settings as last saved (or being saved).
+    /// The public IP settings on screen: the last saved ones, or the ones
+    /// a running or queued save writes.
     public_ip: PublicIpPrefs,
+    /// The public IP settings `config.toml` holds; a failed save goes back
+    /// to them.
+    public_ip_stored: PublicIpPrefs,
     /// The lookup address field as typed.
     public_ip_url_text: String,
     /// The reason the last public IP save failed, while `error` shows it.
@@ -212,6 +222,7 @@ impl NetTab {
             pgid: None,
             taking_over: None,
             public_ip: PublicIpPrefs::default(),
+            public_ip_stored: PublicIpPrefs::default(),
             public_ip_url_text: String::new(),
             public_ip_error: None,
         }
@@ -220,6 +231,7 @@ impl NetTab {
     /// The public IP settings as `config.toml` holds them.
     pub fn set_public_ip(&mut self, prefs: PublicIpPrefs) {
         self.public_ip_url_text = prefs.url.clone();
+        self.public_ip_stored = prefs.clone();
         self.public_ip = prefs;
     }
 
@@ -237,16 +249,21 @@ impl NetTab {
         !self.public_ip_url_text.is_empty() && !publicip::url_ok(&self.public_ip_url_text)
     }
 
-    /// A public IP save ended; a failure shows where the Apply errors do.
-    pub fn public_ip_saved(&mut self, r: Result<(), String>) {
+    /// The save of `prefs` ended. A failure shows where the Apply errors
+    /// do, and the switch and the address go back to what `config.toml`
+    /// holds, so the screen never shows a setting that is not in effect.
+    pub fn public_ip_saved(&mut self, prefs: &PublicIpPrefs, r: Result<(), String>) {
         match r {
             Ok(()) => {
+                self.public_ip_stored = prefs.clone();
                 if self.public_ip_error.is_some() && self.error == self.public_ip_error {
                     self.error = None;
                 }
                 self.public_ip_error = None;
             }
             Err(e) => {
+                self.public_ip = self.public_ip_stored.clone();
+                self.public_ip_url_text = self.public_ip_stored.url.clone();
                 self.error = Some(e.clone());
                 self.public_ip_error = Some(e);
             }
@@ -261,12 +278,13 @@ impl NetTab {
                 self.public_ip.on = on;
                 Some(NetRequest::SavePublicIp(self.public_ip.clone()))
             }
-            NetEvent::PublicIpUrlText(text) => {
-                self.public_ip_url_text = text;
+            NetEvent::PublicIpUrlCancel => {
+                self.public_ip_url_text = self.public_ip.url.clone();
                 None
             }
-            NetEvent::PublicIpUrlCommit => {
-                if self.public_ip_url_refused() || self.public_ip_url_text == self.public_ip.url {
+            NetEvent::PublicIpUrl { text, commit } => {
+                self.public_ip_url_text = text;
+                if !commit || self.public_ip_url_refused() || self.public_ip_url_text == self.public_ip.url {
                     return None;
                 }
                 self.public_ip.url = self.public_ip_url_text.clone();
@@ -315,7 +333,7 @@ impl NetTab {
     pub fn event(&mut self, e: NetEvent, remote: bool) -> Option<NetRequest> {
         if matches!(
             e,
-            NetEvent::PublicIp(_) | NetEvent::PublicIpUrlText(_) | NetEvent::PublicIpUrlCommit
+            NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel
         ) {
             return self.public_ip_event(e);
         }
@@ -466,7 +484,7 @@ impl NetTab {
                 self.error = None;
                 Some(NetRequest::TakeOver(which))
             }
-            NetEvent::PublicIp(_) | NetEvent::PublicIpUrlText(_) | NetEvent::PublicIpUrlCommit => None,
+            NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel => None,
         }
     }
 
@@ -1595,29 +1613,96 @@ mod tests {
             Some(NetRequest::SavePublicIp(prefs(true, "")))
         );
         assert_eq!(t.public_ip(), &prefs(true, ""));
-        assert_eq!(t.event(NetEvent::PublicIpUrlText("http://x".into()), false), None);
+        let url = |text: &str, commit: bool| NetEvent::PublicIpUrl {
+            text: text.into(),
+            commit,
+        };
+        assert_eq!(t.event(url("http://x", false), false), None);
         assert!(t.public_ip_url_refused());
         assert_eq!(t.public_ip_url_text(), "http://x");
-        assert_eq!(t.event(NetEvent::PublicIpUrlCommit, false), None);
+        assert_eq!(t.event(url("http://x", true), false), None);
         assert_eq!(t.public_ip(), &prefs(true, ""), "a refused address is not taken");
-        assert_eq!(
-            t.event(NetEvent::PublicIpUrlText("https://ip.example.net".into()), false),
-            None
-        );
+        assert_eq!(t.event(url("https://ip.example.net", false), false), None);
         assert!(!t.public_ip_url_refused());
         assert_eq!(
-            t.event(NetEvent::PublicIpUrlCommit, false),
+            t.event(url("https://ip.example.net", true), false),
             Some(NetRequest::SavePublicIp(prefs(true, "https://ip.example.net")))
         );
         // The same address again is nothing to save.
-        assert_eq!(t.event(NetEvent::PublicIpUrlCommit, false), None);
+        assert_eq!(t.event(url("https://ip.example.net", true), false), None);
+        // Typed and committed in one frame: one event, saved.
+        assert_eq!(
+            t.event(url("https://ip2.example.net", true), false),
+            Some(NetRequest::SavePublicIp(prefs(true, "https://ip2.example.net")))
+        );
         // Emptied: the default address counts again.
-        t.event(NetEvent::PublicIpUrlText(String::new()), false);
+        t.event(url("", false), false);
         assert!(!t.public_ip_url_refused());
         assert_eq!(
-            t.event(NetEvent::PublicIpUrlCommit, false),
+            t.event(url("", true), false),
             Some(NetRequest::SavePublicIp(prefs(true, "")))
         );
+    }
+
+    #[test]
+    fn escape_in_the_lookup_address_puts_the_saved_one_back() {
+        use crate::publicip::PublicIpPrefs;
+        let mut t = tab();
+        t.set_public_ip(PublicIpPrefs {
+            on: true,
+            url: "https://ip.example.net".into(),
+        });
+        let typed = NetEvent::PublicIpUrl {
+            text: "https://other.example.net".into(),
+            commit: false,
+        };
+        assert_eq!(t.event(typed, false), None);
+        assert_eq!(t.event(NetEvent::PublicIpUrlCancel, false), None);
+        assert_eq!(t.public_ip_url_text(), "https://ip.example.net");
+        assert_eq!(t.public_ip().url, "https://ip.example.net");
+        // A refused address goes the same way, and its note with it.
+        t.event(
+            NetEvent::PublicIpUrl {
+                text: "http://x".into(),
+                commit: false,
+            },
+            false,
+        );
+        assert!(t.public_ip_url_refused());
+        t.event(NetEvent::PublicIpUrlCancel, false);
+        assert!(!t.public_ip_url_refused());
+    }
+
+    #[test]
+    fn a_failed_public_ip_save_shows_the_stored_settings_again() {
+        use crate::publicip::PublicIpPrefs;
+        let stored = PublicIpPrefs {
+            on: false,
+            url: "https://ip.example.net".into(),
+        };
+        let mut t = tab();
+        t.set_public_ip(stored.clone());
+        let Some(NetRequest::SavePublicIp(first)) = t.event(NetEvent::PublicIp(true), false) else {
+            panic!("the switch saves");
+        };
+        t.public_ip_saved(&first, Ok(()));
+        let Some(NetRequest::SavePublicIp(second)) = t.event(
+            NetEvent::PublicIpUrl {
+                text: "https://other.example.net".into(),
+                commit: true,
+            },
+            false,
+        ) else {
+            panic!("the address saves");
+        };
+        t.public_ip_saved(&second, Err("disk full".into()));
+        // Back to the last save that worked: on, with the old address.
+        assert_eq!(t.public_ip(), &first);
+        assert_eq!(t.public_ip_url_text(), "https://ip.example.net");
+        assert_eq!(t.error(), Some("disk full"));
+        // The next save that works clears the error it left.
+        t.public_ip_saved(&first, Ok(()));
+        assert_eq!(t.error(), None);
     }
 
     #[test]
@@ -1647,11 +1732,17 @@ mod tests {
             Some(NetRequest::SavePublicIp(_))
         ));
         // A failed save names itself where the Apply errors stand.
-        t.public_ip_saved(Err("disk full".into()));
+        t.public_ip_saved(&PublicIpPrefs::default(), Err("disk full".into()));
         assert_eq!(t.error(), Some("disk full"));
         // Back drops an address that was typed and not taken.
         let mut t = tab();
-        t.event(NetEvent::PublicIpUrlText("http://x".into()), false);
+        t.event(
+            NetEvent::PublicIpUrl {
+                text: "http://x".into(),
+                commit: false,
+            },
+            false,
+        );
         t.drop_draft();
         assert_eq!(t.public_ip_url_text(), "");
         assert!(!t.public_ip_url_refused());

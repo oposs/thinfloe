@@ -4505,7 +4505,13 @@ mod tests {
         let rects = text_rects(&shapes);
         let height = |name: &str| rects.iter().find(|(t, _)| t == name).unwrap().1.height();
         assert!(height("Show the public IP address") < 1.5 * height("Lookup address"));
-        net.event(NetEvent::PublicIpUrlText("http://ip.example.net".into()), false);
+        net.event(
+            NetEvent::PublicIpUrl {
+                text: "http://ip.example.net".into(),
+                commit: false,
+            },
+            false,
+        );
         let texts = net_texts(&network_settings(net));
         assert!(has(&texts, PUBLIC_IP_NOTE), "{texts:?}");
         let texts = net_texts(&network_settings(crate::network::NetTab::new(false)));
@@ -4961,6 +4967,130 @@ mod tests {
         }
         let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
         assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CancelApply)]);
+    }
+
+    /// Frames of the Network tab of `menu` on one context, at 1920x1600;
+    /// each gets its events and reports its event.
+    fn net_frames(menu: &Menu, frames: Vec<Vec<egui::Event>>) -> (Vec<(String, Rect)>, Vec<Option<UiEvent>>) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let mut texts = vec![];
+        let mut events = vec![];
+        for (i, input) in [vec![], vec![], vec![]].into_iter().chain(frames).enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1920.0, 1600.0)),
+                events: input,
+                time: Some(i as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut ev = None;
+            let mut o = ctx.run_ui(input, |ui| {
+                ev = show(ui, menu, &[None], &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            if texts.is_empty() {
+                texts = text_rects(&o.shapes);
+            }
+            events.push(ev);
+        }
+        (texts, events.split_off(3))
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A click on Apply that takes the focus from the lookup address field
+    /// is reported, and the field's commit follows on the next frame.
+    #[test]
+    fn apply_and_the_lookup_address_commit_of_one_frame_both_arrive() {
+        use crate::network::NetEvent;
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        let typed = "https://ip.example.net";
+        net.event(
+            NetEvent::PublicIpUrl {
+                text: typed.into(),
+                commit: false,
+            },
+            false,
+        );
+        let menu = network_settings(net);
+        let (texts, _) = net_frames(&menu, vec![]);
+        let at = |name: &str| texts.iter().find(|(t, _)| t == name).unwrap().1.center();
+        let (field, apply) = (at(typed), at("Apply"));
+        let (_, events) = net_frames(&menu, vec![click_at(field), click_at(apply), vec![], vec![]]);
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        assert_eq!(
+            events,
+            [
+                None,
+                ev(NetEvent::Apply),
+                ev(NetEvent::PublicIpUrl {
+                    text: typed.into(),
+                    commit: true,
+                }),
+                None,
+            ]
+        );
+    }
+
+    /// Text and Enter in one frame: one event carries both.
+    #[test]
+    fn typing_and_enter_in_one_frame_commit_the_text() {
+        use crate::network::NetEvent;
+        let menu = network_settings(two_networks());
+        let (texts, _) = net_frames(&menu, vec![]);
+        let field = texts
+            .iter()
+            .find(|(t, _)| t == crate::publicip::DEFAULT_URL)
+            .unwrap()
+            .1
+            .center();
+        let typed = vec![
+            egui::Event::Text("https://ip.example.net".into()),
+            key(egui::Key::Enter),
+        ];
+        let (_, events) = net_frames(&menu, vec![click_at(field), typed]);
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::PublicIpUrl {
+                    text: "https://ip.example.net".into(),
+                    commit: true,
+                })))
+            ]
+        );
+    }
+
+    /// Escape in the lookup address field cancels it.
+    #[test]
+    fn escape_in_the_lookup_address_cancels_it() {
+        use crate::network::NetEvent;
+        let menu = network_settings(two_networks());
+        let (texts, _) = net_frames(&menu, vec![]);
+        let field = texts
+            .iter()
+            .find(|(t, _)| t == crate::publicip::DEFAULT_URL)
+            .unwrap()
+            .1
+            .center();
+        let (_, events) = net_frames(&menu, vec![click_at(field), vec![key(egui::Key::Escape)]]);
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::PublicIpUrlCancel)))
+            ]
+        );
     }
 
     /// Escape closes a Network dialog as Cancel does.
