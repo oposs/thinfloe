@@ -966,7 +966,18 @@ fn show_settings(
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
     };
-    event.or(body)
+    match (event, body) {
+        // The tab click wins the frame, but the lookup address field's
+        // last text must reach the menu, or leaving the tab commits an
+        // older one.
+        (
+            Some(SettingsEvent::Tab(tab)),
+            Some(SettingsEvent::Network(
+                e @ (crate::network::NetEvent::PublicIpUrl { .. } | crate::network::NetEvent::PublicIpUrlCancel),
+            )),
+        ) => Some(SettingsEvent::TabAfterUrl(tab, e)),
+        (event, body) => event.or(body),
+    }
 }
 
 /// Padding above and below the notes band.
@@ -4995,6 +5006,116 @@ mod tests {
             events.push(ev);
         }
         (texts, events.split_off(3))
+    }
+
+    /// `net_frames` on a menu that takes each Settings event, as the app
+    /// does; the effects it answers with.
+    fn net_frames_live(menu: &mut Menu, frames: Vec<Vec<egui::Event>>) -> Vec<Option<crate::menu::Effect>> {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let mut effects = vec![];
+        for (i, input) in frames.into_iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1920.0, 1600.0)),
+                events: input,
+                time: Some(i as f64 * 0.1),
+                ..Default::default()
+            };
+            let mut ev = None;
+            let mut o = ctx.run_ui(input, |ui| {
+                ev = show(ui, menu, &[None], &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            effects.push(match ev {
+                Some(UiEvent::Settings(e)) => menu.settings(e),
+                _ => None,
+            });
+        }
+        effects
+    }
+
+    /// The Apply click that takes the focus from the lookup address field
+    /// also clears the Apply error in the footer: the next frame's first
+    /// pass is thrown away for the new height, and the field's commit
+    /// still arrives.
+    #[test]
+    fn the_lookup_address_commit_survives_a_thrown_away_pass() {
+        use crate::menu::{Effect, Job};
+        use crate::network::NetEvent;
+        let typed = "https://ip.example.net";
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        assert!(net.event(NetEvent::Apply, false).is_some());
+        net.apply_done(Err(crate::jobs::ApplyFailed::new("no link".into())));
+        net.event(
+            NetEvent::PublicIpUrl {
+                text: typed.into(),
+                commit: false,
+            },
+            false,
+        );
+        let mut menu = network_settings(net);
+        let (texts, _) = net_frames(&menu, vec![]);
+        assert!(texts.iter().any(|(t, _)| t == "no link"), "{texts:?}");
+        let at = |name: &str| texts.iter().find(|(t, _)| t == name).unwrap().1.center();
+        let (field, apply) = (at(typed), at("Apply"));
+        let effects = net_frames_live(
+            &mut menu,
+            vec![vec![], vec![], vec![], click_at(field), click_at(apply), vec![], vec![]],
+        );
+        assert!(
+            matches!(effects[4], Some(Effect::Start(Job::NetApply { .. }))),
+            "{effects:?}"
+        );
+        assert_eq!(menu.network.error(), None, "the footer lost its error line");
+        assert_eq!(
+            effects[5..],
+            [
+                Some(Effect::Start(Job::PublicIpSave(crate::publicip::PublicIpPrefs {
+                    on: false,
+                    url: typed.into(),
+                }))),
+                None,
+            ]
+        );
+    }
+
+    /// A lookup address commit kept from the frame before (it met an
+    /// Apply click) and a tab click on one frame: the tab click carries it.
+    /// (Text typed on the frame of a click never reaches the field: egui
+    /// moves the focus first.)
+    #[test]
+    fn a_tab_click_carries_the_kept_lookup_address_event() {
+        use crate::network::NetEvent;
+        let typed = "https://ip.example.net";
+        let mut net = two_networks();
+        net.event(NetEvent::Forget("Lab".into()), false);
+        net.event(
+            NetEvent::PublicIpUrl {
+                text: typed.into(),
+                commit: false,
+            },
+            false,
+        );
+        let menu = network_settings(net);
+        let (texts, _) = net_frames(&menu, vec![]);
+        let at = |name: &str| texts.iter().find(|(t, _)| t == name).unwrap().1.center();
+        let (field, apply, tab) = (at(typed), at("Apply"), at("Screen"));
+        let (_, events) = net_frames(&menu, vec![click_at(field), click_at(apply), click_at(tab)]);
+        assert_eq!(
+            events[1..],
+            [
+                Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::Apply))),
+                Some(UiEvent::Settings(SettingsEvent::TabAfterUrl(
+                    SettingsTab::Screen,
+                    NetEvent::PublicIpUrl {
+                        text: typed.into(),
+                        commit: true,
+                    }
+                ))),
+            ]
+        );
     }
 
     fn key(key: egui::Key) -> egui::Event {
