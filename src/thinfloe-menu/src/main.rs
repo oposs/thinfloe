@@ -239,6 +239,8 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         config: std::sync::Arc::new(std::sync::Mutex::new(opened.store)),
         layout,
         labwc: jobs::LabwcCmds::from_env(),
+        net_roots: thinfloe_menu::netstat::Roots::system(),
+        pci_ids: PathBuf::from("/usr/share/misc/pci.ids"),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

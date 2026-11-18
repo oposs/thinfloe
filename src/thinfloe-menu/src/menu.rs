@@ -1237,8 +1237,8 @@ impl Menu {
                 self.network.loaded(wifi, wired, devices);
                 None
             }
-            JobResult::NetStatus(r) => {
-                self.network.status_done(r);
+            JobResult::NetStatus(r, details) => {
+                self.network.status_done(r, details);
                 None
             }
             JobResult::NetScan(r) => {
@@ -3198,9 +3198,9 @@ mod tests {
         assert_eq!(m.tick(now), Some(Effect::Start(Job::NetLoad)));
         assert_eq!(m.tick(now), Some(Effect::Start(Job::NetStatus)));
         assert_eq!(m.tick(now), None);
-        m.finished(JobResult::NetStatus(Ok(Vec::new())), now);
+        m.finished(JobResult::NetStatus(Ok(Vec::new()), Default::default()), now);
         assert_eq!(m.tick(now + NET_POLL), Some(Effect::Start(Job::NetStatus)));
-        m.finished(JobResult::NetStatus(Ok(Vec::new())), now);
+        m.finished(JobResult::NetStatus(Ok(Vec::new()), Default::default()), now);
         m.screen = Screen::Grid;
         assert_eq!(m.tick(now + NET_POLL * 2), None);
     }
