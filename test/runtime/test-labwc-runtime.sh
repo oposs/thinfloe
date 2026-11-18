@@ -994,11 +994,14 @@ fi
 # fullscreen window, on every monitor, without taking the keyboard focus or
 # the clicks of that window. 'thinfloe-menu --osd --probe' maps the OSD's
 # layer surfaces (overlay layer, keyboard interactivity none, an empty input
-# region) with plain fills: a 320x61 panel in TILE (0d1218) with a 1 px LINE
-# (151b22) frame 22 px above the bottom centre, and a 30x30 mark in TILE with
-# a WARN (c79a4a) frame 14 px from the right and 34 px from the top. grim
-# reads the pixels back; on a 1280x720 output the panel is x 480..799,
-# y 637..697 and the mark x 1236..1265, y 34..63. A red point outside the
+# region) and draws a Volume 45 % panel and the muted-microphone mark: a
+# 320x61 panel in TILE (0d1218) with a 1 px LINE (151b22) frame 22 px above
+# the bottom centre, and a 30x30 mark in TILE with a WARN (c79a4a) frame 14
+# px from the right and 34 px from the top. grim reads the pixels back; on a
+# 1280x720 output the panel is x 480..799, y 637..697 and the mark x
+# 1236..1265, y 34..63. The interior points miss the text, the icons and the
+# bar: the panel's (640,668) lies between the name and the level, the
+# mark's (1239,49) left of its 18 px icon (x 1242..1259). A red point outside the
 # OSD (100,100) proves the window really is under it. The X11 run uses two
 # outputs and the shipped config, so the probe window spans both (2560x720,
 # at 0,0: window and global coordinates agree); a click on the mark of
@@ -1106,7 +1109,7 @@ osd_focus() {
     fi
 }
 
-osd_run x11 2 "panel1=640,668 panel2=1920,668 frame1=480,668 mark1=1251,49 mark2=2531,49 markframe1=1265,49 control=100,100"
+osd_run x11 2 "panel1=640,668 panel2=1920,668 frame1=480,668 mark1=1239,49 mark2=2519,49 markframe1=1265,49 control=100,100"
 osd_geom=$(echo "$OSD_OUT" | grep -o '^GEOMETRY [0-9]*x[0-9]*' | tail -1 | cut -d' ' -f2)
 if [[ "$osd_geom" == "2560x720" ]]; then
     echo "ok   - the X11 window under the OSD spans both outputs ($osd_geom)"
@@ -1127,7 +1130,7 @@ else
     fail=1
 fi
 
-osd_run native 1 "panel1=640,668 frame1=480,668 mark1=1251,49 markframe1=1265,49 control=100,100"
+osd_run native 1 "panel1=640,668 frame1=480,668 mark1=1239,49 markframe1=1265,49 control=100,100"
 osd_expect "the OSD panel and mark show above a native fullscreen window" \
     panel1=0d1218 frame1=151b22 mark1=0d1218 markframe1=c79a4a
 osd_expect "the native fullscreen window is under the OSD (control point)" control=ff0000
