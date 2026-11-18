@@ -27,7 +27,7 @@ use crate::keyboard::KeyboardTab;
 use crate::log::{Kind, Log};
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
-use crate::network::{NetRequest, NetTab};
+use crate::network::{NetEvent, NetRequest, NetTab};
 use crate::screentab::{self, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::statustab::StatusEvent;
@@ -290,9 +290,9 @@ pub struct Menu {
     /// The write to start when the running one ends: the newest text, or
     /// `Some(None)` to remove the file.
     status_next: Option<Option<String>>,
-    /// A public IP write runs; one at a time, so the last click is the one
-    /// that stays.
-    public_ip_writing: bool,
+    /// The public IP settings a running write writes; one write at a
+    /// time, so the last click is the one that stays.
+    public_ip_running: Option<crate::publicip::PublicIpPrefs>,
     /// The public IP write for when the running one ends.
     public_ip_next: Option<crate::publicip::PublicIpPrefs>,
     /// A Save-On-Exit program ended while the end-of-session question
@@ -363,7 +363,7 @@ impl Menu {
             status_error: None,
             status_writing: false,
             status_next: None,
-            public_ip_writing: false,
+            public_ip_running: None,
             public_ip_next: None,
             deferred_save: false,
             last_check: None,
@@ -397,11 +397,11 @@ impl Menu {
     /// a later one replaces it. Two writes at once could end in either
     /// order, and the older click would stay in the file.
     fn write_public_ip(&mut self, prefs: crate::publicip::PublicIpPrefs) -> Option<Effect> {
-        if self.public_ip_writing {
+        if self.public_ip_running.is_some() {
             self.public_ip_next = Some(prefs);
             return None;
         }
-        self.public_ip_writing = true;
+        self.public_ip_running = Some(prefs.clone());
         Some(Effect::Start(Job::PublicIpSave(prefs)))
     }
 
@@ -761,7 +761,20 @@ impl Menu {
                 return None;
             }
             SettingsEvent::Tab(tab) => {
+                let left_network = self.settings_tab == SettingsTab::Network && tab != SettingsTab::Network;
                 self.settings_tab = tab;
+                // Leaving the tab is leaving the lookup address field: the
+                // address typed there is committed, as on a focus loss. The
+                // tab click is the frame's one event, so the field's own
+                // commit of that frame never arrives.
+                if left_network {
+                    let commit = NetEvent::PublicIpUrl {
+                        text: self.network.public_ip_url_text().to_string(),
+                        commit: true,
+                    };
+                    let r = self.network.event(commit, false)?;
+                    return self.net_request(r);
+                }
                 return None;
             }
             SettingsEvent::IdleTimeout(idle) => {
@@ -1081,12 +1094,12 @@ impl Menu {
             self.logout = Some(Logout::Failed { message });
             return None;
         }
-        if self.save.running || self.status_writing || self.public_ip_writing {
+        if self.save.running || self.status_writing || self.public_ip_running.is_some() {
             // The logout save follows; a queued one would only repeat it.
-            // A status layout write still running (or queued behind one)
-            // ends first: the save started beside it and the menu exited
-            // before the write reached the file, so the archive kept the
-            // old layout.
+            // A status layout or public IP write still running (or queued
+            // behind one) ends first: the save started beside it and the
+            // menu exited before the write reached the file, so the
+            // archive kept the old setting.
             self.save.again = false;
             self.logout = Some(Logout::WaitSave);
             return None;
@@ -1317,8 +1330,14 @@ impl Menu {
                     self.log
                         .note(Kind::Warn, format!("The public IP setting could not be saved: {e}."));
                 }
-                self.network.public_ip_saved(r);
-                self.public_ip_writing = false;
+                // A result nobody waits for changes nothing.
+                let ran = self.public_ip_running.take()?;
+                // A click queued behind a failed write was made on settings
+                // that are now put back on screen; it goes too.
+                if r.is_err() {
+                    self.public_ip_next = None;
+                }
+                self.network.public_ip_saved(&ran, r);
                 if let Some(next) = self.public_ip_next.take() {
                     return self.write_public_ip(next);
                 }
@@ -1943,6 +1962,41 @@ mod tests {
             Some(Effect::Start(Job::Save))
         );
         assert_eq!(m.network.error(), Some("disk full"));
+    }
+
+    #[test]
+    fn leaving_the_network_tab_commits_the_lookup_address() {
+        use crate::publicip::PublicIpPrefs;
+        let mut m = net_menu(false);
+        let typed = NetEvent::PublicIpUrl {
+            text: "https://ip.example.net".into(),
+            commit: false,
+        };
+        assert_eq!(net(&mut m, typed), None);
+        assert_eq!(
+            m.settings(SettingsEvent::Tab(SettingsTab::Screen)),
+            Some(Effect::Start(Job::PublicIpSave(PublicIpPrefs {
+                on: false,
+                url: "https://ip.example.net".into(),
+            })))
+        );
+        // Nothing typed: changing tabs saves nothing.
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Network)), None);
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Keyboard)), None);
+    }
+
+    #[test]
+    fn a_failed_public_ip_write_drops_the_click_queued_behind_it() {
+        use crate::publicip::PublicIpPrefs;
+        let mut m = net_menu(false);
+        let now = Instant::now();
+        assert!(net(&mut m, NetEvent::PublicIp(true)).is_some());
+        assert_eq!(net(&mut m, NetEvent::PublicIp(false)), None);
+        assert_eq!(m.finished(JobResult::PublicIpSaved(Err("disk full".into())), now), None);
+        // The screen shows what config.toml holds: off, as before.
+        assert_eq!(m.network.public_ip(), &PublicIpPrefs::default());
+        // A result nobody waits for changes nothing.
+        assert_eq!(m.finished(JobResult::PublicIpSaved(Ok(())), now), None);
     }
 
     #[test]

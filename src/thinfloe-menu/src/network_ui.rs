@@ -39,6 +39,8 @@ pub fn dialog_open(net: &NetTab) -> bool {
 /// The Network tab, `width` wide, and its dialogs.
 pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
     let t = Theme::current(ui.ctx());
+    let pending = take_pending_url(ui.ctx());
+    let mut url = None;
     // Apply and its error follow the bands, as the Upgrade screen's footer;
     // pinned to the foot of the panel only when the bands scroll.
     let rect = Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
@@ -77,7 +79,7 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
             // Saved at once and unrelated to the network files: it takes
             // clicks before they are read and while an Apply runs.
             band(ui, &t, inner, between, "Public IP address", |ui| {
-                public_ip(ui, &t, net, &mut event)
+                public_ip(ui, &t, net, pending.as_ref(), &mut event, &mut url)
             });
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
@@ -94,7 +96,70 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
     {
         event = Some(e);
     }
-    event
+    // A frame reports one event. The lookup address field reports its
+    // own on top of a click elsewhere when that click took its focus
+    // (Apply, the switch); the click is reported now and the field's event
+    // on the next frame, so neither is lost.
+    match (event, merge_url(pending, url)) {
+        (None, url) => url,
+        (Some(e), None) => Some(e),
+        (Some(e), Some(url)) => {
+            keep_pending_url(ui.ctx(), url);
+            Some(e)
+        }
+    }
+}
+
+fn pending_url_id() -> egui::Id {
+    egui::Id::unique("tf-net-public-ip-pending")
+}
+
+/// The lookup address event a frame could not report, kept for the frame
+/// after it only: one found later (the tab was left, say) is stale.
+fn keep_pending_url(ctx: &egui::Context, e: NetEvent) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(pending_url_id(), (pass, Some(e))));
+    ctx.request_repaint();
+}
+
+fn take_pending_url(ctx: &egui::Context) -> Option<NetEvent> {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.remove_temp::<(u64, Option<NetEvent>)>(pending_url_id()))
+        .filter(|(at, _)| at + 1 == pass)
+        .and_then(|(_, e)| e)
+}
+
+/// The lookup address event of this frame on top of one kept from the
+/// last: the newer text, committed if either was. Escape wins in either
+/// order: egui reports the focus loss on the frame after it once more,
+/// and that commit of the old text must not undo the cancel.
+fn merge_url(kept: Option<NetEvent>, now: Option<NetEvent>) -> Option<NetEvent> {
+    match (kept, now) {
+        (kept, None) => kept,
+        (Some(NetEvent::PublicIpUrlCancel), _) => Some(NetEvent::PublicIpUrlCancel),
+        (Some(NetEvent::PublicIpUrl { commit: was, .. }), Some(NetEvent::PublicIpUrl { text, commit })) => {
+            Some(NetEvent::PublicIpUrl {
+                text,
+                commit: was || commit,
+            })
+        }
+        (_, now) => now,
+    }
+}
+
+/// What the lookup address field reports: Escape cancels, Enter or a
+/// focus loss commits the text, a change reports it.
+fn url_field_event(changed: Option<String>, lost_focus: bool, escape: bool, shown: &str) -> Option<NetEvent> {
+    if lost_focus && escape {
+        return Some(NetEvent::PublicIpUrlCancel);
+    }
+    if changed.is_none() && !lost_focus {
+        return None;
+    }
+    Some(NetEvent::PublicIpUrl {
+        text: changed.unwrap_or_else(|| shown.to_string()),
+        commit: lost_focus,
+    })
 }
 
 /// A TILE band with its heading, as the rows of the Packages tab.
@@ -273,30 +338,41 @@ fn dns(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
 }
 
 /// The public IP switch and its lookup address. The address is saved when
-/// the field is left or takes Enter; one the menu does not use is named
-/// below it and not saved.
-fn public_ip(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
+/// the field is left or takes Enter, and Escape puts the saved one back;
+/// one the menu does not use is named below it and not saved. The field's
+/// event goes to `url`, apart from the clicks in `event`. `pending`: its
+/// event from the last frame, not reported yet, whose text is shown.
+fn public_ip(
+    ui: &mut Ui,
+    t: &Theme,
+    net: &NetTab,
+    pending: Option<&NetEvent>,
+    event: &mut Option<NetEvent>,
+    url: &mut Option<NetEvent>,
+) {
     let mut on = net.public_ip().on;
     form_row(ui, t, "Show the public IP address", |ui| {
         if ui.add(Switch::new(&mut on)).changed() {
             *event = Some(NetEvent::PublicIp(on));
         }
     });
+    let shown = match pending {
+        Some(NetEvent::PublicIpUrl { text, .. }) => text.as_str(),
+        _ => net.public_ip_url_text(),
+    };
     form_row(ui, t, "Lookup address", |ui| {
-        let mut text = net.public_ip_url_text().to_string();
+        let mut text = shown.to_string();
         let r = ui.add(
             Input::new(&mut text)
                 .hint(publicip::DEFAULT_URL)
                 .max_width(brand::NET_FIELD_W)
                 .id_salt("tf-net-public-ip-url"),
         );
-        if r.changed() {
-            *event = Some(NetEvent::PublicIpUrlText(text));
-        } else if r.lost_focus() {
-            *event = Some(NetEvent::PublicIpUrlCommit);
-        }
+        let changed = r.changed().then_some(text);
+        *url = url_field_event(changed, r.lost_focus(), escape(ui), shown);
     });
-    if net.public_ip_url_refused() {
+    let refused = !shown.is_empty() && !publicip::url_ok(shown);
+    if refused {
         let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
         note(
             ui,
@@ -550,4 +626,43 @@ fn confirm_dialog(ui: &Ui) -> Option<NetEvent> {
         });
     });
     event.or_else(|| escape(ui).then_some(NetEvent::CancelApply))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(text: &str, commit: bool) -> Option<NetEvent> {
+        Some(NetEvent::PublicIpUrl {
+            text: text.into(),
+            commit,
+        })
+    }
+
+    #[test]
+    fn a_kept_lookup_address_event_merges_with_the_next() {
+        let cancel = Some(NetEvent::PublicIpUrlCancel);
+        assert_eq!(merge_url(None, None), None);
+        assert_eq!(merge_url(url("a", true), None), url("a", true));
+        assert_eq!(merge_url(None, url("a", false)), url("a", false));
+        // The newer text, and a commit is never dropped.
+        assert_eq!(merge_url(url("a", true), url("ab", false)), url("ab", true));
+        // Escape wins in either order.
+        assert_eq!(merge_url(cancel.clone(), url("a", true)), cancel);
+        assert_eq!(merge_url(url("a", true), cancel.clone()), cancel);
+    }
+
+    #[test]
+    fn the_lookup_address_field_reports_change_commit_and_cancel() {
+        assert_eq!(url_field_event(None, false, false, "a"), None);
+        assert_eq!(url_field_event(Some("ab".into()), false, false, "a"), url("ab", false));
+        assert_eq!(url_field_event(Some("ab".into()), true, false, "a"), url("ab", true));
+        assert_eq!(url_field_event(None, true, false, "a"), url("a", true));
+        assert_eq!(
+            url_field_event(None, true, true, "a"),
+            Some(NetEvent::PublicIpUrlCancel)
+        );
+        // Escape without leaving the field is not a cancel.
+        assert_eq!(url_field_event(None, false, true, "a"), None);
+    }
 }

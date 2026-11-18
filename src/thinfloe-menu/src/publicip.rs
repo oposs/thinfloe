@@ -10,7 +10,9 @@ const SCHEME: &str = "https://";
 
 /// A lookup address the menu may ask: `https://` only, as for the add-on
 /// sources fetched without asking, since the answer is fetched in the
-/// background and shown as a fact. A non-empty host, no whitespace or
+/// background and shown as a fact. A host with at least one letter or
+/// digit before a `:`, `/`, `?`, `#` or `@` ends it (so `https://:443`
+/// and `https://@` are refused), no whitespace or
 /// control character (the address becomes a program argument), at most
 /// `URL_MAX` bytes.
 pub fn url_ok(url: &str) -> bool {
@@ -18,9 +20,9 @@ pub fn url_ok(url: &str) -> bool {
         return false;
     };
     let rest = &url[SCHEME.len()..];
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = rest.split([':', '/', '?', '#', '@']).next().unwrap_or("");
     scheme.eq_ignore_ascii_case(SCHEME)
-        && !host.is_empty()
+        && host.chars().any(|c| c.is_ascii_alphanumeric())
         && url.len() <= URL_MAX
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
@@ -45,7 +47,11 @@ mod tests {
 
     #[test]
     fn only_https_lookup_addresses_are_accepted() {
-        for good in ["https://api.ipify.org", "HTTPS://ip.example.net/plain"] {
+        for good in [
+            "https://api.ipify.org",
+            "HTTPS://ip.example.net/plain",
+            "https://ip.example.net:8443/",
+        ] {
             assert!(url_ok(good), "{good}");
         }
         let long = format!("https://{}", "a".repeat(257 - "https://".len()));
@@ -57,6 +63,11 @@ mod tests {
             "https://a b",
             "https://a\n",
             "-K/etc/x",
+            "https://:443",
+            "https://@",
+            "https://?x",
+            "https://#x",
+            "https://./",
             long.as_str(),
         ] {
             assert!(!url_ok(bad), "{bad:?}");
