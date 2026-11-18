@@ -1,17 +1,27 @@
 //! `thinfloe-menu --osd`: the on-screen display of the volume and
 //! brightness keys, in overlay surfaces above every window (`surface`).
 //!
-//! For now only `--osd --probe` exists, a test hook: it shows a Volume
-//! 45 % panel and the mark (`draw`) on every output, at scale 1, until
-//! SIGTERM.
+//! The session starts `--osd` once (`thinfloe-session`); labwc runs
+//! `--osd-key <action>` on each media key, which hands the action to the
+//! OSD over a datagram socket (`socket`) and returns at once. The OSD runs
+//! `wpctl` and `ddcutil` (`audio`, `ddc`) off its loop (`run`) and shows
+//! the result for 1.5 s (`state`). Without an OSD the client changes the
+//! volume itself and leaves the brightness alone.
+//!
+//! `--osd --probe` is a test hook: it shows a Volume 45 % panel and the
+//! mark on every output, at scale 1, until SIGTERM.
 
 pub mod audio;
 pub mod ddc;
 pub mod draw;
+mod run;
+pub mod socket;
+pub mod state;
 pub mod surface;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +36,109 @@ const PROBE_ARG: &str = "--probe";
 
 /// Most bytes of a tool's stdout the OSD reads; more is an error.
 const TOOL_BYTES: usize = 64 * 1024;
+
+/// Percent one volume key changes the default sink by.
+const VOLUME_STEP: i32 = 5;
+
+/// A key labwc hands to `--osd-key`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    MicMute,
+    BrightnessUp,
+    BrightnessDown,
+}
+
+impl Action {
+    pub const ALL: [Action; 6] = [
+        Action::VolumeUp,
+        Action::VolumeDown,
+        Action::VolumeMute,
+        Action::MicMute,
+        Action::BrightnessUp,
+        Action::BrightnessDown,
+    ];
+
+    pub fn parse(s: &str) -> Option<Action> {
+        Action::ALL.into_iter().find(|a| a.as_str() == s)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::VolumeUp => "volume-up",
+            Action::VolumeDown => "volume-down",
+            Action::VolumeMute => "volume-mute",
+            Action::MicMute => "mic-mute",
+            Action::BrightnessUp => "brightness-up",
+            Action::BrightnessDown => "brightness-down",
+        }
+    }
+}
+
+/// Where the OSD listens: `TF_OSD_SOCKET`, else
+/// `$XDG_RUNTIME_DIR/thinfloe-osd.sock`; an empty variable is unset.
+pub fn socket_path() -> Option<PathBuf> {
+    socket_path_from(std::env::var_os("TF_OSD_SOCKET"), std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+fn socket_path_from(sock: Option<OsString>, runtime_dir: Option<OsString>) -> Option<PathBuf> {
+    if let Some(p) = sock.filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let dir = runtime_dir.filter(|d| !d.is_empty())?;
+    Some(PathBuf::from(dir).join("thinfloe-osd.sock"))
+}
+
+/// `thinfloe-menu --osd-key <action>`: hand the key to the OSD, or act
+/// without it. labwc waits for nothing: every outcome but an unknown
+/// action is exit 0.
+pub fn osd_key_main(args: &[OsString]) -> ExitCode {
+    let name = args.first().map(|a| a.as_os_str()).unwrap_or(OsStr::new(""));
+    let Some(action) = name.to_str().and_then(Action::parse) else {
+        eprintln!("thinfloe-menu --osd-key: unknown action '{}'", name.to_string_lossy());
+        return ExitCode::from(2);
+    };
+    let sent = match socket_path() {
+        Some(path) => socket::send(&path, action),
+        None => Err(socket::SendError::NoServer),
+    };
+    match sent {
+        Ok(()) => {}
+        Err(socket::SendError::NoServer) => act_without_osd(action),
+        Err(socket::SendError::Io(e)) => eprintln!("thinfloe-menu --osd-key: {}: {e}", action.as_str()),
+    }
+    ExitCode::SUCCESS
+}
+
+/// The volume and mute keys through one `wpctl` call each; the brightness
+/// keys need the OSD's monitor list and do nothing.
+fn act_without_osd(a: Action) {
+    let w = audio::Wpctl::from_env();
+    let done = match a {
+        Action::VolumeUp => w.change(VOLUME_STEP).map(|_| ()),
+        Action::VolumeDown => w.change(-VOLUME_STEP).map(|_| ()),
+        Action::VolumeMute => w.toggle_sink_mute().map(|_| ()),
+        Action::MicMute => w.toggle_source_mute().map(|_| ()),
+        Action::BrightnessUp | Action::BrightnessDown => {
+            eprintln!("thinfloe-menu --osd-key: no OSD running; brightness not changed");
+            return;
+        }
+    };
+    match done {
+        Ok(()) => eprintln!(
+            "thinfloe-menu --osd-key: no OSD running; {} done without a display",
+            a.as_str()
+        ),
+        Err(e) => eprintln!("thinfloe-menu --osd-key: no OSD running; {}: {e}", a.as_str()),
+    }
+}
+
+/// The longest the OSD sleeps in `poll`. SIGTERM interrupts a running
+/// poll, but one that lands between the STOP check and the call is only
+/// seen when this runs out.
+const POLL_MAX_MS: libc::c_int = 1000;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -43,17 +156,26 @@ pub fn osd_main(args: &[OsString]) -> ExitCode {
             }
         };
     }
-    eprintln!("thinfloe-menu --osd: not yet");
-    ExitCode::from(2)
+    match run::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("thinfloe-menu --osd: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn install_sigterm() {
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
+    }
 }
 
 /// Shows a Volume 45 % panel and the mark on every output that has a
 /// name, again whenever the outputs change, until SIGTERM.
 fn probe() -> Result<(), String> {
-    // SAFETY: the handler only stores to an atomic.
-    unsafe {
-        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
-    }
+    install_sigterm();
     let mut painter = Painter::new();
     let view = PanelView::Volume { percent: 45 };
     let panel = panel_placement(1.0, view.has_bar());
@@ -77,7 +199,7 @@ fn probe() -> Result<(), String> {
             revents: 0,
         };
         // SAFETY: one valid pollfd for the duration of the call.
-        let n = unsafe { libc::poll(&mut pfd, 1, 1000) };
+        let n = unsafe { libc::poll(&mut pfd, 1, POLL_MAX_MS) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::Interrupted {
@@ -127,6 +249,26 @@ fn run_tool(cmd: &[String], args: &[String], timeout: Duration) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actions_round_trip() {
+        for a in Action::ALL {
+            assert_eq!(Action::parse(a.as_str()), Some(a));
+        }
+        assert_eq!(Action::parse("volume"), None);
+    }
+
+    #[test]
+    fn the_socket_is_in_the_runtime_dir_unless_named() {
+        let o = |s: &str| Some(OsString::from(s));
+        assert_eq!(socket_path_from(o("/a/s"), o("/run")), Some(PathBuf::from("/a/s")));
+        assert_eq!(
+            socket_path_from(o(""), o("/run/user/1001")),
+            Some(PathBuf::from("/run/user/1001/thinfloe-osd.sock"))
+        );
+        assert_eq!(socket_path_from(None, o("")), None);
+        assert_eq!(socket_path_from(None, None), None);
+    }
 
     #[test]
     fn a_blank_override_is_the_default_command() {

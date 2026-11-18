@@ -7,11 +7,13 @@
 //!
 //! Each draw is one memfd, one `wl_shm_pool` and one `wl_buffer`, which is
 //! destroyed when the compositor releases it. An output whose `name` event
-//! (`wl_output` v4) has not arrived yet gets nothing; a removed output and
-//! a `closed` surface take their surfaces with them.
+//! (`wl_output` v4) has not arrived yet gets nothing; a removed output
+//! takes its surfaces with it. A surface the compositor `closed` is not
+//! made again until the outputs change, so a compositor that closes every
+//! new surface cannot drive the OSD into a loop.
 
 use crate::brand::{MARK_RIGHT, MARK_SIDE, MARK_TOP, OSD_BAR_GAP, OSD_BAR_H, OSD_BOTTOM, OSD_ICON, OSD_PAD_Y, OSD_W};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
@@ -35,13 +37,14 @@ pub struct Placement {
     pub size: (u32, u32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Panel,
     Mark,
 }
 
 /// Whether an output came, went or got its name since the last dispatch.
+/// A `closed` surface does not count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutputsChanged(pub bool);
 
@@ -80,7 +83,7 @@ struct Layer {
     surface: wl_surface::WlSurface,
     layer: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
     place: Placement,
-    /// The compositor has sent a configure for the current placement.
+    /// The compositor has sent a configure of the current placement's size.
     configured: bool,
     /// A frame that waits for the configure.
     pending: Option<(u32, Vec<u32>)>,
@@ -123,6 +126,9 @@ struct State {
     layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1,
     /// By the output's global name.
     outputs: BTreeMap<u32, Output>,
+    /// Surfaces the compositor closed, by output id; `show` leaves them
+    /// alone until the outputs change.
+    closed: BTreeSet<(u32, SurfaceKind)>,
     changed: bool,
     /// The first error seen inside an event handler.
     error: Option<String>,
@@ -153,6 +159,7 @@ impl Surfaces {
             shm,
             layer_shell,
             outputs: BTreeMap::new(),
+            closed: BTreeSet::new(),
             changed: false,
             error: None,
         };
@@ -206,7 +213,10 @@ impl Surfaces {
         self.state.outputs.values().filter_map(|o| o.name.clone()).collect()
     }
 
-    /// Show `pixels` (XRGB8888, row-major, width*height) for `kind` on `output`, creating the layer surface when needed.
+    /// Show `pixels` (XRGB8888, row-major, width*height) for `kind` on
+    /// `output`, creating the layer surface when needed. A surface the
+    /// compositor closed stays away, without an error, until the outputs
+    /// change.
     pub fn show(
         &mut self,
         output: &str,
@@ -229,6 +239,9 @@ impl Surfaces {
         let Some(id) = self.state.output_id(output) else {
             return Err(format!("no output {output}"));
         };
+        if self.state.closed.contains(&(id, kind)) {
+            return Ok(());
+        }
         let frame = (width, pixels.to_vec());
         let out = self.state.outputs.get_mut(&id).expect("output_id found it");
         let wl = out.wl.clone();
@@ -302,6 +315,14 @@ fn apply_placement(layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, place: &Pl
     layer.set_margin(top, right, bottom, left);
 }
 
+/// Whether a configure of `(width, height)` lets a frame of `size` show.
+/// A configure of an earlier placement may still arrive after `show`
+/// changed the size; the frame of the new size waits for one that
+/// matches. 0 leaves that side to us.
+fn configure_fits(size: (u32, u32), (width, height): (u32, u32)) -> bool {
+    (width == 0 || width == size.0) && (height == 0 || height == size.1)
+}
+
 /// A memfd with `pixels` in wl_shm's XRGB8888, little-endian.
 fn shm_file(pixels: &[u32]) -> Result<File, String> {
     let name = CString::new("thinfloe-osd").expect("no NUL");
@@ -319,6 +340,13 @@ fn shm_file(pixels: &[u32]) -> Result<File, String> {
 }
 
 impl State {
+    /// An output came, went or got its name: closed surfaces may be made
+    /// again.
+    fn outputs_changed(&mut self) {
+        self.changed = true;
+        self.closed.clear();
+    }
+
     fn output_id(&self, name: &str) -> Option<u32> {
         self.outputs
             .iter()
@@ -341,7 +369,7 @@ impl State {
                 mark: None,
             },
         );
-        self.changed = true;
+        self.outputs_changed();
     }
 
     fn attach(
@@ -395,7 +423,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
                 if let Some(mut out) = state.outputs.remove(&name) {
                     out.drop_surfaces();
                     out.wl.release();
-                    state.changed = true;
+                    state.outputs_changed();
                 }
             }
             _ => {}
@@ -416,7 +444,7 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
             && let Some(out) = state.outputs.get_mut(id)
         {
             out.name = Some(name);
-            state.changed = true;
+            state.outputs_changed();
         }
     }
 }
@@ -439,9 +467,12 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, (u32, SurfaceKind)> for
             return;
         }
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
                 let l = slot.as_mut().expect("checked above");
                 layer.ack_configure(serial);
+                if !configure_fits(l.place.size, (width, height)) {
+                    return;
+                }
                 l.configured = true;
                 if let Some(frame) = l.pending.take() {
                     let surface = l.surface.clone();
@@ -456,7 +487,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, (u32, SurfaceKind)> for
                 if let Some(l) = slot.take() {
                     l.destroy();
                 }
-                state.changed = true;
+                state.closed.insert((id, kind));
             }
             _ => {}
         }
@@ -511,6 +542,18 @@ mod tests {
         assert_eq!(panel_placement(1.5, true).margin, (0, 0, 33, 0));
         assert_eq!(mark_placement(1.0).margin, (34, 14, 0, 0));
         assert_eq!(mark_placement(2.0).size, (60, 60));
+    }
+
+    #[test]
+    fn only_a_configure_of_the_current_size_releases_a_frame() {
+        let with_bar = panel_placement(1.0, true).size;
+        let without = panel_placement(1.0, false).size;
+        assert!(configure_fits(with_bar, with_bar));
+        assert!(!configure_fits(with_bar, without));
+        assert!(!configure_fits(panel_placement(2.0, true).size, with_bar));
+        assert!(configure_fits(with_bar, (0, 0)));
+        assert!(configure_fits(with_bar, (with_bar.0, 0)));
+        assert!(!configure_fits(with_bar, (0, without.1)));
     }
 
     #[test]
