@@ -19,8 +19,10 @@ const SCHEME: &str = "https://";
 /// background and shown as a fact. A host with at least one letter or
 /// digit before a `:`, `/`, `?`, `#` or `@` ends it (so `https://:443`
 /// and `https://@` are refused), no whitespace or
-/// control character (the address becomes a program argument), at most
-/// `URL_MAX` bytes.
+/// control character (the address becomes a program argument), no `[`,
+/// `]`, `{` or `}` (curl's URL globbing would turn one lookup into many;
+/// `--globoff` stops that too, and this keeps an IPv6 literal host out
+/// with them), at most `URL_MAX` bytes.
 pub fn url_ok(url: &str) -> bool {
     let Some(scheme) = url.get(..SCHEME.len()) else {
         return false;
@@ -30,7 +32,9 @@ pub fn url_ok(url: &str) -> bool {
     scheme.eq_ignore_ascii_case(SCHEME)
         && host.chars().any(|c| c.is_ascii_alphanumeric())
         && url.len() <= URL_MAX
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '[' | ']' | '{' | '}'))
 }
 
 /// The address a lookup asks: the one set, or `DEFAULT_URL` when none is.
@@ -64,6 +68,9 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 const TICK: Duration = Duration::from_secs(1);
 /// How often the address is asked again while nothing else changes.
 pub const EVERY: Duration = Duration::from_secs(15 * 60);
+/// The least time between a lookup and one a new route asks for: a link
+/// that flaps asks at most this often.
+pub const ROUTE_PAUSE: Duration = Duration::from_secs(30);
 
 /// The address in a lookup's body: the trimmed text, when it is at most
 /// `BODY_MAX` bytes and parses as an IPv4 or IPv6 address. A captive
@@ -76,13 +83,19 @@ pub fn parse_answer(body: &[u8]) -> Option<IpAddr> {
 }
 
 /// curl's arguments for one lookup of `url`.
+/// `-q` first (curl honours it only there): no `.curlrc` is read, since it
+/// lives in the home that travels with the person and could set a proxy,
+/// `--insecure` or an output file. `--globoff`: no `[]` or `{}` in the
+/// address expands into more requests.
 /// `--proto =https` and `--max-redirs 0` without `-L`: no redirect is
 /// followed, and none could lead to another scheme. `--url` keeps an
 /// address from ever being read as an option. The status code follows the
 /// body on a line of its own.
 pub fn curl_args(url: &str) -> Vec<String> {
     [
+        "-q",
         "-s",
+        "--globoff",
         "--proto",
         "=https",
         "--max-redirs",
@@ -151,10 +164,12 @@ pub struct Want {
 }
 
 impl Want {
-    /// The switch is on, the element has cells and the sampler reads: not
-    /// while covered, not on a short screen, not when unticked.
+    /// The switch is on, the element has cells, the sampler reads and the
+    /// route has an interface: not while covered, not on a short screen,
+    /// not when unticked, not before the sampler's first copy and not while
+    /// the link is gone (the lookup could only fail).
     pub fn active(&self) -> bool {
-        self.prefs.on && self.placed && self.sampling
+        self.prefs.on && self.placed && self.sampling && self.route.0.is_some()
     }
 }
 
@@ -169,7 +184,8 @@ pub struct Schedule {
 
 impl Schedule {
     /// Whether to ask now, and if so the ask counts from `now`. While
-    /// active: the first time, on a new route, and `EVERY` after the last.
+    /// active: the first time, on a new route (at least `ROUTE_PAUSE` after
+    /// the last), and `EVERY` after the last.
     /// The switch going off, or a new lookup address, starts over.
     pub fn due(&mut self, want: &Want, now: Instant) -> bool {
         if !want.prefs.on || want.prefs.url != self.url {
@@ -181,7 +197,10 @@ impl Schedule {
         }
         let due = match &self.last {
             None => true,
-            Some((at, route)) => *route != want.route || now.saturating_duration_since(*at) >= EVERY,
+            Some((at, route)) => {
+                let since = now.saturating_duration_since(*at);
+                (*route != want.route && since >= ROUTE_PAUSE) || since >= EVERY
+            }
         };
         if due {
             self.last = Some((now, want.route.clone()));
@@ -228,7 +247,9 @@ pub fn spawn(
                 Ok(a) => Answer::Addr(*a),
                 Err(_) => Answer::Failed,
             });
-            let Ok(mut held) = shared.lock() else { return };
+            // A poisoned lock still holds a usable answer; ending the
+            // thread would stop the lookup silently.
+            let mut held = shared.lock().unwrap_or_else(|e| e.into_inner());
             let changed = *held != next;
             if next == Some(Answer::Failed)
                 && *held != Some(Answer::Failed)
@@ -279,6 +300,10 @@ mod tests {
             "https://@",
             "https://?x",
             "https://#x",
+            "https://x.example/[1-100000]",
+            "https://x.example/{a,b}",
+            "https://x.example/]",
+            "https://x.example/}",
             "https://./",
             long.as_str(),
         ] {
@@ -340,7 +365,9 @@ mod tests {
         assert_eq!(
             args,
             [
+                "-q",
                 "-s",
+                "--globoff",
                 "--proto",
                 "=https",
                 "--max-redirs",
@@ -355,6 +382,13 @@ mod tests {
                 "https://ip.example.net",
             ]
         );
+        // `-q` reaches curl as its very first argument, where it counts.
+        let d = TestDir::new("publicip", "first-arg");
+        let first = d.join("first");
+        let script = format!("printf '%s' \"$1\" > '{}'; printf '203.0.113.7\\n200'", first.display());
+        let curl = ["/bin/sh", "-c", &script, "curl"].map(String::from).to_vec();
+        assert!(lookup(&curl, "https://ip.example.net", Duration::from_secs(5)).is_ok());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "-q");
         let d = TestDir::new("publicip", "redirect");
         let marker = d.join("ran");
         let url = "https://ip.example.net";
@@ -483,6 +517,57 @@ mod tests {
             ..active()
         };
         assert_eq!(due_at(other), [0, 600, 1500, 2400, 3300]);
+        // No interface: before the sampler's first copy, or with the link
+        // gone, nothing is asked; the link back asks at once.
+        let no_link = Want {
+            route: (None, None, None),
+            ..active()
+        };
+        assert!(!no_link.active());
+        assert_eq!(due_at(|_| no_link.clone()), Vec::<u64>::new());
+        let lost = |t: u64| {
+            if (100..400).contains(&t) {
+                no_link.clone()
+            } else {
+                active()
+            }
+        };
+        assert_eq!(
+            due_at(lost),
+            [0, 900, 1800, 2700],
+            "the same route back is no new route"
+        );
+        let late = |t: u64| if t < 120 { no_link.clone() } else { active() };
+        assert_eq!(due_at(late), [120, 1020, 1920, 2820]);
+    }
+
+    #[test]
+    fn a_flapping_link_asks_at_most_every_30_s() {
+        // The route changes every 5 s for the first 10 minutes: a lookup
+        // starts at most every `ROUTE_PAUSE`, then the quarter hours count
+        // from the last one.
+        let flap = |t: u64| Want {
+            route: if t < 600 && (t / 5) % 2 == 1 {
+                (Some("wlan0".into()), None, None)
+            } else {
+                active().route
+            },
+            ..active()
+        };
+        let got = due_at(flap);
+        for w in got.windows(2) {
+            assert!(w[1] - w[0] >= 30, "{got:?}");
+        }
+        // Without the pause it would be 120 lookups in those 10 minutes.
+        let flapping = got.iter().filter(|&&t| t < 600).count();
+        assert!(flapping <= 600 / 30, "{got:?}");
+        // The last flap (wlan0 at 595) is followed by the route back at 600,
+        // asked 30 s later, then every quarter hour.
+        assert_eq!(
+            got.iter().copied().filter(|&t| t >= 600).collect::<Vec<_>>(),
+            [625, 1525, 2425, 3325]
+        );
+        assert_eq!(ROUTE_PAUSE, Duration::from_secs(30));
     }
 
     /// Wait up to 20 s for `cond`: the thread looks once a second, and a
@@ -513,12 +598,14 @@ mod tests {
         let got = || answer.lock().unwrap().clone();
         wait_for("the first lookup fails", || got() == Some(Answer::Failed));
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
-        let route = |w: &Arc<Mutex<Want>>, name: &str| w.lock().unwrap().route.0 = Some(name.into());
-        // Two more failures on new routes: the thread is sequential, so once
-        // the third has run the second's answer is in.
-        route(&want, "wlan0");
+        // A new lookup address asks at once (a new route would wait
+        // `ROUTE_PAUSE`).
+        let url = |w: &Arc<Mutex<Want>>, u: &str| w.lock().unwrap().prefs.url = u.into();
+        // Two more failures: the thread is sequential, so once the third has
+        // run the second's answer is in.
+        url(&want, "https://a.example");
         wait_for("the second lookup runs", || ran() == 2);
-        route(&want, "wlan1");
+        url(&want, "https://b.example");
         wait_for("the third lookup runs", || ran() == 3);
         let lines = feed.drain();
         assert_eq!(lines.len(), 1, "{lines:?}");
