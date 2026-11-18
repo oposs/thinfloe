@@ -649,8 +649,13 @@ fn job_result(
         }
         Job::NetStatus => {
             let r = jobs::network_status(paths, feed);
-            // Files only, so it adds no wait the tool's call has not had.
-            let details = crate::netdetail::read(&paths.net_roots, r.as_deref().unwrap_or_default(), &paths.pci_ids);
+            // Files only, so it adds no wait the tool's call has not had. A
+            // failed call is not read for: the tab keeps the last list and
+            // the details read with it.
+            let details = match &r {
+                Ok(list) => crate::netdetail::read(&paths.net_roots, list, &paths.pci_ids),
+                Err(_) => crate::netdetail::Details::default(),
+            };
             JobResult::NetStatus(r, details)
         }
         Job::NetScan => JobResult::NetScan(jobs::network_scan(paths, feed)),
@@ -1682,6 +1687,35 @@ mod tests {
             })
         );
         assert_eq!(got[3], JobResult::UpgradeEnded { status: Ok(Some(0)) });
+    }
+
+    /// The details come only with a list; a failed status call reads none,
+    /// since the tab keeps the last list and its details then.
+    #[test]
+    fn net_status_reads_details_only_beside_a_list() {
+        let d = TestDir::new("app", "net-details");
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        std::fs::write(d.join("etc/resolv.conf"), "nameserver 9.9.9.9\n").unwrap();
+        let status = |tool: &str| {
+            let mut p = paths(Vec::new());
+            p.network_cmd = ["/bin/sh", "-c", tool, "sh"].map(String::from).to_vec();
+            p.net_roots = crate::netstat::Roots::under(&d);
+            let (tx, rx) = mpsc::channel();
+            run_job(Job::NetStatus, &p, &Arc::new(Feed::default()), false, move |r| {
+                let _ = tx.send(r);
+            });
+            rx.try_iter().collect::<Vec<_>>()
+        };
+        let got = status(r#"echo '{"interfaces":[{"name":"eno1","kind":"wired","state":"no-cable"}]}'"#);
+        assert!(
+            matches!(&got[..], [JobResult::NetStatus(Ok(_), det)] if det.dns_in_use == ["9.9.9.9"] && det.ifaces.len() == 1),
+            "{got:?}"
+        );
+        let got = status("exit 3");
+        assert!(
+            matches!(&got[..], [JobResult::NetStatus(Err(_), det)] if *det == crate::netdetail::Details::default()),
+            "{got:?}"
+        );
     }
 
     #[test]
