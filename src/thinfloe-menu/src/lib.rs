@@ -38,6 +38,7 @@ pub mod nettab;
 pub mod network;
 pub mod network_ui;
 pub mod notes;
+pub mod osd;
 pub mod outputs;
 pub mod pciids;
 pub mod publicip;
