@@ -179,6 +179,35 @@ pub const NOTES_DIALOG_RESERVE: f32 = 240.0;
 /// stack in one column.
 pub const UPGRADE_TWO_COLUMNS_W: f32 = 720.0;
 
+// The on-screen display of the volume and brightness keys, in logical
+// pixels, multiplied by the menu's scale (`osd::surface`).
+/// The panel's width.
+pub const OSD_W: f32 = 320.0;
+/// From the panel to the bottom edge of its monitor.
+pub const OSD_BOTTOM: f32 = 22.0;
+/// Above and below the panel's content, its 1 px border counted in.
+pub const OSD_PAD_Y: f32 = 12.0;
+/// Left and right of the panel's content, its 1 px border counted in.
+pub const OSD_PAD_X: f32 = 16.0;
+/// The panel's icon.
+pub const OSD_ICON: f32 = 22.0;
+/// Between the icon and the name.
+pub const OSD_GAP: f32 = 10.0;
+/// The name, in Geo.
+pub const OSD_TEXT_PT: f32 = 19.0;
+/// The level bar's height.
+pub const OSD_BAR_H: f32 = 6.0;
+/// From the icon row to the level bar.
+pub const OSD_BAR_GAP: f32 = 9.0;
+/// The side of the muted-microphone mark.
+pub const MARK_SIDE: f32 = 30.0;
+/// The mark's icon.
+pub const MARK_ICON: f32 = 18.0;
+/// From the mark to the right edge of its monitor.
+pub const MARK_RIGHT: f32 = 14.0;
+/// From the mark to the top edge of its monitor.
+pub const MARK_TOP: f32 = 34.0;
+
 /// Font family of the name, titles and tile names.
 pub const GEO: &str = "geo";
 const GEO_FONT: &str = "Geo-Oblique";

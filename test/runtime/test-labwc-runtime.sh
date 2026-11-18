@@ -9,7 +9,9 @@
 # window keeps the keyboard focus when the menu replaces its window behind it,
 # and that labwc loads no keybindings: Alt-Tab and its kin reach the focused
 # window, and that a keybinding marked allowWhenInhibited passes an X11
-# keyboard grab while an unmarked one does not.
+# keyboard grab while an unmarked one does not, and that the OSD of the
+# volume and brightness keys shows above a fullscreen window on every
+# output without taking its focus or its clicks.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -985,6 +987,156 @@ if [[ "$GB_HITS" == "hits=pass plain " ]]; then
     echo "ok   - without a grab both bindings run (control)"
 else
     echo "FAIL - control run without a grab: $GB_HITS (expected hits=pass plain )"
+    fail=1
+fi
+
+# The on-screen display of the volume and brightness keys must show above a
+# fullscreen window, on every monitor, without taking the keyboard focus or
+# the clicks of that window. 'thinfloe-menu --osd --probe' maps the OSD's
+# layer surfaces (overlay layer, keyboard interactivity none, an empty input
+# region) with plain fills: a 320x61 panel in TILE (0d1218) with a 1 px LINE
+# (151b22) frame 22 px above the bottom centre, and a 30x30 mark in TILE with
+# a WARN (c79a4a) frame 14 px from the right and 34 px from the top. grim
+# reads the pixels back; on a 1280x720 output the panel is x 480..799,
+# y 637..697 and the mark x 1236..1265, y 34..63. A red point outside the
+# OSD (100,100) proves the window really is under it. The X11 run uses two
+# outputs and the shipped config, so the probe window spans both (2560x720,
+# at 0,0: window and global coordinates agree); a click on the mark of
+# output 2 (2531,49) must reach the probe. The native run has a fullscreen
+# foot on one output that copies every byte it gets to /tmp/keys; an x typed
+# while the OSD is up must reach it. wlrctl's state:active alone cannot see
+# a layer surface take the keyboard: with keyboard interactivity exclusive
+# the toplevel stays active (tried).
+# shellcheck disable=SC2016 # expands inside the container
+osd_script='if [ "$OSD_MODE" = x11 ]; then
+    python3 /usr/local/bin/x11-probe.py --background ff0000 --hold 12 --buttons &
+    app=thinfloe-probe
+else
+    foot -o colors.background=ff0000 --fullscreen sh -c "stty raw -echo; exec timeout 12 dd bs=1 of=/tmp/keys 2>/dev/null" &
+    app=foot
+fi
+sleep 3
+wlrctl toplevel find app_id:$app state:active && echo focus_before=active || echo focus_before=inactive
+thinfloe-menu --osd --probe &
+osd=$!
+sleep 2
+wlrctl toplevel find app_id:$app state:active && echo focus_after=active || echo focus_after=inactive
+grim -t ppm /tmp/shot.ppm
+if [ "$OSD_MODE" = x11 ]; then
+    wlrctl pointer move -5000 -5000; wlrctl pointer move 2531 49; wlrctl pointer click left
+else
+    wtype -s 1000 x -s 300
+    echo "keys=$(od -An -tx1 /tmp/keys | tr -d " \n")"
+fi
+sleep 1
+python3 -c "
+import sys
+data = open(\"/tmp/shot.ppm\", \"rb\").read()
+fields, pos = [], 0
+while len(fields) < 4:
+    while data[pos:pos + 1].isspace():
+        pos += 1
+    start = pos
+    while not data[pos:pos + 1].isspace():
+        pos += 1
+    fields.append(data[start:pos])
+pos += 1
+w = int(fields[1])
+print(\"shot %sx%s\" % (fields[1].decode(), fields[2].decode()))
+for arg in sys.argv[1:]:
+    name, xy = arg.split(\"=\")
+    x, y = map(int, xy.split(\",\"))
+    o = pos + 3 * (y * w + x)
+    print(\"px %s=%s\" % (name, data[o:o + 3].hex()))
+" $OSD_POINTS
+kill $osd
+wait $osd
+echo osd_rc=$?
+wait
+exit 0'
+osd_run() {
+    local mode="$1" outputs="$2" points="$3" name="thinfloe-runtime-test-osd-$1-$$" rc
+    OSD_OUT=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS="$outputs" \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e OSD_MODE="$mode" \
+        -e OSD_POINTS="$points" \
+        -e OSD_SCRIPT="$osd_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$OSD_SCRIPT" >/tmp/osd.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/osd.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during OSD test)"
+        echo "$OSD_OUT" | grep -E '^(GEOMETRY|BUTTON|focus_|px |shot |osd_rc=)'
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+}
+# osd_px NAME: the colour grim read at the named point.
+osd_px() {
+    echo "$OSD_OUT" | grep -E "^px $1=" | tail -1 | cut -d= -f2
+}
+# osd_expect WHAT NAME=RRGGBB...: one ok or FAIL line for all of them.
+osd_expect() {
+    local what="$1" bad="" p
+    shift
+    for p in "$@"; do
+        [[ "$(osd_px "${p%%=*}")" == "${p#*=}" ]] || bad+=" ${p%%=*}=$(osd_px "${p%%=*}") (want ${p#*=})"
+    done
+    if [[ -z "$bad" ]]; then
+        echo "ok   - $what"
+    else
+        echo "FAIL - $what:$bad"
+        fail=1
+    fi
+}
+osd_focus() {
+    local what="$1" r
+    r=$(echo "$OSD_OUT" | grep -E '^(focus_before|focus_after|osd_rc)=' | tr '\n' ' ')
+    if [[ "$r" == "focus_before=active focus_after=active osd_rc=0 " ]]; then
+        echo "ok   - $what keeps the focus under the OSD, which ends with 0 on SIGTERM"
+    else
+        echo "FAIL - $what under the OSD: $r (expected focus_before=active focus_after=active osd_rc=0)"
+        echo "$OSD_OUT" | grep -E 'thinfloe-menu' | head -20
+        fail=1
+    fi
+}
+
+osd_run x11 2 "panel1=640,668 panel2=1920,668 frame1=480,668 mark1=1251,49 mark2=2531,49 markframe1=1265,49 control=100,100"
+osd_geom=$(echo "$OSD_OUT" | grep -o '^GEOMETRY [0-9]*x[0-9]*' | tail -1 | cut -d' ' -f2)
+if [[ "$osd_geom" == "2560x720" ]]; then
+    echo "ok   - the X11 window under the OSD spans both outputs ($osd_geom)"
+else
+    echo "FAIL - the X11 window under the OSD is '$osd_geom', expected 2560x720"
+    fail=1
+fi
+osd_expect "the OSD panel shows on both outputs above a spanning X11 window" \
+    panel1=0d1218 panel2=0d1218 frame1=151b22
+osd_expect "the OSD mark shows on both outputs above a spanning X11 window" \
+    mark1=0d1218 mark2=0d1218 markframe1=c79a4a
+osd_expect "the X11 window is under the OSD (control point)" control=ff0000
+osd_focus "the spanning X11 window"
+if echo "$OSD_OUT" | grep -qx 'BUTTON 2531 49'; then
+    echo "ok   - a click on the OSD mark reaches the X11 window below"
+else
+    echo "FAIL - the click on the OSD mark did not reach the X11 window: '$(echo "$OSD_OUT" | grep '^BUTTON' | tr '\n' ' ')' (expected BUTTON 2531 49)"
+    fail=1
+fi
+
+osd_run native 1 "panel1=640,668 frame1=480,668 mark1=1251,49 markframe1=1265,49 control=100,100"
+osd_expect "the OSD panel and mark show above a native fullscreen window" \
+    panel1=0d1218 frame1=151b22 mark1=0d1218 markframe1=c79a4a
+osd_expect "the native fullscreen window is under the OSD (control point)" control=ff0000
+osd_focus "the native fullscreen window"
+osd_keys=$(echo "$OSD_OUT" | grep -E '^keys=' | tail -1)
+if [[ "$osd_keys" == "keys=78" ]]; then
+    echo "ok   - a key typed under the OSD reaches the native fullscreen window"
+else
+    echo "FAIL - a key typed under the OSD did not reach the native fullscreen window: '$osd_keys' (expected keys=78)"
     fail=1
 fi
 
