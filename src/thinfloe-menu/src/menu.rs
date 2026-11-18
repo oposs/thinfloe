@@ -857,7 +857,10 @@ impl Menu {
             }
             SettingsEvent::MachineCopy => {
                 let rows = self.machine_rows(Instant::now());
-                return (!rows.is_empty()).then(|| Effect::Start(Job::Copy(crate::machine::clipboard_text(&rows))));
+                if rows.is_empty() || !self.machine.start_copy() {
+                    return None;
+                }
+                return Some(Effect::Start(Job::Copy(crate::machine::clipboard_text(&rows))));
             }
             SettingsEvent::DismissReport => {
                 return self
@@ -1415,7 +1418,7 @@ impl Menu {
             JobResult::Copied(r) => {
                 if let Err(e) = &r {
                     self.log
-                        .note(Kind::Warn, format!("Could not copy to the clipboard: {e}"));
+                        .note(Kind::Warn, format!("Could not copy to the clipboard: {e}."));
                 }
                 self.machine.copy_done(r);
                 None
@@ -3346,6 +3349,28 @@ mod tests {
                 .lines()
                 .any(|l| l.kind == Kind::Warn && l.plain().contains("no Wayland"))
         );
+    }
+
+    #[test]
+    fn a_second_copy_click_waits_for_the_running_copy() {
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        m.screen = Screen::Settings;
+        m.settings(SettingsEvent::Tab(SettingsTab::Machine));
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        m.finished(JobResult::MachineFacts(crate::machine::Facts::default()), now);
+        assert!(matches!(
+            m.settings(SettingsEvent::MachineCopy),
+            Some(Effect::Start(Job::Copy(_)))
+        ));
+        assert!(m.machine.copying(), "the button is off");
+        assert_eq!(m.settings(SettingsEvent::MachineCopy), None, "no second job");
+        m.finished(JobResult::Copied(Ok(())), now);
+        assert!(!m.machine.copying());
+        assert!(matches!(
+            m.settings(SettingsEvent::MachineCopy),
+            Some(Effect::Start(Job::Copy(_)))
+        ));
     }
 
     #[test]

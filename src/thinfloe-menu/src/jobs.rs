@@ -1463,20 +1463,21 @@ mod tests {
     fn copy_text_leaves_what_the_tool_forked_running() {
         // wl-copy forks the server that holds the clipboard and exits. The
         // run must return at that exit and not kill the fork: here the fork
-        // writes a file a moment after its parent is gone.
+        // waits for `go`, which exists only once copy_text has returned, and
+        // then writes `mark`. No timing: a loaded machine cannot fail it.
         let d = dir("copyfork");
+        let go = d.join("go");
         let mark = d.join("served");
-        let script = format!("cat >/dev/null; (sleep 0.3; echo ok > '{}') & exit 0", mark.display());
-        let cmd = vec!["/bin/sh".into(), "-c".into(), script, "sh".into()];
-        let started = Instant::now();
-        assert_eq!(copy_text(&cmd, "x"), Ok(()));
-        assert!(
-            started.elapsed() < Duration::from_millis(300),
-            "{:?}",
-            started.elapsed()
+        let script = format!(
+            "cat >/dev/null; (while [ ! -e '{}' ]; do sleep 0.02; done; echo ok > '{}') & exit 0",
+            go.display(),
+            mark.display()
         );
+        let cmd = vec!["/bin/sh".into(), "-c".into(), script, "sh".into()];
+        assert_eq!(copy_text(&cmd, "x"), Ok(()));
         assert!(!mark.exists(), "returned before the fork wrote");
-        let until = Instant::now() + Duration::from_secs(3);
+        fs::write(&go, "").unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
         while !mark.exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }

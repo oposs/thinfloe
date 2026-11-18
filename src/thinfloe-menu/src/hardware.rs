@@ -49,7 +49,8 @@ pub const MAX_FANS: usize = 4;
 const MAX_LABEL: usize = 16;
 const MAX_DMI: usize = 40;
 /// The longest CPU name kept: AMD's run past 40 (`AMD Ryzen 7 PRO 5850U
-/// with Radeon Graphics`).
+/// with Radeon Graphics`). `sanitise` already cuts at `battery::MAX_NAME`,
+/// so a lower `MAX_NAME` shortens the CPU name too.
 const MAX_CPU_NAME: usize = 64;
 /// A reading outside this is a missing or broken sensor: chips report 0, 127
 /// or -128 for an input with nothing on it.

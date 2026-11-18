@@ -62,16 +62,29 @@ fn line(label: impl AsRef<str>, value: impl AsRef<str>) -> Line {
     }
 }
 
-/// `3.1 / 7.7 GiB`, or in MiB when there is less than 1 GiB in all.
-pub fn usage(u: Usage) -> String {
+/// The unit a size of `total` bytes is shown in: its divisor, name and
+/// decimals. GiB with one decimal from 1 GiB on, else whole MiB.
+fn unit(total: u64) -> (f64, &'static str, usize) {
     const MIB: f64 = 1024.0 * 1024.0;
     const GIB: f64 = 1024.0 * MIB;
-    let (used, total) = (u.used.min(u.total) as f64, u.total as f64);
-    if total >= GIB {
-        format!("{:.1} / {:.1} GiB", used / GIB, total / GIB)
+    if total as f64 >= GIB {
+        (GIB, "GiB", 1)
     } else {
-        format!("{:.0} / {:.0} MiB", used / MIB, total / MIB)
+        (MIB, "MiB", 0)
     }
+}
+
+/// `3.1 / 7.7 GiB`, or in MiB when there is less than 1 GiB in all.
+pub fn usage(u: Usage) -> String {
+    let (div, name, p) = unit(u.total);
+    let (used, total) = (u.used.min(u.total) as f64, u.total as f64);
+    format!("{:.p$} / {:.p$} {name}", used / div, total / div)
+}
+
+/// `7.7 GiB`, or `512 MiB` below 1 GiB: a size in `usage`'s units.
+pub fn size(bytes: u64) -> String {
+    let (div, name, p) = unit(bytes);
+    format!("{:.p$} {name}", bytes as f64 / div)
 }
 
 /// `800 MHz`, `2.4 GHz`.
@@ -684,6 +697,9 @@ mod tests {
             "8.0 / 8.0 GiB",
             "never over the total"
         );
+        assert_eq!(size(GIB), "1.0 GiB");
+        assert_eq!(size(GIB - 1), "1024 MiB");
+        assert_eq!(size(512 * 1024 * 1024), "512 MiB");
         assert_eq!(clock(800), "800 MHz");
         assert_eq!(clock(2401), "2.4 GHz");
         assert_eq!(uptime(0), "0 m");

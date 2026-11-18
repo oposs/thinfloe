@@ -51,7 +51,9 @@ pub fn machine_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option
                     }
                     ui.add_space(GAP / 2.0);
                     ui.horizontal(|ui| {
-                        if ui.add(Button::new("Copy").variant(ButtonVariant::Secondary)).clicked() {
+                        let copy = Button::new("Copy").variant(ButtonVariant::Secondary);
+                        // Off while a copy runs: a second click would start a second job.
+                        if ui.add_enabled(!tab.copying(), copy).clicked() {
                             event = Some(SettingsEvent::MachineCopy);
                         }
                         match &tab.copied {
