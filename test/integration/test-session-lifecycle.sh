@@ -106,7 +106,7 @@ run_session() {
     rm -f "$WORK/saved" "$WORK/foot.args" "$WORK/status" "$WORK/thinfloe-session.status" "$WORK/sudo.args" "$WORK/steps"
     printf '#!/bin/sh\n%s\n' "$1" >"$WORK/bin/menu"
     chmod 755 "$WORK/bin/menu"
-    env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" \
+    env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" \
         TF_STATE_DIR="$WORK/state" XDG_RUNTIME_DIR="${SESSION_XDG-$WORK}" TF_SESSION_STATUS="$WORK/thinfloe-session.status" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
         TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
@@ -135,7 +135,7 @@ rm -f "$WORK/helper.out" "$WORK/helper.pid"
 echo 2 >"$WORK/stale-scale"
 printf '#!/bin/sh\nsleep 0.5\nexit 0\n' >"$WORK/bin/menu"
 chmod 755 "$WORK/bin/menu"
-env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
     TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
     TF_SCALE_FILE="$WORK/stale-scale" TF_LABWC_SCALE="$WORK/bin/scale-helper" \
     sh "$SESSION" >/dev/null 2>&1
@@ -180,7 +180,7 @@ for where in named default; do
         out_file="$WORK/stale-menu-output"
         echo HDMI-A-1 >"$out_file"
         echo HDMI-A-1 >"$out_file.applied"
-        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+        env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
             TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
             TF_MENU_OUTPUT_FILE="$out_file" TF_LABWC_SCALE="$WORK/bin/output-helper" \
             sh "$SESSION" >/dev/null 2>&1
@@ -188,7 +188,7 @@ for where in named default; do
         out_file="$WORK/thinfloe-menu-output"
         echo HDMI-A-1 >"$out_file"
         echo HDMI-A-1 >"$out_file.applied"
-        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+        env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
             TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
             TF_LABWC_SCALE="$WORK/bin/output-helper" \
             sh "$SESSION" >/dev/null 2>&1
@@ -211,11 +211,11 @@ chmod 755 "$WORK/bin/menu"
 for empty in unset empty; do
     rm -f "$WORK/rm.args"
     if [[ $empty == unset ]]; then
-        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
+        env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
             TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
             TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1
     else
-        env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
+        env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" TF_SESSION_STATUS="$WORK/status.file" \
             XDG_RUNTIME_DIR= TF_SCALE_FILE= \
             TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
             TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1
@@ -234,6 +234,40 @@ rc=$?
 [[ ! -e "$WORK/saved" ]] && ok "logout: the session does not save again" || bad "logout: the session saved after the menu"
 [[ "$(cat "$WORK/thinfloe-session.status" 2>/dev/null)" == 0 ]] && ok "logout: status 0 recorded" || bad "logout: status file wrong"
 [[ ! -e "$WORK/foot.args" ]] && ok "logout: no failure window" || bad "logout: failure window shown"
+
+# The OSD (TF_OSD) starts with the session and dies with it; the menu's exit
+# status and the save behaviour stay as without it. The stub leaves its
+# arguments and pid in osd.args and stays up.
+cat >"$WORK/bin/osd" <<STUB
+#!/bin/sh
+echo "\$* \$\$" >"$WORK/.osd.args"
+mv "$WORK/.osd.args" "$WORK/osd.args"
+exec sleep 30
+STUB
+chmod 755 "$WORK/bin/osd"
+rm -f "$WORK/osd.args"
+# The menu waits for the OSD to have started, at most 2 s.
+SESSION_OSD="$WORK/bin/osd" run_session "n=0; while [ ! -e '$WORK/osd.args' ] && [ \$n -lt 20 ]; do sleep 0.1; n=\$((n + 1)); done; exit 0"
+rc=$?
+osd_arg= osd_pid=
+read -r osd_arg osd_pid 2>/dev/null <"$WORK/osd.args"
+echo "$osd_pid" >"$WORK/osd.pid"
+[[ $osd_arg == --osd ]] && ok "osd: started with --osd" || bad "osd: arguments '$(cat "$WORK/osd.args" 2>/dev/null)'"
+if [[ -n "$osd_pid" ]] && gone_within "$osd_pid" 5; then
+    ok "osd: ends with the session"
+else
+    bad "osd: $osd_pid still running"
+fi
+[[ $rc -eq 0 ]] && ok "osd: session exits 0 on logout" || bad "osd: session exited $rc"
+[[ ! -e "$WORK/saved" ]] && ok "osd: the session does not save" || bad "osd: the session saved"
+[[ "$(cat "$WORK/thinfloe-session.status" 2>/dev/null)" == 0 ]] && ok "osd: status 0 recorded" || bad "osd: status file wrong"
+[[ ! -e "$WORK/foot.args" ]] && ok "osd: no failure window" || bad "osd: failure window shown"
+# A missing OSD binary changes nothing.
+SESSION_OSD=/nonexistent run_session 'exit 0'
+rc=$?
+[[ $rc -eq 0 && ! -e "$WORK/saved" && ! -e "$WORK/foot.args" &&
+   "$(cat "$WORK/thinfloe-session.status" 2>/dev/null)" == 0 ]] \
+    && ok "osd: a missing TF_OSD leaves the logout as it was" || bad "osd: missing TF_OSD: rc=$rc"
 
 # 10 and 11: the menu has saved, as for 0; the session restarts or powers
 # off the machine. There is no polkit, so it needs sudo.
@@ -484,7 +518,7 @@ start_session() { # menu-code
     printf '#!/bin/sh\n%s\n' "$1" >"$WORK/bin/menu"
     chmod 755 "$WORK/bin/menu"
     set -m
-    env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
+    env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/bin:/usr/bin:/bin" HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK" \
         TF_MENU="$WORK/bin/menu" TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" \
         TF_LABWC_SCALE=/bin/true sh "$SESSION" >/dev/null 2>&1 &
     session_pid=$!
@@ -652,7 +686,7 @@ run_profile() { # menu-status [extra env assignments...]
     local menu_rc=$1
     shift
     rm -f "$WORK/ps/steps"
-    env -i PATH="$WORK/ps/bin:/usr/bin:/bin" HOME="$WORK/ps/home" \
+    env -i TF_OSD="${SESSION_OSD-/nonexistent}" PATH="$WORK/ps/bin:/usr/bin:/bin" HOME="$WORK/ps/home" \
         TF_STATE_DIR="$WORK/ps/state" XDG_RUNTIME_DIR="$WORK/ps/run" STUB_MENU_RC="$menu_rc" \
         TF_SESSION_VERDICT="$VERDICT" TF_SESSION_FAILURES="$WORK/ps/failures" \
         TF_PLYMOUTH_STEP="$WORK/ps/step" TF_LABWC_SCALE=/bin/true TF_WAIT_KMS=/bin/true \

@@ -488,6 +488,9 @@ fn main() -> ExitCode {
     if args.get(1).is_some_and(|a| a == osd::OSD_ARG) {
         return osd::osd_main(&args[2..]);
     }
+    if args.get(1).is_some_and(|a| a == osd::OSD_KEY_ARG) {
+        return osd::osd_key_main(&args[2..]);
+    }
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();
     }
