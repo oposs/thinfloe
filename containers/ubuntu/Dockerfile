@@ -7,7 +7,9 @@
 # manager_v1 is added for native Wayland clients such as OxuLnk
 # (0004-keyboard-shortcuts-inhibit.patch), and labwc no longer loads its
 # default keybindings when rc.xml defines none
-# (0005-no-default-keybinds.patch);
+# (0005-no-default-keybinds.patch), and a keybinding marked
+# allowWhenInhibited="yes" still runs under a keyboard grab or shortcuts
+# inhibitor (0006-keybind-allow-when-inhibited.patch);
 # see docs/superpowers/specs/2026-07-27-labwc-multimonitor-fullscreen-design.md.
 #
 # Patches live in containers/ubuntu/patches/ and are appended to the source
