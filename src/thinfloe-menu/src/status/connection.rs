@@ -8,9 +8,10 @@
 //! the order `Row::drop`: the public address, then the VPN. The link and the
 //! address stay. A WiFi link
 //! row too wide for the column leaves out the word `WiFi`. A long value is
-//! cut at the padding. On the tightest rows of the largest cell the labels
-//! are half a point smaller, so a `p` does not reach the `k` under it
-//! (`label_in_row`).
+//! cut at the padding. Only in a rect squeezed below the shipped cell
+//! heights do the rows get so tight that the labels are half a point
+//! smaller, so a `p` does not reach the `k` under it (`label_in_row`); with
+//! at most four rows the shipped sizes never get there.
 
 use super::battery::cut;
 use super::{Data, Element, Size, Source, background, cell_height, sizes_for};
