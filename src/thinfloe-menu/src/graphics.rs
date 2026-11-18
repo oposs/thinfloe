@@ -49,7 +49,8 @@ pub struct Codec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Vaapi {
     Codecs(Vec<Codec>),
-    NotAvailable,
+    /// Why not, for the menu's log: the run's error, its exit, or no codec.
+    NotAvailable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +71,9 @@ const CODECS: [(&str, &str); 4] = [
 pub fn read(sys: &Path, pci_ids: &Path, vainfo_cmd: &[String]) -> Info {
     Info {
         gpus: gpus(sys, pci_ids),
+        // `vainfo --display drm` opens libva's default render node. On a
+        // machine with two GPUs the codec list belongs to that node's GPU
+        // and is not tied to any one GPU row of the band.
         vaapi: vaapi(vainfo_cmd, VAINFO_TIMEOUT),
     }
 }
@@ -151,19 +155,26 @@ pub fn parse_vainfo(text: &str) -> Vec<Codec> {
 
 /// `vainfo` on the DRM display, which needs no Wayland or X environment in
 /// the job thread. A failed, slow or flooding run, or one that lists no
-/// codec, is `NotAvailable`.
+/// codec, is `NotAvailable` with the cause. libva picks the render node
+/// (its default, the first one), not the caller.
 pub fn vaapi(cmd: &[String], timeout: Duration) -> Vaapi {
     let args = ["--display".to_string(), "drm".to_string()];
-    let Ok(q) = crate::quiet::run(cmd, &args, None, VAINFO_CAP, timeout) else {
-        return Vaapi::NotAvailable;
+    let q = match crate::quiet::run(cmd, &args, None, VAINFO_CAP, timeout) {
+        Ok(q) => q,
+        Err(e) => return Vaapi::NotAvailable(e),
     };
+    match q.status {
+        Some(0) => {}
+        Some(n) => return Vaapi::NotAvailable(format!("vainfo exited with status {n}")),
+        None => return Vaapi::NotAvailable("vainfo was killed by a signal".to_string()),
+    }
     // An output that fills the cap may be cut mid-list.
-    if q.status != Some(0) || q.stdout.len() >= VAINFO_CAP {
-        return Vaapi::NotAvailable;
+    if q.stdout.len() >= VAINFO_CAP {
+        return Vaapi::NotAvailable(format!("vainfo wrote {VAINFO_CAP} bytes or more"));
     }
     let codecs = parse_vainfo(&String::from_utf8_lossy(&q.stdout));
     if codecs.is_empty() {
-        Vaapi::NotAvailable
+        Vaapi::NotAvailable("vainfo lists no codec".to_string())
     } else {
         Vaapi::Codecs(codecs)
     }
@@ -298,14 +309,17 @@ vainfo: Supported profile and entrypoints
         // A run that lists no codec has none to offer.
         assert_eq!(
             vaapi(&sh("echo 'vainfo: no profiles'"), Duration::from_secs(5)),
-            Vaapi::NotAvailable
+            Vaapi::NotAvailable("vainfo lists no codec".into())
         );
     }
 
     #[test]
     fn a_slow_vainfo_is_not_available() {
         let started = Instant::now();
-        assert_eq!(vaapi(&sh("sleep 5"), Duration::from_millis(200)), Vaapi::NotAvailable);
+        assert_eq!(
+            vaapi(&sh("sleep 5"), Duration::from_millis(200)),
+            Vaapi::NotAvailable("no answer within 200 ms".into())
+        );
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
@@ -316,13 +330,30 @@ vainfo: Supported profile and entrypoints
         fs::write(&listing, SKYLAKE).unwrap();
         // A listing that came with a failure is not trusted.
         let script = format!("cat '{}'; exit 1", listing.display());
-        assert_eq!(vaapi(&sh(&script), Duration::from_secs(5)), Vaapi::NotAvailable);
         assert_eq!(
-            vaapi(&["/nonexistent/vainfo".to_string()], Duration::from_secs(5)),
-            Vaapi::NotAvailable
+            vaapi(&sh(&script), Duration::from_secs(5)),
+            Vaapi::NotAvailable("vainfo exited with status 1".into())
         );
-        // An endless output stops at the cap.
-        assert_eq!(vaapi(&["yes".to_string()], Duration::from_secs(5)), Vaapi::NotAvailable);
+        assert!(matches!(
+            vaapi(&["/nonexistent/vainfo".to_string()], Duration::from_secs(5)),
+            Vaapi::NotAvailable(e) if e.starts_with("/nonexistent/vainfo: ")
+        ));
+        assert!(matches!(
+            vaapi(&sh("kill -9 $$"), Duration::from_secs(5)),
+            Vaapi::NotAvailable(e) if e == "vainfo was killed by a signal"
+        ));
+        // An endless output stops at the cap; one of exactly the cap may be
+        // cut mid-list. In a shell: `yes` itself refuses `--display` and
+        // exits 1 before writing anything.
+        assert_eq!(
+            vaapi(&sh("yes"), Duration::from_secs(5)),
+            Vaapi::NotAvailable(format!("more than {VAINFO_CAP} bytes of output"))
+        );
+        let full = format!("head -c {VAINFO_CAP} /dev/zero");
+        assert_eq!(
+            vaapi(&sh(&full), Duration::from_secs(5)),
+            Vaapi::NotAvailable(format!("vainfo wrote {VAINFO_CAP} bytes or more"))
+        );
     }
 
     #[test]

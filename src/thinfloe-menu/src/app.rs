@@ -564,7 +564,7 @@ fn panic_result(job: &Job) -> JobResult {
         // The band says what it would say on a machine without either.
         Job::Graphics => JobResult::Graphics(crate::graphics::Info {
             gpus: Vec::new(),
-            vaapi: crate::graphics::Vaapi::NotAvailable,
+            vaapi: crate::graphics::Vaapi::NotAvailable(e),
         }),
     }
 }
