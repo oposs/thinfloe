@@ -601,8 +601,12 @@ mod tests {
         // A new lookup address asks at once (a new route would wait
         // `ROUTE_PAUSE`).
         let url = |w: &Arc<Mutex<Want>>, u: &str| w.lock().unwrap().prefs.url = u.into();
-        // Two more failures: the thread is sequential, so once the third has
-        // run the second's answer is in.
+        // Two more failures. The thread is sequential, so once the third has
+        // run, the second's answer is in, or was dropped as stale when the
+        // address changed during its lookup. Either way no second log line
+        // may come: a kept answer is `Failed` after `Failed`, and a dropped
+        // one writes nothing. The third's answer may still be on its way;
+        // it too is `Failed` after `Failed`, so the count holds.
         url(&want, "https://a.example");
         wait_for("the second lookup runs", || ran() == 2);
         url(&want, "https://b.example");
