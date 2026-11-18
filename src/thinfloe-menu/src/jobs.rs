@@ -180,6 +180,8 @@ pub enum JobResult {
         result: Result<crate::keyboard::KbOutcome, String>,
     },
     ReportDismissed(Result<(), String>),
+    /// The Screen tab's GPUs and VA-API codecs.
+    Graphics(crate::graphics::Info),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,8 +232,10 @@ pub struct Paths {
     pub labwc: LabwcCmds,
     /// Where /sys, /proc, /run and /etc are, for the Network tab's details.
     pub net_roots: crate::netstat::Roots,
-    /// The PCI id list that names a WiFi chip.
+    /// The PCI id list that names a WiFi chip and a GPU.
     pub pci_ids: PathBuf,
+    /// `vainfo` (`TF_VAINFO_CMD`), for the Screen tab's video codecs.
+    pub vainfo_cmd: Vec<String>,
 }
 
 /// How a keyboard change reaches the running compositor.
@@ -1607,6 +1611,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1622,6 +1627,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1637,6 +1643,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1893,6 +1900,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1909,6 +1917,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -2159,6 +2168,7 @@ mod tests {
             labwc: LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),
