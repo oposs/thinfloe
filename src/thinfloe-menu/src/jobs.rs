@@ -582,7 +582,7 @@ const STDERR_KEEP: usize = 4096;
 
 /// `capture` for any tool: stderr goes to the log under `source`, and
 /// `on_spawn` gets the process group before the wait.
-fn capture_as(
+pub(crate) fn capture_as(
     cmd: &[String],
     args: &[String],
     cap: usize,
