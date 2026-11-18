@@ -1354,6 +1354,16 @@ impl Menu {
                 }
             }
             JobResult::Graphics(info) => {
+                // The band only says "not available"; the log keeps why. The
+                // job runs once a session, so this line comes once too.
+                if let crate::graphics::Vaapi::NotAvailable(why) = &info.vaapi {
+                    self.log.push(crate::log::Line {
+                        time: crate::log::local_time(),
+                        source: Some("graphics".to_string()),
+                        runs: vec![crate::log::Run::plain(format!("VA-API not available: {why}."))],
+                        kind: Kind::Event,
+                    });
+                }
                 self.graphics = Some(info);
                 None
             }
@@ -3222,10 +3232,26 @@ mod tests {
         assert_eq!(m.graphics, None, "no answer yet");
         let info = Info {
             gpus: Vec::new(),
-            vaapi: Vaapi::NotAvailable,
+            vaapi: Vaapi::NotAvailable("vainfo exited with status 1".into()),
         };
         assert_eq!(m.finished(JobResult::Graphics(info.clone()), now), None);
         assert_eq!(m.graphics.as_ref(), Some(&info));
+        // The cause is logged once, under its source.
+        let logged: Vec<_> = m
+            .log
+            .lines()
+            .filter(|l| l.source.as_deref() == Some("graphics"))
+            .map(|l| (l.kind, l.plain()))
+            .collect();
+        assert_eq!(logged, [ev("VA-API not available: vainfo exited with status 1.")]);
+        // Codecs found: nothing to log.
+        let mut ok = Menu::new(grid(), false);
+        let codecs = Info {
+            gpus: Vec::new(),
+            vaapi: Vaapi::Codecs(Vec::new()),
+        };
+        ok.finished(JobResult::Graphics(codecs), now);
+        assert!(ok.log.lines().all(|l| l.source.as_deref() != Some("graphics")));
         // Back on the tab later: the answer stands, nothing runs again.
         m.settings(SettingsEvent::Tab(SettingsTab::Keyboard));
         assert_eq!(m.tick(now), None);

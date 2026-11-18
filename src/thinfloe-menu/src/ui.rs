@@ -1240,7 +1240,7 @@ fn graphics_band(ui: &mut Ui, info: Option<&crate::graphics::Info>) {
                         muted(ui, &graphics::codec_line(c));
                     }
                 }
-                Vaapi::NotAvailable => muted(ui, "VA-API not available"),
+                Vaapi::NotAvailable(_) => muted(ui, "VA-API not available"),
             }
         });
 }
@@ -4110,13 +4110,28 @@ mod tests {
             assert!(has(&got, want), "{want} not in {got:?}");
         }
         assert!(!has(&got, "Reading…"), "{got:?}");
+        // A GPU without a driver link has no Driver row.
+        menu.graphics = Some(Info {
+            gpus: vec![Gpu {
+                card: "card0".into(),
+                ids: (0x8086, 0x1916),
+                name: None,
+                driver: None,
+            }],
+            vaapi: Vaapi::NotAvailable("vainfo lists no codec".into()),
+        });
+        let got = texts(&menu);
+        assert!(has(&got, "GPU") && has(&got, "8086:1916"), "{got:?}");
+        assert!(!has(&got, "Driver"), "{got:?}");
         menu.graphics = Some(Info {
             gpus: Vec::new(),
-            vaapi: Vaapi::NotAvailable,
+            vaapi: Vaapi::NotAvailable("vainfo exited with status 1".into()),
         });
         let got = texts(&menu);
         assert!(has(&got, "No graphics device found"), "{got:?}");
         assert!(has(&got, "VA-API not available"), "{got:?}");
+        // The cause is for the log, not the band.
+        assert!(!got.iter().any(|t| t.contains("status 1")), "{got:?}");
     }
 
     #[test]
