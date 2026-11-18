@@ -17,8 +17,11 @@
   docs/superpowers/specs/). Until it is confirmed, every keybinding added
   here is a key combination that can never reach the ThinLinc session.
 
-  labwc treats default keybinds as opt-in: omitting the default-keybind
-  element yields none.
+  An empty keyboard section alone is not enough: labwc 0.9.3 loads its
+  built-in keybindings (Alt-Tab, Alt-F4, Super-Return and more) whenever no
+  keybind is defined. Our labwc drops that fallback
+  (containers/ubuntu/patches/0005-no-default-keybinds.patch); only an
+  explicit default-keybind element would bring them back.
 -->
 <labwc_config>
   <keyboard>

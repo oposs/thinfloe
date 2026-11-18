@@ -6,7 +6,9 @@
 # (the assumption thinfloe-compose-labwc-config's merge depends on).
 # Finally asserts that thinfloe-menu, a native Wayland client, maps at the full
 # output size, rasterises on the CPU and keeps running, and that a fullscreen
-# window keeps the keyboard focus when the menu replaces its window behind it.
+# window keeps the keyboard focus when the menu replaces its window behind it,
+# and that labwc loads no keybindings: Alt-Tab and its kin reach the focused
+# window.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -829,6 +831,68 @@ if echo "$inhibit_out" | grep -Eq 'wl_registry[@#][0-9]+\.global\([0-9]+, "zwp_k
 else
     echo "FAIL - labwc does not advertise zwp_keyboard_shortcuts_inhibit_manager_v1"
     echo "$inhibit_out" | grep -E 'wl_registry[@#][0-9]+\.global' | head -60
+    fail=1
+fi
+
+# ThinFloe has no hotkeys. labwc 0.9.3 loads its built-in keybindings
+# (A-Tab, A-F4, A-Space, W-Return, W-a, ...) whenever rc.xml defines none;
+# the shipped images had them although rc.xml has no keybind, and Alt-Tab
+# switched windows on the desktop instead of reaching ThinLinc
+# (containers/ubuntu/patches/0005-no-default-keybinds.patch). The rc.xml text
+# guards in test/integration cannot see this, so this asks the compositor.
+#
+# Two foot windows; the second ("two") has the focus and copies every byte it
+# gets to /tmp/keys. wtype types x, Alt-Tab, Alt-Space, Super-a, y through one
+# virtual keyboard: wlrctl makes a new virtual keyboard per call and foot has
+# not bound it when the key arrives, so nothing reached foot that way. The
+# leading 1 s pause lets foot bind the new keyboard. With labwc's defaults,
+# Alt-Tab moves the focus to "one" and only x arrives; with none, foot gets
+# 78 1b 09 1b 20 61 79 (x, ESC Tab, ESC space, a, y) and keeps the focus.
+# A rig that sends no keys at all fails the byte check, so this cannot pass
+# vacuously.
+KB_CONTAINER_NAME="thinfloe-runtime-test-keys-$$"
+# shellcheck disable=SC2016 # expands inside the container
+kb_script='foot --app-id=one sleep 20 &
+one=$!
+sleep 1.5
+foot --app-id=two sh -c "stty raw -echo; exec dd bs=1 of=/tmp/keys 2>/dev/null" &
+two=$!
+sleep 1.5
+wlrctl toplevel find app_id:two state:active && echo kb_before=active || echo kb_before=inactive
+wtype -s 1000 x -M alt -P tab -p tab -m alt -s 300 -M alt -P space -p space -m alt -s 300 -M logo a -m logo -s 300 y -s 500
+sleep 1
+wlrctl toplevel find app_id:two state:active && echo kb_after=active || echo kb_after=inactive
+echo "kb_bytes=$(od -An -tx1 /tmp/keys | tr -s " \n" " " | sed "s/^ //; s/ $//")"
+kill "$one" "$two" 2>/dev/null
+exit 0'
+kb_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$KB_CONTAINER_NAME" \
+    -e WLR_BACKENDS=headless \
+    -e WLR_HEADLESS_OUTPUTS=1 \
+    -e WLR_RENDERER=pixman \
+    -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e KB_SCRIPT="$kb_script" \
+    "$IMAGE" \
+    sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+           printf "%s\n" "$KB_SCRIPT" >/tmp/kb.sh &&
+           labwc -V -C /etc/thinfloe/labwc -S "sh /tmp/kb.sh"' 2>&1)
+kb_rc=$?
+if [[ $kb_rc -eq 124 || $kb_rc -eq 137 ]]; then
+    echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during keybinding test)"
+    podman rm -f "$KB_CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+if echo "$kb_out" | grep -q 'load default key bindings'; then
+    echo "FAIL - labwc loaded its default keybindings"
+    echo "$kb_out" | grep 'load default key bindings'
+    fail=1
+else
+    echo "ok   - labwc loads no default keybindings"
+fi
+KB_RESULT=$(echo "$kb_out" | grep -E '^kb_(before|after|bytes)=' | tr '\n' ' ')
+if [[ "$KB_RESULT" == "kb_before=active kb_after=active kb_bytes=78 1b 09 1b 20 61 79 " ]]; then
+    echo "ok   - Alt-Tab, Alt-Space and Super-a reach the focused window, which keeps the focus"
+else
+    echo "FAIL - keys did not all reach the focused window: $KB_RESULT (expected kb_before=active kb_after=active kb_bytes=78 1b 09 1b 20 61 79)"
     fail=1
 fi
 
