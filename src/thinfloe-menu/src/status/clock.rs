@@ -62,12 +62,10 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, lines: &[(&str, String)], gap_be
         let l = p.layout_no_wrap(label.to_string(), crate::brand::geo(m.label), fg);
         let beside_label = right - (left + l.size().x + m.gap);
         let width_of = |s: &str| p.layout_no_wrap(s.to_string(), font.clone(), fg).size().x;
-        let room = if width_of(&cut_to_fit(value, beside_label, &width_of)) > beside_label {
-            right - left
-        } else {
-            beside_label
-        };
-        let v = p.layout_no_wrap(cut_to_fit(value, room, &width_of), font, fg);
+        let text = cut_to_fit(value, beside_label, &width_of)
+            .or_else(|| cut_to_fit(value, right - left, &width_of))
+            .unwrap_or_else(|| "…".to_string());
+        let v = p.layout_no_wrap(text, font, fg);
         let vx = right - v.size().x;
         if vx >= left {
             p.galley(pos2(vx, mid - v.size().y / 2.0), v, fg);
@@ -79,17 +77,17 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, lines: &[(&str, String)], gap_be
 }
 
 /// `value`, or its end behind a `…` when `width_of` says it is wider than
-/// `room`: the longest end that fits.
-fn cut_to_fit(value: &str, room: f32, width_of: &dyn Fn(&str) -> f32) -> String {
+/// `room`: the longest end that fits. `None` when not even `…` and the last
+/// letter fit, because a bare `…` tells the reader nothing.
+fn cut_to_fit(value: &str, room: f32, width_of: &dyn Fn(&str) -> f32) -> Option<String> {
     if width_of(value) <= room {
-        return value.to_string();
+        return Some(value.to_string());
     }
     value
         .char_indices()
         .skip(1)
         .map(|(i, _)| format!("…{}", &value[i..]))
         .find(|s| width_of(s) <= room)
-        .unwrap_or_else(|| "…".to_string())
 }
 
 impl Element for Clock {
@@ -245,8 +243,53 @@ mod tests {
 
     #[test]
     fn clock_draws_inside_its_rect_at_every_size() {
-        let now = Instant::now();
-        testing::assert_inside(&Clock, &Data::EMPTY, now);
+        let buenos_aires = jiff::tz::db().get("America/Argentina/Buenos_Aires").unwrap();
+        let data = Data {
+            wall: Some(UNIX_EPOCH + Duration::from_secs(JANUARY as u64)),
+            zone: Some(&buenos_aires),
+            ..Data::EMPTY
+        };
+        testing::assert_inside(&Clock, &data, Instant::now());
+        // All three lines are there at both heights.
+        let one = Size { w: 1, h: 1 };
+        for h in testing::CELL_HEIGHTS {
+            let drawn: Vec<String> = texts(&shapes(&Clock, rect_of(one, h), one, &data, Instant::now()))
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect();
+            for label in ["Time", "Date", "Zone"] {
+                assert!(drawn.contains(&label.to_string()), "{h}: {drawn:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_needs_a_real_letter_after_the_ellipsis() {
+        let one_per_char = |s: &str| s.chars().count() as f32;
+        assert_eq!(cut_to_fit("abc", 3.0, &one_per_char).as_deref(), Some("abc"));
+        assert_eq!(cut_to_fit("abcd", 3.0, &one_per_char).as_deref(), Some("…cd"));
+        assert_eq!(cut_to_fit("abcd", 2.0, &one_per_char).as_deref(), Some("…d"));
+        assert_eq!(cut_to_fit("abcd", 1.0, &one_per_char), None);
+    }
+
+    #[test]
+    fn the_label_gives_way_when_no_letter_fits_beside_it() {
+        let one = Size { w: 1, h: 1 };
+        let mut rect = rect_of(one, 64.0);
+        rect.set_width(55.0);
+        let lines = [pair("Zone", "America/Argentina/Buenos_Aires")];
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut out = None;
+        for _ in 0..3 {
+            let mut o = ctx.run_ui(Default::default(), |ui| paint(ui, rect, one, &lines, 3.0));
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        let shapes: Vec<egui::Shape> = out.unwrap().shapes.into_iter().map(|c| c.shape).collect();
+        let got: Vec<String> = texts(&shapes).into_iter().map(|(s, _)| s).collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].starts_with('…') && got[0].len() > '…'.len_utf8(), "{got:?}");
     }
 
     #[test]
