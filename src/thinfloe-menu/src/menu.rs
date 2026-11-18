@@ -190,6 +190,8 @@ pub enum Job {
     KeyboardApply(crate::config::Keyboard),
     /// Remove the migration report from `[notice]`.
     DismissReport,
+    /// Read the GPUs from sysfs and the VA-API codecs from `vainfo`.
+    Graphics,
 }
 
 /// What fills the space above the log.
@@ -323,6 +325,11 @@ pub struct Menu {
     pub monitors: MonTab,
     /// The Keyboard tab, and the apply it runs.
     pub keyboard: KeyboardTab,
+    /// The Screen tab's graphics band; `None` until the job answers.
+    pub graphics: Option<crate::graphics::Info>,
+    /// The graphics job was started: it runs once a session, as the GPU
+    /// does not change and `vainfo` takes a moment.
+    graphics_asked: bool,
     /// What the config directory has to say, shown on the Settings screen.
     pub config_notes: ConfigNotes,
 }
@@ -385,6 +392,8 @@ impl Menu {
                 crate::config::Keyboard::default(),
                 Err("The keyboard layout list is not loaded.".into()),
             ),
+            graphics: None,
+            graphics_asked: false,
             config_notes: ConfigNotes::default(),
         }
     }
@@ -1344,6 +1353,10 @@ impl Menu {
                     _ => None,
                 }
             }
+            JobResult::Graphics(info) => {
+                self.graphics = Some(info);
+                None
+            }
             JobResult::PublicIpSaved(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1503,6 +1516,14 @@ impl Menu {
             self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
         if let Some(r) = self.network.poll(now, net_open) {
             return self.net_request(r);
+        }
+        // Asked here rather than at the tab click: leaving the Network tab
+        // may already answer that click with the public IP write.
+        let screen_open =
+            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Screen;
+        if screen_open && !self.graphics_asked {
+            self.graphics_asked = true;
+            return Some(Effect::Start(Job::Graphics));
         }
         if self.logout.is_none() && self.screen == Screen::Upgrade {
             let r = self.upgrade.poll(now)?;
@@ -3186,6 +3207,35 @@ mod tests {
             net(&mut m, NetEvent::Apply),
             Some(Effect::Start(Job::NetApply { .. }))
         ));
+    }
+
+    #[test]
+    fn the_graphics_are_read_once_when_the_screen_tab_first_opens() {
+        use crate::graphics::{Info, Vaapi};
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        m.screen = Screen::Settings;
+        assert_eq!(m.tick(now), None, "Packages tab");
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Screen)), None);
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::Graphics)));
+        assert_eq!(m.tick(now), None, "asked already");
+        assert_eq!(m.graphics, None, "no answer yet");
+        let info = Info {
+            gpus: Vec::new(),
+            vaapi: Vaapi::NotAvailable,
+        };
+        assert_eq!(m.finished(JobResult::Graphics(info.clone()), now), None);
+        assert_eq!(m.graphics.as_ref(), Some(&info));
+        // Back on the tab later: the answer stands, nothing runs again.
+        m.settings(SettingsEvent::Tab(SettingsTab::Keyboard));
+        assert_eq!(m.tick(now), None);
+        m.settings(SettingsEvent::Tab(SettingsTab::Screen));
+        assert_eq!(m.tick(now), None);
+        // Nor once the Settings screen opens again.
+        m.screen = Screen::Grid;
+        m.screen = Screen::Settings;
+        m.settings_tab = SettingsTab::Screen;
+        assert_eq!(m.tick(now), None);
     }
 
     #[test]

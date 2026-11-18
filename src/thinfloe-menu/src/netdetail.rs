@@ -56,10 +56,7 @@ pub fn read(roots: &Roots, ifaces: &[Iface], pci_ids: &Path) -> Details {
             d.gateway = route.as_ref().filter(|r| r.iface == i.name).and_then(|r| r.gateway);
             if i.kind == IfKind::Wifi {
                 let dev = dir.join("device");
-                d.driver = fs::read_link(dev.join("driver")).ok().and_then(|l| {
-                    l.file_name()
-                        .map(|n| n.to_string_lossy().chars().take(DRIVER_MAX).collect())
-                });
+                d.driver = driver(&dev);
                 d.chip = chip(&dev, pci_ids);
             }
             d
@@ -75,8 +72,18 @@ fn attr(path: &Path) -> Option<String> {
     bounded::read_text(path, ATTR_MAX).map(|s| s.trim().to_string())
 }
 
-/// A hex id as sysfs writes it: `0x8086` for PCI, `0bda` for USB.
-fn hex_id(path: &Path) -> Option<u16> {
+/// The name of the kernel driver bound to the sysfs device `dev`: the
+/// last part of its `driver` link. The Screen tab's graphics band reads it
+/// this way too.
+pub(crate) fn driver(dev: &Path) -> Option<String> {
+    let link = fs::read_link(dev.join("driver")).ok()?;
+    link.file_name()
+        .map(|n| n.to_string_lossy().chars().take(DRIVER_MAX).collect())
+}
+
+/// A hex id as sysfs writes it: `0x8086` for PCI, `0bda` for USB. The
+/// Screen tab's graphics band reads the GPU's ids with it too.
+pub(crate) fn hex_id(path: &Path) -> Option<u16> {
     let s = attr(path)?;
     u16::from_str_radix(s.strip_prefix("0x").unwrap_or(&s), 16).ok()
 }

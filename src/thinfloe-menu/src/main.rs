@@ -100,6 +100,15 @@ fn curl_cmd() -> Vec<String> {
     }
 }
 
+/// `vainfo`, for the Screen tab's video codecs; `TF_VAINFO_CMD`
+/// (space-separated) replaces it for tests.
+fn vainfo_cmd() -> Vec<String> {
+    match std::env::var("TF_VAINFO_CMD") {
+        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(String::from).collect(),
+        _ => vec!["vainfo".to_string()],
+    }
+}
+
 fn battery_file() -> PathBuf {
     env_path("TF_BATTERY_FILE", battery::FILE)
 }
@@ -241,6 +250,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         labwc: jobs::LabwcCmds::from_env(),
         net_roots: thinfloe_menu::netstat::Roots::system(),
         pci_ids: PathBuf::from("/usr/share/misc/pci.ids"),
+        vainfo_cmd: vainfo_cmd(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

@@ -561,6 +561,11 @@ fn panic_result(job: &Job) -> JobResult {
             result: Err(e),
         },
         Job::DismissReport => JobResult::ReportDismissed(Err(e)),
+        // The band says what it would say on a machine without either.
+        Job::Graphics => JobResult::Graphics(crate::graphics::Info {
+            gpus: Vec::new(),
+            vaapi: crate::graphics::Vaapi::NotAvailable,
+        }),
     }
 }
 
@@ -690,6 +695,12 @@ fn job_result(
             JobResult::KeyboardApplied { kb, result }
         }
         Job::DismissReport => JobResult::ReportDismissed(jobs::dismiss_report(&paths.config)),
+        // The GPUs are under the same /sys the Network tab reads.
+        Job::Graphics => JobResult::Graphics(crate::graphics::read(
+            &paths.net_roots.sys,
+            &paths.pci_ids,
+            &paths.vainfo_cmd,
+        )),
     }
 }
 
@@ -981,6 +992,7 @@ impl App {
             labwc: self.cfg.paths.labwc.clone(),
             net_roots: self.cfg.paths.net_roots.clone(),
             pci_ids: self.cfg.paths.pci_ids.clone(),
+            vainfo_cmd: self.cfg.paths.vainfo_cmd.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -1648,6 +1660,7 @@ mod tests {
             labwc: jobs::LabwcCmds::from_env(),
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+            vainfo_cmd: vec!["/nonexistent/vainfo".into()],
         }
     }
 

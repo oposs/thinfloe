@@ -1099,7 +1099,8 @@ fn packages_tab(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], width: f32) ->
     event
 }
 
-/// The Screen tab: when the screen turns off, and below it the monitors.
+/// The Screen tab: when the screen turns off, below it the monitors, then
+/// the graphics.
 /// Apply follows the bands, as on the Network tab; pinned to the foot of
 /// the panel only when the bands scroll.
 fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {
@@ -1128,6 +1129,10 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
                     crate::monitors_ui::monitors_band(ui, &menu.monitors, now, band_w)
                 })
                 .inner;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = between;
+                graphics_band(ui, menu.graphics.as_ref());
+            });
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
             idle.or(monitors.map(SettingsEvent::Monitors))
@@ -1179,6 +1184,65 @@ fn idle_band(ui: &mut Ui, menu: &Menu) -> Option<SettingsEvent> {
             }
         });
     event
+}
+
+/// The GPUs with their drivers, and the video codecs VA-API offers;
+/// `info` is `None` until the graphics job answers.
+fn graphics_band(ui: &mut Ui, info: Option<&crate::graphics::Info>) {
+    use crate::graphics::{self, Vaapi};
+    let t = Theme::current(ui.ctx());
+    let inner_w = ui.available_width() - ROW_MARGIN_X;
+    let muted = |ui: &mut Ui, text: &str| {
+        ui.add(egui::Label::new(egui::RichText::new(text).color(t.palette().muted_foreground)).truncate());
+    };
+    // A label in the form's column, its value muted beside it.
+    let row = |ui: &mut Ui, label: &str, value: &str| {
+        ui.horizontal(|ui| {
+            ui.scope(|ui| {
+                ui.set_min_width(brand::FORM_LABEL_W);
+                ui.set_max_width(brand::FORM_LABEL_W);
+                ui.label(egui::RichText::new(label).color(t.palette().foreground));
+            });
+            muted(ui, value);
+        });
+    };
+    egui::Frame::new()
+        .fill(t.palette().card)
+        .inner_margin(egui::Margin {
+            left: ROW_LEFT,
+            right: ROW_RIGHT,
+            top: 12,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.label(
+                egui::RichText::new("Graphics")
+                    .font(brand::geo(brand::SECTION_PT))
+                    .color(t.palette().foreground),
+            );
+            let Some(info) = info else {
+                muted(ui, "Reading…");
+                return;
+            };
+            if info.gpus.is_empty() {
+                muted(ui, "No graphics device found");
+            }
+            for gpu in &info.gpus {
+                row(ui, "GPU", &gpu.shown_name());
+                if let Some(driver) = &gpu.driver {
+                    row(ui, "Driver", driver);
+                }
+            }
+            match &info.vaapi {
+                Vaapi::Codecs(codecs) => {
+                    for c in codecs {
+                        muted(ui, &graphics::codec_line(c));
+                    }
+                }
+                Vaapi::NotAvailable => muted(ui, "VA-API not available"),
+            }
+        });
 }
 
 /// One add-on: tick box, icon, name, source, state, and its button.
@@ -4004,6 +4068,55 @@ mod tests {
             .into_iter()
             .map(|(t, _)| t)
             .collect()
+    }
+
+    /// The Graphics band follows the monitors: "Reading…" until the job
+    /// answers, then each GPU and driver and the codecs, or why there are
+    /// none.
+    #[test]
+    fn the_graphics_band_follows_the_monitors() {
+        use crate::graphics::{Codec, Gpu, Info, Vaapi};
+        let texts = |menu: &Menu| -> Vec<String> {
+            text_rects(&settings_shapes(menu, 1920.0, 1600.0))
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect()
+        };
+        let at = |texts: &[String], name: &str| {
+            texts
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("{name} not in {texts:?}"))
+        };
+        let mut menu = screen_settings();
+        let got = texts(&menu);
+        assert!(at(&got, "Monitors") < at(&got, "Graphics"), "{got:?}");
+        assert!(at(&got, "Graphics") < at(&got, "Reading…"), "{got:?}");
+        menu.graphics = Some(Info {
+            gpus: vec![Gpu {
+                card: "card0".into(),
+                ids: (0x8086, 0x1916),
+                name: None,
+                driver: Some("i915".into()),
+            }],
+            vaapi: Vaapi::Codecs(vec![Codec {
+                name: "H.264",
+                decode: true,
+                encode: true,
+            }]),
+        });
+        let got = texts(&menu);
+        for want in ["GPU", "8086:1916", "Driver", "i915", "H.264 decode, encode"] {
+            assert!(has(&got, want), "{want} not in {got:?}");
+        }
+        assert!(!has(&got, "Reading…"), "{got:?}");
+        menu.graphics = Some(Info {
+            gpus: Vec::new(),
+            vaapi: Vaapi::NotAvailable,
+        });
+        let got = texts(&menu);
+        assert!(has(&got, "No graphics device found"), "{got:?}");
+        assert!(has(&got, "VA-API not available"), "{got:?}");
     }
 
     #[test]

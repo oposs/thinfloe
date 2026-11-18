@@ -13,6 +13,7 @@ pub mod density;
 pub mod desktop;
 pub mod drives;
 pub mod generated;
+pub mod graphics;
 pub mod hardware;
 pub mod header;
 pub mod heads;
