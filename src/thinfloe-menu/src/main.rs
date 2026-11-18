@@ -91,6 +91,15 @@ fn network_cmd() -> Vec<String> {
     }
 }
 
+/// `curl`, for the public IP lookup; `TF_CURL_CMD` (space-separated)
+/// replaces it for tests.
+fn curl_cmd() -> Vec<String> {
+    match std::env::var("TF_CURL_CMD") {
+        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(String::from).collect(),
+        _ => vec!["curl".to_string()],
+    }
+}
+
 fn battery_file() -> PathBuf {
     env_path("TF_BATTERY_FILE", battery::FILE)
 }
@@ -498,6 +507,7 @@ fn main() -> ExitCode {
         kanshi_changed,
         network_roots: thinfloe_menu::netstat::Roots::system(),
         hardware_roots: thinfloe_menu::hardware::Roots::system(),
+        curl_cmd: curl_cmd(),
         program_path: program_path(),
         header,
         upgrade_status: upgrade_status_path(),

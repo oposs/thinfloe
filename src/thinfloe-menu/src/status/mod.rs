@@ -154,6 +154,9 @@ pub struct Data<'a> {
     /// The machine's time zone, looked up once per frame by the app; `None`:
     /// UTC.
     pub zone: Option<&'a jiff::tz::TimeZone>,
+    /// The public IP lookup's last answer; `None` while the switch is off
+    /// or before the first answer.
+    pub public_ip: Option<&'a crate::publicip::Answer>,
 }
 
 impl Data<'_> {
@@ -176,6 +179,7 @@ impl Data<'_> {
         hardware: None,
         wall: None,
         zone: None,
+        public_ip: None,
     };
 }
 
@@ -359,6 +363,12 @@ impl Area {
     /// yet: its source must run to find out.
     pub fn needs(&self, source: Source) -> bool {
         self.chosen().any(|(e, _)| e.sources().contains(&source))
+    }
+
+    /// The element `id` gets cells on this screen, whether or not it has
+    /// anything yet.
+    pub fn places_element(&self, id: &str, short: bool) -> bool {
+        self.planned(short).iter().any(|(e, _, _)| e.id() == id)
     }
 
     /// Some shown choice that draws from `source` gets cells on this screen,
@@ -849,6 +859,17 @@ mod tests {
         assert!(!hidden.places(Source::Hardware, false));
         assert!(!hidden.needs(Source::Hardware));
         assert!(!Area::default().places(Source::Hardware, false));
+    }
+
+    #[test]
+    fn places_element_follows_the_planned_cells() {
+        let shipped = Area::shipped();
+        assert!(shipped.places_element("connection", false));
+        // The connection element has no short size.
+        assert!(!shipped.places_element("connection", true));
+        assert!(shipped.places_element("network", true));
+        assert!(!area("-connection 1x2\n").places_element("connection", false));
+        assert!(!shipped.places_element("no-such-element", false));
     }
 
     /// Layouts to try: the shipped one, the one the final review found, and

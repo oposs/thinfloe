@@ -61,6 +61,8 @@ pub enum Wake {
     Network,
     /// The hardware element appeared or went.
     Hardware,
+    /// The public IP lookup has a new answer.
+    PublicIp,
     /// The status layout file changed.
     Status,
 }
@@ -89,6 +91,8 @@ pub struct Config {
     pub network_roots: crate::netstat::Roots,
     /// Where the hardware element's sampler reads /sys and /proc.
     pub hardware_roots: crate::hardware::Roots,
+    /// curl and what runs it, for the public IP lookup (`TF_CURL_CMD`).
+    pub curl_cmd: Vec<String>,
     /// Where the programs of add-on tiles are looked for.
     pub program_path: OsString,
     /// Host name and version for the header.
@@ -176,6 +180,9 @@ pub struct App {
 
 /// Starts a sampler thread with its `on` flag and returns its shared copy.
 type Spawn<T> = Box<dyn FnMut(Arc<AtomicBool>) -> Arc<Mutex<T>>>;
+/// Starts the public IP lookup with what is wanted of it and returns its
+/// last answer.
+type SpawnPublic = Box<dyn FnMut(Arc<Mutex<crate::publicip::Want>>) -> Arc<Mutex<Option<crate::publicip::Answer>>>>;
 
 /// The samplers of the status area. Each starts the first time a ticked
 /// element draws from it (placed or not: an element without content must
@@ -191,12 +198,18 @@ struct Samplers {
     hardware_on: Arc<AtomicBool>,
     spawn_network: Spawn<crate::netstat::Series>,
     spawn_hardware: Spawn<Option<crate::hardware::Snapshot>>,
+    /// The public IP lookup: started the first time its switch is on, never
+    /// before, and never again; `public_want` tells it whether to ask.
+    public: Option<Arc<Mutex<Option<crate::publicip::Answer>>>>,
+    public_want: Arc<Mutex<crate::publicip::Want>>,
+    spawn_public: SpawnPublic,
 }
 
 impl Samplers {
     fn new(
         spawn_network: Spawn<crate::netstat::Series>,
         spawn_hardware: Spawn<Option<crate::hardware::Snapshot>>,
+        spawn_public: SpawnPublic,
     ) -> Samplers {
         Samplers {
             network: None,
@@ -205,7 +218,39 @@ impl Samplers {
             hardware_on: Arc::new(AtomicBool::new(false)),
             spawn_network,
             spawn_hardware,
+            public: None,
+            public_want: Arc::default(),
+            spawn_public,
         }
+    }
+
+    /// Tell the public IP lookup what is wanted now: the switch, whether the
+    /// connection element has cells on a screen `height` points high, whether
+    /// the network sampler reads (after `sync`), and the route of `snap`.
+    /// The lookup thread starts the first time the switch is on.
+    fn sync_public(
+        &mut self,
+        area: &crate::status::Area,
+        prefs: &crate::publicip::PublicIpPrefs,
+        height: f32,
+        snap: Option<&crate::netstat::Snapshot>,
+    ) {
+        let want = crate::publicip::Want {
+            prefs: prefs.clone(),
+            placed: area.places_element("connection", ui::short_screen(height)),
+            sampling: self.network_on.load(Ordering::Relaxed),
+            route: snap.map(|s| crate::publicip::route_key(&s.info)).unwrap_or_default(),
+        };
+        // Before the start, so the new thread's first look finds it set.
+        *self.public_want.lock().unwrap_or_else(|e| e.into_inner()) = want;
+        if prefs.on && self.public.is_none() {
+            self.public = Some((self.spawn_public)(self.public_want.clone()));
+        }
+    }
+
+    /// The public IP lookup's last answer.
+    fn public_answer(&self) -> Option<crate::publicip::Answer> {
+        self.public.as_ref().and_then(|p| p.lock().ok().and_then(|a| a.clone()))
     }
 
     /// The samplers' latest copies, taken under their locks for as long as
@@ -316,6 +361,7 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     let samplers = {
         let (net_waker, hw_waker) = (event_loop.create_proxy(), event_loop.create_proxy());
         let (net_roots, hw_roots) = (cfg.network_roots.clone(), cfg.hardware_roots.clone());
+        let (public_waker, curl, public_feed) = (event_loop.create_proxy(), cfg.curl_cmd.clone(), feed.clone());
         Samplers::new(
             Box::new(move |on| {
                 let waker = net_waker.clone();
@@ -328,6 +374,12 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
                 let waker = hw_waker.clone();
                 crate::hardware::spawn(hw_roots.clone(), on, move || {
                     let _ = waker.send_event(Wake::Hardware);
+                })
+            }),
+            Box::new(move |want| {
+                let waker = public_waker.clone();
+                crate::publicip::spawn(curl.clone(), want, public_feed.clone(), move || {
+                    let _ = waker.send_event(Wake::PublicIp);
                 })
             }),
         )
@@ -818,7 +870,14 @@ impl App {
     /// now. Called after every layout change and on every frame, which is
     /// where a cover change is seen.
     fn sync_samplers(&mut self) {
-        self.samplers.sync(&self.cfg.menu.status, self.covered, self.height);
+        let menu = &self.cfg.menu;
+        self.samplers.sync(&menu.status, self.covered, self.height);
+        self.samplers.sync_public(
+            &menu.status,
+            menu.network.public_ip(),
+            self.height,
+            menu.netstat.as_ref(),
+        );
     }
 
     /// Read the status layout file again: the person or the menu changed it.
@@ -976,10 +1035,18 @@ impl App {
         if let Some(snap) = hardware {
             self.cfg.menu.set_hardware(snap);
         }
+        self.cfg.menu.set_public_ip(self.samplers.public_answer());
         self.covered = covered;
         self.height = live.window.inner_size().height as f32 / self.ctx.pixels_per_point();
         // `sync_samplers`, with the fields apart: `live` is borrowed.
-        self.samplers.sync(&self.cfg.menu.status, self.covered, self.height);
+        let menu = &self.cfg.menu;
+        self.samplers.sync(&menu.status, self.covered, self.height);
+        self.samplers.sync_public(
+            &menu.status,
+            menu.network.public_ip(),
+            self.height,
+            menu.netstat.as_ref(),
+        );
         // egui takes a new zoom factor at the start of the next pass and
         // lays that pass out with a guessed screen rect.
         let settling = settling(self.ctx.zoom_factor(), live.scale);
@@ -1411,7 +1478,7 @@ impl ApplicationHandler<Wake> for App {
                     self.apply(effect, event_loop);
                 }
             }
-            Wake::Output | Wake::Network | Wake::Hardware => {}
+            Wake::Output | Wake::Network | Wake::Hardware | Wake::PublicIp => {}
         }
         if let Some(live) = self.live.as_ref() {
             live.window.request_redraw();
@@ -1835,6 +1902,7 @@ esac"#;
                 h.set(h.get() + 1);
                 Arc::default()
             }),
+            Box::new(|_| Arc::default()),
         );
         let on = |s: &Samplers| {
             (
@@ -1872,13 +1940,70 @@ esac"#;
     }
 
     #[test]
+    fn the_public_ip_lookup_starts_only_when_switched_on() {
+        use crate::publicip::{Answer, PublicIpPrefs};
+        use std::cell::Cell;
+        let spawned = Rc::new(Cell::new(0));
+        let answer: Arc<Mutex<Option<Answer>>> = Arc::default();
+        let (n, a) = (spawned.clone(), answer.clone());
+        let mut s = Samplers::new(
+            Box::new(|_| Arc::default()),
+            Box::new(|_| Arc::default()),
+            Box::new(move |_| {
+                n.set(n.get() + 1);
+                a.clone()
+            }),
+        );
+        let shipped = crate::status::Area::shipped();
+        let tall = ui::SHORT_SCREEN_H;
+        let off = PublicIpPrefs::default();
+        let on = PublicIpPrefs {
+            on: true,
+            url: String::new(),
+        };
+        let want = |s: &Samplers| s.public_want.lock().unwrap().clone();
+        for _ in 0..3 {
+            s.sync(&shipped, false, tall);
+            s.sync_public(&shipped, &off, tall, None);
+        }
+        assert_eq!(spawned.get(), 0, "with the switch off no lookup thread is spawned");
+        assert!(!want(&s).active());
+        assert_eq!(s.public_answer(), None);
+        // Switched on: started once, and what it wants is set.
+        s.sync_public(&shipped, &on, tall, Some(&crate::status::connection::sample()));
+        assert_eq!(spawned.get(), 1);
+        let w = want(&s);
+        assert!(w.active(), "{w:?}");
+        assert_eq!(w.route.0.as_deref(), Some("eth0"));
+        // Off and on again: the same thread, never a second one.
+        s.sync_public(&shipped, &off, tall, None);
+        assert!(!want(&s).prefs.on);
+        s.sync_public(&shipped, &on, tall, None);
+        assert_eq!(spawned.get(), 1);
+        // Covered: the network sampler rests, and so does the lookup. On a
+        // short screen the connection element has no cells.
+        s.sync(&shipped, true, tall);
+        s.sync_public(&shipped, &on, tall, None);
+        assert!(!want(&s).sampling && !want(&s).active());
+        s.sync(&shipped, false, tall - 1.0);
+        s.sync_public(&shipped, &on, tall - 1.0, None);
+        assert!(!want(&s).placed && !want(&s).active());
+        *answer.lock().unwrap() = Some(Answer::Failed);
+        assert_eq!(s.public_answer(), Some(Answer::Failed));
+    }
+
+    #[test]
     fn a_sampler_gives_no_copy_before_its_first_reading() {
         // Before the first reading the element has nothing yet, which the
         // Status tab must not take for "nothing to show on this machine".
         let net = Arc::new(Mutex::new(crate::netstat::Series::default()));
         let hw: Arc<Mutex<_>> = Arc::default();
         let (n, h) = (net.clone(), hw.clone());
-        let mut s = Samplers::new(Box::new(move |_| n.clone()), Box::new(move |_| h.clone()));
+        let mut s = Samplers::new(
+            Box::new(move |_| n.clone()),
+            Box::new(move |_| h.clone()),
+            Box::new(|_| Arc::default()),
+        );
         s.sync(&crate::status::Area::shipped(), false, ui::SHORT_SCREEN_H);
         let (network, hardware) = s.copies();
         assert!(network.is_none() && hardware.is_none(), "{network:?} {hardware:?}");
@@ -1902,6 +2027,7 @@ esac"#;
                 h.set(h.get() + 1);
                 Arc::default()
             }),
+            Box::new(|_| Arc::default()),
         );
         // Only cpu is ticked, on a short screen, where it has no size: it
         // still needs its data, but nothing is read for it.
@@ -1981,7 +2107,11 @@ esac"#;
             },
             false,
         );
-        let mut s = Samplers::new(Box::new(|_| Arc::default()), Box::new(|_| Arc::default()));
+        let mut s = Samplers::new(
+            Box::new(|_| Arc::default()),
+            Box::new(|_| Arc::default()),
+            Box::new(|_| Arc::default()),
+        );
         let tall = ui::SHORT_SCREEN_H;
         // What `Wake::Status` runs.
         let refresh = |menu: &mut Menu, s: &mut Samplers| reload_status(menu, s, &file, false, tall);
@@ -2010,7 +2140,11 @@ esac"#;
         write_status(&file, Some(&["-network 2x2", "-connection 1x2"]));
         reread(&mut menu, &file);
         assert!(!menu.status.needs(crate::status::Source::Network));
-        let mut s = Samplers::new(Box::new(|_| Arc::default()), Box::new(|_| Arc::default()));
+        let mut s = Samplers::new(
+            Box::new(|_| Arc::default()),
+            Box::new(|_| Arc::default()),
+            Box::new(|_| Arc::default()),
+        );
         // Broken TOML, a directory, a huge file: none of them is the default.
         std::fs::write(&file, "this is [not toml\n").unwrap();
         reload_status(&mut menu, &mut s, &file, false, ui::SHORT_SCREEN_H);
