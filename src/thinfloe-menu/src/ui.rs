@@ -7141,6 +7141,7 @@ mod tests {
             hardware: Some(&hardware),
             wall: Some(std::time::SystemTime::now()),
             zone: None,
+            public_ip: None,
         };
         for e in ELEMENTS {
             for size in e.sizes() {

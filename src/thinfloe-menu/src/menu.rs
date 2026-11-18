@@ -277,6 +277,8 @@ pub struct Menu {
     pub netstat: Option<crate::netstat::Snapshot>,
     /// The hardware sampler's last copy, set by the app before each frame.
     pub hardware: Option<crate::hardware::Snapshot>,
+    /// The public IP lookup's last answer, set by the app before each frame.
+    public_ip: Option<crate::publicip::Answer>,
     /// The frame's time on the wall clock and the machine's zone, set by the
     /// app before each frame, for the clock element.
     wall: Option<std::time::SystemTime>,
@@ -358,6 +360,7 @@ impl Menu {
             status: crate::status::Area::default(),
             netstat: None,
             hardware: None,
+            public_ip: None,
             wall: None,
             zone: jiff::tz::TimeZone::UTC,
             status_error: None,
@@ -721,7 +724,15 @@ impl Menu {
             hardware: self.hardware.as_ref(),
             wall: self.wall,
             zone: Some(&self.zone),
+            // The switch decides at once: an answer from before it went off
+            // is not shown while the thread has yet to clear it.
+            public_ip: self.public_ip.as_ref().filter(|_| self.network.public_ip().on),
         }
+    }
+
+    /// Take the public IP lookup's answer.
+    pub fn set_public_ip(&mut self, answer: Option<crate::publicip::Answer>) {
+        self.public_ip = answer;
     }
 
     /// Take the hardware sampler's copy.
@@ -4108,6 +4119,22 @@ mod tests {
         let t1 = t0 + std::time::Duration::from_secs(7);
         m.set_battery(Vec::new(), t1);
         assert_eq!(m.status_sources().battery_since, Some(t1));
+    }
+
+    #[test]
+    fn the_public_answer_shows_only_while_the_switch_is_on() {
+        use crate::publicip::{Answer, PublicIpPrefs};
+        let mut m = Menu::new(grid(), false);
+        let a = Answer::Addr("203.0.113.7".parse().unwrap());
+        m.set_public_ip(Some(a.clone()));
+        assert_eq!(m.status_sources().public_ip, None, "off by default");
+        m.network.set_public_ip(PublicIpPrefs {
+            on: true,
+            url: String::new(),
+        });
+        assert_eq!(m.status_sources().public_ip, Some(&a));
+        m.set_public_ip(None);
+        assert_eq!(m.status_sources().public_ip, None, "no answer yet");
     }
 
     fn status_settings() -> Menu {

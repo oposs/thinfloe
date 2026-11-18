@@ -36,6 +36,7 @@ pub mod network_ui;
 pub mod notes;
 pub mod outputs;
 pub mod publicip;
+pub mod quiet;
 pub mod raster;
 pub mod release;
 pub mod screentab;

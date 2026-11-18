@@ -1,10 +1,12 @@
 //! The connection element: one fact per row, the label in Geo on the left,
-//! the value from one column: the interface and its link, the IPv4 address
-//! and the VPN. The rates stay in the traffic graph. It draws from the same
+//! the value from one column: the interface and its link, the IPv4 address,
+//! the VPN, and the public address while its lookup is on and has answered.
+//! The rates stay in the traffic graph. It draws from the same
 //! `netstat::Snapshot` as the graph and has content when the graph has.
 //!
 //! Rows move closer together as far as `min_row`, then rows are left out in
-//! the order `Row::drop`: the VPN. The link and the address stay. A WiFi link
+//! the order `Row::drop`: the public address, then the VPN. The link and the
+//! address stay. A WiFi link
 //! row too wide for the column leaves out the word `WiFi`. A long value is
 //! cut at the padding. On the tightest rows of the largest cell the labels
 //! are half a point smaller, so a `p` does not reach the `k` under it
@@ -23,8 +25,8 @@ pub struct Connection;
 const SIZES: &[Size] = &[Size { w: 1, h: 2 }, Size { w: 2, h: 1 }];
 
 /// Every label there can be; the value column starts after the widest, so it
-/// does not move when a row is left out. `Public` comes with the public
-/// address lookup; it is counted already, so the column stays put then too.
+/// does not move when a row is left out, or when `Public` comes and goes
+/// with the lookup's switch.
 const LABELS: [&str; 4] = ["Link", "IPv4", "VPN", "Public"];
 
 /// Which font a run of text is in.
@@ -93,8 +95,9 @@ pub struct Row {
     pub drop: u8,
 }
 
-/// The rows in their order.
-pub fn rows(snap: &Snapshot) -> Vec<Row> {
+/// The rows in their order; `public` is the public IP lookup's answer, with
+/// no row while there is none.
+pub fn rows(snap: &Snapshot, public: Option<&crate::publicip::Answer>) -> Vec<Row> {
     let fg = Tone::Normal;
     let i = &snap.info;
     let link = match (&i.iface, i.link) {
@@ -118,7 +121,13 @@ pub fn rows(snap: &Snapshot) -> Vec<Row> {
         Vpn::Absent => vec![label("no VPN", Tone::Muted)],
     };
     let row = |label: &'static str, runs: Vec<Run>, drop: u8| Row { label, runs, drop };
-    vec![row("Link", link, 0), row("IPv4", ip, 0), row("VPN", vpn, 1)]
+    let mut out = vec![row("Link", link, 0), row("IPv4", ip, 0), row("VPN", vpn, 1)];
+    match public {
+        Some(crate::publicip::Answer::Addr(a)) => out.push(row("Public", vec![value(a.to_string(), fg)], 2)),
+        Some(crate::publicip::Answer::Failed) => out.push(row("Public", vec![label("–", Tone::Muted)], 2)),
+        None => {}
+    }
+    out
 }
 
 /// The tightest a row may be: its value and a point.
@@ -169,11 +178,11 @@ fn font(face: Face, m: &StatusSizes) -> FontId {
 /// the left padding, its runs from the value column. A row too wide for the
 /// column leaves out the word `WiFi`; a run still too wide is cut at the
 /// right padding.
-fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot) {
+fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, public: Option<&crate::publicip::Answer>) {
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let m = sizes_for(cell_height(rect, size));
-    let (rows, row_h) = fit(rows(snap), rect.height(), &m);
+    let (rows, row_h) = fit(rows(snap, public), rect.height(), &m);
     let width = |text: &str, font: &FontId| {
         p.layout_no_wrap(text.to_string(), font.clone(), Color32::TRANSPARENT)
             .size()
@@ -247,7 +256,7 @@ impl Element for Connection {
     fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, _now: Instant) {
         background(ui, rect);
         if let Some(snap) = data.network {
-            paint(ui, rect, size, snap);
+            paint(ui, rect, size, snap, data.public_ip);
         }
     }
 
@@ -429,21 +438,21 @@ mod tests {
         // A usual network loses nothing at either height, tall or wide.
         for (h, m) in [(STATUS_CELL_LARGE_H, STATUS_LARGE), (STATUS_CELL_SMALL_H, STATUS_SMALL)] {
             for height in [tall_height(h), h] {
-                let (r, _) = fit(rows(&sample()), height, &m);
+                let (r, _) = fit(rows(&sample(), None), height, &m);
                 assert_eq!(labels_of(&r), ["Link", "IPv4", "VPN"], "{h} {height}");
             }
         }
         // The row is no taller than a line, however much room there is.
-        assert_eq!(fit(rows(&sample()), 400.0, &STATUS_LARGE).1, STATUS_LARGE.row);
+        assert_eq!(fit(rows(&sample(), None), 400.0, &STATUS_LARGE).1, STATUS_LARGE.row);
         // Squeezed, the rows first move together as far as `min_row`.
         let three = 2.0 * STATUS_LARGE.pad_y + 3.0 * min_row(&STATUS_LARGE);
-        let (r, h) = fit(rows(&sample()), three, &STATUS_LARGE);
+        let (r, h) = fit(rows(&sample(), None), three, &STATUS_LARGE);
         assert_eq!(r.len(), 3);
         assert!((h - min_row(&STATUS_LARGE)).abs() < 0.01, "{h}");
         // Squeezed further the VPN goes; the link and the address stay.
         let mut seen = Vec::new();
         for h in (5..=150).rev() {
-            let got: Vec<String> = labels_of(&fit(rows(&sample()), h as f32, &STATUS_LARGE).0)
+            let got: Vec<String> = labels_of(&fit(rows(&sample(), None), h as f32, &STATUS_LARGE).0)
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
@@ -458,6 +467,73 @@ mod tests {
             |a: &[String], b: &[String]| -> Vec<String> { a.iter().filter(|x| !b.contains(x)).cloned().collect() };
         let order: Vec<String> = seen.windows(2).flat_map(|w| gone(&w[0], &w[1])).collect();
         assert_eq!(order, ["VPN"]);
+    }
+
+    fn with_public<'a>(s: &'a Snapshot, a: &'a crate::publicip::Answer) -> Data<'a> {
+        Data {
+            public_ip: Some(a),
+            ..data(s)
+        }
+    }
+
+    #[test]
+    fn the_public_row_shows_the_answer_and_drops_first() {
+        use crate::publicip::Answer;
+        let addr = Answer::Addr("203.0.113.7".parse().unwrap());
+        let snap = sample();
+        // Four rows fit in either size at either cell height.
+        for h in CELL_HEIGHTS {
+            for size in [TALL, WIDE] {
+                let out = shapes(
+                    &Connection,
+                    rect_of(size, h),
+                    size,
+                    &with_public(&snap, &addr),
+                    Instant::now(),
+                );
+                assert_eq!(
+                    drawn(&out),
+                    [
+                        "Link eth0 1 Gbit/s",
+                        "IPv4 192.168.1.23/24",
+                        "VPN wg0 up",
+                        "Public 203.0.113.7"
+                    ],
+                    "{size} {h}"
+                );
+            }
+        }
+        let t = theme();
+        let out = shapes(
+            &Connection,
+            rect_of(TALL, STATUS_CELL_LARGE_H),
+            TALL,
+            &with_public(&snap, &Answer::Failed),
+            Instant::now(),
+        );
+        assert_eq!(drawn(&out).last().map(String::as_str), Some("Public –"));
+        assert_eq!(colour_of(&out, "–"), t.palette().muted_foreground);
+        // No answer: no row.
+        assert_eq!(rows(&sample(), None).len(), 3);
+        // Squeezed, `Public` goes first, then the VPN; the link and the
+        // address stay.
+        let mut seen: Vec<Vec<&str>> = Vec::new();
+        for h in (5..=150).rev() {
+            let got: Vec<&str> = fit(rows(&sample(), Some(&addr)), h as f32, &STATUS_SMALL)
+                .0
+                .iter()
+                .map(|r| r.label)
+                .collect();
+            assert!(got.contains(&"Link") && got.contains(&"IPv4"), "{h}: {got:?}");
+            if seen.last() != Some(&got) {
+                seen.push(got);
+            }
+        }
+        let gone: Vec<&str> = seen
+            .windows(2)
+            .flat_map(|w| w[0].iter().filter(|x| !w[1].contains(x)).copied().collect::<Vec<_>>())
+            .collect();
+        assert_eq!(gone, ["Public", "VPN"]);
     }
 
     #[test]
@@ -530,7 +606,7 @@ mod tests {
         assert!(d.contains(&"Link e<0>? 1 Gbit/s".to_string()), "{d:?}");
         odd.info.iface = Some("<b>&\"'\x01".into());
         odd.info.link = Link::Wifi(None);
-        let r = rows(&odd);
+        let r = rows(&odd, None);
         assert_eq!(r[0].runs[0].text, "<b>&\"'?");
         let d = drawn(&tall(&odd, STATUS_CELL_LARGE_H));
         assert!(d.iter().any(|r| r.starts_with("Link <b>&\"'?")), "{d:?}");
@@ -580,12 +656,15 @@ mod tests {
         // A 40-character interface on WiFi.
         hostile.info.iface = Some("e".repeat(40));
         hostile.info.link = Link::Wifi(Some(-61));
-        testing::assert_inside(&Connection, &data(&hostile), now);
+        // The longest an address can be written, as the public answer.
+        let v6 = crate::publicip::Answer::Addr("1111:2222:3333:4444:5555:6666:7777:8888".parse().unwrap());
+        let hostile_data = with_public(&hostile, &v6);
+        testing::assert_inside(&Connection, &hostile_data, now);
         testing::assert_inside(&Connection, &data(&sample()), now);
         for size in SIZES {
             for h in [STATUS_CELL_LARGE_H, STATUS_CELL_SMALL_H, 70.3] {
                 let rect = rect_of(*size, h).translate(vec2(0.37, 0.61));
-                let out = shapes(&Connection, rect, *size, &data(&hostile), now);
+                let out = shapes(&Connection, rect, *size, &hostile_data, now);
                 for s in &out {
                     assert!(
                         rect.expand(0.01).contains_rect(s.visual_bounding_rect()),
