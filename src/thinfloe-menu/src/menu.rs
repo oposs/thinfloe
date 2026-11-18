@@ -393,6 +393,24 @@ impl Menu {
         self.network.set_public_ip(public_ip);
     }
 
+    /// Show `tab` of the Settings screen. Leaving the Network tab is leaving
+    /// its lookup address field: the address typed there is committed, as
+    /// on a focus loss. The tab click is the frame's one event, so the
+    /// field's own commit of that frame never arrives.
+    fn switch_tab(&mut self, tab: SettingsTab) -> Option<Effect> {
+        let left_network = self.settings_tab == SettingsTab::Network && tab != SettingsTab::Network;
+        self.settings_tab = tab;
+        if !left_network {
+            return None;
+        }
+        let commit = NetEvent::PublicIpUrl {
+            text: self.network.public_ip_url_text().to_string(),
+            commit: true,
+        };
+        let r = self.network.event(commit, false)?;
+        self.net_request(r)
+    }
+
     /// Start a public IP write, or keep it for when the running one ends;
     /// a later one replaces it. Two writes at once could end in either
     /// order, and the older click would stay in the file.
@@ -760,22 +778,12 @@ impl Menu {
                 self.offer_retry();
                 return None;
             }
-            SettingsEvent::Tab(tab) => {
-                let left_network = self.settings_tab == SettingsTab::Network && tab != SettingsTab::Network;
-                self.settings_tab = tab;
-                // Leaving the tab is leaving the lookup address field: the
-                // address typed there is committed, as on a focus loss. The
-                // tab click is the frame's one event, so the field's own
-                // commit of that frame never arrives.
-                if left_network {
-                    let commit = NetEvent::PublicIpUrl {
-                        text: self.network.public_ip_url_text().to_string(),
-                        commit: true,
-                    };
-                    let r = self.network.event(commit, false)?;
-                    return self.net_request(r);
-                }
-                return None;
+            SettingsEvent::Tab(tab) => return self.switch_tab(tab),
+            SettingsEvent::TabAfterUrl(tab, e) => {
+                // At most one of the two starts a write; a second queues.
+                let first = self.network.event(e, false).and_then(|r| self.net_request(r));
+                let second = self.switch_tab(tab);
+                return first.or(second);
             }
             SettingsEvent::IdleTimeout(idle) => {
                 return (idle != self.screen_tab.idle).then_some(Effect::WriteScreen { idle });
@@ -1983,6 +1991,49 @@ mod tests {
         // Nothing typed: changing tabs saves nothing.
         assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Network)), None);
         assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Keyboard)), None);
+    }
+
+    #[test]
+    fn a_tab_click_after_the_field_commits_the_newest_text() {
+        use crate::publicip::PublicIpPrefs;
+        let mut m = net_menu(false);
+        let typed = |text: &str| NetEvent::PublicIpUrl {
+            text: text.into(),
+            commit: false,
+        };
+        assert_eq!(net(&mut m, typed("https://ip.example.ne")), None);
+        assert_eq!(
+            m.settings(SettingsEvent::TabAfterUrl(
+                SettingsTab::Screen,
+                typed("https://ip.example.net")
+            )),
+            Some(Effect::Start(Job::PublicIpSave(PublicIpPrefs {
+                on: false,
+                url: "https://ip.example.net".into(),
+            })))
+        );
+        assert_eq!(m.settings_tab, SettingsTab::Screen);
+        // Escape on the frame of the tab click: nothing is saved.
+        let mut m = net_menu(false);
+        net(&mut m, typed("https://ip.example.net"));
+        assert_eq!(
+            m.settings(SettingsEvent::TabAfterUrl(
+                SettingsTab::Screen,
+                NetEvent::PublicIpUrlCancel
+            )),
+            None
+        );
+        assert_eq!(m.network.public_ip_url_text(), "");
+        // A commit on that frame starts the one write.
+        let mut m = net_menu(false);
+        let commit = NetEvent::PublicIpUrl {
+            text: "https://ip.example.net".into(),
+            commit: true,
+        };
+        assert!(matches!(
+            m.settings(SettingsEvent::TabAfterUrl(SettingsTab::Screen, commit)),
+            Some(Effect::Start(Job::PublicIpSave(_)))
+        ));
     }
 
     #[test]

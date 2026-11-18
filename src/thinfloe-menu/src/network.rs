@@ -263,7 +263,11 @@ impl NetTab {
             }
             Err(e) => {
                 self.public_ip = self.public_ip_stored.clone();
-                self.public_ip_url_text = self.public_ip_stored.url.clone();
+                // An address typed after the failed commit is the person's
+                // next try, not yet committed: it stays in the field.
+                if self.public_ip_url_text == prefs.url {
+                    self.public_ip_url_text = self.public_ip_stored.url.clone();
+                }
                 self.error = Some(e.clone());
                 self.public_ip_error = Some(e);
             }
@@ -1703,6 +1707,46 @@ mod tests {
         // The next save that works clears the error it left.
         t.public_ip_saved(&first, Ok(()));
         assert_eq!(t.error(), None);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_an_address_typed_after_its_commit() {
+        use crate::publicip::PublicIpPrefs;
+        let mut t = tab();
+        let Some(NetRequest::SavePublicIp(failing)) = t.event(
+            NetEvent::PublicIpUrl {
+                text: "https://ip.example.net".into(),
+                commit: true,
+            },
+            false,
+        ) else {
+            panic!("the address saves");
+        };
+        // Typed on while the save runs, not committed.
+        t.event(
+            NetEvent::PublicIpUrl {
+                text: "https://ip2.example.net".into(),
+                commit: false,
+            },
+            false,
+        );
+        t.public_ip_saved(&failing, Err("disk full".into()));
+        assert_eq!(t.public_ip(), &PublicIpPrefs::default(), "the stored settings");
+        assert_eq!(t.public_ip_url_text(), "https://ip2.example.net");
+        // Committed now, it is saved.
+        assert_eq!(
+            t.event(
+                NetEvent::PublicIpUrl {
+                    text: "https://ip2.example.net".into(),
+                    commit: true,
+                },
+                false,
+            ),
+            Some(NetRequest::SavePublicIp(PublicIpPrefs {
+                on: false,
+                url: "https://ip2.example.net".into(),
+            }))
+        );
     }
 
     #[test]

@@ -23,6 +23,11 @@ pub enum SettingsEvent {
     CheckNow,
     Back,
     Tab(SettingsTab),
+    /// A tab click on a frame on which the Network tab's lookup address
+    /// field also reported (`NetEvent::PublicIpUrl` or
+    /// `PublicIpUrlCancel`): the field's event goes first, so leaving the
+    /// tab commits the newest text.
+    TabAfterUrl(SettingsTab, NetEvent),
     /// The screen timeout select, in seconds; 0 is never.
     IdleTimeout(u32),
     /// Something on the Network tab.

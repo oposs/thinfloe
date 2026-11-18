@@ -39,7 +39,7 @@ pub fn dialog_open(net: &NetTab) -> bool {
 /// The Network tab, `width` wide, and its dialogs.
 pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
     let t = Theme::current(ui.ctx());
-    let pending = take_pending_url(ui.ctx());
+    let pending = pending_url(ui.ctx());
     let mut url = None;
     // Apply and its error follow the bands, as the Upgrade screen's footer;
     // pinned to the foot of the panel only when the bands scroll.
@@ -100,11 +100,23 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
     // own on top of a click elsewhere when that click took its focus
     // (Apply, the switch); the click is reported now and the field's event
     // on the next frame, so neither is lost.
-    match (event, merge_url(pending, url)) {
+    let url = merge_url(pending, url);
+    let ctx = ui.ctx();
+    // A pass egui throws away (a page or its footer changed its height)
+    // reports nothing, and the pass after it gets no input: the field's
+    // event waits for that one.
+    if ctx.will_discard() {
+        if let Some(url) = url {
+            keep_pending_url(ctx, url);
+        }
+        return event;
+    }
+    forget_pending_url(ctx);
+    match (event, url) {
         (None, url) => url,
         (Some(e), None) => Some(e),
         (Some(e), Some(url)) => {
-            keep_pending_url(ui.ctx(), url);
+            keep_pending_url(ctx, url);
             Some(e)
         }
     }
@@ -122,11 +134,17 @@ fn keep_pending_url(ctx: &egui::Context, e: NetEvent) {
     ctx.request_repaint();
 }
 
-fn take_pending_url(ctx: &egui::Context) -> Option<NetEvent> {
+/// The kept event, left in place: it goes only once a pass that is not
+/// thrown away has reported it (`forget_pending_url`).
+fn pending_url(ctx: &egui::Context) -> Option<NetEvent> {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.remove_temp::<(u64, Option<NetEvent>)>(pending_url_id()))
+    ctx.data(|d| d.get_temp::<(u64, Option<NetEvent>)>(pending_url_id()))
         .filter(|(at, _)| at + 1 == pass)
         .and_then(|(_, e)| e)
+}
+
+fn forget_pending_url(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<(u64, Option<NetEvent>)>(pending_url_id()));
 }
 
 /// The lookup address event of this frame on top of one kept from the
