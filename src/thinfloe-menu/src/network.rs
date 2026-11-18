@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::jobs::ApplyFailed;
 use crate::netfiles::{self, Change, FileState, Net, WifiFile, Wired, WiredFile};
 use crate::nettab::{self, Iface, InRange};
+use crate::publicip::{self, PublicIpPrefs};
 
 /// The status poll while the tab is open.
 pub const POLL: Duration = Duration::from_secs(2);
@@ -45,6 +46,13 @@ pub enum NetEvent {
     CancelApply,
     /// *Let the menu manage it*: `"wifi"` or `"wired"`.
     TakeOver(&'static str),
+    /// The public IP switch; saved at once.
+    PublicIp(bool),
+    /// The lookup address field was typed in.
+    PublicIpUrlText(String),
+    /// The lookup address field lost focus or took Enter: the typed
+    /// address is saved, unless it is refused.
+    PublicIpUrlCommit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +62,8 @@ pub enum NetRequest {
     Scan,
     Apply(Change),
     TakeOver(&'static str),
+    /// Write the public IP switch and lookup address.
+    SavePublicIp(PublicIpPrefs),
 }
 
 /// The wired part as the form shows it: the select and the two texts.
@@ -169,6 +179,12 @@ pub struct NetTab {
     pgid: Option<i32>,
     /// The file a take-over runs for: `"wifi"` or `"wired"`.
     taking_over: Option<&'static str>,
+    /// The public IP settings as last saved (or being saved).
+    public_ip: PublicIpPrefs,
+    /// The lookup address field as typed.
+    public_ip_url_text: String,
+    /// The reason the last public IP save failed, while `error` shows it.
+    public_ip_error: Option<String>,
 }
 
 impl NetTab {
@@ -195,6 +211,68 @@ impl NetTab {
             applying: false,
             pgid: None,
             taking_over: None,
+            public_ip: PublicIpPrefs::default(),
+            public_ip_url_text: String::new(),
+            public_ip_error: None,
+        }
+    }
+
+    /// The public IP settings as `config.toml` holds them.
+    pub fn set_public_ip(&mut self, prefs: PublicIpPrefs) {
+        self.public_ip_url_text = prefs.url.clone();
+        self.public_ip = prefs;
+    }
+
+    pub fn public_ip(&self) -> &PublicIpPrefs {
+        &self.public_ip
+    }
+
+    pub fn public_ip_url_text(&self) -> &str {
+        &self.public_ip_url_text
+    }
+
+    /// The typed lookup address is one the menu does not use; it is not
+    /// saved.
+    pub fn public_ip_url_refused(&self) -> bool {
+        !self.public_ip_url_text.is_empty() && !publicip::url_ok(&self.public_ip_url_text)
+    }
+
+    /// A public IP save ended; a failure shows where the Apply errors do.
+    pub fn public_ip_saved(&mut self, r: Result<(), String>) {
+        match r {
+            Ok(()) => {
+                if self.public_ip_error.is_some() && self.error == self.public_ip_error {
+                    self.error = None;
+                }
+                self.public_ip_error = None;
+            }
+            Err(e) => {
+                self.error = Some(e.clone());
+                self.public_ip_error = Some(e);
+            }
+        }
+    }
+
+    /// The public IP band: it has nothing to do with the network files, so
+    /// it works before they are read and while an Apply or take-over runs.
+    fn public_ip_event(&mut self, e: NetEvent) -> Option<NetRequest> {
+        match e {
+            NetEvent::PublicIp(on) => {
+                self.public_ip.on = on;
+                Some(NetRequest::SavePublicIp(self.public_ip.clone()))
+            }
+            NetEvent::PublicIpUrlText(text) => {
+                self.public_ip_url_text = text;
+                None
+            }
+            NetEvent::PublicIpUrlCommit => {
+                if self.public_ip_url_refused() || self.public_ip_url_text == self.public_ip.url {
+                    return None;
+                }
+                self.public_ip.url = self.public_ip_url_text.clone();
+                Some(NetRequest::SavePublicIp(self.public_ip.clone()))
+            }
+            _ => None,
         }
     }
 
@@ -235,6 +313,12 @@ impl NetTab {
     /// One click or text change. While an Apply or a take-over runs, and
     /// before the files are read, nothing is changed.
     pub fn event(&mut self, e: NetEvent, remote: bool) -> Option<NetRequest> {
+        if matches!(
+            e,
+            NetEvent::PublicIp(_) | NetEvent::PublicIpUrlText(_) | NetEvent::PublicIpUrlCommit
+        ) {
+            return self.public_ip_event(e);
+        }
         if self.applying || self.taking_over.is_some() || self.wifi.is_none() || self.wired.is_none() {
             return None;
         }
@@ -382,6 +466,7 @@ impl NetTab {
                 self.error = None;
                 Some(NetRequest::TakeOver(which))
             }
+            NetEvent::PublicIp(_) | NetEvent::PublicIpUrlText(_) | NetEvent::PublicIpUrlCommit => None,
         }
     }
 
@@ -607,6 +692,8 @@ impl NetTab {
         self.add = None;
         self.confirm = false;
         self.error = None;
+        // A lookup address typed and not taken goes too; it was never saved.
+        self.public_ip_url_text = self.public_ip.url.clone();
         dropped
     }
 
@@ -1496,5 +1583,77 @@ mod tests {
         assert_eq!(t.event(NetEvent::OpenAdd, false), None);
         assert!(!t.dirty());
         assert_eq!(t.event(NetEvent::Apply, false), None);
+    }
+
+    #[test]
+    fn the_switch_saves_at_once_and_the_address_on_commit() {
+        use crate::publicip::PublicIpPrefs;
+        let mut t = tab();
+        let prefs = |on: bool, url: &str| PublicIpPrefs { on, url: url.into() };
+        assert_eq!(
+            t.event(NetEvent::PublicIp(true), false),
+            Some(NetRequest::SavePublicIp(prefs(true, "")))
+        );
+        assert_eq!(t.public_ip(), &prefs(true, ""));
+        assert_eq!(t.event(NetEvent::PublicIpUrlText("http://x".into()), false), None);
+        assert!(t.public_ip_url_refused());
+        assert_eq!(t.public_ip_url_text(), "http://x");
+        assert_eq!(t.event(NetEvent::PublicIpUrlCommit, false), None);
+        assert_eq!(t.public_ip(), &prefs(true, ""), "a refused address is not taken");
+        assert_eq!(
+            t.event(NetEvent::PublicIpUrlText("https://ip.example.net".into()), false),
+            None
+        );
+        assert!(!t.public_ip_url_refused());
+        assert_eq!(
+            t.event(NetEvent::PublicIpUrlCommit, false),
+            Some(NetRequest::SavePublicIp(prefs(true, "https://ip.example.net")))
+        );
+        // The same address again is nothing to save.
+        assert_eq!(t.event(NetEvent::PublicIpUrlCommit, false), None);
+        // Emptied: the default address counts again.
+        t.event(NetEvent::PublicIpUrlText(String::new()), false);
+        assert!(!t.public_ip_url_refused());
+        assert_eq!(
+            t.event(NetEvent::PublicIpUrlCommit, false),
+            Some(NetRequest::SavePublicIp(prefs(true, "")))
+        );
+    }
+
+    #[test]
+    fn the_public_ip_band_works_outside_an_apply() {
+        use crate::publicip::PublicIpPrefs;
+        // Before the files are read.
+        let mut t = NetTab::new(false);
+        t.set_public_ip(PublicIpPrefs {
+            on: true,
+            url: "https://ip.example.net".into(),
+        });
+        assert_eq!(t.public_ip_url_text(), "https://ip.example.net");
+        assert_eq!(
+            t.event(NetEvent::PublicIp(false), false),
+            Some(NetRequest::SavePublicIp(PublicIpPrefs {
+                on: false,
+                url: "https://ip.example.net".into()
+            }))
+        );
+        // While an Apply runs.
+        let mut t = tab();
+        t.event(NetEvent::Forget("Home".into()), false);
+        assert!(matches!(t.event(NetEvent::Apply, false), Some(NetRequest::Apply(_))));
+        assert!(t.applying());
+        assert!(matches!(
+            t.event(NetEvent::PublicIp(true), false),
+            Some(NetRequest::SavePublicIp(_))
+        ));
+        // A failed save names itself where the Apply errors stand.
+        t.public_ip_saved(Err("disk full".into()));
+        assert_eq!(t.error(), Some("disk full"));
+        // Back drops an address that was typed and not taken.
+        let mut t = tab();
+        t.event(NetEvent::PublicIpUrlText("http://x".into()), false);
+        t.drop_draft();
+        assert_eq!(t.public_ip_url_text(), "");
+        assert!(!t.public_ip_url_refused());
     }
 }

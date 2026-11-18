@@ -8,6 +8,7 @@ use crate::brand::{self, role};
 use crate::netfiles::FileState;
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
+use crate::publicip;
 use crate::ui::{self, GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
 use egui::{Rect, RichText, Sense, Ui};
 use shadcn_egui::Theme;
@@ -19,6 +20,7 @@ use shadcn_egui::components::icon::IconView;
 use shadcn_egui::components::input::Input;
 use shadcn_egui::components::item::{Item, ItemSize};
 use shadcn_egui::components::select::Select;
+use shadcn_egui::components::switch::Switch;
 use shadcn_egui::icons::lucide;
 
 /// The wired select: index 1 is a fixed address.
@@ -72,6 +74,11 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
                     band(ui, &t, inner, between, "DNS", |ui| dns(ui, &t, net, &mut event));
                 });
             }
+            // Saved at once and unrelated to the network files: it takes
+            // clicks before they are read and while an Apply runs.
+            band(ui, &t, inner, between, "Public IP address", |ui| {
+                public_ip(ui, &t, net, &mut event)
+            });
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
             event
@@ -262,6 +269,40 @@ fn dns(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
     // kept text.
     if net.wifi_file().is_some_and(|w| w.state == FileState::Hand) {
         line(ui, "WiFi keeps the DNS servers from your old settings.");
+    }
+}
+
+/// The public IP switch and its lookup address. The address is saved when
+/// the field is left or takes Enter; one the menu does not use is named
+/// below it and not saved.
+fn public_ip(ui: &mut Ui, t: &Theme, net: &NetTab, event: &mut Option<NetEvent>) {
+    let mut on = net.public_ip().on;
+    form_row(ui, t, "Show the public IP address", |ui| {
+        if ui.add(Switch::new(&mut on)).changed() {
+            *event = Some(NetEvent::PublicIp(on));
+        }
+    });
+    form_row(ui, t, "Lookup address", |ui| {
+        let mut text = net.public_ip_url_text().to_string();
+        let r = ui.add(
+            Input::new(&mut text)
+                .hint(publicip::DEFAULT_URL)
+                .max_width(brand::NET_FIELD_W)
+                .id_salt("tf-net-public-ip-url"),
+        );
+        if r.changed() {
+            *event = Some(NetEvent::PublicIpUrlText(text));
+        } else if r.lost_focus() {
+            *event = Some(NetEvent::PublicIpUrlCommit);
+        }
+    });
+    if net.public_ip_url_refused() {
+        let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
+        note(
+            ui,
+            indent,
+            RichText::new("Only https:// addresses are used.").color(t.palette().muted_foreground),
+        );
     }
 }
 

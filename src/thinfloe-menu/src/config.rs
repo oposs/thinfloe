@@ -438,6 +438,11 @@ pub struct NetworkCfg {
     /// Text of a hand-written wired file the menu keeps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_wired: Option<String>,
+    /// Show the public IP address; off unless the person switches it on,
+    /// because the lookup asks a server outside the network.
+    pub public_ip: bool,
+    /// The lookup address; empty means `publicip::DEFAULT_URL`.
+    pub public_ip_url: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -484,6 +489,18 @@ fn ipv4_list(v: &[String], what: &str) -> Result<Vec<Ipv4Addr>, String> {
 }
 
 impl NetworkCfg {
+    /// `self` with the public IP keys of `current`. A network Apply or a
+    /// take-over builds its settings from a copy taken before netplan or the
+    /// root tool ran; the switch may have been flipped meanwhile, and the
+    /// copy must not take that back.
+    pub fn with_public_ip_of(self, current: &NetworkCfg) -> NetworkCfg {
+        NetworkCfg {
+            public_ip: current.public_ip,
+            public_ip_url: current.public_ip_url.clone(),
+            ..self
+        }
+    }
+
     pub fn nets(&self) -> Vec<Net> {
         self.networks
             .iter()
@@ -755,6 +772,8 @@ mod tests {
         });
         c.network.kept_wifi = Some("network:\n  \"x\": 1\n".into());
         c.network.kept_wired = Some("a \"b\"".into());
+        c.network.public_ip = true;
+        c.network.public_ip_url = "https://ip.example.net".into();
         c.notice.migration = Some("x".into());
         let text = to_text(&c);
         let back = parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
@@ -917,6 +936,35 @@ mod tests {
         let mut m = MonitorsCfg::from_profiles(&sample_profiles());
         m.profiles[0].outputs[0].criteria = "Dell Inc. U2419H ABC-1".into();
         assert!(m.to_profiles().is_ok());
+    }
+
+    #[test]
+    fn a_config_without_public_ip_keys_has_it_off() {
+        let c = parse("version = 1\n\n[network]\nwifi_dns = []\n").unwrap();
+        assert!(!c.network.public_ip);
+        assert_eq!(c.network.public_ip_url, "");
+        assert!(!ThinfloeConfig::default().network.public_ip);
+    }
+
+    #[test]
+    fn with_public_ip_of_copies_both_keys() {
+        let current = NetworkCfg {
+            public_ip: true,
+            public_ip_url: "https://ip.example.net".into(),
+            ..NetworkCfg::default()
+        };
+        let planned = NetworkCfg {
+            wifi_dns: vec!["1.1.1.1".into()],
+            ..NetworkCfg::default()
+        };
+        let got = planned.with_public_ip_of(&current);
+        assert!(got.public_ip);
+        assert_eq!(got.public_ip_url, "https://ip.example.net");
+        assert_eq!(got.wifi_dns, ["1.1.1.1"]);
+        // Off in `current` switches it off in the result as well.
+        let back = got.with_public_ip_of(&NetworkCfg::default());
+        assert!(!back.public_ip);
+        assert_eq!(back.public_ip_url, "");
     }
 
     #[test]

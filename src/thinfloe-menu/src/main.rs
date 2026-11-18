@@ -211,6 +211,10 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         .cloned()
         .collect();
     let keyboard_cfg = opened.store.cfg.keyboard.clone();
+    let public_ip = thinfloe_menu::publicip::PublicIpPrefs {
+        on: opened.store.cfg.network.public_ip,
+        url: opened.store.cfg.network.public_ip_url.clone(),
+    };
     let (screen_tab, status_layout) = (
         screentab::from_config(&opened.store.cfg.screen),
         status::layout_from(&opened.store.cfg.status),
@@ -249,6 +253,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
+    menu.network.set_public_ip(public_ip);
     menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, registry);
     menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
