@@ -52,14 +52,16 @@ fn px(v: f32, scale: f32) -> f32 {
 /// The panel at the bottom centre: `OSD_W` wide, the icon row between its
 /// paddings, and the level bar below it when `bar`.
 pub fn panel_placement(scale: f32, bar: bool) -> Placement {
-    let mut h = 2.0 * OSD_PAD_Y + OSD_ICON;
+    // Each term is rounded on its own, as the drawing lays them out, so
+    // the frame and the surface agree at every scale.
+    let mut h = 2.0 * px(OSD_PAD_Y, scale) + px(OSD_ICON, scale);
     if bar {
-        h += OSD_BAR_GAP + OSD_BAR_H;
+        h += px(OSD_BAR_GAP, scale) + px(OSD_BAR_H, scale);
     }
     Placement {
         anchor: Anchor::Bottom,
         margin: (0, 0, px(OSD_BOTTOM, scale) as i32, 0),
-        size: (px(OSD_W, scale) as u32, px(h, scale) as u32),
+        size: (px(OSD_W, scale) as u32, h as u32),
     }
 }
 
@@ -502,6 +504,10 @@ mod tests {
         assert_eq!(panel_placement(1.0, true).size, (320, 61));
         assert_eq!(panel_placement(1.0, false).size, (320, 46));
         assert_eq!(panel_placement(2.0, true).size, (640, 122));
+        // Rounded per value (15+15+28+11+8), not the sum (76.25 -> 76).
+        assert_eq!(panel_placement(1.25, true).size, (400, 77));
+        assert_eq!(mark_placement(1.25).size, (38, 38));
+        assert_eq!(mark_placement(1.25).margin, (43, 18, 0, 0));
         assert_eq!(panel_placement(1.5, true).margin, (0, 0, 33, 0));
         assert_eq!(mark_placement(1.0).margin, (34, 14, 0, 0));
         assert_eq!(mark_placement(2.0).size, (60, 60));
