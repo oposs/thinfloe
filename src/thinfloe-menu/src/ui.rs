@@ -4293,20 +4293,32 @@ mod tests {
                 handshake_age_s: None,
             },
         ];
-        net.status_done(Ok(lines.to_vec()));
+        let details = crate::netdetail::Details {
+            ifaces: vec![crate::netdetail::IfDetail {
+                name: "wlp1".into(),
+                mac: Some("3c:52:82:aa:bb:cc".into()),
+                driver: Some("iwlwifi".into()),
+                ..Default::default()
+            }],
+            dns_in_use: vec!["192.168.1.1".into()],
+        };
+        net.status_done(Ok(lines.to_vec()), details);
         let texts = net_texts(&network_settings(net));
         assert!(has(&texts, "Connections now"), "{texts:?}");
         for i in &lines {
             let line = crate::nettab::iface_line(i);
             assert!(has(&texts, &line), "{line} not in {texts:?}");
         }
+        assert!(has(&texts, "MAC 3c:52:82:aa:bb:cc · iwlwifi"), "{texts:?}");
+        assert!(has(&texts, "DNS in use 192.168.1.1"), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         // Before the first status answer nothing is known yet.
         let texts = net_texts(&network_settings(two_networks()));
+        assert!(!texts.iter().any(|t| t.starts_with("DNS in use")), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         assert!(has(&texts, "Looking for network adapters…"), "{texts:?}");
         let mut net = two_networks();
-        net.status_done(Ok(Vec::new()));
+        net.status_done(Ok(Vec::new()), Default::default());
         let texts = net_texts(&network_settings(net));
         assert!(has(&texts, "No network adapter found"), "{texts:?}");
     }
@@ -6526,15 +6538,18 @@ mod tests {
         shot(&menu, "settings-screen-21in-4k.ppm", (3840, 2160), 2.25);
         // The Network tab: menu-made settings, two networks, a fixed address.
         let mut net = two_networks();
-        net.status_done(Ok(vec![crate::nettab::Iface {
-            name: "enp1s0".into(),
-            kind: crate::nettab::IfKind::Wired,
-            state: crate::nettab::IfState::Connected,
-            addresses: vec!["192.168.1.10/24".into()],
-            ssid: None,
-            signal_dbm: None,
-            handshake_age_s: None,
-        }]));
+        net.status_done(
+            Ok(vec![crate::nettab::Iface {
+                name: "enp1s0".into(),
+                kind: crate::nettab::IfKind::Wired,
+                state: crate::nettab::IfState::Connected,
+                addresses: vec!["192.168.1.10/24".into()],
+                ssid: None,
+                signal_dbm: None,
+                handshake_age_s: None,
+            }]),
+            Default::default(),
+        );
         menu.settings_tab = crate::settings::SettingsTab::Network;
         menu.network = net;
         shot(&menu, "settings-network-1080.ppm", (1920, 1080), 1.0);
@@ -6556,7 +6571,7 @@ mod tests {
             shot(&m, "settings-network-netboot-1080.ppm", one, 1.0);
             // No adapter at all.
             m.network = net_files(false, FileState::Missing, FileState::Missing, &[]);
-            m.network.status_done(Ok(Vec::new()));
+            m.network.status_done(Ok(Vec::new()), Default::default());
             shot(&m, "settings-network-noadapter-1080.ppm", one, 1.0);
             // A saved network whose adapter is gone.
             m.network = net_files(false, FileState::Menu, FileState::Menu, &["wlp9"]);
@@ -7064,15 +7079,18 @@ mod tests {
         let mut menu = open_settings();
         menu.settings_tab = crate::settings::SettingsTab::Network;
         menu.network = two_networks();
-        menu.network.status_done(Ok(vec![crate::nettab::Iface {
-            name: "enp1s0".into(),
-            kind: crate::nettab::IfKind::Wired,
-            state: crate::nettab::IfState::Connected,
-            addresses: vec!["192.168.1.10/24".into()],
-            ssid: None,
-            signal_dbm: None,
-            handshake_age_s: None,
-        }]));
+        menu.network.status_done(
+            Ok(vec![crate::nettab::Iface {
+                name: "enp1s0".into(),
+                kind: crate::nettab::IfKind::Wired,
+                state: crate::nettab::IfState::Connected,
+                addresses: vec!["192.168.1.10/24".into()],
+                ssid: None,
+                signal_dbm: None,
+                handshake_age_s: None,
+            }]),
+            Default::default(),
+        );
         shot(&menu, "page-network.ppm", (2880, 1920), 2.0);
     }
 

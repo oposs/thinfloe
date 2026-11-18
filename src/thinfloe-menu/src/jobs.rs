@@ -151,7 +151,8 @@ pub enum JobResult {
     },
     /// The network files as read, and the machine's WiFi adapters.
     NetLoaded(netfiles::WifiFile, netfiles::WiredFile, Vec<String>),
-    NetStatus(Result<Vec<Iface>, String>),
+    /// The tool's interfaces, and the facts read from sysfs beside them.
+    NetStatus(Result<Vec<Iface>, String>, crate::netdetail::Details),
     NetScan(Result<Vec<InRange>, String>),
     /// The network tool applies the settings, in a process group of its own.
     NetApplyStarted {
@@ -227,6 +228,10 @@ pub struct Paths {
     pub layout: crate::migrate::HomeLayout,
     /// The programs that hand a keyboard change to the running labwc.
     pub labwc: LabwcCmds,
+    /// Where /sys, /proc, /run and /etc are, for the Network tab's details.
+    pub net_roots: crate::netstat::Roots,
+    /// The PCI id list that names a WiFi chip.
+    pub pci_ids: PathBuf,
 }
 
 /// How a keyboard change reaches the running compositor.
@@ -1600,6 +1605,8 @@ mod tests {
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1613,6 +1620,8 @@ mod tests {
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1626,6 +1635,8 @@ mod tests {
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1880,6 +1891,8 @@ mod tests {
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1894,6 +1907,8 @@ mod tests {
             config: crate::store::test_shared(&d.join("cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -2142,6 +2157,8 @@ mod tests {
             config: net_store(d, NetworkCfg::default()),
             layout: crate::migrate::HomeLayout::New,
             labwc: LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),

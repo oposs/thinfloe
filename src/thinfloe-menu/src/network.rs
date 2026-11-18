@@ -11,6 +11,7 @@
 use std::time::{Duration, Instant};
 
 use crate::jobs::ApplyFailed;
+use crate::netdetail::Details;
 use crate::netfiles::{self, Change, FileState, Net, WifiFile, Wired, WiredFile};
 use crate::nettab::{self, Iface, InRange};
 use crate::publicip::{self, PublicIpPrefs};
@@ -166,6 +167,8 @@ pub struct NetTab {
     wired: Option<WiredFile>,
     devices: Vec<String>,
     ifaces: Vec<Iface>,
+    /// The MAC, gateway, chip and DNS read with the last listed `ifaces`.
+    details: Details,
     /// A status call has answered once, with a list or an error.
     status_known: bool,
     status_error: Option<String>,
@@ -205,6 +208,7 @@ impl NetTab {
             wired: None,
             devices: Vec::new(),
             ifaces: Vec::new(),
+            details: Details::default(),
             status_known: false,
             status_error: None,
             draft_wifi: None,
@@ -583,12 +587,14 @@ impl NetTab {
         self.devices = devices;
     }
 
-    pub fn status_done(&mut self, r: Result<Vec<Iface>, String>) {
+    /// A failed call keeps the last list and the details read with it.
+    pub fn status_done(&mut self, r: Result<Vec<Iface>, String>, details: Details) {
         self.status_busy = false;
         self.status_known = true;
         match r {
             Ok(list) => {
                 self.ifaces = list;
+                self.details = details;
                 self.status_error = None;
             }
             Err(e) => self.status_error = Some(e),
@@ -739,6 +745,10 @@ impl NetTab {
 
     pub fn ifaces(&self) -> &[Iface] {
         &self.ifaces
+    }
+
+    pub fn details(&self) -> &Details {
+        &self.details
     }
 
     /// The interfaces are known: an empty list means there are none.
@@ -917,12 +927,12 @@ mod tests {
         assert_eq!(t.poll(t0, true), Some(NetRequest::Load));
         assert_eq!(t.poll(t0, true), Some(NetRequest::Status));
         assert_eq!(t.poll(t0, true), None, "a status call is in flight");
-        t.status_done(Ok(Vec::new()));
+        t.status_done(Ok(Vec::new()), Details::default());
         assert_eq!(t.poll(t0 + Duration::from_secs(1), true), None);
         assert_eq!(t.poll(t0 + POLL, true), Some(NetRequest::Status));
         // The answer is late: no second call while one runs.
         assert_eq!(t.poll(t0 + POLL * 3, true), None);
-        t.status_done(Err("timeout".into()));
+        t.status_done(Err("timeout".into()), Details::default());
         assert_eq!(t.poll(t0 + POLL * 3, true), Some(NetRequest::Status));
         // Loaded once; not again on its own.
         t.loaded(
@@ -930,7 +940,7 @@ mod tests {
             wired(FileState::Missing, Wired::dhcp()),
             Vec::new(),
         );
-        t.status_done(Ok(Vec::new()));
+        t.status_done(Ok(Vec::new()), Details::default());
         assert_eq!(t.poll(t0 + POLL * 4, true), Some(NetRequest::Status));
     }
 
@@ -942,7 +952,7 @@ mod tests {
         assert_eq!(t.poll(t0 + POLL * 10, false), None);
         assert_eq!(t.poll(t0 + POLL * 10, true), Some(NetRequest::Load));
         assert_eq!(t.poll(t0 + POLL * 10, true), Some(NetRequest::Status));
-        t.status_done(Ok(Vec::new()));
+        t.status_done(Ok(Vec::new()), Details::default());
         assert_eq!(t.poll(t0 + POLL * 20, false), None);
     }
 

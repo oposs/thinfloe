@@ -586,7 +586,7 @@ fn net_failed(job: &Job, e: String) -> JobResult {
             },
             Vec::new(),
         ),
-        Job::NetStatus => JobResult::NetStatus(Err(e)),
+        Job::NetStatus => JobResult::NetStatus(Err(e), Default::default()),
         Job::NetScan => JobResult::NetScan(Err(e)),
         Job::NetApply { .. } => JobResult::NetApplied(Err(jobs::ApplyFailed::new(e))),
         _ => JobResult::NetTakenOver(Err(e)),
@@ -647,7 +647,12 @@ fn job_result(
             let (wifi, wired) = jobs::net_load(paths);
             JobResult::NetLoaded(wifi, wired, netfiles::wifi_devices(&paths.homes.sys_net))
         }
-        Job::NetStatus => JobResult::NetStatus(jobs::network_status(paths, feed)),
+        Job::NetStatus => {
+            let r = jobs::network_status(paths, feed);
+            // Files only, so it adds no wait the tool's call has not had.
+            let details = crate::netdetail::read(&paths.net_roots, r.as_deref().unwrap_or_default(), &paths.pci_ids);
+            JobResult::NetStatus(r, details)
+        }
         Job::NetScan => JobResult::NetScan(jobs::network_scan(paths, feed)),
         // The root tool's group is reported at once, so a logout can stop it.
         Job::NetApply { change } => {
@@ -969,6 +974,8 @@ impl App {
             config: self.cfg.paths.config.clone(),
             layout: self.cfg.paths.layout,
             labwc: self.cfg.paths.labwc.clone(),
+            net_roots: self.cfg.paths.net_roots.clone(),
+            pci_ids: self.cfg.paths.pci_ids.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -1634,6 +1641,8 @@ mod tests {
             config: crate::store::test_shared(Path::new("/nonexistent/cfg")),
             layout: crate::migrate::HomeLayout::New,
             labwc: jobs::LabwcCmds::from_env(),
+            net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+            pci_ids: PathBuf::from("/nonexistent/pci.ids"),
         }
     }
 
@@ -1727,7 +1736,7 @@ esac"#;
         );
         let got = run(Job::NetStatus);
         assert!(
-            matches!(&got[..], [JobResult::NetStatus(Ok(v))] if v.len() == 1),
+            matches!(&got[..], [JobResult::NetStatus(Ok(v), _)] if v.len() == 1),
             "{got:?}"
         );
         let got = run(Job::NetScan);

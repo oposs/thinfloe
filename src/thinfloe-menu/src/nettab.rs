@@ -2,6 +2,7 @@
 //! wired address form, and the text lines. The tool's JSON is untrusted
 //! input as far as the menu cares: rows are capped, text is cut.
 
+use crate::netdetail::IfDetail;
 use crate::netfiles::{self, FileState, WifiFile, Wired};
 use serde_json::Value;
 use std::net::Ipv4Addr;
@@ -364,9 +365,36 @@ pub fn adapter_changed(wifi: &WifiFile, devices: &[String]) -> bool {
         && wifi.device.as_deref().is_some_and(|d| !devices.iter().any(|x| x == d))
 }
 
+/// The fixed facts of one interface under its status line, for example
+/// `MAC 3c:52:82:aa:bb:cc · gateway 192.168.1.1 · Intel Corporation Wi-Fi 6
+/// AX201 · iwlwifi`; `None` when nothing is known.
+pub fn detail_line(d: &IfDetail) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = &d.mac {
+        parts.push(format!("MAC {m}"));
+    }
+    if let Some(g) = d.gateway {
+        parts.push(format!("gateway {g}"));
+    }
+    parts.extend(d.chip.iter().chain(&d.driver).cloned());
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The DNS servers the machine uses now: `DNS in use 192.168.1.1, 9.9.9.9`,
+/// or `DNS in use: none`.
+pub fn dns_in_use_line(dns: &[String]) -> String {
+    if dns.is_empty() {
+        "DNS in use: none".to_string()
+    } else {
+        format!("DNS in use {}", dns.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netstat::{self, Roots};
+    use crate::testdir::TestDir;
 
     #[test]
     fn parse_status_reads_the_contract() {
@@ -624,5 +652,57 @@ mod tests {
         assert!(!adapter_changed(&wifi_file(FileState::Hand, Some("wlp2s0")), &machine));
         assert!(!adapter_changed(&wifi_file(FileState::Menu, None), &machine));
         assert!(!adapter_changed(&wifi_file(FileState::Menu, Some("wlp2s0")), &[]));
+    }
+
+    #[test]
+    fn dns_in_use_from_a_fake_resolv_conf() {
+        let d = TestDir::new("nettab", "dns");
+        let roots = Roots::under(&d);
+        assert_eq!(dns_in_use_line(&netstat::dns_in_use(&roots)), "DNS in use: none");
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        std::fs::write(d.join("etc/resolv.conf"), "nameserver 192.168.1.1\n").unwrap();
+        assert_eq!(dns_in_use_line(&netstat::dns_in_use(&roots)), "DNS in use 192.168.1.1");
+        std::fs::create_dir_all(d.join("run/systemd/resolve")).unwrap();
+        std::fs::write(
+            d.join("run/systemd/resolve/resolv.conf"),
+            "# resolved\nnameserver 192.168.1.1\nnameserver 9.9.9.9\nsearch lan\n",
+        )
+        .unwrap();
+        assert_eq!(
+            dns_in_use_line(&netstat::dns_in_use(&roots)),
+            "DNS in use 192.168.1.1, 9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn detail_line_joins_what_is_known() {
+        let full = IfDetail {
+            name: "wlp58s0".into(),
+            mac: Some("3c:52:82:aa:bb:cc".into()),
+            gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            chip: Some("Intel Corporation Wi-Fi 6 AX201".into()),
+            driver: Some("iwlwifi".into()),
+        };
+        assert_eq!(
+            detail_line(&full).as_deref(),
+            Some("MAC 3c:52:82:aa:bb:cc · gateway 192.168.1.1 · Intel Corporation Wi-Fi 6 AX201 · iwlwifi")
+        );
+        let mac_only = IfDetail {
+            name: "eno1".into(),
+            mac: Some("3c:52:82:00:00:01".into()),
+            ..IfDetail::default()
+        };
+        assert_eq!(detail_line(&mac_only).as_deref(), Some("MAC 3c:52:82:00:00:01"));
+        let driver_only = IfDetail {
+            name: "wlan0".into(),
+            driver: Some("iwlwifi".into()),
+            ..IfDetail::default()
+        };
+        assert_eq!(detail_line(&driver_only).as_deref(), Some("iwlwifi"));
+        let none = IfDetail {
+            name: "wg0".into(),
+            ..IfDetail::default()
+        };
+        assert_eq!(detail_line(&none), None);
     }
 }

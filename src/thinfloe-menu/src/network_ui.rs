@@ -250,6 +250,15 @@ fn text_row(ui: &mut Ui, t: &Theme, label: &str, value: &str, hint: &'static str
 fn connections(ui: &mut Ui, t: &Theme, net: &NetTab) {
     for i in net.ifaces() {
         muted(ui, t, nettab::iface_line(i));
+        let detail = net.details().ifaces.iter().find(|d| d.name == i.name);
+        if let Some(line) = detail.and_then(nettab::detail_line) {
+            muted(ui, t, line);
+        }
+    }
+    // Only beside a list that is current; before the first answer, or
+    // after a failed one, it would claim "none".
+    if net.status_known() && net.status_error().is_none() {
+        muted(ui, t, nettab::dns_in_use_line(&net.details().dns_in_use));
     }
     match net.status_error() {
         Some(e) => warn(ui, t, e),
