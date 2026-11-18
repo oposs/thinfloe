@@ -12,7 +12,7 @@ use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 // The palette. UI code reads these through the theme: the six that are
 // shadcn roles as `Theme::palette()` (ICE primary and ring, BG background,
 // TILE card, TILE_HOVER accent, LINE border, MUTED muted_foreground), the
-// other five as the app colours in `role`.
+// other six as the app colours in `role`.
 
 /// Ice blue, the accent.
 const ICE: Color32 = Color32::from_rgb(0x7c, 0xc4, 0xff);
@@ -29,14 +29,18 @@ const WARN: Color32 = Color32::from_rgb(0xc7, 0x9a, 0x4a);
 const GOOD: Color32 = Color32::from_rgb(0x98, 0xc3, 0x79);
 /// A battery about to run out.
 const RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
+/// The level bar of muted audio.
+const BAR_OFF: Color32 = Color32::from_rgb(0x3a, 0x45, 0x50);
 
 /// The palette's values, for tests that look for a colour in drawn shapes.
 #[cfg(test)]
 pub(crate) mod rgb {
     use egui::Color32;
+    pub(crate) const BAR_OFF: Color32 = super::BAR_OFF;
     pub(crate) const BG: Color32 = super::BG;
     pub(crate) const GOOD: Color32 = super::GOOD;
     pub(crate) const ICE: Color32 = super::ICE;
+    pub(crate) const LINE: Color32 = super::LINE;
     pub(crate) const MUTED: Color32 = super::MUTED;
     pub(crate) const TILE: Color32 = super::TILE;
     pub(crate) const TILE_HOVER: Color32 = super::TILE_HOVER;
@@ -57,6 +61,8 @@ pub mod role {
     pub const GOOD: Role = Role::custom("tf-good");
     /// Alarm: a battery about to run out.
     pub const ALERT: Role = Role::custom("tf-alert");
+    /// The OSD's level bar while the audio is muted.
+    pub const BAR_OFF: Role = Role::custom("tf-bar-off");
 }
 
 /// The 16 basic terminal colours, picked to read on the dark log
@@ -260,6 +266,7 @@ pub fn theme() -> shadcn_egui::Theme {
         .color(role::WARN, WARN, WARN)
         .color(role::GOOD, GOOD, GOOD)
         .color(role::ALERT, RED, RED)
+        .color(role::BAR_OFF, BAR_OFF, BAR_OFF)
         .variant(CHOICE_ROW, ItemVariant::Outline, |r, _| {
             r.item.bg.set(Paint::Role(Role::Card, 1.0));
             r.item.bg.on(State::HOVER, Paint::Role(Role::Accent, 1.0));
@@ -399,6 +406,8 @@ mod tests {
             ("status/network.rs", include_str!("status/network.rs")),
             ("status/connection.rs", include_str!("status/connection.rs")),
             ("status/layout.rs", include_str!("status/layout.rs")),
+            ("osd/mod.rs", include_str!("osd/mod.rs")),
+            ("osd/draw.rs", include_str!("osd/draw.rs")),
         ] {
             let code = src.split("#[cfg(test)]").next().unwrap();
             let hits = style_literal_lines(name, code);
