@@ -40,6 +40,8 @@ pub enum SettingsEvent {
     DismissReport,
     /// Something on the Keyboard tab.
     Keyboard(crate::keyboard::KbEvent),
+    /// *Copy* on the This machine tab.
+    MachineCopy,
 }
 
 /// The tabs of the Settings screen.
@@ -50,15 +52,17 @@ pub enum SettingsTab {
     Screen,
     Keyboard,
     Status,
+    Machine,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 5] = [
+    pub const ALL: [SettingsTab; 6] = [
         SettingsTab::Packages,
         SettingsTab::Network,
         SettingsTab::Screen,
         SettingsTab::Keyboard,
         SettingsTab::Status,
+        SettingsTab::Machine,
     ];
 
     pub fn label(self) -> &'static str {
@@ -68,6 +72,7 @@ impl SettingsTab {
             SettingsTab::Screen => "Screen",
             SettingsTab::Keyboard => "Keyboard",
             SettingsTab::Status => "Status",
+            SettingsTab::Machine => "This machine",
         }
     }
 }
@@ -320,6 +325,12 @@ fn local_date_time(epoch: i64) -> (String, String) {
 mod tests {
     use super::*;
     use crate::testdir::TestDir;
+
+    #[test]
+    fn the_tabs_end_with_this_machine() {
+        assert_eq!(SettingsTab::ALL.last(), Some(&SettingsTab::Machine));
+        assert_eq!(SettingsTab::Machine.label(), "This machine");
+    }
 
     fn status(state: AddonState, installed: Option<&str>, auto: bool) -> AddonStatus {
         AddonStatus {

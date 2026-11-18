@@ -359,6 +359,8 @@ mod tests {
             ("network_ui.rs", include_str!("network_ui.rs")),
             ("monitors_ui.rs", include_str!("monitors_ui.rs")),
             ("keyboardtab_ui.rs", include_str!("keyboardtab_ui.rs")),
+            ("machine.rs", include_str!("machine.rs")),
+            ("machine_ui.rs", include_str!("machine_ui.rs")),
             ("statustab.rs", include_str!("statustab.rs")),
             ("statustab_ui.rs", include_str!("statustab_ui.rs")),
             ("status/mod.rs", include_str!("status/mod.rs")),

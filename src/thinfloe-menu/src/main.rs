@@ -109,6 +109,15 @@ fn vainfo_cmd() -> Vec<String> {
     }
 }
 
+/// `wl-copy`, for the This machine tab's Copy; `TF_WL_COPY_CMD`
+/// (space-separated) replaces it for tests.
+fn wl_copy_cmd() -> Vec<String> {
+    match std::env::var("TF_WL_COPY_CMD") {
+        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(String::from).collect(),
+        _ => vec!["wl-copy".to_string()],
+    }
+}
+
 fn battery_file() -> PathBuf {
     env_path("TF_BATTERY_FILE", battery::FILE)
 }
@@ -251,6 +260,8 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         net_roots: thinfloe_menu::netstat::Roots::system(),
         pci_ids: PathBuf::from("/usr/share/misc/pci.ids"),
         vainfo_cmd: vainfo_cmd(),
+        wl_copy_cmd: wl_copy_cmd(),
+        hardware_roots: thinfloe_menu::hardware::Roots::system(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();
@@ -506,6 +517,7 @@ fn main() -> ExitCode {
     }
     let header = header::read_header(&env_path("TF_VERSION_FILE", "/etc/thinfloe/version"));
     menu.set_installed(header.version.clone());
+    menu.set_header(header.clone());
     match app::run(Config {
         menu,
         paths,

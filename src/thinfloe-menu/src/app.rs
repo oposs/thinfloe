@@ -495,6 +495,15 @@ fn network_wake(screen: Screen, tab: SettingsTab, shown: bool) -> Option<Duratio
     (screen == Screen::Settings && tab == SettingsTab::Network && shown).then_some(network::POLL)
 }
 
+/// When the loop must wake for the This machine tab's uptime row: at its
+/// next minute, while the tab is open and the window is on screen. Asked of
+/// the screen here, not of the tab: the tab hears it closed only at the next
+/// tick, and the frame before that would set a wake for nothing.
+fn machine_wake(menu: &Menu, now: Instant, shown: bool) -> Option<Duration> {
+    let open = menu.screen == Screen::Settings && menu.settings_tab == SettingsTab::Machine && shown;
+    open.then(|| menu.machine.next_change(now)).flatten()
+}
+
 /// The body of a job's worker thread. Every result goes through `send`:
 /// the start of a program first, a write's progress lines in the order the
 /// tool printed them, and the final result last.
@@ -566,6 +575,9 @@ fn panic_result(job: &Job) -> JobResult {
             gpus: Vec::new(),
             vaapi: crate::graphics::Vaapi::NotAvailable(e),
         }),
+        // The tab shows what the menu knows itself.
+        Job::MachineFacts => JobResult::MachineFacts(crate::machine::Facts::default()),
+        Job::Copy(_) => JobResult::Copied(Err(e)),
     }
 }
 
@@ -701,6 +713,8 @@ fn job_result(
             &paths.pci_ids,
             &paths.vainfo_cmd,
         )),
+        Job::MachineFacts => JobResult::MachineFacts(crate::machine::read(&paths.hardware_roots)),
+        Job::Copy(text) => JobResult::Copied(jobs::copy_text(&paths.wl_copy_cmd, &text)),
     }
 }
 
@@ -993,6 +1007,8 @@ impl App {
             net_roots: self.cfg.paths.net_roots.clone(),
             pci_ids: self.cfg.paths.pci_ids.clone(),
             vainfo_cmd: self.cfg.paths.vainfo_cmd.clone(),
+            wl_copy_cmd: self.cfg.paths.wl_copy_cmd.clone(),
+            hardware_roots: self.cfg.paths.hardware_roots.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -1183,6 +1199,7 @@ impl App {
                 let poll = upgrade_wake(menu.screen, &menu.upgrade.stage, shown)
                     .into_iter()
                     .chain(network_wake(menu.screen, menu.settings_tab, shown))
+                    .chain(machine_wake(menu, now, shown))
                     .chain(menu.monitors.next_wake(now))
                     .min();
                 let at = Instant::now();
@@ -1661,6 +1678,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         }
     }
 
@@ -1936,6 +1955,39 @@ esac"#;
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Network, false), None);
         assert_eq!(network_wake(Screen::Settings, SettingsTab::Packages, true), None);
         assert_eq!(network_wake(Screen::Grid, SettingsTab::Network, true), None);
+    }
+
+    #[test]
+    fn the_uptime_row_wakes_the_loop_only_while_its_tab_is_on_screen() {
+        let mut menu = Menu::new(
+            crate::tiles::Grid {
+                tiles: Vec::new(),
+                banner: Vec::new(),
+            },
+            false,
+        );
+        let now = Instant::now();
+        menu.screen = Screen::Settings;
+        menu.settings_tab = SettingsTab::Machine;
+        assert_eq!(menu.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        assert_eq!(machine_wake(&menu, now, true), None, "no reading yet");
+        let f = crate::machine::Facts {
+            uptime: Some(30),
+            ..Default::default()
+        };
+        menu.finished(crate::jobs::JobResult::MachineFacts(f), now);
+        let wake = machine_wake(&menu, now, true).unwrap();
+        assert!(
+            wake > Duration::from_secs(29) && wake < Duration::from_secs(31),
+            "{wake:?}"
+        );
+        assert_eq!(machine_wake(&menu, now, false), None, "covered");
+        // Another tab, before a tick told the tab: no wake already.
+        menu.settings_tab = SettingsTab::Packages;
+        assert_eq!(machine_wake(&menu, now, true), None);
+        menu.settings_tab = SettingsTab::Machine;
+        menu.screen = Screen::Grid;
+        assert_eq!(machine_wake(&menu, now, true), None);
     }
 
     fn area(text: &[u8]) -> crate::status::Area {
