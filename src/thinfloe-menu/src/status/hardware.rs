@@ -63,11 +63,14 @@ fn line(label: impl AsRef<str>, value: impl AsRef<str>) -> Line {
 }
 
 /// The unit a size of `total` bytes is shown in: its divisor, name and
-/// decimals. GiB with one decimal from 1 GiB on, else whole MiB.
+/// decimals. Whole MiB, unless that shows 1024 MiB or more: then GiB with
+/// one decimal. The choice follows the rounded text, so 1 GiB less one byte
+/// reads `1.0 GiB`, not `1024 MiB`.
 fn unit(total: u64) -> (f64, &'static str, usize) {
     const MIB: f64 = 1024.0 * 1024.0;
     const GIB: f64 = 1024.0 * MIB;
-    if total as f64 >= GIB {
+    let mib: f64 = format!("{:.0}", total as f64 / MIB).parse().unwrap_or(f64::MAX);
+    if mib >= 1024.0 {
         (GIB, "GiB", 1)
     } else {
         (MIB, "MiB", 0)
@@ -698,7 +701,17 @@ mod tests {
             "never over the total"
         );
         assert_eq!(size(GIB), "1.0 GiB");
-        assert_eq!(size(GIB - 1), "1024 MiB");
+        // Rounds to 1024 MiB, so it is shown as the GiB it rounds to.
+        assert_eq!(size(GIB - 1), "1.0 GiB");
+        assert_eq!(size(GIB - 512 * 1024), "1.0 GiB");
+        assert_eq!(size(GIB - 512 * 1024 - 1), "1023 MiB");
+        assert_eq!(
+            usage(Usage {
+                used: 512 * 1024 * 1024,
+                total: GIB - 1
+            }),
+            "0.5 / 1.0 GiB"
+        );
         assert_eq!(size(512 * 1024 * 1024), "512 MiB");
         assert_eq!(clock(800), "800 MHz");
         assert_eq!(clock(2401), "2.4 GHz");

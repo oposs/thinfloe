@@ -12,9 +12,9 @@
 ### Changed
 
 - The "Network details" tile is now the "Connection" tile, with the link, the IPv4 address, the VPN and, when switched on, the public address. Down, Up, Peak, Total and Since are gone: the traffic graph shows the rates, and the gateway and DNS servers are on the Network tab. A saved status layout keeps the tile at its place and size.
-- The "Fans, uptime, model" tile is gone, and the fan speeds are now a line in the "Temperatures and fans" tile; uptime, maker and model are on the This machine tab. A saved status layout drops the old tile without a note.
+- The "Fans, uptime, model" tile is gone, and the fan speeds are now a line in the "Temperatures and fans" tile; uptime, maker and model are on the This machine tab. A saved status layout drops the old tile without a note; without a saved layout, the clock now sits under the batteries and the bottom row holds temperatures, CPU and memory.
 - The clock tile has a third line with the time zone, for example `Zone Europe/Zurich`, or `CET` for a zone set without a name.
-- On a small screen, where the status area has one row, the traffic graph is two cells wide instead of three.
+- On a low screen (the status area has one row), the traffic graph is two cells wide instead of three.
 
 ### Fixed
 
