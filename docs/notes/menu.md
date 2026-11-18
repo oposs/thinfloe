@@ -1,4 +1,4 @@
-This note covers how the tile menu works: the window rules, tiles and icons, the Upgrade screen, density, monitor arrangement, its log, failure handling and its known limits.
+This note covers how the tile menu works: the window rules, tiles and icons, the Upgrade screen, density, monitor arrangement, the Network tab, the Graphics band, the This machine tab, its log, failure handling and its known limits.
 
 ## Window rules and folded windows
 
@@ -239,6 +239,78 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   Guards: the `netfiles` and `network` tests,
   `every_network_control_scrolls_into_reach`,
   `test/integration/test-network-netplan.sh`.
+
+## Settings facts: Network, Screen and This machine
+
+Facts that do not change while the machine runs live in Settings, not in
+the status area (see [status-area.md](status-area.md)).
+
+**Network tab, "Connections now".** Under each interface line a muted line
+(`nettab::detail_line`) joins with ` · ` what is known: `MAC
+3c:52:82:aa:bb:cc` (an all-zero MAC is left out), `gateway 192.168.1.1`
+for the interface holding the default route, and for WiFi the chip and the
+driver (`device/driver` link name). The chip is the PCI vendor and device
+name from `/usr/share/misc/pci.ids` (package `pciutils`), else `8086:2723`,
+or `USB 0bda:8179` for a USB adapter. Below the interfaces a row `DNS in
+use 192.168.1.1, 9.9.9.9` (or `DNS in use: none`) gives the servers the
+machine uses now, from `/run/systemd/resolve/resolv.conf`, else
+`/etc/resolv.conf`; it shows only after the first status answer without an
+error, so it never says "none" too early. The "DNS servers" field further
+down holds only configured servers. `netdetail::read` runs in the job
+thread after each successful `thinfloe-network status`, so the facts are
+read when the tab opens and on each of its refreshes; it reads `/sys` and
+`/proc`, bounded, and starts no subprocess. A failed status call keeps the
+last list and the details read with it.
+
+**Network tab, "Public IP address".** A band after DNS with the switch
+"Show the public IP address" and the field "Lookup address" (hint
+`https://api.ipify.org`, the address used while the field is empty). It is
+outside the Apply group: it takes clicks before the network files are
+read and while an Apply or a take-over runs. The switch saves
+`public_ip` in `[network]` at once; the address saves as `public_ip_url`
+on Enter, when the field loses focus, and when the user leaves the Network
+tab. Escape puts the saved address back, and Back discards a typed one;
+neither saves. An address `publicip::url_ok` refuses is not saved and the
+field shows "Only https:// addresses are used." Writes run one at a time,
+the latest click waits behind the running one, and a logout waits for
+them. A failed save puts the switch and the saved address back to what
+`config.toml` holds, shows the error line and logs a warning; text typed
+since the commit stays in the field. A network Apply or take-over keeps
+both keys. The lookup itself: [status-area.md](status-area.md#public-ip-lookup).
+
+**Screen tab, "Graphics".** A band after the monitors: per DRM card
+(`/sys/class/drm/card<N>`, at most 16, a card without PCI ids such as
+simpledrm left out) a row `GPU` with the `pci.ids` name or the ids
+(`8086:1916`) and a row `Driver` (left out without a driver link), then the
+VA-API codecs as muted lines such as `H.264 decode, encode`, `HEVC decode`
+(H.264, HEVC, VP9 and AV1 only, in that order), `VA-API not available`, or
+`No graphics device found`; `Reading…` until the job answers. The job runs
+once per menu run, when the Settings screen first shows the Screen tab
+(from `tick`, since the click that leaves the Network tab already carries
+the public IP write as its one effect). It runs `vainfo --display drm`
+(`TF_VAINFO_CMD` replaces `vainfo`) through `quiet::run`, 5 s timeout, at
+most 64 KiB of output. A failure, a timeout, a full cap or a listing
+without codecs is "not available", and the menu log gets one line `VA-API
+not available: <cause>.` under the source `graphics`. The codecs are those
+of libva's default render node, not tied to one GPU row on a machine with
+two. tfuser is not in the `render` or `video` group; the render node is
+reached through logind's `uaccess` ACL for the tty1 session (not verified
+on hardware).
+
+**This machine tab.** The last Settings tab. Rows: Maker, Model, CPU
+model, Cores, RAM, ThinFloe version, Kernel, Boot (`USB` or `Netboot`),
+Hostname, Uptime, then one row per installed add-on with its version; an
+unknown value leaves its row out. The facts (`machine::read`: DMI,
+`/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`,
+`/proc/sys/kernel/osrelease`, bounded) are read each time the tab opens;
+the uptime counts on from that reading and the loop wakes for it once a
+minute only while the tab is on screen. Copy puts all rows on the
+clipboard as `Label: value` lines with `wl-copy` (`TF_WL_COPY_CMD`), 3 s
+timeout; `wl-copy` forks a server that keeps the text, and the menu leaves
+that fork running. The button is off while a copy runs; then the band
+says "Copied" or shows the error in the warning colour, and a failure is
+also logged as "Could not copy to the clipboard: <error>." The tab changes
+nothing, so it stays enabled after a failed migration of the settings.
 
 ## Keyboard tab
 
