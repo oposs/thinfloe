@@ -16,7 +16,19 @@ pub struct Clock;
 
 const SIZES: &[Size] = &[Size { w: 1, h: 1 }];
 
-/// `Time 14:05` and `Date Thu 5 Nov 2026` at `epoch` seconds in `zone`.
+/// How `zone` is named on the tile: its IANA name, or the abbreviation in
+/// force at `ts` (`CET`, `CEST`) for a zone with none. `log::zone_for` names
+/// a copied `/etc/localtime` "localtime" and a `TZ=` rule has no name at all;
+/// neither tells the reader anything.
+pub fn zone_label(zone: &TimeZone, ts: Timestamp) -> String {
+    match zone.iana_name() {
+        Some(name) if name != "localtime" => name.to_string(),
+        _ => zone.to_offset_info(ts).abbreviation().to_string(),
+    }
+}
+
+/// `Time 14:05`, `Date Thu 5 Nov 2026` and `Zone Europe/Zurich` at `epoch`
+/// seconds in `zone`.
 fn lines_at(epoch: i64, zone: &TimeZone) -> Vec<(&'static str, String)> {
     let Ok(ts) = Timestamp::from_second(epoch) else {
         return Vec::new();
@@ -25,12 +37,17 @@ fn lines_at(epoch: i64, zone: &TimeZone) -> Vec<(&'static str, String)> {
     vec![
         ("Time", at.strftime("%H:%M").to_string()),
         ("Date", at.strftime("%a %-d %b %Y").to_string()),
+        ("Zone", zone_label(zone, ts)),
     ]
 }
 
 /// Draw label and value lines in `rect` of `size` cells, centred: the label
 /// in Geo from the left padding, the value right-aligned at the right one.
-/// A label that would run into its value is left out.
+/// A label that would run into its value is left out. A value too wide for
+/// the space right of the label is cut from the start and prefixed with `…`:
+/// the city at the end of `America/Argentina/Buenos_Aires` tells more than
+/// the continent. Only when not even `…` and one letter fit beside the label
+/// is the label dropped and the whole width left to the value.
 fn paint(ui: &egui::Ui, rect: Rect, size: Size, lines: &[(&str, String)], gap_between_cells: f32) {
     let t = Theme::current(ui.ctx());
     let fg = t.palette().foreground;
@@ -41,8 +58,16 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, lines: &[(&str, String)], gap_be
     let (left, right) = (rect.left() + m.pad_x, rect.right() - m.pad_x);
     for (i, (label, value)) in lines.iter().enumerate() {
         let mid = top + (i as f32 + 0.5) * m.row;
-        let v = p.layout_no_wrap(value.clone(), FontId::proportional(m.value), fg);
+        let font = FontId::proportional(m.value);
         let l = p.layout_no_wrap(label.to_string(), crate::brand::geo(m.label), fg);
+        let beside_label = right - (left + l.size().x + m.gap);
+        let width_of = |s: &str| p.layout_no_wrap(s.to_string(), font.clone(), fg).size().x;
+        let room = if width_of(&cut_to_fit(value, beside_label, &width_of)) > beside_label {
+            right - left
+        } else {
+            beside_label
+        };
+        let v = p.layout_no_wrap(cut_to_fit(value, room, &width_of), font, fg);
         let vx = right - v.size().x;
         if vx >= left {
             p.galley(pos2(vx, mid - v.size().y / 2.0), v, fg);
@@ -51,6 +76,20 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, lines: &[(&str, String)], gap_be
             p.galley(pos2(left, mid - l.size().y / 2.0), l, fg);
         }
     }
+}
+
+/// `value`, or its end behind a `…` when `width_of` says it is wider than
+/// `room`: the longest end that fits.
+fn cut_to_fit(value: &str, room: f32, width_of: &dyn Fn(&str) -> f32) -> String {
+    if width_of(value) <= room {
+        return value.to_string();
+    }
+    value
+        .char_indices()
+        .skip(1)
+        .map(|(i, _)| format!("…{}", &value[i..]))
+        .find(|s| width_of(s) <= room)
+        .unwrap_or_else(|| "…".to_string())
 }
 
 impl Element for Clock {
@@ -111,17 +150,97 @@ mod tests {
         let at = |epoch, zone: &str| lines_at(epoch, &jiff::tz::db().get(zone).unwrap());
         assert_eq!(
             at(12 * 3600, "UTC"),
-            [pair("Time", "12:00"), pair("Date", "Thu 1 Jan 1970")]
+            [
+                pair("Time", "12:00"),
+                pair("Date", "Thu 1 Jan 1970"),
+                pair("Zone", "UTC")
+            ]
         );
         assert_eq!(
             at(12 * 3600, "Asia/Kolkata"),
-            [pair("Time", "17:30"), pair("Date", "Thu 1 Jan 1970")]
+            [
+                pair("Time", "17:30"),
+                pair("Date", "Thu 1 Jan 1970"),
+                pair("Zone", "Asia/Kolkata")
+            ]
         );
         // The date turns over with the zone, not with UTC.
         assert_eq!(
             at(20 * 3600, "Asia/Kolkata"),
-            [pair("Time", "01:30"), pair("Date", "Fri 2 Jan 1970")]
+            [
+                pair("Time", "01:30"),
+                pair("Date", "Fri 2 Jan 1970"),
+                pair("Zone", "Asia/Kolkata")
+            ]
         );
+    }
+
+    fn label_at(zone: &TimeZone, epoch: i64) -> String {
+        zone_label(zone, Timestamp::from_second(epoch).unwrap())
+    }
+
+    const JANUARY: i64 = 1_767_225_600; // 2026-01-01
+    const JULY: i64 = 1_782_864_000; // 2026-07-01
+
+    #[test]
+    fn the_zone_line_names_an_iana_zone() {
+        let zurich = jiff::tz::db().get("Europe/Zurich").unwrap();
+        assert_eq!(lines_at(JANUARY, &zurich)[2], pair("Zone", "Europe/Zurich"));
+    }
+
+    #[test]
+    fn a_posix_tz_shows_its_abbreviation() {
+        let tz = TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap();
+        assert_eq!(label_at(&tz, JANUARY), "CET");
+        assert_eq!(label_at(&tz, JULY), "CEST");
+    }
+
+    #[test]
+    fn a_copied_localtime_shows_its_abbreviation() {
+        let dir = crate::testdir::TestDir::new("clock", "localtime");
+        let copy = dir.join("localtime");
+        std::fs::copy("/usr/share/zoneinfo/Europe/Zurich", &copy).unwrap();
+        let tz = crate::log::zone_for(None, &copy);
+        assert_eq!(label_at(&tz, JANUARY), "CET");
+    }
+
+    #[test]
+    fn utc_is_utc() {
+        assert_eq!(label_at(&TimeZone::UTC, JANUARY), "UTC");
+    }
+
+    #[test]
+    fn a_long_zone_keeps_the_city() {
+        // The tile is 220 points wide and the zone fits there; a narrower
+        // rect stands for a larger font scale or a longer name.
+        let one = Size { w: 1, h: 1 };
+        let zone = "America/Argentina/Buenos_Aires";
+        for h in testing::CELL_HEIGHTS {
+            let mut rect = rect_of(one, h);
+            rect.set_width(150.0);
+            let lines = [pair("Zone", zone)];
+            let ctx = egui::Context::default();
+            crate::brand::apply(&ctx);
+            let mut out = None;
+            for _ in 0..3 {
+                let mut o = ctx.run_ui(Default::default(), |ui| paint(ui, rect, one, &lines, 3.0));
+                o.textures_delta.clear();
+                out = Some(o);
+            }
+            let shapes: Vec<egui::Shape> = out.unwrap().shapes.into_iter().map(|c| c.shape).collect();
+            let got = testing::texts(&shapes);
+            let value = &got[0].0;
+            assert!(
+                value.starts_with('…') && value.ends_with("Buenos_Aires"),
+                "{h}: {got:?}"
+            );
+            for s in testing::flatten(&shapes) {
+                if let egui::Shape::Text(t) = s {
+                    let r = t.visual_bounding_rect();
+                    assert!(rect.contains_rect(r), "{h}: {r:?} outside {rect:?}");
+                }
+            }
+        }
     }
 
     #[test]
