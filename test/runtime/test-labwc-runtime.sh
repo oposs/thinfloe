@@ -8,7 +8,8 @@
 # output size, rasterises on the CPU and keeps running, and that a fullscreen
 # window keeps the keyboard focus when the menu replaces its window behind it,
 # and that labwc loads no keybindings: Alt-Tab and its kin reach the focused
-# window.
+# window, and that a keybinding marked allowWhenInhibited passes an X11
+# keyboard grab while an unmarked one does not.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -899,6 +900,91 @@ if [[ "$KB_RESULT" == "kb_before=active kb_after=active kb_bytes=78 1b 09 1b 20 
     echo "ok   - Alt-Tab, Alt-Space and Super-a reach the focused window, which keeps the focus"
 else
     echo "FAIL - keys did not all reach the focused window: $KB_RESULT (expected kb_before=active kb_after=active kb_bytes=78 1b 09 1b 20 61 79)"
+    fail=1
+fi
+
+
+# Volume and brightness keys must reach the machine while ThinLinc holds an
+# X11 keyboard grab or OxuLnk a shortcuts inhibitor, and nothing else may
+# (containers/ubuntu/patches/0006-keybind-allow-when-inhibited.patch). A test
+# rc.xml has two bindings: XF86AudioRaiseVolume with allowWhenInhibited="yes"
+# appends "pass" to /tmp/hits, XF86AudioLowerVolume without it "plain". wtype
+# starts first, so a virtual keyboard exists before Xwayland starts (Xwayland
+# installs its grab hook only when the seat has a keyboard), and sends both
+# keys after 4 s. The probe maps a window, takes the X11 grab with --grab, and
+# prints the keys it gets (--keymap names wtype's key codes, which Xwayland's
+# default keymap in this rig does not). Under the grab only the marked binding runs and the
+# plain key reaches the probe; the control run without the grab runs both
+# bindings, which proves the rig sends both keys.
+# No client in this rig creates a zwp_keyboard_shortcuts_inhibitor_v1; the
+# OxuLnk path rests on the same line of labwc and stays an owner check.
+# shellcheck disable=SC2016 # expands inside the container
+gb_rcxml='<?xml version="1.0"?>
+<labwc_config>
+  <keyboard>
+    <keybind key="XF86AudioRaiseVolume" allowWhenInhibited="yes"><action name="Execute" command="sh -c '"'"'echo pass >>/tmp/hits'"'"'" /></keybind>
+    <keybind key="XF86AudioLowerVolume"><action name="Execute" command="sh -c '"'"'echo plain >>/tmp/hits'"'"'" /></keybind>
+  </keyboard>
+</labwc_config>'
+# shellcheck disable=SC2016 # expands inside the container
+gb_script='touch /tmp/hits
+wtype -s 4000 -k XF86AudioRaiseVolume -s 300 -k XF86AudioLowerVolume &
+sleep 0.5
+python3 /usr/local/bin/x11-probe.py $GB_GRAB --keymap XF86AudioRaiseVolume,XF86AudioLowerVolume --keys 7
+echo "hits=$(tr "\n" " " </tmp/hits)"
+exit 0'
+gb_run() {
+    local name="thinfloe-runtime-test-gb-$1-$$"
+    local grab_arg=""
+    [[ $1 == grab ]] && grab_arg="--grab"
+    GB_OUT=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e GB_GRAB="$grab_arg" \
+        -e GB_RCXML="$gb_rcxml" \
+        -e GB_SCRIPT="$gb_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/gb && chmod 700 /tmp/xdg &&
+               cp /etc/thinfloe/labwc/themerc-override /etc/thinfloe/labwc/environment /tmp/gb/ &&
+               printf "%s\n" "$GB_RCXML" >/tmp/gb/rc.xml &&
+               printf "%s\n" "$GB_SCRIPT" >/tmp/gb.sh &&
+               WAYLAND_DEBUG=1 labwc -C /tmp/gb -S "sh /tmp/gb.sh"' 2>&1)
+    local rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during grab bypass test)"
+        echo "$GB_OUT" | grep -E '^(KEY |hits=)'
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+    GB_HITS=$(echo "$GB_OUT" | grep -E '^hits=' | tail -1)
+    GB_KEYS=$(echo "$GB_OUT" | grep -E '^KEY ' | tr '\n' ' ')
+}
+
+gb_run grab
+if ! echo "$GB_OUT" | grep -Eq 'zwp_xwayland_keyboard_grab_manager_v1[@#][0-9]+\.grab_keyboard\('; then
+    echo "skip - the rig cannot drive an X11 keyboard grab; the grab bypass is an owner check on hardware"
+else
+    if [[ "$GB_HITS" == "hits=pass " ]]; then
+        echo "ok   - under an X11 keyboard grab only the allowWhenInhibited binding runs"
+    else
+        echo "FAIL - under an X11 keyboard grab: $GB_HITS (expected hits=pass )"
+        fail=1
+    fi
+    if [[ "$GB_KEYS" == *"KEY XF86AudioLowerVolume "* && "$GB_KEYS" != *"KEY XF86AudioRaiseVolume "* ]]; then
+        echo "ok   - the grabbing client gets the plain key and not the allowWhenInhibited one"
+    else
+        echo "FAIL - keys at the grabbing client: '$GB_KEYS' (expected KEY XF86AudioLowerVolume only)"
+        fail=1
+    fi
+fi
+
+gb_run nograb
+if [[ "$GB_HITS" == "hits=pass plain " ]]; then
+    echo "ok   - without a grab both bindings run (control)"
+else
+    echo "FAIL - control run without a grab: $GB_HITS (expected hits=pass plain )"
     fail=1
 fi
 

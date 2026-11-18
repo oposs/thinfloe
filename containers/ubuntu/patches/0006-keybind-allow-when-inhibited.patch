@@ -1,0 +1,58 @@
+Description: keybindings marked allowWhenInhibited pass a grab or inhibitor
+ While a view switches the keybindings off, labwc 0.9.3 skips every
+ keybinding but ToggleKeybinds. ThinFloe's labwc switches them off for an
+ X11 keyboard grab (0002, ThinLinc) and for a keyboard shortcuts inhibitor
+ (0004, OxuLnk), so with a remote session in front the volume and
+ brightness keys went to the remote machine and never changed the local
+ volume or backlight.
+ .
+ A <keybind> with allowWhenInhibited="yes" (a boolean like allowWhenLocked)
+ now matches while the bindings are off. A binding without it behaves as
+ before. The attribute lets rc.xml stay the one place that says which keys
+ pass: thinfloe-compose-labwc-config sets it on the media keys only.
+ .
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2026-11-18
+---
+--- a/include/config/keybind.h
++++ b/include/config/keybind.h
+@@ -20,6 +20,7 @@
+ 	size_t keycodes_len;
+ 	int keycodes_layout;
+ 	bool allow_when_locked;
++	bool allow_when_inhibited;
+ 	struct wl_list actions;  /* struct action.link */
+ 	struct wl_list link;     /* struct rcxml.keybinds */
+ 	bool on_release;
+--- a/src/config/rcxml.c
++++ b/src/config/rcxml.c
+@@ -563,6 +563,7 @@
+ 	lab_xml_get_bool(node, "onRelease", &keybind->on_release);
+ 	lab_xml_get_bool(node, "layoutDependent", &keybind->use_syms_only);
+ 	lab_xml_get_bool(node, "allowWhenLocked", &keybind->allow_when_locked);
++	lab_xml_get_bool(node, "allowWhenInhibited", &keybind->allow_when_inhibited);
+ 
+ 	append_parsed_actions(node, &keybind->actions);
+ }
+--- a/src/input/keyboard.c
++++ b/src/input/keyboard.c
+@@ -196,7 +196,15 @@
+ 		if (modifiers ^ keybind->modifiers) {
+ 			continue;
+ 		}
+-		if (view_inhibits_actions(server->active_view, &keybind->actions)) {
++		/*
++		 * thinfloe: a binding with allowWhenInhibited="yes" runs even
++		 * while a keyboard grab, a shortcuts inhibitor or ToggleKeybinds
++		 * switches the bindings off. thinfloe-compose-labwc-config sets
++		 * it on the volume and brightness keys only.
++		 */
++		if (!keybind->allow_when_inhibited
++				&& view_inhibits_actions(server->active_view,
++					&keybind->actions)) {
+ 			continue;
+ 		}
+ 		if (sym == XKB_KEY_NoSymbol) {
