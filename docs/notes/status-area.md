@@ -1,6 +1,10 @@
-This note covers the menu's status area as built on the status-area branch (design of 2026-11-10): elements, placement, the layout in `config.toml`, the Status tab, the samplers and what each element shows.
+This note covers the menu's status area: elements, placement, the layout in `config.toml`, the Status tab, the samplers, the public IP lookup and what each element shows.
 
-The design is `docs/superpowers/specs/2026-11-10-status-area-design.md`. It
+The design is `docs/superpowers/specs/2026-11-10-status-area-design.md`,
+with part 1 of `docs/superpowers/specs/2026-11-17-status-redesign-design.md`
+on top (tiles show only values that change while the machine runs; fixed
+facts moved to the Network, Screen and This machine tabs, see
+[menu.md](menu.md#settings-facts-network-screen-and-this-machine)). It
 replaces the drawing, configuration and elements of
 `docs/superpowers/specs/2026-11-03-status-area.md` (PR #6), which built SVG
 elements rendered with resvg and placed by files in `/etc/thinfloe/status/`.
@@ -36,7 +40,9 @@ None of that is in the code any more.
 - An element is a unit struct implementing `status::Element`
   (`src/thinfloe-menu/src/status/mod.rs`): `id`, `name`, `sizes` (the first
   is the default), `short_size`, `sources`, `has_content`, `draw`,
-  `next_change` and `refresh`. `status::ELEMENTS` lists them; its order is
+  `next_change`, `refresh` and `shown_by_default` (true unless the element
+  waits, hidden, in the Status tab until the user ticks it; no shipped
+  element sets it false yet). `status::ELEMENTS` lists them; its order is
   the default order. The comment at the top of `status/mod.rs` lists the
   steps to add one, including a new `Source`.
 - `draw` is pure (same data and time, same picture) and draws only inside
@@ -52,13 +58,15 @@ Shipped elements:
 | id | name | sizes (first = default) | short size | source | refresh |
 |---|---|---|---|---|---|
 | `battery` | Keyboard and mouse batteries | 1x1, 2x1 | 1x1 | Battery | on change |
-| `network` | Network traffic | 2x2, 3x1, 2x1 | 3x1 | Network | 1 s |
-| `network-info` | Network details | 1x2, 2x1 | none | Network | 1 s |
-| `temperatures` | Temperatures | 1x1, 1x2 | none | Hardware | 5 s |
+| `network` | Network traffic | 2x2, 3x1, 2x1 | 2x1 | Network | 1 s |
+| `connection` | Connection | 1x2, 2x1 | none | Network | 1 s |
+| `clock` | Clock | 1x1 | none | none | next minute |
+| `temperatures` | Temperatures and fans | 1x1, 1x2 | none | Hardware | 5 s |
 | `cpu` | CPU | 1x1 | none | Hardware | 5 s |
 | `memory` | Memory | 1x1 | none | Hardware | 5 s |
-| `system` | Fans, uptime, model | 1x1, 2x1 | none | Hardware | 5 s |
-| `clock` | Clock | 1x1 | none | none | next minute |
+
+The traffic graph's short size is 2x1, so the short screen's one row of
+four cells holds the battery 1x1 and the graph and still has room.
 
 ## Placement
 
@@ -72,16 +80,17 @@ Shipped elements:
 - The elements with content are packed into the planned rows only
   (`Area::shown_where`, `pack`'s `max_rows`). First fit over fewer elements
   can need more rows than over all of them (clock, battery, network 2x2,
-  network-info 2x1 with no battery: 2 planned, 3 needed), and an unreserved
+  connection 2x1 with no battery: 2 planned, 3 needed), and an unreserved
   row would cover the log. An element that would need one is left out
   ("no room"). So an element gaining content mid-session (a Bolt keyboard
   reconnecting) can push a later one out until it has none again.
   `shown_rows_never_exceed_planned_rows_for_any_content` tries every
   content subset of 302 layouts.
-- The default list packs to the layout of PR #6: battery 0,0; network 2x2
-  at 1,0; network-info 1x2 at 3,0; temperatures 0,1; cpu 0,2; memory 1,2;
-  system 2,2; clock 3,2 (`the_default_list_packs_to_the_pr6_layout`). On a
-  short screen: battery and the graph at 3x1.
+- The default list packs to battery 0,0; network 2x2 at 1,0; connection
+  1x2 at 3,0; clock 0,1; temperatures 0,2; cpu 1,2; memory 2,2; cell 3,2
+  stays free (`the_default_list_packs_to_the_redesign_layout`). On a short
+  screen: battery 1x1 and the graph 2x1
+  (`a_short_screen_holds_battery_and_the_traffic_graph`).
 - The menu asks for a frame at the soonest `refresh` or `next_change` of the
   elements drawn (`Area::wake`).
 
@@ -101,9 +110,16 @@ Shipped elements:
 - An unknown id (a newer image wrote the list): kept, not drawn, written
   back at its place, one note.
 - A size the element does not offer: its default size, one note.
-- An element the list does not name (a newer image added it): appended,
-  shown, at its default size. The packing places it only where room is
-  left.
+- An element the list does not name (a newer image added it): appended
+  at its default size, shown unless `shown_by_default` is false. The
+  packing places it only where room is left.
+- Retired ids (`layout::RETIRED`): a `network-info` line becomes
+  `connection` at the same place, size and tick (both offer 1x2 and 2x1);
+  a `system` line is dropped (its fans are in `temperatures`). Neither
+  gives a note, and neither is written back. When the list also has a
+  `connection` line, the first of the two wins: a `network-info` line
+  after it is dropped silently, a `connection` line after a mapped
+  `network-info` gets the note for a second line.
 - Each note opens the menu's log as a warning once; the same list read
   again logs nothing new (notes are compared without their line number,
   `layout::note_key`). `thinfloe-menu --check` prints `status: layout from
@@ -122,8 +138,8 @@ Shipped elements:
   in the list's order: a tick box, a size select offering only the
   element's `sizes()`, and Up and Down buttons. Unknown ids get no row.
   A click on the name ticks the box too. The rows are as high as the small
-  controls (shadcn-egui `layout::row`, 2 pt above and below), so all eight
-  fit above the preview at 1920 x 1080; `ui.horizontal` made each row the
+  controls (shadcn-egui `layout::row`, 2 pt above and below), so all
+  seven fit above the preview at 1920 x 1080; `ui.horizontal` made each row the
   default button's height and two scrolled away. The note is cut with an
   ellipsis where the name and the controls leave no room.
 - A ticked element that is not drawn shows a muted note (`statustab::rows`),
@@ -155,16 +171,16 @@ Shipped elements:
 - Network (`netstat.rs`, every 1 s): reads while a ticked element needs it
   and no window covers the menu. No subprocess: `/proc/net/route` (lowest
   metric), `getifaddrs`, `statistics/{rx,tx}_bytes`, `speed` (`-1` is
-  none), `/proc/net/wireless` or a `wireless/` directory,
-  `/run/systemd/resolve/resolv.conf` (else `/etc/resolv.conf`), and `wg0`'s
-  `flags` (`IFF_UP`; its operstate is `unknown` while up). 300 samples per
+  none), `/proc/net/wireless` or a `wireless/` directory, and `wg0`'s
+  `flags` (`IFF_UP`; its operstate is `unknown` while up). It reads no
+  resolv.conf: the DNS servers in use are on the Network tab
+  (`netstat::dns_in_use`, read with the tab's status). 300 samples per
   direction; a rate is the byte delta over the real elapsed time. A counter
-  that goes back or a new interface starts the graph again with no spike,
-  and the total keeps counting. A reading more than 3 s after the last (the
-  sampler rested while covered) clears the graph and pushes no rate; its
-  bytes still count in the total. Without a default route the first
-  interface with an address is measured (`no default route`); with no
-  address but loopback and link-local the network elements have no content.
+  that goes back or a new interface starts the graph again with no spike.
+  A reading more than 3 s after the last (the sampler rested while covered)
+  clears the graph and pushes no rate. Without a default route the first
+  interface with an address is measured; with no address but loopback and
+  link-local the network elements have no content.
   It stays separate from the Network tab's `sudo -n thinfloe-network status`,
   which runs as root only while that tab is open.
 - Hardware (`hardware.rs`, every 5 s): reads while no window covers the
@@ -174,6 +190,42 @@ Shipped elements:
 - Battery: the menu reads `/run/thinfloe/peripherals/battery` at start and
   on every change seen by its once-a-second file watch (`battery.rs`). See
   [peripheral-battery.md](peripheral-battery.md) for the reader.
+
+## Public IP lookup
+
+- Off unless the user switches it on: `public_ip` (default `false`) and
+  `public_ip_url` (default `""`, meaning `https://api.ipify.org`) in
+  `[network]` of `config.toml`, set on the Network tab (see
+  [menu.md](menu.md#settings-facts-network-screen-and-this-machine)).
+- Its own thread (`publicip::spawn`), started the first time the switch is
+  on and never before; never in the network sampler. It looks every second
+  at what the app wants (`publicip::Want`) and is active only while the
+  switch is on, `connection` has cells on this screen
+  (`Area::places_element`), the network sampler reads (so not while a window
+  covers the menu, not on a short screen, not when unticked) and the
+  sampler's route has an interface.
+- While active it asks (`Schedule::due`) the first time, when the route
+  (interface, gateway or IPv4 address) changes but at least 30 s after the
+  last ask (`ROUTE_PAUSE`), and 15 minutes after the last (`EVERY`). The
+  switch going off or a new lookup address starts the schedule over; off
+  also clears the answer, so turning it on shows nothing old. An answer to
+  prefs that changed during the lookup is thrown away.
+- The request: `curl -q -s --globoff --proto =https --max-redirs 0
+  --max-time 5 --max-filesize 64 --write-out '\n%{response_code}' --url
+  <address>` through `quiet::run` (own process group, at most 128 bytes of
+  stdout, killed after 8 s). `-q` keeps a `.curlrc` in the travelling home
+  out (it could set a proxy, `--insecure` or an output file); `--globoff`
+  keeps `[]` and `{}` from expanding into more requests; no redirect is
+  followed. `TF_CURL_CMD` replaces `curl` for tests.
+- Before every request the address is checked again (`publicip::url_ok`),
+  since `config.toml` can be edited by hand: `https://` (any case), a host
+  with a letter or digit before the first `:`, `/`, `?`, `#` or `@`, no
+  whitespace or control character, no `[`, `]`, `{` or `}` (so no IPv6
+  literal host either), at most 256 bytes.
+- An answer is status 200 and a body of at most 64 bytes that, trimmed,
+  parses as an IPv4 or IPv6 address; anything else is `Failed`. A turn to
+  `Failed` logs one warning `public IP lookup failed: <reason>` under the
+  source `public-ip`; the reason never quotes the body.
 
 ## What each element shows
 
@@ -196,35 +248,45 @@ Shipped elements:
   one row (3x1, 2x1) it is the graph alone edge to edge, with the rate
   labels (none for 0), unit and legend inside the plot on a backing and no
   time labels.
-- Network details: one fact per row, label in Geo, value from one column:
-  `Down`, `Up`, `Peak`, `Total` (since the click on the oldest running
-  Save-On-Exit tile, ThinLinc or OxuLnk, else since the menu start; when the
-  oldest ends, the next one's own start counts), `Since`, `Link`
-  (`eth0 1 Gbit/s`, `wlan0 WiFi -56 dBm`), `IPv4`, `Gateway`, `DNS` (each
-  further server a row without a label), `VPN` (`wg0 up`/`down`, `no VPN`).
-  It has content when the graph has. Rows move closer down to a minimum,
-  then rows are left out: further DNS servers (the last first), the peak,
-  the since, the total, DNS, the gateway, the link; rates, address and VPN
-  stay. A `Link` row too wide leaves out the word `WiFi`; a value still too
-  long is cut at the padding. On the tightest rows the Geo labels are half a
-  point smaller (`label_in_row`).
-- Clock: `Time 14:05` and `Date Thu 5 Nov 2026` in the machine's zone, with
-  English names whatever the locale; drawn again when the minute turns. It
-  always has content. It has no short size; the header shows the time on a
+- Connection: one fact per row, label in Geo, value from one column:
+  `Link` (`eth0 1 Gbit/s`, `wlan0 WiFi -56 dBm`; `no interface` in the
+  warning colour), `IPv4` (`192.168.1.23/24`; `no IPv4 address`), `VPN`
+  (`wg0 up`/`down`, `no VPN`), and `Public` while the lookup is on and has
+  answered (the address, or a muted `–` after a failure). The value column
+  starts after the widest of the four labels, so it does not move when
+  `Public` comes or goes. It has content when the graph has. The rates are
+  in the graph only; gateway and DNS are on the Network tab. All four rows
+  fit at both shipped sizes and both cell heights; only a rect squeezed
+  below that first moves the rows together down to `min_row`, then leaves
+  out `Public`, then `VPN`; `Link` and `IPv4` stay. A `Link` row too wide
+  leaves out the word `WiFi`; a value still too long is cut at the padding.
+  On the tightest rows the Geo labels are half a point smaller
+  (`label_in_row`); with at most four rows the shipped sizes never get
+  that tight.
+- Clock: `Time 14:05`, `Date Thu 5 Nov 2026` and `Zone Europe/Zurich` in
+  the machine's zone, with English names whatever the locale; drawn again
+  when the minute turns. The zone line is the zone's IANA name; a zone
+  without one (a POSIX `TZ=CET-1CEST`, a copied `/etc/localtime`, which
+  `log::zone_for` names `localtime`) shows its abbreviation in force
+  (`CET`); no zone is `UTC`. A value too wide is cut from the start behind
+  `…`, keeping the city; only when not even `…` and one letter fit beside
+  the label is the label left out. It always has content. It has no short size; the header shows the time on a
   short screen. Wall time and zone come through `Data`, read once per frame
   by the app, so a DHCP zone that arrives later shows at the next minute.
-- Hardware: four elements fed by one sampler, nothing pages. A label in Geo
+- Hardware: three elements fed by one sampler, nothing pages. A label in Geo
   on the left, the value on the right; a value the machine does not provide
   drops out with no placeholder, and an element with nothing is not drawn.
   `temperatures`: the sensors that fit; those left out are the least
   important (the first CPU sensor stays, then hot ones before normal ones,
   then the order of `sensor_name`: CPU, GPU, Disk, RAM, WiFi, LAN, Chipset,
-  Board, others), and those kept stay in that order. `cpu`: `CPU load`, `CPU
-  clock`. `memory`: `RAM`, `zram` (`3.1 / 8.0 GiB`). `system`: the fans on
-  one line (those that do not fit beside `Fans` with `rpm` are left out, the
-  first ones stay; a fan at 0 rpm drops out), `Up 3 d 4 h`, `Model
-  NUC8i3BEK` (`Maker` when the machine names no model), cut at its end when
-  too long.
+  Board, others), and those kept stay in that order. After the sensors, in
+  a line no sensor needs, the fans: `Fans 1200 900 rpm` (`Fan 1200 rpm`
+  for one); those that do not fit beside the label with `rpm` are left
+  out, the first ones stay, one fan always stays, and a fan at 0 rpm drops
+  out. The fan line goes first when lines run out. Sensors alone or fans
+  alone are content. `cpu`: `CPU load`, `CPU clock`. `memory`: `RAM`,
+  `zram` (`3.1 / 8.0 GiB`). Uptime, maker and model are on the This machine
+  tab.
 - Temperature colours (`hardware::thresholds`): critical 5 C below `crit`;
   hot at `max` when that is below critical, else 15 C below `crit`; with
   `max` alone, critical 15 C above it; with no limit 80 and 95 C. Limits
@@ -247,6 +309,8 @@ element and size is for PR reviews.
   hardware elements and the network list, the battery symbol, the alert
   colour (no device was below 10 %) and pages (only two devices).
 - The network sampler on real interfaces.
+- The public IP lookup against `api.ipify.org` from a real machine, and
+  the `Public` row on screen.
 - Hardware sensors: the names and labels are from memory (the development
   host is a VM with no hwmon); `k10temp`'s `tempN_max`, if it reports 70,
   would warn at 70 C; reading sensors every 5 s may wake a suspended

@@ -4,7 +4,17 @@
 
 ### New
 
+- Settings has a new tab, This machine: maker, model, CPU model and cores, RAM, ThinFloe version, kernel, boot from USB or network, host name, uptime, and each installed add-on with its version. Copy puts all of it on the clipboard as `Label: value` lines, ready to paste into a support request.
+- The Network tab shows the MAC address of each connection, the gateway of the one that carries the traffic, and for WiFi the chip and its driver. A new line "DNS in use" names the DNS servers the machine asks now, also when they come from DHCP.
+- The Screen tab has a Graphics band: the graphics chip, its driver, and the video formats (H.264, HEVC, VP9, AV1) it decodes or encodes in hardware, or "VA-API not available". When VA-API is not available, the menu log says why under `graphics`.
+- The Connection tile can show the machine's public IP address: switch on "Show the public IP address" on the Network tab (off by default). The address comes from `https://api.ipify.org`, or from an `https://` address typed under "Lookup address", and is asked only while the tile is on screen: at first, when the network changes and every 15 minutes. A failed lookup shows `Public –` and one line in the menu log.
+
 ### Changed
+
+- The "Network details" tile is now the "Connection" tile, with the link, the IPv4 address, the VPN and, when switched on, the public address. Down, Up, Peak, Total and Since are gone: the traffic graph shows the rates, and the gateway and DNS servers are on the Network tab. A saved status layout keeps the tile at its place and size.
+- The "Fans, uptime, model" tile is gone, and the fan speeds are now a line in the "Temperatures and fans" tile; uptime, maker and model are on the This machine tab. A saved status layout drops the old tile without a note.
+- The clock tile has a third line with the time zone, for example `Zone Europe/Zurich`, or `CET` for a zone set without a name.
+- On a small screen, where the status area has one row, the traffic graph is two cells wide instead of three.
 
 ### Fixed
 

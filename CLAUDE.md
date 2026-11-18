@@ -339,8 +339,8 @@ and hardware results:
 
 - [boot-flow.md](docs/notes/boot-flow.md): build containers, boot flow, SquashFS/ZRAM layering, machine-id, old enhancement ideas.
 - [boot-screen.md](docs/notes/boot-screen.md): palette, fonts, shadcn-egui, the Plymouth theme and its step line.
-- [menu.md](docs/notes/menu.md): window rules, tiles and icons, the Upgrade screen, density, monitor arrangement, the Network tab's DNS servers, the menu's log and failure handling, known limits.
-- [status-area.md](docs/notes/status-area.md): the status area, its elements, layout file, Status tab and samplers.
+- [menu.md](docs/notes/menu.md): window rules, tiles and icons, the Upgrade screen, density, monitor arrangement, the Network tab's DNS servers and public IP switch, the Graphics band, the This machine tab, the menu's log and failure handling, known limits.
+- [status-area.md](docs/notes/status-area.md): the status area, its elements, layout file, Status tab, samplers and the public IP lookup.
 - [peripheral-battery.md](docs/notes/peripheral-battery.md): the battery reader, its units, the HID++ details and hardware results.
 - [session.md](docs/notes/session.md): session startup, the user files, the labwc config merge, audio volume, screen blanking, GPU wait, terminals, screenshots.
 - [time-zone.md](docs/notes/time-zone.md): `TZ=`, the DHCP time zone and its tests.
