@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Alt-Tab switched between the windows on the ThinFloe desktop, the tile menu included, instead of reaching the ThinLinc session, even when that session was fullscreen; Alt-F4, Alt-Space, Super-Return, Super-a and Super with the arrow keys also acted on the desktop. ThinFloe now has no key shortcuts at all, so these keys reach the program that has the focus. The volume and brightness keys therefore no longer change the machine's own volume or screen brightness; they go to the focused program too.
 - The time zone from the DHCP server could stay at UTC after the start when the server's answer came in while an earlier one was still being read; it now always takes effect. A renewal that brings the same zone no longer logs `thinfloe: time zone <zone> from DHCP` again.
 - The Upgrade screen offered to upgrade a stick to the release it already had ("Upgrade this machine's stick to ThinFloe 4.5.0" on a 4.5.0 stick), and What's new then said "No changes between 4.5.0 and 4.5.0". It now says the stick already has that release and the button reads Write again, or Downgrade for a stick with a newer release; when the stick keeps an older release as fallback, it says that this one is dropped. What's new is off for such a stick, and also for a test build of the release it would get.
 

@@ -190,10 +190,14 @@ aborted. `--add-drivers` is no substitute.
 ### labwc must have zero keybindings
 
 `overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section with no
-`<default />` and no `<keybind>`. Our labwc's keyboard-grab patch would
+`<default />` and no `<keybind>`. That alone is not enough: labwc 0.9.3
+loads its built-in bindings (Alt-Tab, Alt-F4 and more) when rc.xml defines
+none, and `containers/ubuntu/patches/0005-no-default-keybinds.patch` removes
+that fallback. Our labwc's keyboard-grab patch would
 suspend bindings while ThinLinc holds the keyboard, but that is unverified on
 hardware; adding one is a deliberate decision followed by `make test-runtime`.
-Guard: `test-session-packages.sh`.
+Guards: `test-session-packages.sh`, `test-labwc-runtime.sh` (no `load default
+key bindings` in the log; Alt-Tab and Alt-Space reach the focused window).
 [Story](docs/notes/history-of-constraints.md#labwc-must-have-zero-keybindings).
 
 ### ssh.socket must stay masked
@@ -217,7 +221,8 @@ Guards: `scripts/check-boot-smoke.sh` (any `Found ordering cycle`),
 
 The Dockerfile builds `labwc_0.9.3-1+thinfloe1` with
 `containers/ubuntu/patches/` (fullscreen across outputs,
-`LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`).
+`LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`;
+no default keybindings).
 The archive package silently loses both. Patches, overlay and brand
 directories are `Makefile` prerequisites. Guards: `make test`, `make
 test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.

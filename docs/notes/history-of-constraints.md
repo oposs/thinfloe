@@ -198,6 +198,29 @@ directory lives at `/etc/thinfloe/labwc`, not under `$HOME` - see
 selected via `labwc -C /etc/thinfloe/labwc` in
 `overlay/etc/profile.d/10-thinfloe-session.sh`.
 
+An empty `<keyboard>` section does not by itself give zero keybindings.
+labwc 0.9.3's `post_processing()` in `src/config/rcxml.c` loads the built-in
+bindings of `include/config/default-bindings.h` whenever rc.xml defines no
+keybind, and logs `load default key bindings` at INFO level. The rc.xml
+comment said the opposite ("omitting the default-keybind element yields
+none"), and the guards in `test-session-packages.sh` and
+`test-labwc-scale.sh` read only the rc.xml text, so the released images
+shipped A-Tab, A-S-Tab, A-F4, A-Space, W-Return, W-a, the W-arrow snaps and
+the XF86 volume and brightness keys. The owner saw it on 2026-11-18: Alt-Tab
+switched windows on the ThinFloe desktop, the tile menu included, with
+ThinLinc windowed and with ThinLinc fullscreen.
+`containers/ubuntu/patches/0005-no-default-keybinds.patch` removes the
+fallback; an explicit `<keyboard><default />` would still load the
+defaults, and the mouse fallback is unchanged.
+
+`test/runtime/test-labwc-runtime.sh` checks the running compositor: its log
+has no `load default key bindings`, and Alt-Tab, Alt-Space and Super-a typed
+with `wtype` reach a focused foot window as bytes while the focus stays on
+it. The keys come from `wtype`, which keeps one virtual keyboard for the
+whole sequence. `wlrctl keyboard type` creates a new virtual keyboard per
+call, foot has not bound it when the key arrives, and in the probe not even
+a plain `x` reached foot.
+
 The reason is *not* the missing `zwp_keyboard_shortcuts_inhibit_manager_v1` -
 that was this repo's earlier explanation and it is wrong. Xwayland's only use
 of that protocol is `maybe_fake_grab_devices()`, which returns immediately
@@ -313,9 +336,12 @@ quilt series. Two behaviours depend on it:
   (`LABWC_FULLSCREEN_SPAN_OUTPUTS`), which is what makes the ThinLinc client
   fill both monitors;
 - `zwp_xwayland_keyboard_grab_manager_v1` exists, so X11 keyboard grabs
-  suspend compositor keybindings.
+  suspend compositor keybindings;
+- labwc loads no default keybindings when rc.xml defines none
+  (`0005-no-default-keybinds.patch`), see
+  [labwc must have zero keybindings](#labwc-must-have-zero-keybindings).
 
-Reverting to the archive `labwc` silently loses both. On a labwc or wlroots
+Reverting to the archive `labwc` silently loses all of them. On a labwc or wlroots
 version bump, expect to rebase the patches; `dpkg-buildpackage` fails loudly
 when a hunk no longer applies, and `make test` plus `make test-runtime` cover
 the rest. `_NET_WM_FULLSCREEN_MONITORS` was investigated and rejected - see

@@ -1,0 +1,37 @@
+Description: no default key bindings when rc.xml has none
+ labwc 0.9.3 loads its built-in key bindings (A-Tab, A-S-Tab, A-F4,
+ A-Space, W-Return, W-a, W-arrows and the XF86 volume and brightness keys)
+ whenever rc.xml defines no keybind, and logs "load default key bindings".
+ ThinFloe's rc.xml has a <keyboard> section with no keybind on purpose,
+ so the image got the defaults after all: Alt-Tab switched windows on the
+ ThinFloe desktop, the tile menu included, instead of reaching the
+ ThinLinc session, even when that session was fullscreen.
+ .
+ post_processing() no longer falls back to the default key bindings. An
+ explicit <keyboard><default /> still loads them, and the fallback to the
+ default mouse bindings is unchanged.
+ .
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2026-11-18
+---
+--- a/src/config/rcxml.c
++++ b/src/config/rcxml.c
+@@ -1680,10 +1680,11 @@
+ static void
+ post_processing(void)
+ {
+-	if (!wl_list_length(&rc.keybinds)) {
+-		wlr_log(WLR_INFO, "load default key bindings");
+-		load_default_key_bindings();
+-	}
++	/*
++	 * thinfloe: no fallback to the default key bindings. An rc.xml
++	 * without keybinds means no keybinds; <keyboard><default /> still
++	 * loads them on request.
++	 */
+ 
+ 	if (!wl_list_length(&rc.mousebinds)) {
+ 		wlr_log(WLR_INFO, "load default mouse bindings");
