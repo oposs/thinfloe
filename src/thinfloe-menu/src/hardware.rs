@@ -1,7 +1,8 @@
 //! What the status area's hardware tiles draw from: temperatures, CPU load
-//! and clock, RAM and zram use and fan speed. The uptime and the machine's
-//! maker and model are read here too (`parse_uptime`, `machine`), but not by
-//! the sampler: no tile shows them.
+//! and clock, RAM and zram use and fan speed. The uptime, the machine's
+//! maker and model and the CPU's name and cores are read here too
+//! (`parse_uptime`, `machine`, `cpu_model`, `cpu_count`), but not by the
+//! sampler: no tile shows them, the This machine tab does.
 //!
 //! A thread of the menu (`spawn`) reads these every `EVERY` from /sys and
 //! /proc, without root and without a subprocess, and rests while the element
@@ -47,6 +48,9 @@ pub const MAX_FANS: usize = 4;
 /// The longest sensor name kept, in characters; the longest DMI name.
 const MAX_LABEL: usize = 16;
 const MAX_DMI: usize = 40;
+/// The longest CPU name kept: AMD's run past 40 (`AMD Ryzen 7 PRO 5850U
+/// with Radeon Graphics`).
+const MAX_CPU_NAME: usize = 64;
 /// A reading outside this is a missing or broken sensor: chips report 0, 127
 /// or -128 for an input with nothing on it.
 const TEMP_RANGE: std::ops::RangeInclusive<f32> = 1.0..=125.0;
@@ -510,7 +514,7 @@ pub fn parse_uptime(text: &str) -> Option<u64> {
 
 /// A DMI string fit to show: printable and short, and `None` for the
 /// placeholders firmware ships.
-pub fn clean_dmi(text: &str) -> Option<String> {
+fn clean_dmi(text: &str) -> Option<String> {
     let t: String = sanitise(text.trim()).chars().take(MAX_DMI).collect();
     let t = t.trim();
     let low = t.to_ascii_lowercase();
@@ -599,6 +603,38 @@ pub fn machine(roots: &Roots) -> (Option<String>, Option<String>) {
         (_, md) => md,
     };
     (maker, model)
+}
+
+/// The first `model name` of `/proc/cpuinfo`, printable, its runs of
+/// blanks made one (Intel pads the name), and cut to `MAX_CPU_NAME`
+/// characters.
+pub fn cpu_model(cpuinfo: &str) -> Option<String> {
+    let value = cpuinfo.lines().find_map(|l| {
+        let (key, value) = l.split_once(':')?;
+        (key.trim() == "model name").then_some(value)
+    })?;
+    // Tested before `sanitise`, which names an empty text "unknown device".
+    if value.trim().is_empty() {
+        return None;
+    }
+    let name: String = sanitise(value)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_CPU_NAME)
+        .collect();
+    let name = name.trim_end();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// How many `processor` entries `/proc/cpuinfo` has: the logical CPUs.
+pub fn cpu_count(cpuinfo: &str) -> Option<usize> {
+    let n = cpuinfo
+        .lines()
+        .filter(|l| l.split_once(':').is_some_and(|(key, _)| key.trim() == "processor"))
+        .count();
+    (n > 0).then_some(n)
 }
 
 /// One reading, what the element draws.
@@ -1204,6 +1240,26 @@ mod tests {
         }
         assert_eq!(clean_dmi("A\x1bB\u{202e}").as_deref(), Some("A?B?"));
         assert_eq!(clean_dmi(&"W".repeat(500)).unwrap().chars().count(), 40);
+    }
+
+    #[test]
+    fn cpu_model_and_count_from_cpuinfo() {
+        let one = "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Intel(R) Core(TM)  i5-7260U CPU @ 2.20GHz\ncpu MHz\t\t: 800.000\n\n";
+        let four = one.repeat(4);
+        assert_eq!(
+            cpu_model(&four).as_deref(),
+            Some("Intel(R) Core(TM) i5-7260U CPU @ 2.20GHz")
+        );
+        assert_eq!(cpu_count(&four), Some(4));
+        // ARM: no model name, no count from `CPU part`.
+        let arm = "processor\t: 0\nBogoMIPS\t: 108.00\nCPU part\t: 0xd08\n";
+        assert_eq!(cpu_model(arm), None);
+        assert_eq!(cpu_count(arm), Some(1));
+        assert_eq!(cpu_count(""), None);
+        assert_eq!(cpu_model("model name\t:   \n"), None);
+        assert_eq!(cpu_model("model name\t: A\x1bB\n").as_deref(), Some("A?B"));
+        let long = format!("model name\t: {}\n", "W".repeat(500));
+        assert_eq!(cpu_model(&long).unwrap().chars().count(), MAX_CPU_NAME);
     }
 
     fn dmi(pairs: &[(&str, &str)]) -> (Option<String>, Option<String>) {

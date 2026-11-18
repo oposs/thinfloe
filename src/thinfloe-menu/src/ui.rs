@@ -950,7 +950,8 @@ fn show_settings(
     s_ui.add_space(GAP);
     // A failed migration leaves the old settings in place: the tabs that
     // would change them show them and take no click.
-    if menu.config_notes.legacy.is_some() && menu.settings_tab != SettingsTab::Packages {
+    if menu.config_notes.legacy.is_some() && !matches!(menu.settings_tab, SettingsTab::Packages | SettingsTab::Machine)
+    {
         s_ui.disable();
     }
     let body = match menu.settings_tab {
@@ -965,6 +966,7 @@ fn show_settings(
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
+        SettingsTab::Machine => crate::machine_ui::machine_tab(&mut s_ui, menu, width, now),
     };
     match (event, body) {
         // The tab click wins the frame, but the lookup address field's
@@ -3465,6 +3467,14 @@ mod tests {
                             (1920.0, 1080.0),
                             &["Clock", "Up", "Down", "1x1", "Reset to default", "Preview"],
                         )
+                    }
+                    crate::settings::SettingsTab::Machine => {
+                        let f = crate::machine::Facts {
+                            maker: Some("HP".into()),
+                            ..Default::default()
+                        };
+                        menu.machine.facts_done(f, Instant::now());
+                        ((1280.0, 720.0), &["Maker", "HP", "Boot", "Copy"])
                     }
                     crate::settings::SettingsTab::Screen => {
                         menu.monitors = two_monitors();

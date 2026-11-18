@@ -182,6 +182,10 @@ pub enum JobResult {
     ReportDismissed(Result<(), String>),
     /// The Screen tab's GPUs and VA-API codecs.
     Graphics(crate::graphics::Info),
+    /// The This machine tab's facts.
+    MachineFacts(crate::machine::Facts),
+    /// The This machine tab's rows reached the clipboard, or why not.
+    Copied(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +240,10 @@ pub struct Paths {
     pub pci_ids: PathBuf,
     /// `vainfo` (`TF_VAINFO_CMD`), for the Screen tab's video codecs.
     pub vainfo_cmd: Vec<String>,
+    /// `wl-copy` (`TF_WL_COPY_CMD`), for the This machine tab's Copy.
+    pub wl_copy_cmd: Vec<String>,
+    /// Where /sys and /proc are, for the This machine tab's facts.
+    pub hardware_roots: crate::hardware::Roots,
 }
 
 /// How a keyboard change reaches the running compositor.
@@ -1123,6 +1131,24 @@ pub fn dismiss_report(store: &crate::store::Shared) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// How long `wl-copy` may take to read the text and hand the clipboard to
+/// its server.
+const COPY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// `text` to the clipboard with `cmd` (`wl-copy`) on its stdin. wl-copy
+/// forks a server that keeps the clipboard after it exits; the run ends at
+/// that exit and leaves the server alone (`quiet::run` kills the group only
+/// at its timeout).
+pub fn copy_text(cmd: &[String], text: &str) -> Result<(), String> {
+    let r = crate::quiet::run(cmd, &[], Some(text.as_bytes()), 0, COPY_TIMEOUT)?;
+    let prog = cmd.first().map_or("", String::as_str);
+    match r.status {
+        Some(0) => Ok(()),
+        Some(code) => Err(format!("{prog} exited with status {code}")),
+        None => Err(format!("{prog} was ended by a signal")),
+    }
+}
+
 fn remove_if_there(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
@@ -1420,6 +1446,44 @@ mod tests {
     // exec fails with "Text file busy". System binaries avoid that race.
 
     #[test]
+    fn copy_text_feeds_the_tool_its_stdin() {
+        let d = dir("copy");
+        let out = d.join("clipboard");
+        let sh = |script: &str| -> Vec<String> { vec!["/bin/sh".into(), "-c".into(), script.into(), "sh".into()] };
+        let cmd = sh(&format!("cat > '{}'", out.display()));
+        assert_eq!(copy_text(&cmd, "Maker: HP\nBoot: USB\n"), Ok(()));
+        assert_eq!(fs::read_to_string(&out).unwrap(), "Maker: HP\nBoot: USB\n");
+        // A failing tool is an error that says so.
+        let e = copy_text(&sh("cat >/dev/null; exit 1"), "x").unwrap_err();
+        assert!(e.contains('1'), "{e}");
+        assert!(copy_text(&["/nonexistent/wl-copy".into()], "x").is_err());
+    }
+
+    #[test]
+    fn copy_text_leaves_what_the_tool_forked_running() {
+        // wl-copy forks the server that holds the clipboard and exits. The
+        // run must return at that exit and not kill the fork: here the fork
+        // writes a file a moment after its parent is gone.
+        let d = dir("copyfork");
+        let mark = d.join("served");
+        let script = format!("cat >/dev/null; (sleep 0.3; echo ok > '{}') & exit 0", mark.display());
+        let cmd = vec!["/bin/sh".into(), "-c".into(), script, "sh".into()];
+        let started = Instant::now();
+        assert_eq!(copy_text(&cmd, "x"), Ok(()));
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!mark.exists(), "returned before the fork wrote");
+        let until = Instant::now() + Duration::from_secs(3);
+        while !mark.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(&mark).unwrap_or_default(), "ok\n");
+    }
+
+    #[test]
     fn every_save_exit_code_has_its_own_outcome() {
         let all: Vec<SaveOutcome> = (0..=5).map(|c| SaveOutcome::from_status(Some(c))).collect();
         assert_eq!(
@@ -1612,6 +1676,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1628,6 +1694,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1644,6 +1712,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -1901,6 +1971,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -1918,6 +1990,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -2169,6 +2243,8 @@ mod tests {
             net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+            wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),

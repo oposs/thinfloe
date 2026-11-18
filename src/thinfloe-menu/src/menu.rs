@@ -22,9 +22,11 @@
 //! SIGKILL would reach only sudo, and the tool would go on holding its lock.
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
+use crate::header::Header;
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::keyboard::KeyboardTab;
 use crate::log::{Kind, Log};
+use crate::machine::MachineTab;
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
 use crate::network::{NetEvent, NetRequest, NetTab};
@@ -192,6 +194,10 @@ pub enum Job {
     DismissReport,
     /// Read the GPUs from sysfs and the VA-API codecs from `vainfo`.
     Graphics,
+    /// Read the This machine tab's facts from /proc and /sys.
+    MachineFacts,
+    /// Put this text on the clipboard with `wl-copy`.
+    Copy(String),
 }
 
 /// What fills the space above the log.
@@ -327,6 +333,11 @@ pub struct Menu {
     pub keyboard: KeyboardTab,
     /// The Screen tab's graphics band; `None` until the job answers.
     pub graphics: Option<crate::graphics::Info>,
+    /// The This machine tab.
+    pub machine: MachineTab,
+    /// Host name and version, as the header shows them; the This machine
+    /// tab lists them too.
+    header: Header,
     /// The graphics job was started: it runs once a session, as the GPU
     /// does not change and `vainfo` takes a moment.
     graphics_asked: bool,
@@ -393,6 +404,8 @@ impl Menu {
                 Err("The keyboard layout list is not loaded.".into()),
             ),
             graphics: None,
+            machine: MachineTab::default(),
+            header: Header::default(),
             graphics_asked: false,
             config_notes: ConfigNotes::default(),
         }
@@ -513,6 +526,30 @@ impl Menu {
     /// The release this machine runs, from `/etc/thinfloe/version`.
     pub fn set_installed(&mut self, v: Option<String>) {
         self.upgrade.installed = v;
+    }
+
+    /// The header's host name and version, for the This machine tab.
+    pub fn set_header(&mut self, h: Header) {
+        self.header = h;
+    }
+
+    /// The This machine tab's rows at `now`; empty until its facts are read.
+    pub fn machine_rows(&self, now: Instant) -> Vec<(String, String)> {
+        let Some(facts) = self.machine.facts() else {
+            return Vec::new();
+        };
+        // In tile order, as the Packages tab lists them.
+        let addons: Vec<(String, String)> = self
+            .tiles
+            .iter()
+            .filter(|t| t.addon)
+            .filter_map(|t| {
+                let id = addon_id(t);
+                let s = self.addons().iter().find(|a| a.id == id && a.present())?;
+                Some((t.name.clone(), s.installed.clone()?))
+            })
+            .collect();
+        crate::machine::rows(facts, self.machine.uptime_at(now), &self.header, self.usb_boot, &addons)
     }
 
     /// A newer release than the installed one, when both are known.
@@ -817,6 +854,10 @@ impl Menu {
             SettingsEvent::Keyboard(e) => {
                 let kb = self.keyboard.event(e)?;
                 return Some(Effect::Start(Job::KeyboardApply(kb)));
+            }
+            SettingsEvent::MachineCopy => {
+                let rows = self.machine_rows(Instant::now());
+                return (!rows.is_empty()).then(|| Effect::Start(Job::Copy(crate::machine::clipboard_text(&rows))));
             }
             SettingsEvent::DismissReport => {
                 return self
@@ -1367,6 +1408,18 @@ impl Menu {
                 self.graphics = Some(info);
                 None
             }
+            JobResult::MachineFacts(f) => {
+                self.machine.facts_done(f, now);
+                None
+            }
+            JobResult::Copied(r) => {
+                if let Err(e) = &r {
+                    self.log
+                        .note(Kind::Warn, format!("Could not copy to the clipboard: {e}"));
+                }
+                self.machine.copy_done(r);
+                None
+            }
             JobResult::PublicIpSaved(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1526,6 +1579,11 @@ impl Menu {
             self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
         if let Some(r) = self.network.poll(now, net_open) {
             return self.net_request(r);
+        }
+        let machine_open =
+            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Machine;
+        if let Some(job) = self.machine.poll(machine_open) {
+            return Some(Effect::Start(job));
         }
         // Asked here rather than at the tab click: leaving the Network tab
         // may already answer that click with the public IP write.
@@ -3077,7 +3135,8 @@ mod tests {
                 SettingsTab::Network,
                 SettingsTab::Screen,
                 SettingsTab::Keyboard,
-                SettingsTab::Status
+                SettingsTab::Status,
+                SettingsTab::Machine
             ]
         );
         assert_eq!(SettingsTab::Network.label(), "Network");
@@ -3217,6 +3276,76 @@ mod tests {
             net(&mut m, NetEvent::Apply),
             Some(Effect::Start(Job::NetApply { .. }))
         ));
+    }
+
+    #[test]
+    fn the_machine_tab_reads_its_facts_when_it_opens() {
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        m.screen = Screen::Settings;
+        assert_eq!(m.tick(now), None, "Packages tab");
+        assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Machine)), None);
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        assert_eq!(m.tick(now), None, "asked already");
+        assert!(m.machine_rows(now).is_empty(), "no answer yet");
+        let f = crate::machine::Facts {
+            kernel: Some("7.0.0".into()),
+            ..Default::default()
+        };
+        assert_eq!(m.finished(JobResult::MachineFacts(f), now), None);
+        assert!(m.machine_rows(now).contains(&("Kernel".into(), "7.0.0".into())));
+        // Each opening reads again: the tab is left and opened again.
+        m.settings(SettingsEvent::Tab(SettingsTab::Keyboard));
+        assert_eq!(m.tick(now), None);
+        m.settings(SettingsEvent::Tab(SettingsTab::Machine));
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        // And when the Settings screen opens again on it.
+        m.screen = Screen::Grid;
+        assert_eq!(m.tick(now), None);
+        m.screen = Screen::Settings;
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+    }
+
+    #[test]
+    fn copy_sends_the_rows_to_the_clipboard() {
+        let bin = crate::testdir::TestDir::new("menu", "machinecopy");
+        let mut m = addon_menu(&bin);
+        m.set_usb_boot(true);
+        m.set_header(crate::header::Header {
+            host: "thinfloe-a1b2c3".into(),
+            version: Some("4.4.0".into()),
+        });
+        m.set_addons(vec![st(AddonState::Installed, Some("4.19.0"))]);
+        m.screen = Screen::Settings;
+        m.settings(SettingsEvent::Tab(SettingsTab::Machine));
+        let now = Instant::now();
+        // Nothing read yet: nothing to copy.
+        assert_eq!(m.settings(SettingsEvent::MachineCopy), None);
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        let f = crate::machine::Facts {
+            maker: Some("HP".into()),
+            ..Default::default()
+        };
+        m.finished(JobResult::MachineFacts(f), now);
+        let rows = m.machine_rows(Instant::now());
+        assert_eq!(rows.last(), Some(&("ThinLinc".to_string(), "4.19.0".to_string())));
+        let text = crate::machine::clipboard_text(&rows);
+        assert_eq!(
+            text,
+            "Maker: HP\nThinFloe version: 4.4.0\nBoot: USB\nHostname: thinfloe-a1b2c3\nThinLinc: 4.19.0\n"
+        );
+        assert_eq!(
+            m.settings(SettingsEvent::MachineCopy),
+            Some(Effect::Start(Job::Copy(text)))
+        );
+        // The answer shows on the tab; a failure also reaches the log.
+        m.finished(JobResult::Copied(Err("wl-copy: no Wayland".into())), now);
+        assert_eq!(m.machine.copied, Some(Err("wl-copy: no Wayland".into())));
+        assert!(
+            m.log
+                .lines()
+                .any(|l| l.kind == Kind::Warn && l.plain().contains("no Wayland"))
+        );
     }
 
     #[test]

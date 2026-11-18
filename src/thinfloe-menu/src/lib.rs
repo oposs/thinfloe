@@ -24,6 +24,8 @@ pub mod kbregistry;
 pub mod keyboard;
 pub mod keyboardtab_ui;
 pub mod log;
+pub mod machine;
+pub mod machine_ui;
 pub mod menu;
 pub mod menu_move;
 pub mod migrate;
