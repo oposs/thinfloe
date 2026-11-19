@@ -363,16 +363,20 @@ FOLD_CONTAINER_NAME="thinfloe-runtime-test-fold-$$"
 
 # The session script travels in an environment variable and is written to a
 # file in the container, so no quoting has to survive labwc's -S.
+# The --windows lists go to files and are printed only after labwc has
+# exited: the menu's debug lines (eprintln!, unbuffered, several writes per
+# line) and labwc's log share the output stream, and a list line printed
+# into the middle of one of them no longer starts with "foot".
 FOLD_SCRIPT='foot sleep 60 &
 sleep 2
 TF_MENU_DEBUG=1 timeout 20 thinfloe-menu 2>&1 &
 sleep 4
 wlrctl toplevel minimize app_id:foot
 sleep 2
-echo LIST1; thinfloe-menu --windows
+thinfloe-menu --windows >/tmp/list1
 thinfloe-menu --unfold foot; echo unfold-rc=$?
 sleep 2
-echo LIST2; thinfloe-menu --windows
+thinfloe-menu --windows >/tmp/list2
 sleep 1
 wait'
 
@@ -385,7 +389,9 @@ fold_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driv
     "$IMAGE" \
     sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
            printf "%s\n" "$FOLD_SCRIPT" >/tmp/fold.sh &&
-           labwc -C /etc/thinfloe/labwc -S "sh /tmp/fold.sh"' 2>&1)
+           { labwc -C /etc/thinfloe/labwc -S "sh /tmp/fold.sh"; rc=$?; } &&
+           for l in list1 list2; do echo "BEGIN-$l"; cat "/tmp/$l"; echo "END-$l"; done;
+           exit $rc' 2>&1)
 fold_rc=$?
 
 if [[ $fold_rc -eq 124 || $fold_rc -eq 137 ]]; then
@@ -395,8 +401,8 @@ if [[ $fold_rc -eq 124 || $fold_rc -eq 137 ]]; then
     exit 1
 fi
 
-list1=$(echo "$fold_out" | sed -n '/^LIST1$/,/^unfold-rc=/p')
-list2=$(echo "$fold_out" | sed -n '/^LIST2$/,$p')
+list1=$(echo "$fold_out" | sed -n '/^BEGIN-list1$/,/^END-list1$/p')
+list2=$(echo "$fold_out" | sed -n '/^BEGIN-list2$/,/^END-list2$/p')
 if echo "$fold_out" | grep -q 'thinfloe-menu: folded: foot '; then
     echo "ok   - thinfloe-menu saw foot fold"
 else
