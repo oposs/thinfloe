@@ -51,7 +51,8 @@ prefix (tests only); the composer escapes it for XML.
   and brightness keys stay off` and leaves the keys off. When `.source/`
   takes no file at all (a `--env-only` call), the old `.source/rc.xml`
   stays and the line ends `the key switches follow at the next start`
-  instead. The exit status does not change.
+  instead; the same line comes when the keys are switched off and the old
+  `.source/rc.xml` has them. The exit status does not change.
 
 ## Live switching
 

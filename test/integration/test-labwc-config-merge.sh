@@ -607,6 +607,39 @@ else
     fi
 fi
 
+# --env-only switching the keys off with an unwritable .source/: the link
+# cannot replace the old rc.xml with the keys, so the same one line.
+if [[ $(id -u) -eq 0 ]]; then
+    ok "unwritable .source/, keys off: skipped as root"
+else
+    printf 'THINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+    OUTK="$WORK/mk-ro-off"
+    mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" || bad "unwritable .source/, keys off: setup compose failed"
+    sum_before=$(cksum <"$OUTK/.source/rc.xml")
+    chmod 500 "$OUTK/.source"
+    : >"$MKGEN"
+    err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
+    chmod 700 "$OUTK/.source"
+    if [[ $rc -eq 0 && "$err" == "thinfloe-compose-labwc-config: cannot write the key bindings; the key switches follow at the next start" &&
+          "$(cksum <"$OUTK/.source/rc.xml")" == "$sum_before" ]]; then
+        ok "unwritable .source/, keys off: rc.xml unchanged, the line on stderr, exit 0"
+    else
+        bad "unwritable .source/, keys off: rc=$rc err=$err"
+    fi
+
+    # Keys already off: rc.xml is already the link, nothing to report.
+    OUTK="$WORK/mk-ro-already"
+    mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" || bad "unwritable .source/, already off: setup compose failed"
+    chmod 500 "$OUTK/.source"
+    err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
+    chmod 700 "$OUTK/.source"
+    if [[ $rc -eq 0 && -z "$err" ]] && keys_off "$OUTK"; then
+        ok "unwritable .source/, keys already off: no line, exit 0"
+    else
+        bad "unwritable .source/, keys already off: rc=$rc err=$err"
+    fi
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - labwc config merge helper"
