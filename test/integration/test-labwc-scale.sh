@@ -28,6 +28,11 @@ cleanup() {
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+# The helper falls back to $XDG_RUNTIME_DIR for every path the test does not
+# set. Point it at an empty directory of the test's own, which must still be
+# empty at the end: a start that forgot one would write into the session's.
+export XDG_RUNTIME_DIR="$WORK/xdg-runtime"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
 
 fail=0
 ok() { echo "ok   - $1"; }
@@ -171,7 +176,8 @@ fonts_are() { [[ $(grep -c "<font place=.*size=\"$1\"" "$D/rc.xml" 2>/dev/null) 
 calls_are() { [[ $(calls) -eq $1 ]]; }
 
 setup; echo 2 >"$WORK/scale"
-TF_SCALE_POLL=0.1 TF_SCALE_FILE="$WORK/scale" TF_LABWC_DIR="$D" TF_LABWC="$WORK/labwc" \
+TF_SCALE_POLL=0.1 TF_SCALE_FILE="$WORK/scale" TF_MENU_OUTPUT_FILE="$WORK/menu-output" \
+    TF_LABWC_DIR="$D" TF_LABWC="$WORK/labwc" \
     STUB_LOG="$WORK/calls" "$HELPER" --wait 2 2>"$WORK/err" &
 hpid=$!
 waitfor "follow: first scale 2 applied" fonts_are 20
@@ -382,5 +388,9 @@ if [[ $rc -eq 0 && -f $D/rc.xml && ! -L $D/rc.xml ]] &&
 else
     bad "Num Lock off: scaled rc.xml: $(grep -n numlock "$D/rc.xml")"
 fi
+
+left=$(ls -A "$XDG_RUNTIME_DIR")
+[[ -z $left ]] && ok "nothing written to \$XDG_RUNTIME_DIR" \
+    || bad "the helper wrote to \$XDG_RUNTIME_DIR: $left"
 
 exit $fail
