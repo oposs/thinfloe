@@ -1,81 +1,202 @@
-//! Volume and microphone mute through `wpctl` (PipeWire). The keys run on
-//! a worker thread (`AudioWorker`), so a slow `wpctl` never stalls the OSD;
-//! presses that arrive while it runs are merged.
+//! Volume and microphone mute through `pactl` (pipewire-pulse), on every
+//! speaker (sink) and microphone (source) at once. The keys run on a
+//! worker thread (`AudioWorker`) that owns the shared state (`sync`), so
+//! a slow `pactl` never stalls the OSD; presses that arrive while it runs
+//! are merged.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-const SINK: &str = "@DEFAULT_AUDIO_SINK@";
-const SOURCE: &str = "@DEFAULT_AUDIO_SOURCE@";
-/// How long one `wpctl` call may take.
+use serde_json::Value;
+
+use super::sync::{Mode, Set, Sync};
+
+/// How long one `pactl` call may take.
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The default sink's volume and mute state.
+/// The shared speaker level and mute state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Level {
     pub percent: u8,
     pub muted: bool,
 }
 
-/// `wpctl get-volume` prints `Volume: 0.45`, with ` [MUTED]` when muted.
-/// Anything else (`Translate ID error ...` without a device) is `None`.
-pub fn parse_get_volume(out: &str) -> Option<Level> {
-    let rest = out.lines().find_map(|l| l.trim().strip_prefix("Volume:"))?;
-    let mut words = rest.split_whitespace();
-    let volume: f64 = words.next()?.parse().ok()?;
-    if !volume.is_finite() || volume < 0.0 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Sink,
+    Source,
+}
+
+impl Kind {
+    /// The word `pactl` uses: `set-sink-volume`, `get-default-source`.
+    fn word(self) -> &'static str {
+        match self {
+            Kind::Sink => "sink",
+            Kind::Source => "source",
+        }
+    }
+}
+
+/// One sink or source as `pactl -f json list` shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    pub kind: Kind,
+    pub index: u32,
+    pub name: String,
+    /// The rounded mean of the channels.
+    pub percent: u8,
+    pub muted: bool,
+}
+
+/// The array `pactl -f json list sinks|sources` prints. A source that is
+/// the monitor of a sink is left out: it is a copy of what the sink
+/// plays, not a microphone. pactl 17 names that sink under
+/// `monitor_source` in a source's entry (empty for a microphone); other
+/// versions under `monitor_of_sink` (`n/a` for none). An entry without a
+/// name, index or channel volume is left out, not the whole list.
+pub fn parse_devices(kind: Kind, json: &str) -> Result<Vec<Device>, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("pactl printed no device list: {e}"))?;
+    let list = v.as_array().ok_or("pactl printed no device list")?;
+    Ok(list.iter().filter_map(|d| device(kind, d)).collect())
+}
+
+fn device(kind: Kind, d: &Value) -> Option<Device> {
+    let monitor_of = |key: &str| {
+        d.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty() && s != "n/a")
+    };
+    if kind == Kind::Source && (monitor_of("monitor_of_sink") || monitor_of("monitor_source")) {
         return None;
     }
-    Some(Level {
-        percent: (volume * 100.0).round().min(f64::from(u8::MAX)) as u8,
-        muted: words.any(|w| w == "[MUTED]"),
+    let percents: Vec<f64> = d
+        .get("volume")?
+        .as_object()?
+        .values()
+        .filter_map(|c| {
+            c.get("value_percent")?
+                .as_str()?
+                .trim()
+                .strip_suffix('%')?
+                .trim()
+                .parse()
+                .ok()
+        })
+        .filter(|p: &f64| p.is_finite() && *p >= 0.0)
+        .collect();
+    if percents.is_empty() {
+        return None;
+    }
+    let mean = percents.iter().sum::<f64>() / percents.len() as f64;
+    Some(Device {
+        kind,
+        index: u32::try_from(d.get("index")?.as_u64()?).ok()?,
+        name: d.get("name")?.as_str()?.to_string(),
+        percent: mean.round().min(f64::from(u8::MAX)) as u8,
+        muted: d.get("mute")?.as_bool()?,
     })
 }
 
-pub struct Wpctl {
+/// A line of `pactl subscribe` about a sink, a source or the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaEvent {
+    New(Kind, u32),
+    Change(Kind, u32),
+    Remove(Kind, u32),
+    /// The server changed, as when the default sink or source moves.
+    Server,
+}
+
+/// `Event 'new' on sink #57`, `Event 'change' on server #4294967295`;
+/// lines about other facilities (`sink-input`, `client`, `card`, …) are
+/// `None`.
+pub fn parse_event(line: &str) -> Option<PaEvent> {
+    let rest = line.trim().strip_prefix("Event '")?;
+    let (what, rest) = rest.split_once("' on ")?;
+    let mut words = rest.split_whitespace();
+    let facility = words.next()?;
+    if facility == "server" {
+        return (what == "change").then_some(PaEvent::Server);
+    }
+    let kind = match facility {
+        "sink" => Kind::Sink,
+        "source" => Kind::Source,
+        _ => return None,
+    };
+    let index = words.next()?.strip_prefix('#')?.parse().ok()?;
+    match what {
+        "new" => Some(PaEvent::New(kind, index)),
+        "change" => Some(PaEvent::Change(kind, index)),
+        "remove" => Some(PaEvent::Remove(kind, index)),
+        _ => None,
+    }
+}
+
+pub struct Pactl {
     cmd: Vec<String>,
     timeout: Duration,
 }
 
-impl Wpctl {
-    /// `TF_WPCTL` split on whitespace, `wpctl` when unset or empty.
-    pub fn from_env() -> Wpctl {
-        Wpctl {
-            cmd: super::cmd_from_env("TF_WPCTL", "wpctl"),
+impl Pactl {
+    /// `TF_PACTL` split on whitespace, `pactl` when unset or empty.
+    pub fn from_env() -> Pactl {
+        Pactl {
+            cmd: super::cmd_from_env("TF_PACTL", "pactl"),
             timeout: TIMEOUT,
         }
     }
 
-    /// Raise or lower the default sink by `delta_pct` percent, at most to
-    /// 100 %; the mute state stays as it is. Returns the new level.
-    pub fn change(&self, delta_pct: i32) -> Result<Level, String> {
-        if delta_pct != 0 {
-            let sign = if delta_pct > 0 { '+' } else { '-' };
-            let amount = format!("{}%{sign}", delta_pct.unsigned_abs());
-            self.run(&["set-volume", "-l", "1.0", SINK, &amount])?;
-        }
-        self.level(SINK)
+    /// Every sink or every source but the monitors.
+    pub fn list(&self, kind: Kind) -> Result<Vec<Device>, String> {
+        let out = self.run(&["-f", "json", "list", &format!("{}s", kind.word())])?;
+        parse_devices(kind, &out)
     }
 
-    pub fn toggle_sink_mute(&self) -> Result<Level, String> {
-        self.run(&["set-mute", SINK, "toggle"])?;
-        self.level(SINK)
+    /// The default sink's or source's name.
+    pub fn default_name(&self, kind: Kind) -> Result<String, String> {
+        let out = self.run(&[&format!("get-default-{}", kind.word())])?;
+        Ok(out.trim().to_string())
     }
 
-    /// Toggle the default source's mute; returns whether it is now muted.
-    pub fn toggle_source_mute(&self) -> Result<bool, String> {
-        self.run(&["set-mute", SOURCE, "toggle"])?;
-        self.source_muted()
+    pub fn set_volume(&self, kind: Kind, name: &str, percent: u8) -> Result<(), String> {
+        self.run(&[&format!("set-{}-volume", kind.word()), name, &format!("{percent}%")])
+            .map(drop)
     }
 
+    pub fn set_mute(&self, kind: Kind, name: &str, muted: bool) -> Result<(), String> {
+        let m = if muted { "1" } else { "0" };
+        self.run(&[&format!("set-{}-mute", kind.word()), name, m]).map(drop)
+    }
+
+    /// Whether the default source is muted: false when it is not listed
+    /// (a monitor, or none).
     pub fn source_muted(&self) -> Result<bool, String> {
-        self.level(SOURCE).map(|l| l.muted)
+        let name = self.default_name(Kind::Source)?;
+        let sources = self.list(Kind::Source)?;
+        Ok(sources.iter().any(|d| d.name == name && d.muted))
     }
 
-    fn level(&self, node: &str) -> Result<Level, String> {
-        let out = self.run(&["get-volume", node])?;
-        parse_get_volume(&out).ok_or_else(|| format!("{} get-volume {node} printed no volume", self.cmd[0]))
+    /// The command line of `pactl subscribe`.
+    pub fn subscribe_args(&self) -> Vec<String> {
+        let mut argv = self.cmd.clone();
+        argv.push("subscribe".into());
+        argv
+    }
+
+    /// Run every set, one after the other. A failure (a device that went
+    /// away) does not stop the other sets; the failures are returned, for
+    /// the log.
+    pub fn apply(&self, sets: &[Set]) -> Vec<String> {
+        sets.iter()
+            .filter_map(|s| {
+                match s {
+                    Set::Volume(k, name, p) => self.set_volume(*k, name, *p),
+                    Set::Mute(k, name, m) => self.set_mute(*k, name, *m),
+                }
+                .err()
+            })
+            .collect()
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {
@@ -89,11 +210,23 @@ pub enum AudioRequest {
     Step(i32),
     ToggleMute,
     ToggleMic,
+    /// A `pactl subscribe` line.
+    Device(PaEvent),
+    /// The volume keys switch changed.
+    Mode(Mode),
+    /// Every device in line with the shared state again (after the
+    /// sound server came back).
+    Resync,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioEvent {
+    /// The shared speaker state after a key.
     Sink(Level),
+    /// The shared microphone mute after the mic key.
     Mic(bool),
+    /// Whether the default source is muted now, for the mark.
+    Mark(bool),
     Failed(String),
 }
 
@@ -104,39 +237,57 @@ struct Queue {
     closed: bool,
 }
 
-/// Runs `wpctl` on a thread of its own, one request at a time. A `Step`
-/// that arrives while the previous `Step` still waits is added to it, so a
-/// held key runs one `wpctl` per call, not one per press; toggles are kept
-/// one by one. Dropping the worker ends the thread after its current call.
+/// True for an event whose only effect is a fresh mark: a source or the
+/// server changed. The OSD's own sets cause these, so they never set.
+fn refreshes_mark(e: &PaEvent) -> bool {
+    matches!(e, PaEvent::Change(Kind::Source, _) | PaEvent::Server)
+}
+
+/// Runs `pactl` on a thread of its own, one request at a time, and owns
+/// the shared state. A `Step` that arrives while the previous `Step`
+/// still waits is added to it, so a held key runs one round of sets per
+/// call, not one per press; change events merge into one mark refresh;
+/// toggles are kept one by one. Dropping the worker ends the thread after
+/// its current call.
 pub struct AudioWorker {
     shared: Arc<(Mutex<Queue>, Condvar)>,
 }
 
 impl AudioWorker {
-    pub fn spawn(w: Wpctl, on_event: impl Fn(AudioEvent) + Send + 'static) -> AudioWorker {
+    /// At start the worker brings every device in line (`Sync::start`) and
+    /// sends one `Mark`.
+    pub fn spawn(p: Pactl, mode: Mode, on_event: impl Fn(AudioEvent) + Send + 'static) -> AudioWorker {
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let s = shared.clone();
         std::thread::spawn(move || {
+            let mut w = Worker { p, mode, sync: None };
+            match w.start() {
+                Ok(muted) => on_event(AudioEvent::Mark(muted)),
+                Err(e) => {
+                    on_event(AudioEvent::Failed(e));
+                    on_event(AudioEvent::Mark(false));
+                }
+            }
             while let Some(r) = next(&s) {
-                on_event(
-                    match r {
-                        AudioRequest::Step(d) => w.change(d).map(AudioEvent::Sink),
-                        AudioRequest::ToggleMute => w.toggle_sink_mute().map(AudioEvent::Sink),
-                        AudioRequest::ToggleMic => w.toggle_source_mute().map(AudioEvent::Mic),
-                    }
-                    .unwrap_or_else(AudioEvent::Failed),
-                );
+                if let Some(ev) = w.handle(r) {
+                    on_event(ev);
+                }
             }
         });
         AudioWorker { shared }
     }
 
-    /// Queue `r` for the worker. Never blocks on `wpctl`.
+    /// Queue `r` for the worker. Never blocks on `pactl`.
     pub fn request(&self, r: AudioRequest) {
+        if matches!(r, AudioRequest::Device(PaEvent::Change(Kind::Sink, _))) {
+            // Someone else's change of a sink is not copied anywhere.
+            return;
+        }
         let (m, cv) = &*self.shared;
         let mut q = m.lock().unwrap_or_else(|e| e.into_inner());
         match (q.pending.back_mut(), r) {
             (Some(AudioRequest::Step(a)), AudioRequest::Step(b)) => *a = a.saturating_add(b),
+            (Some(AudioRequest::Device(a)), AudioRequest::Device(b)) if refreshes_mark(a) && refreshes_mark(&b) => {}
             (_, r) => q.pending.push_back(r),
         }
         cv.notify_one();
@@ -148,6 +299,119 @@ impl Drop for AudioWorker {
         let (m, cv) = &*self.shared;
         m.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         cv.notify_one();
+    }
+}
+
+/// The worker thread's side: `pactl` and the shared state, which exists
+/// once a start has listed the devices.
+struct Worker {
+    p: Pactl,
+    mode: Mode,
+    sync: Option<Sync>,
+}
+
+impl Worker {
+    /// Read the defaults, take the shared state from them and bring every
+    /// device in line. Whether the default source is muted, for the mark.
+    fn start(&mut self) -> Result<bool, String> {
+        let sinks = self.p.list(Kind::Sink)?;
+        let sources = self.p.list(Kind::Source)?;
+        let default_sink = self.p.default_name(Kind::Sink).ok();
+        let default_source = self.p.default_name(Kind::Source).ok();
+        let (sync, sets) = Sync::start(
+            self.mode,
+            &sinks,
+            &sources,
+            default_sink.as_deref(),
+            default_source.as_deref(),
+        );
+        self.apply(&sets);
+        self.sync = Some(sync);
+        let source = default_source.unwrap_or_default();
+        Ok(sources.iter().any(|d| d.name == source && d.muted))
+    }
+
+    /// Run `sets`; a failed set is logged, not reported as the key's
+    /// failure.
+    fn apply(&self, sets: &[Set]) {
+        for e in self.p.apply(sets) {
+            eprintln!("thinfloe-menu --osd: {e}");
+        }
+    }
+
+    fn mark(&self) -> AudioEvent {
+        self.p.source_muted().map_or_else(AudioEvent::Failed, AudioEvent::Mark)
+    }
+
+    /// What `r` does; the event to send, if any.
+    fn handle(&mut self, r: AudioRequest) -> Option<AudioEvent> {
+        let done = match r {
+            AudioRequest::Step(d) => self
+                .with(Kind::Sink, |s, sinks| s.step(d, sinks))
+                .map(|s| AudioEvent::Sink(s.level())),
+            AudioRequest::ToggleMute => self
+                .with(Kind::Sink, Sync::toggle_mute)
+                .map(|s| AudioEvent::Sink(s.level())),
+            AudioRequest::ToggleMic => self
+                .with(Kind::Source, Sync::toggle_mic)
+                .map(|s| AudioEvent::Mic(s.mic_muted())),
+            AudioRequest::Device(PaEvent::New(kind, index)) => {
+                return self.on_new(kind, index).err().map(AudioEvent::Failed);
+            }
+            AudioRequest::Device(e) if refreshes_mark(&e) => return Some(self.mark()),
+            AudioRequest::Device(_) => return None,
+            AudioRequest::Mode(m) => {
+                self.mode = m;
+                return self.realign(|s, sinks, sources| s.set_mode(m, sinks, sources));
+            }
+            AudioRequest::Resync => return self.realign(|s, sinks, sources| s.reapply(sinks, sources)),
+        };
+        Some(done.unwrap_or_else(AudioEvent::Failed))
+    }
+
+    /// The shared state, started first if no start has worked yet (the
+    /// sound server was not up), and the devices of `kind`; `f` changes
+    /// the state, its sets run. The state afterwards.
+    fn with(&mut self, kind: Kind, f: impl FnOnce(&mut Sync, &[Device]) -> Vec<Set>) -> Result<Sync, String> {
+        if self.sync.is_none() {
+            self.start()?;
+        }
+        let devices = self.p.list(kind)?;
+        let sync = self.sync.as_mut().expect("started");
+        let sets = f(sync, &devices);
+        let after = sync.clone();
+        self.apply(&sets);
+        Ok(after)
+    }
+
+    fn on_new(&mut self, kind: Kind, index: u32) -> Result<(), String> {
+        let Some(sync) = &self.sync else {
+            // A start lines up the new device with all the others.
+            return self.start().map(drop);
+        };
+        let devices = self.p.list(kind)?;
+        if let Some(d) = devices.iter().find(|d| d.index == index) {
+            self.apply(&sync.on_new(d));
+        }
+        Ok(())
+    }
+
+    /// Every device again, through `f`; a start does that by itself.
+    fn realign(&mut self, f: impl FnOnce(&mut Sync, &[Device], &[Device]) -> Vec<Set>) -> Option<AudioEvent> {
+        let Some(sync) = &mut self.sync else {
+            return self.start().err().map(AudioEvent::Failed);
+        };
+        let lists = self
+            .p
+            .list(Kind::Sink)
+            .and_then(|s| Ok((s, self.p.list(Kind::Source)?)));
+        let (sinks, sources) = match lists {
+            Ok(l) => l,
+            Err(e) => return Some(AudioEvent::Failed(e)),
+        };
+        let sets = f(sync, &sinks, &sources);
+        self.apply(&sets);
+        None
     }
 }
 
@@ -173,19 +437,50 @@ mod tests {
     use std::path::Path;
     use std::time::Instant;
 
-    /// A fake `wpctl`: a shell script that logs its arguments to `log` and
-    /// then runs `body`.
-    fn fake(d: &Path, body: &str) -> Wpctl {
-        let log = d.join("log");
-        let script = d.join("wpctl");
+    const SINKS: &str = include_str!("../../tests/fixtures/pactl-sinks.json");
+    const SOURCES: &str = include_str!("../../tests/fixtures/pactl-sources.json");
+    const SUBSCRIBE: &str = include_str!("../../tests/fixtures/pactl-subscribe.txt");
+
+    /// A device list in the shape `pactl -f json list` prints, with two
+    /// channels at `percent` each.
+    fn json(devs: &[(u32, &str, u8, bool)]) -> String {
+        let items: Vec<String> = devs
+            .iter()
+            .map(|(i, n, p, m)| {
+                format!(
+                    r#"{{"index":{i},"name":"{n}","mute":{m},"volume":{{"front-left":{{"value":1,"value_percent":"{p}%","db":"0 dB"}},"front-right":{{"value":1,"value_percent":"{p}%","db":"0 dB"}}}},"monitor_source":""}}"#
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    /// A fake `pactl` in `d`: logs its arguments to `log`, answers
+    /// `-f json list sinks|sources` from `sinks.json`/`sources.json` and
+    /// `get-default-*` from `default-sink`/`default-source`, then runs
+    /// `body`.
+    fn fake(d: &Path, sinks: &str, sources: &str, default_sink: &str, default_source: &str, body: &str) -> Pactl {
+        std::fs::write(d.join("sinks.json"), sinks).unwrap();
+        std::fs::write(d.join("sources.json"), sources).unwrap();
+        std::fs::write(d.join("default-sink"), format!("{default_sink}\n")).unwrap();
+        std::fs::write(d.join("default-source"), format!("{default_source}\n")).unwrap();
+        let dir = d.display();
+        let script = d.join("pactl");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display()),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{dir}/log'\n{body}\ncase \"$*\" in\n\
+                 '-f json list sinks') cat '{dir}/sinks.json';;\n\
+                 '-f json list sources') cat '{dir}/sources.json';;\n\
+                 get-default-sink) cat '{dir}/default-sink';;\n\
+                 get-default-source) cat '{dir}/default-source';;\n\
+                 esac\n"
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Wpctl {
+        Pactl {
             cmd: vec![script.to_string_lossy().into_owned()],
             timeout: TIMEOUT,
         }
@@ -199,6 +494,10 @@ mod tests {
             .collect()
     }
 
+    fn calls(d: &Path, prefix: &str) -> Vec<String> {
+        log(d).into_iter().filter(|l| l.starts_with(prefix)).collect()
+    }
+
     fn wait_for(what: &str, cond: impl Fn() -> bool) {
         let until = Instant::now() + Duration::from_secs(10);
         while !cond() {
@@ -207,168 +506,409 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_volume_parses_level_and_mute() {
-        assert_eq!(
-            parse_get_volume("Volume: 0.45\n"),
-            Some(Level {
-                percent: 45,
-                muted: false
-            })
-        );
-        assert_eq!(
-            parse_get_volume("Volume: 0.45 [MUTED]\n"),
-            Some(Level {
-                percent: 45,
-                muted: true
-            })
-        );
-        assert_eq!(
-            parse_get_volume("Volume: 1.00\n"),
-            Some(Level {
-                percent: 100,
-                muted: false
-            })
-        );
-        assert_eq!(parse_get_volume("Translate ID error\n"), None);
+    type Events = Arc<Mutex<Vec<AudioEvent>>>;
+
+    fn spawn(p: Pactl, mode: Mode) -> (AudioWorker, Events) {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let e = events.clone();
+        let worker = AudioWorker::spawn(p, mode, move |ev| e.lock().unwrap().push(ev));
+        (worker, events)
+    }
+
+    fn count(events: &Events, f: impl Fn(&AudioEvent) -> bool) -> usize {
+        events.lock().unwrap().iter().filter(|e| f(e)).count()
     }
 
     #[test]
-    fn a_failing_wpctl_is_an_error_not_a_level() {
-        let d = TestDir::new("osd-audio", "fail");
-        let w = fake(&d, "echo 'Translate ID error: node not found' >&2; exit 1");
-        assert!(w.change(5).is_err());
-        assert!(w.toggle_sink_mute().is_err());
-        assert!(w.source_muted().is_err());
-        // Exit 0 with no level is no level either.
-        let w = fake(&d, "exit 0");
-        assert!(w.change(5).is_err());
-    }
-
-    #[test]
-    fn change_runs_set_volume_with_the_cap_then_get_volume() {
-        let d = TestDir::new("osd-audio", "change");
-        let w = fake(&d, "case \"$1\" in get-volume) echo 'Volume: 0.50';; esac");
+    fn parse_devices_reads_name_index_percent_mute() {
+        // Taken from pactl 17 (pulseaudio-utils, Ubuntu 26.04) on
+        // pipewire-pulse 1.6.2 with two null sinks.
         assert_eq!(
-            w.change(5),
-            Ok(Level {
-                percent: 50,
-                muted: false
-            })
+            parse_devices(Kind::Sink, SINKS),
+            Ok(vec![
+                Device {
+                    kind: Kind::Sink,
+                    index: 51,
+                    name: "tf_null_a".into(),
+                    percent: 46,
+                    muted: false
+                },
+                Device {
+                    kind: Kind::Sink,
+                    index: 58,
+                    name: "tf_null_b".into(),
+                    percent: 100,
+                    muted: true
+                },
+            ])
         );
+        assert_eq!(parse_devices(Kind::Sink, "[]"), Ok(vec![]));
+        assert!(parse_devices(Kind::Sink, "").is_err());
+        assert!(parse_devices(Kind::Sink, "{}").is_err());
+        // An entry without a name or a volume is left out, not the list.
+        let odd = r#"[{"index":1,"mute":false},{"index":2,"name":"x","mute":false,"volume":{}},
+                     {"index":3,"name":"y","mute":true,"volume":{"mono":{"value_percent":"30%"}}}]"#;
         assert_eq!(
-            log(&d),
-            [
-                "set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+",
-                "get-volume @DEFAULT_AUDIO_SINK@"
-            ]
-        );
-        w.change(-10).unwrap();
-        assert_eq!(log(&d)[2], "set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 10%-");
-    }
-
-    #[test]
-    fn sink_mute_toggles_the_default_sink() {
-        let d = TestDir::new("osd-audio", "mute");
-        let w = fake(&d, "case \"$1\" in get-volume) echo 'Volume: 0.30 [MUTED]';; esac");
-        assert_eq!(
-            w.toggle_sink_mute(),
-            Ok(Level {
+            parse_devices(Kind::Sink, odd),
+            Ok(vec![Device {
+                kind: Kind::Sink,
+                index: 3,
+                name: "y".into(),
                 percent: 30,
                 muted: true
-            })
+            }])
         );
+    }
+
+    #[test]
+    fn parse_devices_skips_monitor_sources() {
+        // pactl 17 prints a monitor's sink under "monitor_source" (empty
+        // for a real microphone); the fixture has two monitors and tf_mic.
+        let got = parse_devices(Kind::Source, SOURCES).unwrap();
+        assert_eq!(got.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["tf_mic"]);
+        assert_eq!((got[0].index, got[0].percent, got[0].muted), (66, 100, false));
+        // Other pactl versions name it "monitor_of_sink", "n/a" for none.
+        let v = r#""volume":{"mono":{"value_percent":"100%"}}"#;
+        let list = format!(
+            r#"[{{"index":1,"name":"alsa_output.x.monitor","mute":false,{v},"monitor_of_sink":"alsa_output.x"}},
+                {{"index":2,"name":"mic","mute":false,{v},"monitor_of_sink":"n/a"}},
+                {{"index":3,"name":"cam","mute":true,{v},"monitor_of_sink":null}},
+                {{"index":4,"name":"usb","mute":false,{v}}}]"#
+        );
+        let got = parse_devices(Kind::Source, &list).unwrap();
+        assert_eq!(
+            got.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["mic", "cam", "usb"]
+        );
+        // A sink's "monitor_source" is its own monitor, not a reason to skip.
+        assert_eq!(parse_devices(Kind::Sink, SINKS).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_event_reads_new_change_remove_server() {
+        use PaEvent::*;
+        assert_eq!(parse_event("Event 'new' on sink #57"), Some(New(Kind::Sink, 57)));
+        assert_eq!(
+            parse_event("Event 'change' on source #12"),
+            Some(Change(Kind::Source, 12))
+        );
+        assert_eq!(
+            parse_event("Event 'remove' on sink #57\n"),
+            Some(Remove(Kind::Sink, 57))
+        );
+        assert_eq!(parse_event("Event 'change' on server #4294967295"), Some(Server));
+        assert_eq!(parse_event("Event 'change' on server"), Some(Server));
+        for none in [
+            "Event 'change' on sink-input #3",
+            "Event 'new' on source-output #3",
+            "Event 'new' on client #78",
+            "Event 'new' on card #1",
+            "Event 'new' on module #536870919",
+            "Event 'new' on sink #x",
+            "Event 'move' on sink #1",
+            "",
+            "Got SIGINT, exiting.",
+        ] {
+            assert_eq!(parse_event(none), None, "{none:?}");
+        }
+        // The lines a real `pactl subscribe` printed while null sinks
+        // came and went.
+        let got: Vec<PaEvent> = SUBSCRIBE.lines().filter_map(parse_event).collect();
+        assert_eq!(got[0], Change(Kind::Sink, 51));
+        assert!(got.contains(&New(Kind::Source, 81)));
+        assert!(got.contains(&Remove(Kind::Source, 51)));
+        assert_eq!(got.iter().filter(|e| **e == Server).count(), 4);
+    }
+
+    #[test]
+    fn pactl_runs_the_calls_the_brief_names() {
+        let d = TestDir::new("osd-audio", "argv");
+        let p = fake(&d, "[]", "[]", "  alsa_output.a \n", "alsa_input.b", "");
+        assert_eq!(p.default_name(Kind::Sink), Ok("alsa_output.a".to_string()));
+        assert_eq!(p.default_name(Kind::Source), Ok("alsa_input.b".to_string()));
+        p.set_volume(Kind::Sink, "s", 45).unwrap();
+        p.set_volume(Kind::Source, "m", 100).unwrap();
+        p.set_mute(Kind::Sink, "s", true).unwrap();
+        p.set_mute(Kind::Source, "m", false).unwrap();
+        assert_eq!(p.list(Kind::Sink), Ok(vec![]));
         assert_eq!(
             log(&d),
             [
-                "set-mute @DEFAULT_AUDIO_SINK@ toggle",
-                "get-volume @DEFAULT_AUDIO_SINK@"
+                "get-default-sink",
+                "get-default-source",
+                "set-sink-volume s 45%",
+                "set-source-volume m 100%",
+                "set-sink-mute s 1",
+                "set-source-mute m 0",
+                "-f json list sinks",
+            ]
+        );
+        assert_eq!(p.subscribe_args().last().map(String::as_str), Some("subscribe"));
+        assert_eq!(p.subscribe_args()[0], p.cmd[0]);
+    }
+
+    #[test]
+    fn a_failing_pactl_is_an_error_not_a_level() {
+        let d = TestDir::new("osd-audio", "fail");
+        let p = fake(
+            &d,
+            "[]",
+            "[]",
+            "",
+            "",
+            "echo 'Connection failure: Connection refused' >&2; exit 1",
+        );
+        assert!(p.list(Kind::Sink).is_err());
+        assert!(p.default_name(Kind::Source).is_err());
+        assert!(p.set_volume(Kind::Sink, "a", 5).is_err());
+        // Exit 0 with no list is no list either.
+        let p = fake(&d, "", "", "", "", "");
+        assert!(p.list(Kind::Sink).is_err());
+
+        let p = fake(&d, "[]", "[]", "", "", "exit 1");
+        let (worker, events) = spawn(p, Mode::Keys);
+        worker.request(AudioRequest::Step(5));
+        wait_for("two Failed events", || {
+            count(&events, |e| matches!(e, AudioEvent::Failed(_))) == 2
+        });
+        // No level from a failing pactl; the start's mark is off.
+        assert_eq!(count(&events, |e| matches!(e, AudioEvent::Sink(_))), 0);
+        assert_eq!(count(&events, |e| *e == AudioEvent::Mark(true)), 0);
+    }
+
+    #[test]
+    fn the_worker_starts_aligned_and_sends_the_mark() {
+        let d = TestDir::new("osd-audio", "start");
+        let sinks = json(&[(1, "a", 40, false), (2, "b", 100, false)]);
+        let sources = json(&[(3, "mic", 100, true), (4, "cam", 100, false)]);
+        let p = fake(&d, &sinks, &sources, "a", "mic", "");
+        let (_worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        assert_eq!(*events.lock().unwrap(), [AudioEvent::Mark(true)]);
+        assert_eq!(calls(&d, "set-"), ["set-sink-volume b 40%", "set-source-mute cam 1"]);
+
+        let d = TestDir::new("osd-audio", "startoff");
+        let p = fake(&d, &sinks, &sources, "a", "mic", "");
+        let (_worker, events) = spawn(p, Mode::Off);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        assert_eq!(
+            calls(&d, "set-"),
+            ["set-sink-volume a 100%", "set-source-mute mic 0"],
+            "Off: full and unmuted"
+        );
+    }
+
+    #[test]
+    fn a_failing_set_on_one_device_still_sets_the_others() {
+        let d = TestDir::new("osd-audio", "gone");
+        let sinks = json(&[(1, "gone", 40, false), (2, "kept", 40, false)]);
+        let p = fake(
+            &d,
+            &sinks,
+            "[]",
+            "gone",
+            "",
+            "[ \"$*\" = 'set-sink-volume gone 45%' ] && { echo 'Failure: No such entity' >&2; exit 1; }",
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        worker.request(AudioRequest::Step(5));
+        wait_for("a Sink event", || {
+            count(&events, |e| matches!(e, AudioEvent::Sink(_))) == 1
+        });
+        assert_eq!(
+            calls(&d, "set-"),
+            ["set-sink-volume gone 45%", "set-sink-volume kept 45%"]
+        );
+        assert!(events.lock().unwrap().contains(&AudioEvent::Sink(Level {
+            percent: 45,
+            muted: false
+        })));
+        assert_eq!(count(&events, |e| matches!(e, AudioEvent::Failed(_))), 0);
+    }
+
+    #[test]
+    fn change_events_only_refresh_the_mark() {
+        let d = TestDir::new("osd-audio", "change");
+        let sinks = json(&[(1, "a", 40, false)]);
+        let sources = json(&[(2, "mic", 100, false)]);
+        // The start waits, so the burst is queued before the worker
+        // takes the first of it.
+        let p = fake(
+            &d,
+            &sinks,
+            &sources,
+            "a",
+            "mic",
+            "[ \"$1\" = get-default-sink ] && sleep 0.5",
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        worker.request(AudioRequest::Device(PaEvent::Change(Kind::Sink, 1)));
+        worker.request(AudioRequest::Device(PaEvent::Change(Kind::Source, 2)));
+        worker.request(AudioRequest::Device(PaEvent::Server));
+        wait_for("the start's mark and one refresh", || {
+            count(&events, |e| matches!(e, AudioEvent::Mark(_))) >= 2
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(count(&events, |e| matches!(e, AudioEvent::Mark(_))), 2);
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new(), "no feedback loop");
+        // One for the start, one for the merged burst.
+        assert_eq!(calls(&d, "get-default-source").len(), 2);
+        assert_eq!(calls(&d, "-f json list sources").len(), 2);
+        // A sink change alone does nothing.
+        worker.request(AudioRequest::Device(PaEvent::Change(Kind::Sink, 1)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(calls(&d, "get-default-source").len(), 2);
+    }
+
+    #[test]
+    fn a_new_device_gets_the_shared_state() {
+        let d = TestDir::new("osd-audio", "new");
+        let sources = json(&[(2, "cam", 100, false)]);
+        let p = fake(&d, &json(&[(1, "a", 30, false)]), &sources, "a", "cam", "");
+        let (worker, events) = spawn(p, Mode::Keys);
+        worker.request(AudioRequest::ToggleMic);
+        wait_for("a Mic event", || {
+            events.lock().unwrap().contains(&AudioEvent::Mic(true))
+        });
+        // A headset arrives as the new default at 100 %.
+        std::fs::write(
+            d.join("sinks.json"),
+            json(&[(1, "a", 30, false), (7, "headset", 100, false)]),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("sources.json"),
+            json(&[(2, "cam", 100, true), (8, "mic", 100, false)]),
+        )
+        .unwrap();
+        std::fs::write(d.join("default-sink"), "headset\n").unwrap();
+        worker.request(AudioRequest::Device(PaEvent::New(Kind::Sink, 7)));
+        worker.request(AudioRequest::Device(PaEvent::New(Kind::Source, 8)));
+        wait_for("both new devices set", || calls(&d, "set-").len() == 3);
+        assert_eq!(
+            calls(&d, "set-"),
+            [
+                "set-source-mute cam 1",
+                "set-sink-volume headset 30%",
+                "set-source-mute mic 1"
+            ]
+        );
+        // An index that is gone by the time it is listed sets nothing.
+        worker.request(AudioRequest::Device(PaEvent::New(Kind::Sink, 99)));
+        worker.request(AudioRequest::Step(5));
+        wait_for("a Sink event", || {
+            count(&events, |e| matches!(e, AudioEvent::Sink(_))) == 1
+        });
+        assert!(events.lock().unwrap().contains(&AudioEvent::Sink(Level {
+            percent: 35,
+            muted: false
+        })));
+    }
+
+    #[test]
+    fn mode_off_resets_every_device() {
+        let d = TestDir::new("osd-audio", "mode");
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, true)]),
+            &json(&[(2, "mic", 60, true)]),
+            "a",
+            "mic",
+            "",
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
+        worker.request(AudioRequest::Mode(Mode::Off));
+        wait_for("four sets", || calls(&d, "set-").len() == 4);
+        assert_eq!(
+            calls(&d, "set-"),
+            [
+                "set-sink-volume a 100%",
+                "set-sink-mute a 0",
+                "set-source-volume mic 100%",
+                "set-source-mute mic 0"
             ]
         );
     }
 
     #[test]
-    fn steps_merge_while_wpctl_runs() {
+    fn steps_merge_while_pactl_runs() {
         let d = TestDir::new("osd-audio", "merge");
-        let w = fake(
+        let p = fake(
             &d,
-            "case \"$1\" in set-volume) sleep 0.3;; get-volume) echo 'Volume: 0.50';; esac",
+            &json(&[(1, "a", 50, false)]),
+            "[]",
+            "a",
+            "",
+            "[ \"$1\" = set-sink-volume ] && sleep 0.3",
         );
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let e = events.clone();
-        let worker = AudioWorker::spawn(w, move |ev| {
-            if let AudioEvent::Sink(l) = ev {
-                e.lock().unwrap().push(l);
-            }
-        });
+        let (worker, events) = spawn(p, Mode::Keys);
         for _ in 0..6 {
             worker.request(AudioRequest::Step(5));
         }
-        let sets = || -> Vec<i32> {
-            log(&d)
-                .iter()
-                .filter_map(|l| l.strip_prefix("set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ "))
-                .map(|n| n.trim_end_matches("%+").parse().unwrap())
-                .collect()
-        };
-        wait_for("the steps add up to 30 %", || sets().iter().sum::<i32>() >= 30);
+        let at_80 = AudioEvent::Sink(Level {
+            percent: 80,
+            muted: false,
+        });
+        wait_for("the steps add up to 80 %", || events.lock().unwrap().contains(&at_80));
         // A third run would start at once; give it room to show.
         std::thread::sleep(Duration::from_millis(400));
-        let sets = sets();
+        let sets = calls(&d, "set-sink-volume");
         assert!(sets.len() <= 2, "{sets:?}");
-        assert_eq!(sets.iter().sum::<i32>(), 30);
-        wait_for("an event per run", || events.lock().unwrap().len() == sets.len());
+        assert_eq!(sets.last().map(String::as_str), Some("set-sink-volume a 80%"));
+        assert_eq!(
+            count(&events, |e| matches!(e, AudioEvent::Sink(_))),
+            sets.len(),
+            "an event per run"
+        );
     }
 
     #[test]
     fn toggles_are_not_merged() {
         let d = TestDir::new("osd-audio", "toggles");
-        let w = fake(
+        let p = fake(
             &d,
-            "case \"$1\" in set-mute) sleep 0.2;; get-volume) echo 'Volume: 0.50';; esac",
+            &json(&[(1, "a", 50, false)]),
+            "[]",
+            "a",
+            "",
+            "[ \"$1\" = set-sink-mute ] && sleep 0.2",
         );
-        let worker = AudioWorker::spawn(w, |_| {});
+        let (worker, events) = spawn(p, Mode::Keys);
         for _ in 0..3 {
             worker.request(AudioRequest::ToggleMute);
         }
-        let toggles = || log(&d).iter().filter(|l| l.starts_with("set-mute")).count();
-        wait_for("three toggles", || toggles() == 3);
+        wait_for("three toggles", || {
+            count(&events, |e| matches!(e, AudioEvent::Sink(_))) == 3
+        });
+        let muted: Vec<bool> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                AudioEvent::Sink(l) => Some(l.muted),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(muted, [true, false, true]);
     }
 
     #[test]
-    fn mic_toggle_targets_the_default_source() {
+    fn mic_toggle_sets_every_source_but_no_monitor() {
         let d = TestDir::new("osd-audio", "mic");
-        let w = fake(&d, "case \"$1\" in get-volume) echo 'Volume: 1.00 [MUTED]';; esac");
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let e = events.clone();
-        let worker = AudioWorker::spawn(w, move |ev| {
-            if let AudioEvent::Mic(m) = ev {
-                e.lock().unwrap().push(m);
-            }
-        });
+        let p = fake(&d, SINKS, SOURCES, "tf_null_a", "tf_null_a.monitor", "");
+        let (worker, events) = spawn(p, Mode::Keys);
         worker.request(AudioRequest::ToggleMic);
-        wait_for("a Mic event", || !events.lock().unwrap().is_empty());
-        assert_eq!(*events.lock().unwrap(), [true]);
-        assert_eq!(
-            log(&d),
-            [
-                "set-mute @DEFAULT_AUDIO_SOURCE@ toggle",
-                "get-volume @DEFAULT_AUDIO_SOURCE@"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_failure_reaches_the_worker_as_failed() {
-        let d = TestDir::new("osd-audio", "workerfail");
-        let w = fake(&d, "exit 1");
-        let failed = Arc::new(Mutex::new(0));
-        let f = failed.clone();
-        let worker = AudioWorker::spawn(w, move |ev| {
-            assert!(matches!(ev, AudioEvent::Failed(_)), "a level from a failing wpctl");
-            *f.lock().unwrap() += 1;
+        wait_for("a Mic event", || {
+            events.lock().unwrap().contains(&AudioEvent::Mic(true))
         });
-        worker.request(AudioRequest::Step(5));
-        wait_for("a Failed event", || *failed.lock().unwrap() == 1);
+        assert_eq!(
+            calls(&d, "set-source"),
+            ["set-source-mute tf_mic 1"],
+            "the monitors are left alone"
+        );
+        // The default source here is a monitor: no mark.
+        assert!(!events.lock().unwrap().contains(&AudioEvent::Mark(true)));
     }
 }

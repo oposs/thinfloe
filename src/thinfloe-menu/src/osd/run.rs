@@ -12,11 +12,12 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::audio::{AudioEvent, AudioRequest, AudioWorker, Wpctl};
+use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
 use super::state::{OsdState, Shown};
 use super::surface::{SurfaceKind, Surfaces, mark_placement, panel_placement};
+use super::sync::Mode;
 use super::{Action, POLL_MAX_MS, STOP, VOLUME_STEP, socket};
 
 /// How often the microphone's mute state is read for the mark.
@@ -144,7 +145,8 @@ pub(super) fn run() -> Result<(), String> {
     let notify = Arc::new(Notify { tx, wake: wake_tx });
 
     let n = notify.clone();
-    let audio = AudioWorker::spawn(Wpctl::from_env(), move |e| n.send(Msg::Audio(e)));
+    // Task 10 reads the switch; until then the keys mode.
+    let audio = AudioWorker::spawn(Pactl::from_env(), Mode::Keys, move |e| n.send(Msg::Audio(e)));
     let n = notify.clone();
     let monitors = Monitors::spawn(Ddcutil::from_env(), move |e| n.send(Msg::Ddc(e)));
     let mut redetect = Redetect::default();
@@ -152,9 +154,9 @@ pub(super) fn run() -> Result<(), String> {
     redetect.started();
     let n = notify.clone();
     std::thread::spawn(move || {
-        let w = Wpctl::from_env();
+        let p = Pactl::from_env();
         while !STOP.load(Ordering::SeqCst) {
-            n.send(Msg::MicPoll(w.source_muted()));
+            n.send(Msg::MicPoll(p.source_muted()));
             std::thread::sleep(MIC_POLL);
         }
     });
@@ -244,7 +246,7 @@ fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
 }
 
 /// Start what `a` asks for; the brightness panel shows at once, the
-/// volume and microphone panels when `wpctl` has answered. True when
+/// volume and microphone panels when `pactl` has answered. True when
 /// something to draw changed.
 fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Monitors, now: Instant) -> bool {
     match a {
@@ -270,6 +272,7 @@ pub(super) fn on_audio(state: &mut OsdState, e: AudioEvent, now: Instant, logged
             state.set_mic(m);
             state.show(Shown::Mic(m), now);
         }
+        AudioEvent::Mark(m) => return state.set_mic(m),
         AudioEvent::Failed(why) => {
             logged.once(format!("thinfloe-menu --osd: {why}"));
             return false;
@@ -415,12 +418,15 @@ mod tests {
         let t0 = Instant::now();
         let mut s = OsdState::new();
         let mut logged = Logged::default();
-        let why = || AudioEvent::Failed("wpctl get-volume @DEFAULT_AUDIO_SINK@ printed no volume".into());
+        let why = || AudioEvent::Failed("pactl -f json list sinks: Connection failure: Connection refused".into());
         assert!(!on_audio(&mut s, why(), t0, &mut logged));
         assert_eq!(s.panel_for("DP-1", t0), None);
         assert!(!s.mark());
         // Logged once, not on every key.
-        assert!(!logged.once("thinfloe-menu --osd: wpctl get-volume @DEFAULT_AUDIO_SINK@ printed no volume".into()));
+        assert!(
+            !logged
+                .once("thinfloe-menu --osd: pactl -f json list sinks: Connection failure: Connection refused".into())
+        );
     }
 
     #[test]
