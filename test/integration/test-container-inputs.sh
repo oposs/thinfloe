@@ -35,8 +35,8 @@ cat >"$RUNTIME" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
     "image inspect") echo sha256:aaaa ;;
-    # Only seed_rootfs_key runs a container; it writes nothing.
-    "run "*) ;;
+    # Only the seeding builds below run one; they write nothing.
+    "build "*|"run "*) ;;
     *) exit 125 ;;
 esac
 STUB
@@ -59,7 +59,14 @@ reset() {
     for f in "${inputs[@]}"; do : >"$TREE/$f"; done
     echo 4.2.0 >"$TREE/RELEASE"
     (cd "$TREE" && find RELEASE containers src overlay brand scripts -exec touch -d '2020-01-01' {} +)
-    echo sha256:aaaa >"$TREE/.ubuntu-container"
+    # The stamp holds a hash of the inputs, so one stub build writes it.
+    if [[ -z "${STAMP_CONTENT:-}" ]]; then
+        rm -f "$TREE/.ubuntu-container"
+        env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+            TF_VERSION=4.2.0-dev+abc .ubuntu-container >/dev/null 2>&1 || bad "seeding the stamp failed"
+        STAMP_CONTENT=$(cat "$TREE/.ubuntu-container")
+    fi
+    printf '%s\n' "$STAMP_CONTENT" >"$TREE/.ubuntu-container"
     touch -d '2021-01-01' "$TREE/.ubuntu-container"
 }
 # make -q exits 0 (up to date), 1 (would rebuild) or 2 (make itself failed).

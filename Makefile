@@ -201,8 +201,19 @@ SLIM_FILES := $(filter-out %~ %/__pycache__,$(wildcard containers/ubuntu/slim/*)
 # against the other checkout's image and reported green. A stamp from before
 # this check is empty and so is dropped once. Build with a distinct VERSION
 # per checkout, or two checkouts will keep rebuilding over each other.
+#
+# .ubuntu-container also holds, on its second line, a hash of the names,
+# modes and contents of its input files, and is dropped when they differ.
+# By mtime alone, `touch .ubuntu-container` after an edit made the stamp
+# newer than the edited file, and make exported the old image as if it
+# were built from it. To force a rebuild, remove the stamp
+# (`rm .ubuntu-container`); never touch it. A mode change (chmod) does not
+# change an mtime either, and is caught the same way.
 image_id = $(CONTAINER_RUNTIME) image inspect --format '{{.Id}}' $(1)
-drop_stale_stamp = $(shell id=$$($(call image_id,$(1)) 2>/dev/null); [ -n "$$id" ] && [ "$$id" = "$$(cat $(2) 2>/dev/null)" ] || rm -f $(2))
+drop_stale_stamp = $(shell id=$$($(call image_id,$(1)) 2>/dev/null); [ -n "$$id" ] && [ "$$id" = "$$(sed -n 1p $(2) 2>/dev/null)" ] || rm -f $(2))
+UBUNTU_INPUTS := $(sort containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES))
+UBUNTU_INPUTS_HASH := $(shell { stat -c '%a %n' $(UBUNTU_INPUTS); sha256sum $(UBUNTU_INPUTS); } 2>&1 | sha256sum | cut -d' ' -f1)
+$(shell [ "$$(sed -n 2p .ubuntu-container 2>/dev/null)" = "$(UBUNTU_INPUTS_HASH)" ] || rm -f .ubuntu-container)
 $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
@@ -214,7 +225,7 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 		-t $(UBUNTU_IMAGE) \
 		-f containers/ubuntu/Dockerfile \
 		.
-	$(call image_id,$(UBUNTU_IMAGE)) >$@
+	{ $(call image_id,$(UBUNTU_IMAGE)) && echo $(UBUNTU_INPUTS_HASH); } >$@
 
 # `artifacts` is a symlink in git: every checkout on the development host
 # writes one directory. By mtime alone, a rootfs another checkout exported

@@ -7,7 +7,8 @@
 # checkout built and re-tagged the image this checkout still called its build
 # up to date, and `make test` checked the other checkout's image and passed.
 # The stamp now holds the image ID, and it is dropped whenever the tag names
-# a different image.
+# a different image. Its second line is a hash of the inputs, so a
+# `touch .ubuntu-container` after an edit no longer hides the edit.
 #
 # Runs the real Makefile in a scratch tree with a stub container runtime: the
 # stub's "build" changes nothing, and "image inspect" reports the ID in
@@ -74,10 +75,10 @@ run_make() {
 # ---------------------------------------------------------------- test 1
 rm -f "$STAMP"
 r=$(run_make sha256:aaaa)
-if [[ "$r" == built ]] && [[ "$(cat "$STAMP" 2>/dev/null)" == sha256:aaaa ]]; then
+if [[ "$r" == built ]] && [[ "$(sed -n 1p "$STAMP" 2>/dev/null)" == sha256:aaaa ]]; then
     ok "a build records the tagged image's ID in the stamp"
 else
-    bad "build gave '$r', stamp holds '$(cat "$STAMP" 2>/dev/null)': $(cat "$WORK/make.out")"
+    bad "build gave '$r', stamp holds '$(sed -n 1p "$STAMP" 2>/dev/null)': $(cat "$WORK/make.out")"
 fi
 
 # ---------------------------------------------------------------- test 2
@@ -91,7 +92,7 @@ fi
 # ---------------------------------------------------------------- test 3
 # Another checkout rebuilt thinfloe-ubuntu:$(VERSION) from its own sources.
 r=$(run_make sha256:bbbb)
-if [[ "$r" == built ]] && [[ "$(cat "$STAMP" 2>/dev/null)" == sha256:bbbb ]]; then
+if [[ "$r" == built ]] && [[ "$(sed -n 1p "$STAMP" 2>/dev/null)" == sha256:bbbb ]]; then
     ok "a different image under the same tag invalidates the stamp"
 else
     bad "a foreign image under the tag left the stamp standing ($r)"
@@ -115,11 +116,42 @@ else
     bad "an empty stamp was taken as up to date ($r)"
 fi
 
+# ---------------------------------------------------------------- test 5b
+# `touch .ubuntu-container` after an edit made the stamp newer than the
+# edited input, and make took the old image as built from it. The stamp
+# holds a hash of the inputs, so an edit is seen whatever the mtimes.
+rm -f "$STAMP"
+run_make sha256:aaaa >/dev/null
+echo "FROM scratch" >"$TREE/containers/ubuntu/Dockerfile"
+touch -d '2020-01-01' "$TREE/containers/ubuntu/Dockerfile"
+touch "$STAMP"
+r=$(run_make sha256:aaaa)
+if [[ "$r" == built ]]; then
+    ok "an edited input rebuilds, also under a touched stamp"
+else
+    bad "a touched stamp hid an edited input ($r)"
+fi
+chmod +x "$TREE/containers/ubuntu/Dockerfile"
+touch -d '2020-01-01' "$TREE/containers/ubuntu/Dockerfile"
+r=$(run_make sha256:aaaa)
+if [[ "$r" == built ]]; then
+    ok "a changed file mode rebuilds"
+else
+    bad "a changed file mode left the stamp standing ($r)"
+fi
+r=$(run_make sha256:aaaa)
+if [[ "$r" == up-to-date ]]; then
+    ok "the stamp of that build stands"
+else
+    bad "the build after the mode change rebuilt again ($r)"
+fi
+
 # ---------------------------------------------------------------- test 6
 # thinfloe-menu is compiled inside the container build from src/thinfloe-menu, which
 # OVERLAY_FILES does not cover. Editing it must make the stamp stale, or
 # 'make test' checks a binary built from the old source.
-echo sha256:aaaa >"$STAMP"
+rm -f "$STAMP"
+run_make sha256:aaaa >/dev/null
 r=$(run_make sha256:aaaa)
 if [[ "$r" != up-to-date ]]; then
     bad "setup: stamp not up to date before touching the crate ($r)"

@@ -412,6 +412,13 @@ none. Build with a distinct `VERSION` per checkout, or two checkouts rebuild
 over each other. `test/integration/test-container-stamp.sh` guards this - run
 via `make test`.
 
+The stamp's mtime was also a way around the check: `touch .ubuntu-container`
+after an edit made the stamp newer than the edited file, and make exported
+the old image as if it were built from it. Since 2026-11-19 the stamp's
+second line is a hash of the names, modes and contents of its inputs, and the
+`Makefile` drops the stamp when they differ. To force a rebuild, remove the
+stamp. `test-container-stamp.sh` guards this too.
+
 A third source is the artifacts directory. `artifacts` is a symlink in git,
 so every checkout on the development host writes one directory, and make
 compared only mtimes: a rootfs another checkout exported was newer than this

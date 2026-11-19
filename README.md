@@ -37,6 +37,10 @@ make ipxe
 
 # Clean and rebuild
 make clean && make
+
+# Build the container again although make sees no change: remove its
+# stamp (touching it does not help)
+rm -f .ubuntu-container && make
 ```
 
 ## Architecture
@@ -223,6 +227,10 @@ podman --version
 
 # Clean and rebuild
 make clean && make
+
+# Build the container again although make sees no change: remove its
+# stamp (touching it does not help)
+rm -f .ubuntu-container && make
 ```
 
 ### Boot Issues

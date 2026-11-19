@@ -108,8 +108,8 @@ cat >"$WORK/podman" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
     "image inspect") echo sha256:aaaa ;;
-    # Only the seeding export below runs a container; it writes nothing.
-    "run "*) ;;
+    # Only the seeding make below builds or runs one; it writes nothing.
+    "build "*|"run "*) ;;
     *) exit 125 ;;
 esac
 STUB
@@ -315,7 +315,7 @@ touch -d '2021-01-01' "$MTREE/.ubuntu-container" "$KIND"
 # from (test-artifact-source.sh); without it the rootfs is stale whatever
 # its mtimes.
 mk rootfs TF_VERSION=4.2.0-dev+abc >/dev/null 2>&1 || bad "seeding the rootfs key failed"
-touch -d '2021-01-01' "$KIND"
+touch -d '2021-01-01' "$KIND" "$MTREE/.ubuntu-container"
 for f in vmlinuz initrd.img ramroot.sqsh; do
     : >"$MTREE/artifacts/rootfs/$f"; touch -d '2022-01-01' "$MTREE/artifacts/rootfs/$f"
 done

@@ -96,10 +96,10 @@ Expected: all three `PASSED`; `ls -l artifacts/rootfs/initrd.img` about 80 MB sm
 Run: `test/integration/test-squashfs-format.sh`
 Expected: `FAIL` on the compression level (current build says `compression-level 3`), exit 1.
 
-- [ ] **Step 3: Change the two defaults** named under Files. Note in the commit that a level change alone does not trigger a re-export (the export rule depends only on `.ubuntu-container`); force it with `touch .ubuntu-container`.
+- [ ] **Step 3: Change the two defaults** named under Files. Note in the commit that a level change alone does not trigger a re-export (the export rule depends only on `.ubuntu-container`); force it with `touch .ubuntu-container`. (Out of date since 2026-11-19: the export key includes the compression settings, so a level change re-exports, and a touched stamp no longer counts as a build; to force a rebuild, `rm .ubuntu-container`.)
 
 - [ ] **Step 4: Rebuild and rerun.**
-Run: `touch .ubuntu-container && flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make VERSION=slim rootfs`, then `test/integration/test-squashfs-format.sh`
+Run (2026-10-24; today without the `touch`): `touch .ubuntu-container && flock /scratch/oetiker/claude-tmp/dbrrg-build.lock make VERSION=slim rootfs`, then `test/integration/test-squashfs-format.sh`
 Expected: `PASSED`; `ramroot.sqsh` about 40 MB smaller than after Task 1.
 
 - [ ] **Step 5: Boot time.** Run `flock … make VERSION=slim qemu-smoke` and read the `Startup finished in …` line of `artifacts/images/qemu-smoke.log`. Baseline (zstd 3, 208e758 gate build): `3.150s (kernel) + 4.750s (initrd) + 3.451s (userspace) = 11.353s`. QEMU timing is noisy: if the userspace part is more than 30 % above 3.451 s, run the smoke a second time; if it stays there, stop and report to the controller.
