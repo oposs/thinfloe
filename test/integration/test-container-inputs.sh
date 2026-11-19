@@ -35,6 +35,8 @@ cat >"$RUNTIME" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
     "image inspect") echo sha256:aaaa ;;
+    # Only seed_rootfs_key runs a container; it writes nothing.
+    "run "*) ;;
     *) exit 125 ;;
 esac
 STUB
@@ -136,7 +138,15 @@ else
 fi
 
 rootfs_state() { make_state artifacts/rootfs/ramroot.sqsh "${1:-}"; }
+# One export through the stub writes the key of what the rootfs was made
+# from (test-artifact-source.sh); without it the rootfs is stale whatever
+# its mtimes. The cases below change mtimes only, so the key stays valid.
+seed_rootfs_key() {
+    env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+        TF_VERSION=4.2.0-dev+abc rootfs >/dev/null 2>&1 || bad "seeding the rootfs key failed"
+}
 reset
+seed_rootfs_key
 printf '4.2.0\n' >"$TREE/RELEASE"
 printf '4.2.0-dev\n' >"$TREE/artifacts/rootfs/.version-kind"
 touch -d '2020-01-01' "$TREE/RELEASE"

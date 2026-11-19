@@ -216,8 +216,28 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 		.
 	$(call image_id,$(UBUNTU_IMAGE)) >$@
 
-$(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) scripts/export-rootfs.sh scripts/lib/common.sh | $(ROOTFS_DIR)
+# `artifacts` is a symlink in git: every checkout on the development host
+# writes one directory. By mtime alone, a rootfs another checkout exported
+# was newer than this checkout's stamp and so "up to date", and `make test`
+# checked the other checkout's rootfs and passed. Each export therefore
+# records a key of what it was made from (the container stamp, the scripts
+# and settings it ran with) next to its files, and a key that differs from
+# this checkout's makes them stale. The rules are grouped (&:), so a stale
+# key runs the export once, not once per file. A key is removed before its
+# export and written after it, so a failed export is never current.
+# Test: test-artifact-source.sh.
+artifact_key = { $(1); } 2>/dev/null | sha256sum | cut -d' ' -f1
+stale_key = $(if $(filter x$(shell $(call artifact_key,$(1))),x$(shell cat $(2) 2>/dev/null)),,FORCE)
+ROOTFS_KEY_FILE := $(ROOTFS_DIR)/.exported-from
+ROOTFS_KEY = cat .ubuntu-container scripts/export-rootfs.sh scripts/lib/common.sh; echo '$(SQUASHFS_COMP) $(SQUASHFS_COMP_LEVEL)'
+IPXE_KEY_FILE := $(ROOTFS_DIR)/.ipxe-from
+IPXE_KEY = cat .ipxe-container
+USB_KEY_FILE := $(IMAGE_DIR)/.built-from
+USB_KEY = cat $(ROOTFS_KEY_FILE) .image-builder-container configs/syslinux.cfg scripts/make-bootable-image.sh scripts/lib/common.sh; echo '$(EFI_PARTITION_SIZE) $(PROJECT_NAME)'
+
+$(KERNEL) $(INITRD) $(SQUASHFS) &: .ubuntu-container $(VERSION_KIND_STAMP) scripts/export-rootfs.sh scripts/lib/common.sh $(call stale_key,$(ROOTFS_KEY),$(ROOTFS_KEY_FILE)) | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
+	rm -f $(ROOTFS_KEY_FILE)
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(CURDIR)/scripts:/scripts:ro \
 		-v $(CURDIR)/artifacts:/artifacts \
@@ -228,6 +248,7 @@ $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) scripts
 		-e BUILD_JOBS=$(BUILD_JOBS) \
 		$(UBUNTU_IMAGE) \
 		/scripts/export-rootfs.sh
+	$(call artifact_key,$(ROOTFS_KEY)) >$(ROOTFS_KEY_FILE)
 
 rootfs: $(KERNEL) $(INITRD) $(SQUASHFS)
 
@@ -240,11 +261,13 @@ rootfs: $(KERNEL) $(INITRD) $(SQUASHFS)
 		containers/ipxe
 	$(call image_id,$(IPXE_BUILDER)) >$@
 
-$(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI): .ipxe-container | $(ROOTFS_DIR)
+$(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI) &: .ipxe-container $(call stale_key,$(IPXE_KEY),$(IPXE_KEY_FILE)) | $(ROOTFS_DIR)
 	@echo "Exporting iPXE boot loaders..."
+	rm -f $(IPXE_KEY_FILE)
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(CURDIR)/artifacts/rootfs:/artifacts \
 		$(IPXE_BUILDER)
+	$(call artifact_key,$(IPXE_KEY)) >$(IPXE_KEY_FILE)
 
 ipxe: $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI)
 	@echo "✓ iPXE boot loaders built"
@@ -262,8 +285,9 @@ ipxe: $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI)
 # new random GPT GUIDs, and the .zst from `make image` no longer matched it.
 $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		scripts/make-bootable-image.sh scripts/lib/common.sh \
-		.image-builder-container | $(IMAGE_DIR)
+		.image-builder-container $(call stale_key,$(USB_KEY),$(USB_KEY_FILE)) | $(IMAGE_DIR)
 	@echo "Creating bootable USB image..."
+	rm -f $(USB_KEY_FILE)
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
 		-v $(CURDIR)/scripts:/scripts:ro \
 		-v $(CURDIR)/artifacts:/artifacts \
@@ -273,6 +297,7 @@ $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		-e PROJECT_NAME=$(PROJECT_NAME) \
 		$(IMAGE_BUILDER) \
 		/scripts/make-bootable-image.sh
+	$(call artifact_key,$(USB_KEY)) >$(USB_KEY_FILE)
 
 $(USB_IMAGE_COMPRESSED): $(USB_IMAGE)
 	@echo "Compressing USB image..."
@@ -577,6 +602,7 @@ test: test-unit rootfs
 	@$(TEST_ENV) test/integration/test-cmdline.sh
 	@$(TEST_ENV) test/integration/test-session-lifecycle.sh
 	@$(TEST_ENV) test/integration/test-container-stamp.sh
+	@$(TEST_ENV) test/integration/test-artifact-source.sh
 	@$(TEST_ENV) test/integration/test-usb-image-deps.sh
 	@$(TEST_ENV) test/integration/test-container-inputs.sh
 	@$(TEST_ENV) test/integration/test-release-version.sh

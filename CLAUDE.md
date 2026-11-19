@@ -74,7 +74,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 
 ### Build
 
-- `MENU_FILES`, `MENU_DIRS`, `PATCH_FILES` and `OVERLAY_DIRS` in the `Makefile` are prerequisites of `.ubuntu-container`; a new input needs a line there, or tests validate a stale image. Each container stamp holds the image ID it built; build with a distinct `VERSION` per checkout. Guards: `test-container-inputs.sh`, `test-container-stamp.sh`.
+- `MENU_FILES`, `MENU_DIRS`, `PATCH_FILES` and `OVERLAY_DIRS` in the `Makefile` are prerequisites of `.ubuntu-container`; a new input needs a line there, or tests validate a stale image. Each container stamp holds the image ID it built; build with a distinct `VERSION` per checkout. `artifacts` is shared by every checkout (a symlink in git): each export writes a key of its sources next to its files, and a foreign key makes them stale. Guards: `test-container-inputs.sh`, `test-container-stamp.sh`, `test-artifact-source.sh`.
 - `SLIM_FILES` (`containers/ubuntu/slim/`, without `*~` and `__pycache__`) is a prerequisite too, and `scripts/export-rootfs.sh` and `scripts/lib/common.sh` are prerequisites of the rootfs artifacts. Guard: `test-container-inputs.sh`.
 - The `RUN` that calls `containers/ubuntu/slim/slim-rootfs.sh` stays the last in the Dockerfile; nothing after it may run `dpkg`, `apt-get` or dracut (a `dpkg` trigger reruns dracut on the slimmed tree). Guard: `test-slim-last-run.sh`.
 - `test-image-size.sh` holds the size budget of `ramroot.sqsh`, `initrd.img` and their sum; raising it needs a reason in the commit message.
