@@ -215,10 +215,7 @@ pub(super) fn run() -> Result<(), String> {
             dirty |= match m {
                 Msg::Audio(e) => on_audio(&mut state, e, now, &mut logged),
                 Msg::Watch(w) => {
-                    audio.request(match w {
-                        Watch::Event(e) => AudioRequest::Device(e),
-                        Watch::Restarted => AudioRequest::Resync,
-                    });
+                    audio.request(watch_request(w));
                     false
                 }
                 Msg::Ddc(e) => {
@@ -235,6 +232,15 @@ pub(super) fn run() -> Result<(), String> {
         dirty |= state.expire(now);
     }
     Ok(())
+}
+
+/// What the worker does with a report of `pactl subscribe`.
+fn watch_request(w: Watch) -> AudioRequest {
+    match w {
+        Watch::Event(e) => AudioRequest::Device(e),
+        Watch::Connected => AudioRequest::Start,
+        Watch::Restarted => AudioRequest::Resync,
+    }
 }
 
 /// The actions waiting on the socket; other datagrams are dropped.
@@ -456,6 +462,15 @@ fn redraw(
 mod tests {
     use super::*;
     use crate::osd::audio::Level;
+
+    #[test]
+    fn the_watch_asks_the_worker_to_start_resync_or_follow() {
+        use crate::osd::audio::{Kind, PaEvent};
+        assert_eq!(watch_request(Watch::Connected), AudioRequest::Start);
+        assert_eq!(watch_request(Watch::Restarted), AudioRequest::Resync);
+        let e = PaEvent::New(Kind::Sink, 3);
+        assert_eq!(watch_request(Watch::Event(e)), AudioRequest::Device(e));
+    }
 
     #[test]
     fn a_failed_audio_event_shows_no_panel() {

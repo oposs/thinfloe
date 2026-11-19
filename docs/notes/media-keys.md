@@ -168,8 +168,13 @@ never set.
   retrying in N s` once per distinct wait and each distinct stderr line of
   `pactl` once (at most 32 lines), so one outage logs about 8 lines. Once a
   restarted child has run for 500 ms or printed a line, the shared state is
-  applied to every device again. The child gets `PR_SET_PDEATHSIG`, so it
-  dies with the OSD, also on SIGKILL.
+  applied to every device again. A start that failed (the server was not up
+  yet, or a 3 s timeout) is tried again when the first `pactl subscribe`
+  reaches the server, and at every later key or event. The child gets
+  `PR_SET_PDEATHSIG`, so it dies with the OSD, also on SIGKILL.
+- The switch turned off while the devices cannot be listed: the shared
+  state is still off, so the next restart or new device gets 100 % and
+  unmuted.
 - No sound server or device: no panel, one log line, no mark.
 - WirePlumber stores the levels it is given in
   `~/.local/state/wireplumber/`; they travel with the home and win over the

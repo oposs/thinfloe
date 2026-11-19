@@ -227,6 +227,7 @@ impl Pactl {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum AudioRequest {
     /// Change the volume by this many percent.
     Step(i32),
@@ -239,6 +240,9 @@ pub enum AudioRequest {
     /// Every device in line with the shared state again (after the
     /// sound server came back).
     Resync,
+    /// Start, if no start has worked yet (the sound server was not up at
+    /// the first try); otherwise nothing.
+    Start,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +419,11 @@ impl Worker {
             AudioRequest::Resync => {
                 return (self.realign(|s, sinks, sources| s.reapply(sinks, sources)), Vec::new());
             }
+            AudioRequest::Start if self.sync.is_some() => return (None, Vec::new()),
+            AudioRequest::Start => {
+                let ev = self.start().map_or_else(AudioEvent::Failed, AudioEvent::Mark);
+                return (Some(ev), Vec::new());
+            }
         };
         match done {
             Ok((ev, sets)) => (Some(ev), sets),
@@ -481,6 +490,9 @@ impl Worker {
 pub enum Watch {
     /// A line of `pactl subscribe` about a sink, a source or the server.
     Event(PaEvent),
+    /// The first `pactl subscribe` reached the sound server: a start that
+    /// failed before it was up can work now.
+    Connected,
     /// `pactl subscribe` ended and runs again: the sound server may have
     /// restarted, and events in between are lost.
     Restarted,
@@ -678,11 +690,14 @@ fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Ba
         };
         match spawned {
             Ok(child) => {
-                // A restart counts once it reached the server: its first
-                // line, or `WATCH_UP` without its end. Sent at the spawn,
-                // a server that came up just after this run failed to
+                // A run counts once it reached the server: its first line,
+                // or `WATCH_UP` without its end. Sent at the spawn, a
+                // server that came up just after this run failed to
                 // connect would get no Resync.
-                let up = (!first).then(|| started + WATCH_UP);
+                let up = (
+                    started + WATCH_UP,
+                    if first { Watch::Connected } else { Watch::Restarted },
+                );
                 let stderr = pump_watch(child, s, up, &on);
                 for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
                     log_once(format!("thinfloe-menu --osd: pactl subscribe: {line}"));
@@ -709,10 +724,10 @@ fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Ba
 }
 
 /// Hand each event line of `child` to `on` until its stdout ends, then
-/// reap it. With `up`, `on` gets `Watch::Restarted` first: at the first
-/// line, or at `up` if the child is still running. What it wrote to
+/// reap it. `on` gets the `Watch` of `up` first: at the first line, or at
+/// the `Instant` of `up` if the child is still running. What it wrote to
 /// stderr, at most `WATCH_LINE` bytes.
-fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), up: Option<Instant>, on: &impl Fn(Watch)) -> String {
+fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), up: (Instant, Watch), on: &impl Fn(Watch)) -> String {
     let err = child.stderr.take().map(|mut e| {
         std::thread::spawn(move || {
             let mut kept = Vec::new();
@@ -735,8 +750,8 @@ fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), up: Option<Ins
         for_each_line(
             out,
             WATCH_LINE,
-            up,
-            || on(Watch::Restarted),
+            Some(up.0),
+            || on(up.1),
             |line| {
                 if let Some(e) = parse_event(line) {
                     on(Watch::Event(e));
@@ -1418,11 +1433,13 @@ pub(super) mod tests {
             "[ \"$1\" = subscribe ] || exit 9; echo \"Event 'new' on source #3\"; echo \"Event 'new' on client #9\"",
         );
         let (w, seen) = watch_seen(&p);
-        wait_for("an event, a restart, an event", || seen.lock().unwrap().len() >= 3);
+        wait_for("connected, an event, a restart, an event", || {
+            seen.lock().unwrap().len() >= 4
+        });
         drop(w);
         let got: Vec<Watch> = seen.lock().unwrap().iter().map(|(_, e)| *e).collect();
         let new = Watch::Event(PaEvent::New(Kind::Source, 3));
-        assert_eq!(got[..3], [new, Watch::Restarted, new]);
+        assert_eq!(got[..4], [Watch::Connected, new, Watch::Restarted, new]);
         // No sound server: pactl ends at once. Starts 1 s, then 2 s apart,
         // and no Restarted: none of them reached a server.
         let d = TestDir::new("osd-audio", "gaps");
@@ -1572,6 +1589,43 @@ pub(super) mod tests {
         let (_worker, events) = spawn(p, Mode::Keys);
         wait_for("the start's mark", || !events.lock().unwrap().is_empty());
         assert_eq!(calls(&d, "set-"), ["set-sink-volume a 100%"]);
+    }
+
+    #[test]
+    fn a_failed_start_is_retried_when_the_watch_connects() {
+        let d = TestDir::new("osd-audio", "retry");
+        // The first default read times out, as at a session start before
+        // pipewire-pulse is up.
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, false)]),
+            "[]",
+            "",
+            "",
+            &format!(
+                "[ \"$1\" = get-default-sink ] && [ ! -e '{0}/up' ] && {{ : > '{0}/up'; echo 'Connection failure: Timeout' >&2; exit 1; }}",
+                d.display()
+            ),
+        );
+        let (worker, events) = spawn(p, Mode::Off);
+        wait_for("the start's failure", || {
+            count(&events, |e| matches!(e, AudioEvent::Failed(_))) == 1
+        });
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
+        worker.request(AudioRequest::Start);
+        wait_for("the retried start's mark", || {
+            events.lock().unwrap().last() == Some(&AudioEvent::Mark(false))
+                && count(&events, |e| matches!(e, AudioEvent::Mark(_))) == 2
+        });
+        assert_eq!(calls(&d, "set-"), ["set-sink-volume a 100%"]);
+        // With a state, Start does nothing.
+        let before = log(&d).len();
+        worker.request(AudioRequest::Start);
+        worker.request(AudioRequest::Step(5));
+        // The step's list and set: the Start before it ran no pactl call.
+        wait_for("the step's set", || log(&d).len() == before + 2);
+        assert_eq!(calls(&d, "get-default-sink").len(), 2, "no third start");
+        assert_eq!(log(&d)[before..], ["-f json list sinks", "set-sink-volume a 100%"]);
     }
 
     #[test]
