@@ -384,7 +384,9 @@ fn run_logged(
 
 /// Run thinfloe-save-home. Its output goes to the log as "save-home".
 pub fn save(paths: &Paths, feed: &Arc<Feed>) -> SaveOutcome {
-    match run_logged(Command::new(&paths.save_home), "save-home", feed, false, |_| {}) {
+    let mut cmd = Command::new(&paths.save_home);
+    default_signals(&mut cmd);
+    match run_logged(cmd, "save-home", feed, false, |_| {}) {
         Ok(st) => SaveOutcome::from_status(st.code()),
         Err(e) => SaveOutcome::Broken(format!("{} could not be started: {e}", paths.save_home.display())),
     }
@@ -2082,6 +2084,72 @@ mod tests {
         assert_eq!(got, ["own"]);
         // SAFETY: getpgrp has no preconditions.
         assert_ne!(pgid, unsafe { libc::getpgrp() });
+    }
+
+    // thinfloe-save-home gets the default action for SIGTERM and SIGHUP like
+    // every other child: a menu whose parent ignored them (a `nohup`, a
+    // session shell started with them ignored) passed that on, and
+    // the save could then not be stopped. The menu's dispositions are the
+    // test binary's, so the check runs in a copy of this binary started with
+    // both ignored; changing them here would reach every parallel test.
+    #[test]
+    fn save_home_gets_the_default_action_for_ignored_signals() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "jobs::tests::save_home_in_a_menu_that_ignores_signals",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("TF_TEST_IGNORING_MENU", "1");
+        // SAFETY: signal is async-signal-safe and touches no memory.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    }
+
+    #[test]
+    fn save_home_in_a_menu_that_ignores_signals() {
+        if std::env::var_os("TF_TEST_IGNORING_MENU").is_none() {
+            return; // runs only inside the test above
+        }
+        let d = dir("save-signals");
+        let feed = Arc::new(Feed::default());
+        for sig in ["TERM", "HUP"] {
+            let script = d.join(format!("save-{sig}"));
+            fs::write(&script, format!("#!/bin/sh\nkill -{sig} $$\nexit 0\n")).unwrap();
+            fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let p = Paths {
+                save_home: script,
+                state_dir: d.to_path_buf(),
+                addon_cmd: default_addon_cmd(),
+                upgrade_cmd: default_upgrade_cmd(),
+                network_cmd: default_network_cmd(),
+                homes: netfiles::Homes::from_env(),
+                kanshi: Kanshi::from_env(),
+                config: crate::store::test_shared(&d.join("cfg")),
+                layout: crate::migrate::HomeLayout::New,
+                labwc: LabwcCmds::from_env(),
+                net_roots: crate::netstat::Roots::under(Path::new("/nonexistent/net")),
+                pci_ids: PathBuf::from("/nonexistent/pci.ids"),
+                vainfo_cmd: vec!["/nonexistent/vainfo".into()],
+                wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+                hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            };
+            assert_eq!(
+                save(&p, &feed),
+                SaveOutcome::Broken("thinfloe-save-home was killed by a signal".into()),
+                "SIG{sig} reached thinfloe-save-home ignored"
+            );
+        }
     }
 
     #[test]
