@@ -553,6 +553,49 @@ pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 /// until it ends and the menu exits.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
+/// How `capture_env` ends a tool it gives up on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GiveUp {
+    /// SIGTERM, then `STOP_WAIT` for it to end. The menu's tools run as
+    /// root through sudo, and SIGKILL would reach only sudo.
+    Term,
+    /// SIGTERM, `KILL_GRACE`, then SIGKILL; the child is always reaped. For
+    /// the OSD's tools (ddcutil, pactl), which run as the user.
+    TermThenKill,
+}
+
+/// With `GiveUp::TermThenKill`, how long a tool has after SIGTERM before
+/// SIGKILL, and then how long the OSD waits before a thread reaps it.
+const KILL_GRACE: Duration = Duration::from_millis(500);
+const KILL_WAIT: Duration = Duration::from_secs(1);
+
+impl GiveUp {
+    /// How long to wait for the tool after SIGTERM.
+    fn grace(self) -> Duration {
+        match self {
+            GiveUp::Term => STOP_WAIT,
+            GiveUp::TermThenKill => KILL_GRACE,
+        }
+    }
+
+    /// Stop the tool's group, and with `TermThenKill` make sure it ends and
+    /// is reaped. A tool still running after SIGKILL (in D state) is reaped
+    /// by a thread when it ends, so it never stays a zombie.
+    fn stop(self, mut child: Child) {
+        let pgid = child.id() as i32;
+        stop(pgid, Signal::Term);
+        if wait_until(&mut child, Instant::now() + self.grace()).is_some() || self == GiveUp::Term {
+            return;
+        }
+        stop(pgid, Signal::Kill);
+        if wait_until(&mut child, Instant::now() + KILL_WAIT).is_none() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
 /// Wait for `child` until `deadline`; `None` when it still runs.
 fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     loop {
@@ -595,7 +638,21 @@ pub(crate) fn capture_as(
     source: &str,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(String, Option<i32>, String), String> {
-    capture_env(cmd, args, &[], cap, timeout, feed, source, on_spawn)
+    capture_env(cmd, args, &[], cap, timeout, feed, source, GiveUp::Term, on_spawn)
+}
+
+/// `capture_as` for a tool that runs as the user, not through sudo: a tool
+/// that has to be stopped gets SIGKILL `KILL_GRACE` after SIGTERM and is
+/// always reaped. Only the OSD uses it; the menu's tools go through sudo.
+pub(crate) fn capture_killable(
+    cmd: &[String],
+    args: &[String],
+    cap: usize,
+    timeout: Duration,
+    feed: &Arc<Feed>,
+    source: &str,
+) -> Result<(String, Option<i32>, String), String> {
+    capture_env(cmd, args, &[], cap, timeout, feed, source, GiveUp::TermThenKill, |_| {})
 }
 
 /// `capture_as` with `envs` added to the tool's environment.
@@ -608,6 +665,7 @@ fn capture_env(
     timeout: Duration,
     feed: &Arc<Feed>,
     source: &str,
+    give_up: GiveUp,
     on_spawn: impl FnOnce(i32),
 ) -> Result<(String, Option<i32>, String), String> {
     let mut command = upgrade_command(cmd, args);
@@ -650,8 +708,7 @@ fn capture_env(
     let out = match out_rx.recv_timeout(timeout) {
         Ok(out) => out,
         Err(_) => {
-            stop(child.id() as i32, Signal::Term);
-            wait_until(&mut child, Instant::now() + STOP_WAIT);
+            give_up.stop(child);
             return Err(format!(
                 "{} did not answer within {} s",
                 cmd[0],
@@ -665,10 +722,9 @@ fn capture_env(
     }
     let left = timeout
         .saturating_sub(started.elapsed())
-        .max(if too_long { STOP_WAIT } else { Duration::ZERO });
+        .max(if too_long { give_up.grace() } else { Duration::ZERO });
     let Some(status) = wait_until(&mut child, Instant::now() + left) else {
-        stop(child.id() as i32, Signal::Term);
-        wait_until(&mut child, Instant::now() + STOP_WAIT);
+        give_up.stop(child);
         return Err(format!(
             "{} did not end within {} s",
             cmd[0],
@@ -1140,6 +1196,7 @@ fn keyboard_hand_over(
         KEYBOARD_TIMEOUT,
         feed,
         KEYBOARD_LOG_SOURCE,
+        GiveUp::Term,
         |_| {},
     )
     .map_err(|e| format!("labwc --reconfigure failed ({e})"))?;
@@ -2257,6 +2314,23 @@ mod tests {
         let r = capture(&sh("sleep 5"), &[], 100, Duration::from_millis(300), &feed);
         assert!(r.unwrap_err().contains("did not answer"));
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn the_menus_tools_get_sigterm_only_never_sigkill() {
+        // They run through sudo: SIGKILL would reach only sudo. The OSD's
+        // `capture_killable` is the one that escalates.
+        let d = crate::testdir::TestDir::new("jobs", "term-only");
+        let pidfile = d.join("pid");
+        let script = format!("trap '' TERM; echo $$ > {}; sleep 30", pidfile.display());
+        let feed = Arc::new(Feed::default());
+        let r = capture(&sh(&script), &[], 100, Duration::from_millis(300), &feed);
+        assert!(r.unwrap_err().contains("did not answer"));
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        // The test started this group; end it either way.
+        stop(pid, Signal::Kill);
+        assert!(alive, "the menu's capture sent more than SIGTERM");
     }
 
     use crate::config::{NetCfg, NetworkCfg};

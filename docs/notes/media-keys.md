@@ -184,7 +184,9 @@ never set.
 
 ## Brightness
 
-Commands (`TF_DDCUTIL` replaces `ddcutil`, timeout 10 s each):
+Commands (`TF_DDCUTIL` replaces `ddcutil`, timeout 10 s each; a command past
+its timeout gets SIGTERM, SIGKILL 0.5 s later, and is always reaped; the
+same holds for the OSD's `pactl` calls):
 
 - `ddcutil detect --terse`: the displays with their I2C bus and DRM
   connector. The connector name matches the Wayland output name.

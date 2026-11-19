@@ -258,12 +258,13 @@ fn cmd_from_env(var: &str, default: &str) -> Vec<String> {
 
 /// Run `cmd` with `args` the way the menu runs its tools (`jobs`): a
 /// process group of its own, default signals, stdout capped at 64 KiB and
-/// the whole group stopped at `timeout`. Its stdout, or why it failed: a
-/// status other than 0 is an error carrying the first line of stderr.
+/// the whole group stopped at `timeout` (SIGTERM, SIGKILL shortly after,
+/// always reaped). Its stdout, or why it failed: a status other than 0 is
+/// an error carrying the first line of stderr.
 fn run_tool(cmd: &[String], args: &[String], timeout: Duration) -> Result<String, String> {
     // The OSD has no log window; stderr is kept in the error instead.
     let feed = Arc::new(crate::log::Feed::default());
-    let (out, status, stderr) = crate::jobs::capture_as(cmd, args, TOOL_BYTES, timeout, &feed, &cmd[0], |_| {})?;
+    let (out, status, stderr) = crate::jobs::capture_killable(cmd, args, TOOL_BYTES, timeout, &feed, &cmd[0])?;
     if status == Some(0) {
         return Ok(out);
     }
@@ -319,5 +320,27 @@ mod tests {
             run_tool(&sh("exit 3"), &[], t),
             Err("/bin/sh failed with status 3".to_string())
         );
+    }
+
+    #[test]
+    fn a_tool_that_ignores_sigterm_is_killed_and_reaped() {
+        let d = crate::testdir::TestDir::new("osd", "ignore-term");
+        let pidfile = d.join("pid");
+        // SIG_IGN is inherited across exec, so `sleep` ignores SIGTERM too.
+        let script = format!("trap '' TERM; echo $$ > {}; sleep 30", pidfile.display());
+        let cmd = ["/bin/sh", "-c", &script, "fake"].map(String::from).to_vec();
+        let t0 = std::time::Instant::now();
+        let r = run_tool(&cmd, &[], Duration::from_millis(300));
+        assert!(r.unwrap_err().contains("did not answer"));
+        assert!(t0.elapsed() < Duration::from_secs(3), "took {:?}", t0.elapsed());
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        // A zombie still answers kill(pid, 0); only a reaped group is gone.
+        let gone = |p: libc::pid_t| unsafe { libc::kill(p, 0) } != 0;
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while !(gone(pid) && gone(-pid)) && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone(pid), "the tool {pid} still exists (alive or a zombie)");
+        assert!(gone(-pid), "a process of group {pid} still exists");
     }
 }
