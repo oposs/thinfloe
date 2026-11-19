@@ -217,6 +217,7 @@ key_bindings() {
 build_source_rc() {
     _src=$OUT_DIR/.source
     _bind=$(key_bindings "$1")
+    _kb_failed=0
     if [ -n "$_bind" ]; then
         _tmp_rc=
         if _tmp_rc=$(mktemp "$_src/.rc.xml.XXXXXX" 2>/dev/null) &&
@@ -230,7 +231,7 @@ build_source_rc() {
             return 0
         fi
         [ -n "$_tmp_rc" ] && rm -f "$_tmp_rc"
-        echo "$me: cannot write the key bindings; the volume and brightness keys stay off" >&2
+        _kb_failed=1
     fi
     # The link replaces a file with the keys in one rename: labwc-scale
     # polls the checksum of rc.xml and must never find it missing.
@@ -238,9 +239,15 @@ build_source_rc() {
     if _tmp_ln=$(mktemp "$_src/.rc.xml.XXXXXX" 2>/dev/null) &&
         ln -sfn "$_src/base.xml" "$_tmp_ln" 2>/dev/null &&
         mv -Tf "$_tmp_ln" "$_src/rc.xml" 2>/dev/null; then
+        [ "$_kb_failed" -eq 1 ] &&
+            echo "$me: cannot write the key bindings; the volume and brightness keys stay off" >&2
         return 0
     fi
     [ -n "$_tmp_ln" ] && rm -f "$_tmp_ln"
+    # The old .source/rc.xml stays, with or without the keys; the full
+    # compose at the next session start writes it again.
+    [ "$_kb_failed" -eq 1 ] &&
+        echo "$me: cannot write the key bindings; the key switches follow at the next start" >&2
     return 0
 }
 

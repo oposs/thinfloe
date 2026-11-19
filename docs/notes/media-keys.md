@@ -48,8 +48,10 @@ prefix (tests only); the composer escapes it for XML.
   `onRelease="yes"`, so a held mute key toggles once.
 - When a binding cannot be written, the composer logs
   `thinfloe-compose-labwc-config: cannot write the key bindings; the volume
-  and brightness keys stay off` and leaves the keys off; its exit status does
-  not change.
+  and brightness keys stay off` and leaves the keys off. When `.source/`
+  takes no file at all (a `--env-only` call), the old `.source/rc.xml`
+  stays and the line ends `the key switches follow at the next start`
+  instead. The exit status does not change.
 
 ## Live switching
 
