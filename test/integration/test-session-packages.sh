@@ -1146,6 +1146,54 @@ else
     fail=1
 fi
 
+# The volume keys run wpctl; the brightness keys run ddcutil, which talks
+# DDC/CI over /dev/i2c-*: the i2c-dev module, loaded at boot, and a udev
+# rule that gives the seat's user (tfuser) the GPU's buses.
+present "wpctl"   'usr/bin/wpctl$'
+present "ddcutil" 'usr/bin/ddcutil$'
+DDC_TMP=$(mktemp -d)
+TMPS+=("$DDC_TMP")
+if unsquashfs -no-xattrs -d "$DDC_TMP/x" "$SQSH" usr/bin/ddcutil etc/modules-load.d/thinfloe-i2c.conf >/dev/null 2>&1 &&
+   [[ -f "$DDC_TMP/x/usr/bin/ddcutil" ]]; then
+    missing=""
+    for lib in $(readelf -d "$DDC_TMP/x/usr/bin/ddcutil" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p'); do
+        grep -qE "/(usr/)?lib/(x86_64-linux-gnu/)?${lib//./\\.}$" "$LIST" || missing+=" $lib"
+    done
+    if [[ -z "$missing" ]]; then
+        echo "ok   - every library ddcutil needs is in the image"
+    else
+        echo "FAIL - ddcutil needs libraries the image lacks:$missing"
+        fail=1
+    fi
+else
+    echo "FAIL - cannot extract usr/bin/ddcutil from $SQSH"
+    fail=1
+fi
+if grep -qx 'i2c-dev' "$DDC_TMP/x/etc/modules-load.d/thinfloe-i2c.conf" 2>/dev/null; then
+    echo "ok   - i2c-dev is loaded at boot (etc/modules-load.d/thinfloe-i2c.conf)"
+else
+    echo "FAIL - etc/modules-load.d/thinfloe-i2c.conf is missing or has no i2c-dev line"
+    fail=1
+fi
+if grep -qE 'usr/lib/modules/[^/]+/kernel/drivers/i2c/i2c-dev\.ko' "$LIST" ||
+   { unsquashfs -no-xattrs -d "$DDC_TMP/m" "$SQSH" 'usr/lib/modules/*/modules.builtin' >/dev/null 2>&1 &&
+     cat "$DDC_TMP"/m/usr/lib/modules/*/modules.builtin 2>/dev/null | grep -q '/i2c-dev\.ko$'; }; then
+    echo "ok   - the kernel has i2c-dev"
+else
+    echo "FAIL - the kernel has no i2c-dev (no module, not built in)"
+    fail=1
+fi
+uaccess=""
+if unsquashfs -no-xattrs -d "$DDC_TMP/r" "$SQSH" usr/lib/udev/rules.d >/dev/null 2>&1; then
+    uaccess=$(grep -lE 'i2c.*uaccess|uaccess.*i2c' "$DDC_TMP"/r/usr/lib/udev/rules.d/*.rules 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
+fi
+if [[ -n "$uaccess" ]]; then
+    echo "ok   - a udev rule gives the seat's user the i2c devices ($uaccess)"
+else
+    echo "FAIL - no rule under usr/lib/udev/rules.d/ has uaccess on a line that names i2c"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

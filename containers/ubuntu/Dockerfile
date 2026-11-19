@@ -116,6 +116,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 # xcursor-themes' whiteglass theme; both the package and that setting are
 # required.
 #
+# ddcutil is for the brightness keys: thinfloe-menu --osd sets a monitor's
+# brightness over DDC/CI with it. The package brings the udev rule that gives
+# the seat's user the GPU's /dev/i2c-* (60-ddcutil-i2c.rules, uaccess);
+# i2c-dev is loaded by overlay/etc/modules-load.d/thinfloe-i2c.conf.
+#
 # systemd-resolved is only downloaded here and installed in the next RUN, see
 # there.
 RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
@@ -165,6 +170,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
     libspa-0.2-bluetooth \
     pulseaudio-utils \
     alsa-utils \
+    ddcutil \
     plymouth \
     plymouth-themes \
     plymouth-theme-spinner \
