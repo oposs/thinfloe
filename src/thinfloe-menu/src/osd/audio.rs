@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -26,6 +27,9 @@ const WATCH_BASE: Duration = Duration::from_secs(1);
 const WATCH_CAP: Duration = Duration::from_secs(30);
 /// The longest line of `pactl subscribe` kept; a longer one is dropped.
 const WATCH_LINE: usize = 4096;
+/// How long a restarted `pactl subscribe` must stay up, without a line,
+/// to count as connected: one without a server ends at once.
+const WATCH_UP: Duration = Duration::from_millis(500);
 /// How long dropping a `Watcher` waits for its thread.
 const WATCH_JOIN: Duration = Duration::from_secs(2);
 
@@ -589,11 +593,45 @@ pub fn watch(p: &Pactl, on: impl Fn(Watch) + Send + 'static) -> Watcher {
     }
 }
 
+/// Messages of the watch, each logged once, at most `cap` of them: a
+/// `pactl` that prints a new line on every run cannot fill the log.
+struct OnceLog {
+    seen: BTreeSet<String>,
+    cap: usize,
+    full: bool,
+}
+
+impl OnceLog {
+    fn new(cap: usize) -> OnceLog {
+        OnceLog {
+            seen: BTreeSet::new(),
+            cap,
+            full: false,
+        }
+    }
+
+    /// The line to log for `msg`, if any.
+    fn line(&mut self, msg: String) -> Option<String> {
+        if self.seen.contains(&msg) {
+            return None;
+        }
+        if self.seen.len() >= self.cap {
+            return (!std::mem::replace(&mut self.full, true))
+                .then(|| "thinfloe-menu --osd: pactl subscribe: more messages are not logged".to_string());
+        }
+        self.seen.insert(msg.clone());
+        Some(msg)
+    }
+}
+
+/// Most distinct messages the watch logs.
+const WATCH_LOG_CAP: usize = 32;
+
 fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Backoff, on: impl Fn(Watch)) {
-    let mut logged = BTreeSet::new();
+    let mut logged = OnceLog::new(WATCH_LOG_CAP);
     let mut log_once = |msg: String| {
-        if logged.insert(msg.clone()) {
-            eprintln!("{msg}");
+        if let Some(line) = logged.line(msg) {
+            eprintln!("{line}");
         }
     };
     let mut first = true;
@@ -604,13 +642,29 @@ fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Ba
             if st.stop {
                 return;
             }
-            let c = Command::new(&argv[0])
-                .args(&argv[1..])
+            let mut cmd = Command::new(&argv[0]);
+            cmd.args(&argv[1..])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
-                .spawn();
+                .process_group(0);
+            // SAFETY: prctl and getppid are async-signal-safe. The child
+            // gets SIGTERM when this thread ends, as when the OSD is
+            // killed with SIGKILL or crashes; a parent already gone before
+            // the prctl is caught by the getppid check.
+            let parent = std::process::id() as libc::pid_t;
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != parent {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                });
+            }
+            let c = cmd.spawn();
             if let Ok(c) = &c {
                 st.child = Some(c.id());
             }
@@ -618,10 +672,12 @@ fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Ba
         };
         match spawned {
             Ok(child) => {
-                if !first {
-                    on(Watch::Restarted);
-                }
-                let stderr = pump_watch(child, s, &on);
+                // A restart counts once it reached the server: its first
+                // line, or `WATCH_UP` without its end. Sent at the spawn,
+                // a server that came up just after this run failed to
+                // connect would get no Resync.
+                let up = (!first).then(|| started + WATCH_UP);
+                let stderr = pump_watch(child, s, up, &on);
                 for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
                     log_once(format!("thinfloe-menu --osd: pactl subscribe: {line}"));
                 }
@@ -647,8 +703,10 @@ fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Ba
 }
 
 /// Hand each event line of `child` to `on` until its stdout ends, then
-/// reap it. What it wrote to stderr, at most `WATCH_LINE` bytes.
-fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), on: &impl Fn(Watch)) -> String {
+/// reap it. With `up`, `on` gets `Watch::Restarted` first: at the first
+/// line, or at `up` if the child is still running. What it wrote to
+/// stderr, at most `WATCH_LINE` bytes.
+fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), up: Option<Instant>, on: &impl Fn(Watch)) -> String {
     let err = child.stderr.take().map(|mut e| {
         std::thread::spawn(move || {
             let mut kept = Vec::new();
@@ -668,11 +726,17 @@ fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), on: &impl Fn(W
         })
     });
     if let Some(out) = child.stdout.take() {
-        for_each_line(out, WATCH_LINE, |line| {
-            if let Some(e) = parse_event(line) {
-                on(Watch::Event(e));
-            }
-        });
+        for_each_line(
+            out,
+            WATCH_LINE,
+            up,
+            || on(Watch::Restarted),
+            |line| {
+                if let Some(e) = parse_event(line) {
+                    on(Watch::Event(e));
+                }
+            },
+        );
     }
     // Not killed from here on: the pid may go once the child is reaped.
     lock_watch(s).child = None;
@@ -681,12 +745,40 @@ fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), on: &impl Fn(W
 }
 
 /// Call `f` with each line of `r` until it ends; a line longer than `max`
-/// bytes is dropped, not kept in memory.
-fn for_each_line(mut r: impl Read, max: usize, mut f: impl FnMut(&str)) {
+/// bytes is dropped, not kept in memory. With `up`, `on_up` runs once,
+/// before the first line or at `up` if `r` has neither ended nor sent a
+/// line by then.
+fn for_each_line<R: Read + AsRawFd>(
+    mut r: R,
+    max: usize,
+    mut up: Option<Instant>,
+    mut on_up: impl FnMut(),
+    mut f: impl FnMut(&str),
+) {
     let mut line: Vec<u8> = Vec::new();
     let mut too_long = false;
     let mut buf = [0u8; 4096];
     loop {
+        if let Some(t) = up {
+            let ms = t
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as libc::c_int;
+            let mut pfd = libc::pollfd {
+                fd: r.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd for the duration of the call.
+            match unsafe { libc::poll(&mut pfd, 1, ms) } {
+                0 => {
+                    up = None;
+                    on_up();
+                }
+                n if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => {}
+            }
+        }
         let n = match r.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => n,
@@ -695,6 +787,9 @@ fn for_each_line(mut r: impl Read, max: usize, mut f: impl FnMut(&str)) {
         };
         for &b in &buf[..n] {
             if b == b'\n' {
+                if up.take().is_some() {
+                    on_up();
+                }
                 if !too_long {
                     f(&String::from_utf8_lossy(&line));
                 }
@@ -1272,31 +1367,77 @@ pub(super) mod tests {
 
     #[test]
     fn the_watch_backs_off_and_resyncs() {
-        // One event, a line about another facility, then the end.
+        // One event, a line about another facility, then the end. A
+        // restart that prints an event line has reached the server.
         let p = sh_pactl(
             "[ \"$1\" = subscribe ] || exit 9; echo \"Event 'new' on source #3\"; echo \"Event 'new' on client #9\"",
         );
         let (w, seen) = watch_seen(&p);
-        wait_for("an event and a restart", || seen.lock().unwrap().len() >= 2);
+        wait_for("an event, a restart, an event", || seen.lock().unwrap().len() >= 3);
         drop(w);
         let got: Vec<Watch> = seen.lock().unwrap().iter().map(|(_, e)| *e).collect();
-        assert_eq!(
-            got[..2],
-            [Watch::Event(PaEvent::New(Kind::Source, 3)), Watch::Restarted]
-        );
-        // No sound server: pactl ends at once. Starts 1 s, then 2 s apart.
-        let p = sh_pactl("echo 'Connection failure: Connection refused' >&2; exit 1");
+        let new = Watch::Event(PaEvent::New(Kind::Source, 3));
+        assert_eq!(got[..3], [new, Watch::Restarted, new]);
+        // No sound server: pactl ends at once. Starts 1 s, then 2 s apart,
+        // and no Restarted: none of them reached a server.
+        let d = TestDir::new("osd-audio", "gaps");
+        let p = sh_pactl(&format!(
+            "date +%s.%N >> '{}/starts'; echo 'Connection failure: Connection refused' >&2; exit 1",
+            d.display()
+        ));
+        let (w, seen) = watch_seen(&p);
+        let starts = || -> Vec<f64> {
+            std::fs::read_to_string(d.join("starts"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.parse().ok())
+                .collect()
+        };
+        wait_for("three starts", || starts().len() >= 3);
+        drop(w);
+        let t = starts();
+        let gaps = [t[1] - t[0], t[2] - t[1]];
+        for (gap, want) in gaps.iter().zip([1.0, 2.0]) {
+            assert!((gap - want).abs() <= 0.2, "gaps {gaps:?}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "no Restarted without a server");
+    }
+
+    #[test]
+    fn a_restart_counts_once_pactl_stays_up() {
+        let d = TestDir::new("osd-audio", "stayup");
+        // Two runs without a server, then one that waits for events.
+        let p = sh_pactl(&format!(
+            "n=$(cat '{0}/n' 2>/dev/null || echo 0); echo $((n + 1)) > '{0}/n'; \
+             [ $n -lt 2 ] && exit 1; exec sleep 30",
+            d.display()
+        ));
         let t0 = Instant::now();
         let (w, seen) = watch_seen(&p);
-        wait_for("two restarts", || seen.lock().unwrap().len() >= 2);
+        wait_for("a restart", || !seen.lock().unwrap().is_empty());
+        let at = seen.lock().unwrap()[0].0 - t0;
+        // 1 s + 2 s of back-off, then 0.5 s up.
+        assert!(at.as_millis().abs_diff(3500) <= 300, "Restarted after {at:?}");
+        std::thread::sleep(Duration::from_millis(300));
         drop(w);
-        let seen = seen.lock().unwrap();
-        assert!(seen.iter().all(|(_, e)| *e == Watch::Restarted));
-        let gaps = [seen[0].0 - t0, seen[1].0 - seen[0].0];
-        for (gap, want) in gaps.iter().zip([1000u128, 2000]) {
-            let ms = gap.as_millis();
-            assert!(ms.abs_diff(want) <= 200, "gaps {gaps:?}");
+        let got: Vec<Watch> = seen.lock().unwrap().iter().map(|(_, e)| *e).collect();
+        assert_eq!(got, [Watch::Restarted]);
+    }
+
+    #[test]
+    fn the_watch_log_stops_after_32_messages() {
+        let mut l = OnceLog::new(32);
+        let mut out = Vec::new();
+        for i in 0..40 {
+            out.extend(l.line(format!("m{i}")));
         }
+        out.extend(l.line("m0".into()));
+        assert_eq!(out.len(), 33, "{out:?}");
+        assert_eq!(out[31], "m31");
+        assert_eq!(
+            out[32],
+            "thinfloe-menu --osd: pactl subscribe: more messages are not logged"
+        );
     }
 
     #[test]

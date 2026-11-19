@@ -1176,7 +1176,7 @@ fi
 # output 2.
 # shellcheck disable=SC2016 # expands inside the container
 mk_pactl='#!/usr/bin/python3
-import json, os, sys
+import json, os, sys, time
 D = "/tmp/pa/"
 a = sys.argv[1:]
 def dev(i, name, pct, mute, monitor=""):
@@ -1225,7 +1225,16 @@ if a == ["subscribe"]:
             f.write(str(n + 1))
         sys.stderr.write("Connection failure: Connection refused\n")
         sys.exit(1)
-    os.execvp("tail", ["tail", "-n", "+1", "-f", D + "events"])
+    # Follow the events file as pactl follows the server. Not tail -f:
+    # coreutils tail ends by itself once its reader is gone, pactl does not.
+    with open(D + "events") as f:
+        while True:
+            line = f.readline()
+            if line:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            else:
+                time.sleep(0.05)
 if len(a) == 4 and a[:3] == ["-f", "json", "list"] and a[3] in ("sinks", "sources"):
     with open(D + a[3] + ".json") as f:
         done(f.read())
@@ -1335,16 +1344,21 @@ start_osd() {
     for i in $(seq 50); do [ -S /tmp/xdg/thinfloe-osd.sock ] && break; sleep 0.1; done
     [ -S /tmp/xdg/thinfloe-osd.sock ] && echo socket=yes || echo socket=no
 }
-# stop_osd: SIGTERM, its status, its stderr, and whether its pactl
-# subscribe (tail -f under the fake) is left behind.
+# stop_osd [SIGNAL]: SIGTERM (or SIGNAL), its status, its stderr, and
+# whether its pactl subscribe is still there 1 s later.
 stop_osd() {
-    kill "$osd"
+    kill -"${1:-TERM}" "$osd"
     wait "$osd"
     echo "osd_rc=$?"
-    local left=no f c
-    for f in /proc/[0-9]*/cmdline; do
-        c=$(tr "\0" " " <"$f" 2>/dev/null)
-        [[ "$c" == "tail -n +1 -f /tmp/pa/events"* ]] && left=yes
+    local left f c i
+    for i in $(seq 10); do
+        left=no
+        for f in /proc/[0-9]*/cmdline; do
+            c=$(tr "\0" " " <"$f" 2>/dev/null)
+            [[ "$c" == *"/tmp/fake-pactl subscribe"* ]] && left=yes
+        done
+        [ "$left" = no ] && break
+        sleep 0.1
     done
     echo "subscribe_left=$left"
     sed "s/^/osderr: /" /tmp/osd.err
@@ -1448,7 +1462,15 @@ liveoff)
         "set-sink-volume spk_a 100%" "set-sink-mute spk_a 0" "set-sink-volume spk_b 100%" "set-sink-mute spk_b 0" \
         "set-source-volume mic_a 100%" "set-source-mute mic_a 0" "set-source-volume mic_b 100%" "set-source-mute mic_b 0" &&
         echo "liveoff_ms=$(ms_since "$t")" || echo liveoff_ms=none
-    stop_osd
+    # Another program mutes a microphone; a reload that does not change
+    # the switch leaves it so.
+    pa set-source-mute mic_a 1
+    from=$(($(grep -c "" /tmp/pactl.log) + 1))
+    thinfloe-menu --osd-key reload
+    sleep 0.5
+    echo "same_sets=$(tail -n +"$from" /tmp/pactl.log | grep -c "^set-")"
+    # Killed outright, the OSD leaves no pactl subscribe behind either.
+    stop_osd KILL
     ;;
 esac
 sed "s/^/pactl: /" /tmp/pactl.log 2>/dev/null
@@ -1580,6 +1602,12 @@ lo=$(mk_val liveoff_ms)
 [[ "$(mk_val keys)" == yes && "$lo" =~ ^[0-9]+$ && $lo -le 1000 ]]
 mk_check $? "the volume switch turned off during a session puts every speaker and microphone at 100 % and unmuted within 1 s of the reload" \
     "keys '$(mk_val keys)', after '$lo' ms; $(tail -n +"$(mk_val reload_from)" <(grep '^pactl: ' <<<"$MK_OUT") | grep 'set-' | tr '\n' ' ')"
+[[ "$(mk_val same_sets)" == 0 ]]
+mk_check $? "a reload that leaves the switch as it is sets no device, so a microphone muted elsewhere stays muted" \
+    "$(mk_val same_sets) set calls"
+[[ "$(mk_val osd_rc)" == 137 && "$(mk_val subscribe_left)" == no ]]
+mk_check $? "an OSD killed with SIGKILL leaves no pactl subscribe behind" \
+    "osd_rc '$(mk_val osd_rc)', subscribe left '$(mk_val subscribe_left)'"
 
 PA_FAIL=2 mk_run bright 2 off on
 mk_expect "without DDC/CI the brightness key shows 'not supported' on both outputs" bright warn1=found warn2=found

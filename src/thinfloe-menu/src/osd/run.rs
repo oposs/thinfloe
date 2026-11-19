@@ -147,8 +147,10 @@ pub(super) fn run() -> Result<(), String> {
     let n = notify.clone();
     let _watch = super::audio::watch(&Pactl::from_env(), move |w| n.send(Msg::Watch(w)));
     let env = env_file();
+    let mut logged = Logged::default();
+    let mut mode = start_mode(&env, &mut logged);
     let n = notify.clone();
-    let audio = AudioWorker::spawn(Pactl::from_env(), read_mode(&env), move |e| n.send(Msg::Audio(e)));
+    let audio = AudioWorker::spawn(Pactl::from_env(), mode, move |e| n.send(Msg::Audio(e)));
     let n = notify.clone();
     let monitors = Monitors::spawn(Ddcutil::from_env(), move |e| n.send(Msg::Ddc(e)));
     let mut redetect = Redetect::default();
@@ -157,7 +159,6 @@ pub(super) fn run() -> Result<(), String> {
     drop(notify);
 
     let mut state = OsdState::new();
-    let mut logged = Logged::default();
     let mut painter = Painter::new();
     let mut drawn: BTreeMap<String, Drawn> = BTreeMap::new();
     let mut dirty = true;
@@ -201,7 +202,11 @@ pub(super) fn run() -> Result<(), String> {
             redetect.outputs_changed(now);
         }
         for a in drain_socket(&sock) {
-            dirty |= on_action(&mut state, a, &audio, &monitors, &env, now);
+            if a == Action::Reload {
+                reload(&audio, &env, &mut mode, &mut logged);
+                continue;
+            }
+            dirty |= on_action(&mut state, a, &audio, &monitors, now);
         }
         let mut buf = [0u8; 64];
         while matches!((&wake_rx).read(&mut buf), Ok(n) if n > 0) {}
@@ -246,18 +251,11 @@ fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
 }
 
 /// Start what `a` asks for; the brightness panel shows at once, the
-/// volume and microphone panels when `pactl` has answered; `Reload`
-/// reads the switch in `env` again. True when something to draw changed.
-fn on_action(
-    state: &mut OsdState,
-    a: Action,
-    audio: &AudioWorker,
-    monitors: &Monitors,
-    env: &Path,
-    now: Instant,
-) -> bool {
+/// volume and microphone panels when `pactl` has answered. True when
+/// something to draw changed. `Reload` is the loop's (`reload`).
+fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Monitors, now: Instant) -> bool {
     match a {
-        Action::Reload => reload(audio, env),
+        Action::Reload => {}
         Action::VolumeUp => audio.request(AudioRequest::Step(VOLUME_STEP)),
         Action::VolumeDown => audio.request(AudioRequest::Step(-VOLUME_STEP)),
         Action::VolumeMute => audio.request(AudioRequest::ToggleMute),
@@ -278,14 +276,43 @@ fn env_file() -> PathBuf {
     crate::config::ConfigDir::from_env().generated_file("environment")
 }
 
-/// The volume keys switch in `env`; a file that cannot be read is off.
-fn read_mode(env: &Path) -> Mode {
-    keys_mode(&std::fs::read_to_string(env).unwrap_or_default())
+/// The volume keys switch in `env`. A missing file is off (the menu has
+/// not written one yet); another read error is an error, so a reload does
+/// not take a passing failure for the switch turned off.
+fn read_mode(env: &Path) -> Result<Mode, String> {
+    match std::fs::read_to_string(env) {
+        Ok(text) => Ok(keys_mode(&text)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Mode::Off),
+        Err(e) => Err(format!("{}: {e}; the volume keys switch is not read", env.display())),
+    }
 }
 
-/// The switch may have changed: every device follows it.
-fn reload(audio: &AudioWorker, env: &Path) {
-    audio.request(AudioRequest::Mode(read_mode(env)));
+/// The switch at start: a read error is logged and counts as off.
+fn start_mode(env: &Path, logged: &mut Logged) -> Mode {
+    read_mode(env).unwrap_or_else(|why| {
+        logged.once(format!("thinfloe-menu --osd: {why}"));
+        Mode::Off
+    })
+}
+
+/// The menu applied a keyboard change, which may or may not have turned
+/// the switch. Only a change reaches the worker: with the switch off, a
+/// mode request puts every device at 100 % and unmuted, which must not
+/// undo a microphone muted elsewhere on every layout change. The loop
+/// keeps the mode rather than the worker comparing, so a reload that
+/// changes nothing costs no `pactl` call at all. A read error keeps the
+/// mode and is logged once.
+fn reload(audio: &AudioWorker, env: &Path, mode: &mut Mode, logged: &mut Logged) {
+    match read_mode(env) {
+        Ok(m) if m != *mode => {
+            *mode = m;
+            audio.request(AudioRequest::Mode(m));
+        }
+        Ok(_) => {}
+        Err(why) => {
+            logged.once(format!("thinfloe-menu --osd: {why}"));
+        }
+    }
 }
 
 /// The answer of a volume or microphone key, or a fresh mark. A failure
@@ -482,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_to_off_resets_every_device() {
+    fn a_reload_acts_only_when_the_switch_changes() {
         use crate::osd::audio::tests::{calls, fake, json, wait_for};
         use crate::osd::audio::{AudioEvent, AudioWorker};
         use std::sync::Mutex;
@@ -497,13 +524,31 @@ mod tests {
             "mic",
             "",
         );
+        let mut logged = Logged::default();
+        let mut mode = start_mode(&env, &mut logged);
+        assert_eq!(mode, Mode::Keys);
         let events = Arc::new(Mutex::new(Vec::<AudioEvent>::new()));
         let e = events.clone();
-        let audio = AudioWorker::spawn(p, read_mode(&env), move |ev| e.lock().unwrap().push(ev));
+        let audio = AudioWorker::spawn(p, mode, move |ev| e.lock().unwrap().push(ev));
         wait_for("the start's mark", || !events.lock().unwrap().is_empty());
         assert_eq!(calls(&d, "set-"), Vec::<String>::new(), "the keys mode keeps the start");
+        // A reload after a layout change: the switch is still on, so the
+        // devices others changed are left alone. A Step after it marks
+        // the point where the reload's sets would have run.
+        reload(&audio, &env, &mut mode, &mut logged);
+        audio.request(AudioRequest::Step(0));
+        wait_for("the step's answer", || {
+            events.lock().unwrap().iter().any(|e| matches!(e, AudioEvent::Sink(_)))
+        });
+        assert_eq!(
+            calls(&d, "set-"),
+            Vec::<String>::new(),
+            "no set for an unchanged switch"
+        );
+        // Turned off: every device to 100 % and unmuted.
         std::fs::write(&env, "THINFLOE_VOLUME_KEYS=on\nTHINFLOE_VOLUME_KEYS=off\n").unwrap();
-        reload(&audio, &env);
+        reload(&audio, &env, &mut mode, &mut logged);
+        assert_eq!(mode, Mode::Off);
         wait_for("four sets", || calls(&d, "set-").len() == 4);
         assert_eq!(
             calls(&d, "set-"),
@@ -514,8 +559,55 @@ mod tests {
                 "set-source-mute mic 0"
             ]
         );
-        // A missing file is the switch off.
-        assert_eq!(read_mode(&d.join("missing")), Mode::Off);
+        // Off again: nothing more. (The fake's lists do not change, so a
+        // Step here would set again; wait instead.)
+        reload(&audio, &env, &mut mode, &mut logged);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(calls(&d, "set-").len(), 4);
+    }
+
+    #[test]
+    fn only_a_missing_switch_file_is_off() {
+        let d = crate::testdir::TestDir::new("osd-run", "readmode");
+        assert_eq!(read_mode(&d.join("missing")), Ok(Mode::Off));
+        std::fs::write(d.join("on"), "THINFLOE_VOLUME_KEYS=on\n").unwrap();
+        assert_eq!(read_mode(&d.join("on")), Ok(Mode::Keys));
+        // A directory at the path: an error, not the switch off.
+        let dir = d.join("generated-environment");
+        std::fs::create_dir(&dir).unwrap();
+        let err = read_mode(&dir).unwrap_err();
+        assert!(err.contains(&dir.display().to_string()), "{err}");
+        // At start the error is logged and the switch counts as off.
+        let mut logged = Logged::default();
+        assert_eq!(start_mode(&dir, &mut logged), Mode::Off);
+        assert!(!logged.once(format!("thinfloe-menu --osd: {err}")), "logged at start");
+    }
+
+    #[test]
+    fn an_unreadable_switch_file_keeps_the_mode() {
+        use crate::osd::audio::tests::{calls, fake, json, wait_for};
+        use crate::osd::audio::{AudioEvent, AudioWorker};
+        use std::sync::Mutex;
+        let d = crate::testdir::TestDir::new("osd-run", "unread");
+        let p = fake(&d, &json(&[(1, "a", 40, true)]), "[]", "a", "", "");
+        let events = Arc::new(Mutex::new(Vec::<AudioEvent>::new()));
+        let e = events.clone();
+        let audio = AudioWorker::spawn(p, Mode::Keys, move |ev| e.lock().unwrap().push(ev));
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        let dir = d.join("env");
+        std::fs::create_dir(&dir).unwrap();
+        let mut logged = Logged::default();
+        let mut mode = Mode::Keys;
+        reload(&audio, &dir, &mut mode, &mut logged);
+        reload(&audio, &dir, &mut mode, &mut logged);
+        assert_eq!(mode, Mode::Keys, "kept");
+        audio.request(AudioRequest::Step(0));
+        wait_for("the step's answer", || {
+            events.lock().unwrap().iter().any(|e| matches!(e, AudioEvent::Sink(_)))
+        });
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new(), "no reset to 100 %");
+        let err = read_mode(&dir).unwrap_err();
+        assert!(!logged.once(format!("thinfloe-menu --osd: {err}")), "logged once");
     }
 
     #[test]
