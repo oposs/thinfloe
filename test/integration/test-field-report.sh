@@ -321,7 +321,7 @@ else
     bad "export-rootfs.sh still packs podman's bind-mounted /etc/hostname"
 fi
 
-if grep -v '^[[:space:]]*#' "$SO" | grep -q 'tf_write_hostname'; then
+if grep -q 'tf_write_hostname' < <(grep -v '^[[:space:]]*#' "$SO"); then
     ok "setup-overlay.sh writes the hostname from the machine-id"
 else
     bad "setup-overlay.sh never calls tf_write_hostname - hostname stays unset"
@@ -338,8 +338,8 @@ fi
 # "thinfloe-", basename left the netboot interface name empty so no boot-mac was
 # recorded. Comments may mention them.
 for f in mount-squashfs.sh thinfloe-lib.sh setup-overlay.sh; do
-    if grep -v '^[[:space:]]*#' "overlay/usr/lib/dracut/modules.d/90thinfloe/$f" \
-       | grep -qE '(^|[|;&(`]|\$\()[[:space:]]*(basename|cut)([[:space:]]|$)'; then
+    if grep -qE '(^|[|;&(`]|\$\()[[:space:]]*(basename|cut)([[:space:]]|$)' \
+       < <(grep -v '^[[:space:]]*#' "overlay/usr/lib/dracut/modules.d/90thinfloe/$f"); then
         bad "$f calls basename/cut, which the initramfs does not ship"
     else
         ok "$f uses no basename/cut command"

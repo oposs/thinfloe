@@ -256,7 +256,7 @@ for f in vmlinuz initrd.img ramroot.sqsh; do
        == "$(sha256sum <"$tmp/srv/upgrade/$f" | cut -d' ' -f1)" ]] || staged=0
 done
 for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
-    mtype -i "$ESP_BOOT" "$cfg" 2>/dev/null | tr -d '\r' | grep -qx 'DEFAULT new' || staged=0
+    grep -qx 'DEFAULT new' < <(mtype -i "$ESP_BOOT" "$cfg" 2>/dev/null | tr -d '\r') || staged=0
 done
 if [[ $staged == 1 ]]; then
     ok "the boot disk has the stand-in release in tl.new/ and DEFAULT new in both syslinux.cfg"

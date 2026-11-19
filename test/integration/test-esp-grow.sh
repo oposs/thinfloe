@@ -135,8 +135,8 @@ grep -q 'fat32expander: Error: device vanished' "$WORK/log" \
 # the one in finalize-upgrade.sh skipped dracut's 99-mount-virtiofs.sh.
 for hook in $(sed -n 's/^[[:space:]]*inst_hook [a-z-]* [0-9]* "$moddir\/\([^"]*\)".*/\1/p' \
         "${LIB%/*}/module-setup.sh"); do
-    if grep -v '^[[:space:]]*#' "${LIB%/*}/$hook" \
-            | grep -qE '(^|[;&|[:space:]])exit([[:space:]]|$)'; then
+    if grep -qE '(^|[;&|[:space:]])exit([[:space:]]|$)' \
+            < <(grep -v '^[[:space:]]*#' "${LIB%/*}/$hook"); then
         bad "$hook calls exit, which ends every later hook of its stage"
     else
         ok "$hook has no exit, so the later hooks of its stage run"

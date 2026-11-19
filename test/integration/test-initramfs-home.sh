@@ -111,7 +111,7 @@ else
 fi
 
 MS_SRC="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/mount-squashfs.sh"
-if grep -v '^[[:space:]]*#' "$MS_SRC" | grep -qE '\bdhclient\b|/sys/class/net/\*'; then
+if grep -qE '\bdhclient\b|/sys/class/net/\*' < <(grep -v '^[[:space:]]*#' "$MS_SRC"); then
     bad "mount-squashfs.sh still runs dhclient or picks the first /sys/class/net entry"
 else
     ok "mount-squashfs.sh leaves DHCP to networkd and takes the lease's interface"
@@ -1103,7 +1103,7 @@ fi
 d="$WORK/hn-noslash"; mkdefault "$d"; mkdir -p "$d/src"
 echo "XKB_DEFAULT_LAYOUT=de" >"$d/src/.dbrrg-environment"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .dbrrg-environment
-tar -tzf "$d/efi/home.tar.gz" | grep -qxF .dbrrg-environment || bad "fixture: member has a ./ prefix"
+grep -qxF .dbrrg-environment < <(tar -tzf "$d/efi/home.tar.gz") || bad "fixture: member has a ./ prefix"
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
 h="$d/newroot/home/tfuser"
 if [[ "$(cat "$h/.thinfloe-environment")" == "XKB_DEFAULT_LAYOUT=de" && ! -e "$h/.dbrrg-environment" ]]; then
@@ -1129,7 +1129,7 @@ d="$WORK/hn-deep"; mkdefault "$d"; mkdir -p "$d/src/.config/dbrrg/menu" "$d/newr
 echo default >"$d/newroot/home/tfuser/.config/thinfloe/menu/default.desktop"
 echo user >"$d/src/.config/dbrrg/menu/x.desktop"
 tar -C "$d/src" -czf "$d/efi/home.tar.gz" .config/dbrrg/menu/x.desktop
-if tar -tzf "$d/efi/home.tar.gz" | grep -qxF ".config/dbrrg/"; then
+if grep -qxF ".config/dbrrg/" < <(tar -tzf "$d/efi/home.tar.gz"); then
     bad "fixture: archive lists the directory itself"
 fi
 restore_home "$d/newroot" "$d/efi" "$d/state" "tl/ramroot.sqsh"
@@ -1323,7 +1323,7 @@ fi
 # file, after a rotation; the drop-in orders that write after the cmdline
 # hook's.
 FU="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/finalize-upgrade.sh"
-if grep -v '^[[:space:]]*#' "$FU" | grep -qE '(cat|<)[[:space:]]*/tmp/thinfloe-ramroot'; then
+if grep -qE '(cat|<)[[:space:]]*/tmp/thinfloe-ramroot' < <(grep -v '^[[:space:]]*#' "$FU"); then
     bad "finalize-upgrade.sh reads /tmp/thinfloe-ramroot, which may not exist yet in pre-mount"
 else
     ok "finalize-upgrade.sh does not read the cmdline hook's /tmp/thinfloe-ramroot"
