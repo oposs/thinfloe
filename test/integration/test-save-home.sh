@@ -552,6 +552,9 @@ fi
 #
 # The script runs in its own process group (setsid) and the whole group gets
 # the signal, as a terminal hangup delivers it. Every wait has a deadline.
+# env --default-signal=HUP (coreutils 8.31) starts it with SIGHUP at its
+# default action: a test run under nohup ignores SIGHUP, the ignore survives
+# exec, and a shell cannot trap a signal that was ignored when it started.
 setup
 ready="$WORK/curl-ready"
 rm -f "$ready"
@@ -565,7 +568,7 @@ TF_STATE_DIR="$WORK/state" \
 TF_CMDLINE="$WORK/cmdline" \
 TMPDIR="$WORK/tmp" \
 PATH="$STUBS:$PATH" \
-    setsid "$SCRIPT" </dev/null >"$WORK/out" 2>"$WORK/err" &
+    setsid env --default-signal=HUP "$SCRIPT" </dev/null >"$WORK/out" 2>"$WORK/err" &
 pid=$!
 for _ in $(seq 100); do
     [[ -e "$ready" ]] && break
