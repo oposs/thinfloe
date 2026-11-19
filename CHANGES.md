@@ -23,6 +23,7 @@
 - The time zone from the DHCP server could stay at UTC after the start when the server's answer came in while an earlier one was still being read; it now always takes effect. A renewal that brings the same zone no longer logs `thinfloe: time zone <zone> from DHCP` again.
 - The Upgrade screen offered to upgrade a stick to the release it already had ("Upgrade this machine's stick to ThinFloe 4.5.0" on a 4.5.0 stick), and What's new then said "No changes between 4.5.0 and 4.5.0". It now says the stick already has that release and the button reads Write again, or Downgrade for a stick with a newer release; when the stick keeps an older release as fallback, it says that this one is dropped. What's new is off for such a stick, and also for a test build of the release it would get.
 - A tile of your own whose `Icon=` names an image by a path longer than 120 characters showed the first letter of its name instead of the image. Paths up to 4096 bytes now work; a longer `Icon=` still shows the letter.
+- `ls -l /var/log` showed `README` as a link to a file that does not exist, and `/etc/vconsole.conf` and the `LC_TIME/coreutils.mo` files under `/usr/share/locale` pointed at nothing too. The image now has no such links, and a build that would ship one stops.
 
 ## 4.5.0 - 2026-11-17
 ### New
