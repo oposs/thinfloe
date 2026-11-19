@@ -584,7 +584,9 @@ else
     bad "--env-only without .source/base.xml: rc=$rc err=$err $(ls -A "$OUTK")"
 fi
 
-# --env-only with an unwritable .source/: unchanged, a line, exit 0.
+# --env-only with an unwritable .source/: unchanged, a line, exit 0. The
+# old .source/rc.xml stays, so the line says the switches follow at the
+# next start, not that the keys are off.
 if [[ $(id -u) -eq 0 ]]; then
     ok "unwritable .source/: skipped as root"
 else
@@ -596,7 +598,7 @@ else
     printf 'THINFLOE_VOLUME_KEYS=on\nTHINFLOE_BRIGHTNESS_KEYS=on\n' >"$MKGEN"
     err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
     chmod 700 "$OUTK/.source"
-    if [[ $rc -eq 0 && "$err" == "thinfloe-compose-labwc-config: cannot write the key bindings; the volume and brightness keys stay off" &&
+    if [[ $rc -eq 0 && "$err" == "thinfloe-compose-labwc-config: cannot write the key bindings; the key switches follow at the next start" &&
           "$(cksum <"$OUTK/.source/rc.xml")" == "$sum_before" ]] &&
        grep -q '^THINFLOE_BRIGHTNESS_KEYS=on$' "$OUTK/environment"; then
         ok "unwritable .source/: rc.xml unchanged, the line on stderr, exit 0"
