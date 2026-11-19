@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn a_datagram_reaches_the_bound_socket() {
-        let d = TestDir::new("osd-socket", "reach");
-        let path = d.join("osd.sock");
+        let d = TestDir::sockets("re");
+        let path = d.socket("s");
         let server = bind(&path).unwrap();
         send(&path, Action::VolumeUp).unwrap();
         let mut buf = [0u8; 64];
@@ -68,11 +68,11 @@ mod tests {
 
     #[test]
     fn send_without_a_server_is_no_server() {
-        let d = TestDir::new("osd-socket", "none");
-        let missing = d.join("missing.sock");
+        let d = TestDir::sockets("no");
+        let missing = d.socket("x");
         assert!(matches!(send(&missing, Action::VolumeUp), Err(SendError::NoServer)));
         // A socket file left by an OSD that is gone.
-        let stale = d.join("stale.sock");
+        let stale = d.socket("st");
         drop(UnixDatagram::bind(&stale).unwrap());
         assert!(stale.exists());
         assert!(matches!(send(&stale, Action::MicMute), Err(SendError::NoServer)));
@@ -80,8 +80,8 @@ mod tests {
 
     #[test]
     fn bind_replaces_a_stale_socket_file() {
-        let d = TestDir::new("osd-socket", "stale");
-        let path = d.join("osd.sock");
+        let d = TestDir::sockets("st");
+        let path = d.socket("s");
         drop(UnixDatagram::bind(&path).unwrap());
         let server = bind(&path).unwrap();
         send(&path, Action::BrightnessDown).unwrap();
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn a_receive_without_a_datagram_does_not_block() {
-        let d = TestDir::new("osd-socket", "nonblock");
-        let server = bind(&d.join("osd.sock")).unwrap();
+        let d = TestDir::sockets("nb");
+        let server = bind(&d.socket("s")).unwrap();
         let mut buf = [0u8; 64];
         assert_eq!(server.recv(&mut buf).unwrap_err().kind(), ErrorKind::WouldBlock);
     }
