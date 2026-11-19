@@ -509,7 +509,8 @@ QEMU_WRITE_TIMEOUT ?= 1200
 
 qemu-smoke-write: $(USB_IMAGE) $(USB_CHECKSUM) $(KERNEL) $(INITRD)
 	@echo "Running headless write smoke test..."
-	BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+	@mkdir -p '$(TEST_TMPDIR)'
+	$(TEST_ENV) BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
 		scripts/run-qemu-write-smoke.sh $(USB_IMAGE) $(USB_IMAGE_COMPRESSED) \
 		$(USB_CHECKSUM) $(KERNEL) $(INITRD) $(QEMU_WRITE_PREFIX) \
 		$(QEMU_WRITE_LOG) $(QEMU_WRITE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
@@ -538,45 +539,54 @@ qemu-smoke-grow: $(USB_IMAGE)
 # than take the machine's memory. Set MEMCAP= where systemd-run is missing.
 MENU_DIR := src/thinfloe-menu
 MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
+
+# The tests' work dirs (mktemp -d, Python's tempfile, Rust's temp_dir) go
+# under TMPDIR. A TMPDIR the caller set wins (CI sets one); otherwise it is
+# .tmp/ in the checkout (git-ignored), so no test writes to /tmp. The recipes
+# pass it to the test scripts only, not to the image builds.
+TEST_TMPDIR := $(or $(TMPDIR),$(CURDIR)/.tmp)
+TEST_ENV := TMPDIR='$(TEST_TMPDIR)'
 test-unit:
-	@python3 -m unittest discover -s test/unit -v
-	cd $(MENU_DIR) && CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS)
+	@mkdir -p '$(TEST_TMPDIR)'
+	@$(TEST_ENV) python3 -m unittest discover -s test/unit -v
+	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS)
 
 test: test-unit rootfs
-	@test/integration/test-firmware.sh
-	@test/integration/test-wifi-stack.sh
-	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
-	@test/integration/test-squashfs-format.sh
-	@test/integration/test-image-slim.sh
-	@test/integration/test-slim-last-run.sh
-	@test/integration/test-initramfs-drivers.sh
-	@test/integration/test-image-size.sh
-	@test/integration/test-labwc-config-merge.sh
-	@test/integration/test-labwc-scale.sh
-	@test/integration/test-initramfs-home.sh
-	@test/integration/test-esp-choice.sh
-	@test/integration/test-esp-grow.sh
-	@test/integration/test-initramfs-commands.sh
-	@test/integration/test-terminal.sh
-	@test/integration/test-boot-smoke-check.sh
-	@test/integration/test-ssh-hostkeys.sh
-	@test/integration/test-save-home.sh
-	@test/integration/test-password.sh
-	@test/integration/test-dhcp-timezone.sh
-	@test/integration/test-field-report.sh
-	@test/integration/test-cmdline.sh
-	@test/integration/test-session-lifecycle.sh
-	@test/integration/test-container-stamp.sh
-	@test/integration/test-usb-image-deps.sh
-	@test/integration/test-container-inputs.sh
-	@test/integration/test-release-version.sh
-	@test/integration/test-release-assets.sh
-	@test/integration/test-public-content.sh
-	@test/integration/test-format-bytes.sh
-	@test/integration/test-plymouth-step.sh
-	@test/integration/test-make-clean.sh
-	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
-	@TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
+	@mkdir -p '$(TEST_TMPDIR)'
+	@$(TEST_ENV) test/integration/test-firmware.sh
+	@$(TEST_ENV) test/integration/test-wifi-stack.sh
+	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
+	@$(TEST_ENV) test/integration/test-squashfs-format.sh
+	@$(TEST_ENV) test/integration/test-image-slim.sh
+	@$(TEST_ENV) test/integration/test-slim-last-run.sh
+	@$(TEST_ENV) test/integration/test-initramfs-drivers.sh
+	@$(TEST_ENV) test/integration/test-image-size.sh
+	@$(TEST_ENV) test/integration/test-labwc-config-merge.sh
+	@$(TEST_ENV) test/integration/test-labwc-scale.sh
+	@$(TEST_ENV) test/integration/test-initramfs-home.sh
+	@$(TEST_ENV) test/integration/test-esp-choice.sh
+	@$(TEST_ENV) test/integration/test-esp-grow.sh
+	@$(TEST_ENV) test/integration/test-initramfs-commands.sh
+	@$(TEST_ENV) test/integration/test-terminal.sh
+	@$(TEST_ENV) test/integration/test-boot-smoke-check.sh
+	@$(TEST_ENV) test/integration/test-ssh-hostkeys.sh
+	@$(TEST_ENV) test/integration/test-save-home.sh
+	@$(TEST_ENV) test/integration/test-password.sh
+	@$(TEST_ENV) test/integration/test-dhcp-timezone.sh
+	@$(TEST_ENV) test/integration/test-field-report.sh
+	@$(TEST_ENV) test/integration/test-cmdline.sh
+	@$(TEST_ENV) test/integration/test-session-lifecycle.sh
+	@$(TEST_ENV) test/integration/test-container-stamp.sh
+	@$(TEST_ENV) test/integration/test-usb-image-deps.sh
+	@$(TEST_ENV) test/integration/test-container-inputs.sh
+	@$(TEST_ENV) test/integration/test-release-version.sh
+	@$(TEST_ENV) test/integration/test-release-assets.sh
+	@$(TEST_ENV) test/integration/test-public-content.sh
+	@$(TEST_ENV) test/integration/test-format-bytes.sh
+	@$(TEST_ENV) test/integration/test-plymouth-step.sh
+	@$(TEST_ENV) test/integration/test-make-clean.sh
+	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
+	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
 
 # Runtime session tests. Needs network (installs python3-xlib into a
 # test-only image) and runs a compositor, so it is deliberately not part of
@@ -588,7 +598,8 @@ test-runtime: rootfs
 		-t $(PROJECT_NAME)-runtime-test:$(VERSION) \
 		-f test/runtime/Dockerfile \
 		test/runtime
-	@test/runtime/test-labwc-runtime.sh $(PROJECT_NAME)-runtime-test:$(VERSION)
+	@mkdir -p '$(TEST_TMPDIR)'
+	@$(TEST_ENV) test/runtime/test-labwc-runtime.sh $(PROJECT_NAME)-runtime-test:$(VERSION)
 
 # A symlinked artifacts directory points somewhere this checkout may not own
 # alone: `rm -rf artifacts/*` follows the link and empties the target, other

@@ -11,7 +11,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${TF_UBUNTU_IMAGE:-localhost/thinfloe-ubuntu:3.0.0}"
-SCRATCH="$(mktemp -d "${TMPDIR:-/scratch/oetiker/claude-tmp}/netplan-fixtures.XXXXXX")" || exit 1
+SCRATCH="$(mktemp -d)" || exit 1
 trap 'rm -rf "$SCRATCH"' EXIT
 
 fail=0

@@ -61,9 +61,7 @@ ok()  { echo "ok   - $1"; }
 bad() { echo "FAIL - $1"; fail=1; }
 
 export MTOOLS_SKIP_CHECK=1
-export TMPDIR="${TMPDIR:-/scratch/oetiker/claude-tmp/thinfloe-tests}"
-mkdir -p "$TMPDIR" || exit 2
-tmp=$(mktemp -d "$TMPDIR/thinfloe-write-smoke.XXXXXX") || exit 2
+tmp=$(mktemp -d --tmpdir thinfloe-write-smoke.XXXXXX) || exit 2
 srv=""
 trap 'kill $srv 2>/dev/null; wait $srv 2>/dev/null; rm -rf "$tmp"' EXIT
 trap 'exit 1' INT TERM HUP

@@ -123,8 +123,9 @@ commands are in the script.
    `mkdir: cannot create directory 'artifacts': File exists`.
    `git update-index --skip-worktree artifacts` keeps the replaced link out
    of `git status`, which would otherwise give the dev version `.dirty`.
-2. Set `TMPDIR` to `$RUNNER_TEMP/thinfloe-tests`. `run-qemu-write-smoke.sh`
-   and several integration tests default it to `/scratch/oetiker/claude-tmp`.
+2. Set `TMPDIR` to `$RUNNER_TEMP/thinfloe-tests`. The test targets put
+   their work dirs under `TMPDIR`; without one the `Makefile` uses `.tmp/`
+   in the checkout.
 3. Install the host tools the targets call outside containers. The list has
    `dnsmasq-base` because the full `dnsmasq` package starts a service on
    port 53.

@@ -4,6 +4,8 @@ artifacts/
 .image-builder-container
 .ipxe-container
 .environment-check
+# Test work dirs when TMPDIR is not set (Makefile TEST_TMPDIR)
+/.tmp/
 
 # Backup files
 *.old
