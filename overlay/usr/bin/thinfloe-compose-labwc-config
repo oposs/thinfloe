@@ -27,10 +27,11 @@
 #                    that is not an error
 #   <output-dir>     e.g. $XDG_RUNTIME_DIR/thinfloe-labwc - passed to labwc -C
 #
-# Every file in <system-dir> other than 'environment' is symlinked into
-# <output-dir> unchanged - rc.xml stays a single source of truth, and a
-# future file added under /etc/thinfloe/labwc/ is picked up without touching
-# this script. 'environment' is composed as <system-dir>/environment, then
+# Every file in <system-dir> other than 'environment' and 'rc.xml' is
+# symlinked into <output-dir> unchanged, so a future file added under
+# /etc/thinfloe/labwc/ is picked up without touching this script. rc.xml is
+# a link to <output-dir>/.source/rc.xml (see "rc.xml and .source/" below).
+# 'environment' is composed as <system-dir>/environment, then
 # <generated-env>, then <user-env> without the lines whose key is listed in
 # ${TF_MANAGED_KEYS:-/etc/thinfloe/menu-managed-keys} (the keys the menu
 # sets; the key is the text before the first "=", after leading blanks and
@@ -42,9 +43,27 @@
 # this twice idempotent instead of accumulating stale symlinks or appended
 # environment lines.
 #
-# With --env-only, <output-dir> must already exist; only 'environment' is
-# rewritten (a temporary file in <output-dir>, renamed over it), so the
-# scaled rc.xml and themerc-override that labwc-scale put there survive.
+# With --env-only, <output-dir> must already exist; 'environment' is
+# rewritten (a temporary file in <output-dir>, renamed over it) and then
+# .source/rc.xml, so the scaled rc.xml and themerc-override that labwc-scale
+# put there survive.
+#
+# rc.xml and .source/:
+#   rc.xml             a link to <output-dir>/.source/rc.xml, always. This is
+#                      the path labwc-scale records as its source at start;
+#                      once the session runs, labwc-scale is the only writer
+#                      of rc.xml, and this script writes only .source/.
+#   .source/base.xml   written only by the full compose (session start): a
+#                      link to <system-dir>/rc.xml, or with THINFLOE_NUMLOCK=off
+#                      a copy that says <numlock>off</numlock>.
+#   .source/rc.xml     written by both modes. With THINFLOE_VOLUME_KEYS and
+#                      THINFLOE_BRIGHTNESS_KEYS both not on, a link to
+#                      .source/base.xml; otherwise base.xml with the media
+#                      key bindings on the lines before </keyboard>, the only
+#                      keybindings labwc gets (CLAUDE.md, "labwc must have zero
+#                      keybindings"). A file that cannot be written leaves
+#                      the keys off (a line on stderr, the exit status is
+#                      unchanged).
 
 set -eu
 
@@ -151,17 +170,88 @@ env_value() {
     ' "$2"
 }
 
+# "on" in the environment file $2 for key $1: the value may be quoted, as a
+# shell or the menu's rebuild reads it.
+env_is() {
+    case $(env_value "$1" "$2") in
+        "$3" | "\"$3\"" | "'$3'") return 0 ;;
+    esac
+    return 1
+}
+
+# The media key bindings for the environment file $1, on stdout. The
+# command goes into an XML attribute, so it is escaped.
+key_bindings() {
+    _kb_vol=0
+    _kb_bri=0
+    env_is THINFLOE_VOLUME_KEYS "$1" on && _kb_vol=1
+    env_is THINFLOE_BRIGHTNESS_KEYS "$1" on && _kb_bri=1
+    TF_OSD_CMD=${TF_OSD_KEY_CMD:-/usr/bin/thinfloe-menu --osd-key} \
+        awk -v vol="$_kb_vol" -v bri="$_kb_bri" '
+        function bind(key, action, extra) {
+            printf "    <keybind key=\"%s\" allowWhenInhibited=\"yes\"%s><action name=\"Execute\" command=\"%s %s\" /></keybind>\n", key, extra, cmd, action
+        }
+        BEGIN {
+            cmd = ENVIRON["TF_OSD_CMD"]
+            gsub(/&/, "\\&amp;", cmd)
+            gsub(/</, "\\&lt;", cmd)
+            gsub(/>/, "\\&gt;", cmd)
+            gsub(/"/, "\\&quot;", cmd)
+            if (vol) {
+                print "    <!-- thinfloe-compose-labwc-config: THINFLOE_VOLUME_KEYS=on -->"
+                bind("XF86AudioRaiseVolume", "volume-up", "")
+                bind("XF86AudioLowerVolume", "volume-down", "")
+                bind("XF86AudioMute", "volume-mute", " onRelease=\"yes\"")
+                bind("XF86AudioMicMute", "mic-mute", " onRelease=\"yes\"")
+            }
+            if (bri) {
+                print "    <!-- thinfloe-compose-labwc-config: THINFLOE_BRIGHTNESS_KEYS=on -->"
+                bind("XF86MonBrightnessUp", "brightness-up", "")
+                bind("XF86MonBrightnessDown", "brightness-down", "")
+            }
+        }'
+}
+
+# .source/rc.xml for the environment file $1: the link to base.xml, or
+# base.xml with the bindings inserted before the </keyboard> line.
+build_source_rc() {
+    _src=$OUT_DIR/.source
+    _bind=$(key_bindings "$1")
+    if [ -n "$_bind" ]; then
+        _tmp_rc=
+        if _tmp_rc=$(mktemp "$_src/.rc.xml.XXXXXX" 2>/dev/null) &&
+            TF_BIND=$_bind awk '
+                !done && /<\/keyboard>/ { print ENVIRON["TF_BIND"]; done = 1 }
+                { print }
+                END { if (!done) exit 1 }
+            ' "$_src/base.xml" >"$_tmp_rc" &&
+            chmod 644 "$_tmp_rc" &&
+            mv -f "$_tmp_rc" "$_src/rc.xml"; then
+            return 0
+        fi
+        [ -n "$_tmp_rc" ] && rm -f "$_tmp_rc"
+        echo "$me: cannot write the key bindings; the volume and brightness keys stay off" >&2
+    fi
+    ln -sfn "$_src/base.xml" "$_src/rc.xml" 2>/dev/null || true
+}
+
 if [ "$ENV_ONLY" -eq 1 ]; then
     [ -d "$OUT_DIR" ] || {
         echo "$me: no composed dir '$OUT_DIR'" >&2
         exit 1
     }
+    OUT_DIR=$(cd "$OUT_DIR" && pwd)
     TMP_ENV=$(mktemp "$OUT_DIR/.environment.XXXXXX") || {
         echo "$me: cannot write into '$OUT_DIR'" >&2
         exit 1
     }
     if merged_environment >"$TMP_ENV" && check_keyboard "$TMP_ENV" &&
         mv -f "$TMP_ENV" "$OUT_DIR/environment"; then
+        if [ -e "$OUT_DIR/.source/base.xml" ]; then
+            build_source_rc "$OUT_DIR/environment"
+        else
+            echo "$me: no .source/base.xml; the key switches follow at the next start" >&2
+        fi
         exit 0
     fi
     rm -f "$TMP_ENV"
@@ -176,15 +266,16 @@ if [ -e "$OUT_DIR" ]; then
     }
 fi
 
-mkdir -p "$OUT_DIR" 2>/dev/null || {
+mkdir -p "$OUT_DIR/.source" 2>/dev/null || {
     echo "$me: cannot create output dir '$OUT_DIR'" >&2
     exit 1
 }
+OUT_DIR=$(cd "$OUT_DIR" && pwd)
 
 for entry in "$SYSTEM_DIR"/*; do
     [ -e "$entry" ] || continue   # empty dir / no glob match
     name=$(basename "$entry")
-    [ "$name" = "environment" ] && continue
+    case $name in environment | rc.xml) continue ;; esac
     ln -s "$entry" "$OUT_DIR/$name"
 done
 
@@ -193,19 +284,14 @@ check_keyboard "$OUT_DIR/environment"
 
 # Num Lock: labwc sets it from <numlock> in rc.xml only when a keyboard
 # appears (at start, on hot-plug), never on --reconfigure, so only the full
-# compose at session start acts on it. THINFLOE_NUMLOCK=off (the menu's
-# Keyboard tab, a managed key) links rc.xml to a copy in .numlock/ that says
-# off; labwc-scale reads its source through that link. Any other value
-# keeps the system link. A copy that cannot be written keeps it too.
-# The value may be quoted, as a shell or the menu's rebuild reads it.
-case $(env_value THINFLOE_NUMLOCK "$OUT_DIR/environment") in
-    off | '"off"' | "'off'") nl_off=1 ;;
-    *) nl_off=0 ;;
-esac
-if [ "$nl_off" -eq 1 ] && [ -r "$SYSTEM_DIR/rc.xml" ]; then
-    nl_dir=$OUT_DIR/.numlock
-    if mkdir -p "$nl_dir" 2>/dev/null &&
-        awk '
+# compose at session start acts on it, in .source/base.xml.
+# THINFLOE_NUMLOCK=off (the menu's Keyboard tab, a managed key) makes
+# base.xml a copy that says off; any other value, or a copy that cannot be
+# written, makes it a link to the system file.
+base=$OUT_DIR/.source/base.xml
+ln -s "$SYSTEM_DIR/rc.xml" "$base"
+if env_is THINFLOE_NUMLOCK "$OUT_DIR/environment" off && [ -r "$SYSTEM_DIR/rc.xml" ]; then
+    if awk '
             # Only the element inside <keyboard> counts, not a mention in
             # a comment elsewhere; without one, it is added.
             /<keyboard>/ { in_kb = 1 }
@@ -222,13 +308,15 @@ if [ "$nl_off" -eq 1 ] && [ -r "$SYSTEM_DIR/rc.xml" ]; then
                 in_kb = 0
             }
             { print }
-        ' "$SYSTEM_DIR/rc.xml" >"$nl_dir/.rc.xml.tmp" &&
-        mv -f "$nl_dir/.rc.xml.tmp" "$nl_dir/rc.xml" &&
-        ln -sfn "$nl_dir/rc.xml" "$OUT_DIR/rc.xml"; then
+        ' "$SYSTEM_DIR/rc.xml" >"$OUT_DIR/.source/.base.xml.tmp" &&
+        mv -f "$OUT_DIR/.source/.base.xml.tmp" "$base"; then
         :
     else
         echo "$me: cannot write the Num Lock rc.xml; Num Lock stays as the system file says" >&2
-        rm -rf "$nl_dir"
-        ln -sfn "$SYSTEM_DIR/rc.xml" "$OUT_DIR/rc.xml"
+        rm -f "$OUT_DIR/.source/.base.xml.tmp"
+        ln -sfn "$SYSTEM_DIR/rc.xml" "$base"
     fi
 fi
+
+build_source_rc "$OUT_DIR/environment"
+ln -s "$OUT_DIR/.source/rc.xml" "$OUT_DIR/rc.xml"

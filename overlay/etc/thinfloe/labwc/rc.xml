@@ -3,7 +3,12 @@
   thinfloe labwc configuration.
 
   IMPORTANT: the <keyboard> section deliberately contains no default-keybind
-  element and no keybind entries, so labwc registers ZERO keybindings.
+  element and no keybind entries: this file has no keybindings. The only
+  ones labwc gets are the volume and brightness keys, which
+  thinfloe-compose-labwc-config adds to its composed copy when a switch in
+  Settings, Keyboard is on (CLAUDE.md: labwc has no keybindings unless a
+  key switch is on). Each of them carries allowWhenInhibited, so it acts
+  even while ThinLinc holds the keyboard.
 
   This is required, not cosmetic. Rootless Xwayland (always the case under
   labwc) never requests zwp_keyboard_shortcuts_inhibit_manager_v1 - its only

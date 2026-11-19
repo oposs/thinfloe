@@ -125,10 +125,14 @@ else
     bad "rc.xml is missing from the merged directory"
 fi
 
-if [[ -L "$OUT/rc.xml" ]]; then
-    ok "rc.xml is a symlink, not a copy"
+# Both key switches off: rc.xml links .source/rc.xml, which ends at the
+# system file, and there is no keybinding.
+if [[ -L "$OUT/rc.xml" && "$(readlink "$OUT/rc.xml")" == "$OUT/.source/rc.xml" &&
+      "$(readlink -f "$OUT/rc.xml")" == "$(readlink -f "$SYSDIR/rc.xml")" ]] &&
+   ! grep -q '<keybind' "$OUT/rc.xml"; then
+    ok "rc.xml links .source/rc.xml, which ends at the system file"
 else
-    bad "rc.xml should be a symlink into the system dir"
+    bad "rc.xml is $(readlink "$OUT/rc.xml") -> $(readlink -f "$OUT/rc.xml")"
 fi
 
 if [[ -L "$OUT/themerc-override" ]] && grep -q '#7cc4ff' "$OUT/themerc-override"; then
@@ -314,8 +318,9 @@ else
 fi
 
 # --- Num Lock ----------------------------------------------------------------
-# THINFLOE_NUMLOCK=off in generated/environment: rc.xml links a copy that
-# says off; on, missing, or set only in the user's file: the system link.
+# THINFLOE_NUMLOCK=off in generated/environment: .source/base.xml is a copy
+# that says off; on, missing, or set only in the user's file: base.xml links
+# the system file. rc.xml links .source/rc.xml in every case.
 NLSYS="$WORK/nl-system"
 mkdir -p "$NLSYS"
 cp "$SYSDIR/environment" "$SYSDIR/themerc-override" "$NLSYS/"
@@ -331,13 +336,15 @@ nl_compose() { TF_MANAGED_KEYS="$NLMANAGED" "$HELPER" "$@"; }
 printf 'XKB_DEFAULT_LAYOUT=de\nTHINFLOE_NUMLOCK=off\n' >"$NLGEN"
 OUTN="$WORK/nl-off"
 if nl_compose "$NLSYS" "$NLGEN" "$NLUSER" "$OUTN" &&
-    [[ -L "$OUTN/rc.xml" && "$(readlink "$OUTN/rc.xml")" == "$OUTN/.numlock/rc.xml" ]] &&
+    [[ -L "$OUTN/rc.xml" && "$(readlink "$OUTN/rc.xml")" == "$OUTN/.source/rc.xml" ]] &&
+    [[ -f "$OUTN/.source/base.xml" && ! -L "$OUTN/.source/base.xml" ]] &&
+    [[ "$(readlink -f "$OUTN/rc.xml")" == "$OUTN/.source/base.xml" ]] &&
     grep -q '<numlock>off</numlock>' "$OUTN/rc.xml" &&
     ! grep -q '<numlock>on' "$OUTN/rc.xml" &&
     diff <(grep -v numlock "$OUTN/rc.xml") <(grep -v numlock "$NLSYS/rc.xml") >/dev/null; then
-    ok "Num Lock off: rc.xml links a copy that says off, otherwise unchanged"
+    ok "Num Lock off: base.xml is a copy that says off, otherwise unchanged"
 else
-    bad "Num Lock off: rc.xml is $(readlink "$OUTN/rc.xml"): $(cat "$OUTN/rc.xml" 2>/dev/null)"
+    bad "Num Lock off: rc.xml is $(readlink -f "$OUTN/rc.xml"): $(cat "$OUTN/rc.xml" 2>/dev/null)"
 fi
 
 # A system rc.xml without a <numlock> line gets one in <keyboard>.
@@ -359,12 +366,14 @@ for v in on missing user; do
         missing) printf 'XKB_DEFAULT_LAYOUT=de\n' >"$NLGEN"; : >"$NLUSER" ;;
         user) printf 'XKB_DEFAULT_LAYOUT=de\n' >"$NLGEN"; printf 'THINFLOE_NUMLOCK=off\n' >"$NLUSER" ;;
     esac
-    OUTV="$WORK/nl-$v"
+    # Not nl-user: that is $NLUSER, which the compose would wipe.
+    OUTV="$WORK/nl-out-$v"
     if nl_compose "$NLSYS" "$NLGEN" "$NLUSER" "$OUTV" &&
-        [[ "$(readlink "$OUTV/rc.xml")" == "$NLSYS/rc.xml" && ! -e "$OUTV/.numlock" ]]; then
-        ok "Num Lock $v: rc.xml links the system file"
+        [[ -L "$OUTV/.source/base.xml" && "$(readlink "$OUTV/.source/base.xml")" == "$NLSYS/rc.xml" &&
+           "$(readlink -f "$OUTV/rc.xml")" == "$(readlink -f "$NLSYS/rc.xml")" && ! -e "$OUTV/.numlock" ]]; then
+        ok "Num Lock $v: base.xml links the system file"
     else
-        bad "Num Lock $v: rc.xml is $(readlink "$OUTV/rc.xml")"
+        bad "Num Lock $v: rc.xml is $(readlink -f "$OUTV/rc.xml")"
     fi
 done
 
@@ -395,13 +404,182 @@ else
     bad "Num Lock off with a comment: $(cat "$OUTC/rc.xml" 2>/dev/null)"
 fi
 
-# --env-only never touches rc.xml, even when the value changed to off.
+# --env-only never touches base.xml, even when the value changed to off.
 printf 'THINFLOE_NUMLOCK=off\n' >"$NLGEN"; : >"$NLUSER"
-if nl_compose --env-only "$NLSYS" "$NLGEN" "$NLUSER" "$WORK/nl-on" &&
-    [[ "$(readlink "$WORK/nl-on/rc.xml")" == "$NLSYS/rc.xml" ]]; then
-    ok "Num Lock: --env-only leaves rc.xml alone"
+if nl_compose --env-only "$NLSYS" "$NLGEN" "$NLUSER" "$WORK/nl-out-on" &&
+    [[ "$(readlink "$WORK/nl-out-on/.source/base.xml")" == "$NLSYS/rc.xml" &&
+       "$(readlink "$WORK/nl-out-on/rc.xml")" == "$WORK/nl-out-on/.source/rc.xml" ]] &&
+    grep -q '<numlock>on</numlock>' "$WORK/nl-out-on/rc.xml"; then
+    ok "Num Lock: --env-only leaves base.xml alone"
 else
-    bad "Num Lock: --env-only changed rc.xml to $(readlink "$WORK/nl-on/rc.xml")"
+    bad "Num Lock: --env-only changed base.xml to $(readlink "$WORK/nl-out-on/.source/base.xml")"
+fi
+
+# --- media keys -------------------------------------------------------------
+# THINFLOE_VOLUME_KEYS / THINFLOE_BRIGHTNESS_KEYS=on in generated/environment:
+# .source/rc.xml is base.xml with the bindings on the lines before
+# </keyboard>. Both off: .source/rc.xml links base.xml. The values may be
+# quoted, as for THINFLOE_NUMLOCK.
+MKUSER="$WORK/mk-user"
+: >"$MKUSER"
+MKGEN="$WORK/mk-gen"
+MKMANAGED="$WORK/mk-managed"
+printf 'THINFLOE_NUMLOCK\nTHINFLOE_VOLUME_KEYS\nTHINFLOE_BRIGHTNESS_KEYS\n' >"$MKMANAGED"
+mk_compose() { TF_MANAGED_KEYS="$MKMANAGED" "$HELPER" "$@"; }
+VOL_KEYS='XF86AudioLowerVolume XF86AudioMicMute XF86AudioMute XF86AudioRaiseVolume'
+BRI_KEYS='XF86MonBrightnessDown XF86MonBrightnessUp'
+# The key names of the bindings in $1, sorted, on one line.
+keys_in() { grep -o '<keybind key="[^"]*"' "$1" | sed 's/.*key="//; s/"$//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'; }
+kb_lines() { grep -c '<keybind' "$1"; }
+inserted() { grep -e '<keybind' -e '<!-- thinfloe-compose-labwc-config: THINFLOE_' "$1"; }
+# $1 without the inserted lines is $2.
+stripped_is() { diff <(grep -v -e '<keybind' -e '<!-- thinfloe-compose-labwc-config: THINFLOE_' "$1") "$2" >/dev/null; }
+in_keyboard() { [[ $(sed -n '/<keyboard>/,/<\/keyboard>/p' "$1" | grep -c '<keybind') -eq $(kb_lines "$1") ]]; }
+keys_off() { [[ "$(readlink "$1/.source/rc.xml")" == "$1/.source/base.xml" ]] && [[ $(kb_lines "$1/rc.xml") -eq 0 ]]; }
+
+VOL_TEXT='    <!-- thinfloe-compose-labwc-config: THINFLOE_VOLUME_KEYS=on -->
+    <keybind key="XF86AudioRaiseVolume" allowWhenInhibited="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key volume-up" /></keybind>
+    <keybind key="XF86AudioLowerVolume" allowWhenInhibited="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key volume-down" /></keybind>
+    <keybind key="XF86AudioMute" allowWhenInhibited="yes" onRelease="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key volume-mute" /></keybind>
+    <keybind key="XF86AudioMicMute" allowWhenInhibited="yes" onRelease="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key mic-mute" /></keybind>'
+BRI_TEXT='    <!-- thinfloe-compose-labwc-config: THINFLOE_BRIGHTNESS_KEYS=on -->
+    <keybind key="XF86MonBrightnessUp" allowWhenInhibited="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key brightness-up" /></keybind>
+    <keybind key="XF86MonBrightnessDown" allowWhenInhibited="yes"><action name="Execute" command="/usr/bin/thinfloe-menu --osd-key brightness-down" /></keybind>'
+
+printf 'THINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+OUTK="$WORK/mk-vol"
+if mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" &&
+    [[ "$(readlink "$OUTK/rc.xml")" == "$OUTK/.source/rc.xml" &&
+       -f "$OUTK/.source/rc.xml" && ! -L "$OUTK/.source/rc.xml" ]] &&
+    [[ $(kb_lines "$OUTK/rc.xml") -eq 4 && "$(keys_in "$OUTK/rc.xml")" == "$VOL_KEYS" ]]; then
+    ok "volume keys on: exactly the four volume keys"
+else
+    bad "volume keys on: $(inserted "$OUTK/rc.xml" 2>/dev/null)"
+fi
+[[ $(grep '<keybind' "$OUTK/rc.xml" | grep -c 'allowWhenInhibited="yes"') -eq 4 &&
+   $(grep -c '<keybind key="XF86AudioMute" .*onRelease="yes"' "$OUTK/rc.xml") -eq 1 &&
+   $(grep -c '<keybind key="XF86AudioMicMute" .*onRelease="yes"' "$OUTK/rc.xml") -eq 1 &&
+   $(grep -c 'onRelease' "$OUTK/rc.xml") -eq 2 ]] \
+    && ok "volume keys on: allowWhenInhibited on all, onRelease on the mute keys" \
+    || bad "volume keys on: attributes: $(inserted "$OUTK/rc.xml")"
+in_keyboard "$OUTK/rc.xml" && ok "volume keys on: inside <keyboard>" || bad "volume keys on: outside <keyboard>"
+[[ "$(inserted "$OUTK/rc.xml")" == "$VOL_TEXT" ]] \
+    && ok "volume keys on: the exact lines" || bad "volume keys on: lines: $(inserted "$OUTK/rc.xml")"
+stripped_is "$OUTK/rc.xml" "$NLSYS/rc.xml" \
+    && ok "volume keys on: otherwise the system file" || bad "volume keys on: other lines differ"
+
+printf 'THINFLOE_BRIGHTNESS_KEYS=on\n' >"$MKGEN"
+OUTK="$WORK/mk-bri"
+if mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" &&
+    [[ $(kb_lines "$OUTK/rc.xml") -eq 2 && "$(keys_in "$OUTK/rc.xml")" == "$BRI_KEYS" &&
+       "$(inserted "$OUTK/rc.xml")" == "$BRI_TEXT" ]] && in_keyboard "$OUTK/rc.xml" &&
+    stripped_is "$OUTK/rc.xml" "$NLSYS/rc.xml"; then
+    ok "brightness keys alone: exactly the two brightness keys"
+else
+    bad "brightness keys alone: $(inserted "$OUTK/rc.xml" 2>/dev/null)"
+fi
+
+printf 'THINFLOE_VOLUME_KEYS=on\nTHINFLOE_BRIGHTNESS_KEYS=on\n' >"$MKGEN"
+OUTK="$WORK/mk-both"
+if TF_OSD_KEY_CMD=/x/osd mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" &&
+    [[ $(kb_lines "$OUTK/rc.xml") -eq 6 && "$(keys_in "$OUTK/rc.xml")" == "$(printf '%s\n' $VOL_KEYS $BRI_KEYS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" ]] &&
+    [[ $(grep -o 'command="[^"]*"' "$OUTK/rc.xml" | grep -c '^command="/x/osd ') -eq 6 &&
+       $(grep -c 'command="' "$OUTK/rc.xml") -eq 6 ]] && in_keyboard "$OUTK/rc.xml"; then
+    ok "both on: six keys, TF_OSD_KEY_CMD is the command prefix"
+else
+    bad "both on: $(inserted "$OUTK/rc.xml" 2>/dev/null)"
+fi
+
+for v in '"on"' "'on'"; do
+    printf 'THINFLOE_VOLUME_KEYS=%s\n' "$v" >"$MKGEN"
+    OUTK="$WORK/mk-q"
+    if mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" && [[ $(kb_lines "$OUTK/rc.xml") -eq 4 ]]; then
+        ok "volume keys $v counts as on"
+    else
+        bad "volume keys $v: $(kb_lines "$OUTK/rc.xml") bindings"
+    fi
+done
+for v in yes 1 '' off; do
+    printf 'THINFLOE_VOLUME_KEYS=%s\nTHINFLOE_BRIGHTNESS_KEYS=%s\n' "$v" "$v" >"$MKGEN"
+    OUTK="$WORK/mk-off"
+    if mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" && keys_off "$OUTK"; then
+        ok "key switches '$v' count as off"
+    else
+        bad "key switches '$v': $(readlink "$OUTK/.source/rc.xml"), $(kb_lines "$OUTK/rc.xml") bindings"
+    fi
+done
+
+# Set only in the user's file: a managed key, dropped.
+: >"$MKGEN"; printf 'THINFLOE_VOLUME_KEYS=on\n' >"$WORK/mk-user2"
+OUTK="$WORK/mk-user-only"
+mk_compose "$NLSYS" "$MKGEN" "$WORK/mk-user2" "$OUTK" && keys_off "$OUTK" \
+    && ok "volume keys set only in the user's file: off" || bad "volume keys in the user's file count"
+
+printf 'THINFLOE_NUMLOCK=off\nTHINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+OUTK="$WORK/mk-nl"
+if mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" &&
+    [[ -f "$OUTK/.source/base.xml" && ! -L "$OUTK/.source/base.xml" ]] &&
+    grep -q '<numlock>off</numlock>' "$OUTK/.source/base.xml" &&
+    grep -q '<numlock>off</numlock>' "$OUTK/.source/rc.xml" &&
+    [[ $(kb_lines "$OUTK/.source/rc.xml") -eq 4 ]] &&
+    stripped_is "$OUTK/.source/rc.xml" "$OUTK/.source/base.xml"; then
+    ok "Num Lock off and volume on: base.xml says off, rc.xml has it and the keys"
+else
+    bad "Num Lock off and volume on: $(cat "$OUTK/.source/rc.xml" 2>/dev/null)"
+fi
+
+# --env-only follows the switches in .source/rc.xml and leaves base.xml alone.
+: >"$MKGEN"
+OUTK="$WORK/mk-envonly"
+mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK"
+link_before=$(readlink "$OUTK/rc.xml")
+printf 'THINFLOE_NUMLOCK=off\nTHINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
+if [[ $rc -eq 0 && -z "$err" && -f "$OUTK/.source/rc.xml" && ! -L "$OUTK/.source/rc.xml" &&
+      $(kb_lines "$OUTK/.source/rc.xml") -eq 4 &&
+      "$(readlink "$OUTK/rc.xml")" == "$link_before" &&
+      "$(readlink "$OUTK/.source/base.xml")" == "$NLSYS/rc.xml" ]] &&
+   ! grep -q '<numlock>off' "$OUTK/.source/rc.xml" &&
+   [[ -z "$(ls -A "$OUTK/.source" | grep -v -x -e base.xml -e rc.xml)" ]]; then
+    ok "--env-only: volume on adds the keys, base.xml and the rc.xml link stay"
+else
+    bad "--env-only volume on: rc=$rc err=$err $(ls -lA "$OUTK/.source")"
+fi
+: >"$MKGEN"
+mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" && keys_off "$OUTK" \
+    && ok "--env-only: switching off links base.xml again" || bad "--env-only switch off: $(readlink "$OUTK/.source/rc.xml")"
+
+# --env-only on a dir without .source/base.xml: only environment, a note.
+OUTK="$WORK/mk-nosource"
+mkdir -p "$OUTK"
+printf 'THINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
+if [[ $rc -eq 0 && "$err" == "thinfloe-compose-labwc-config: no .source/base.xml; the key switches follow at the next start" &&
+      ! -e "$OUTK/.source" && -f "$OUTK/environment" ]]; then
+    ok "--env-only without .source/base.xml: environment only, a note, exit 0"
+else
+    bad "--env-only without .source/base.xml: rc=$rc err=$err $(ls -A "$OUTK")"
+fi
+
+# --env-only with an unwritable .source/: unchanged, a line, exit 0.
+if [[ $(id -u) -eq 0 ]]; then
+    ok "unwritable .source/: skipped as root"
+else
+    printf 'THINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+    OUTK="$WORK/mk-ro"
+    mk_compose "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK"
+    sum_before=$(cksum <"$OUTK/.source/rc.xml")
+    chmod 500 "$OUTK/.source"
+    printf 'THINFLOE_VOLUME_KEYS=on\nTHINFLOE_BRIGHTNESS_KEYS=on\n' >"$MKGEN"
+    err=$(mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" 2>&1); rc=$?
+    chmod 700 "$OUTK/.source"
+    if [[ $rc -eq 0 && "$err" == "thinfloe-compose-labwc-config: cannot write the key bindings; the volume and brightness keys stay off" &&
+          "$(cksum <"$OUTK/.source/rc.xml")" == "$sum_before" ]] &&
+       grep -q '^THINFLOE_BRIGHTNESS_KEYS=on$' "$OUTK/environment"; then
+        ok "unwritable .source/: rc.xml unchanged, the line on stderr, exit 0"
+    else
+        bad "unwritable .source/: rc=$rc err=$err"
+    fi
 fi
 
 if [[ $fail -ne 0 ]]; then

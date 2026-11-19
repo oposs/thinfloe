@@ -24,8 +24,12 @@
 # "thinfloe: menu output not applied: <why>", nothing else changes. Once the
 # session runs, the helper is the only program that writes the composed
 # rc.xml. Its source is whatever the rc.xml link pointed at when the helper
-# started: the system file, or the composer's .numlock/rc.xml copy when Num
-# Lock is off.
+# started: thinfloe-compose-labwc-config's .source/rc.xml, which the composer
+# rewrites (and only that) when the menu switches the media keys. A change
+# of the source's content counts like a new scale: the scaled copy is built
+# again from the new source and labwc reconfigures. While the links are in
+# place (scale 1, no output name) nothing is done: labwc reads the new
+# source through them on the menu's own reconfigure.
 #
 #   rc.xml           the size="10" of each <font place=...> line becomes
 #                    round(10 * scale), in points (<theme><font size>)
@@ -42,7 +46,8 @@
 # The menu rewrites the file when the real window width is known, when the
 # window moves to another monitor and when the scale changes. The helper
 # therefore keeps running for the whole session (thinfloe-session stops it at
-# the end) and reads the file once a second (TF_SCALE_POLL overrides). Each
+# the end) and reads the file, the output file and the source's checksum
+# once a second (TF_SCALE_POLL overrides). Each
 # change is applied again, always from the files the symlinks pointed at
 # when the helper started, never from the copies of the last run; a change to a scale that rounds
 # to 1 with no output name puts the symlinks back. labwc is reconfigured after each change. An
@@ -295,8 +300,11 @@ pick_output() {
     fi
 }
 
+# The source's content, to notice the composer rewriting it.
+source_sum() { cksum <"$rc_link" 2>/dev/null; }
+
 pick_output
-last="$scale|$out"
+last="$scale|$out|$(source_sum)"
 retries_left=3
 attempt "$scale" "$out"
 [ -n "$once" ] && exit 0
@@ -306,7 +314,7 @@ while :; do
     s=$(read_scale)
     [ -n "$s" ] && scale=$s
     pick_output
-    now="$scale|$out"
+    now="$scale|$out|$(source_sum)"
     if [ "$now" != "$last" ]; then
         last=$now
         retries_left=3
