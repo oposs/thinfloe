@@ -1146,10 +1146,11 @@ else
     fail=1
 fi
 
-# The volume keys run wpctl; the brightness keys run ddcutil, which talks
-# DDC/CI over /dev/i2c-*: the i2c-dev module, loaded at boot, and a udev
-# rule that gives the seat's user (tfuser) the GPU's buses.
-present "wpctl"   'usr/bin/wpctl$'
+# The volume keys run pactl (pulseaudio-utils, through pipewire-pulse);
+# the brightness keys run ddcutil, which talks DDC/CI over /dev/i2c-*: the
+# i2c-dev module, loaded at boot, and a udev rule that gives the seat's
+# user (tfuser) the GPU's buses.
+present "pactl"   'usr/bin/pactl$'
 present "ddcutil" 'usr/bin/ddcutil$'
 DDC_TMP=$(mktemp -d)
 TMPS+=("$DDC_TMP")

@@ -1149,9 +1149,13 @@ fi
 # The volume and brightness keys end to end: the Keyboard tab's switches
 # (THINFLOE_VOLUME_KEYS, THINFLOE_BRIGHTNESS_KEYS in generated/environment),
 # the image's composer, labwc's bindings, 'thinfloe-menu --osd-key' and the
-# OSD process. A fake wpctl (TF_WPCTL) logs its arguments to /tmp/wpctl.log,
-# answers 0.45 for the sink and /tmp/mic (default 'Volume: 1.00') for the
-# source; a fake ddcutil (TF_DDCUTIL) finds no monitor. wtype sends the keys
+# OSD process. A fake pactl (TF_PACTL) logs its arguments to /tmp/pactl.log
+# and keeps two sinks (spk_a, spk_b at 45 %), two sources (mic_a, mic_b at
+# 80 %, unmuted) and the monitor source spk_a.monitor in /tmp/pa as pactl 17
+# prints them (tests/fixtures/pactl-*.json); a set changes the file and
+# appends a change event, as pipewire-pulse does, and 'subscribe' follows
+# /tmp/pa/events. PA_NOLOG=1 changes a device without a log line, as another
+# program would. A fake ddcutil (TF_DDCUTIL) finds no monitor. wtype sends the keys
 # through one virtual keyboard per call; the leading 1 s pause lets wev bind
 # it (see the keybinding case above). wev prints a sym line for the press and
 # for the release of a key that reaches it.
@@ -1171,13 +1175,81 @@ fi
 # right border (WARN, c79a4a) is at (1265,49) on output 1 and (2545,49) on
 # output 2.
 # shellcheck disable=SC2016 # expands inside the container
-mk_wpctl='#!/bin/sh
-echo "$*" >>/tmp/wpctl.log
-case "$1 $2" in
-    "get-volume @DEFAULT_AUDIO_SINK@") echo "Volume: 0.45" ;;
-    "get-volume @DEFAULT_AUDIO_SOURCE@") cat /tmp/mic 2>/dev/null || echo "Volume: 1.00" ;;
-esac
-exit 0'
+mk_pactl='#!/usr/bin/python3
+import json, os, sys
+D = "/tmp/pa/"
+a = sys.argv[1:]
+def dev(i, name, pct, mute, monitor=""):
+    ch = {"value": round(pct * 65536 / 100), "value_percent": "%d%%" % pct, "db": "0.00 dB"}
+    return {"index": i, "state": "SUSPENDED", "name": name, "description": name, "driver": "PipeWire",
+            "mute": mute, "volume": {"front-left": dict(ch), "front-right": dict(ch)}, "balance": 0.0,
+            "monitor_source": monitor, "ports": [], "active_port": None, "formats": ["pcm"],
+            "properties": {"node.name": name, "device.class": "monitor" if monitor else "sound"}}
+def load(kind):
+    with open(D + kind + "s.json") as f:
+        return json.load(f)
+def save(kind, devs):
+    with open(D + kind + "s.json.new", "w") as f:
+        json.dump(devs, f)
+    os.rename(D + kind + "s.json.new", D + kind + "s.json")
+def event(what, kind, i):
+    with open(D + "events", "a") as f:
+        f.write("Event %s%s%s on %s #%d\n" % (chr(39), what, chr(39), kind, i))
+def done(text=""):
+    sys.stdout.write(text)
+    sys.exit(0)
+if a == ["tf-init"]:
+    os.makedirs(D, exist_ok=True)
+    save("sink", [dev(1, "spk_a", 45, False), dev(2, "spk_b", 45, False)])
+    save("source", [dev(3, "spk_a.monitor", 100, False, "spk_a"), dev(4, "mic_a", 80, False), dev(5, "mic_b", 80, False)])
+    for k, v in (("default-sink", "spk_a\n"), ("default-source", "mic_a\n"), ("events", "")):
+        with open(D + k, "w") as f:
+            f.write(v)
+    done()
+if a[:1] == ["tf-add-source"]:
+    devs = load("source")
+    devs.append(dev(int(a[2]), a[1], 100, False))
+    save("source", devs)
+    event("new", "source", int(a[2]))
+    done()
+if not os.environ.get("PA_NOLOG"):
+    with open("/tmp/pactl.log", "a") as f:
+        f.write(" ".join(a) + "\n")
+if a == ["subscribe"]:
+    # PA_SUBSCRIBE_FAIL=N: the first N runs find no sound server.
+    n = 0
+    if os.path.exists(D + "subscribe-fails"):
+        n = int(open(D + "subscribe-fails").read())
+    if n < int(os.environ.get("PA_SUBSCRIBE_FAIL") or 0):
+        with open(D + "subscribe-fails", "w") as f:
+            f.write(str(n + 1))
+        sys.stderr.write("Connection failure: Connection refused\n")
+        sys.exit(1)
+    os.execvp("tail", ["tail", "-n", "+1", "-f", D + "events"])
+if len(a) == 4 and a[:3] == ["-f", "json", "list"] and a[3] in ("sinks", "sources"):
+    with open(D + a[3] + ".json") as f:
+        done(f.read())
+if a in (["get-default-sink"], ["get-default-source"]):
+    with open(D + "default-" + a[0][12:]) as f:
+        done(f.read())
+if len(a) == 3 and a[0].split("-")[:1] == ["set"]:
+    _, kind, what = a[0].split("-")
+    devs = load(kind)
+    for d in devs:
+        if d["name"] == a[1]:
+            if what == "volume":
+                p = int(a[2].rstrip("%"))
+                for ch in d["volume"].values():
+                    ch["value"], ch["value_percent"] = round(p * 65536 / 100), "%d%%" % p
+            else:
+                d["mute"] = {"1": True, "0": False, "toggle": not d["mute"]}[a[2]]
+            save(kind, devs)
+            event("change", kind, d["index"])
+            done()
+    sys.stderr.write("Failure: No such entity\n")
+    sys.exit(1)
+sys.stderr.write("fake pactl: unknown call %s\n" % a)
+sys.exit(1)'
 # shellcheck disable=SC2016 # expands inside the container
 mk_ddcutil='#!/bin/sh
 echo "$*" >>/tmp/ddcutil.log
@@ -1236,6 +1308,47 @@ mk_script='# after T0 S: sleep until S seconds after the time T0 ($EPOCHREALTIME
 after() { sleep "$(awk -v a="$1" -v s="$2" -v n="$EPOCHREALTIME" "BEGIN { d = a + s - n; print (d > 0 ? d : 0) }")"; }
 px() { python3 /tmp/px.py "$@"; }
 wev_syms() { tail -n +"$1" /tmp/wev.log | grep -o "sym: [A-Za-z0-9_]*" | cut -d" " -f2 | tr "\n" " "; }
+# pa ARGS: change a device as another program would (no log line).
+pa() { PA_NOLOG=1 /tmp/fake-pactl "$@"; }
+# ms_since T0: milliseconds since the time T0 ($EPOCHREALTIME).
+ms_since() { awk -v a="$1" -v n="$EPOCHREALTIME" "BEGIN { printf \"%d\", (n - a) * 1000 }"; }
+# wait_log S LINE...: wait at most S seconds until /tmp/pactl.log, from
+# line $FROM on (default 1), has every LINE.
+wait_log() {
+    local deadline missing l
+    deadline=$(awk -v n="$EPOCHREALTIME" -v s="$1" "BEGIN { printf \"%.3f\", n + s }")
+    shift
+    while :; do
+        missing=0
+        for l in "$@"; do
+            grep -qxF -- "$l" <(tail -n +"${FROM:-1}" /tmp/pactl.log 2>/dev/null) || missing=1
+        done
+        [ "$missing" = 0 ] && return 0
+        awk -v n="$EPOCHREALTIME" -v u="$deadline" "BEGIN { exit !(n > u) }" && return 1
+        sleep 0.05
+    done
+}
+# start_osd: the OSD, and socket=yes once it listens.
+start_osd() {
+    thinfloe-menu --osd 2>/tmp/osd.err &
+    osd=$!
+    for i in $(seq 50); do [ -S /tmp/xdg/thinfloe-osd.sock ] && break; sleep 0.1; done
+    [ -S /tmp/xdg/thinfloe-osd.sock ] && echo socket=yes || echo socket=no
+}
+# stop_osd: SIGTERM, its status, its stderr, and whether its pactl
+# subscribe (tail -f under the fake) is left behind.
+stop_osd() {
+    kill "$osd"
+    wait "$osd"
+    echo "osd_rc=$?"
+    local left=no f c
+    for f in /proc/[0-9]*/cmdline; do
+        c=$(tr "\0" " " <"$f" 2>/dev/null)
+        [[ "$c" == "tail -n +1 -f /tmp/pa/events"* ]] && left=yes
+    done
+    echo "subscribe_left=$left"
+    sed "s/^/osderr: /" /tmp/osd.err
+}
 case $MK_MODE in
 keys-off | keys-on | live)
     stdbuf -oL wev -f wl_keyboard:key >/tmp/wev.log 2>&1 &
@@ -1246,8 +1359,8 @@ keys-off | keys-on | live)
     echo "wev1=$(wev_syms 1)"
     if [ "$MK_MODE" = live ]; then
         n=$(($(wc -l </tmp/wev.log) + 1))
-        printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/gen/environment
-        thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/gen/environment /nonexistent /tmp/xdg/thinfloe-labwc
+        printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/cfg/generated/environment
+        thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/cfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc
         echo "binds=$(grep -c "keybind key=" /tmp/xdg/thinfloe-labwc/rc.xml)"
         labwc --reconfigure
         # labwc reads rc.xml again on the SIGHUP that --reconfigure sends; it
@@ -1261,10 +1374,7 @@ keys-off | keys-on | live)
 osd | bright)
     python3 /usr/local/bin/x11-probe.py --background ff0000 --hold 40 &
     sleep 3
-    thinfloe-menu --osd 2>/tmp/osd.err &
-    osd=$!
-    for i in $(seq 50); do [ -S /tmp/xdg/thinfloe-osd.sock ] && break; sleep 0.1; done
-    [ -S /tmp/xdg/thinfloe-osd.sock ] && echo socket=yes || echo socket=no
+    start_osd
     if [ "$MK_MODE" = osd ]; then
         wtype -k XF86AudioRaiseVolume
         t=$EPOCHREALTIME
@@ -1274,23 +1384,40 @@ osd | bright)
         px volgone bar1=547,682 panel1=640,668
         # A volume key, then the microphone key 0.5 s later, while the
         # Volume panel still shows: the panel takes the size of the new view.
-        echo "Volume: 1.00 [MUTED]" >/tmp/mic
         wtype -k XF86AudioRaiseVolume -s 500 -k XF86AudioMicMute
         t=$EPOCHREALTIME
         after "$t" 0.5
         px mic in1=760,690 top1=760,652 above1=760,645 gap1=522,682 icon1=496,664,518,686#c79a4a in2=2040,690 top2=2040,652 above2=2040,645 gap2=1802,682 icon2=1776,664,1798,686#c79a4a
-        echo "Volume: 1.00" >/tmp/mic
+        px micmark --within 2 m1=1265,49@c79a4a m2=2545,49@c79a4a
+        # The mark follows the default source, whoever sets it.
+        pa set-source-mute mic_a 0
         px nomark --within 3 m1=1265,49@ff0000 m2=2545,49@ff0000
-        # The mark follows the microphone, on every output, also when one goes.
-        echo "Volume: 1.00 [MUTED]" >/tmp/mic
+        pa set-source-mute mic_a 1
         px mark --within 2 m1=1265,49@c79a4a m2=2545,49@c79a4a
+        # The mark follows the microphone, on every output, also when one goes.
         wlr-randr --output HEADLESS-2 --off
         sleep 1
         kill -0 "$osd" 2>/dev/null && echo osd_alive=yes || echo osd_alive=no
         px unplug m1=1265,49
-        echo "Volume: 1.00" >/tmp/mic
+        pa set-source-mute mic_a 0
         px markgone --within 2 m1=1265,49@ff0000
+        # A microphone plugged in while the microphone key holds them muted
+        # (the unmute above came from another program, not the key) is muted at once.
+        t=$EPOCHREALTIME
+        pa tf-add-source mic_c 6
+        wait_log 1.5 "set-source-mute mic_c 1" && echo "hotplug_ms=$(ms_since "$t")" || echo hotplug_ms=none
     else
+        # No sound server for the first two runs of pactl subscribe (at 0 s,
+        # then 1 s later); the third, 2 s after that, reaches it. The start
+        # puts every device at 100 % (the volume switch is off); spk_b then
+        # drifts without an event, and a restart puts it back.
+        wait_log 3 "set-sink-volume spk_b 100%" && pa set-sink-volume spk_b 30%
+        from=$(($(grep -c "" /tmp/pactl.log) + 1))
+        for i in $(seq 60); do
+            [ "$(grep -cx subscribe /tmp/pactl.log)" -ge 3 ] && break
+            sleep 0.1
+        done
+        FROM=$from wait_log 2 "set-sink-volume spk_b 100%" && echo resync=yes || echo resync=no
         # The first detection may run before the OSD knows the outputs; the
         # one 2 s after they came names both.
         for i in $(seq 80); do
@@ -1300,13 +1427,31 @@ osd | bright)
         wtype -k XF86MonBrightnessUp
         px bright --within 1.2 warn1=640,652,800,698#c79a4a warn2=1920,652,2080,698#c79a4a
     fi
-    kill "$osd"
-    wait "$osd"
-    echo "osd_rc=$?"
-    sed "s/^/osderr: /" /tmp/osd.err
+    stop_osd
+    ;;
+liveoff)
+    start_osd
+    # The keys move every speaker and microphone away from 100 % and
+    # unmuted: up to 50 %, muted, and both microphones (at 80 %) muted.
+    wtype -s 1000 -k XF86AudioRaiseVolume -s 300 -k XF86AudioMute -s 300 -k XF86AudioMicMute -s 300
+    wait_log 3 "set-sink-volume spk_b 50%" "set-sink-mute spk_b 1" "set-source-mute mic_b 1" && echo keys=yes || echo keys=no
+    # The Keyboard tab turns the switch off: the composer, labwc, then the
+    # OSD is told.
+    printf "THINFLOE_VOLUME_KEYS=off\n" >/tmp/cfg/generated/environment
+    thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/cfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc
+    labwc --reconfigure
+    from=$(($(grep -c "" /tmp/pactl.log) + 1))
+    echo "reload_from=$from"
+    t=$EPOCHREALTIME
+    thinfloe-menu --osd-key reload
+    FROM=$from wait_log 1.5 \
+        "set-sink-volume spk_a 100%" "set-sink-mute spk_a 0" "set-sink-volume spk_b 100%" "set-sink-mute spk_b 0" \
+        "set-source-volume mic_a 100%" "set-source-mute mic_a 0" "set-source-volume mic_b 100%" "set-source-mute mic_b 0" &&
+        echo "liveoff_ms=$(ms_since "$t")" || echo liveoff_ms=none
+    stop_osd
     ;;
 esac
-sed "s/^/wpctl: /" /tmp/wpctl.log 2>/dev/null
+sed "s/^/pactl: /" /tmp/pactl.log 2>/dev/null
 exit 0'
 mk_run() {
     local mode="$1" outputs="$2" vol="$3" bri="$4" name="thinfloe-runtime-test-mk-$1-$$" rc
@@ -1315,27 +1460,29 @@ mk_run() {
         -e WLR_HEADLESS_OUTPUTS="$outputs" \
         -e WLR_RENDERER=pixman \
         -e XDG_RUNTIME_DIR=/tmp/xdg \
-        -e TF_WPCTL=/tmp/fake-wpctl \
+        -e TF_PACTL=/tmp/fake-pactl \
+        -e TF_CONFIG_DIR=/tmp/cfg \
+        -e PA_SUBSCRIBE_FAIL="${PA_FAIL:-0}" \
         -e TF_DDCUTIL=/tmp/fake-ddcutil \
         -e MK_MODE="$mode" \
         -e MK_VOL="$vol" \
         -e MK_BRI="$bri" \
-        -e MK_WPCTL="$mk_wpctl" \
+        -e MK_PACTL="$mk_pactl" \
         -e MK_DDCUTIL="$mk_ddcutil" \
         -e MK_PX="$mk_px" \
         -e MK_SCRIPT="$mk_script" \
         "$IMAGE" \
-        sh -c 'mkdir -p /tmp/xdg /tmp/gen && chmod 700 /tmp/xdg &&
-               printf "%s\n" "$MK_WPCTL" >/tmp/fake-wpctl && printf "%s\n" "$MK_DDCUTIL" >/tmp/fake-ddcutil &&
-               chmod +x /tmp/fake-wpctl /tmp/fake-ddcutil &&
+        sh -c 'mkdir -p /tmp/xdg /tmp/cfg/generated && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$MK_PACTL" >/tmp/fake-pactl && printf "%s\n" "$MK_DDCUTIL" >/tmp/fake-ddcutil &&
+               chmod +x /tmp/fake-pactl /tmp/fake-ddcutil && /tmp/fake-pactl tf-init &&
                printf "%s\n" "$MK_PX" >/tmp/px.py && printf "%s\n" "$MK_SCRIPT" >/tmp/mk.sh &&
-               printf "THINFLOE_VOLUME_KEYS=%s\nTHINFLOE_BRIGHTNESS_KEYS=%s\n" "$MK_VOL" "$MK_BRI" >/tmp/gen/environment &&
-               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/gen/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               printf "THINFLOE_VOLUME_KEYS=%s\nTHINFLOE_BRIGHTNESS_KEYS=%s\n" "$MK_VOL" "$MK_BRI" >/tmp/cfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/cfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
                labwc -C /tmp/xdg/thinfloe-labwc -S "bash /tmp/mk.sh"' 2>&1)
     rc=$?
     if [[ $rc -eq 124 || $rc -eq 137 ]]; then
         echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the media key test, $mode)"
-        echo "$MK_OUT" | grep -E '^(wev|px|osd|socket|wpctl|binds)'
+        echo "$MK_OUT" | grep -E '^(wev|px|osd|socket|pactl|binds)'
         podman rm -f "$name" >/dev/null 2>&1
         exit 1
     fi
@@ -1377,18 +1524,18 @@ wev1=$(mk_val wev1)
 [[ "$(mk_val wev_focus)" == active && " $wev1" == *" XF86AudioRaiseVolume "* ]]
 mk_check $? "with the volume switch off, XF86AudioRaiseVolume reaches the focused window" \
     "wev focus '$(mk_val wev_focus)', syms '$wev1'"
-! grep -q '^wpctl: set-volume' <<<"$MK_OUT"
+! grep -q '^pactl: set-' <<<"$MK_OUT"
 mk_check $? "with the volume switch off, the key does not change the volume" \
-    "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
+    "$(echo "$MK_OUT" | grep '^pactl: ' | tr '\n' ' ')"
 
 mk_run keys-on 1 on off
 wev1=$(mk_val wev1)
 [[ "$(mk_val wev_focus)" == active && " $wev1" != *" XF86AudioRaiseVolume "* && " $wev1" == *" x "* ]]
 mk_check $? "with the volume switch on, labwc takes XF86AudioRaiseVolume and the x after it reaches the window" \
     "wev focus '$(mk_val wev_focus)', syms '$wev1'"
-grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+' <<<"$MK_OUT"
-mk_check $? "with the volume switch on and no OSD running, the key raises the volume by 5 %" \
-    "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
+grep -qx 'pactl: set-sink-volume spk_a 50%' <<<"$MK_OUT" && grep -qx 'pactl: set-sink-volume spk_b 50%' <<<"$MK_OUT"
+mk_check $? "with the volume switch on and no OSD running, the key raises both speakers from 45 % to 50 %" \
+    "$(echo "$MK_OUT" | grep '^pactl: ' | tr '\n' ' ')"
 
 mk_run live 1 off off
 wev1=$(mk_val wev1)
@@ -1398,33 +1545,58 @@ mk_check $? "the volume switch acts at once: after --env-only and labwc --reconf
     "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
 
 mk_run osd 2 on off
-[[ "$(mk_val socket)" == yes ]] && grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+' <<<"$MK_OUT"
-mk_check $? "the volume key reaches the running OSD, which raises the volume by 5 %" \
-    "socket $(mk_val socket); $(echo "$MK_OUT" | grep '^wpctl: set' | tr '\n' ' ')"
-mk_expect "0.5 s after the volume key the Volume panel shows on both outputs, its bar at 45 %" vol \
+[[ "$(mk_val socket)" == yes ]] && grep -qx 'pactl: set-sink-volume spk_a 50%' <<<"$MK_OUT" &&
+    grep -qx 'pactl: set-sink-volume spk_b 50%' <<<"$MK_OUT"
+mk_check $? "the volume key reaches the running OSD, which raises both speakers from 45 % to 50 %" \
+    "socket $(mk_val socket); $(echo "$MK_OUT" | grep '^pactl: set' | tr '\n' ' ')"
+mk_expect "0.5 s after the volume key the Volume panel shows on both outputs, its bar at 50 %" vol \
     panel1=0d1218 panel2=0d1218 bar1=7cc4ff bar2=7cc4ff gap1=7cc4ff tall1=0d1218
 mk_expect "2.5 s after the volume key the panel is gone" volgone bar1=ff0000 panel1=ff0000
 mk_expect "the microphone key 0.5 s after a volume key shows the Microphone off panel 15 px lower, without a bar, on both outputs" mic \
     in1=0d1218 top1=151b22 above1=ff0000 gap1=0d1218 in2=0d1218 top2=151b22 above2=ff0000 gap2=0d1218
 mk_expect "the Microphone off panel draws its icon in WARN on both outputs" mic icon1=found icon2=found
-grep -qx 'wpctl: set-mute @DEFAULT_AUDIO_SOURCE@ toggle' <<<"$MK_OUT"
-mk_check $? "the microphone key toggles the default source's mute" \
-    "$(grep '^wpctl: set' <<<"$MK_OUT" | tr '\n' ' ')"
-mk_expect "the mark goes when the microphone is on" nomark m1=ff0000 m2=ff0000
+grep -qx 'pactl: set-source-mute mic_a 1' <<<"$MK_OUT" && grep -qx 'pactl: set-source-mute mic_b 1' <<<"$MK_OUT"
+mk_check $? "the microphone key mutes both microphones" \
+    "$(grep '^pactl: set' <<<"$MK_OUT" | tr '\n' ' ')"
+mk_expect "after the microphone key the mark shows on both outputs within 2 s" micmark m1=c79a4a m2=c79a4a
+mk_expect "the mark goes when the default microphone is unmuted by another program" nomark m1=ff0000 m2=ff0000
 mk_expect "the mark shows on both outputs within 2 s of the microphone being muted" mark m1=c79a4a m2=c79a4a
 [[ "$(mk_val osd_alive)" == yes && "$(mk_px unplug m1)" == c79a4a ]]
 mk_check $? "with HEADLESS-2 switched off the OSD keeps running and output 1 keeps the mark" \
     "OSD alive '$(mk_val osd_alive)', mark pixel '$(mk_px unplug m1)'"
 mk_expect "the mark goes within 2 s of the microphone being on again" markgone m1=ff0000
-[[ "$(mk_val osd_rc)" == 0 ]]
-mk_check $? "the OSD ends with 0 on SIGTERM" "osd_rc '$(mk_val osd_rc)'; $(echo "$MK_OUT" | grep '^osderr: ' | head -5 | tr '\n' ' ')"
+hp=$(mk_val hotplug_ms)
+[[ "$hp" =~ ^[0-9]+$ && $hp -le 1000 ]]
+mk_check $? "a microphone plugged in while the microphone key holds them muted is muted within 1 s" \
+    "after '$hp' ms; $(grep '^pactl: set-source' <<<"$MK_OUT" | tr '\n' ' ')"
+! grep -q '^pactl: set-[a-z]*-[a-z]* spk_a\.monitor ' <<<"$MK_OUT"
+mk_check $? "the monitor source is never set" "$(grep '^pactl: set-.*monitor' <<<"$MK_OUT" | tr '\n' ' ')"
+[[ "$(mk_val osd_rc)" == 0 && "$(mk_val subscribe_left)" == no ]]
+mk_check $? "the OSD ends with 0 on SIGTERM and leaves no pactl subscribe behind" \
+    "osd_rc '$(mk_val osd_rc)', subscribe left '$(mk_val subscribe_left)'; $(echo "$MK_OUT" | grep '^osderr: ' | head -5 | tr '\n' ' ')"
 
-mk_run bright 2 off on
+mk_run liveoff 1 on off
+lo=$(mk_val liveoff_ms)
+[[ "$(mk_val keys)" == yes && "$lo" =~ ^[0-9]+$ && $lo -le 1000 ]]
+mk_check $? "the volume switch turned off during a session puts every speaker and microphone at 100 % and unmuted within 1 s of the reload" \
+    "keys '$(mk_val keys)', after '$lo' ms; $(tail -n +"$(mk_val reload_from)" <(grep '^pactl: ' <<<"$MK_OUT") | grep 'set-' | tr '\n' ' ')"
+
+PA_FAIL=2 mk_run bright 2 off on
 mk_expect "without DDC/CI the brightness key shows 'not supported' on both outputs" bright warn1=found warn2=found
 n1=$(echo "$MK_OUT" | grep -c '^osderr: .*monitor HEADLESS-1 does not answer DDC/CI')
 n2=$(echo "$MK_OUT" | grep -c '^osderr: .*monitor HEADLESS-2 does not answer DDC/CI')
 [[ $n1 -eq 1 && $n2 -eq 1 ]]
 mk_check $? "the OSD logs once per output that the monitor does not answer DDC/CI" \
     "HEADLESS-1 $n1 times, HEADLESS-2 $n2 times"
+nsub=$(grep -cx 'pactl: subscribe' <<<"$MK_OUT")
+nref=$(grep -c '^osderr: thinfloe-menu --osd: pactl subscribe: Connection failure: Connection refused$' <<<"$MK_OUT")
+nr1=$(grep -cx 'osderr: thinfloe-menu --osd: pactl subscribe ended; retrying in 1 s' <<<"$MK_OUT")
+nr2=$(grep -cx 'osderr: thinfloe-menu --osd: pactl subscribe ended; retrying in 2 s' <<<"$MK_OUT")
+[[ $nsub -eq 3 && $nref -eq 1 && $nr1 -eq 1 && $nr2 -eq 1 ]]
+mk_check $? "without a sound server pactl subscribe starts again after 1 s, then 2 s, and each message is logged once" \
+    "subscribe started $nsub times (want 3); refused logged $nref, 1 s $nr1, 2 s $nr2 times; $(grep '^osderr: .*pactl' <<<"$MK_OUT" | tr '\n' ' ')"
+[[ "$(mk_val resync)" == yes && "$(mk_val subscribe_left)" == no ]]
+mk_check $? "once pactl subscribe runs again, a speaker that drifted is put back at the shared state" \
+    "resync '$(mk_val resync)', subscribe left '$(mk_val subscribe_left)'"
 
 exit $fail

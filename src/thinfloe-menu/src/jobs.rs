@@ -260,6 +260,9 @@ pub struct LabwcCmds {
     pub config_dir: Option<PathBuf>,
     /// labwc's process id as labwc gave it to its children (`LABWC_PID`).
     pub labwc_pid: Option<String>,
+    /// The OSD's socket (`TF_OSD_SOCKET`, else in `XDG_RUNTIME_DIR`), told
+    /// to read the volume keys switch again after a live apply.
+    pub osd_socket: Option<PathBuf>,
 }
 
 impl LabwcCmds {
@@ -281,6 +284,7 @@ impl LabwcCmds {
             system_dir: PathBuf::from("/etc/thinfloe/labwc"),
             config_dir: var("TF_LABWC_CONFIG_DIR").map(PathBuf::from),
             labwc_pid: var("LABWC_PID"),
+            osd_socket: crate::osd::socket_path(),
         }
     }
 }
@@ -1061,9 +1065,32 @@ pub fn keyboard_apply(
         return Ok(KbOutcome::NextStart);
     };
     Ok(match keyboard_hand_over(l, config_dir, &generated, &user, feed) {
-        Ok(()) => KbOutcome::Live,
+        Ok(()) => {
+            tell_osd(l.osd_socket.as_deref(), feed);
+            KbOutcome::Live
+        }
         Err(why) => KbOutcome::Saved(why),
     })
+}
+
+/// Ask the OSD to read the volume keys switch again. No OSD running is
+/// fine (it reads the switch when it starts); another failure goes to
+/// the log, and the keyboard apply still counts.
+fn tell_osd(socket: Option<&Path>, feed: &Feed) {
+    use crate::osd::{Action, socket};
+    let Some(path) = socket else { return };
+    match socket::send(path, Action::Reload) {
+        Ok(()) | Err(socket::SendError::NoServer) => {}
+        Err(socket::SendError::Io(e)) => feed.push(Line {
+            time: local_time(),
+            source: Some(KEYBOARD_LOG_SOURCE.to_string()),
+            runs: vec![Run::plain(format!(
+                "the volume keys switch could not be handed to the OSD ({}): {e}",
+                path.display()
+            ))],
+            kind: Kind::Warn,
+        }),
+    }
 }
 
 /// Compose labwc's `environment` in `config_dir` again and ask the running
@@ -1542,6 +1569,7 @@ mod tests {
             system_dir: PathBuf::from("/etc/thinfloe/labwc"),
             config_dir: config_dir.map(Path::to_path_buf),
             labwc_pid: pid.map(String::from),
+            osd_socket: Some(d.join("no-osd.sock")),
         };
         p
     }
@@ -1559,6 +1587,45 @@ mod tests {
             .lines()
             .map(String::from)
             .collect()
+    }
+
+    #[test]
+    fn keyboard_apply_tells_the_osd_to_reload() {
+        use crate::osd::{Action, socket};
+        // A short name: a socket path stops at 108 bytes.
+        let d = dir("kb-osd");
+        let out = d.join("run/labwc");
+        let mut p = kb_paths(&d, "true", "true", Some(&out), Some("4242"));
+        let path = d.join("o.sock");
+        let osd = socket::bind(&path).unwrap();
+        p.labwc.osd_socket = Some(path);
+        let feed = Arc::new(Feed::default());
+        assert_eq!(
+            keyboard_apply(&p, &de_kb(), &feed),
+            Ok(crate::keyboard::KbOutcome::Live)
+        );
+        let mut buf = [0u8; 64];
+        let n = osd.recv(&mut buf).expect("a datagram");
+        assert_eq!(socket::decode(&buf[..n]), Some(Action::Reload));
+        // No OSD listens: nothing to tell, nothing logged, still live.
+        p.labwc.osd_socket = Some(d.join("gone.sock"));
+        let feed = Arc::new(Feed::default());
+        assert_eq!(
+            keyboard_apply(&p, &de_kb(), &feed),
+            Ok(crate::keyboard::KbOutcome::Live)
+        );
+        assert!(feed.drain().is_empty());
+        // Saved for the next start: labwc was not told, so neither is the OSD.
+        let d2 = dir("kb-osd2");
+        let mut p = kb_paths(&d2, "true", "true", None, Some("4242"));
+        let path = d2.join("o.sock");
+        let osd = socket::bind(&path).unwrap();
+        p.labwc.osd_socket = Some(path);
+        assert_eq!(
+            keyboard_apply(&p, &de_kb(), &Arc::new(Feed::default())),
+            Ok(crate::keyboard::KbOutcome::NextStart)
+        );
+        assert!(osd.recv(&mut buf).is_err(), "no datagram");
     }
 
     #[test]
