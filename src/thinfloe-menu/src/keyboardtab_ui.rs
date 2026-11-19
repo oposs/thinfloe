@@ -3,7 +3,7 @@
 
 use crate::brand;
 use crate::config::Compose;
-use crate::keyboard::{KbEvent, KeyboardTab};
+use crate::keyboard::{KbEvent, KeyboardTab, MEDIA_KEYS_NOTE};
 use crate::ui::{GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT};
 use egui::{RichText, Ui};
 use shadcn_egui::Theme;
@@ -71,6 +71,14 @@ fn row(ui: &mut Ui, t: &Theme, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// The explanation under a media key switch, in the control column.
+fn media_keys_note(ui: &mut Ui, t: &Theme) {
+    ui.horizontal(|ui| {
+        ui.add_space(brand::FORM_LABEL_W);
+        ui.add(egui::Label::new(RichText::new(MEDIA_KEYS_NOTE).color(t.palette().muted_foreground)).wrap());
+    });
+}
+
 /// Card 1: the five settings.
 fn pickers(ui: &mut Ui, t: &Theme, tab: &KeyboardTab) -> Option<KbEvent> {
     let mut event = None;
@@ -106,6 +114,22 @@ fn pickers(ui: &mut Ui, t: &Theme, tab: &KeyboardTab) -> Option<KbEvent> {
             event = Some(KbEvent::NumLock(numlock));
         }
     });
+
+    let mut volume = tab.shown.volume_keys;
+    row(ui, t, "Volume keys control this machine", |ui| {
+        if ui.add(Switch::new(&mut volume)).changed() {
+            event = Some(KbEvent::VolumeKeys(volume));
+        }
+    });
+    media_keys_note(ui, t);
+
+    let mut brightness = tab.shown.brightness_keys;
+    row(ui, t, "Brightness keys control the monitors", |ui| {
+        if ui.add(Switch::new(&mut brightness)).changed() {
+            event = Some(KbEvent::BrightnessKeys(brightness));
+        }
+    });
+    media_keys_note(ui, t);
 
     let labels: Vec<&str> = Compose::ALL.iter().map(|c| c.label()).collect();
     let mut idx = Compose::ALL.iter().position(|&c| c == tab.shown.compose).unwrap_or(0);

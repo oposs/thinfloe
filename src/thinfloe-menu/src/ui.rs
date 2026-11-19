@@ -3451,7 +3451,7 @@ mod tests {
                         // With the layout list loaded, as on a real machine.
                         menu.keyboard = keyboard_menu().keyboard;
                         (
-                            (1280.0, 720.0),
+                            (1280.0, 1080.0),
                             &[
                                 "Layout",
                                 "Variant",
@@ -3652,7 +3652,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_tab_shows_its_rows() {
-        for size in [(1920.0, 1080.0), (1280.0, 720.0)] {
+        for size in [(1920.0, 1080.0), (1280.0, 900.0)] {
             let texts = text_rects(&settings_shapes(&keyboard_menu(), size.0, size.1));
             let at = |what: &str| {
                 texts
@@ -3666,10 +3666,10 @@ mod tests {
             let caps = at("CapsLock acts as Ctrl");
             let numlock = at("Num Lock on at start");
             let compose = at("Compose key");
-            // One column of rows, top to bottom. At 1280x720 the test field
+            // One column of rows, top to bottom. At 1280x900 the test field
             // is below the fold and reached by scrolling.
             let mut ys = vec![layout, variant, caps, numlock, compose];
-            if size.1 > 720.0 {
+            if size.1 > 900.0 {
                 ys.push(at("Try it here"));
             }
             let ys: Vec<f32> = ys.iter().map(|r| r.top()).collect();
@@ -3714,7 +3714,7 @@ mod tests {
                      and kept the old ones, so nothing changed on this machine until the next start";
         let mut menu = keyboard_menu();
         menu.keyboard.note = Some(error.into());
-        let texts = text_rects(&settings_shapes(&menu, 1280.0, 720.0));
+        let texts = text_rects(&settings_shapes(&menu, 1280.0, 1080.0));
         // One galley holding the whole text, on more than one row.
         let note = texts
             .iter()
@@ -3724,7 +3724,7 @@ mod tests {
         let line = texts.iter().find(|(t, _)| t == "Layout").unwrap().1.height();
         assert!(note.height() > line * 1.5, "one line: {note:?}");
         // Card 2 follows below the note (it scrolls into view at this size).
-        assert!(note.max.y < 720.0 && note.max.x <= 1280.0, "{note:?}");
+        assert!(note.max.y < 1080.0 && note.max.x <= 1280.0, "{note:?}");
     }
 
     #[test]

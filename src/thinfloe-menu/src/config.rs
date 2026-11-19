@@ -22,12 +22,14 @@ const MAX_ENV_BYTES: u64 = 64 * 1024;
 
 /// Keys of the `environment` file the menu owns when the system file is
 /// missing.
-const DEFAULT_MANAGED: [&str; 5] = [
+const DEFAULT_MANAGED: [&str; 7] = [
     "XKB_DEFAULT_MODEL",
     "XKB_DEFAULT_LAYOUT",
     "XKB_DEFAULT_VARIANT",
     "XKB_DEFAULT_OPTIONS",
     "THINFLOE_NUMLOCK",
+    "THINFLOE_VOLUME_KEYS",
+    "THINFLOE_BRIGHTNESS_KEYS",
 ];
 
 /// The per-user config directory and the paths in it.
@@ -197,6 +199,11 @@ pub struct Keyboard {
     /// Num Lock on when labwc starts or a keyboard is plugged in; off
     /// suits small keyboards with a number pad over the letter keys.
     pub numlock: bool,
+    /// The volume keys (and the mute keys) control this machine: labwc
+    /// binds them and they no longer reach any program.
+    pub volume_keys: bool,
+    /// The brightness keys control the monitors; same binding rule.
+    pub brightness_keys: bool,
 }
 
 impl Default for Keyboard {
@@ -207,6 +214,8 @@ impl Default for Keyboard {
             caps_as_ctrl: true,
             compose: Compose::RightAlt,
             numlock: true,
+            volume_keys: false,
+            brightness_keys: false,
         }
     }
 }
@@ -751,6 +760,8 @@ mod tests {
                 caps_as_ctrl: false,
                 compose: Compose::Menu,
                 numlock: false,
+                volume_keys: false,
+                brightness_keys: false,
             },
             ..ThinfloeConfig::default()
         };
@@ -992,6 +1003,15 @@ mod tests {
         assert_eq!(
             dropped_env_lines(env, &managed),
             ["XKB_DEFAULT_LAYOUT=de", "  export XKB_DEFAULT_MODEL=pc104"]
+        );
+    }
+
+    #[test]
+    fn media_key_switches_default_off_and_old_files_load() {
+        let c: ThinfloeConfig = toml::from_str("[keyboard]\nlayout = \"de\"\n").unwrap();
+        assert!(!c.keyboard.volume_keys && !c.keyboard.brightness_keys);
+        assert!(
+            DEFAULT_MANAGED.contains(&"THINFLOE_VOLUME_KEYS") && DEFAULT_MANAGED.contains(&"THINFLOE_BRIGHTNESS_KEYS")
         );
     }
 
