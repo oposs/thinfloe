@@ -1569,7 +1569,8 @@ mod tests {
             system_dir: PathBuf::from("/etc/thinfloe/labwc"),
             config_dir: config_dir.map(Path::to_path_buf),
             labwc_pid: pid.map(String::from),
-            osd_socket: Some(d.join("no-osd.sock")),
+            // No OSD; a test that talks to one binds it in TestDir::sockets.
+            osd_socket: None,
         };
         p
     }
@@ -1592,11 +1593,11 @@ mod tests {
     #[test]
     fn keyboard_apply_tells_the_osd_to_reload() {
         use crate::osd::{Action, socket};
-        // A short name: a socket path stops at 108 bytes.
-        let d = dir("kb-osd");
+        // A short directory: a socket path stops at 108 bytes.
+        let d = TestDir::sockets("kb");
         let out = d.join("run/labwc");
         let mut p = kb_paths(&d, "true", "true", Some(&out), Some("4242"));
-        let path = d.join("o.sock");
+        let path = d.socket("s");
         let osd = socket::bind(&path).unwrap();
         p.labwc.osd_socket = Some(path);
         let feed = Arc::new(Feed::default());
@@ -1608,7 +1609,7 @@ mod tests {
         let n = osd.recv(&mut buf).expect("a datagram");
         assert_eq!(socket::decode(&buf[..n]), Some(Action::Reload));
         // No OSD listens: nothing to tell, nothing logged, still live.
-        p.labwc.osd_socket = Some(d.join("gone.sock"));
+        p.labwc.osd_socket = Some(d.socket("x"));
         let feed = Arc::new(Feed::default());
         assert_eq!(
             keyboard_apply(&p, &de_kb(), &feed),
@@ -1616,9 +1617,9 @@ mod tests {
         );
         assert!(feed.drain().is_empty());
         // Saved for the next start: labwc was not told, so neither is the OSD.
-        let d2 = dir("kb-osd2");
+        let d2 = TestDir::sockets("kb2");
         let mut p = kb_paths(&d2, "true", "true", None, Some("4242"));
-        let path = d2.join("o.sock");
+        let path = d2.socket("s");
         let osd = socket::bind(&path).unwrap();
         p.labwc.osd_socket = Some(path);
         assert_eq!(

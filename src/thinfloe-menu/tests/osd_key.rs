@@ -5,21 +5,24 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 const MENU: &str = env!("CARGO_BIN_EXE_thinfloe-menu");
 
-/// A fresh directory under $TMPDIR, removed when dropped.
-struct Dir(PathBuf);
+#[allow(dead_code)]
+#[path = "../src/testdir.rs"]
+mod testdir;
+use testdir::TestDir;
+
+/// A fresh directory under $TMPDIR, removed when dropped, short enough for
+/// the OSD's socket (`TestDir::sockets`).
+struct Dir(TestDir);
 
 impl Dir {
     fn new(tag: &str) -> Dir {
-        let d = std::env::temp_dir().join(format!("thinfloe-menu-osd-key-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        Dir(d)
+        Dir(TestDir::sockets(&format!("k{tag}")))
     }
 
     /// An executable shell script that logs its arguments to `log`, then
@@ -37,19 +40,13 @@ impl Dir {
     }
 }
 
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn osd_key(d: &Path, args: &[&str]) -> Output {
+fn osd_key(d: &TestDir, args: &[&str]) -> Output {
     Command::new(MENU)
         .arg("--osd-key")
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("TF_OSD_SOCKET", d.join("missing.sock"))
+        .env("TF_OSD_SOCKET", d.socket("x"))
         .env("TF_PACTL", d.join("pactl"))
         .env("TF_DDCUTIL", d.join("ddcutil"))
         .output()
@@ -92,7 +89,7 @@ fn sinks_at_40() -> String {
 
 #[test]
 fn osd_key_without_a_server_runs_pactl_itself() {
-    let d = Dir::new("pactl");
+    let d = Dir::new("pa");
     // tf_null_a at 40 %, tf_null_b at 100 %.
     let sinks = include_str!("fixtures/pactl-sinks.json")
         .replace("\"45%\"", "\"40%\"")
@@ -118,7 +115,7 @@ fn osd_key_without_a_server_runs_pactl_itself() {
 
 #[test]
 fn osd_key_without_a_server_mutes_every_speaker_and_microphone() {
-    let d = Dir::new("pamute");
+    let d = Dir::new("pm");
     // Both sinks unmuted at 40 %; the default sink unmuted.
     let sinks = sinks_at_40().replace("\"mute\":true", "\"mute\":false");
     fake_pactl(
@@ -146,7 +143,7 @@ fn osd_key_without_a_server_mutes_every_speaker_and_microphone() {
 
 #[test]
 fn osd_key_without_a_sound_server_says_so_and_exits_0() {
-    let d = Dir::new("paserver");
+    let d = Dir::new("ps");
     d.fake("pactl", "echo 'Connection failure: Connection refused' >&2; exit 1");
     let out = osd_key(&d.0, &["volume-down"]);
     assert_eq!(out.status.code(), Some(0));
@@ -159,7 +156,7 @@ fn osd_key_without_a_sound_server_says_so_and_exits_0() {
 
 #[test]
 fn osd_key_without_a_server_leaves_brightness_alone() {
-    let d = Dir::new("ddc");
+    let d = Dir::new("dd");
     d.fake("ddcutil", "exit 0");
     for a in ["brightness-up", "brightness-down"] {
         let out = osd_key(&d.0, &[a]);
@@ -172,7 +169,7 @@ fn osd_key_without_a_server_leaves_brightness_alone() {
 
 #[test]
 fn osd_key_rejects_an_unknown_action() {
-    let d = Dir::new("unknown");
+    let d = Dir::new("un");
     let out = osd_key(&d.0, &["volume"]);
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -185,8 +182,8 @@ fn osd_key_rejects_an_unknown_action() {
 
 #[test]
 fn osd_key_reaches_a_listening_osd() {
-    let d = Dir::new("server");
-    let path = d.0.join("osd.sock");
+    let d = Dir::new("sv");
+    let path = d.0.socket("s");
     let server = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
     d.fake("pactl", "exit 0");
     let out = Command::new(MENU)
@@ -206,7 +203,7 @@ fn osd_key_reaches_a_listening_osd() {
 
 #[test]
 fn osd_key_without_a_readable_default_sets_nothing() {
-    let d = Dir::new("padefault");
+    let d = Dir::new("pd");
     fake_pactl(&d, &sinks_at_40(), "[]", "tf_null_a\n", "");
     // get-default-sink fails before the case answers it.
     let body = fs::read_to_string(d.0.join("pactl")).unwrap().replacen(
