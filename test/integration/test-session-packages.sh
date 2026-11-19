@@ -123,13 +123,11 @@ absent  "nodm"             'usr/sbin/nodm$'
 absent  "wm2"              'usr/bin/wm2$'
 absent  "lxterminal"       'usr/bin/lxterminal$'
 
-# Guard the standing constraint: labwc must register no keybindings. Rootless
-# Xwayland never requests zwp_keyboard_shortcuts_inhibit_manager_v1 (that was
-# this repo's earlier, disproved explanation); the mechanism that matters is
-# zwp_xwayland_keyboard_grab_manager_v1, which our labwc now implements but
-# which remains unverified on real hardware - so any binding it owns can
-# still never reach the remote ThinLinc session. See CLAUDE.md's "labwc must
-# have zero keybindings".
+# Guard the standing constraint: the system rc.xml registers no keybindings.
+# A binding labwc owns never reaches the remote ThinLinc session. The only
+# bindings come from the composer when a key switch is on (checked further
+# down, after menu-managed-keys). See CLAUDE.md's "labwc has no keybindings
+# unless a key switch is on".
 RC=$(mktemp -d)
 TMPS+=("$RC")
 unsquashfs -q -f -d "$RC" "$SQSH" 'etc/thinfloe/labwc/rc.xml' 'etc/thinfloe/labwc/themerc-override' >/dev/null 2>&1
@@ -800,6 +798,58 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/mk" "$SQSH" etc/thinfloe/menu-managed-key
     echo "ok   - /etc/thinfloe/menu-managed-keys lists the four XKB keys, THINFLOE_NUMLOCK and the two media key switches"
 else
     echo "FAIL - /etc/thinfloe/menu-managed-keys does not list exactly the four XKB keys, THINFLOE_NUMLOCK and the two media key switches"
+    fail=1
+fi
+
+# The keybindings labwc gets come from the image's composer, not from rc.xml
+# alone (CLAUDE.md, "labwc has no keybindings unless a key switch is on"):
+# with both switches off the composed rc.xml has no <keybind; with both on it
+# has exactly the six media keys, each allowWhenInhibited="yes" (patch 0006
+# lets such a binding past a ThinLinc grab or an OxuLnk inhibitor), and no
+# other line carries that attribute.
+CK="$DPKG_TMP/ck"
+MEDIA_KEYS="XF86AudioLowerVolume XF86AudioMicMute XF86AudioMute XF86AudioRaiseVolume XF86MonBrightnessDown XF86MonBrightnessUp "
+mkdir -p "$CK"
+if unsquashfs -no-xattrs -d "$CK/x" "$SQSH" usr/bin/thinfloe-compose-labwc-config \
+       etc/thinfloe/labwc etc/thinfloe/menu-managed-keys >/dev/null 2>&1 &&
+   [[ -f "$CK/x/usr/bin/thinfloe-compose-labwc-config" && -f "$CK/x/etc/thinfloe/labwc/rc.xml" &&
+      -f "$CK/x/etc/thinfloe/menu-managed-keys" ]]; then
+    # compose_rc VOL BRI: the composed rc.xml for these switch values on stdout.
+    compose_rc() {
+        local d="$CK/$1-$2"
+        mkdir -p "$d"
+        printf 'THINFLOE_VOLUME_KEYS=%s\nTHINFLOE_BRIGHTNESS_KEYS=%s\n' "$1" "$2" >"$d/generated-env"
+        TF_KB_CHECK=/nonexistent TF_MANAGED_KEYS="$CK/x/etc/thinfloe/menu-managed-keys" \
+            sh "$CK/x/usr/bin/thinfloe-compose-labwc-config" "$CK/x/etc/thinfloe/labwc" \
+            "$d/generated-env" "$d/no-user-env" "$d/out" >"$d/log" 2>&1 &&
+            cat "$d/out/rc.xml"
+    }
+    if ! RC_OFF=$(compose_rc off off); then
+        echo "FAIL - the image's composer failed with both key switches off: $(cat "$CK/off-off/log")"
+        fail=1
+    elif [[ $(grep -c '<keybind' <<<"$RC_OFF") -ne 0 || $(grep -c 'allowWhenInhibited *=' <<<"$RC_OFF") -ne 0 ]]; then
+        echo "FAIL - with both key switches off the composed rc.xml has keybindings: $(grep -E '<keybind|allowWhenInhibited *=' <<<"$RC_OFF")"
+        fail=1
+    else
+        echo "ok   - with both key switches off the composed rc.xml has no keybindings"
+    fi
+    if ! RC_ON=$(compose_rc on on); then
+        echo "FAIL - the image's composer failed with both key switches on: $(cat "$CK/on-on/log")"
+        fail=1
+    else
+        n_bind=$(grep -c '<keybind' <<<"$RC_ON")
+        n_allow=$(grep -o 'allowWhenInhibited *=' <<<"$RC_ON" | wc -l)
+        n_bind_allow=$(grep '<keybind' <<<"$RC_ON" | grep -c 'allowWhenInhibited="yes"')
+        keys=$(grep -o '<keybind key="[^"]*"' <<<"$RC_ON" | sed 's/.*key="//; s/"$//' | sort | tr '\n' ' ')
+        if [[ $n_bind -eq 6 && $n_bind_allow -eq 6 && $n_allow -eq 6 && "$keys" == "$MEDIA_KEYS" ]]; then
+            echo "ok   - with both key switches on the composed rc.xml binds exactly the six media keys, each allowWhenInhibited"
+        else
+            echo "FAIL - with both key switches on: $n_bind keybindings, $n_bind_allow of them allowWhenInhibited=\"yes\", $n_allow allowWhenInhibited attributes in all, keys '$keys' (want 6, 6, 6, '$MEDIA_KEYS')"
+            fail=1
+        fi
+    fi
+else
+    echo "FAIL - cannot extract the composer, /etc/thinfloe/labwc and menu-managed-keys from $SQSH"
     fail=1
 fi
 

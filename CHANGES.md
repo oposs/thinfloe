@@ -4,6 +4,7 @@
 
 ### New
 
+- Settings → Keyboard has two new switches, both off by default: with them on, the volume keys (up, down, mute, microphone mute) change the volume of every speaker and the mute of every microphone of this machine, and the brightness keys change the brightness of every monitor that supports DDC/CI, also inside a fullscreen ThinLinc session. A panel at the bottom of each monitor shows the new level, and a microphone sign stays at the top right of every monitor while the microphone is muted. Volume and mute set with the keys are kept across restarts, a speaker or microphone plugged in later takes the same setting, and with the switch off every speaker and microphone is kept at full volume and unmuted.
 - Settings has a new tab, This machine: maker, model, CPU model and cores, RAM, ThinFloe version, kernel, boot from USB or network, host name, uptime, and each installed add-on with its version. Copy puts all of it on the clipboard as `Label: value` lines, ready to paste into a support request.
 - The Network tab shows the MAC address of each connection, the gateway of the one that carries the traffic, and for WiFi the chip and its driver. A new line "DNS in use" names the DNS servers the machine asks now, also when they come from DHCP.
 - The Screen tab has a Graphics band: the graphics chip, its driver, and the video formats (H.264, HEVC, VP9, AV1) it decodes or encodes in hardware, or "VA-API not available". When VA-API is not available, the menu log says why under `graphics`.
@@ -18,7 +19,7 @@
 
 ### Fixed
 
-- Alt-Tab switched between the windows on the ThinFloe desktop, the tile menu included, instead of reaching the ThinLinc session, even when that session was fullscreen; Alt-F4, Alt-Space, Super-Return, Super-a and Super with the arrow keys also acted on the desktop. ThinFloe now has no key shortcuts at all, so these keys reach the program that has the focus. The volume and brightness keys therefore no longer change the machine's own volume or screen brightness; they go to the focused program too.
+- Alt-Tab switched between the windows on the ThinFloe desktop, the tile menu included, instead of reaching the ThinLinc session, even when that session was fullscreen; Alt-F4, Alt-Space, Super-Return, Super-a and Super with the arrow keys also acted on the desktop. ThinFloe now has no key shortcuts at all, so these keys reach the program that has the focus. The volume and brightness keys therefore go to the focused program too, unless they are given back to the machine in Settings → Keyboard.
 - The time zone from the DHCP server could stay at UTC after the start when the server's answer came in while an earlier one was still being read; it now always takes effect. A renewal that brings the same zone no longer logs `thinfloe: time zone <zone> from DHCP` again.
 - The Upgrade screen offered to upgrade a stick to the release it already had ("Upgrade this machine's stick to ThinFloe 4.5.0" on a 4.5.0 stick), and What's new then said "No changes between 4.5.0 and 4.5.0". It now says the stick already has that release and the button reads Write again, or Downgrade for a stick with a newer release; when the stick keeps an older release as fallback, it says that this one is dropped. What's new is off for such a stick, and also for a test build of the release it would get.
 

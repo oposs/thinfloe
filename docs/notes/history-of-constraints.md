@@ -119,6 +119,22 @@ about 20 s and then runs the menu unaccelerated on simpledrm or, worst case, sho
 the failure screen after about 40 s. `test-firmware.sh` checks a pinned list
 of files per APU and that no `navi10_` file and no `radeon/` is left.
 
+The fourth cut is not firmware but sits in the same step (owner,
+2026-11-19). `ddcutil`, added for the brightness keys, hard-depends on
+`i2c-tools`, and `i2c-tools` depends on `perl` only for its decode scripts
+(`decode-dimms`, `decode-edid`, `ddcmon` and others), which nothing in
+ThinFloe runs. `perl`, `libperl5.40` and `perl-modules-5.40` added about
+49 MB unpacked and took `ramroot.sqsh` from 391.0 to 400.6 MB, over its
+399 MB budget. `drop_perl_modules` in `slim-rootfs.sh` removes every file
+that only these three packages own, read from the dpkg file lists (dpkg is
+not run), and stops the build unless `/usr/bin/perl -e 'use strict; use
+warnings'` still runs on `perl-base`. The squashfs went back to 392.4 MB.
+dpkg still lists the three packages as installed, so an add-on `.deb` that
+needs a perl module installs and then fails at runtime.
+`test-session-packages.sh` finds every file with a perl `#!` line and
+fails on one that is not on its list, or that is listed as used and does
+not compile on `perl-base`.
+
 ## The WiFi core stack must come from the kernel, never from a backport
 
 `containers/ubuntu/Dockerfile` installs `linux-image-generic` and **not**
@@ -189,7 +205,7 @@ false on dracut 110. `--add-drivers` is not a substitute: it bypasses the
 filter for its own arguments only (`dracut:2768`), leaving every module
 requested by `90thinfloe/module-setup.sh` still filtered.
 
-## labwc must have zero keybindings
+## labwc has no keybindings unless a key switch is on
 
 `overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section with no
 `<default />` and no `<keybind>` entries. This is mandatory. The config
@@ -244,8 +260,34 @@ is therefore unverified and can only be confirmed on hardware with a keyboard
 attached. Adding a keybinding is now a config decision rather than an
 impossibility - make it deliberately, and re-run `make test-runtime` after.
 
-`test/integration/test-session-packages.sh` guards the zero-keybindings
-assertion on `rc.xml` itself - run via `make test`.
+On 2026-11-18 the owner wanted the volume and brightness keys back on the
+machine, as an opt-in: two switches in Settings → Keyboard, both off by
+default. `containers/ubuntu/patches/0006-keybind-allow-when-inhibited.patch`
+adds the keybind attribute `allowWhenInhibited`; `match_keybinding_for_sym()`
+skips the `view_inhibits_actions()` test for such a binding, so it runs also
+while ThinLinc holds an X11 grab (patch `0002`) or OxuLnk holds a shortcuts
+inhibitor (patch `0004`). The system `rc.xml` still has no binding.
+`thinfloe-compose-labwc-config` writes `rc.xml` as a link to `.source/rc.xml`
+in the composed directory; `.source/base.xml` is the system file (or its
+Num Lock off copy), and `.source/rc.xml` is a link to it while both switches
+are off, else a copy with the six media keys before `</keyboard>`, each
+`allowWhenInhibited="yes"`. A live apply rewrites only `.source/rc.xml`, and
+`labwc-scale`, still the only runtime writer of `rc.xml`, sees the changed
+source by its `cksum`. The headless rig did drive the X11 grab this time:
+with `wtype` started first, Xwayland gets a keyboard capability and sends
+`grab_keyboard`, and `test-labwc-runtime.sh` shows that under the grab only
+the `allowWhenInhibited` binding runs while the grabbing client gets the
+plain key (red on an image without `0006`). No rig can create a
+`zwp_keyboard_shortcuts_inhibitor_v1`, so the OxuLnk path, which rests on the
+same code line, stays an owner check on hardware. The full feature is in
+[media-keys.md](media-keys.md).
+
+`test/integration/test-session-packages.sh` checks that the system `rc.xml`
+has no binding, and runs the image's composer: with both switches off the
+composed `rc.xml` has no `<keybind`, with both on exactly the six media keys,
+each `allowWhenInhibited="yes"`, and the attribute nowhere else.
+`test-labwc-config-merge.sh` covers the composer's cases offline. All run
+via `make test`.
 
 ## ssh.socket must stay masked
 
@@ -339,7 +381,11 @@ quilt series. Two behaviours depend on it:
   suspend compositor keybindings;
 - labwc loads no default keybindings when rc.xml defines none
   (`0005-no-default-keybinds.patch`), see
-  [labwc must have zero keybindings](#labwc-must-have-zero-keybindings).
+  [labwc has no keybindings unless a key switch is on](#labwc-has-no-keybindings-unless-a-key-switch-is-on);
+- a keybind with `allowWhenInhibited="yes"` runs also while an X11 grab or
+  a shortcuts inhibitor holds the keyboard
+  (`0006-keybind-allow-when-inhibited.patch`); every other binding stays
+  suspended.
 
 Reverting to the archive `labwc` silently loses all of them. On a labwc or wlroots
 version bump, expect to rebase the patches; `dpkg-buildpackage` fails loudly

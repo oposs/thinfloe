@@ -64,6 +64,7 @@ release.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
 - User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
 - Keyboard tab: `src/thinfloe-menu/src/` (`kbregistry.rs` layout list, `keyboard.rs` state, `keyboardtab_ui.rs` drawing, `jobs::keyboard_apply` the live apply).
+- OSD: `src/thinfloe-menu/src/osd/` (`thinfloe-menu --osd`, `--osd-key`).
 - Config store and migration: `src/thinfloe-menu/src/` (`config.rs` schema, `store.rs` the only writer, `generated.rs` derived files, `migrate.rs` the 4.x migration).
 - Tests: `test/integration/` (`make test`), `test/unit/` (`make test-unit`), `test/runtime/` (`make test-runtime`).
 
@@ -98,7 +99,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - A fresh install's home copy always leaves out `~/.config/thinfloe/ssh-host-keys` and `wg0.conf`, their 4.x paths, `~/.dbrrg-ssh-host-keys` and the attic copies in `~/cfg-attic/` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
 - Reboot and power off from the session need `sudo systemctl ...`: the image has no polkit.
 - Screen blanking uses `swayidle` and `wlopm`, never `wlr-randr --off`, which changes the monitor layout. No lock screen: tfuser has no password.
-- No keybinding for a terminal or screenshots (see zero keybindings); from a VT: `XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot` (or `grim`).
+- No keybinding for a terminal or screenshots (see the keybinding constraint); from a VT: `XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot` (or `grim`).
 
 ### Menu
 
@@ -108,7 +109,8 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - The menu sends a running `thinfloe-upgrade write` SIGTERM, never SIGKILL (SIGKILL reaches only sudo and the lock stays held). Jobs run in their own process group.
 - A fullscreen window that leaves winit no monitor for the menu is not a move: the last known monitor counts (`seen_monitor` in `app.rs`). Taken as a move, it gave the largest mode's scale and the title bars grew (2026-10-30). See [docs/notes/menu.md](docs/notes/menu.md).
 - A `[keyboard]` value reaches `generated/environment` only through `keyboard::validate`, and values from outside the tab through `keyboard::repair`; the composer checks again with `thinfloe-menu --check-keyboard`. labwc 0.9.3 segfaults at start on a pair XKB cannot build. See [docs/notes/menu.md](docs/notes/menu.md) (Keyboard tab).
-- The scale file `$XDG_RUNTIME_DIR/thinfloe-scale` is written atomically (one number and a newline); `labwc-scale` and `thinfloe-terminal` read it.
+- The scale file `$XDG_RUNTIME_DIR/thinfloe-scale` is written atomically (one number and a newline); `labwc-scale`, `thinfloe-terminal` and the OSD read it.
+- The OSD never takes focus or a click (layer overlay, empty input region, keyboard interactivity none), and only the composer writes `allowWhenInhibited`. See [docs/notes/media-keys.md](docs/notes/media-keys.md).
 - Status area: an element is one module in `status/` plus a line in `status::ELEMENTS`; `draw` is pure and stays in its rect. The layout is `[status]` in `config.toml`, written only by the menu. Notes: [docs/notes/status-area.md](docs/notes/status-area.md).
 - The battery file `/run/thinfloe/peripherals/battery` is a contract between the root reader and the menu: one line per device, `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind`; the menu still reads a 4-field line (kind unknown). See [docs/notes/peripheral-battery.md](docs/notes/peripheral-battery.md).
 
@@ -154,8 +156,8 @@ Guards: `test-session-packages.sh`, `test-password.sh`.
 Never sweep `/usr/lib/firmware` with `find`/`rm`; change the package list in
 the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
-The exceptions are three cuts in `containers/ubuntu/slim/slim-rootfs.sh`
-(owner, 2026-11-12):
+The exceptions are four cuts in `containers/ubuntu/slim/slim-rootfs.sh`
+(owner, 2026-11-12; perl 2026-11-19):
 
 - Intel WiFi: per series only the ucode the driver loads.
 - AMD graphics: only APU firmware (Carrizo, Stoney, Ryzen), by chip name and by the IP versions
@@ -166,6 +168,10 @@ The exceptions are three cuts in `containers/ubuntu/slim/slim-rootfs.sh`
   build (exit 3). No QEMU test runs amdgpu.
 - `intel-ucode`, after dracut has built the early microcode archive (the
   build stops without it).
+- perl's payload (`perl`, `libperl5.*`, `perl-modules-5.*`; `perl-base`
+  stays): `i2c-tools`, pulled in by `ddcutil`, needs perl only for its decode
+  scripts. Guard: `test-session-packages.sh` (every perl script in the image
+  is listed).
 
 Guards: `test-firmware.sh`, `test-initramfs-drivers.sh`,
 `test_iwlwifi_keep.py`, `test_amdgpu_keep.py`, and the build's checks that
@@ -187,18 +193,21 @@ machine's loaded modules: zram and the NIC drivers were dropped and the boot
 aborted. `--add-drivers` is no substitute.
 [Story](docs/notes/history-of-constraints.md#dracut-must-be-invoked-with---no-hostonly).
 
-### labwc must have zero keybindings
+### labwc has no keybindings unless a key switch is on
 
-`overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section with no
-`<default />` and no `<keybind>`. That alone is not enough: labwc 0.9.3
-loads its built-in bindings (Alt-Tab, Alt-F4 and more) when rc.xml defines
-none, and `containers/ubuntu/patches/0005-no-default-keybinds.patch` removes
-that fallback. Our labwc's keyboard-grab patch would
-suspend bindings while ThinLinc holds the keyboard, but that is unverified on
-hardware; adding one is a deliberate decision followed by `make test-runtime`.
-Guards: `test-session-packages.sh`, `test-labwc-runtime.sh` (no `load default
-key bindings` in the log; Alt-Tab and Alt-Space reach the focused window).
-[Story](docs/notes/history-of-constraints.md#labwc-must-have-zero-keybindings).
+The system `overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section
+with no `<default />` and no `<keybind>`. That alone is not enough: labwc
+0.9.3 loads its built-in bindings (Alt-Tab, Alt-F4 and more) when rc.xml
+defines none, and `containers/ubuntu/patches/0005-no-default-keybinds.patch`
+removes that fallback. `thinfloe-compose-labwc-config` adds bindings only
+when a switch in Settings → Keyboard is on, and then exactly the six media
+keys with `allowWhenInhibited="yes"` (patch `0006`), which pass a ThinLinc
+grab or an OxuLnk inhibitor; every other key reaches the focused program.
+Adding any other binding is a deliberate decision followed by `make
+test-runtime`. Guards: `test-session-packages.sh`,
+`test-labwc-config-merge.sh`, `test-labwc-runtime.sh` (no `load default key
+bindings` in the log; Alt-Tab and Alt-Space reach the focused window).
+[Story](docs/notes/history-of-constraints.md#labwc-has-no-keybindings-unless-a-key-switch-is-on).
 
 ### ssh.socket must stay masked
 
@@ -222,8 +231,8 @@ Guards: `scripts/check-boot-smoke.sh` (any `Found ordering cycle`),
 The Dockerfile builds `labwc_0.9.3-1+thinfloe1` with
 `containers/ubuntu/patches/` (fullscreen across outputs,
 `LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`;
-no default keybindings).
-The archive package silently loses both. Patches, overlay and brand
+no default keybindings, `0005`; `allowWhenInhibited` on a keybind, `0006`).
+The archive package silently loses all of them. Patches, overlay and brand
 directories are `Makefile` prerequisites. Guards: `make test`, `make
 test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.
 [Story](docs/notes/history-of-constraints.md#labwc-is-a-local-rebuild-not-the-archive-package).
@@ -310,6 +319,9 @@ qemu-smoke-grow`.
 `dpkg -i` resolves nothing, so every library ThinLinc and OxuLnk need is in
 one `apt-get install` block by name (`libxrandr2` for ThinLinc's dlopen). A
 new add-on library needs a line there. Guard: `test-addon-deps.sh`.
+perl's payload is cut (see the firmware constraint): an add-on `.deb` that
+needs perl modules passes `dpkg -i`, because dpkg still lists perl as
+installed, and breaks at runtime.
 [Story](docs/notes/history-of-constraints.md#add-on-runtime-libraries-are-listed-by-name-in-the-dockerfile).
 
 ### A 3.x home is migrated once
@@ -353,4 +365,5 @@ and hardware results:
 - [esp-and-upgrade.md](docs/notes/esp-and-upgrade.md): `thinfloe-upgrade`: home copy, size check, the batch interface, check timers.
 - [network-boot.md](docs/notes/network-boot.md): netboot networking and its smoke test.
 - [add-ons.md](docs/notes/add-ons.md): add-on sources, storage, locks, boot install, checks, the menu.
+- [media-keys.md](docs/notes/media-keys.md): the volume and brightness keys, the OSD and the microphone mark, DDC/CI, tests and owner checks.
 - [history-of-constraints.md](docs/notes/history-of-constraints.md): the full story behind each standing constraint.
