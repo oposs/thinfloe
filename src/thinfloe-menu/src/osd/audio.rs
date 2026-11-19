@@ -451,7 +451,10 @@ impl Worker {
         Ok(())
     }
 
-    /// Every device again, through `f`; a start does that by itself.
+    /// Every device again, through `f`; a start does that by itself. When
+    /// the devices cannot be listed, `f` still changes the state, with no
+    /// devices: after a switch-off the next `Resync` or new device gets
+    /// 100 % and unmuted, not the keys' state.
     fn realign(&mut self, f: impl FnOnce(&mut Shared, &[Device], &[Device]) -> Vec<Set>) -> Option<AudioEvent> {
         let Some(sync) = &mut self.sync else {
             return self.start().err().map(AudioEvent::Failed);
@@ -462,7 +465,10 @@ impl Worker {
             .and_then(|s| Ok((s, self.p.list(Kind::Source)?)));
         let (sinks, sources) = match lists {
             Ok(l) => l,
-            Err(e) => return Some(AudioEvent::Failed(e)),
+            Err(e) => {
+                f(sync, &[], &[]);
+                return Some(AudioEvent::Failed(e));
+            }
         };
         let sets = f(sync, &sinks, &sources);
         self.apply(&sets);
@@ -1225,6 +1231,45 @@ pub(super) mod tests {
         wait_for("the start's mark", || !events.lock().unwrap().is_empty());
         assert_eq!(calls(&d, "set-"), Vec::<String>::new());
         worker.request(AudioRequest::Mode(Mode::Off));
+        wait_for("four sets", || calls(&d, "set-").len() == 4);
+        assert_eq!(
+            calls(&d, "set-"),
+            [
+                "set-sink-volume a 100%",
+                "set-sink-mute a 0",
+                "set-source-volume mic 100%",
+                "set-source-mute mic 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_switch_off_whose_list_fails_still_turns_the_state_off() {
+        let d = TestDir::new("osd-audio", "offfail");
+        // While `nolist` exists, every device list times out.
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, true)]),
+            &json(&[(2, "mic", 60, true)]),
+            "a",
+            "mic",
+            &format!(
+                "[ -e '{}/nolist' ] && [ \"$1\" = -f ] && {{ echo 'Connection failure: Timeout' >&2; exit 1; }}",
+                d.display()
+            ),
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        std::fs::write(d.join("nolist"), "").unwrap();
+        worker.request(AudioRequest::Mode(Mode::Off));
+        wait_for("the failed list", || {
+            count(&events, |e| matches!(e, AudioEvent::Failed(_))) == 1
+        });
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
+        // The sound server is back: the shared state is off, so every
+        // device goes to 100 % and unmuted, the microphone too.
+        std::fs::remove_file(d.join("nolist")).unwrap();
+        worker.request(AudioRequest::Resync);
         wait_for("four sets", || calls(&d, "set-").len() == 4);
         assert_eq!(
             calls(&d, "set-"),
