@@ -17,9 +17,13 @@ pub const MAX_SHIPPED_FILES: usize = 64;
 pub const MAX_DIR_ENTRIES: usize = 4096;
 /// A tile file larger than this is not a tile file.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
-/// Name, Comment and Icon are cut to this many characters. A 60 KB Name
-/// would otherwise be laid out and rasterised on every frame.
+/// Name, Comment and the add-on source line's parts are cut to this many
+/// characters. A 60 KB Name would otherwise be laid out and rasterised on
+/// every frame.
 pub const MAX_TEXT_CHARS: usize = 120;
+/// An `Icon=` is a name or a path and is never drawn as text, so the text
+/// limit does not apply; a path longer than PATH_MAX names no file.
+pub const MAX_ICON_BYTES: usize = 4096;
 
 /// What a tile does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +245,8 @@ fn flag(entry: &Entry, suffix: &str) -> bool {
     tf_key(entry, suffix) == Some("true")
 }
 
-fn non_empty(entry: &Entry, key: &str) -> Option<String> {
+/// The value of `key` on one line and trimmed, `None` when it is empty.
+fn one_line(entry: &Entry, key: &str) -> Option<String> {
     // A tile draws each text as one line. A `\n` escape or other control
     // character becomes a space, so one file cannot paint text down over
     // the rows below.
@@ -251,7 +256,18 @@ fn non_empty(entry: &Entry, key: &str) -> Option<String> {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let v = v.trim();
-    (!v.is_empty()).then(|| v.chars().take(MAX_TEXT_CHARS).collect())
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+/// A text the menu draws, cut to `MAX_TEXT_CHARS`.
+fn non_empty(entry: &Entry, key: &str) -> Option<String> {
+    one_line(entry, key).map(|v| v.chars().take(MAX_TEXT_CHARS).collect())
+}
+
+/// The `Icon=` value whole: a cut path names another file or none. A value
+/// longer than `MAX_ICON_BYTES` is no icon, and the tile draws its letter.
+fn icon(entry: &Entry) -> Option<String> {
+    one_line(entry, "Icon").filter(|v| v.len() <= MAX_ICON_BYTES)
 }
 
 /// Build a tile from one parsed file. `user` restricts the action to `run`.
@@ -284,7 +300,7 @@ fn tile_from(file: &str, entry: &Entry, origin: Origin) -> Tile {
         file: file.to_string(),
         name,
         comment: non_empty(entry, "Comment"),
-        icon: non_empty(entry, "Icon"),
+        icon: icon(entry),
         action,
         argv,
         terminal: action == Action::Run && entry.get("Terminal") == Some("true"),
@@ -349,7 +365,7 @@ fn reword(mut tile: Tile, user: &SourceFile) -> Tile {
             if let Some(comment) = non_empty(entry, "Comment") {
                 tile.comment = Some(comment);
             }
-            if let Some(icon) = non_empty(entry, "Icon") {
+            if let Some(icon) = icon(entry) {
                 tile.icon = Some(icon);
             }
             let ignored: Vec<String> = SHIPPED_ONLY_KEYS
@@ -1154,6 +1170,36 @@ mod tests {
         );
         assert_eq!(tiles[0].name.chars().count(), MAX_TEXT_CHARS);
         assert_eq!(tiles[0].comment.as_ref().unwrap().chars().count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn a_long_icon_path_is_kept_whole() {
+        // A path in a deep directory (a long TMPDIR, a home on a network
+        // share) is longer than the text limit. Cut there, it named no file
+        // and the tile drew its letter instead of the icon.
+        let path = format!("/{}/icon.svg", "d".repeat(200));
+        let tile = format!("[Desktop Entry]\nName=N\nExec=x\nIcon={path}\n");
+        let tiles = merge(&[], &[src("1.desktop", &tile)]);
+        assert_eq!(tiles[0].icon.as_deref(), Some(path.as_str()));
+        let reworded = merge(
+            &[src("30-t.desktop", "[Desktop Entry]\nName=T\nExec=t\n")],
+            &[src("30-t.desktop", &format!("[Desktop Entry]\nIcon={path}\n"))],
+        );
+        assert_eq!(reworded[0].icon.as_deref(), Some(path.as_str()));
+    }
+
+    #[test]
+    fn an_icon_longer_than_a_path_can_be_is_no_icon() {
+        let huge = format!("/{}", "d".repeat(MAX_ICON_BYTES));
+        let tiles = merge(
+            &[],
+            &[src(
+                "1.desktop",
+                &format!("[Desktop Entry]\nName=N\nExec=x\nIcon={huge}\n"),
+            )],
+        );
+        assert_eq!(tiles[0].icon, None);
+        assert!(tiles[0].usable(), "the tile itself stays usable");
     }
 
     #[test]
