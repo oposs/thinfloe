@@ -219,8 +219,8 @@ $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 $(KERNEL) $(INITRD) $(SQUASHFS): .ubuntu-container $(VERSION_KIND_STAMP) scripts/export-rootfs.sh scripts/lib/common.sh | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
-		-v $(PWD)/scripts:/scripts:ro \
-		-v $(PWD)/artifacts:/artifacts \
+		-v $(CURDIR)/scripts:/scripts:ro \
+		-v $(CURDIR)/artifacts:/artifacts \
 		-e SQUASHFS_COMP=$(SQUASHFS_COMP) \
 		-e SQUASHFS_COMP_LEVEL=$(SQUASHFS_COMP_LEVEL) \
 		-e 'TF_VERSION=$(TF_VERSION)' \
@@ -243,7 +243,7 @@ rootfs: $(KERNEL) $(INITRD) $(SQUASHFS)
 $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI): .ipxe-container | $(ROOTFS_DIR)
 	@echo "Exporting iPXE boot loaders..."
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
-		-v $(PWD)/artifacts/rootfs:/artifacts \
+		-v $(CURDIR)/artifacts/rootfs:/artifacts \
 		$(IPXE_BUILDER)
 
 ipxe: $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI)
@@ -265,9 +265,9 @@ $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		.image-builder-container | $(IMAGE_DIR)
 	@echo "Creating bootable USB image..."
 	$(CONTAINER_RUNTIME) run --rm --log-driver=none \
-		-v $(PWD)/scripts:/scripts:ro \
-		-v $(PWD)/artifacts:/artifacts \
-		-v $(PWD)/configs:/configs:ro \
+		-v $(CURDIR)/scripts:/scripts:ro \
+		-v $(CURDIR)/artifacts:/artifacts \
+		-v $(CURDIR)/configs:/configs:ro \
 		-e EFI_PARTITION_SIZE=$(EFI_PARTITION_SIZE) \
 		-e BUILD_ID=$(BUILD_ID) \
 		-e PROJECT_NAME=$(PROJECT_NAME) \
@@ -585,6 +585,7 @@ test: test-unit rootfs
 	@$(TEST_ENV) test/integration/test-format-bytes.sh
 	@$(TEST_ENV) test/integration/test-plymouth-step.sh
 	@$(TEST_ENV) test/integration/test-make-clean.sh
+	@$(TEST_ENV) test/integration/test-make-mounts.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
 
