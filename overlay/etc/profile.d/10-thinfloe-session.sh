@@ -8,7 +8,8 @@
 # restore_home() (in the initramfs) on every boot, with no excludes. A
 # config file kept under $HOME would therefore be pinned forever on an
 # already-deployed machine - including the rc.xml that enforces the
-# zero-keybindings constraint - and a corrected file shipped in a future
+# constraint "labwc has no keybindings unless a key switch is on" - and a
+# corrected file shipped in a future
 # image would never reach it.
 # TF_SESSION_ATTEMPTED guards against recursion: the failure path below
 # leaves a login shell on tty1, and a login shell re-sources this file. The

@@ -7,8 +7,9 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `thinfloe-menu` at the bottom (`ToggleAlwaysOnBottom`) and out of the
   window list that feeds the menu's folded-window strip (`skipTaskbar`).
 - No window list: waybar and GTK 3 left the image. labwc draws an iconify button
-  and, with zero keybindings, a minimized window needs a way back: it shows
-  as a chip in the folded-window strip at the bottom of `thinfloe-menu`, and
+  and, with no keybinding but the optional media keys, a minimized window
+  needs a way back: it shows as a chip in the folded-window strip at the
+  bottom of `thinfloe-menu`, and
   one click restores it. A fullscreen ThinLinc client covers the menu, so
   the strip is visible exactly when no window is fullscreen, which is when a
   window can go missing.
