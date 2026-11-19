@@ -549,15 +549,16 @@ pub const DRIVES_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 /// After SIGTERM for a timeout, how long to wait for the tool to end.
 /// Then we give up waiting; it may linger, these are not write jobs. A tool
-/// that ignores SIGTERM past this is dropped unreaped and stays a zombie
-/// until it ends and the menu exits.
+/// that ignores SIGTERM past this is left running and reaped by a thread
+/// when it ends, so it never stays a zombie.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// How `capture_env` ends a tool it gives up on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GiveUp {
-    /// SIGTERM, then `STOP_WAIT` for it to end. The menu's tools run as
-    /// root through sudo, and SIGKILL would reach only sudo.
+    /// SIGTERM, then `STOP_WAIT` for it to end, never SIGKILL: the menu's
+    /// tools run as root through sudo, and SIGKILL would reach only sudo.
+    /// A tool still running is reaped by a thread when it ends.
     Term,
     /// SIGTERM, `KILL_GRACE`, then SIGKILL; the child is always reaped. For
     /// the OSD's tools (ddcutil, pactl), which run as the user.
@@ -578,21 +579,25 @@ impl GiveUp {
         }
     }
 
-    /// Stop the tool's group, and with `TermThenKill` make sure it ends and
-    /// is reaped. A tool still running after SIGKILL (in D state) is reaped
-    /// by a thread when it ends, so it never stays a zombie.
+    /// Stop the tool's group; with `TermThenKill` make sure it ends. A tool
+    /// still running at the end (ignoring SIGTERM, or in D state after
+    /// SIGKILL) is reaped by a thread when it ends, so it never stays a
+    /// zombie.
     fn stop(self, mut child: Child) {
         let pgid = child.id() as i32;
         stop(pgid, Signal::Term);
-        if wait_until(&mut child, Instant::now() + self.grace()).is_some() || self == GiveUp::Term {
+        if wait_until(&mut child, Instant::now() + self.grace()).is_some() {
             return;
         }
-        stop(pgid, Signal::Kill);
-        if wait_until(&mut child, Instant::now() + KILL_WAIT).is_none() {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+        if self == GiveUp::TermThenKill {
+            stop(pgid, Signal::Kill);
+            if wait_until(&mut child, Instant::now() + KILL_WAIT).is_some() {
+                return;
+            }
         }
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -2331,6 +2336,30 @@ mod tests {
         // The test started this group; end it either way.
         stop(pid, Signal::Kill);
         assert!(alive, "the menu's capture sent more than SIGTERM");
+    }
+
+    #[test]
+    fn a_menu_tool_that_outlives_the_stop_wait_is_reaped_when_it_ends() {
+        // Ignores SIGTERM and ends on its own after STOP_WAIT has passed.
+        let d = crate::testdir::TestDir::new("jobs", "reap-late");
+        let pidfile = d.join("pid");
+        let script = format!("trap '' TERM; echo $$ > {}; sleep 7", pidfile.display());
+        let feed = Arc::new(Feed::default());
+        let r = capture(&sh(&script), &[], 100, Duration::from_millis(300), &feed);
+        assert!(r.unwrap_err().contains("did not answer"));
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        // Still running: no SIGKILL on this path.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the tool ended before its sleep");
+        // A zombie still answers kill(pid, 0); only a reaped one is gone.
+        let until = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let gone = unsafe { libc::kill(pid, 0) } != 0;
+        if !gone {
+            stop(pid, Signal::Kill);
+        }
+        assert!(gone, "the tool {pid} was not reaped after it ended (a zombie)");
     }
 
     use crate::config::{NetCfg, NetworkCfg};
