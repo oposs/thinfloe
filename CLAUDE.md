@@ -152,9 +152,9 @@ yes` stays: the user sets a password with `sudo thinfloe-password`.
 Guards: `test-session-packages.sh`, `test-password.sh`.
 [Story](docs/notes/history-of-constraints.md#no-login-password-ships-in-the-image).
 
-### Firmware is selected by package, never by cleanup
+### Firmware and payloads are selected by package, never by cleanup
 
-Never sweep `/usr/lib/firmware` with `find`/`rm`; change the package list in
+Never sweep `/usr/lib/firmware` or a package's files with `find`/`rm`; change the package list in
 the Dockerfile instead. A sweep once deleted i915 firmware and CPU microcode
 and left dangling symlinks. Guard: `test-firmware.sh`.
 The exceptions are four cuts in `containers/ubuntu/slim/slim-rootfs.sh`
@@ -178,7 +178,7 @@ Guards: `test-firmware.sh`, `test-initramfs-drivers.sh`,
 `test_iwlwifi_keep.py`, `test_amdgpu_keep.py`, and the build's checks that
 every firmware name a module asks for survives unless dropped on purpose and
 that no firmware link dangles.
-[Story](docs/notes/history-of-constraints.md#firmware-is-selected-by-package-never-by-cleanup).
+[Story](docs/notes/history-of-constraints.md#firmware-and-payloads-are-selected-by-package-never-by-cleanup).
 
 ### The WiFi core stack must come from the kernel, never from a backport
 
@@ -320,7 +320,7 @@ qemu-smoke-grow`.
 `dpkg -i` resolves nothing, so every library ThinLinc and OxuLnk need is in
 one `apt-get install` block by name (`libxrandr2` for ThinLinc's dlopen). A
 new add-on library needs a line there. Guard: `test-addon-deps.sh`.
-perl's payload is cut (see the firmware constraint): an add-on `.deb` that
+perl's payload is cut (see the firmware and payloads constraint): an add-on `.deb` that
 needs perl modules passes `dpkg -i`, because dpkg still lists perl as
 installed, and breaks at runtime.
 [Story](docs/notes/history-of-constraints.md#add-on-runtime-libraries-are-listed-by-name-in-the-dockerfile).
