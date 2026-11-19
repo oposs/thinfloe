@@ -347,6 +347,50 @@ drop_hwdb_sources() {
     [[ -n $out ]] || die "systemd-hwdb knows no usb:v046DpC52B after removing hwdb.d"
 }
 
+# ddcutil depends on i2c-tools, and i2c-tools depends on perl only for its
+# decode-* scripts. perl brings perl-modules-5.* and libperl5.* (about 9 MB
+# in the squashfs). Remove the payload of those three packages; perl-base
+# stays (Essential: debconf, adduser and the maintainer script helpers run on
+# it). The paths come from the dpkg file lists, read and not run; a path that
+# another package also lists stays. test-session-packages.sh lists every perl
+# script left in the image and checks that the used ones compile on perl-base.
+drop_perl_modules() {
+    local info=/var/lib/dpkg/info pkg l lists=() mine others
+    for pkg in perl 'libperl5.*' 'perl-modules-5.*'; do
+        # libperl5.*.list matches libperl5.40:amd64.list as well: sort -u.
+        l=$( { compgen -G "$info/$pkg.list"; compgen -G "$info/$pkg:*.list"; } | sort -u) || true
+        [[ -n $l && $l != *$'\n'* ]] || die "want one dpkg file list for $pkg, found: ${l:-none}"
+        lists+=("$l")
+    done
+    mine=$(mktemp)
+    others=$(mktemp)
+    cat "${lists[@]}" | grep -vx '/\.' | sort -u >"$mine" \
+        || { rm -f "$mine" "$others"; die "cannot read the perl file lists"; }
+    local f skip=() n=0 bytes=0
+    for f in "${lists[@]}"; do skip+=(! -path "$f"); done
+    find "$info" -name '*.list' "${skip[@]}" -exec cat {} + | sort -u >"$others" \
+        || { rm -f "$mine" "$others"; die "cannot read the other dpkg file lists"; }
+    while IFS= read -r f; do
+        [[ -L $f || -f $f ]] || continue
+        bytes=$((bytes + $(stat -c %s -- "$f")))
+        rm -f -- "$f" || { rm -f "$mine" "$others"; die "removing $f failed"; }
+        n=$((n + 1))
+    done < <(comm -23 "$mine" "$others")
+    # Deepest first, so a directory whose subdirectories went is empty too.
+    while IFS= read -r f; do
+        [[ -d $f && ! -L $f ]] || continue
+        rmdir --ignore-fail-on-non-empty -- "$f" || { rm -f "$mine" "$others"; die "rmdir $f failed"; }
+    done < <(comm -23 "$mine" "$others" | sort -r)
+    rm -f "$mine" "$others"
+    local out
+    out=$(/usr/bin/perl -e 'use strict; use warnings; print "ok"' 2>&1) || true
+    [[ $out == ok ]] || die "perl-base does not run after removing perl's modules: $out"
+    for f in /usr/share/perl /usr/lib/x86_64-linux-gnu/perl; do
+        [[ ! -e $f ]] || die "$f is still there after removing perl's modules"
+    done
+    echo "slim-rootfs: removed $n files of perl, libperl and perl-modules ($((bytes / 1000000)) MB)" >&2
+}
+
 main() {
     preconditions
     trim_media_modules
@@ -359,6 +403,7 @@ main() {
     check_no_dangling_links "after the last firmware cut"
     drop_i18n
     drop_hwdb_sources
+    drop_perl_modules
 }
 
 main "$@"
