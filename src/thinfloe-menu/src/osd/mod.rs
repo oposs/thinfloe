@@ -4,9 +4,10 @@
 //! The session starts `--osd` once (`thinfloe-session`); labwc runs
 //! `--osd-key <action>` on each media key, which hands the action to the
 //! OSD over a datagram socket (`socket`) and returns at once. The OSD runs
-//! `wpctl` and `ddcutil` (`audio`, `ddc`) off its loop (`run`) and shows
-//! the result for 1.5 s (`state`). Without an OSD the client changes the
-//! volume itself and leaves the brightness alone.
+//! `pactl` and `ddcutil` (`audio`, `ddc`) off its loop (`run`), keeps
+//! every speaker and microphone in step (`sync`) and shows the result for
+//! 1.5 s (`state`). Without an OSD the client changes the volume itself
+//! and leaves the brightness alone.
 //!
 //! `--osd --probe` is a test hook: it shows a Volume 45 % panel and the
 //! mark on every output, at scale 1, until SIGTERM.
@@ -18,6 +19,7 @@ mod run;
 pub mod socket;
 pub mod state;
 pub mod surface;
+pub mod sync;
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::AsRawFd;
@@ -37,7 +39,7 @@ const PROBE_ARG: &str = "--probe";
 /// Most bytes of a tool's stdout the OSD reads; more is an error.
 const TOOL_BYTES: usize = 64 * 1024;
 
-/// Percent one volume key changes the default sink by.
+/// Percent one volume key changes the speakers by.
 const VOLUME_STEP: i32 = 5;
 
 /// A key labwc hands to `--osd-key`.
@@ -112,20 +114,36 @@ pub fn osd_key_main(args: &[OsString]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The volume and mute keys through one `wpctl` call each; the brightness
-/// keys need the OSD's monitor list and do nothing.
+/// The volume and mute keys on every speaker or microphone through
+/// `pactl`, starting from the default device's value since there is no
+/// shared state; the brightness keys need the OSD's monitor list and do
+/// nothing.
 fn act_without_osd(a: Action) {
-    let w = audio::Wpctl::from_env();
-    let done = match a {
-        Action::VolumeUp => w.change(VOLUME_STEP).map(|_| ()),
-        Action::VolumeDown => w.change(-VOLUME_STEP).map(|_| ()),
-        Action::VolumeMute => w.toggle_sink_mute().map(|_| ()),
-        Action::MicMute => w.toggle_source_mute().map(|_| ()),
+    let kind = match a {
+        Action::VolumeUp | Action::VolumeDown | Action::VolumeMute => audio::Kind::Sink,
+        Action::MicMute => audio::Kind::Source,
         Action::BrightnessUp | Action::BrightnessDown => {
             eprintln!("thinfloe-menu --osd-key: no OSD running; brightness not changed");
             return;
         }
     };
+    let p = audio::Pactl::from_env();
+    let done = p.list(kind).map(|devices| {
+        let default = p.default_name(kind).ok();
+        let (mut s, _) = match kind {
+            audio::Kind::Sink => sync::Sync::start(sync::Mode::Keys, &devices, &[], default.as_deref(), None),
+            audio::Kind::Source => sync::Sync::start(sync::Mode::Keys, &[], &devices, None, default.as_deref()),
+        };
+        let sets = match a {
+            Action::VolumeUp => s.step(VOLUME_STEP, &devices),
+            Action::VolumeDown => s.step(-VOLUME_STEP, &devices),
+            Action::VolumeMute => s.toggle_mute(&devices),
+            _ => s.toggle_mic(&devices),
+        };
+        for e in p.apply(&sets) {
+            eprintln!("thinfloe-menu --osd-key: no OSD running; {}: {e}", a.as_str());
+        }
+    });
     match done {
         Ok(()) => eprintln!(
             "thinfloe-menu --osd-key: no OSD running; {} done without a display",
@@ -272,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_blank_override_is_the_default_command() {
-        assert_eq!(cmd_from_env("TF_OSD_TEST_UNSET_VARIABLE", "wpctl"), ["wpctl"]);
+        assert_eq!(cmd_from_env("TF_OSD_TEST_UNSET_VARIABLE", "pactl"), ["pactl"]);
     }
 
     #[test]
