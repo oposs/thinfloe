@@ -41,6 +41,25 @@
 
 ---
 
+## Amendment 2026-11-19: every speaker and microphone in sync (Tasks 9 and 10)
+
+Spec: the section "Amendment 2026-11-19: every speaker and microphone in sync" of the spec; it wins over the earlier text. The old Task 9 (docs) is now Task 11.
+
+Global constraints added by the amendment (every later task includes them):
+- All audio goes through `pactl` (env `TF_PACTL`, default `pactl`); the menu no longer calls `wpctl`, and `TF_WPCTL` is gone.
+- Switch on: the volume keys set every sink to the shared level `L` (5 % steps, clamp 0..=100); mute toggles the shared `M` on every sink; mic mute toggles the shared `Q` on every source. Monitor sources (`monitor_of_sink` set) are never touched.
+- Switch off: every sink and source at 100 % and unmuted, at OSD start and when the switch is turned off.
+- A device that appears (`pactl subscribe`: `new`) gets the shared state (switch on) or 100 %/unmuted (switch off) at once. Source volume is otherwise not changed while the switch is on.
+- The OSD never reads `L`, `M`, `Q` back from the current default device after start. Changes by others are not copied to other devices. The mark follows the default source's real mute state.
+- The 1 s `wpctl` mic poll is gone; `pactl subscribe` drives the mark. A `pactl subscribe` that ends is restarted after 1 s, doubling to at most 30 s, logged once; after a restart the shared state is applied to every device again.
+
+Review focus added:
+1. **A USB headset** brings a sink and a source in one burst, and WirePlumber may make both the new defaults: the shared level must not jump to the headset's 100 %, the new source must be muted when `Q` is set. Test in Task 9 (`a_new_default_device_does_not_become_the_shared_level`).
+2. **A device removed while a set runs:** `pactl set-sink-volume <gone>` fails; the other devices are still set, and the action is not reported as a failure of the whole key. Test in Task 9 (`a_failing_set_on_one_device_still_sets_the_others`).
+3. **The OSD's own sets** produce `change` events: they must not cause more sets (no feedback loop). Test in Task 9 (`change_events_only_refresh_the_mark`).
+4. **No `pipewire-pulse`** (no sound server, or it restarts): `pactl subscribe` exits at once; no busy loop, one log line, and the state is applied again once it answers. Test in Task 10 (runtime log, and `the_watch_backs_off_and_resyncs` in `audio.rs`).
+5. **Switch turned off during a session:** every device back to 100 % unmuted without a restart. Test in Task 10 (`a_reload_to_off_resets_every_device`, and the runtime live-switch case).
+
 ## File Structure
 
 - `containers/ubuntu/patches/0006-keybind-allow-when-inhibited.patch`: new labwc patch (Task 1).
@@ -477,7 +496,83 @@ No respawn. The menu's exit codes and the save behaviour are unchanged.
 - [ ] **Step 4: Image gate.** Run the flock line from Global Constraints. Expected: all `ok`. Note the `test-image-size.sh` sizes and the delta against 493.0 MB in the commit message. Over 503 MB: raise `MAX_SUM` by the measured need, rounded up to a whole MB, and give the reason in the commit message.
 - [ ] **Step 5: Commit** `feat(image): ddcutil and i2c-dev for the brightness keys; runtime test of the media keys`
 
-### Task 9: docs and the keybinding guard
+### Task 8a: perl's module tree out of the image (owner, 2026-11-19)
+
+`ddcutil` hard-depends on `i2c-tools`, which depends on `perl` only for its `decode-*` scripts; that brought about 9 MB and made Task 8 raise `MAX_SQSH` to 401 MB. The owner chose to cut it.
+
+**Files:**
+- Modify: `containers/ubuntu/slim/slim-rootfs.sh`, `test/integration/test-image-size.sh` (`MAX_SQSH` back to 399 MB), `test/integration/test-session-packages.sh` (guard)
+
+- [ ] **Step 1: Find what perl brings and who uses it.** In the built rootfs (Task 8 image): `dpkg -L perl libperl5.* perl-modules-5.*` and their sizes; every file in the image with a `#!` line naming perl (`/usr/bin/perl`, `/usr/bin/env perl`), with the package it belongs to; what `perl-base` provides (it stays: it is Essential). Record the list in the report.
+- [ ] **Step 2: Write the failing guard** in `test-session-packages.sh`: the image has no `usr/share/perl/5.*` tree and no `libperl.so*`, `usr/bin/perl` still runs `-e 'use strict; use warnings; print "ok"'` inside the rootfs container, and every perl-shebang file in the image is on an explicit list in the test (each line with the package and why it is dead or works with `perl-base` alone). An unknown perl script fails the test and names itself.
+- [ ] **Step 3: Implement** the cut in `slim-rootfs.sh` next to the other cuts, deleting the `perl`, `libperl5.*` and `perl-modules-5.*` payload paths (not `perl-base`'s), with a comment: why (i2c-tools' decode scripts, ~9 MB), and that the guard lists the perl scripts left. The slim RUN stays the last in the Dockerfile. `MAX_SQSH` back to 399 MB, its comment updated.
+- [ ] **Step 4: Image gate** (Global Constraints line). Expected: all `ok`; `ramroot.sqsh` back under 399 MB; note the sizes in the commit message.
+- [ ] **Step 5: Commit** `feat(image): drop perl's module tree that i2c-tools pulled in`
+
+### Task 9: the shared audio state over every device (`pactl`)
+
+**Files:**
+- Create: `src/thinfloe-menu/src/osd/sync.rs` (pure: the shared state and what to set)
+- Modify: `src/thinfloe-menu/src/osd/audio.rs` (`Wpctl` → `Pactl`, JSON and event parsers, the worker owns `Sync`), `src/thinfloe-menu/src/osd/mod.rs` (`mod sync;`, `act_without_osd`), `src/thinfloe-menu/src/osd/run.rs` (only to compile against the new worker; the loop changes are Task 10), `src/thinfloe-menu/tests/osd_key.rs` (fake `pactl` instead of fake `wpctl`)
+
+**Interfaces:**
+- Produces in `audio.rs`:
+  - `pub enum Kind { Sink, Source }`
+  - `pub struct Device { pub kind: Kind, pub index: u32, pub name: String, pub percent: u8, pub muted: bool }`
+  - `pub fn parse_devices(kind: Kind, json: &str) -> Result<Vec<Device>, String>`: the array `pactl -f json list sinks|sources` prints; `percent` is the rounded mean of the channels' `value_percent` (`"45%"`); a source whose `monitor_of_sink` is a sink name (not `"n/a"`, not null, not missing) is skipped.
+  - `pub enum PaEvent { New(Kind, u32), Change(Kind, u32), Remove(Kind, u32), Server }` and `pub fn parse_event(line: &str) -> Option<PaEvent>` for `pactl subscribe` lines: `Event 'new' on sink #57`, `Event 'change' on source #12`, `Event 'remove' on sink #57`, `Event 'change' on server #…`/`Event 'change' on server`; every other facility (`sink-input`, `client`, `card`, …) is `None`.
+  - `pub struct Pactl` with `from_env()` (`TF_PACTL`), `list(Kind) -> Result<Vec<Device>, String>`, `default_name(Kind) -> Result<String, String>` (`get-default-sink` / `get-default-source`, trimmed), `set_volume(Kind, &str, u8) -> Result<(), String>` (`set-sink-volume NAME 45%` / `set-source-volume`), `set_mute(Kind, &str, bool) -> Result<(), String>` (`set-sink-mute NAME 1|0` / `set-source-mute`), `subscribe_args() -> Vec<String>` (the argv for Task 10's watcher). Timeout per call stays `TIMEOUT` (3 s), through `run_tool`.
+  - `AudioRequest`: `Step(i32)`, `ToggleMute`, `ToggleMic`, `Device(PaEvent)`, `Mode(Mode)`, `Resync`. Consecutive `Step`s merge (as now); consecutive `Device(Change…|Server)` merge into one mark refresh.
+  - `AudioEvent`: `Sink(Level)` (the shared `L`/`M` after a key), `Mic(bool)` (the shared `Q` after the mic key), `Mark(bool)` (the default source's real mute after a refresh), `Failed(String)`. `Level` stays as it is.
+  - `AudioWorker::spawn(p: Pactl, mode: Mode, on_event: impl Fn(AudioEvent) + Send + 'static) -> AudioWorker`; at start the worker runs `Sync::start` and sends `Mark` once.
+- Produces in `sync.rs`:
+  - `pub enum Mode { Keys, Off }`
+  - `pub enum Set { Volume(Kind, String, u8), Mute(Kind, String, bool) }`
+  - `pub struct Sync` (private fields `mode`, `level: u8`, `sink_muted: bool`, `mic_muted: bool`) with
+    `pub fn start(mode: Mode, sinks: &[Device], sources: &[Device], default_sink: Option<&str>, default_source: Option<&str>) -> (Sync, Vec<Set>)`,
+    `pub fn step(&mut self, delta: i32, sinks: &[Device]) -> Vec<Set>`,
+    `pub fn toggle_mute(&mut self, sinks: &[Device]) -> Vec<Set>`,
+    `pub fn toggle_mic(&mut self, sources: &[Device]) -> Vec<Set>`,
+    `pub fn on_new(&self, d: &Device) -> Vec<Set>`,
+    `pub fn set_mode(&mut self, mode: Mode, sinks: &[Device], sources: &[Device]) -> Vec<Set>`,
+    `pub fn reapply(&self, sinks: &[Device], sources: &[Device]) -> Vec<Set>`,
+    `pub fn level(&self) -> Level`, `pub fn mic_muted(&self) -> bool`.
+  - Rules: a `Set` is produced only where the device's value differs. `start` with `Keys` takes `L`/`M` from the default sink (or 100/false when there is none) and `Q` from the default source (or false); with `Off`, `L = 100`, `M = Q = false`, and every sink and source gets volume 100 and unmute. Keys act in either mode (they are bound only when the switch is on); `Mode` decides `start`, `set_mode` and `on_new`. `on_new` in `Keys`: a sink gets `L` and `M`, a source gets `Q` (its volume untouched); in `Off`: volume 100 and unmute.
+
+- [ ] **Step 1: Write failing tests.**
+  - `sync.rs`: `start_takes_the_default_and_aligns_the_rest` (two sinks 40 %/100 %, default the first → `L = 40`, one `Set::Volume(Sink, second, 40)`); `off_resets_every_device_to_full_and_unmuted` (sinks 40 % muted, sources muted → volume 100 and unmute on all, no `Set` for a device already at 100 % unmuted); `step_moves_every_sink_from_the_shared_level` (`L = 40`, sinks at 40 and 70, `step(5)` → both to 45; `step(+5)` at 98 → 100; `step(-5)` at 3 → 0); `toggle_mic_sets_every_source` (two sources, one muted by someone else, `Q = false` → `toggle_mic` gives `Q = true` and a mute `Set` only for the unmuted one); `a_new_default_device_does_not_become_the_shared_level` (start with `L = 30`, then `on_new` for a headset sink at 100 % → `Set::Volume(Sink, headset, 30)`, `level().percent == 30`; a new source with `Q` set → `Set::Mute(Source, mic, true)`); `on_new_in_off_mode_gives_full_and_unmuted`; `set_mode_off_resets_and_back_to_keys_keeps_full` (after `Off`, `set_mode(Keys)` takes `L = 100`, `M = Q = false`, no `Set`).
+  - `audio.rs`: `parse_devices_reads_name_index_percent_mute` (fixture: two sinks, stereo channels `"45%"`/`"47%"` → 46); `parse_devices_skips_monitor_sources` (a source with `monitor_of_sink: "alsa_output.x"` skipped, one with `"n/a"` kept); `parse_event_reads_new_change_remove_server` (the four line forms, plus `Event 'change' on sink-input #3` → `None`); `a_failing_set_on_one_device_still_sets_the_others` (fake `pactl` that fails `set-sink-volume gone 45%` and logs every call: a `Step` with sinks `gone` and `kept` still calls `set-sink-volume kept 45%`, the event is `Sink(Level { percent: 45, .. })`, and the failure is in the log, not an `AudioEvent::Failed`); `change_events_only_refresh_the_mark` (worker gets `Device(Change(Sink, 1))`, `Device(Change(Source, 2))`, `Device(Server)` in a burst → no `set-` call in the fake's log, one `get-default-source` and one `list sources`, one `Mark` event); `a_failing_pactl_is_an_error_not_a_level` (rename of the wpctl test: `list sinks` fails → `Failed`). Keep the existing `Step` merge test, adapted.
+  - `tests/osd_key.rs`: `osd_key_without_a_server_runs_pactl_itself` (fake `pactl` with two sinks, default the first at 40 %: `--osd-key volume-up` → `set-sink-volume <both> 45%`, exit 0); keep `osd_key_without_a_server_leaves_brightness_alone`.
+  The fake `pactl` in tests answers `-f json list sinks|sources` from files in its temp dir, `get-default-*` from a file, logs `$*`. Put fixtures in `src/thinfloe-menu/tests/fixtures/pactl-*.json` (also used by `audio.rs` unit tests through `include_str!`). Take the JSON shape from the real `pactl` in the image (Ubuntu 26.04 `pulseaudio-utils`): run `podman run --rm --entrypoint pactl localhost/<rootfs image>:mediakeys -f json list sinks` cannot list without a server, so start `pipewire`, `wireplumber` and `pipewire-pulse` in the rootfs container with a `null` sink (`pactl load-module module-null-sink`) and save that output; say in the report where the fixture came from.
+- [ ] **Step 2: Run** `cargo test osd::` and `cargo test --test osd_key` (wrapped). Expected: FAIL (missing items).
+- [ ] **Step 3: Implement** `sync.rs`, the `audio.rs` changes and `act_without_osd` (no process: list, take the default device's value, compute, set every device of that kind; brightness unchanged). Remove `Wpctl`, `parse_get_volume` and every `TF_WPCTL` use; the loop in `run.rs` keeps its mic poll for now but calls the default source through `Pactl` (Task 10 replaces it), and spawns the worker with `Mode::Keys` (Task 10 reads the switch).
+- [ ] **Step 4: Run** `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `make test-unit` (all wrapped). Expected: PASS, output clean.
+- [ ] **Step 5: Commit** `feat(menu): the audio keys set every speaker and microphone through pactl`
+
+### Task 10: events instead of the mic poll; the switch reaches the OSD; runtime test
+
+**Files:**
+- Modify: `src/thinfloe-menu/src/osd/audio.rs` (the watcher), `src/thinfloe-menu/src/osd/run.rs` (watch thread, `Reload`), `src/thinfloe-menu/src/osd/mod.rs` (`Action::Reload`), `src/thinfloe-menu/src/jobs.rs` (`keyboard_apply` sends `reload`), `test/runtime/test-labwc-runtime.sh` (fake `pactl`; hotplug and reset cases)
+
+**Interfaces:**
+- Consumes: Task 9's `Pactl`, `PaEvent`, `AudioRequest`, `AudioEvent::Mark`, `Mode`.
+- Produces: `Action::Reload` (`as_str` `"reload"`, accepted by `--osd-key` and the socket; not bound by the composer). `pub fn watch(p: &Pactl, on: impl Fn(Watch) + Send + 'static)` in `audio.rs`, run on its own thread: `pub enum Watch { Event(PaEvent), Restarted }`. `pub fn keys_mode(env_text: &str) -> Mode` in `sync.rs`: `THINFLOE_VOLUME_KEYS` with the composer's quoting rule (`on`, `"on"`, `'on'` → `Keys`; anything else or missing → `Off`; the last assignment wins).
+- The watcher: `pactl subscribe` as a child (stdout piped, stderr to the OSD's stderr, its own process group like the other tools), each line through `parse_event`. On EOF or a spawn error: log `thinfloe-menu --osd: pactl subscribe ended; retrying in N s` once per distinct N, sleep (1, 2, 4, … capped at 30 s; back to 1 s after a run that lasted 30 s), start again, then send `Watch::Restarted` (the loop turns it into `AudioRequest::Resync`). The child is killed and reaped when the OSD stops (SIGTERM path), never left behind.
+- The loop: `Watch::Event(e)` → `AudioRequest::Device(e)`; `AudioEvent::Mark(m)` → `state.set_mic(m)` without a panel; `Action::Reload` → read the generated environment again (the file `store.dir.generated_file("environment")` names; the OSD finds it the way the menu's `Paths` does) and send `AudioRequest::Mode(keys_mode(..))`. At start, the mode comes from the same file. The 1 s mic poll thread and `MIC_POLL` are removed.
+- `keyboard_apply`: after a `Live` outcome, `osd::socket::send(&path, Action::Reload)`; `NoServer` is ignored, another error is logged to the menu's log; the outcome is unchanged.
+
+- [ ] **Step 1: Write failing tests.**
+  - `audio.rs`: `the_watch_backs_off_and_resyncs` (fake `pactl subscribe` that prints one `Event 'new' on source #3` line and exits: the callback sees `Event(New(Source, 3))`, then `Restarted`; with a fake that exits at once, the gaps between starts are 1 s then 2 s, within 200 ms; run with a shortened base delay through a `#[cfg(test)]` constructor, not by waiting 30 s).
+  - `sync.rs`: `keys_mode_reads_the_switch` (`THINFLOE_VOLUME_KEYS=on`, `="on"`, `='on'` → `Keys`; `=off`, `=yes`, empty, missing → `Off`; `…=on\n…=off` → `Off`).
+  - `run.rs`: `a_mark_event_sets_the_mark_without_a_panel`; `a_reload_to_off_resets_every_device` (through the worker with a fake `pactl`: start in `Keys` with a sink at 40 %, `Mode(Off)` → `set-sink-volume <sink> 100%` and the mutes cleared).
+  - `jobs.rs`: `keyboard_apply_tells_the_osd_to_reload` (a bound test socket at `TF_OSD_SOCKET` receives `reload` after a live apply; without a socket the outcome is still `Live`). Keep socket paths short: the TestDir name for any socket test at most 12 characters (UNIX paths stop at 108 bytes, and a long `TMPDIR` plus a 7-digit PID gets close).
+  - `test-labwc-runtime.sh`: replace the fake `wpctl` (`TF_WPCTL`, `/tmp/wpctl.log`) of Task 8's cases with a fake `pactl` (`TF_PACTL=/tmp/fake-pactl`): it logs `$*` to `/tmp/pactl.log`, answers `-f json list sinks|sources` from `/tmp/pa/sinks.json` / `sources.json` (two sinks at 45 %, two sources unmuted, plus one monitor source), `get-default-*` from `/tmp/pa/default-*`, and `subscribe` with `tail -n +1 -f /tmp/pa/events` (and it updates the JSON files on `set-*` calls, so reads see the new values). Task 8's expectations change from `set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+` to `set-sink-volume <sink1> 50%` and `set-sink-volume <sink2> 50%`; the mic mark cases now mute through the files plus an `Event 'change' on source #N` line instead of `/tmp/mic`. New cases: **hotplug while muted** (mic key → both sources muted; then add a third source, unmuted, and append `Event 'new' on source #N`: within 1 s `/tmp/pactl.log` has `set-source-mute <third> 1`, and the monitor source has no `set-` call at all); **live switch off** (switch on, a volume key, then the composer `--env-only` with `THINFLOE_VOLUME_KEYS=off`, `labwc --reconfigure` and `thinfloe-menu --osd-key reload`: within 1 s every sink and source gets `100%` and `0`).
+- [ ] **Step 2: Run** the cargo tests (wrapped). Expected: FAIL.
+- [ ] **Step 3: Implement** as in Interfaces.
+- [ ] **Step 4: Run** `cargo test`, `clippy`, `fmt`, `make test-unit` (wrapped), then the image gate line from Global Constraints. Expected: all `ok`, the new runtime lines included.
+- [ ] **Step 5: Commit** `feat(menu): the OSD follows audio devices through pactl subscribe and the switch through reload`
+
+### Task 11: docs and the keybinding guard
 
 **Files:**
 - Modify: `CLAUDE.md`, `docs/notes/history-of-constraints.md`, `docs/notes/session.md`, `docs/notes/menu.md`, `test/integration/test-session-packages.sh`, `CHANGES.md`
@@ -495,6 +590,15 @@ No respawn. The menu's exit codes and the save behaviour are unchanged.
   In `### Fixed`, the #28 entry's last sentence becomes: "The volume and brightness keys therefore go to the focused program too, unless they are given back to the machine in Settings → Keyboard." Keep the entry's issue tag as it is.
 - [ ] **Step 8: Gate.** `bash test/integration/test-session-packages.sh` against the Task 8 image (the image is not rebuilt; docs are no image input), `systemd-run … make test-unit`. Expected: all ok.
 - [ ] **Step 9: Commit** `docs: the volume and brightness keys, the OSD and the keybinding rule`
+
+
+#### Amendments from the audio change (2026-11-19)
+
+
+The old Task 9's text below applies, with these changes from the audio amendment:
+- Step 4 (session.md): "the keys set the sink volume and mute through `wpctl`" becomes "the keys set every speaker's volume and mute and every microphone's mute through `pactl`; with the switch off every speaker and microphone is set to 100 % and unmuted at session start and when the switch is turned off".
+- Step 6 (media-keys.md, audio section): `pactl` commands, the shared state and why it is not read back from the default device, hotplug through `pactl subscribe` (back-off), `reload`, monitor sources left alone; no mic poll. Owner checks: two speakers and two microphones; a headset plugged in during a muted ThinLinc call is muted.
+- Step 7 (CHANGES): the New entry's first sentence says the volume keys change "the volume of every speaker and the mute of every microphone of this machine"; add a sentence: "A speaker or microphone plugged in later takes the same setting, and with the switch off every speaker and microphone is kept at full volume and unmuted."
 
 ---
 

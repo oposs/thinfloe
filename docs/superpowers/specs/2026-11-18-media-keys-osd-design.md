@@ -188,3 +188,131 @@ it is muted, so nobody talks into a muted call without knowing.
 - Mic mute with a ThinLinc call: the remote side hears nothing.
 - Volume keys inside a fullscreen ThinLinc session (the grab bypass), and
   that Alt-Tab still goes to ThinLinc there.
+
+## Amendment 2026-11-19: every speaker and microphone in sync
+
+Added to `docs/superpowers/specs/2026-11-18-media-keys-osd-design.md` after
+Tasks 1-7 were built. Where this section and the text above disagree, this
+section wins.
+
+### Why
+
+A thin client often has more than one speaker and more than one microphone:
+the monitor's speakers, a USB headset, a webcam microphone. The keys as first
+designed change only the default sink and the default source. The other
+devices stay where they were, and a microphone that is not the default stays
+live while the mark says the microphone is off (owner, 2026-11-19).
+
+### What the user gets
+
+- **Volume switch on.** The volume keys set **every** speaker (sink) to the
+  same level; mute mutes or unmutes every speaker; mic mute mutes or unmutes
+  every microphone (source). Monitor sources (`*.monitor`, the copy of a
+  sink's output) are not microphones and are left alone.
+- **Volume switch off.** Every speaker and every microphone is at 100 % and
+  unmuted: at session start, and again when the switch is turned off. The
+  remote client (ThinLinc, OxuLnk) sets the loudness, as before this branch.
+  This also clears a microphone left muted from an earlier session, which no
+  key could unmute while the switch is off.
+- **Hotplug** (owner's choice, 2026-11-19). A speaker or microphone plugged in
+  during the session joins the current state at once: with the switch on, a
+  new speaker gets the shared level and mute state, a new microphone the
+  shared mic mute state; with the switch off, the new device gets 100 % and
+  unmuted. A microphone plugged in during a muted call is muted before anyone
+  can hear it (within the time PipeWire takes to report it, well under 1 s).
+- The panel shows the shared level. The mark still follows the **default**
+  source's real mute state, whoever set it (the source a remote client
+  records from), and still shows when the switch is off.
+- The levels set with the keys are still kept across restarts: WirePlumber
+  stores each device's level, so all of them come back at the shared level.
+
+### Approaches
+
+1. **All audio through `pactl`** (chosen; owner left the method to the
+   controller). One long-running `pactl subscribe` child of the OSD process
+   reports new devices and changes at once; `pactl -f json list sinks` and
+   `… sources` list the devices; `pactl set-sink-volume`, `set-sink-mute`,
+   `set-source-volume` and `set-source-mute` set them by name. One tool,
+   machine-readable output, events instead of a poll. `pactl` is in the
+   image (`pulseaudio-utils`), it talks to `pipewire-pulse`, and WirePlumber
+   stores what it sets just as it stores `wpctl` sets.
+2. `wpctl` to set, `pactl subscribe` only as a trigger: two tools with two
+   different device numberings; `wpctl` has no machine-readable listing
+   (`wpctl status` is for people). More fragile than 1.
+3. A WirePlumber Lua policy script: instant and independent of the OSD
+   process, but the rule is split between Lua and Rust, it cannot be tested
+   with fakes like the rest, and WirePlumber 0.5's Lua API moves.
+
+Dropped: a 1 s poll of `wpctl status` (text for people; a new microphone is
+live for up to 1 s).
+
+### Decided
+
+- Approach 1. `TF_WPCTL` is replaced by `TF_PACTL` (default `pactl`).
+  `wpctl` is no longer called by the menu.
+- The OSD process owns the **shared state**: speaker level `L` (percent),
+  speaker mute `M`, microphone mute `Q`. It does not read the shared state
+  again from whichever device is the default at a given moment: a headset
+  plugged in often becomes the new default, and its 100 % must not become the
+  shared level.
+  - Start, switch on: `L` and `M` from the default sink, `Q` from the default
+    source; then every sink gets `L`/`M` and every source gets `Q` (this
+    brings devices that drifted apart back in line).
+  - Start, or switch turned off: `L = 100`, `M = Q = false`; every sink and
+    source gets volume 100 % and unmute.
+  - Volume key (switch on): `L` = clamp(`L` ± 5, 0, 100), set on every sink;
+    mute state untouched (unchanged rule: the panel shows "Muted" with the
+    new level when `M` is set).
+  - Mute key: `M = !M`, set on every sink. Mic mute key: `Q = !Q`, set on
+    every source.
+  - A new sink (`new` event): gets `L`/`M` (switch on) or 100 %/unmuted
+    (switch off). A new source: gets `Q` (switch on) or 100 %/unmuted
+    (switch off). Source volume is otherwise never changed while the switch
+    is on.
+- Changes made by others (the remote client setting the default sink, a
+  user's `pactl`) are not copied to the other devices; the next key press
+  sets every device from the shared state again. The OSD's own sets produce
+  `change` events; only `new` events and the default source's mute drive
+  actions, so there is no feedback loop.
+- The mark is refreshed from the default source on `change` events of a
+  source and of the server (the default device changed), coalesced. The 1 s
+  `wpctl` mic poll is gone.
+- The OSD learns the switch from `THINFLOE_VOLUME_KEYS` in
+  `~/.config/thinfloe/generated/environment`: read at start, and read again
+  when the menu, after a keyboard apply, sends the OSD a `reload` datagram
+  on the existing socket.
+- `--osd-key` without an OSD process (crashed, not started) does the same
+  for all devices itself: it lists the sinks or sources and sets each,
+  starting from the default device's current value, since it has no shared
+  state. Brightness still does nothing without the process.
+- `pactl subscribe` ends (pipewire-pulse restarted, `pactl` missing): the OSD
+  logs it once, restarts the child after 1 s, doubling to at most 30 s, and
+  on reconnect applies the shared state to every device again.
+- No sound device at all: as before, no panel, one log line, no mark.
+
+### Left to the builder
+
+- The exact `pactl -f json` fields (names, `monitor_source`/`monitor_of_sink`,
+  per-channel volume) as `pulseaudio-utils` in Ubuntu 26.04 prints them:
+  check on the built image and pin them in a fixture.
+- Whether `pactl`'s percent and WirePlumber's stored volume agree (both
+  cubic); the 100 % default of `50-thinfloe-volume.conf` must read back as
+  100 %.
+- Coalescing of event bursts (a USB headset brings a sink and a source at
+  once), and the restart back-off timing.
+
+### Impact on the plan
+
+- New Task 8b after Task 8: `audio.rs` (wpctl runner → pactl runner, JSON
+  parser, subscribe child), `run.rs` (shared state, events instead of the mic
+  poll, `reload`), `mod.rs`/`--osd-key` fallback, `jobs::keyboard_apply`
+  sends `reload`, Task 8's runtime cases switch from a fake `wpctl` to a fake
+  `pactl` with two sinks and two sources, plus a hotplug case (a third
+  source appears while muted and is muted).
+- Task 9 (docs, CHANGES): `docs/notes/session.md` (Audio volume) and the
+  CHANGES entry say "every speaker and microphone".
+
+### Owner checks on hardware
+
+- Two speakers and two microphones (e.g. monitor speakers plus a USB headset):
+  keys move both; a headset plugged in during a muted ThinLinc call is muted.
