@@ -170,8 +170,9 @@ never set.
   restarted child has run for 500 ms or printed a line, the shared state is
   applied to every device again. A start that failed (the server was not up
   yet, or a 3 s timeout) is tried again when the first `pactl subscribe`
-  reaches the server, and at every later key or event. The child gets
-  `PR_SET_PDEATHSIG`, so it dies with the OSD, also on SIGKILL.
+  reaches the server, and at every later key, new device, switch change or
+  restart. The child gets `PR_SET_PDEATHSIG`, so it dies with the OSD,
+  also on SIGKILL.
 - The switch turned off while the devices cannot be listed: the shared
   state is still off, so the next restart or new device gets 100 % and
   unmuted.
