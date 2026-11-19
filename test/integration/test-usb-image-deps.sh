@@ -30,6 +30,8 @@ cat >"$RUNTIME" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
     "image inspect") echo sha256:aaaa ;;
+    # Only the seeding make below runs a container; it writes nothing.
+    "run "*) ;;
     *) exit 125 ;;
 esac
 STUB
@@ -55,6 +57,12 @@ touch -d '2020-01-01' "$TREE/RELEASE" "$TREE/artifacts/rootfs/.version-kind"
 for f in vmlinuz initrd.img ramroot.sqsh; do : >"$TREE/artifacts/rootfs/$f"; done
 touch -d '2022-01-01' "$TREE"/artifacts/rootfs/*
 USB="artifacts/images/thinfloe-usb.img"
+# One build through the stub writes the keys of what the rootfs and the
+# image were made from (test-artifact-source.sh); without them both are
+# stale whatever their mtimes.
+env -u MAKEFLAGS -u MAKELEVEL make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
+    TF_VERSION=4.2.0-dev+abc rootfs "$USB" >/dev/null 2>&1 || bad "seeding the artifact keys failed"
+touch -d '2022-01-01' "$TREE"/artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh}
 
 # Prints "up-to-date" when make would not rebuild the image, "rebuild" otherwise.
 state() {

@@ -412,6 +412,16 @@ none. Build with a distinct `VERSION` per checkout, or two checkouts rebuild
 over each other. `test/integration/test-container-stamp.sh` guards this - run
 via `make test`.
 
+A third source is the artifacts directory. `artifacts` is a symlink in git,
+so every checkout on the development host writes one directory, and make
+compared only mtimes: a rootfs another checkout exported was newer than this
+checkout's stamp, so make called it up to date and an image gate tested a
+rootfs without this checkout's changes (2026-11-19). Each export (rootfs,
+iPXE loaders, USB image) now writes a key of what it was made from next to
+its files (`.exported-from`, `.ipxe-from`, `images/.built-from`), and a key
+that differs from this checkout's makes the files stale.
+`test/integration/test-artifact-source.sh` guards this.
+
 ## Per-machine network config is installed by the initramfs, never by a unit
 
 The netplan systemd generator creates `netplan-wpa-<if>.service` when the
