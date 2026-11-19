@@ -14,6 +14,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 MAKEFILE="${1:-$REPO/Makefile}"
 
 WORK=$(mktemp -d)
@@ -38,11 +40,7 @@ for f in containers/ubuntu/Dockerfile containers/ipxe/Dockerfile containers/imag
     : >"$TREE/$f"
 done
 mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim"
-# The tree's artifacts must be its own: never a link out of the scratch area.
-case "$(realpath -m "$TREE/artifacts")" in
-    "$WORK"/*) ;;
-    *) echo "FAIL - $TREE/artifacts resolves outside $WORK; not running make" >&2; exit 1 ;;
-esac
+tf_guard_tree "$TREE" "$WORK"
 
 out=$(cd "$WORK" && env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION make -n -C "$TREE" \
     CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.2.0-dev+abc \

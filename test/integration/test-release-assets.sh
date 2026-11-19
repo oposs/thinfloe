@@ -10,6 +10,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 SCRIPT="$REPO/scripts/release-assets.sh"
 
 WORK=$(mktemp -d)
@@ -212,6 +214,7 @@ fi
 MTREE="$WORK/mtree"
 mkdir -p "$MTREE"
 cp "$REPO/Makefile" "$MTREE/Makefile"
+tf_guard_tree "$MTREE" "$WORK"
 mkdir -p "$MTREE/scripts"
 cp "$SCRIPT" "$MTREE/scripts/release-assets.sh"
 printf '4.2.0\n' >"$MTREE/RELEASE"

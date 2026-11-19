@@ -19,6 +19,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -74,7 +76,9 @@ checkout() {
     mkdir -p "$t/containers/ubuntu/patches" "$t/containers/ubuntu/slim" "$t/containers/ipxe" \
         "$t/containers/image-builder" "$t/src/thinfloe-menu/src" "$t/scripts/lib" "$t/configs"
     cp "$REPO/Makefile" "$t/Makefile"
+    # A link, as in a real checkout, but to a directory inside $WORK.
     ln -s "$SHARED" "$t/artifacts"
+    tf_guard_tree "$t" "$WORK"
     echo 4.2.0 >"$t/RELEASE"
     for f in containers/ubuntu/Dockerfile containers/ipxe/Dockerfile containers/image-builder/Dockerfile \
              src/thinfloe-menu/src/main.rs scripts/export-rootfs.sh scripts/lib/common.sh \
