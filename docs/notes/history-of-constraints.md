@@ -54,7 +54,7 @@ across a 300 s boot, so `login -f tfuser` succeeds against a `!` field. A
 failing autologin would have restarted it every 5 seconds
 (`RestartSec=5`, `StartLimitIntervalSec=0`). Not verified on hardware.
 
-## Firmware is selected by package, never by cleanup
+## Firmware and payloads are selected by package, never by cleanup
 
 `scripts/export-rootfs.sh` once ran
 `find /usr/lib/firmware -type f -not -name "iwlwifi*" -delete` before
