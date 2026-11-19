@@ -896,7 +896,12 @@ kanshi_reset() {
     fi
     rm -rf "$KDIR" "$MARKER" "$WORK/kanshi.argv" "$WORK/kanshi.pid" "$WORK/kanshi.seen" "$SRC"
 }
-exec {kanshi_lock}>"${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/thinfloe-test-kanshi.lock"
+# The session looks for this user's kanshi in /proc, so runs of every
+# checkout of this user must queue on one lock. TMPDIR is per checkout (the
+# Makefile sets it to the checkout's .tmp), so without XDG_RUNTIME_DIR the
+# lock is a file in /tmp named by the uid: the one place every checkout of
+# this user shares. It holds no data.
+exec {kanshi_lock}>"${XDG_RUNTIME_DIR:-/tmp}/thinfloe-test-kanshi-$(id -u).lock"
 if ! flock -w 120 "$kanshi_lock"; then
     bad "kanshi cases: another run of this test held the kanshi lock for 120 s"
 fi
