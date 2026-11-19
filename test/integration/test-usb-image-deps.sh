@@ -30,8 +30,8 @@ cat >"$RUNTIME" <<'STUB'
 #!/bin/bash
 case "$1 ${2:-}" in
     "image inspect") echo sha256:aaaa ;;
-    # Only the seeding make below runs a container; it writes nothing.
-    "run "*) ;;
+    # Only the seeding make below builds or runs one; it writes nothing.
+    "build "*|"run "*) ;;
     *) exit 125 ;;
 esac
 STUB
@@ -62,6 +62,7 @@ USB="artifacts/images/thinfloe-usb.img"
 # stale whatever their mtimes.
 env -u MAKEFLAGS -u MAKELEVEL make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
     TF_VERSION=4.2.0-dev+abc rootfs "$USB" >/dev/null 2>&1 || bad "seeding the artifact keys failed"
+touch -d '2021-01-01' "$TREE/.ubuntu-container"
 touch -d '2022-01-01' "$TREE"/artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh}
 
 # Prints "up-to-date" when make would not rebuild the image, "rebuild" otherwise.
