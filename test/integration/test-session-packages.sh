@@ -796,10 +796,10 @@ done
 MK="$DPKG_TMP/mk/etc/thinfloe/menu-managed-keys"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/mk" "$SQSH" etc/thinfloe/menu-managed-keys >/dev/null 2>&1 &&
    [[ "$(grep -v '^#' "$MK" | grep -v '^$' | sort | tr '\n' ' ')" == \
-      "THINFLOE_NUMLOCK XKB_DEFAULT_LAYOUT XKB_DEFAULT_MODEL XKB_DEFAULT_OPTIONS XKB_DEFAULT_VARIANT " ]]; then
-    echo "ok   - /etc/thinfloe/menu-managed-keys lists the four XKB keys and THINFLOE_NUMLOCK"
+      "THINFLOE_BRIGHTNESS_KEYS THINFLOE_NUMLOCK THINFLOE_VOLUME_KEYS XKB_DEFAULT_LAYOUT XKB_DEFAULT_MODEL XKB_DEFAULT_OPTIONS XKB_DEFAULT_VARIANT " ]]; then
+    echo "ok   - /etc/thinfloe/menu-managed-keys lists the four XKB keys, THINFLOE_NUMLOCK and the two media key switches"
 else
-    echo "FAIL - /etc/thinfloe/menu-managed-keys does not list exactly the four XKB keys and THINFLOE_NUMLOCK"
+    echo "FAIL - /etc/thinfloe/menu-managed-keys does not list exactly the four XKB keys, THINFLOE_NUMLOCK and the two media key switches"
     fail=1
 fi
 
