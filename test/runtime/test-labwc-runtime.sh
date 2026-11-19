@@ -1127,7 +1127,7 @@ osd_expect "the OSD mark shows on both outputs above a spanning X11 window" \
     mark1=0d1218 mark2=0d1218 markframe1=c79a4a
 osd_expect "the X11 window is under the OSD (control point)" control=ff0000
 osd_focus "the spanning X11 window"
-if echo "$OSD_OUT" | grep -qx 'BUTTON 2531 49'; then
+if grep -qx 'BUTTON 2531 49' <<<"$OSD_OUT"; then
     echo "ok   - a click on the OSD mark reaches the X11 window below"
 else
     echo "FAIL - the click on the OSD mark did not reach the X11 window: '$(echo "$OSD_OUT" | grep '^BUTTON' | tr '\n' ' ')' (expected BUTTON 2531 49)"
