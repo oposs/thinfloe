@@ -149,7 +149,7 @@ grep -q 'thinfloe: title bar scale not applied' "$WORK/err" \
     && ok "failing labwc: reason on stderr" || bad "failing labwc: stderr: $(cat "$WORK/err")"
 [[ $(calls) -eq 2 ]] \
     && ok "failing labwc: reconfigured again after the restore" || bad "failing labwc: labwc calls: $(calls)"
-[[ $(readlink "$D/rc.xml") == "$SYSDIR/rc.xml" ]] \
+[[ $(readlink "$D/rc.xml") == "$D/.source/rc.xml" && $(readlink -f "$D/rc.xml") == "$(readlink -f "$SYSDIR/rc.xml")" ]] \
     && ok "failing labwc: symlink target restored" || bad "failing labwc: wrong target"
 
 # --- a file that arrives late -------------------------------------------
@@ -194,8 +194,8 @@ calls_are 2 && ok "follow: unchanged file, no extra reconfigure" || bad "follow:
 echo 1 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
 waitfor "follow: change to 1 restores the links" untouched
 waitfor "follow: reconfigure after the restore" calls_are 3
-[[ $(readlink "$D/rc.xml") == "$SYSDIR/rc.xml" ]] \
-    && ok "follow: link target is the system file" || bad "follow: wrong target"
+[[ $(readlink "$D/rc.xml") == "$D/.source/rc.xml" && $(readlink -f "$D/rc.xml") == "$(readlink -f "$SYSDIR/rc.xml")" ]] \
+    && ok "follow: link target is the composer's source" || bad "follow: wrong target"
 
 echo 3 >"$WORK/scale.tmp"; mv "$WORK/scale.tmp" "$WORK/scale"
 waitfor "follow: back to 3 gives size 30" fonts_are 30
@@ -387,6 +387,72 @@ if [[ $rc -eq 0 && -f $D/rc.xml && ! -L $D/rc.xml ]] &&
 else
     bad "Num Lock off: scaled rc.xml: $(grep -n numlock "$D/rc.xml")"
 fi
+
+# --- a change of the source is followed ------------------------------------
+# The composer's layout: rc.xml -> .source/rc.xml -> a file. The menu's
+# key switches make the composer rewrite .source/rc.xml (temp file, rename);
+# the helper rebuilds its scaled copy from the new source and reconfigures.
+SD="$WORK/src-run"
+src_setup() {
+    rm -rf "$SD" "$WORK/scale" "$WORK/menu-output" "$WORK/menu-output.applied"
+    mkdir -p "$SD/.source"
+    : >"$WORK/calls"
+    cp "$SYSDIR/rc.xml" "$SD/base.xml"
+    ln -s "$SD/base.xml" "$SD/.source/rc.xml"
+    ln -s "$SD/.source/rc.xml" "$SD/rc.xml"
+    ln -s "$SYSDIR/themerc-override" "$SD/themerc-override"
+}
+src_follow() {
+    TF_SCALE_POLL=0.2 TF_SCALE_RETRY=30 TF_SCALE_FILE="$WORK/scale" \
+        TF_MENU_OUTPUT_FILE="$WORK/menu-output" TF_LABWC_DIR="$SD" \
+        TF_LABWC="$WORK/labwc" STUB_LOG="$WORK/calls" "$HELPER" --wait 2 2>"$WORK/err" &
+    hpid=$!
+}
+# A new source with a binding in <keyboard>, temp file and rename.
+src_change() {
+    sed 's#</keyboard>#  <keybind key="XF86AudioMute" allowWhenInhibited="yes"><action name="Execute" command="/x/osd volume-mute" /></keybind>\n  </keyboard>#' \
+        "$SD/base.xml" >"$SD/.source/.rc.xml.tmp"
+    mv -f "$SD/.source/.rc.xml.tmp" "$SD/.source/rc.xml"
+}
+# waitfor1 DESC CMD...: up to 1 s.
+waitfor1() {
+    local desc=$1 n=0
+    shift
+    until "$@"; do
+        n=$((n + 1))
+        if [[ $n -gt 10 ]]; then bad "$desc"; return 1; fi
+        sleep 0.1
+    done
+    ok "$desc"
+}
+src_scaled_with_key() {
+    [[ -f $SD/rc.xml && ! -L $SD/rc.xml ]] &&
+        grep -q '<keybind key="XF86AudioMute"' "$SD/rc.xml" &&
+        [[ $(grep -c '<font place=.*size="20"' "$SD/rc.xml") -eq 2 ]]
+}
+src_fonts20() { [[ $(grep -c '<font place=.*size="20"' "$SD/rc.xml" 2>/dev/null) -eq 2 ]]; }
+
+src_setup; echo 2 >"$WORK/scale"
+src_follow
+waitfor "source: first scale 2 applied" src_fonts20
+waitfor "source: one reconfigure" calls_are 1
+src_change
+waitfor1 "source: a changed source is scaled within 1 s" src_scaled_with_key
+waitfor1 "source: one more reconfigure" calls_are 2
+sleep 0.6
+calls_are 2 && ok "source: unchanged source, no extra reconfigure" || bad "source: calls $(calls)"
+stop
+
+src_setup; echo 1 >"$WORK/scale"
+src_follow
+sleep 0.5
+src_change
+sleep 1
+{ calls_are 0 && [[ -L $SD/rc.xml && $(readlink "$SD/rc.xml") == "$SD/.source/rc.xml" ]] &&
+  grep -q '<keybind key="XF86AudioMute"' "$SD/rc.xml"; } \
+    && ok "source at scale 1: no reconfigure, rc.xml stays the link" \
+    || bad "source at scale 1: calls $(calls), rc.xml $(readlink "$SD/rc.xml")"
+stop
 
 left=$(ls -A "$XDG_RUNTIME_DIR")
 [[ -z $left ]] && ok "nothing written to \$XDG_RUNTIME_DIR" \
