@@ -377,8 +377,8 @@ mod tests {
     fn kb(layout: &str, variant: &str, caps: bool, compose: Compose) -> Keyboard {
         Keyboard {
             layout: layout.into(),
-            caps_as_ctrl: caps,
             variant: variant.into(),
+            caps_as_ctrl: caps,
             compose,
             numlock: true,
             volume_keys: false,
