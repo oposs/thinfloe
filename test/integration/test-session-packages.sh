@@ -1177,7 +1177,7 @@ else
 fi
 if grep -qE 'usr/lib/modules/[^/]+/kernel/drivers/i2c/i2c-dev\.ko' "$LIST" ||
    { unsquashfs -no-xattrs -d "$DDC_TMP/m" "$SQSH" 'usr/lib/modules/*/modules.builtin' >/dev/null 2>&1 &&
-     cat "$DDC_TMP"/m/usr/lib/modules/*/modules.builtin 2>/dev/null | grep -q '/i2c-dev\.ko$'; }; then
+     grep -qs '/i2c-dev\.ko$' "$DDC_TMP"/m/usr/lib/modules/*/modules.builtin; }; then
     echo "ok   - the kernel has i2c-dev"
 else
     echo "FAIL - the kernel has no i2c-dev (no module, not built in)"

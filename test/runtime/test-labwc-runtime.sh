@@ -1375,7 +1375,7 @@ wev1=$(mk_val wev1)
 [[ "$(mk_val wev_focus)" == active && " $wev1" == *" XF86AudioRaiseVolume "* ]]
 mk_check $? "with the volume switch off, XF86AudioRaiseVolume reaches the focused window" \
     "wev focus '$(mk_val wev_focus)', syms '$wev1'"
-! echo "$MK_OUT" | grep -q '^wpctl: set-volume'
+! grep -q '^wpctl: set-volume' <<<"$MK_OUT"
 mk_check $? "with the volume switch off, the key does not change the volume" \
     "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
 
@@ -1384,7 +1384,7 @@ wev1=$(mk_val wev1)
 [[ "$(mk_val wev_focus)" == active && " $wev1" != *" XF86AudioRaiseVolume "* && " $wev1" == *" x "* ]]
 mk_check $? "with the volume switch on, labwc takes XF86AudioRaiseVolume and the x after it reaches the window" \
     "wev focus '$(mk_val wev_focus)', syms '$wev1'"
-echo "$MK_OUT" | grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+'
+grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+' <<<"$MK_OUT"
 mk_check $? "with the volume switch on and no OSD running, the key raises the volume by 5 %" \
     "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
 
@@ -1396,7 +1396,7 @@ mk_check $? "the volume switch acts at once: after --env-only and labwc --reconf
     "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
 
 mk_run osd 2 on off
-[[ "$(mk_val socket)" == yes ]] && echo "$MK_OUT" | grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+'
+[[ "$(mk_val socket)" == yes ]] && grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+' <<<"$MK_OUT"
 mk_check $? "the volume key reaches the running OSD, which raises the volume by 5 %" \
     "socket $(mk_val socket); $(echo "$MK_OUT" | grep '^wpctl: set' | tr '\n' ' ')"
 mk_expect "0.5 s after the volume key the Volume panel shows on both outputs, its bar at 45 %" vol \
