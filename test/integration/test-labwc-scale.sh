@@ -20,7 +20,6 @@ if [[ ! -x "$HELPER" ]]; then
     exit 1
 fi
 
-mkdir -p "${TMPDIR:-/scratch/oetiker/claude-tmp/thinfloe-tests}"
 WORK=$(mktemp -d)
 hpid=
 cleanup() {

@@ -34,8 +34,8 @@ if [[ $MODE == artifacts ]]; then
     exit 0
 fi
 
-# 2. run-qemu-write-smoke.sh and several integration tests default TMPDIR
-# to the development host's scratch disk.
+# 2. The tests' work dirs go under TMPDIR; without one the Makefile picks
+# .tmp/ in the checkout. The runner's own temp dir is the better place.
 echo "ci-runner-setup: TMPDIR"
 mkdir -p "$RUNNER_TEMP/thinfloe-tests"
 echo "TMPDIR=$RUNNER_TEMP/thinfloe-tests" >>"$GITHUB_ENV"

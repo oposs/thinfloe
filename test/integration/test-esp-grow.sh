@@ -12,9 +12,7 @@ set -o pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB="$REPO/overlay/usr/lib/dracut/modules.d/90thinfloe/thinfloe-lib.sh"
 
-: "${TMPDIR:=/scratch/oetiker/claude-tmp/thinfloe-tests}"
-mkdir -p "$TMPDIR"
-WORK=$(mktemp -d "$TMPDIR/test-esp-grow.XXXXXX")
+WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 fail=0

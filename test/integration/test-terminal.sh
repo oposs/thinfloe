@@ -16,9 +16,7 @@ fail=0
 ok()  { echo "ok   - $1"; }
 bad() { echo "FAIL - $1"; fail=1; }
 
-: "${TMPDIR:=/scratch/oetiker/claude-tmp/thinfloe-tests}"
-mkdir -p "$TMPDIR"
-work=$(mktemp -d "$TMPDIR/test-terminal.XXXXXX")
+work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bin"
 
