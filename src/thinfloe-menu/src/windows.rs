@@ -1,6 +1,7 @@
 //! Folded windows, read from labwc through zwlr_foreign_toplevel_manager_v1.
 //!
-//! With zero keybindings and no window list, a minimized window has no way
+//! labwc has no keybindings unless a key switch is on (and then only the
+//! media keys), and there is no window list, so a minimized window has no way
 //! back unless the menu offers one. `Tracker` is the pure bookkeeping, `Windows`
 //! the Wayland connection that feeds it.
 

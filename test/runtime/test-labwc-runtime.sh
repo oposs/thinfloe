@@ -362,8 +362,9 @@ else
     fail=1
 fi
 
-# A folded window must stay reachable: with zero keybindings the menu is the
-# only way back. foot is folded with wlrctl; the menu (TF_MENU_DEBUG) must see
+# A folded window must stay reachable: labwc has no keybindings unless a key
+# switch is on (and then only the media keys), so the menu is the only way
+# back. foot is folded with wlrctl; the menu (TF_MENU_DEBUG) must see
 # it, --windows must list it as folded, --unfold must bring it back.
 FOLD_CONTAINER_NAME="thinfloe-runtime-test-fold-$$"
 

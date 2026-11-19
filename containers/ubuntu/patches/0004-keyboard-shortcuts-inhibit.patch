@@ -3,7 +3,8 @@ Description: implement zwp_keyboard_shortcuts_inhibit_manager_v1
  switch its keybindings off for their window. labwc 0.9.3 does not offer the
  protocol, so OxuLnk logs "keyboard grab unavailable: compositor does not
  support shortcut inhibition" and shows the grab as not working, although
- the image ships zero keybindings and every key already reaches it.
+ the image ships no keybindings unless a media key switch is on, and every
+ other key already reaches it.
  .
  Adds src/protocols/keyboard-shortcuts-inhibit.c on top of the wlroots
  helper. Each inhibitor on a view's surface counts in a new per-view field,

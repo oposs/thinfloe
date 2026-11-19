@@ -3,7 +3,8 @@
 This note covers the two key switches of Settings → Keyboard, the keybinding
 path through labwc, the on-screen display (OSD) and the microphone mark, audio
 through `pactl`, brightness through DDC/CI, the tests and what is left to check
-on hardware. Design: `docs/superpowers/specs/2026-11-18-media-keys-osd-design.md`
+on hardware. Design:
+`docs/superpowers/specs/2026-11-18-media-keys-osd-design.md`
 (its amendment of 2026-11-19 wins over the text above it).
 
 ## What the switches do
@@ -42,9 +43,9 @@ prefix (tests only); the composer escapes it for XML.
   or OxuLnk a shortcuts inhibitor (patch `0004`); the grabbing program does
   not get the key. Every other key still reaches it. Only the composer
   writes this attribute.
-- labwc repeats a held keybinding (500 ms delay, 30 per second). The volume and brightness keys step on
-  while held; the two mute keys carry `onRelease="yes"`, so a held mute key
-  toggles once.
+- labwc repeats a held keybinding (500 ms delay, 30 per second). The volume
+  and brightness keys step on while held; the two mute keys carry
+  `onRelease="yes"`, so a held mute key toggles once.
 - When a binding cannot be written, the composer logs
   `thinfloe-compose-labwc-config: cannot write the key bindings; the volume
   and brightness keys stay off` and leaves the keys off; its exit status does
@@ -103,15 +104,18 @@ of the menu leaves the other running and the session's exit codes unchanged.
   each term rounded on its own.
 - Panel: `OSD_W` wide, `OSD_BOTTOM` above the bottom edge, centred; padding
   `OSD_PAD_X`, `OSD_PAD_Y`; icon `OSD_ICON`, gap `OSD_GAP`; Geo `OSD_TEXT_PT`;
-  bar `OSD_BAR_H` high, `OSD_BAR_GAP` below the row. Fill `TILE`, border `LINE`, square corners. Icon in
-  `ICE`, name left, value right in `MUTED`. The bar fill is `ICE`, the track
-  `LINE`, `BAR_OFF` while muted. The panel goes
-  `HIDE_AFTER` (1.5 s) after the last key.
+  bar `OSD_BAR_H` high, `OSD_BAR_GAP` below the row. Fill `TILE`, border
+  `LINE`, square corners. Icon in `ICE`, name left, value right in `MUTED`.
+  The bar fill is `ICE`, the track `LINE`, `BAR_OFF` while muted. The panel
+  goes `HIDE_AFTER` (1.5 s) after the last key.
 - Panel states: Volume (`volume-2`, percent, bar); Muted (`volume-x` in
   `MUTED`, the level, grey bar); Microphone off (`mic-off` in `WARN`, no bar);
   Microphone on (`mic`, no bar); Brightness (`sun`, that monitor's own
   percent and bar); Brightness on a monitor without DDC/CI (`sun` in
-  `MUTED`, "not supported" in `WARN`, no bar, on that monitor only).
+  `MUTED`, "not supported" in `WARN`, no bar, on that monitor only);
+  Brightness with an unknown value (`sun` in `ICE`, no value, no bar: before the
+  first detection, on an output that came after it, or on a monitor whose
+  value could not be read).
 - Mark: `MARK_SIDE` square, `MARK_RIGHT` from the right edge and `MARK_TOP`
   from the top of every output, `TILE` fill, `WARN` border, `mic-off`
   (`MARK_ICON`) in `WARN`. It follows the default source's real mute state,
@@ -164,8 +168,8 @@ never set.
   retrying in N s` once per distinct wait and each distinct stderr line of
   `pactl` once (at most 32 lines), so one outage logs about 8 lines. Once a
   restarted child has run for 500 ms or printed a line, the shared state is
-  applied to every device again. The child gets `PR_SET_PDEATHSIG`, so it dies with the
-  OSD, also on SIGKILL.
+  applied to every device again. The child gets `PR_SET_PDEATHSIG`, so it
+  dies with the OSD, also on SIGKILL.
 - No sound server or device: no panel, one log line, no mark.
 - WirePlumber stores the levels it is given in
   `~/.local/state/wireplumber/`; they travel with the home and win over the

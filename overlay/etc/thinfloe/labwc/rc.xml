@@ -18,7 +18,8 @@
   labwc carries a patch implementing it
   (containers/ubuntu/patches/0002-xwayland-keyboard-grab.patch), but that
   path is unverified on real hardware with a keyboard attached (see
-  CLAUDE.md's "labwc must have zero keybindings" and the design spec in
+  CLAUDE.md's "labwc has no keybindings unless a key switch is on" and the
+  design spec in
   docs/superpowers/specs/). Until it is confirmed, every keybinding added
   here is a key combination that can never reach the ThinLinc session.
 

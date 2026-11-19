@@ -60,10 +60,10 @@
 #                      THINFLOE_BRIGHTNESS_KEYS both not on, a link to
 #                      .source/base.xml; otherwise base.xml with the media
 #                      key bindings on the lines before </keyboard>, the only
-#                      keybindings labwc gets (CLAUDE.md, "labwc must have zero
-#                      keybindings"). A file that cannot be written leaves
-#                      the keys off (a line on stderr, the exit status is
-#                      unchanged).
+#                      keybindings labwc gets (CLAUDE.md, "labwc has no
+#                      keybindings unless a key switch is on"). A file that
+#                      cannot be written leaves the keys off (a line on
+#                      stderr, the exit status is unchanged).
 
 set -eu
 
