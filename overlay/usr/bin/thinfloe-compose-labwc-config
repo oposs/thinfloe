@@ -232,7 +232,16 @@ build_source_rc() {
         [ -n "$_tmp_rc" ] && rm -f "$_tmp_rc"
         echo "$me: cannot write the key bindings; the volume and brightness keys stay off" >&2
     fi
-    ln -sfn "$_src/base.xml" "$_src/rc.xml" 2>/dev/null || true
+    # The link replaces a file with the keys in one rename: labwc-scale
+    # polls the checksum of rc.xml and must never find it missing.
+    _tmp_ln=
+    if _tmp_ln=$(mktemp "$_src/.rc.xml.XXXXXX" 2>/dev/null) &&
+        ln -sfn "$_src/base.xml" "$_tmp_ln" 2>/dev/null &&
+        mv -Tf "$_tmp_ln" "$_src/rc.xml" 2>/dev/null; then
+        return 0
+    fi
+    [ -n "$_tmp_ln" ] && rm -f "$_tmp_ln"
+    return 0
 }
 
 if [ "$ENV_ONLY" -eq 1 ]; then

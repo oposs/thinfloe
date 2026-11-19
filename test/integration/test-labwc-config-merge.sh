@@ -549,6 +549,29 @@ fi
 mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK" && keys_off "$OUTK" \
     && ok "--env-only: switching off links base.xml again" || bad "--env-only switch off: $(readlink "$OUTK/.source/rc.xml")"
 
+# The switch-off replaces the file .source/rc.xml by the link in one rename:
+# labwc-scale polls its checksum every second and must never find it gone.
+# ln makes a temporary link, mv -T puts it in place.
+TRACE_BIN="$WORK/trace-bin"
+mkdir -p "$TRACE_BIN"
+for tool in ln mv; do
+    real=$(command -v "$tool")
+    printf '#!/bin/sh\necho "%s $*" >>"%s"\nexec "%s" "$@"\n' "$tool" "$WORK/trace" "$real" >"$TRACE_BIN/$tool"
+    chmod 755 "$TRACE_BIN/$tool"
+done
+printf 'THINFLOE_VOLUME_KEYS=on\n' >"$MKGEN"
+mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK"
+: >"$MKGEN"
+: >"$WORK/trace"
+PATH="$TRACE_BIN:$PATH" mk_compose --env-only "$NLSYS" "$MKGEN" "$MKUSER" "$OUTK"
+if keys_off "$OUTK" && ! grep -q "^ln .*$OUTK/.source/rc.xml\$" "$WORK/trace" &&
+    grep -q "^mv -Tf $OUTK/.source/\.rc\.xml\.[^ ]* $OUTK/.source/rc.xml\$" "$WORK/trace" &&
+    [[ -z "$(ls -A "$OUTK/.source" | grep -v -x -e base.xml -e rc.xml)" ]]; then
+    ok "--env-only switch off: the link replaces rc.xml in one rename, no temporary left"
+else
+    bad "--env-only switch off not atomic: $(cat "$WORK/trace") / $(ls -A "$OUTK/.source")"
+fi
+
 # --env-only on a dir without .source/base.xml: only environment, a note.
 OUTK="$WORK/mk-nosource"
 mkdir -p "$OUTK"
