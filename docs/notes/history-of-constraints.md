@@ -208,11 +208,17 @@ requested by `90thinfloe/module-setup.sh` still filtered.
 ## labwc has no keybindings unless a key switch is on
 
 `overlay/etc/thinfloe/labwc/rc.xml` has a `<keyboard>` section with no
-`<default />` and no `<keybind>` entries. This is mandatory. The config
-directory lives at `/etc/thinfloe/labwc`, not under `$HOME` - see
-[Persistent Home Directory](home-persistence.md) for why - and is
-selected via `labwc -C /etc/thinfloe/labwc` in
-`overlay/etc/profile.d/10-thinfloe-session.sh`.
+`<default />` and no `<keybind>` entries. This is mandatory. The system
+config directory lives at `/etc/thinfloe/labwc`, not under `$HOME` - see
+[Persistent Home Directory](home-persistence.md) for why. At first
+`overlay/etc/profile.d/10-thinfloe-session.sh` started labwc with
+`labwc -C /etc/thinfloe/labwc`. Today it runs labwc with `-C` on a directory
+that `thinfloe-compose-labwc-config` composes at session start: the system
+files linked in, `rc.xml` included (or a copy of it written for the Num Lock
+switch or by `labwc-scale`), and a merged `environment`; only when the merge
+fails does it fall back to `/etc/thinfloe/labwc` (see
+[session.md](session.md)). The keybindings so come from the system `rc.xml`
+either way.
 
 An empty `<keyboard>` section does not by itself give zero keybindings.
 labwc 0.9.3's `post_processing()` in `src/config/rcxml.c` loads the built-in
