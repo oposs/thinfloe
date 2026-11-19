@@ -1194,6 +1194,131 @@ else
     fail=1
 fi
 
+# ddcutil depends on i2c-tools, which depends on perl for its decode-*
+# scripts only. slim-rootfs.sh removes the payload of perl, libperl5.* and
+# perl-modules-5.*; perl-base (Essential: debconf, adduser, the maintainer
+# script helpers) stays and must still run.
+absent  "perl's module tree"  'usr/share/perl/5[^/]*/'
+absent  "perl's XS module tree" 'usr/lib/x86_64-linux-gnu/perl/5[^/]*/'
+absent  "libperl"             'usr/lib/x86_64-linux-gnu/libperl\.so'
+present "perl-base's perl"    'usr/bin/perl$'
+present "perl-base's modules" 'usr/lib/x86_64-linux-gnu/perl-base/strict\.pm$'
+perl_out=$(podman run --rm --log-driver=none --network=none "$IMAGE" \
+    /usr/bin/perl -e 'use strict; use warnings; print "ok"' 2>&1)
+if [[ "$perl_out" == "ok" ]]; then
+    echo "ok   - perl-base runs a strict script"
+else
+    echo "FAIL - /usr/bin/perl -e 'use strict; use warnings' in $IMAGE: ${perl_out:-no output}"
+    fail=1
+fi
+# Every file in the image whose #! line names perl, matched against this
+# list (first matching glob wins): package | verdict | why. "ok" means the
+# file is used and must compile (perl -c, with its #! flags) on perl-base
+# alone; "dead" means nothing on a ThinFloe client runs it. A perl script
+# that no line matches fails and names itself, and so does a line without a
+# file.
+PERL_SCRIPTS='/usr/bin/c_rehash|openssl|ok|ca-certificates update hook
+/usr/bin/ddcmon|i2c-tools|ok|manual monitor probe; ddcutil does not use it
+/usr/bin/decode-dimms|i2c-tools|ok|manual RAM SPD decoder; nothing calls it
+/usr/bin/decode-edid|i2c-tools|ok|manual EDID decoder; nothing calls it
+/usr/bin/decode-vaio|i2c-tools|ok|manual Sony EEPROM decoder; nothing calls it
+/usr/sbin/i2c-stub-from-dump|i2c-tools|ok|manual i2c-stub loader; nothing calls it
+/usr/bin/deb-systemd-helper|init-system-helpers|ok|maintainer scripts (add-on dpkg -i)
+/usr/bin/deb-systemd-invoke|init-system-helpers|ok|maintainer scripts (add-on dpkg -i)
+/usr/sbin/update-rc.d|init-system-helpers|ok|maintainer scripts (add-on dpkg -i)
+/usr/sbin/adduser|adduser|ok|maintainer scripts
+/usr/sbin/deluser|adduser|ok|maintainer scripts
+/usr/sbin/pam-auth-update|libpam-runtime|ok|maintainer scripts
+/usr/sbin/pam_getenv|libpam-runtime|ok|PAM helper
+/usr/sbin/update-locale|locales|ok|locale configuration
+/usr/sbin/validlocale|locales|ok|locale configuration
+/usr/bin/ucfq|ucf|ok|maintainer scripts
+/usr/bin/linux-run-hooks|linux-base|ok|kernel maintainer scripts
+/usr/bin/linux-update-symlinks|linux-base|ok|kernel maintainer scripts
+/usr/bin/linux-version|linux-base|ok|kernel maintainer scripts
+/usr/bin/linux-check-removal|linux-base|dead|kernel removal only; perl -c runs its usage check
+/usr/bin/helpztags|vim-common|ok|vim help tags; nothing calls it
+/usr/lib/ssl/misc/CA.pl|openssl|ok|manual CA helper; nothing calls it
+/usr/lib/ssl/misc/tsget.pl|openssl|dead|needs WWW::Curl, missing with full perl too
+/usr/lib/dpkg/methods/apt/setup|apt|dead|dselect access method; dselect is not used
+/usr/share/rsync/scripts/lsh|rsync|dead|rsync test helper, needs English.pm
+/usr/share/rsync/scripts/*|rsync|ok|example scripts; nothing calls them
+/usr/lib/x86_64-linux-gnu/perl-base/*|perl-base|ok|perl-base itself
+/usr/bin/debconf*|debconf|ok|debconf, used by maintainer scripts
+/usr/sbin/dpkg-preconfigure|debconf|ok|debconf
+/usr/sbin/dpkg-reconfigure|debconf|ok|debconf
+/usr/share/debconf/*|debconf|ok|debconf frontend
+/usr/share/perl5/Debian/DebConf/Client/ConfModule.pm|debconf|dead|old client API, no package uses it; loading it starts a frontend
+/usr/share/perl5/Debconf/DbDriver/LDAP.pm|debconf|dead|needs Net::LDAP, missing with full perl too
+/usr/share/perl5/Debconf/Element/Gnome.pm|debconf|dead|Gnome frontend needs Gtk3, missing with full perl too
+/usr/share/perl5/Debconf/Element/Gnome/*|debconf|dead|Gnome frontend needs Gtk3, missing with full perl too
+/usr/share/perl5/Debconf/FrontEnd/Gnome.pm|debconf|dead|Gnome frontend needs Gtk3, missing with full perl too
+/usr/share/perl5/Debconf/FrontEnd/Web.pm|debconf|dead|Web frontend needs CGI, missing with full perl too
+/usr/share/perl5/Debconf/FrontEnd/Readline.pm|debconf|dead|needs Term::ReadLine; debconf falls back to Teletype or Noninteractive
+/usr/share/perl5/Debconf/FrontEnd/Text.pm|debconf|dead|needs Term::ReadLine; debconf falls back to Teletype or Noninteractive
+/usr/share/perl5/Debconf/Element/Noninteractive/Error.pm|debconf|dead|does not compile with full perl either (undeclared $mail, a debconf bug)
+/usr/share/perl5/Debconf/*|debconf|ok|debconf modules'
+# Runs in the image: prints "<path>\tOK" or "<path>\tFAIL\t<first error line>"
+# for every regular file whose first line is a perl #! line.
+# shellcheck disable=SC2016
+PERL_SCAN='import os, re, subprocess
+pat = re.compile(rb"^#!\s*(\S*/)?(env\s+(-\S+\s+)*)?perl[0-9.]*(\s|$)")
+skip = ("/proc", "/sys", "/dev", "/run", "/tmp")
+for root, dirs, files in os.walk("/"):
+    dirs[:] = sorted(d for d in dirs if os.path.join(root, d) not in skip)
+    for name in sorted(files):
+        p = os.path.join(root, name)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                head = fh.readline(200)
+        except OSError:
+            continue
+        if not pat.match(head):
+            continue
+        flags = [w for w in head.decode("latin-1").split()[1:] if w.startswith("-")]
+        r = subprocess.run(["/usr/bin/perl", *flags, "-c", p], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+        if r.returncode == 0:
+            print(p + "\tOK")
+        else:
+            err = r.stderr.decode("utf-8", "replace").strip().splitlines() or ["exit %d" % r.returncode]
+            print(p + "\tFAIL\t" + err[0][:160])'
+if scan_out=$(timeout 300 podman run --rm --log-driver=none --network=none "$IMAGE" \
+        python3 -I -c "$PERL_SCAN" 2>&1) && [[ -n "$scan_out" ]]; then
+    declare -A perl_used=()
+    perl_bad=0
+    while IFS=$'\t' read -r path status err; do
+        hit=""
+        while IFS='|' read -r pattern _ verdict _; do
+            # shellcheck disable=SC2053 # pattern is a glob on purpose
+            if [[ $path == $pattern ]]; then hit="$verdict"; perl_used[$pattern]=1; break; fi
+        done <<<"$PERL_SCRIPTS"
+        if [[ -z "$hit" ]]; then
+            echo "FAIL - perl script $path is not on the list in this test (${status}${err:+: $err})"
+            perl_bad=1
+        elif [[ $hit == ok && $status != OK ]]; then
+            echo "FAIL - perl script $path does not compile on perl-base: $err"
+            perl_bad=1
+        fi
+    done <<<"$scan_out"
+    while IFS='|' read -r pattern pkg _; do
+        if [[ -z "${perl_used[$pattern]:-}" ]]; then
+            echo "FAIL - perl list line matches no file in the image: $pattern ($pkg)"
+            perl_bad=1
+        fi
+    done <<<"$PERL_SCRIPTS"
+    if [[ $perl_bad -eq 0 ]]; then
+        echo "ok   - every perl script in the image is listed; the used ones compile on perl-base ($(grep -c . <<<"$scan_out") files)"
+    else
+        fail=1
+    fi
+else
+    echo "FAIL - cannot scan $IMAGE for perl scripts: ${scan_out:-no output}"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

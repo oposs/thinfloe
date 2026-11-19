@@ -14,11 +14,12 @@ set -uo pipefail
 # Budgets in bytes: the sizes measured on 2026-11-13 plus 2 %, rounded up to
 # a whole MB. initrd.img 84.7 MB; ramroot.sqsh 391.0 MB and the sum 493.0 MB
 # after nouveau stayed and Carrizo/Stoney firmware came in (first set at
-# 389.1 MB and 491.1 MB). ramroot.sqsh 401 MB since ddcutil (the brightness
-# keys) came in at 400.6 MB: it depends on i2c-tools, which brings perl; the
-# sum stayed within its budget (502.7 MB).
+# 389.1 MB and 491.1 MB). ddcutil (the brightness keys) brought i2c-tools and
+# with it perl (400.6 MB, budget raised to 401 MB for one commit);
+# slim-rootfs.sh drops perl's module tree again, so the budget is back at
+# 399 MB.
 # Raising one needs a reason in the commit message.
-MAX_SQSH=401000000
+MAX_SQSH=399000000
 MAX_INITRD=87000000
 MAX_SUM=503000000
 
