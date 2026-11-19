@@ -255,6 +255,10 @@ None of these can be shown in QEMU or the headless rig:
 - Mic mute in a ThinLinc call: the remote side hears nothing.
 - Volume keys inside a fullscreen ThinLinc session, and Alt-Tab still goes to
   ThinLinc there.
+- XF86AudioMute and XF86AudioMicMute inside a fullscreen ThinLinc session:
+  their bindings act on release (`onRelease="yes"`), and the runtime test
+  covers only a press binding under a grab. Each key must act once, and the
+  remote side must get no stray key release.
 - OxuLnk: the keys pass its shortcuts inhibitor (no rig can create one).
 - The real keyboard's keys send the keysyms the composer binds.
 - Two speakers and two microphones (monitor speakers and a USB headset): the
