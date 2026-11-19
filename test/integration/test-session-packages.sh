@@ -1370,6 +1370,42 @@ else
     fail=1
 fi
 
+# Links to files the image does not have. gnu-coreutils' LC_TIME/coreutils.mo
+# point into LC_MESSAGES, which the dpkg excludes drop (see the Dockerfile).
+# systemd's tmpfiles made /var/log/README and /etc/vconsole.conf at each
+# boot; the overlay replaces legacy.conf and debian.conf without those two
+# lines. Any other difference from systemd's file means systemd changed it,
+# and the copy must be made again.
+absent "the LC_TIME coreutils.mo links" '^squashfs-root/usr/share/locale/[^/]+/LC_TIME/coreutils\.mo$'
+absent "/var/log/README"                '^squashfs-root/var/log/README$'
+absent "/etc/vconsole.conf"             '^squashfs-root/etc/vconsole\.conf$'
+TF_TMP=$(mktemp -d)
+TMPS+=("$TF_TMP")
+tf_lines() { grep -v -e '^#' -e '^[[:space:]]*$' "$1"; }
+if unsquashfs -no-xattrs -d "$TF_TMP/x" "$SQSH" \
+        usr/lib/tmpfiles.d/legacy.conf usr/lib/tmpfiles.d/debian.conf \
+        etc/tmpfiles.d/legacy.conf etc/tmpfiles.d/debian.conf >/dev/null 2>&1; then
+    for pair in "legacy.conf /var/log/README" "debian.conf /etc/vconsole.conf"; do
+        f=${pair%% *} path=${pair#* }
+        sys="$TF_TMP/x/usr/lib/tmpfiles.d/$f" ours="$TF_TMP/x/etc/tmpfiles.d/$f"
+        if ! [[ -f "$sys" && -f "$ours" ]]; then
+            echo "FAIL - $f is missing from usr/lib/tmpfiles.d or etc/tmpfiles.d"
+            fail=1
+        elif ! tf_lines "$sys" | grep -qF " $path "; then
+            echo "FAIL - systemd's $f no longer makes $path: drop etc/tmpfiles.d/$f from the overlay"
+            fail=1
+        elif diff <(tf_lines "$sys" | grep -vF " $path ") <(tf_lines "$ours") >/dev/null; then
+            echo "ok   - etc/tmpfiles.d/$f is systemd's without $path"
+        else
+            echo "FAIL - systemd's $f changed; copy it again into overlay/etc/tmpfiles.d/ without $path"
+            fail=1
+        fi
+    done
+else
+    echo "FAIL - cannot extract the tmpfiles.d files from $SQSH"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo ""
     echo "FAILED - session stack is not as expected"

@@ -39,6 +39,25 @@ check_no_dangling_links() {
     [[ -z $links ]] || die "dangling firmware symlinks $1:"$'\n'"$links"
 }
 
+# No link anywhere in the finished tree may dangle: it would point at nothing
+# on every client. A target under a file system that exists only at run time
+# (/run, /proc, /sys, /dev, /tmp) is filled at boot and counts as present.
+# Runs last, after every cut.
+check_no_dangling_links_in_tree() {
+    local links link target bad=""
+    links=$(find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /tmp \
+        -o -path /thinfloe-slim \) -prune -o -xtype l -print) || die "find over / failed"
+    while IFS= read -r link; do
+        [[ -n $link ]] || continue
+        target=$(readlink -m -- "$link")
+        case $target in
+            /run/* | /proc/* | /sys/* | /dev/* | /tmp/*) continue ;;
+        esac
+        bad+="$link -> $(readlink -- "$link")"$'\n'
+    done <<<"$links"
+    [[ -z $bad ]] || die "dangling symlinks in the image:"$'\n'"$bad"
+}
+
 # Exactly one kernel, and the initrd that dracut built for it.
 preconditions() {
     local dirs=()
@@ -404,6 +423,7 @@ main() {
     drop_i18n
     drop_hwdb_sources
     drop_perl_modules
+    check_no_dangling_links_in_tree
 }
 
 main "$@"

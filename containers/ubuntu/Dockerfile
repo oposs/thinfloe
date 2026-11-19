@@ -102,6 +102,14 @@ RUN set -eu; mkdir -p /out; \
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
+# The base image's dpkg excludes drop every LC_MESSAGES/*.mo, but
+# gnu-coreutils also ships LC_TIME/coreutils.mo in each language as a link
+# into LC_MESSAGES, which that pattern does not match: 45 dangling links.
+# Exclude LC_TIME/*.mo as well and unpack gnu-coreutils again (below, with
+# the upgrade), so the exclude covers what the base image already holds.
+# slim-rootfs.sh fails the build on any dangling link.
+RUN printf 'path-exclude=/usr/share/locale/*/LC_TIME/*.mo\n' >/etc/dpkg/dpkg.cfg.d/thinfloe-excludes
+
 # Update and install base packages in single layer to avoid stale cache.
 #
 # xcursor-themes ships Xcursor pointer theme files (whiteglass, redglass,
@@ -123,7 +131,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 #
 # systemd-resolved is only downloaded here and installed in the next RUN, see
 # there.
-RUN apt-get update && apt-get upgrade -y && apt-get install -yq \
+RUN apt-get update && apt-get upgrade -y && apt-get install -yq --reinstall gnu-coreutils && \
+    apt-get install -yq \
     --no-install-recommends --no-install-suggests \
     systemd-sysv \
     vim-tiny \
@@ -316,7 +325,14 @@ ADD overlay/ /__overlay
 # and git cannot store mode 0600, so set it here.
 # The 644 copy of the DHCP default is what the settings tab shows and restores,
 # since /etc/netplan/ethernet.yaml itself is unreadable for tfuser.
+# The overlay's etc/tmpfiles.d/{legacy,debian}.conf replace systemd's files
+# of the same name without the lines for /var/log/README and
+# /etc/vconsole.conf: their targets (/usr/share/doc/systemd/README.logs,
+# /etc/default/keyboard from keyboard-configuration) are not in the image,
+# so each boot made two dangling links. The links systemd's postinst already
+# made go here.
 RUN tar cf - --exclude="*~" --exclude="__pycache__" -C /__overlay . | tar xf - && rm -rf /__overlay \
+    && rm -f /var/log/README /etc/vconsole.conf \
     && chmod 600 /etc/netplan/*.yaml \
     && install -D -m 644 /etc/netplan/ethernet.yaml /usr/share/thinfloe/netplan/ethernet.yaml
 RUN chown -R tfuser:tfuser /home/tfuser
