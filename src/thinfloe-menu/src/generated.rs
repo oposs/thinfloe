@@ -75,11 +75,13 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             // labwc does not start on a keymap XKB cannot build.
             crate::keyboard::validate(kb, inp.registry.as_deref()).map_err(|e| format!("Keyboard: {e}"))?;
             Ok(Some(with_header(&format!(
-                "XKB_DEFAULT_LAYOUT={}\nXKB_DEFAULT_VARIANT={}\nXKB_DEFAULT_OPTIONS={}\nTHINFLOE_NUMLOCK={}\n",
+                "XKB_DEFAULT_LAYOUT={}\nXKB_DEFAULT_VARIANT={}\nXKB_DEFAULT_OPTIONS={}\nTHINFLOE_NUMLOCK={}\nTHINFLOE_VOLUME_KEYS={}\nTHINFLOE_BRIGHTNESS_KEYS={}\n",
                 kb.layout,
                 kb.variant,
                 xkb_options(kb),
-                if kb.numlock { "on" } else { "off" }
+                if kb.numlock { "on" } else { "off" },
+                if kb.volume_keys { "on" } else { "off" },
+                if kb.brightness_keys { "on" } else { "off" }
             ))))
         }
         "screen" => Ok(Some(with_header(&screentab::body(cfg.screen.idle_timeout)))),
@@ -220,13 +222,22 @@ mod tests {
         assert_eq!(
             t,
             format!(
-                "{HEADER}\nXKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps\nTHINFLOE_NUMLOCK=on\n"
+                "{HEADER}\nXKB_DEFAULT_LAYOUT=us\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_OPTIONS=compose:ralt,ctrl:nocaps\nTHINFLOE_NUMLOCK=on\nTHINFLOE_VOLUME_KEYS=off\nTHINFLOE_BRIGHTNESS_KEYS=off\n"
             )
         );
         let mut c = ThinfloeConfig::default();
         c.keyboard.numlock = false;
         let t = render(&c, "environment", &inp()).unwrap().unwrap();
-        assert!(t.ends_with("\nTHINFLOE_NUMLOCK=off\n"), "{t}");
+        assert!(t.contains("\nTHINFLOE_NUMLOCK=off\n"), "{t}");
+    }
+
+    #[test]
+    fn media_key_switches_reach_the_environment() {
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.volume_keys = true;
+        let t = render(&c, "environment", &inp()).unwrap().unwrap();
+        assert!(t.contains("\nTHINFLOE_VOLUME_KEYS=on\n"), "{t}");
+        assert!(t.contains("\nTHINFLOE_BRIGHTNESS_KEYS=off\n"), "{t}");
     }
 
     #[test]

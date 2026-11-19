@@ -775,6 +775,8 @@ mod tests {
                 caps_as_ctrl: true,
                 compose: Compose::Menu,
                 numlock: true,
+                volume_keys: false,
+                brightness_keys: false,
             }
         );
         assert_eq!(c.screen.idle_timeout, 900);

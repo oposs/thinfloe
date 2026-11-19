@@ -13,6 +13,8 @@ pub enum KbEvent {
     CapsAsCtrl(bool),
     Compose(Compose),
     NumLock(bool),
+    VolumeKeys(bool),
+    BrightnessKeys(bool),
     /// The test field: text typed to try the layout. Applies nothing.
     TryText(String),
 }
@@ -27,6 +29,9 @@ pub enum KbOutcome {
     /// Saved, but handing it to the running compositor failed: why.
     Saved(String),
 }
+
+/// Said under the volume and brightness switches.
+pub const MEDIA_KEYS_NOTE: &str = "When on, these keys no longer reach the ThinLinc session or any other program.";
 
 /// Said after a live apply while Num Lock differs from the session's start
 /// value: labwc sets it only when a keyboard appears.
@@ -194,6 +199,8 @@ impl KeyboardTab {
             KbEvent::CapsAsCtrl(on) => next.caps_as_ctrl = on,
             KbEvent::Compose(c) => next.compose = c,
             KbEvent::NumLock(on) => next.numlock = on,
+            KbEvent::VolumeKeys(on) => next.volume_keys = on,
+            KbEvent::BrightnessKeys(on) => next.brightness_keys = on,
         }
         let checked = match &self.registry {
             Ok(reg) => validate(&next, Some(reg)),
@@ -411,6 +418,15 @@ mod tests {
         let mut t = tab("us", "");
         assert_eq!(t.event(KbEvent::CapsAsCtrl(true)), None);
         assert!(!t.applying);
+    }
+
+    #[test]
+    fn a_media_key_switch_applies_live_without_a_note() {
+        let mut t = tab("us", "");
+        let next = t.event(KbEvent::VolumeKeys(true)).unwrap();
+        assert!(next.volume_keys);
+        assert_eq!(t.done(&next, Ok(KbOutcome::Live)), None);
+        assert_eq!(t.note, None);
     }
 
     #[test]
