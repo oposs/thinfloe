@@ -10,6 +10,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -95,6 +97,7 @@ fi
 MTREE="$WORK/mtree"
 mkdir -p "$MTREE/containers/ubuntu/patches" "$MTREE/artifacts/rootfs"
 cp "$REPO/Makefile" "$MTREE/Makefile"
+tf_guard_tree "$MTREE" "$WORK"
 printf '4.2.0\n' >"$MTREE/RELEASE"
 : >"$MTREE/containers/ubuntu/Dockerfile"
 mkdir -p "$MTREE/overlay/etc"
@@ -162,6 +165,7 @@ rm -f "$MTREE/overlay/etc/new"
 NOGIT="$WORK/nogit"
 mkdir -p "$NOGIT"
 cp "$MTREE/Makefile" "$MTREE/RELEASE" "$NOGIT/"
+tf_guard_tree "$NOGIT" "$WORK"
 if ! out=$(GIT_CEILING_DIRECTORIES="$WORK" env -u MAKEFLAGS -u MAKELEVEL -u TF_VERSION \
             make -C "$NOGIT" CONTAINER_RUNTIME="$WORK/podman" -n image 2>&1) \
         && grep -qF 'nor a dev version 4.2.0-dev+<sha>[.dirty]' <<<"$out" \
@@ -181,6 +185,7 @@ done
 RTREE="$WORK/rtree"
 mkdir -p "$RTREE"
 cp "$MTREE/Makefile" "$RTREE/"
+tf_guard_tree "$RTREE" "$WORK"
 for r in $'4.2.0\n4.2.1' '4.2.0 4.2.1' 4.2 ''; do
     printf '%s\n' "$r" >"$RTREE/RELEASE"
     if ! out=$(env -u MAKEFLAGS -u MAKELEVEL make -C "$RTREE" -n image TF_VERSION=4.2.0 2>&1) \

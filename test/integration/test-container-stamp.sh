@@ -19,6 +19,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -47,6 +49,7 @@ TREE="$WORK/tree"
 mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/artifacts/rootfs" \
     "$TREE/src/thinfloe-menu/src"
 cp "$REPO/Makefile" "$TREE/Makefile"
+tf_guard_tree "$TREE" "$WORK"
 : >"$TREE/containers/ubuntu/Dockerfile"
 : >"$TREE/src/thinfloe-menu/src/main.rs"
 echo 4.0.0 >"$TREE/RELEASE"

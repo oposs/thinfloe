@@ -13,6 +13,8 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=test/integration/lib/scratch-tree.sh
+source "$REPO/test/integration/lib/scratch-tree.sh"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -36,12 +38,13 @@ setup() {
     echo 4.2.0 >"$TREE/RELEASE"
     : >"$SHARED/rootfs/ramroot.sqsh"
     if [[ "$1" == link ]]; then
-        ln -s "$SHARED" "$TREE/artifacts"
+        ln -s "$SHARED" "$TREE/artifacts"  # a link, but into $WORK
     else
         cp -r "$SHARED" "$TREE/artifacts"
     fi
     : >"$TREE/.ubuntu-container"
     : >"$TREE/.image-builder-container"
+    tf_guard_tree "$TREE" "$WORK"
 }
 
 run_clean() {
