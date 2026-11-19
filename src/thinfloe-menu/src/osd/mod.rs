@@ -128,22 +128,27 @@ fn act_without_osd(a: Action) {
         }
     };
     let p = audio::Pactl::from_env();
-    let done = p.list(kind).map(|devices| {
-        let default = p.default_name(kind).ok();
-        let (mut s, _) = match kind {
-            audio::Kind::Sink => sync::Sync::start(sync::Mode::Keys, &devices, &[], default.as_deref(), None),
-            audio::Kind::Source => sync::Sync::start(sync::Mode::Keys, &[], &devices, None, default.as_deref()),
-        };
-        let sets = match a {
-            Action::VolumeUp => s.step(VOLUME_STEP, &devices),
-            Action::VolumeDown => s.step(-VOLUME_STEP, &devices),
-            Action::VolumeMute => s.toggle_mute(&devices),
-            _ => s.toggle_mic(&devices),
-        };
-        for e in p.apply(&sets) {
-            eprintln!("thinfloe-menu --osd-key: no OSD running; {}: {e}", a.as_str());
-        }
-    });
+    // A default that cannot be read is an error, not "no default": the
+    // keys would start from 100 %.
+    let done = p
+        .list(kind)
+        .and_then(|d| Ok((d, p.default_name(kind)?)))
+        .map(|(devices, name)| {
+            let default = Some(name).filter(|n| !n.is_empty());
+            let (mut s, _) = match kind {
+                audio::Kind::Sink => sync::Shared::start(sync::Mode::Keys, &devices, &[], default.as_deref(), None),
+                audio::Kind::Source => sync::Shared::start(sync::Mode::Keys, &[], &devices, None, default.as_deref()),
+            };
+            let sets = match a {
+                Action::VolumeUp => s.step(VOLUME_STEP, &devices),
+                Action::VolumeDown => s.step(-VOLUME_STEP, &devices),
+                Action::VolumeMute => s.toggle_mute(&devices),
+                _ => s.toggle_mic(&devices),
+            };
+            for e in p.apply(&sets) {
+                eprintln!("thinfloe-menu --osd-key: no OSD running; {}: {e}", a.as_str());
+            }
+        });
     match done {
         Ok(()) => eprintln!(
             "thinfloe-menu --osd-key: no OSD running; {} done without a display",

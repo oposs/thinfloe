@@ -203,3 +203,25 @@ fn osd_key_reaches_a_listening_osd() {
     // The OSD acts, not the client.
     assert_eq!(d.log(), "");
 }
+
+#[test]
+fn osd_key_without_a_readable_default_sets_nothing() {
+    let d = Dir::new("padefault");
+    fake_pactl(&d, &sinks_at_40(), "[]", "tf_null_a\n", "");
+    // get-default-sink fails before the case answers it.
+    let body = fs::read_to_string(d.0.join("pactl")).unwrap().replacen(
+        "case",
+        "[ \"$1\" = get-default-sink ] && { echo 'Connection failure: Timeout' >&2; exit 1; }\ncase",
+        1,
+    );
+    fs::write(d.0.join("pactl"), body).unwrap();
+    let out = osd_key(&d.0, &["volume-up"]);
+    assert_eq!(out.status.code(), Some(0));
+    let log = d.log();
+    assert!(!log.contains("set-"), "{log}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no OSD running; volume-up: ") && err.contains("Timeout"),
+        "{err}"
+    );
+}

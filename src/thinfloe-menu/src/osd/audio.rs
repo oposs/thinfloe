@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::sync::{Mode, Set, Sync};
+use super::sync::{Mode, Set, Shared};
 
 /// How long one `pactl` call may take.
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -53,7 +53,8 @@ pub struct Device {
 /// the monitor of a sink is left out: it is a copy of what the sink
 /// plays, not a microphone. pactl 17 names that sink under
 /// `monitor_source` in a source's entry (empty for a microphone); other
-/// versions under `monitor_of_sink` (`n/a` for none). An entry without a
+/// versions under `monitor_of_sink` (`n/a` for none); either way its
+/// `device.class` property is `monitor`. An entry without a
 /// name, index or channel volume is left out, not the whole list.
 pub fn parse_devices(kind: Kind, json: &str) -> Result<Vec<Device>, String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("pactl printed no device list: {e}"))?;
@@ -67,7 +68,10 @@ fn device(kind: Kind, d: &Value) -> Option<Device> {
             .and_then(Value::as_str)
             .is_some_and(|s| !s.is_empty() && s != "n/a")
     };
-    if kind == Kind::Source && (monitor_of("monitor_of_sink") || monitor_of("monitor_source")) {
+    let class = d.pointer("/properties/device.class").and_then(Value::as_str);
+    if kind == Kind::Source
+        && (monitor_of("monitor_of_sink") || monitor_of("monitor_source") || class == Some("monitor"))
+    {
         return None;
     }
     let percents: Vec<f64> = d
@@ -254,7 +258,7 @@ pub struct AudioWorker {
 }
 
 impl AudioWorker {
-    /// At start the worker brings every device in line (`Sync::start`) and
+    /// At start the worker brings every device in line (`Shared::start`) and
     /// sends one `Mark`.
     pub fn spawn(p: Pactl, mode: Mode, on_event: impl Fn(AudioEvent) + Send + 'static) -> AudioWorker {
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
@@ -269,9 +273,13 @@ impl AudioWorker {
                 }
             }
             while let Some(r) = next(&s) {
-                if let Some(ev) = w.handle(r) {
+                let (ev, sets) = w.handle(r);
+                // The panel shows the new state at once; a stalled sound
+                // server holds only the sets, not the panel.
+                if let Some(ev) = ev {
                     on_event(ev);
                 }
+                w.apply(&sets);
             }
         });
         AudioWorker { shared }
@@ -307,7 +315,7 @@ impl Drop for AudioWorker {
 struct Worker {
     p: Pactl,
     mode: Mode,
-    sync: Option<Sync>,
+    sync: Option<Shared>,
 }
 
 impl Worker {
@@ -316,9 +324,12 @@ impl Worker {
     fn start(&mut self) -> Result<bool, String> {
         let sinks = self.p.list(Kind::Sink)?;
         let sources = self.p.list(Kind::Source)?;
-        let default_sink = self.p.default_name(Kind::Sink).ok();
-        let default_source = self.p.default_name(Kind::Source).ok();
-        let (sync, sets) = Sync::start(
+        // A default that cannot be read fails the start: taken for "no
+        // default", it would set every device to 100 %.
+        let named = |n: String| Some(n).filter(|n| !n.is_empty());
+        let default_sink = named(self.p.default_name(Kind::Sink)?);
+        let default_source = named(self.p.default_name(Kind::Source)?);
+        let (sync, sets) = Shared::start(
             self.mode,
             &sinks,
             &sources,
@@ -343,45 +354,56 @@ impl Worker {
         self.p.source_muted().map_or_else(AudioEvent::Failed, AudioEvent::Mark)
     }
 
-    /// What `r` does; the event to send, if any.
-    fn handle(&mut self, r: AudioRequest) -> Option<AudioEvent> {
+    /// What `r` does: the event to send, if any, and the sets to run
+    /// after it.
+    fn handle(&mut self, r: AudioRequest) -> (Option<AudioEvent>, Vec<Set>) {
         let done = match r {
             AudioRequest::Step(d) => self
                 .with(Kind::Sink, |s, sinks| s.step(d, sinks))
-                .map(|s| AudioEvent::Sink(s.level())),
+                .map(|(s, sets)| (AudioEvent::Sink(s.level()), sets)),
             AudioRequest::ToggleMute => self
-                .with(Kind::Sink, Sync::toggle_mute)
-                .map(|s| AudioEvent::Sink(s.level())),
+                .with(Kind::Sink, Shared::toggle_mute)
+                .map(|(s, sets)| (AudioEvent::Sink(s.level()), sets)),
             AudioRequest::ToggleMic => self
-                .with(Kind::Source, Sync::toggle_mic)
-                .map(|s| AudioEvent::Mic(s.mic_muted())),
+                .with(Kind::Source, Shared::toggle_mic)
+                .map(|(s, sets)| (AudioEvent::Mic(s.mic_muted()), sets)),
             AudioRequest::Device(PaEvent::New(kind, index)) => {
-                return self.on_new(kind, index).err().map(AudioEvent::Failed);
+                return (self.on_new(kind, index).err().map(AudioEvent::Failed), Vec::new());
             }
-            AudioRequest::Device(e) if refreshes_mark(&e) => return Some(self.mark()),
-            AudioRequest::Device(_) => return None,
+            AudioRequest::Device(e) if refreshes_mark(&e) => return (Some(self.mark()), Vec::new()),
+            AudioRequest::Device(_) => return (None, Vec::new()),
             AudioRequest::Mode(m) => {
                 self.mode = m;
-                return self.realign(|s, sinks, sources| s.set_mode(m, sinks, sources));
+                return (
+                    self.realign(|s, sinks, sources| s.set_mode(m, sinks, sources)),
+                    Vec::new(),
+                );
             }
-            AudioRequest::Resync => return self.realign(|s, sinks, sources| s.reapply(sinks, sources)),
+            AudioRequest::Resync => {
+                return (self.realign(|s, sinks, sources| s.reapply(sinks, sources)), Vec::new());
+            }
         };
-        Some(done.unwrap_or_else(AudioEvent::Failed))
+        match done {
+            Ok((ev, sets)) => (Some(ev), sets),
+            Err(e) => (Some(AudioEvent::Failed(e)), Vec::new()),
+        }
     }
 
     /// The shared state, started first if no start has worked yet (the
     /// sound server was not up), and the devices of `kind`; `f` changes
-    /// the state, its sets run. The state afterwards.
-    fn with(&mut self, kind: Kind, f: impl FnOnce(&mut Sync, &[Device]) -> Vec<Set>) -> Result<Sync, String> {
+    /// the state. The state afterwards, and the sets still to run.
+    fn with(
+        &mut self,
+        kind: Kind,
+        f: impl FnOnce(&mut Shared, &[Device]) -> Vec<Set>,
+    ) -> Result<(Shared, Vec<Set>), String> {
         if self.sync.is_none() {
             self.start()?;
         }
         let devices = self.p.list(kind)?;
         let sync = self.sync.as_mut().expect("started");
         let sets = f(sync, &devices);
-        let after = sync.clone();
-        self.apply(&sets);
-        Ok(after)
+        Ok((sync.clone(), sets))
     }
 
     fn on_new(&mut self, kind: Kind, index: u32) -> Result<(), String> {
@@ -397,7 +419,7 @@ impl Worker {
     }
 
     /// Every device again, through `f`; a start does that by itself.
-    fn realign(&mut self, f: impl FnOnce(&mut Sync, &[Device], &[Device]) -> Vec<Set>) -> Option<AudioEvent> {
+    fn realign(&mut self, f: impl FnOnce(&mut Shared, &[Device], &[Device]) -> Vec<Set>) -> Option<AudioEvent> {
         let Some(sync) = &mut self.sync else {
             return self.start().err().map(AudioEvent::Failed);
         };
@@ -580,6 +602,13 @@ mod tests {
             got.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
             ["mic", "cam", "usb"]
         );
+        // A source marked only by its properties is a monitor too.
+        let marked = format!(
+            r#"[{{"index":5,"name":"m","mute":false,{v},"properties":{{"device.class":"monitor"}}}},
+                                 {{"index":6,"name":"k","mute":false,{v},"properties":{{"device.class":"sound"}}}}]"#
+        );
+        let got = parse_devices(Kind::Source, &marked).unwrap();
+        assert_eq!(got.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["k"]);
         // A sink's "monitor_source" is its own monitor, not a reason to skip.
         assert_eq!(parse_devices(Kind::Sink, SINKS).unwrap().len(), 2);
     }
@@ -715,6 +744,8 @@ mod tests {
         wait_for("a Sink event", || {
             count(&events, |e| matches!(e, AudioEvent::Sink(_))) == 1
         });
+        // The sets run after the event.
+        wait_for("both sets", || calls(&d, "set-").len() == 2);
         assert_eq!(
             calls(&d, "set-"),
             ["set-sink-volume gone 45%", "set-sink-volume kept 45%"]
@@ -903,6 +934,9 @@ mod tests {
         wait_for("a Mic event", || {
             events.lock().unwrap().contains(&AudioEvent::Mic(true))
         });
+        wait_for("the source set", || !calls(&d, "set-source").is_empty());
+        // Room for a wrong set on a monitor to show.
+        std::thread::sleep(Duration::from_millis(200));
         assert_eq!(
             calls(&d, "set-source"),
             ["set-source-mute tf_mic 1"],
@@ -910,5 +944,61 @@ mod tests {
         );
         // The default source here is a monitor: no mark.
         assert!(!events.lock().unwrap().contains(&AudioEvent::Mark(true)));
+    }
+
+    #[test]
+    fn a_failed_default_read_fails_the_start_and_is_retried() {
+        let d = TestDir::new("osd-audio", "nodefault");
+        // A timeout or an error is not "no default": the sink at 40 % must
+        // not be taken for a start without one and set to 100 %.
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, false)]),
+            "[]",
+            "a",
+            "",
+            "[ \"$1\" = get-default-sink ] && { echo 'Connection failure: Timeout' >&2; exit 1; }",
+        );
+        let (worker, events) = spawn(p, Mode::Off);
+        wait_for("the start's failure", || {
+            count(&events, |e| matches!(e, AudioEvent::Failed(_))) == 1
+        });
+        worker.request(AudioRequest::Step(5));
+        wait_for("the retried start fails too", || {
+            count(&events, |e| matches!(e, AudioEvent::Failed(_))) == 2
+        });
+        assert_eq!(calls(&d, "get-default-sink").len(), 2, "the start is retried");
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
+        assert_eq!(count(&events, |e| matches!(e, AudioEvent::Sink(_))), 0);
+        // An empty default is "no default": full and unmuted.
+        let d = TestDir::new("osd-audio", "emptydef");
+        let p = fake(&d, &json(&[(1, "a", 40, false)]), "[]", "", "", "");
+        let (_worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        assert_eq!(calls(&d, "set-"), ["set-sink-volume a 100%"]);
+    }
+
+    #[test]
+    fn the_key_event_comes_before_the_sets() {
+        let d = TestDir::new("osd-audio", "latency");
+        // A stalled pipewire-pulse: every set takes 1 s.
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, false), (2, "b", 40, false)]),
+            "[]",
+            "a",
+            "",
+            "case \"$1\" in set-*) sleep 1;; esac",
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        let t0 = Instant::now();
+        worker.request(AudioRequest::Step(5));
+        wait_for("a Sink event", || {
+            count(&events, |e| matches!(e, AudioEvent::Sink(_))) == 1
+        });
+        assert!(t0.elapsed() < Duration::from_millis(900), "{:?}", t0.elapsed());
+        // The sets still run, both of them.
+        wait_for("both sets", || calls(&d, "set-sink-volume").len() == 2);
     }
 }
