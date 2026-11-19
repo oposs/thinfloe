@@ -339,10 +339,21 @@ pad over the letter keys) is `numlock` in `[keyboard]` and
 Lock from `<numlock>` in `rc.xml` only when a keyboard appears (at start and
 on hot-plug, `new_keyboard()` in `src/seat.c`), never on `--reconfigure`, so
 a live apply that changed it says "Num Lock follows at the next start." At
-session start, `thinfloe-compose-labwc-config` links `rc.xml` to a copy in
-`.numlock/` of the composed directory that says off; `labwc-scale` scales
-that copy. Guards: `test-labwc-config-merge.sh`, `test-labwc-scale.sh`, the
-`keyboard`, `generated` and `convert` tests.
+session start, `thinfloe-compose-labwc-config` writes `.source/base.xml` of
+the composed directory as a copy of the system `rc.xml` that says off;
+`labwc-scale` scales what `rc.xml` points to. Guards:
+`test-labwc-config-merge.sh`, `test-labwc-scale.sh`, the `keyboard`,
+`generated` and `convert` tests.
+
+"Volume keys control this machine" and "Brightness keys control the
+monitors" (both off by default) are `volume_keys` and `brightness_keys` in
+`[keyboard]` and `THINFLOE_VOLUME_KEYS=on|off`, `THINFLOE_BRIGHTNESS_KEYS=on|off`
+in `generated/environment` (managed keys, listed in
+`/etc/thinfloe/menu-managed-keys`). Under each switch the note "When on,
+these keys no longer reach the ThinLinc session or any other program." in
+the muted colour (`MEDIA_KEYS_NOTE`). A change takes effect at once: the
+composer adds or drops the bindings and the OSD gets a `reload`. See
+[media-keys.md](media-keys.md).
 
 labwc 0.9.3 segfaults at start (status 139, before the session runs) on a
 layout and variant XKB cannot build, so no value reaches

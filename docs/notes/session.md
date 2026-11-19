@@ -6,12 +6,19 @@ This note covers the running session: startup, the per-machine user files, the l
   sets `device.routes.default-sink-volume` and `-source-volume` to 1.0, so
   the remote client (ThinLinc through `tlclient-pulseaudio`, OxuLnk through
   `pipewire-alsa`) sets the loudness. WirePlumber 0.5.13's own output
-  default is 0.064 (40 % cubic, about -24 dB), and the image has no volume
-  control at the machine. The default is applied with `save = false`
-  (`apply-routes.lua`) and never stored; a volume set with `wpctl`/`pactl`
-  is stored in `~/.local/state/wireplumber/default-routes`, travels with the
-  home archive and wins. `test-session-packages.sh` asks the image's
-  WirePlumber for both values. **Not verified on hardware.**
+  default is 0.064 (40 % cubic, about -24 dB). The default is applied with
+  `save = false` (`apply-routes.lua`) and never stored; a volume set with
+  `wpctl`/`pactl` is stored in `~/.local/state/wireplumber/default-routes`,
+  travels with the home archive and wins. `test-session-packages.sh` asks
+  the image's WirePlumber for both values. **Not verified on hardware.**
+- With "Volume keys control this machine" on (Settings → Keyboard), the
+  keys set every speaker's volume and mute and every microphone's mute
+  through `pactl`. WirePlumber stores them in `~/.local/state/wireplumber/`,
+  they travel with the home, and they win over the 1.0 default at the next
+  start. With the switch off, every speaker and microphone is set to 100 %
+  and unmuted at session start and when the switch is turned off, so the
+  remote client sets the loudness as before. Details:
+  [media-keys.md](media-keys.md).
 
 ## Session startup and the per-machine user files
 
@@ -91,15 +98,20 @@ After modifying overlay files, rebuild with `make image`.
 The Keyboard tab of the Settings screen (`jobs::keyboard_apply`, in
 `src/thinfloe-menu/src/`) applies a change without a restart, in one job:
 `config.toml` (`[keyboard]`, written by the store) -> `generated/environment`
-(`XKB_DEFAULT_LAYOUT`, `_VARIANT`, `_OPTIONS`) ->
-`thinfloe-compose-labwc-config --env-only` (rewrites only the merged
-`environment` in `$XDG_RUNTIME_DIR/thinfloe-labwc`) -> `labwc --reconfigure`.
-Only one apply runs at a time.
+(`XKB_DEFAULT_LAYOUT`, `_VARIANT`, `_OPTIONS`, `THINFLOE_VOLUME_KEYS`,
+`THINFLOE_BRIGHTNESS_KEYS`) -> `thinfloe-compose-labwc-config --env-only`
+(rewrites the merged `environment` in `$XDG_RUNTIME_DIR/thinfloe-labwc` and
+`.source/rc.xml`) -> `labwc --reconfigure`, then a `reload` to the OSD. Only
+one apply runs at a time.
 
 The full composition stays at session start. The composed directory holds
 copies that `labwc-scale` made of `rc.xml` and `themerc-override`; a full
 rebuild during the session would wipe the scaled copies, so `--env-only`
-leaves everything but `environment` alone.
+writes only `environment` and `.source/rc.xml`. `rc.xml` is a link to
+`.source/rc.xml`; `.source/base.xml` is the system `rc.xml` (or its Num Lock
+off copy) and `.source/rc.xml` is a link to it, or a copy with the media key
+bindings when a key switch is on. `labwc-scale` is the only runtime writer of
+`rc.xml` and sees a changed source by its `cksum`.
 
 `test/runtime/test-labwc-runtime.sh` runs this sequence against the real
 labwc: start with `us`, apply `ch`/`de_nodeadkeys`, and assert the merged
@@ -236,8 +248,8 @@ characters) is `overlay/etc/xdg/foot/foot.ini`. foot has no scroll bar;
 `indicator-position=relative` shows a box on the right edge while the view
 is scrolled back. `test/integration/test-terminal.sh` guards the size rule
 and the config. The failure windows of `thinfloe-session` start `foot`
-directly and get the 14 px look. With zero
-labwc keybindings ([Standing Constraints](../../CLAUDE.md#standing-constraints)) there is no
+directly and get the 14 px look. With no
+labwc keybinding but the optional media keys ([Standing Constraints](../../CLAUDE.md#standing-constraints)) there is no
 other in-session path, so when the session is down, reach a terminal from a VT
 (Ctrl+Alt+F2, say) or over SSH instead. **SSH needs a password
 first:** a machine nobody has run `sudo thinfloe-password` on refuses every
@@ -250,13 +262,13 @@ XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot
 ```
 
 Do not add a keybinding to launch it - that would violate the
-zero-keybindings constraint.
+keybinding constraint.
 
 ## Screenshots
 
 Screenshots use `grim`, with `slurp` for region selection and `wl-copy` to
-put the result on the clipboard. Same constraint as `foot`: with zero
-keybindings there is no in-session trigger, so take them from a VT or over
+put the result on the clipboard. Same constraint as `foot`: with no
+keybinding there is no in-session trigger, so take them from a VT or over
 SSH.
 
 ```bash
@@ -266,4 +278,4 @@ XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 \
 ```
 
 Do not add a keybinding for this - that would violate the
-zero-keybindings constraint.
+keybinding constraint.
