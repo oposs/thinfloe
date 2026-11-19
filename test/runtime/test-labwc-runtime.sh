@@ -113,7 +113,7 @@ fi
 # libwayland versions: 1.22 and earlier print "wl_registry@N", 1.24 (shipped
 # in this image) prints "wl_registry#N". Accept either rather than pinning
 # to whichever the base image currently ships.
-if echo "$grab_out" | grep -Eq 'wl_registry[@#][0-9]+\.bind\([0-9]+, "zwp_xwayland_keyboard_grab_manager_v1"'; then
+if grep -Eq 'wl_registry[@#][0-9]+\.bind\([0-9]+, "zwp_xwayland_keyboard_grab_manager_v1"' <<<"$grab_out"; then
     echo "ok   - Xwayland bound the xwayland keyboard grab manager"
 else
     echo "FAIL - labwc is not advertising the manager to Xwayland"
@@ -236,15 +236,15 @@ for rc_name in kb_control_rc kb_rc; do
     fi
 done
 
-if echo "$kb_out" | grep -qx 'MERGED XKB_DEFAULT_LAYOUT=ch'; then
+if grep -qx 'MERGED XKB_DEFAULT_LAYOUT=ch' <<<"$kb_out"; then
     echo "ok   - a keyboard apply reaches labwc's environment"
 else
     echo "FAIL - the merged environment lacks XKB_DEFAULT_LAYOUT=ch after the apply"
     echo "$kb_out"
     fail=1
 fi
-if echo "$kb_control" | after_apply | grep -q 'failed to create xkb keymap'; then
-    if echo "$kb_out" | after_apply | grep -q 'failed to create xkb keymap'; then
+if grep -q 'failed to create xkb keymap' < <(after_apply <<<"$kb_control"); then
+    if grep -q 'failed to create xkb keymap' < <(after_apply <<<"$kb_out"); then
         echo "FAIL - labwc could not build the new keymap"
         echo "$kb_out"
         fail=1
@@ -276,7 +276,7 @@ if [[ $kb_start_rc -eq 124 || $kb_start_rc -eq 137 ]]; then
     echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang with a repaired keyboard)"
     podman rm -f "$KB_START_NAME" >/dev/null 2>&1
     fail=1
-elif echo "$kb_start" | grep -qx 'SESSION-RAN fr//'; then
+elif grep -qx 'SESSION-RAN fr//' <<<"$kb_start"; then
     echo "ok   - a keyboard pair XKB cannot build is repaired before labwc starts"
 else
     echo "FAIL - labwc with fr/de_nodeadkeys at start: rc=$kb_start_rc, no session with layout fr and no variant"
@@ -308,14 +308,14 @@ if [[ $menu_rc -eq 124 || $menu_rc -eq 137 ]]; then
     exit 1
 fi
 
-if echo "$menu_out" | grep -q 'thinfloe-menu: configure 1280x720'; then
+if grep -q 'thinfloe-menu: configure 1280x720' <<<"$menu_out"; then
     echo "ok   - thinfloe-menu maps at the full output size (1280x720)"
 else
     echo "FAIL - thinfloe-menu did not configure at 1280x720"
     echo "$menu_out"
     fail=1
 fi
-if echo "$menu_out" | grep -q 'thinfloe-menu: raster'; then
+if grep -q 'thinfloe-menu: raster' <<<"$menu_out"; then
     echo "ok   - thinfloe-menu rasterised a frame on the CPU"
 else
     echo "FAIL - thinfloe-menu never rasterised a frame"
@@ -340,7 +340,7 @@ else
     echo "$menu_out" | grep 'thinfloe-menu: icon '
     fail=1
 fi
-if echo "$menu_out" | grep -q 'menu-rc=124'; then
+if grep -q 'menu-rc=124' <<<"$menu_out"; then
     echo "ok   - thinfloe-menu kept running until stopped"
 else
     echo "FAIL - thinfloe-menu exited on its own: $(echo "$menu_out" | grep menu-rc)"
@@ -349,7 +349,7 @@ fi
 
 # Geo must be known to fontconfig in the built image (title bar font).
 geo_out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none "$IMAGE" fc-list 2>&1)
-if echo "$geo_out" | grep -q 'Geo'; then
+if grep -q 'Geo' <<<"$geo_out"; then
     echo "ok   - fc-list lists Geo"
 else
     echo "FAIL - fc-list does not list Geo"
@@ -403,35 +403,35 @@ fi
 
 list1=$(echo "$fold_out" | sed -n '/^BEGIN-list1$/,/^END-list1$/p')
 list2=$(echo "$fold_out" | sed -n '/^BEGIN-list2$/,/^END-list2$/p')
-if echo "$fold_out" | grep -q 'thinfloe-menu: folded: foot '; then
+if grep -q 'thinfloe-menu: folded: foot ' <<<"$fold_out"; then
     echo "ok   - thinfloe-menu saw foot fold"
 else
     echo "FAIL - thinfloe-menu never printed 'folded: foot'"
     echo "$fold_out"
     fail=1
 fi
-if echo "$list1" | grep -Eq '^foot	.*	folded$'; then
+if grep -Eq '^foot	.*	folded$' <<<"$list1"; then
     echo "ok   - --windows lists the folded foot as folded"
 else
     echo "FAIL - --windows did not list foot as folded"
     echo "$fold_out"
     fail=1
 fi
-if echo "$fold_out" | grep -q 'unfold-rc=0'; then
+if grep -q 'unfold-rc=0' <<<"$fold_out"; then
     echo "ok   - --unfold foot exited 0"
 else
     echo "FAIL - --unfold foot did not exit 0"
     echo "$fold_out"
     fail=1
 fi
-if echo "$list2" | grep -Eq '^foot	.*	open$'; then
+if grep -Eq '^foot	.*	open$' <<<"$list2"; then
     echo "ok   - --windows lists foot as open after --unfold"
 else
     echo "FAIL - foot is not open after --unfold"
     echo "$fold_out"
     fail=1
 fi
-if echo "$fold_out" | grep -q 'thinfloe-menu: unfolded: foot '; then
+if grep -q 'thinfloe-menu: unfolded: foot ' <<<"$fold_out"; then
     echo "ok   - thinfloe-menu saw foot unfold"
 else
     echo "FAIL - thinfloe-menu never printed 'unfolded: foot'"
@@ -486,7 +486,7 @@ if [[ $cover_rc -eq 124 || $cover_rc -eq 137 ]]; then
     exit 1
 fi
 
-if echo "$cover_out" | grep -qx 'scale-before=1' && echo "$cover_out" | grep -qx 'scale-covered=1'; then
+if grep -qx 'scale-before=1' <<<"$cover_out" && grep -qx 'scale-covered=1' <<<"$cover_out"; then
     echo "ok   - a fullscreen window over the menu leaves the scale as it was"
 else
     echo "FAIL - the scale changed while a fullscreen window covered the menu"
@@ -556,8 +556,8 @@ fi
 echo "info - $(echo "$kanshi_out" | grep -E '^kanshi-package=') $(echo "$kanshi_out" | grep -E '^kanshictl=')"
 # kanshi-first equals labwc's own placement of HEADLESS-2, so only
 # kanshi-second (a position labwc never picks) proves that kanshi acted.
-if echo "$kanshi_out" | grep -qx 'kanshi-first=1280x720@1280,0' \
-    && echo "$kanshi_out" | grep -qx 'kanshi-second=1280x720@0,720'; then
+if grep -qx 'kanshi-first=1280x720@1280,0' <<<"$kanshi_out" \
+    && grep -qx 'kanshi-second=1280x720@0,720' <<<"$kanshi_out"; then
     echo "ok   - kanshi applies a profile and re-applies it after the file changes (SIGHUP)"
 else
     echo "FAIL - kanshi did not apply the profile or did not re-apply it on SIGHUP"
@@ -615,13 +615,13 @@ wait'
     MOVE_RESULT=$(echo "$out" | grep -E '^(first|second): .*configure |^size |^rule-inserted|Invalid output|MoveToOutput|segmentation|core dumped|panicked')
     MOVE_RULE_OK=0
     [[ "$rule_output" == none ]] && MOVE_RULE_OK=1
-    echo "$out" | grep -qx 'rule-inserted' && MOVE_RULE_OK=1
+    grep -qx 'rule-inserted' <<<"$out" && MOVE_RULE_OK=1
     MOVE_FIRST=$(echo "$out" | grep -E '^first: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
     MOVE_SECOND=$(echo "$out" | grep -E '^second: .*configure ' | tail -1 | grep -o '[0-9]*x[0-9]*$')
     MOVE_INVALID=0
-    echo "$out" | grep -q 'Invalid output' && MOVE_INVALID=1
+    grep -q 'Invalid output' <<<"$out" && MOVE_INVALID=1
     MOVE_CRASH=0
-    echo "$out" | grep -Eqi 'segmentation|core dumped|panicked' && MOVE_CRASH=1
+    grep -Eqi 'segmentation|core dumped|panicked' <<<"$out" && MOVE_CRASH=1
 }
 
 # Control: no rule. The menu must NOT end on HEADLESS-1, or the next case
@@ -637,8 +637,8 @@ fi
 
 run_move_case HEADLESS-1
 if [[ $MOVE_RULE_OK -eq 1 && "$MOVE_FIRST" == 1000x600 && "$MOVE_SECOND" == 1000x600 ]] \
-    && echo "$MOVE_RESULT" | grep -qx 'size HEADLESS-1 1000x600' \
-    && echo "$MOVE_RESULT" | grep -qx 'size HEADLESS-2 1024x768'; then
+    && grep -qx 'size HEADLESS-1 1000x600' <<<"$MOVE_RESULT" \
+    && grep -qx 'size HEADLESS-2 1024x768' <<<"$MOVE_RESULT"; then
     echo "ok   - MoveToOutput moves the menu to HEADLESS-1 (1000x600), also a second one started later; HEADLESS-2 keeps 1024x768"
 else
     echo "FAIL - menu did not end up on HEADLESS-1 through MoveToOutput (rule inserted $MOVE_RULE_OK, first $MOVE_FIRST, second $MOVE_SECOND)"
@@ -832,7 +832,7 @@ if [[ $inhibit_rc -eq 124 || $inhibit_rc -eq 137 ]]; then
     podman rm -f "$INHIBIT_CONTAINER_NAME" >/dev/null 2>&1
     exit 1
 fi
-if echo "$inhibit_out" | grep -Eq 'wl_registry[@#][0-9]+\.global\([0-9]+, "zwp_keyboard_shortcuts_inhibit_manager_v1"'; then
+if grep -Eq 'wl_registry[@#][0-9]+\.global\([0-9]+, "zwp_keyboard_shortcuts_inhibit_manager_v1"' <<<"$inhibit_out"; then
     echo "ok   - labwc advertises the keyboard shortcuts inhibit manager"
 else
     echo "FAIL - labwc does not advertise zwp_keyboard_shortcuts_inhibit_manager_v1"
@@ -887,7 +887,7 @@ if [[ $kb_rc -eq 124 || $kb_rc -eq 137 ]]; then
     podman rm -f "$KB_CONTAINER_NAME" >/dev/null 2>&1
     exit 1
 fi
-if echo "$kb_out" | grep -q 'load default key bindings'; then
+if grep -q 'load default key bindings' <<<"$kb_out"; then
     echo "FAIL - labwc loaded its default keybindings"
     echo "$kb_out" | grep 'load default key bindings'
     fail=1

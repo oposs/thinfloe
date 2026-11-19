@@ -119,17 +119,17 @@ for n in 1 2; do
     tr -d '\r' <"$LOG.$n" | grep -a 'thinfloe: \(boot stick\|enlarging\|could not grow\|the boot stick\)\|fat32expander:\|sgdisk:' | sed "s/^/    boot $n: /"
 done
 
-if tr -d '\r' <"$LOG.1" | grep -aq 'thinfloe: boot stick partition grown'; then
+if grep -aq 'thinfloe: boot stick partition grown' < <(tr -d '\r' <"$LOG.1"); then
     ok "boot 1 grew the partition"
 else
     bad "boot 1 did not log 'boot stick partition grown'"
 fi
-if tr -d '\r' <"$LOG.1" | grep -aq 'thinfloe: boot stick enlarged'; then
+if grep -aq 'thinfloe: boot stick enlarged' < <(tr -d '\r' <"$LOG.1"); then
     ok "boot 1 enlarged the FAT32"
 else
     bad "boot 1 did not log 'boot stick enlarged'"
 fi
-if tr -d '\r' <"$LOG.2" | grep -aq 'thinfloe: \(boot stick partition grown\|enlarging\)'; then
+if grep -aq 'thinfloe: \(boot stick partition grown\|enlarging\)' < <(tr -d '\r' <"$LOG.2"); then
     bad "boot 2 grew or enlarged again"
 else
     ok "boot 2 left the ESP alone"

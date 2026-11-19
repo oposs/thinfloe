@@ -280,7 +280,7 @@ fi
 
 # The stub does not catch an absolute /usr/bin/thinfloe-save-home, so check
 # the code as well.
-if grep -v '^[[:space:]]*#' "$SESSION" | grep -q 'thinfloe-save-home'; then
+if grep -q 'thinfloe-save-home' < <(grep -v '^[[:space:]]*#' "$SESSION"); then
     bad "thinfloe-session still calls thinfloe-save-home; the menu saves before it exits"
 else
     ok "thinfloe-session never calls thinfloe-save-home"

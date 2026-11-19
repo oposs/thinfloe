@@ -139,8 +139,8 @@ fi
 snapshot "$B_IMG" "$tmp/b-after" || exit 2
 for f in syslinux.cfg efi-syslinux.cfg; do
     if [[ "${seen[0]}" != none ]] \
-       && tr -d '\r' <"$tmp/b-after/$f" \
-          | grep -q "ramroot=tl/ramroot.sqsh .* thinfloe.stick=${seen[0]}\$"; then
+       && grep -q "ramroot=tl/ramroot.sqsh .* thinfloe.stick=${seen[0]}\$" \
+              < <(tr -d '\r' <"$tmp/b-after/$f"); then
         ok "stick B's $f carries thinfloe.stick=${seen[0]}"
     else
         bad "stick B's $f lacks thinfloe.stick=${seen[0]}"

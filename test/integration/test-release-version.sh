@@ -323,7 +323,7 @@ for args in "-n rootfs" "-q rootfs" "help"; do
         bad "make $args rewrote .version-kind ($(cat "$KIND"))"
     fi
 done
-if mk -n artifacts/rootfs/ramroot.sqsh TF_VERSION=4.2.0 2>/dev/null | grep -q export-rootfs.sh; then
+if grep -q export-rootfs.sh < <(mk -n artifacts/rootfs/ramroot.sqsh TF_VERSION=4.2.0 2>/dev/null); then
     ok "make -n shows the export a release build runs"
 else
     bad "make -n of a release build shows no export"

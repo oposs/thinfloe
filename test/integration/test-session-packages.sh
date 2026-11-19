@@ -302,7 +302,7 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/thinfloe-session >/
         echo "FAIL - thinfloe-session does not blank via wlopm"
         fail=1
     fi
-    if grep -vE '^[[:space:]]*#' "$SESS" | grep -qE 'wlr-randr[^|]*--off'; then
+    if grep -qE 'wlr-randr[^|]*--off' < <(grep -vE '^[[:space:]]*#' "$SESS"); then
         echo "FAIL - thinfloe-session blanks with 'wlr-randr --off' (disables the"
         echo "       output and reflows the layout); use wlopm instead"
         fail=1
@@ -930,7 +930,7 @@ TMPS+=("$MENU_TMP")
 if unsquashfs -no-xattrs -d "$MENU_TMP/x" "$SQSH" usr/bin/thinfloe-menu >/dev/null 2>&1 &&
    [[ -f "$MENU_TMP/x/usr/bin/thinfloe-menu" ]]; then
     MB="$MENU_TMP/x/usr/bin/thinfloe-menu"
-    if readelf -d "$MB" | grep NEEDED | grep -qiE 'vulkan|libGL|libEGL|GLES'; then
+    if grep -qiE 'vulkan|libGL|libEGL|GLES' < <(readelf -d "$MB" | grep NEEDED); then
         echo "FAIL - thinfloe-menu links a GPU library"
         fail=1
     elif grep -aqE 'libvulkan\.so|libEGL\.so|libGLESv2\.so|libGL\.so' "$MB"; then
@@ -947,7 +947,7 @@ fi
 # The session body is the menu now; tlclient is one of its tiles.
 if [[ -n "${SESS:-}" && -f "$SESS" ]] &&
    grep -q 'TF_MENU:-/usr/bin/thinfloe-menu' "$SESS" &&
-   ! grep -v '^[[:space:]]*#' "$SESS" | grep -q '/opt/thinlinc/bin/tlclient'; then
+   ! grep -q '/opt/thinlinc/bin/tlclient' < <(grep -v '^[[:space:]]*#' "$SESS"); then
     echo "ok   - thinfloe-session launches thinfloe-menu, not tlclient"
 else
     echo "FAIL - thinfloe-session does not launch thinfloe-menu"
