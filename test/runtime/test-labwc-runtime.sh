@@ -11,7 +11,10 @@
 # window, and that a keybinding marked allowWhenInhibited passes an X11
 # keyboard grab while an unmarked one does not, and that the OSD of the
 # volume and brightness keys shows above a fullscreen window on every
-# output without taking its focus or its clicks.
+# output without taking its focus or its clicks, and that the volume and
+# brightness keys work end to end: the Keyboard tab's switches decide whether
+# labwc takes the keys, the OSD shows the level, the microphone mark and
+# "not supported" without DDC/CI, and survives an output going away.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -1142,5 +1145,280 @@ else
     echo "FAIL - a key typed under the OSD did not reach the native fullscreen window: '$osd_keys' (expected keys=78)"
     fail=1
 fi
+
+# The volume and brightness keys end to end: the Keyboard tab's switches
+# (THINFLOE_VOLUME_KEYS, THINFLOE_BRIGHTNESS_KEYS in generated/environment),
+# the image's composer, labwc's bindings, 'thinfloe-menu --osd-key' and the
+# OSD process. A fake wpctl (TF_WPCTL) logs its arguments to /tmp/wpctl.log,
+# answers 0.45 for the sink and /tmp/mic (default 'Volume: 1.00') for the
+# source; a fake ddcutil (TF_DDCUTIL) finds no monitor. wtype sends the keys
+# through one virtual keyboard per call; the leading 1 s pause lets wev bind
+# it (see the keybinding case above). wev prints a sym line for the press and
+# for the release of a key that reaches it.
+#
+# The pixels, as the OSD case above, on 1280x720 outputs: the Volume panel is
+# x 480..799, y 637..697 (61 high, 22 above the bottom). Its ICE (7cc4ff) bar
+# is 6 high at y 680..685, from x 496 (16 in) over 45 % of the 288 px track:
+# x 496..625. (547,682) is the brief's bar point, (522,682) a bar point that
+# lies in the gap between the icon (x 496..517) and the name (from x 528) of a
+# panel without a bar. The panel without a bar (Microphone off, Brightness not
+# supported) is 46 high, y 652..697: its top edge moves down by 15 px. So
+# (760,645) is TILE (0d1218) in the Volume panel and red above the shorter
+# one; (760,652) is its top border (LINE, 151b22); (760,690) is inside both,
+# below the row of icon and text, and x 760 is right of the name. The mark's
+# right border (WARN, c79a4a) is at (1265,49) on output 1 and (2545,49) on
+# output 2.
+# shellcheck disable=SC2016 # expands inside the container
+mk_wpctl='#!/bin/sh
+echo "$*" >>/tmp/wpctl.log
+case "$1 $2" in
+    "get-volume @DEFAULT_AUDIO_SINK@") echo "Volume: 0.45" ;;
+    "get-volume @DEFAULT_AUDIO_SOURCE@") cat /tmp/mic 2>/dev/null || echo "Volume: 1.00" ;;
+esac
+exit 0'
+# shellcheck disable=SC2016 # expands inside the container
+mk_ddcutil='#!/bin/sh
+echo "$*" >>/tmp/ddcutil.log
+exit 1'
+# px.py TAG [--within S] SPEC...: grim takes the screen and each SPEC prints
+# "px TAG name=value". name=x,y gives the colour at a point, name=x,y@rrggbb
+# the same with an expectation; name=x0,y0,x1,y1#rrggbb is "found" when some
+# pixel of the box (x1, y1 exclusive) has the colour, else "none". With
+# --within S the screen is taken again until every expectation holds, at
+# most S seconds.
+# shellcheck disable=SC2016 # expands inside the container
+mk_px='import subprocess, sys, time
+def shot():
+    data = subprocess.run(["grim", "-t", "ppm", "-"], capture_output=True, check=True).stdout
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        start = pos
+        while not data[pos:pos + 1].isspace():
+            pos += 1
+        fields.append(data[start:pos])
+    return data, pos + 1, int(fields[1]), int(fields[2])
+def at(img, x, y):
+    data, pos, w, h = img
+    if not (0 <= x < w and 0 <= y < h):
+        return "outside"
+    o = pos + 3 * (y * w + x)
+    return data[o:o + 3].hex()
+def value(img, spec):
+    if "#" in spec:
+        box, want = spec.split("#")
+        x0, y0, x1, y1 = map(int, box.split(","))
+        hit = any(at(img, x, y) == want for y in range(y0, y1) for x in range(x0, x1))
+        return ("found" if hit else "none"), "found"
+    xy, _, want = spec.partition("@")
+    x, y = map(int, xy.split(","))
+    return at(img, x, y), (want or None)
+args = sys.argv[1:]
+tag = args.pop(0)
+within = 0.0
+if args and args[0] == "--within":
+    within = float(args[1])
+    args = args[2:]
+t0 = time.monotonic()
+while True:
+    img = shot()
+    vals = [(a.split("=")[0],) + value(img, a.split("=", 1)[1]) for a in args]
+    if all(w is None or v == w for _, v, w in vals) or time.monotonic() - t0 >= within:
+        break
+    time.sleep(0.1)
+for name, v, _ in vals:
+    print("px %s %s=%s" % (tag, name, v), flush=True)'
+# shellcheck disable=SC2016 # expands inside the container
+mk_script='# after T0 S: sleep until S seconds after the time T0 ($EPOCHREALTIME).
+after() { sleep "$(awk -v a="$1" -v s="$2" -v n="$EPOCHREALTIME" "BEGIN { d = a + s - n; print (d > 0 ? d : 0) }")"; }
+px() { python3 /tmp/px.py "$@"; }
+wev_syms() { tail -n +"$1" /tmp/wev.log | grep -o "sym: [A-Za-z0-9_]*" | cut -d" " -f2 | tr "\n" " "; }
+case $MK_MODE in
+keys-off | keys-on | live)
+    stdbuf -oL wev -f wl_keyboard:key >/tmp/wev.log 2>&1 &
+    sleep 1.5
+    wlrctl toplevel find app_id:wev state:active && echo wev_focus=active || echo wev_focus=inactive
+    wtype -s 1000 -k XF86AudioRaiseVolume -s 300 x -s 500
+    sleep 0.5
+    echo "wev1=$(wev_syms 1)"
+    if [ "$MK_MODE" = live ]; then
+        n=$(($(wc -l </tmp/wev.log) + 1))
+        printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/gen/environment
+        thinfloe-compose-labwc-config --env-only /etc/thinfloe/labwc /tmp/gen/environment /nonexistent /tmp/xdg/thinfloe-labwc
+        echo "binds=$(grep -c "keybind key=" /tmp/xdg/thinfloe-labwc/rc.xml)"
+        labwc --reconfigure
+        # labwc reads rc.xml again on the SIGHUP that --reconfigure sends; it
+        # tells no client when it is done.
+        sleep 1
+        wtype -s 1000 -k XF86AudioRaiseVolume -s 300 y -s 500
+        sleep 0.5
+        echo "wev2=$(wev_syms "$n")"
+    fi
+    ;;
+osd | bright)
+    python3 /usr/local/bin/x11-probe.py --background ff0000 --hold 40 &
+    sleep 3
+    thinfloe-menu --osd 2>/tmp/osd.err &
+    osd=$!
+    for i in $(seq 50); do [ -S /tmp/xdg/thinfloe-osd.sock ] && break; sleep 0.1; done
+    [ -S /tmp/xdg/thinfloe-osd.sock ] && echo socket=yes || echo socket=no
+    if [ "$MK_MODE" = osd ]; then
+        wtype -k XF86AudioRaiseVolume
+        t=$EPOCHREALTIME
+        after "$t" 0.5
+        px vol panel1=640,668 panel2=1920,668 bar1=547,682 bar2=1827,682 gap1=522,682 tall1=760,645
+        after "$t" 2.5
+        px volgone bar1=547,682 panel1=640,668
+        # A volume key, then the microphone key 0.5 s later, while the
+        # Volume panel still shows: the panel takes the size of the new view.
+        echo "Volume: 1.00 [MUTED]" >/tmp/mic
+        wtype -k XF86AudioRaiseVolume -s 500 -k XF86AudioMicMute
+        t=$EPOCHREALTIME
+        after "$t" 0.5
+        px mic in1=760,690 top1=760,652 above1=760,645 gap1=522,682 in2=2040,690 top2=2040,652 above2=2040,645
+        echo "Volume: 1.00" >/tmp/mic
+        px nomark --within 3 m1=1265,49@ff0000 m2=2545,49@ff0000
+        # The mark follows the microphone, on every output, also when one goes.
+        echo "Volume: 1.00 [MUTED]" >/tmp/mic
+        px mark --within 2 m1=1265,49@c79a4a m2=2545,49@c79a4a
+        wlr-randr --output HEADLESS-2 --off
+        sleep 1
+        kill -0 "$osd" 2>/dev/null && echo osd_alive=yes || echo osd_alive=no
+        px unplug m1=1265,49
+        echo "Volume: 1.00" >/tmp/mic
+        px markgone --within 2 m1=1265,49@ff0000
+    else
+        # The first detection may run before the OSD knows the outputs; the
+        # one 2 s after they came names both.
+        for i in $(seq 80); do
+            [ "$(grep -c "does not answer DDC/CI" /tmp/osd.err)" -ge 2 ] && break
+            sleep 0.1
+        done
+        wtype -k XF86MonBrightnessUp
+        px bright --within 1.2 warn1=640,652,800,698#c79a4a warn2=1920,652,2080,698#c79a4a
+    fi
+    kill "$osd"
+    wait "$osd"
+    echo "osd_rc=$?"
+    sed "s/^/osderr: /" /tmp/osd.err
+    ;;
+esac
+sed "s/^/wpctl: /" /tmp/wpctl.log 2>/dev/null
+exit 0'
+mk_run() {
+    local mode="$1" outputs="$2" vol="$3" bri="$4" name="thinfloe-runtime-test-mk-$1-$$" rc
+    MK_OUT=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS="$outputs" \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e TF_WPCTL=/tmp/fake-wpctl \
+        -e TF_DDCUTIL=/tmp/fake-ddcutil \
+        -e MK_MODE="$mode" \
+        -e MK_VOL="$vol" \
+        -e MK_BRI="$bri" \
+        -e MK_WPCTL="$mk_wpctl" \
+        -e MK_DDCUTIL="$mk_ddcutil" \
+        -e MK_PX="$mk_px" \
+        -e MK_SCRIPT="$mk_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/gen && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$MK_WPCTL" >/tmp/fake-wpctl && printf "%s\n" "$MK_DDCUTIL" >/tmp/fake-ddcutil &&
+               chmod +x /tmp/fake-wpctl /tmp/fake-ddcutil &&
+               printf "%s\n" "$MK_PX" >/tmp/px.py && printf "%s\n" "$MK_SCRIPT" >/tmp/mk.sh &&
+               printf "THINFLOE_VOLUME_KEYS=%s\nTHINFLOE_BRIGHTNESS_KEYS=%s\n" "$MK_VOL" "$MK_BRI" >/tmp/gen/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/gen/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               labwc -C /tmp/xdg/thinfloe-labwc -S "bash /tmp/mk.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the media key test, $mode)"
+        echo "$MK_OUT" | grep -E '^(wev|px|osd|socket|wpctl|binds)'
+        podman rm -f "$name" >/dev/null 2>&1
+        exit 1
+    fi
+}
+# mk_val KEY: the value of the last KEY=... line.
+mk_val() {
+    echo "$MK_OUT" | grep -E "^$1=" | tail -1 | cut -d= -f2-
+}
+# mk_px TAG NAME: the value px.py printed.
+mk_px() {
+    echo "$MK_OUT" | grep -E "^px $1 $2=" | tail -1 | cut -d= -f2
+}
+# mk_expect WHAT TAG NAME=VALUE...: one ok or FAIL line for all of them.
+mk_expect() {
+    local what="$1" tag="$2" bad="" p
+    shift 2
+    for p in "$@"; do
+        [[ "$(mk_px "$tag" "${p%%=*}")" == "${p#*=}" ]] || bad+=" ${p%%=*}=$(mk_px "$tag" "${p%%=*}") (want ${p#*=})"
+    done
+    if [[ -z "$bad" ]]; then
+        echo "ok   - $what"
+    else
+        echo "FAIL - $what:$bad"
+        echo "$MK_OUT" | grep -E '^(px|osd|socket|osderr)' | head -40
+        fail=1
+    fi
+}
+mk_check() {
+    if [[ "$1" == 0 ]]; then
+        echo "ok   - $2"
+    else
+        echo "FAIL - $2: $3"
+        fail=1
+    fi
+}
+
+mk_run keys-off 1 off off
+wev1=$(mk_val wev1)
+[[ "$(mk_val wev_focus)" == active && " $wev1" == *" XF86AudioRaiseVolume "* ]]
+mk_check $? "with the volume switch off, XF86AudioRaiseVolume reaches the focused window" \
+    "wev focus '$(mk_val wev_focus)', syms '$wev1'"
+! echo "$MK_OUT" | grep -q '^wpctl: set-volume'
+mk_check $? "with the volume switch off, the key does not change the volume" \
+    "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
+
+mk_run keys-on 1 on off
+wev1=$(mk_val wev1)
+[[ "$(mk_val wev_focus)" == active && " $wev1" != *" XF86AudioRaiseVolume "* && " $wev1" == *" x "* ]]
+mk_check $? "with the volume switch on, labwc takes XF86AudioRaiseVolume and the x after it reaches the window" \
+    "wev focus '$(mk_val wev_focus)', syms '$wev1'"
+echo "$MK_OUT" | grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+'
+mk_check $? "with the volume switch on and no OSD running, the key raises the volume by 5 %" \
+    "$(echo "$MK_OUT" | grep '^wpctl: ' | tr '\n' ' ')"
+
+mk_run live 1 off off
+wev1=$(mk_val wev1)
+wev2=$(mk_val wev2)
+[[ " $wev1" == *" XF86AudioRaiseVolume "* && " $wev2" != *" XF86AudioRaiseVolume "* && " $wev2" == *" y "* ]]
+mk_check $? "the volume switch acts at once: after --env-only and labwc --reconfigure the key no longer reaches the window" \
+    "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
+
+mk_run osd 2 on off
+[[ "$(mk_val socket)" == yes ]] && echo "$MK_OUT" | grep -qx 'wpctl: set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+'
+mk_check $? "the volume key reaches the running OSD, which raises the volume by 5 %" \
+    "socket $(mk_val socket); $(echo "$MK_OUT" | grep '^wpctl: set' | tr '\n' ' ')"
+mk_expect "0.5 s after the volume key the Volume panel shows on both outputs, its bar at 45 %" vol \
+    panel1=0d1218 panel2=0d1218 bar1=7cc4ff bar2=7cc4ff gap1=7cc4ff tall1=0d1218
+mk_expect "2.5 s after the volume key the panel is gone" volgone bar1=ff0000 panel1=ff0000
+mk_expect "the microphone key 0.5 s after a volume key shows the Microphone off panel 15 px lower, without a bar, on both outputs" mic \
+    in1=0d1218 top1=151b22 above1=ff0000 gap1=0d1218 in2=0d1218 top2=151b22 above2=ff0000
+mk_expect "the mark goes when the microphone is on" nomark m1=ff0000 m2=ff0000
+mk_expect "the mark shows on both outputs within 2 s of the microphone being muted" mark m1=c79a4a m2=c79a4a
+[[ "$(mk_val osd_alive)" == yes && "$(mk_px unplug m1)" == c79a4a ]]
+mk_check $? "with HEADLESS-2 switched off the OSD keeps running and output 1 keeps the mark" \
+    "OSD alive '$(mk_val osd_alive)', mark pixel '$(mk_px unplug m1)'"
+mk_expect "the mark goes within 2 s of the microphone being on again" markgone m1=ff0000
+[[ "$(mk_val osd_rc)" == 0 ]]
+mk_check $? "the OSD ends with 0 on SIGTERM" "osd_rc '$(mk_val osd_rc)'; $(echo "$MK_OUT" | grep '^osderr: ' | head -5 | tr '\n' ' ')"
+
+mk_run bright 2 off on
+mk_expect "without DDC/CI the brightness key shows 'not supported' on both outputs" bright warn1=found warn2=found
+n1=$(echo "$MK_OUT" | grep -c '^osderr: .*monitor HEADLESS-1 does not answer DDC/CI')
+n2=$(echo "$MK_OUT" | grep -c '^osderr: .*monitor HEADLESS-2 does not answer DDC/CI')
+[[ $n1 -eq 1 && $n2 -eq 1 ]]
+mk_check $? "the OSD logs once per output that the monitor does not answer DDC/CI" \
+    "HEADLESS-1 $n1 times, HEADLESS-2 $n2 times"
 
 exit $fail
