@@ -245,9 +245,11 @@ build_source_rc() {
     fi
     [ -n "$_tmp_ln" ] && rm -f "$_tmp_ln"
     # The old .source/rc.xml stays, with or without the keys; the full
-    # compose at the next session start writes it again.
-    [ "$_kb_failed" -eq 1 ] &&
+    # compose at the next session start writes it again. Already the link
+    # with the keys off is the wanted state: nothing to report.
+    if [ "$_kb_failed" -eq 1 ] || [ "$(readlink "$_src/rc.xml" 2>/dev/null)" != "$_src/base.xml" ]; then
         echo "$me: cannot write the key bindings; the key switches follow at the next start" >&2
+    fi
     return 0
 }
 
