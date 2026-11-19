@@ -4,9 +4,13 @@
 //! a slow `pactl` never stalls the OSD; presses that arrive while it runs
 //! are merged.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::collections::{BTreeSet, VecDeque};
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -14,6 +18,16 @@ use super::sync::{Mode, Set, Shared};
 
 /// How long one `pactl` call may take.
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// The first wait before `pactl subscribe` starts again; it doubles up to
+/// `WATCH_CAP`.
+const WATCH_BASE: Duration = Duration::from_secs(1);
+/// The longest wait before `pactl subscribe` starts again; a run that
+/// lasted this long counts as working, and the wait drops back.
+const WATCH_CAP: Duration = Duration::from_secs(30);
+/// The longest line of `pactl subscribe` kept; a longer one is dropped.
+const WATCH_LINE: usize = 4096;
+/// How long dropping a `Watcher` waits for its thread.
+const WATCH_JOIN: Duration = Duration::from_secs(2);
 
 /// The shared speaker level and mute state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,13 +287,28 @@ impl AudioWorker {
                 }
             }
             while let Some(r) = next(&s) {
+                // What may change a source's mute sends a fresh mark once
+                // its sets are done, read from the default source: the
+                // mark follows that source's real state, never the shared
+                // one (a monitor as the default has no mark).
+                let remark = matches!(
+                    r,
+                    AudioRequest::ToggleMic
+                        | AudioRequest::Mode(_)
+                        | AudioRequest::Resync
+                        | AudioRequest::Device(PaEvent::New(Kind::Source, _))
+                );
                 let (ev, sets) = w.handle(r);
+                let failed = matches!(ev, Some(AudioEvent::Failed(_)));
                 // The panel shows the new state at once; a stalled sound
                 // server holds only the sets, not the panel.
                 if let Some(ev) = ev {
                     on_event(ev);
                 }
                 w.apply(&sets);
+                if remark && !failed {
+                    on_event(w.mark());
+                }
             }
         });
         AudioWorker { shared }
@@ -437,6 +466,249 @@ impl Worker {
     }
 }
 
+/// What `watch` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watch {
+    /// A line of `pactl subscribe` about a sink, a source or the server.
+    Event(PaEvent),
+    /// `pactl subscribe` ended and runs again: the sound server may have
+    /// restarted, and events in between are lost.
+    Restarted,
+}
+
+/// The wait before `pactl subscribe` starts again: `base`, doubled after
+/// each short run up to `cap`, `base` again after a run of `cap` or more.
+struct Backoff {
+    base: Duration,
+    cap: Duration,
+    next: Duration,
+    logged: BTreeSet<Duration>,
+}
+
+impl Backoff {
+    fn new(base: Duration, cap: Duration) -> Backoff {
+        Backoff {
+            base,
+            cap,
+            next: base,
+            logged: BTreeSet::new(),
+        }
+    }
+
+    /// The wait after a run that lasted `ran_for`.
+    fn after_run(&mut self, ran_for: Duration) -> Duration {
+        if ran_for >= self.cap {
+            self.next = self.base;
+        }
+        let d = self.next;
+        self.next = (d * 2).min(self.cap);
+        d
+    }
+
+    /// The log line for a wait of `d`, once per distinct wait.
+    fn log_line(&mut self, d: Duration) -> Option<String> {
+        self.logged.insert(d).then(|| {
+            format!(
+                "thinfloe-menu --osd: pactl subscribe ended; retrying in {} s",
+                d.as_secs()
+            )
+        })
+    }
+}
+
+/// The watch thread and its `pactl subscribe` child, shared with the
+/// `Watcher` that stops them.
+#[derive(Default)]
+struct WatchState {
+    stop: bool,
+    /// The running child's pid, which is also its process group.
+    child: Option<u32>,
+    /// The thread has ended.
+    done: bool,
+}
+
+type WatchShared = Arc<(Mutex<WatchState>, Condvar)>;
+
+fn lock_watch(s: &(Mutex<WatchState>, Condvar)) -> MutexGuard<'_, WatchState> {
+    s.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `pactl subscribe` on a thread of its own. Dropping it kills the child's
+/// whole process group (a shell's `tail -f` too), reaps it and ends the
+/// thread; the drop does not wait out a back-off.
+pub struct Watcher {
+    shared: WatchShared,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let mut st = lock_watch(&self.shared);
+        st.stop = true;
+        if let Some(pid) = st.child {
+            // SAFETY: the child is not reaped while `child` is set, so its
+            // process group still exists and is ours.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+        self.shared.1.notify_all();
+        // A grandchild that left the group could hold the pipe open; the
+        // OSD does not hang on it.
+        let (st, _) = self
+            .shared
+            .1
+            .wait_timeout_while(st, WATCH_JOIN, |s| !s.done)
+            .unwrap_or_else(|e| e.into_inner());
+        let done = st.done;
+        drop(st);
+        if let (true, Some(t)) = (done, self.thread.take()) {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Run `pactl subscribe` and hand each line about a sink, a source or the
+/// server to `on`. When it ends (no sound server, pipewire-pulse
+/// restarted, no `pactl`), it is started again after a wait (`Backoff`,
+/// logged once per distinct wait), then `on` gets `Watch::Restarted`.
+/// Its stderr is logged once per distinct line, so a missing server
+/// does not log every 30 s.
+pub fn watch(p: &Pactl, on: impl Fn(Watch) + Send + 'static) -> Watcher {
+    let argv = p.subscribe_args();
+    let shared: WatchShared = Arc::default();
+    let s = shared.clone();
+    let thread = std::thread::spawn(move || {
+        watch_loop(&argv, &s, Backoff::new(WATCH_BASE, WATCH_CAP), on);
+        lock_watch(&s).done = true;
+        s.1.notify_all();
+    });
+    Watcher {
+        shared,
+        thread: Some(thread),
+    }
+}
+
+fn watch_loop(argv: &[String], s: &(Mutex<WatchState>, Condvar), mut backoff: Backoff, on: impl Fn(Watch)) {
+    let mut logged = BTreeSet::new();
+    let mut log_once = |msg: String| {
+        if logged.insert(msg.clone()) {
+            eprintln!("{msg}");
+        }
+    };
+    let mut first = true;
+    loop {
+        let started = Instant::now();
+        let spawned = {
+            let mut st = lock_watch(s);
+            if st.stop {
+                return;
+            }
+            let c = Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn();
+            if let Ok(c) = &c {
+                st.child = Some(c.id());
+            }
+            c
+        };
+        match spawned {
+            Ok(child) => {
+                if !first {
+                    on(Watch::Restarted);
+                }
+                let stderr = pump_watch(child, s, &on);
+                for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    log_once(format!("thinfloe-menu --osd: pactl subscribe: {line}"));
+                }
+            }
+            Err(e) => log_once(format!("thinfloe-menu --osd: {} subscribe: {e}", argv[0])),
+        }
+        first = false;
+        let wait = backoff.after_run(started.elapsed());
+        let st = lock_watch(s);
+        if st.stop {
+            return;
+        }
+        if let Some(msg) = backoff.log_line(wait) {
+            eprintln!("{msg}");
+        }
+        let (st, _) =
+            s.1.wait_timeout_while(st, wait, |st| !st.stop)
+                .unwrap_or_else(|e| e.into_inner());
+        if st.stop {
+            return;
+        }
+    }
+}
+
+/// Hand each event line of `child` to `on` until its stdout ends, then
+/// reap it. What it wrote to stderr, at most `WATCH_LINE` bytes.
+fn pump_watch(mut child: Child, s: &(Mutex<WatchState>, Condvar), on: &impl Fn(Watch)) -> String {
+    let err = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match e.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = WATCH_LINE.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&kept).into_owned()
+        })
+    });
+    if let Some(out) = child.stdout.take() {
+        for_each_line(out, WATCH_LINE, |line| {
+            if let Some(e) = parse_event(line) {
+                on(Watch::Event(e));
+            }
+        });
+    }
+    // Not killed from here on: the pid may go once the child is reaped.
+    lock_watch(s).child = None;
+    let _ = child.wait();
+    err.and_then(|t| t.join().ok()).unwrap_or_default()
+}
+
+/// Call `f` with each line of `r` until it ends; a line longer than `max`
+/// bytes is dropped, not kept in memory.
+fn for_each_line(mut r: impl Read, max: usize, mut f: impl FnMut(&str)) {
+    let mut line: Vec<u8> = Vec::new();
+    let mut too_long = false;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                if !too_long {
+                    f(&String::from_utf8_lossy(&line));
+                }
+                line.clear();
+                too_long = false;
+            } else if line.len() < max {
+                line.push(b);
+            } else {
+                too_long = true;
+            }
+        }
+    }
+}
+
 /// The next request, waiting for one; `None` once the worker is dropped.
 fn next(shared: &(Mutex<Queue>, Condvar)) -> Option<AudioRequest> {
     let (m, cv) = shared;
@@ -453,7 +725,7 @@ fn next(shared: &(Mutex<Queue>, Condvar)) -> Option<AudioRequest> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::testdir::TestDir;
     use std::path::Path;
@@ -465,7 +737,7 @@ mod tests {
 
     /// A device list in the shape `pactl -f json list` prints, with two
     /// channels at `percent` each.
-    fn json(devs: &[(u32, &str, u8, bool)]) -> String {
+    pub(in crate::osd) fn json(devs: &[(u32, &str, u8, bool)]) -> String {
         let items: Vec<String> = devs
             .iter()
             .map(|(i, n, p, m)| {
@@ -481,7 +753,14 @@ mod tests {
     /// `-f json list sinks|sources` from `sinks.json`/`sources.json` and
     /// `get-default-*` from `default-sink`/`default-source`, then runs
     /// `body`.
-    fn fake(d: &Path, sinks: &str, sources: &str, default_sink: &str, default_source: &str, body: &str) -> Pactl {
+    pub(in crate::osd) fn fake(
+        d: &Path,
+        sinks: &str,
+        sources: &str,
+        default_sink: &str,
+        default_source: &str,
+        body: &str,
+    ) -> Pactl {
         std::fs::write(d.join("sinks.json"), sinks).unwrap();
         std::fs::write(d.join("sources.json"), sources).unwrap();
         std::fs::write(d.join("default-sink"), format!("{default_sink}\n")).unwrap();
@@ -516,11 +795,11 @@ mod tests {
             .collect()
     }
 
-    fn calls(d: &Path, prefix: &str) -> Vec<String> {
+    pub(in crate::osd) fn calls(d: &Path, prefix: &str) -> Vec<String> {
         log(d).into_iter().filter(|l| l.starts_with(prefix)).collect()
     }
 
-    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+    pub(in crate::osd) fn wait_for(what: &str, cond: impl Fn() -> bool) {
         let until = Instant::now() + Duration::from_secs(10);
         while !cond() {
             assert!(Instant::now() < until, "{what}");
@@ -944,6 +1223,137 @@ mod tests {
         );
         // The default source here is a monitor: no mark.
         assert!(!events.lock().unwrap().contains(&AudioEvent::Mark(true)));
+    }
+
+    #[test]
+    fn the_mic_key_sends_the_mark_after_its_sets() {
+        let d = TestDir::new("osd-audio", "remark");
+        // The fake's set-source-mute mutes the list, as pipewire-pulse does.
+        let p = fake(
+            &d,
+            "[]",
+            &json(&[(3, "mic", 100, false), (4, "cam", 100, false)]),
+            "",
+            "mic",
+            &format!(
+                "[ \"$1\" = set-source-mute ] && sed -i 's/\"mute\":false/\"mute\":true/' '{}/sources.json'",
+                d.display()
+            ),
+        );
+        let (worker, events) = spawn(p, Mode::Keys);
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        worker.request(AudioRequest::ToggleMic);
+        wait_for("the mark after the sets", || events.lock().unwrap().len() == 3);
+        // The panel first; the mark from the default source's real state,
+        // read after both sets.
+        assert_eq!(
+            *events.lock().unwrap(),
+            [AudioEvent::Mark(false), AudioEvent::Mic(true), AudioEvent::Mark(true)]
+        );
+        assert_eq!(calls(&d, "set-"), ["set-source-mute mic 1", "set-source-mute cam 1"]);
+    }
+
+    /// `/bin/sh -c script`, so no test writes a script and executes it.
+    fn sh_pactl(script: &str) -> Pactl {
+        Pactl {
+            cmd: ["/bin/sh", "-c", script, "pactl"].map(String::from).to_vec(),
+            timeout: TIMEOUT,
+        }
+    }
+
+    type Seen = Arc<Mutex<Vec<(Instant, Watch)>>>;
+
+    fn watch_seen(p: &Pactl) -> (Watcher, Seen) {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let w = watch(p, move |e| s.lock().unwrap().push((Instant::now(), e)));
+        (w, seen)
+    }
+
+    #[test]
+    fn the_watch_backs_off_and_resyncs() {
+        // One event, a line about another facility, then the end.
+        let p = sh_pactl(
+            "[ \"$1\" = subscribe ] || exit 9; echo \"Event 'new' on source #3\"; echo \"Event 'new' on client #9\"",
+        );
+        let (w, seen) = watch_seen(&p);
+        wait_for("an event and a restart", || seen.lock().unwrap().len() >= 2);
+        drop(w);
+        let got: Vec<Watch> = seen.lock().unwrap().iter().map(|(_, e)| *e).collect();
+        assert_eq!(
+            got[..2],
+            [Watch::Event(PaEvent::New(Kind::Source, 3)), Watch::Restarted]
+        );
+        // No sound server: pactl ends at once. Starts 1 s, then 2 s apart.
+        let p = sh_pactl("echo 'Connection failure: Connection refused' >&2; exit 1");
+        let t0 = Instant::now();
+        let (w, seen) = watch_seen(&p);
+        wait_for("two restarts", || seen.lock().unwrap().len() >= 2);
+        drop(w);
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|(_, e)| *e == Watch::Restarted));
+        let gaps = [seen[0].0 - t0, seen[1].0 - seen[0].0];
+        for (gap, want) in gaps.iter().zip([1000u128, 2000]) {
+            let ms = gap.as_millis();
+            assert!(ms.abs_diff(want) <= 200, "gaps {gaps:?}");
+        }
+    }
+
+    #[test]
+    fn the_back_off_doubles_to_30_s_and_drops_after_a_long_run() {
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        let short = Duration::from_millis(10);
+        let secs: Vec<u64> = (0..7).map(|_| b.after_run(short).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30]);
+        // A run that lasted 30 s worked: the next gap is 1 s again.
+        assert_eq!(b.after_run(Duration::from_secs(30)).as_secs(), 1);
+        assert_eq!(b.after_run(short).as_secs(), 2);
+        // Only a new gap is logged.
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        let logged: Vec<Option<String>> = [short, short, Duration::from_secs(31), short]
+            .into_iter()
+            .map(|r| {
+                let d = b.after_run(r);
+                b.log_line(d)
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                Some("thinfloe-menu --osd: pactl subscribe ended; retrying in 1 s".to_string()),
+                Some("thinfloe-menu --osd: pactl subscribe ended; retrying in 2 s".to_string()),
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn dropping_the_watch_ends_its_pactl() {
+        let d = TestDir::new("osd-audio", "watchend");
+        // A pactl with a child of its own, as `tail -f` under a shell.
+        let p = sh_pactl(&format!(
+            "sleep 1000 & echo $! > '{0}/child'; echo $$ > '{0}/pid'; wait",
+            d.display()
+        ));
+        let (w, seen) = watch_seen(&p);
+        let read = |f: &str| std::fs::read_to_string(d.join(f)).ok().filter(|s| s.ends_with('\n'));
+        wait_for("both pids", || read("pid").is_some() && read("child").is_some());
+        let t0 = Instant::now();
+        drop(w);
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "the drop does not wait out a back-off"
+        );
+        for f in ["pid", "child"] {
+            let pid = read(f).unwrap();
+            let gone = || {
+                std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+                    .map_or(true, |s| s.split_whitespace().nth(2) == Some("Z"))
+            };
+            wait_for(&format!("{f} {} ends", pid.trim()), gone);
+        }
+        assert!(seen.lock().unwrap().is_empty(), "no restart after the drop");
     }
 
     #[test]

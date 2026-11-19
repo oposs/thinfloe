@@ -42,7 +42,7 @@ const TOOL_BYTES: usize = 64 * 1024;
 /// Percent one volume key changes the speakers by.
 const VOLUME_STEP: i32 = 5;
 
-/// A key labwc hands to `--osd-key`.
+/// A key labwc hands to `--osd-key`, or `Reload` from the menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     VolumeUp,
@@ -51,16 +51,20 @@ pub enum Action {
     MicMute,
     BrightnessUp,
     BrightnessDown,
+    /// Read the volume keys switch again (the menu sends it after a
+    /// keyboard apply). No key is bound to it.
+    Reload,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 7] = [
         Action::VolumeUp,
         Action::VolumeDown,
         Action::VolumeMute,
         Action::MicMute,
         Action::BrightnessUp,
         Action::BrightnessDown,
+        Action::Reload,
     ];
 
     pub fn parse(s: &str) -> Option<Action> {
@@ -75,6 +79,7 @@ impl Action {
             Action::MicMute => "mic-mute",
             Action::BrightnessUp => "brightness-up",
             Action::BrightnessDown => "brightness-down",
+            Action::Reload => "reload",
         }
     }
 }
@@ -117,9 +122,11 @@ pub fn osd_key_main(args: &[OsString]) -> ExitCode {
 /// The volume and mute keys on every speaker or microphone through
 /// `pactl`, starting from the default device's value since there is no
 /// shared state; the brightness keys need the OSD's monitor list and do
-/// nothing.
+/// nothing. Without an OSD there is nothing to reload: it reads the
+/// switch when it starts.
 fn act_without_osd(a: Action) {
     let kind = match a {
+        Action::Reload => return,
         Action::VolumeUp | Action::VolumeDown | Action::VolumeMute => audio::Kind::Sink,
         Action::MicMute => audio::Kind::Source,
         Action::BrightnessUp | Action::BrightnessDown => {
@@ -279,6 +286,7 @@ mod tests {
             assert_eq!(Action::parse(a.as_str()), Some(a));
         }
         assert_eq!(Action::parse("volume"), None);
+        assert_eq!(Action::parse("reload"), Some(Action::Reload));
     }
 
     #[test]

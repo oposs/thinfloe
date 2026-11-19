@@ -20,6 +20,29 @@ pub enum Mode {
     Off,
 }
 
+/// The switch in the generated environment (`THINFLOE_VOLUME_KEYS`), by
+/// the composer's rule: a line starting with `#` is skipped, key and value
+/// are trimmed of blanks, the last assignment wins, and `on`, `"on"` or
+/// `'on'` is on. Anything else, or no such line, is off.
+pub fn keys_mode(env_text: &str) -> Mode {
+    let mut last = "";
+    for line in env_text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim_matches([' ', '\t', '\r']) == "THINFLOE_VOLUME_KEYS" {
+            last = v.trim_matches([' ', '\t', '\r']);
+        }
+    }
+    match last {
+        "on" | "\"on\"" | "'on'" => Mode::Keys,
+        _ => Mode::Off,
+    }
+}
+
 /// One `pactl` set on one device, by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Set {
@@ -353,6 +376,33 @@ mod tests {
             }
         );
         assert!(!s.mic_muted());
+    }
+
+    #[test]
+    fn keys_mode_reads_the_switch() {
+        for on in ["on", "\"on\"", "'on'", " on \r"] {
+            assert_eq!(keys_mode(&format!("THINFLOE_VOLUME_KEYS={on}\n")), Mode::Keys, "{on:?}");
+        }
+        for off in ["off", "yes", "", "On", "\"on"] {
+            assert_eq!(
+                keys_mode(&format!("THINFLOE_VOLUME_KEYS={off}\n")),
+                Mode::Off,
+                "{off:?}"
+            );
+        }
+        assert_eq!(keys_mode(""), Mode::Off, "missing");
+        assert_eq!(keys_mode("THINFLOE_BRIGHTNESS_KEYS=on\n"), Mode::Off);
+        assert_eq!(keys_mode("# THINFLOE_VOLUME_KEYS=on\n"), Mode::Off, "a comment");
+        assert_eq!(keys_mode("XTHINFLOE_VOLUME_KEYS=on\n"), Mode::Off);
+        // The last assignment wins, as in the composer.
+        assert_eq!(
+            keys_mode("THINFLOE_VOLUME_KEYS=on\nTHINFLOE_VOLUME_KEYS=off\n"),
+            Mode::Off
+        );
+        assert_eq!(
+            keys_mode("THINFLOE_VOLUME_KEYS=off\n THINFLOE_VOLUME_KEYS = on\n"),
+            Mode::Keys
+        );
     }
 
     #[test]

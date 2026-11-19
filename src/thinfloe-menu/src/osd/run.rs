@@ -1,5 +1,5 @@
 //! The OSD process's loop: keys from the socket, results from the audio
-//! and monitor workers and the microphone poll, the Wayland connection,
+//! and monitor workers, `pactl subscribe` events, the Wayland connection,
 //! and a redraw of every output after each change.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,16 +12,14 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl};
+use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl, Watch};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
 use super::state::{OsdState, Shown};
 use super::surface::{SurfaceKind, Surfaces, mark_placement, panel_placement};
-use super::sync::Mode;
+use super::sync::{Mode, keys_mode};
 use super::{Action, POLL_MAX_MS, STOP, VOLUME_STEP, socket};
 
-/// How often the microphone's mute state is read for the mark.
-const MIC_POLL: Duration = Duration::from_secs(1);
 /// How long after the outputs change the monitors are detected again:
 /// a monitor that just came answers DDC/CI only after a while.
 const REDETECT_DELAY: Duration = Duration::from_secs(2);
@@ -29,8 +27,8 @@ const REDETECT_DELAY: Duration = Duration::from_secs(2);
 /// What the worker threads report to the loop.
 enum Msg {
     Audio(AudioEvent),
-    /// The microphone poll's answer.
-    MicPoll(Result<bool, String>),
+    /// A `pactl subscribe` line, or its restart.
+    Watch(Watch),
     Ddc(DdcEvent),
 }
 
@@ -50,7 +48,7 @@ impl Notify {
 }
 
 /// Messages logged once per process: a missing sound device would
-/// otherwise log every second.
+/// otherwise log on every key.
 #[derive(Default)]
 pub(super) struct Logged(BTreeSet<String>);
 
@@ -144,22 +142,18 @@ pub(super) fn run() -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let notify = Arc::new(Notify { tx, wake: wake_tx });
 
+    // The watch first: a device that comes while the worker starts is
+    // then not missed.
     let n = notify.clone();
-    // Task 10 reads the switch; until then the keys mode.
-    let audio = AudioWorker::spawn(Pactl::from_env(), Mode::Keys, move |e| n.send(Msg::Audio(e)));
+    let _watch = super::audio::watch(&Pactl::from_env(), move |w| n.send(Msg::Watch(w)));
+    let env = env_file();
+    let n = notify.clone();
+    let audio = AudioWorker::spawn(Pactl::from_env(), read_mode(&env), move |e| n.send(Msg::Audio(e)));
     let n = notify.clone();
     let monitors = Monitors::spawn(Ddcutil::from_env(), move |e| n.send(Msg::Ddc(e)));
     let mut redetect = Redetect::default();
     monitors.redetect();
     redetect.started();
-    let n = notify.clone();
-    std::thread::spawn(move || {
-        let p = Pactl::from_env();
-        while !STOP.load(Ordering::SeqCst) {
-            n.send(Msg::MicPoll(p.source_muted()));
-            std::thread::sleep(MIC_POLL);
-        }
-    });
     drop(notify);
 
     let mut state = OsdState::new();
@@ -207,7 +201,7 @@ pub(super) fn run() -> Result<(), String> {
             redetect.outputs_changed(now);
         }
         for a in drain_socket(&sock) {
-            dirty |= on_action(&mut state, a, &audio, &monitors, now);
+            dirty |= on_action(&mut state, a, &audio, &monitors, &env, now);
         }
         let mut buf = [0u8; 64];
         while matches!((&wake_rx).read(&mut buf), Ok(n) if n > 0) {}
@@ -215,7 +209,13 @@ pub(super) fn run() -> Result<(), String> {
         while let Ok(m) = rx.try_recv() {
             dirty |= match m {
                 Msg::Audio(e) => on_audio(&mut state, e, now, &mut logged),
-                Msg::MicPoll(r) => on_mic_poll(&mut state, r, &mut logged),
+                Msg::Watch(w) => {
+                    audio.request(match w {
+                        Watch::Event(e) => AudioRequest::Device(e),
+                        Watch::Restarted => AudioRequest::Resync,
+                    });
+                    false
+                }
                 Msg::Ddc(e) => {
                     if matches!(e, DdcEvent::Detected(_)) && redetect.finished() {
                         monitors.redetect();
@@ -246,10 +246,18 @@ fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
 }
 
 /// Start what `a` asks for; the brightness panel shows at once, the
-/// volume and microphone panels when `pactl` has answered. True when
-/// something to draw changed.
-fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Monitors, now: Instant) -> bool {
+/// volume and microphone panels when `pactl` has answered; `Reload`
+/// reads the switch in `env` again. True when something to draw changed.
+fn on_action(
+    state: &mut OsdState,
+    a: Action,
+    audio: &AudioWorker,
+    monitors: &Monitors,
+    env: &Path,
+    now: Instant,
+) -> bool {
     match a {
+        Action::Reload => reload(audio, env),
         Action::VolumeUp => audio.request(AudioRequest::Step(VOLUME_STEP)),
         Action::VolumeDown => audio.request(AudioRequest::Step(-VOLUME_STEP)),
         Action::VolumeMute => audio.request(AudioRequest::ToggleMute),
@@ -263,15 +271,33 @@ fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Mo
     false
 }
 
-/// The answer of a volume or microphone key. A failure (no sound device)
-/// is logged once per message and shows nothing.
+/// The generated environment the menu writes, where the volume keys
+/// switch is: found as the menu finds it (`TF_CONFIG_DIR`, else
+/// `$HOME/.config/thinfloe`).
+fn env_file() -> PathBuf {
+    crate::config::ConfigDir::from_env().generated_file("environment")
+}
+
+/// The volume keys switch in `env`; a file that cannot be read is off.
+fn read_mode(env: &Path) -> Mode {
+    keys_mode(&std::fs::read_to_string(env).unwrap_or_default())
+}
+
+/// The switch may have changed: every device follows it.
+fn reload(audio: &AudioWorker, env: &Path) {
+    audio.request(AudioRequest::Mode(read_mode(env)));
+}
+
+/// The answer of a volume or microphone key, or a fresh mark. A failure
+/// (no sound device) is logged once per message and shows nothing. The
+/// mic key's panel shows the shared state at once; the mark changes only
+/// with a `Mark`, which the worker reads from the default source after
+/// the key's sets, so it never flickers when that source does not follow
+/// (a monitor as the default).
 pub(super) fn on_audio(state: &mut OsdState, e: AudioEvent, now: Instant, logged: &mut Logged) -> bool {
     match e {
         AudioEvent::Sink(l) => state.show(Shown::Sink(l), now),
-        AudioEvent::Mic(m) => {
-            state.set_mic(m);
-            state.show(Shown::Mic(m), now);
-        }
+        AudioEvent::Mic(m) => state.show(Shown::Mic(m), now),
         AudioEvent::Mark(m) => return state.set_mic(m),
         AudioEvent::Failed(why) => {
             logged.once(format!("thinfloe-menu --osd: {why}"));
@@ -279,15 +305,6 @@ pub(super) fn on_audio(state: &mut OsdState, e: AudioEvent, now: Instant, logged
         }
     }
     true
-}
-
-/// The microphone poll keeps the mark; an error counts as not muted.
-fn on_mic_poll(state: &mut OsdState, r: Result<bool, String>, logged: &mut Logged) -> bool {
-    let muted = r.unwrap_or_else(|why| {
-        logged.once(format!("thinfloe-menu --osd: {why}"));
-        false
-    });
-    state.set_mic(muted)
 }
 
 /// A detection's result or a brightness step's new level. An output that
@@ -430,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_event_shows_the_level_and_a_mic_event_sets_the_mark() {
+    fn a_sink_event_shows_the_level_and_a_mic_event_shows_its_panel() {
         let t0 = Instant::now();
         let mut s = OsdState::new();
         let mut logged = Logged::default();
@@ -442,21 +459,63 @@ mod tests {
         assert_eq!(s.panel_for("DP-1", t0), Some(PanelView::Volume { percent: 55 }));
         assert!(on_audio(&mut s, AudioEvent::Mic(true), t0, &mut logged));
         assert_eq!(s.panel_for("DP-1", t0), Some(PanelView::MicOff));
-        assert!(s.mark());
+        // The mark waits for the default source's real state (a Mark
+        // event), so a monitor as the default never flashes it.
+        assert!(!s.mark());
     }
 
     #[test]
-    fn the_mic_poll_keeps_the_mark_without_a_panel() {
+    fn a_mark_event_sets_the_mark_without_a_panel() {
         let t0 = Instant::now();
         let mut s = OsdState::new();
         let mut logged = Logged::default();
-        assert!(on_mic_poll(&mut s, Ok(true), &mut logged));
+        assert!(on_audio(&mut s, AudioEvent::Mark(true), t0, &mut logged));
         assert!(s.mark());
         assert_eq!(s.panel_for("DP-1", t0), None);
-        assert!(!on_mic_poll(&mut s, Ok(true), &mut logged));
-        // No sound device: no mark.
-        assert!(on_mic_poll(&mut s, Err("no device".into()), &mut logged));
+        assert!(
+            !on_audio(&mut s, AudioEvent::Mark(true), t0, &mut logged),
+            "nothing changed"
+        );
+        assert!(on_audio(&mut s, AudioEvent::Mark(false), t0, &mut logged));
         assert!(!s.mark());
+        assert_eq!(s.panel_for("DP-1", t0), None);
+    }
+
+    #[test]
+    fn a_reload_to_off_resets_every_device() {
+        use crate::osd::audio::tests::{calls, fake, json, wait_for};
+        use crate::osd::audio::{AudioEvent, AudioWorker};
+        use std::sync::Mutex;
+        let d = crate::testdir::TestDir::new("osd-run", "reload");
+        let env = d.join("environment");
+        std::fs::write(&env, "THINFLOE_VOLUME_KEYS=on\n").unwrap();
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 40, true)]),
+            &json(&[(2, "mic", 60, true)]),
+            "a",
+            "mic",
+            "",
+        );
+        let events = Arc::new(Mutex::new(Vec::<AudioEvent>::new()));
+        let e = events.clone();
+        let audio = AudioWorker::spawn(p, read_mode(&env), move |ev| e.lock().unwrap().push(ev));
+        wait_for("the start's mark", || !events.lock().unwrap().is_empty());
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new(), "the keys mode keeps the start");
+        std::fs::write(&env, "THINFLOE_VOLUME_KEYS=on\nTHINFLOE_VOLUME_KEYS=off\n").unwrap();
+        reload(&audio, &env);
+        wait_for("four sets", || calls(&d, "set-").len() == 4);
+        assert_eq!(
+            calls(&d, "set-"),
+            [
+                "set-sink-volume a 100%",
+                "set-sink-mute a 0",
+                "set-source-volume mic 100%",
+                "set-source-mute mic 0"
+            ]
+        );
+        // A missing file is the switch off.
+        assert_eq!(read_mode(&d.join("missing")), Mode::Off);
     }
 
     #[test]
