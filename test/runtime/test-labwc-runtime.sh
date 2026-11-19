@@ -1165,7 +1165,9 @@ fi
 # supported) is 46 high, y 652..697: its top edge moves down by 15 px. So
 # (760,645) is TILE (0d1218) in the Volume panel and red above the shorter
 # one; (760,652) is its top border (LINE, 151b22); (760,690) is inside both,
-# below the row of icon and text, and x 760 is right of the name. The mark's
+# below the row of icon and text, and x 760 is right of the name. Its icon is
+# the box x 496..517, y 664..685 (16 in, 12 below its top, 22 square), drawn
+# in WARN (c79a4a) for Microphone off; output 2 adds 1280 to x. The mark's
 # right border (WARN, c79a4a) is at (1265,49) on output 1 and (2545,49) on
 # output 2.
 # shellcheck disable=SC2016 # expands inside the container
@@ -1276,7 +1278,7 @@ osd | bright)
         wtype -k XF86AudioRaiseVolume -s 500 -k XF86AudioMicMute
         t=$EPOCHREALTIME
         after "$t" 0.5
-        px mic in1=760,690 top1=760,652 above1=760,645 gap1=522,682 in2=2040,690 top2=2040,652 above2=2040,645
+        px mic in1=760,690 top1=760,652 above1=760,645 gap1=522,682 icon1=496,664,518,686#c79a4a in2=2040,690 top2=2040,652 above2=2040,645 gap2=1802,682 icon2=1776,664,1798,686#c79a4a
         echo "Volume: 1.00" >/tmp/mic
         px nomark --within 3 m1=1265,49@ff0000 m2=2545,49@ff0000
         # The mark follows the microphone, on every output, also when one goes.
@@ -1403,7 +1405,11 @@ mk_expect "0.5 s after the volume key the Volume panel shows on both outputs, it
     panel1=0d1218 panel2=0d1218 bar1=7cc4ff bar2=7cc4ff gap1=7cc4ff tall1=0d1218
 mk_expect "2.5 s after the volume key the panel is gone" volgone bar1=ff0000 panel1=ff0000
 mk_expect "the microphone key 0.5 s after a volume key shows the Microphone off panel 15 px lower, without a bar, on both outputs" mic \
-    in1=0d1218 top1=151b22 above1=ff0000 gap1=0d1218 in2=0d1218 top2=151b22 above2=ff0000
+    in1=0d1218 top1=151b22 above1=ff0000 gap1=0d1218 in2=0d1218 top2=151b22 above2=ff0000 gap2=0d1218
+mk_expect "the Microphone off panel draws its icon in WARN on both outputs" mic icon1=found icon2=found
+grep -qx 'wpctl: set-mute @DEFAULT_AUDIO_SOURCE@ toggle' <<<"$MK_OUT"
+mk_check $? "the microphone key toggles the default source's mute" \
+    "$(grep '^wpctl: set' <<<"$MK_OUT" | tr '\n' ' ')"
 mk_expect "the mark goes when the microphone is on" nomark m1=ff0000 m2=ff0000
 mk_expect "the mark shows on both outputs within 2 s of the microphone being muted" mark m1=c79a4a m2=c79a4a
 [[ "$(mk_val osd_alive)" == yes && "$(mk_px unplug m1)" == c79a4a ]]
