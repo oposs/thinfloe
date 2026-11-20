@@ -262,6 +262,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         vainfo_cmd: vainfo_cmd(),
         wl_copy_cmd: wl_copy_cmd(),
         hardware_roots: thinfloe_menu::hardware::Roots::system(),
+        time: thinfloe_menu::timetab::TimePaths::system(),
     };
     let mut grid = tiles::load(&shipped, &user_dir());
     let path = program_path();

@@ -244,6 +244,8 @@ pub struct Paths {
     pub wl_copy_cmd: Vec<String>,
     /// Where /sys and /proc are, for the This machine tab's facts.
     pub hardware_roots: crate::hardware::Roots,
+    /// The time tool, chronyc and the time files, for the Time band.
+    pub time: crate::timetab::TimePaths,
 }
 
 /// How a keyboard change reaches the running compositor.
@@ -1811,6 +1813,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         assert_eq!(save(&ok, &Arc::new(Feed::default())), SaveOutcome::Saved);
         let one = Paths {
@@ -1829,6 +1832,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         assert_eq!(save(&one, &Arc::new(Feed::default())), SaveOutcome::HomeMissing);
         let missing = Paths {
@@ -1847,6 +1851,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         assert!(matches!(
             save(&missing, &Arc::new(Feed::default())),
@@ -2143,6 +2148,7 @@ mod tests {
                 vainfo_cmd: vec!["/nonexistent/vainfo".into()],
                 wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
                 hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+                time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
             };
             assert_eq!(
                 save(&p, &feed),
@@ -2172,6 +2178,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         // /bin/sh with no arguments reads stdin, which is /dev/null: exit 0.
         assert_eq!(save(&p, &feed), SaveOutcome::Saved);
@@ -2191,6 +2198,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         let _ = save(&p, &feed);
         let got = feed.drain();
@@ -2485,6 +2493,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
         p.homes = netfiles::Homes {
             home: d.join("home"),

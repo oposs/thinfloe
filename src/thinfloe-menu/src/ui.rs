@@ -4610,6 +4610,7 @@ mod tests {
                 ..Default::default()
             }],
             dns_in_use: vec!["192.168.1.1".into()],
+            ..Default::default()
         };
         net.status_done(Ok(lines.to_vec()), details);
         // The band closes the tab: a screen tall enough to show it whole.

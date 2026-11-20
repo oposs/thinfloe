@@ -31,6 +31,8 @@ pub struct IfDetail {
 pub struct Details {
     pub ifaces: Vec<IfDetail>,
     pub dns_in_use: Vec<String>,
+    /// The time zone and the clock's sync, read on the same poll.
+    pub time: crate::timetab::TimeStatus,
 }
 
 /// The details of each interface of `ifaces`, in their order, and the DNS
@@ -63,6 +65,7 @@ pub fn read(roots: &Roots, ifaces: &[Iface], pci_ids: &Path) -> Details {
     Details {
         ifaces,
         dns_in_use: netstat::dns_in_use(roots),
+        time: Default::default(),
     }
 }
 
