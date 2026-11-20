@@ -16,9 +16,9 @@
 //! column when the VPN or public row comes or goes.
 //!
 //! Rows move closer together as far as `min_row`, then, while a column holds
-//! more rows than fit, rows are left out in the order `Row::drop`: uptime,
-//! traffic, DNS, gateway, the public address, the VPN. The link and the
-//! address stay. A row too wide for its
+//! more rows than fit, that column's rows are left out in the order
+//! `Row::drop`: uptime, traffic, DNS, gateway, the public address, the VPN.
+//! The link and the address stay. A row too wide for its
 //! room leaves out the word `WiFi`; a value still too long starts after its
 //! label and is cut at the padding. Only in a rect squeezed below the
 //! shipped cell heights do the rows get so tight that the labels are half a
@@ -210,19 +210,24 @@ fn lines(rows: &[Row], columns: usize) -> usize {
 
 /// The rows that fit `height` in `columns` columns and how high each is: as
 /// tall as a line when there is room, as tight as `min_row` before any row
-/// is left out. Rows leave in `Row::drop` order until no column holds more
-/// than fit.
+/// is left out. While a column holds more rows than fit, its row of the
+/// highest `Row::drop` is left out.
 pub fn fit(mut rows: Vec<Row>, height: f32, columns: usize, m: &StatusSizes) -> (Vec<Row>, f32) {
     let columns = columns.clamp(1, 2);
     let avail = (height - 2.0 * m.pad_y).max(0.0);
     let fits = (avail / min_row(m)).floor() as usize;
-    while lines(&rows, columns) > fits {
-        let worst = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.drop > 0)
-            .max_by_key(|(_, r)| r.drop)
-            .map(|(i, _)| i);
+    loop {
+        let at = places(&rows, columns);
+        let worst = (0..columns)
+            .filter(|&c| at.iter().filter(|p| p.0 == c).count() > fits)
+            .find_map(|c| {
+                rows.iter()
+                    .zip(&at)
+                    .enumerate()
+                    .filter(|(_, (r, p))| r.drop > 0 && p.0 == c)
+                    .max_by_key(|(_, (r, _))| r.drop)
+                    .map(|(i, _)| i)
+            });
         match worst {
             Some(i) => {
                 rows.remove(i);
@@ -717,9 +722,10 @@ mod tests {
                     seen.push(got);
                 }
             }
-            // In two columns a step can take several rows; within a step
-            // the higher rank goes first.
-            let rank = |l: &str| rows(&sample(), Some(&addr)).iter().find(|r| r.label == l).unwrap().drop;
+            // In two columns a step can take a row of each column; the
+            // order holds within each column.
+            let all = rows(&sample(), Some(&addr));
+            let rank = |l: &str| all.iter().find(|r| r.label == l).unwrap().drop;
             let gone: Vec<&str> = seen
                 .windows(2)
                 .flat_map(|w| {
@@ -728,7 +734,22 @@ mod tests {
                     g
                 })
                 .collect();
-            assert_eq!(gone, ["Uptime", "Traffic", "DNS", "Gateway", "Public", "VPN"], "{cols}");
+            let order = ["Uptime", "Traffic", "DNS", "Gateway", "Public", "VPN"];
+            if cols == 1 {
+                assert_eq!(gone, order);
+            } else {
+                let side = |right: bool| {
+                    let of = |l: &str| all.iter().any(|r| r.label == l && r.right == right);
+                    (
+                        gone.iter().copied().filter(|l| of(l)).collect::<Vec<_>>(),
+                        order.iter().copied().filter(|l| of(l)).collect::<Vec<_>>(),
+                    )
+                };
+                for right in [false, true] {
+                    let (got, want) = side(right);
+                    assert_eq!(got, want, "right column: {right}");
+                }
+            }
         }
         // Squeezed, the rows first move together as far as `min_row`.
         let eight = 2.0 * STATUS_LARGE.pad_y + 8.0 * min_row(&STATUS_LARGE);
@@ -748,11 +769,11 @@ mod tests {
             let right = r.iter().filter(|x| x.right).count();
             assert!(left <= lines.max(2) && right <= lines, "{lines}: {:?}", labels_of(&r));
         }
-        // Three lines: the left column loses DNS, so Uptime and Traffic,
-        // ranked above it, are gone too.
+        // Three lines: each column loses its own highest rank, the left
+        // DNS, the right Uptime; Traffic stays.
         let h = 2.0 * m.pad_y + 3.0 * min_row(&m) + 0.5;
         let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
-        assert_eq!(labels_of(&r), ["Link", "IPv4", "Gateway", "VPN", "Public"]);
+        assert_eq!(labels_of(&r), ["Link", "IPv4", "Gateway", "VPN", "Public", "Traffic"]);
     }
 
     #[test]

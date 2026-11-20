@@ -109,9 +109,11 @@ At most eight rows.
   per column fit (large: 4 x 16 = 64 of 64 pt; small: 4 x 13.5 of 54 pt,
   above `min_row` 12). Both columns use one row height, so the rows line
   up across.
-- `fit`: rows leave out by drop rank (Uptime, Traffic, DNS, Gateway,
-  Public, VPN) while a column holds more than `floor(avail / min_row)`
-  rows; Link and IPv4 stay. At shipped sizes and cell heights
+- `fit`: while a column holds more than `floor(avail / min_row)` rows,
+  that column's row of the highest drop rank leaves (Uptime, Traffic,
+  DNS, Gateway, Public, VPN; in 2x1 the left column loses DNS, then
+  Gateway, the right Uptime, Traffic, Public, VPN, so at three lines
+  Link IPv4 Gateway | VPN Public Traffic stay); Link and IPv4 stay. At shipped sizes and cell heights
   nothing leaves out.
 - `label_in_row` stays: only on the tightest rows is a Geo label half a
   point smaller.
@@ -152,8 +154,8 @@ In `status/connection.rs` (rewritten where they pinned the column):
 - unknown gateway and DNS: `none` in the warning colour; no counters, no
   uptime: no Traffic and no Uptime row;
 - DNS with three servers: `9.9.9.9 +2`, the `+2` muted;
-- drop order under squeeze: Uptime, Traffic, DNS, Gateway, Public, VPN;
-  Link and IPv4 stay;
+- drop order under squeeze: Uptime, Traffic, DNS, Gateway, Public, VPN,
+  in 2x1 within each column; Link and IPv4 stay;
 - nothing leaves out at shipped sizes and heights, with the public answer;
 - the existing WiFi-word, cut, control-character, no-overlap and
   inside-rect tests, extended to the new rows and the hostile case (a
