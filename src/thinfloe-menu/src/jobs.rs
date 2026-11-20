@@ -1115,8 +1115,10 @@ pub enum TimeSaveFail {
     NotApplied(String),
 }
 
-/// The tool's worst case: three tool calls of 20 s each.
-pub const TIME_APPLY_TIMEOUT: Duration = Duration::from_secs(70);
+/// Above the worst case of `thinfloe-time apply`: `LOCK_WAIT` (30 s) plus
+/// three tool calls (timedatectl, systemctl, chronyc) of `TOOL_TIMEOUT`
+/// (20 s) each is 90 s. `test-thinfloe-time.sh` compares the constants.
+pub const TIME_APPLY_TIMEOUT: Duration = Duration::from_secs(100);
 const TIME_BYTES: usize = 64 * 1024;
 const TIME_LOG_SOURCE: &str = "time";
 
