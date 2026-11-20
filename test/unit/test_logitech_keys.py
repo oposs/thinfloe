@@ -601,8 +601,24 @@ class TakeLock(unittest.TestCase):
         with mock.patch.object(mod, "LOCK_WAIT", 0.3), redirect_stderr(buf):
             self.assertIsNone(mod.take_lock(self.state))
         self.assertLess(time.monotonic() - start, 2.0)
-        self.assertIn("thinfloe: logitech-keys: ", buf.getvalue())
-        self.assertIn("lock busy", buf.getvalue())
+        self.assertEqual(buf.getvalue(), "")    # the caller logs a busy lock
+
+    def test_busy_lock_is_one_journal_line_over_two_rescans(self):
+        other = os.open(str(self.state / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, other)
+        mod.fcntl.flock(other, mod.fcntl.LOCK_EX)
+        k = mod.Keys(uinput=mock.Mock(), take_lock=mod.take_lock,
+                     find_nodes=lambda: [(Path("/dev/hidraw9"), "phys1")],
+                     open_listener=lambda node: mock.Mock(),
+                     open_transport=lambda node: mock.Mock(),
+                     wait=lambda ls, timeout: [])
+        buf = io.StringIO()
+        with mock.patch.object(mod, "LOCK_WAIT", 0.1), \
+                mock.patch.object(mod.pb, "_paths", lambda: (None, None, None, self.state)), \
+                redirect_stderr(buf):
+            k.rescan()
+            k.rescan()
+        self.assertEqual(buf.getvalue().count("lock busy"), 1, buf.getvalue())
 
 
 class Main(unittest.TestCase):
