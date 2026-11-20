@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""
+logitech-keys - send the microphone mute key of Logi Bolt keyboards as F20
+
+The mic-mute key of a Logi Bolt keyboard (MX Mechanical) sends nothing by
+itself: the keyboard reports it only after host software diverts control
+CID 0x011C (measured on the MX Mechanical) of REPROG_CONTROLS_V4 (0x1B04).
+This program finds that control in a paired slot, diverts it (setCidReporting
+without the persist bits, so the keyboard forgets it at power-off) and turns
+each press of the diverted-buttons event into KEY_F20 on a uinput device
+named "ThinFloe Logitech keys". F20 is a key no keyboard has and no program
+binds, so it reaches the menu's mute handling unchanged.
+
+This file holds the HID++ and uinput parts. It reuses the transport and
+request code of peripheral-battery, under a software id of its own (0x0B;
+the battery reader has 0x0A), so the two never take each other's replies.
+Needs root. TF_PERIPHERAL_BATTERY names the battery reader (default
+/usr/libexec/thinfloe/peripheral-battery).
+"""
+
+import fcntl
+import importlib.machinery
+import importlib.util
+import os
+import struct
+import time
+from typing import Optional
+
+MIC_CID = 0x011C
+KEY_F20 = 190
+REPROG = 0x1B04
+SWID = 0x0B
+DIVERTABLE = 0x20       # getCidInfo flags: the control can be diverted
+
+EV_SYN, EV_KEY = 0, 1
+UI_SET_EVBIT = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_DEV_SETUP = 0x405C5503
+UI_DEV_CREATE = 0x5501
+UI_DEV_DESTROY = 0x5502
+DEVICE_NAME = b"ThinFloe Logitech keys"
+BUS_USB = 3
+EVENT = "llHHi"         # struct input_event: time (sec, usec), type, code, value
+
+
+def _load_battery():
+    path = os.environ.get("TF_PERIPHERAL_BATTERY", "/usr/libexec/thinfloe/peripheral-battery")
+    loader = importlib.machinery.SourceFileLoader("peripheral_battery", path)
+    spec = importlib.util.spec_from_loader("peripheral_battery", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+pb = _load_battery()
+pb.SWID = SWID      # _feature_call reads the module global at call time
+
+
+def find_mic(t, slot: int, deadline: float) -> Optional[int]:
+    """The 0x1B04 feature index when the slot has a divertable MIC_CID, else
+    None. Asks only the root getFeature, getCount and getCidInfo."""
+    idx = pb._feature_index(t, slot, REPROG, deadline)
+    if not idx:
+        return None
+    r = pb._feature_call(t, slot, idx, 0, b"", deadline)
+    if not r:
+        return None
+    for n in range(r[0]):
+        info = pb._feature_call(t, slot, idx, 1, bytes([n]), deadline)
+        if not info or len(info) < 5:
+            return None
+        if (info[0] << 8 | info[1]) == MIC_CID:
+            return idx if info[4] & DIVERTABLE else None
+    return None
+
+
+def set_divert(t, slot: int, idx: int, on: bool, deadline: float) -> bool:
+    """setCidReporting for MIC_CID: divert flag only, never the persist bits."""
+    params = bytes([MIC_CID >> 8, MIC_CID & 0xFF, 0x03 if on else 0x02])
+    return bool(pb._feature_call(t, slot, idx, 3, params, deadline))
+
+
+def mic_down(rep: bytes, idx: int) -> Optional[bool]:
+    """For a diverted-buttons event of feature index idx: whether MIC_CID is
+    among the pressed controls (CIDs in pairs from byte 4). None for any
+    other report."""
+    head = pb.event_head(rep)
+    if head is None or head[1] != idx:
+        return None
+    cids = struct.unpack(">4H", bytes(rep[4:12]).ljust(8, b"\0"))
+    return MIC_CID in cids
+
+
+class Uinput:
+    """A keyboard device that can send KEY_F20 only."""
+
+    def __init__(self, path: str = "/dev/uinput"):
+        self.fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, KEY_F20)
+            setup = struct.pack("HHHH80sI", BUS_USB, 0, 0, 1, DEVICE_NAME, 0)
+            fcntl.ioctl(self.fd, UI_DEV_SETUP, setup)
+            fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        except OSError:
+            os.close(self.fd)
+            raise
+
+    def _event(self, kind: int, code: int, value: int) -> None:
+        now = time.time()
+        sec = int(now)
+        os.write(self.fd, struct.pack(EVENT, sec, int((now - sec) * 1e6), kind, code, value))
+
+    def key(self, code: int, down: bool) -> None:
+        self._event(EV_KEY, code, 1 if down else 0)
+        self._event(EV_SYN, 0, 0)
+
+    def close(self) -> None:
+        try:
+            fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+        finally:
+            os.close(self.fd)
