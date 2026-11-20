@@ -271,11 +271,13 @@ four cells holds the battery 1x1 and the graph and still has room.
   NIC the boot, so the two rows cover one span; a connection uptime has no
   source (the kernel keeps no time of the carrier coming up, and the menu
   restarts at every log out). It has content when the graph has. 1x2 draws
-  one column; 2x1 draws two at one row height, the first taking the first
-  half of the rows (rounded up). All eight rows fit at both shipped sizes
+  one column; 2x1 draws two at one row height, the left holding Link,
+  IPv4, Gateway and DNS, the right VPN, Public, Traffic and Uptime from
+  the top, so no row changes column when the VPN or Public row appears. All eight rows fit at both shipped sizes
   and both cell heights; only a rect squeezed below that first moves the
-  rows together down to `min_row`, then leaves out Uptime, Traffic, DNS,
-  Gateway, Public, VPN in that order; Link and IPv4 stay. A row too wide
+  rows together down to `min_row`, then, while a column holds more rows
+  than fit, leaves out Uptime, Traffic, DNS, Gateway, Public, VPN in that
+  order; Link and IPv4 stay. A row too wide
   leaves out the word `WiFi`; a value still too long starts after its
   label and is cut at the padding. On the tightest rows the Geo labels are
   half a point smaller (`label_in_row`); the shipped sizes never get that
