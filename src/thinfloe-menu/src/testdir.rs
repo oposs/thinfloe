@@ -12,8 +12,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// directory, so one's `make` cannot remove the other's files.
 pub struct TestDir(PathBuf);
 
-/// The next sequence number of this process.
+/// The next sequence number of this process for `new`.
 static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// The next sequence number for `sockets`, counted apart from `new`, so
+/// the many plain directories do not use up the short socket sequence.
+static SOCKET_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// A socket directory's sequence number takes this many base-36 digits.
 const SEQ_DIGITS: usize = 2;
@@ -41,7 +45,7 @@ impl TestDir {
     /// it fits `sun_path` also under a long $TMPDIR. Take the socket paths
     /// from `socket`.
     pub fn sockets(tag: &str) -> TestDir {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let n = SOCKET_SEQ.fetch_add(1, Ordering::Relaxed);
         TestDir::make(format!("tf-{tag}-{}-{}", std::process::id(), base36(n)))
     }
 
@@ -70,12 +74,12 @@ impl TestDir {
 }
 
 /// `n` in `SEQ_DIGITS` base-36 digits. Panics past the last one: a run
-/// with that many test directories needs a longer sequence.
+/// with that many socket directories needs a longer sequence.
 fn base36(n: usize) -> String {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     assert!(
         n < 36usize.pow(SEQ_DIGITS as u32),
-        "test directory sequence {n} needs more than {SEQ_DIGITS} digits"
+        "socket test directory number {n}: one run made more socket directories than {SEQ_DIGITS} base-36 digits count; raise SEQ_DIGITS and check that the socket paths still fit SOCKET_PATH_MAX"
     );
     (0..SEQ_DIGITS)
         .rev()
@@ -157,5 +161,11 @@ mod tests {
         assert_eq!(base36(35), "0z");
         assert_eq!(base36(36), "10");
         assert_eq!(base36(1295), "zz");
+    }
+
+    #[test]
+    #[should_panic(expected = "made more socket directories than 2 base-36 digits count")]
+    fn a_socket_sequence_past_the_digits_names_the_cause() {
+        base36(1296);
     }
 }
