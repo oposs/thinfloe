@@ -700,6 +700,7 @@ mod tests {
                 driver: Some("iwlwifi".into()),
             }],
             dns_in_use: vec!["192.168.1.1".into(), "9.9.9.9".into()],
+            time: Default::default(),
         };
         let lines = info_lines(std::slice::from_ref(&w), &details, true, None);
         assert_eq!(
