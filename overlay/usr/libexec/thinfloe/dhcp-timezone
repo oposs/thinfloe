@@ -108,8 +108,14 @@ read_menu() {
 # on a change only.
 set_ntp() {
     local want=$1 have= file=$CHRONY_DHCP/thinfloe.sources tmp
+    local pending=$STATE_DIR/dhcp-ntp-reload-pending
     [ -f "$file" ] && have=$(<"$file")
-    [ "$want" = "$have" ] && return 0
+    if [ "$want" = "$have" ]; then
+        # A failed reload is retried, although the file is unchanged.
+        [ -e "$pending" ] || return 0
+        reload_ntp "$pending"
+        return 0
+    fi
     if [ -z "$want" ]; then
         rm -f -- "$file"
         echo "thinfloe: no NTP servers from DHCP"
@@ -119,7 +125,20 @@ set_ntp() {
             || { echo "thinfloe: could not write $file"; rm -f -- "${tmp:-}"; return 0; }
         echo "thinfloe: NTP servers ${NTP_LIST# } from DHCP"
     fi
-    chronyc reload sources >/dev/null 2>&1 || echo "thinfloe: chronyc reload sources failed"
+    reload_ntp "$pending"
+}
+
+# chronyc reload sources; the marker $1 is set before and cleared after a
+# good reload, so a failed one is retried at the next read. Its own file:
+# thinfloe-time keeps another under its lock, which this script does not take.
+reload_ntp() {
+    mkdir -p -- "$STATE_DIR" && : >"$1" \
+        || echo "thinfloe: could not write $1"
+    if chronyc reload sources >/dev/null 2>&1; then
+        rm -f -- "$1"
+    else
+        echo "thinfloe: chronyc reload sources failed"
+    fi
 }
 
 # The zone this process set last; scan logs only a different one. SKIPPED:

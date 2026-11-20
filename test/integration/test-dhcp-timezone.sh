@@ -48,6 +48,7 @@ chmod +x "$WORK/bin/timedatectl"
 cat >"$WORK/bin/chronyc" <<STUB
 #!/bin/bash
 printf '%s\n' "\$*" >>"$WORK/chronyc"
+exit "\${STUB_CHRONYC_RC:-0}"
 STUB
 chmod +x "$WORK/bin/chronyc"
 
@@ -164,6 +165,20 @@ grep -qxF "thinfloe: NTP servers 10.0.0.5 fd00::7 from DHCP" "$WORK/out" || fail
 once 'NTP=10.0.0.5 fd00::7\n'
 [[ $(grep -c . "$WORK/chronyc") -eq 1 ]] || fail "unchanged_ntp_no_reload: reloaded again"
 [[ ! -s "$WORK/out" ]] || fail "unchanged_ntp_no_reload: logged again: $(cat "$WORK/out")"
+
+# A failed reload is retried at the next read, although the file is unchanged.
+once 'NTP=10.0.0.6\n'
+rm -f "$WORK/chronyc"
+STUB_CHRONYC_RC=1 once 'NTP=10.0.0.9\n'
+grep -qxF "thinfloe: chronyc reload sources failed" "$WORK/out" || fail "failed_reload_retried: no failure line: $(cat "$WORK/out")"
+[[ -e "$WORK/state/dhcp-ntp-reload-pending" ]] || fail "failed_reload_retried: no pending marker"
+rm -f "$WORK/chronyc"
+once 'NTP=10.0.0.9\n'
+[[ "$(cat "$WORK/chronyc" 2>/dev/null)" == "reload sources" ]] || fail "failed_reload_retried: no reload on the next read"
+[[ ! -e "$WORK/state/dhcp-ntp-reload-pending" ]] || fail "failed_reload_retried: marker kept after a good reload"
+rm -f "$WORK/chronyc"
+once 'NTP=10.0.0.9\n'
+[[ ! -e "$WORK/chronyc" ]] || fail "failed_reload_retried: reloaded again with nothing pending"
 
 once 'NTP=evil;rm 1.2.3.4 a.b 999.1.1.1 1.2.3 ::g\n'
 [[ "$(cat "$SRCS" 2>/dev/null)" == "server 1.2.3.4 iburst" ]] || fail "hostile_ntp_dropped: $(cat "$SRCS" 2>/dev/null)"
