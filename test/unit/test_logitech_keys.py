@@ -482,6 +482,59 @@ class KeysTests(KeysBase):
         self.assertIn("no answer to the undivert request", buf.getvalue())
         self.assertTrue(self.uin.closed)
 
+    def test_lost_ws_reply_does_not_record_the_slot(self):
+        k = self.keys({1: KBD})
+        real = self.silence(lambda m: m[0] == 0x11 and m[2] == 0 and m[4:6] == b"\x1d\x4b")
+        k.rescan()
+        self.assertEqual(self.diverts(), [])
+        self.f._answer = real
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+        self.lst.queue.append(RECONNECT1)     # the recorded wake index works
+        k.step(0)
+        self.assertEqual(len(self.diverts()), 2)
+
+    def test_slot_without_wake_feature_is_still_recorded(self):
+        k = self.keys({1: KBD}, ws={})
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_new_node_is_found_within_5_seconds(self):
+        k = self.keys({1: KBD})
+        self.nodes = []
+        k.step(0)
+        self.nodes = [(NODE, "phys1")]
+        self.f.clock.t += 5
+        k.step(0)
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_slots_of_a_known_node_are_probed_every_30_seconds(self):
+        k = self.keys({1: KBD})
+        self.silence(lambda m: m[0] == 0x11)
+        k.step(0)
+
+        def asked():
+            return len([w for w in self.f.written if w[0] == 0x11])
+        base = asked()
+        for _ in range(5):                    # 5 s steps up to 25 s
+            self.f.clock.t += 5
+            k.step(0)
+        self.assertEqual(asked(), base)
+        self.f.clock.t += 5
+        k.step(0)
+        self.assertGreater(asked(), base)
+
+    def test_wake_with_busy_lock_logs_only_the_lock(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.busy = True
+        self.lst.queue.append(RECONNECT1)
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            k.step(0)
+        self.assertEqual(buf.getvalue().count("lock busy"), 1, buf.getvalue())
+        self.assertNotIn("no answer", buf.getvalue())
+
     def test_node_gone_releases_key(self):
         k = self.keys({1: KBD})
         k.rescan()

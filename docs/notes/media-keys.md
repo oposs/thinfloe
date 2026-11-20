@@ -225,9 +225,10 @@ and no program ever saw it. `/usr/libexec/thinfloe/logitech-keys` (a root
 program, unit `thinfloe-logitech-keys.service`) asks the keyboard to divert
 control `0x011C` (microphone mute) to the host, and sends `KEY_F20` through
 `/dev/uinput` (device "ThinFloe Logitech keys") while the key is down. The
-composer's microphone binding listens for F20 when "Volume keys control this
-machine" is on; with the switch off F20 reaches the program in front, which
-is how ThinLinc gets the key and passes XF86AudioMicMute to the remote side.
+composer's microphone binding is on XF86AudioMicMute, which F20 produces, and
+is present when "Volume keys control this machine" is on; with the switch off
+F20 reaches the program in front, which is how ThinLinc gets the key and
+passes XF86AudioMicMute to the remote side.
 F20, not `KEY_MICMUTE`: XKB maps both to XF86AudioMicMute (`<FK20>` and
 `<I256>`), but X11 key codes end at 255, so `<I256>` cannot reach Xwayland or
 ThinLinc; `<FK20>` is code 198. Laptops send their microphone key as F20 for
@@ -238,7 +239,8 @@ with the battery watcher when a Logitech hidraw node appears. It shares the
 battery reader's HID++ code and lock file; the kernel needs uinput (built
 in; `test-session-packages.sh` checks that `/dev/uinput` will exist). The
 diversion is undone when the service stops, and made again when the
-keyboard wakes or the receiver is plugged in again. Tests:
+keyboard wakes or the receiver is plugged in again (the program looks for a
+new receiver every 5 s, so the key works up to 5 s after a replug). Tests:
 `test/unit/test_logitech_keys.py` with fake nodes, `test-session-packages.sh`.
 
 Owner checks on hardware:
