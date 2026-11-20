@@ -317,12 +317,19 @@ def apply() -> None:
         body = "".join(["zone=%s\n" % zone] if zone else []) + \
             "".join("ntp=%s\n" % s for s in servers)
         try:
+            # The marker first: if it cannot be written, nothing changes,
+            # and a retry still sees the servers to install and reload.
+            had_pending = os.path.exists(PENDING)
+            write_atomic(PENDING, "")
             write_atomic(conf, body or None)
-            changed = install_sources(servers) or os.path.exists(PENDING)
-            if changed:
-                write_atomic(PENDING, "")
+            changed = install_sources(servers) or had_pending
         except OSError as e:
             raise TimeError("cannot install the time settings: %s" % (e.strerror or e))
+        if not changed:
+            try:
+                os.unlink(PENDING)
+            except OSError:
+                pass  # left over: the next apply reloads once more
         if zone:
             rc, out = run([TIMEDATECTL, "set-timezone", "--", zone])
             if rc != 0:
