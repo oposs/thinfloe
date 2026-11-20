@@ -46,6 +46,11 @@ change keeps that. The OSD sets `animation_time` 0 too (`osd/draw.rs`).
 The knob is the theme's `foreground` (`#fafafa`) in every state: in
 `brand::theme()`, `style.switch_thumb.bg = Prop::fixed(Paint::Role(Role::Foreground, 1.0))`.
 The track keeps lyra's colours (ice blue when on, `input` at 80 % when off).
+The knob is 14 px (lyra: 16) and steps 1 px in from the track's border at
+the off end (`shift_x` `Px(1)`) and by `calc(100% + 1px)` when on, so the
+track shows 2 px around it on every side, at either end the same gap
+(controller, 2026-11-20: the edge of the light knob must read against the
+ice track, 1.8:1).
 
 - *(architect)* One knob colour in both states, rather than a dark knob with
   a frame or a different track colour: a knob of constant colour is what
@@ -77,8 +82,10 @@ In `brand.rs`'s tests, through the menu's own path (brand theme,
    a click, a pass with it on. In both rasters the knob (pixels of the
    knob colour inside the track) is found; it is the same colour in both,
    its centre moves right by at least a third of the track width, and its
-   contrast with the page background is at least 4.5:1. Red before the fix
-   (the on knob is `#04121f`, contrast about 1.1:1).
+   contrast with the page background is at least 4.5:1; the track colour
+   shows in a ring 2 px wide around the knob on all four sides, and the gap
+   at the off end equals the gap at the on end. Red before the fix (the on
+   knob is `#04121f`, contrast about 1.1:1; the inset was 1 px).
 2. `a_switch_click_damages_the_old_and_new_knob`: the tracker's damage for
    the click pass covers both knob rects. Green before and after; it pins
    that the loop draws the move.
