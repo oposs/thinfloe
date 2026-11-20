@@ -264,8 +264,8 @@ codecs) pushed the row out of view; a band fits there only within about
 Guard: `the_position_row_is_in_view_on_a_1080_screen`. The producers are pure: `nettab::info_lines`,
 `graphics::info_lines`, `machine::rows`.
 
-**Sysfs sizes.** sysfs reports every attribute file as 4096 bytes,
-whatever it holds. `bounded::read_attr` reads it as a regular file to a
+**Sysfs sizes.** sysfs reports every attribute file as one page (4096
+bytes on most hosts), whatever it holds. `bounded::read_attr` reads it as a regular file to a
 byte cap and does not look at the reported size; `netdetail` and
 `hardware.rs` use it. In 4.6.0 the Network tab read attributes with a
 size-checked reader and a 256-byte cap, so no GPU id, MAC or WiFi chip was
