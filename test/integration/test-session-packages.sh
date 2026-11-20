@@ -75,6 +75,13 @@ present "DHCP time zone script" 'usr/libexec/thinfloe/dhcp-timezone$'
 absent  "DHCP time zone path unit" 'thinfloe-dhcp-timezone\.path$'
 present "DHCP time zone watcher enabled" 'etc/systemd/system/multi-user\.target\.wants/thinfloe-dhcp-timezone\.service$'
 present "inotifywait"       'usr/bin/inotifywait$'
+# The Time band: the root tool, chrony (no timesyncd), its pools file the
+# menu's servers set aside, and the zone list the menu offers.
+present "time tool"         'usr/bin/thinfloe-time$'
+present "chronyc"           'usr/bin/chronyc$'
+present "Ubuntu NTP pools"  'etc/chrony/sources\.d/ubuntu-ntp-pools\.sources$'
+present "zone.tab"          'usr/share/zoneinfo/zone\.tab$'
+absent  "systemd-timesyncd" 'systemd-timesyncd\.service$'
 present "labwc config merge" 'usr/bin/thinfloe-compose-labwc-config$'
 present "swayidle"          'usr/bin/swayidle$'
 present "wlopm"             'usr/bin/wlopm$'
@@ -247,6 +254,16 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/env" "$SQSH" \
     echo "ok   - LABWC_FULLSCREEN_SPAN_OUTPUTS is set"
 else
     echo "FAIL - LABWC_FULLSCREEN_SPAN_OUTPUTS not set in the shipped environment"
+    fail=1
+fi
+
+# chrony reads the DHCP servers and the menu's servers from these two.
+if unsquashfs -no-xattrs -d "$DPKG_TMP/chrony" "$SQSH" etc/chrony/chrony.conf >/dev/null 2>&1 &&
+   grep -qx 'sourcedir /run/chrony-dhcp' "$DPKG_TMP/chrony/etc/chrony/chrony.conf" &&
+   grep -qx 'sourcedir /etc/chrony/sources.d' "$DPKG_TMP/chrony/etc/chrony/chrony.conf"; then
+    echo "ok   - chrony.conf reads /run/chrony-dhcp and /etc/chrony/sources.d"
+else
+    echo "FAIL - chrony.conf lacks a sourcedir the Time band relies on"
     fail=1
 fi
 

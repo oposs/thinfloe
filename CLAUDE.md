@@ -59,6 +59,7 @@ release.
 - Shipped tiles: `overlay/etc/thinfloe/menu/*.desktop`; user tiles `~/.config/thinfloe/menu/`.
 - Home save: `overlay/usr/bin/thinfloe-save-home`; restore: `restore_home()` in `thinfloe-lib.sh`.
 - Stick writer and upgrades: `overlay/usr/bin/thinfloe-upgrade`.
+- Time zone and NTP: `overlay/usr/bin/thinfloe-time` (live, as root), `install_local_time()` in `thinfloe-lib.sh` (boot), `overlay/usr/libexec/thinfloe/dhcp-timezone` (DHCP zone and NTP servers), the Time band in `timeband.rs`/`network_ui.rs`. Notes: [docs/notes/time-zone.md](docs/notes/time-zone.md).
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units. Bolt microphone mute key (HID++ divert, F20 through uinput): `overlay/usr/libexec/thinfloe/logitech-keys` and `thinfloe-logitech-keys.service`, started by the same udev rule.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
@@ -362,7 +363,7 @@ and hardware results:
 - [status-area.md](docs/notes/status-area.md): the status area, its elements, layout file, Status tab, samplers and the public IP lookup.
 - [peripheral-battery.md](docs/notes/peripheral-battery.md): the battery reader, its units, the HID++ details and hardware results.
 - [session.md](docs/notes/session.md): session startup, the user files, the labwc config merge, audio volume, screen blanking, GPU wait, terminals, screenshots.
-- [time-zone.md](docs/notes/time-zone.md): `TZ=`, the DHCP time zone and its tests.
+- [time-zone.md](docs/notes/time-zone.md): the Time band, the precedence of menu, DHCP and `TZ=`, chrony and the DHCP NTP servers, and their tests.
 - [home-persistence.md](docs/notes/home-persistence.md): home restore and save, the archive, the password file, exit codes.
 - [esp-and-upgrade.md](docs/notes/esp-and-upgrade.md): `thinfloe-upgrade`: home copy, size check, the batch interface, check timers.
 - [network-boot.md](docs/notes/network-boot.md): netboot networking and its smoke test.

@@ -66,7 +66,7 @@ setpriv --pdeathsig TERM -- "$DNSMASQ" --conf-file=/dev/null --keep-in-foregroun
     --user=root --group=root --port=0 --interface=tap0 --except-interface=lo \
     --bind-interfaces --listen-address=10.77.0.1 \
     --dhcp-range=10.77.0.50,10.77.0.60,12h --dhcp-authoritative \
-    --dhcp-option=101,"$ZONE" \
+    --dhcp-option=101,"$ZONE" --dhcp-option=42,10.77.0.1 \
     --dhcp-leasefile="$LOG.leases" --pid-file="$LOG.pid" \
     --log-dhcp --log-facility="$DNSMASQ_LOG" &
 dns=$!
@@ -116,6 +116,13 @@ if grep -qaF "$WANT" "$LOG"; then
     echo "ok   - $WANT"
 else
     echo "FAIL - no '$WANT' line in the boot log"
+    fail=1
+fi
+# Option 42 reaches chrony through dhcp-timezone.
+if grep -qaF "thinfloe: NTP servers 10.77.0.1 from DHCP" "$LOG"; then
+    echo "ok   - the DHCP NTP server reached chrony"
+else
+    echo "FAIL - no 'thinfloe: NTP servers 10.77.0.1 from DHCP' line in the boot log"
     fail=1
 fi
 if grep -qaF "Found ordering cycle" "$LOG"; then

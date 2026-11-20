@@ -91,12 +91,13 @@ cannot parse TOML, read files the menu derives from it into `generated/`.
 
 | Path | Written by | Read by | Holds |
 |---|---|---|---|
-| `config.toml` | the menu | the menu | `[keyboard]`, `[screen]`, `[status]`, `[monitors]`, `[network]`, and the migration report until dismissed |
+| `config.toml` | the menu | the menu | `[keyboard]`, `[screen]`, `[status]`, `[monitors]`, `[network]`, `[time]`, and the migration report until dismissed |
 | `generated/environment` | the menu | the session profile, the labwc config composer | `XKB_DEFAULT_*`, `THINFLOE_NUMLOCK=on\|off` |
 | `generated/screen` | the menu | `thinfloe-session` | `idle_timeout=<seconds>` |
 | `generated/kanshi`, `kanshi.prev`, `layout-unconfirmed` | the menu | `thinfloe-session`, kanshi | the monitor arrangement and the undo state of an unconfirmed one |
 | `generated/wifi.yaml`, `ethernet.yaml` | the menu | the initramfs (`install_local_network()`), `thinfloe-network` | netplan, mode 600 |
-| `environment` | by hand | the session profile, the composer | extra variables (`TZ=`, cursor, `LABWC_FULLSCREEN_SPAN_OUTPUTS`); `XKB_DEFAULT_*` lines are dropped |
+| `generated/time` | the menu | the initramfs (`install_local_time()`), `thinfloe-time` | `zone=`, `ntp=` lines; absent when both are automatic ([time-zone.md](time-zone.md)) |
+| `environment` | by hand | the session profile, the composer | extra variables (`TZ=` for this session only, cursor, `LABWC_FULLSCREEN_SPAN_OUTPUTS`); `XKB_DEFAULT_*` lines are dropped |
 | `sessionrc` | by hand | `thinfloe-session` | commands run at session start |
 | `menu/*.desktop`, `addons` | by hand, `thinfloe-addon` | the menu, `thinfloe-addon` | user tiles, ticked add-ons |
 | `password`, `ssh-host-keys/`, `wg0.conf`, `save-home-exclude` | root tools, by hand | the same, the initramfs, `thinfloe-save-home`, `thinfloe-upgrade` | remote-access hash, SSH host keys, WireGuard, save exclude list |
