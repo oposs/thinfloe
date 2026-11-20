@@ -19,7 +19,8 @@
 //! more rows than fit, that column's rows are left out in the order
 //! `Row::drop`: uptime, traffic, DNS, gateway, the public address, the VPN.
 //! The link and the address stay; with room for one line only, the 2 x 1
-//! size puts the address in the right column. A row too wide for its
+//! size puts the address in the right column. Below one line the rows are
+//! cut at the edge. A row too wide for its
 //! room leaves out the word `WiFi`; a value still too long starts after its
 //! label and is cut at the padding. Only in a rect squeezed below the
 //! shipped cell heights do the rows get so tight that the labels are half a
@@ -348,6 +349,9 @@ impl Element for Connection {
     }
 
     fn draw(&self, ui: &mut egui::Ui, rect: Rect, size: Size, data: &Data, _now: Instant) {
+        // Below one line the kept rows are taller than the rect: they are
+        // cut at its edge, never painted past it.
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         background(ui, rect);
         if let Some(snap) = data.network {
             paint(ui, rect, size, snap, data.public_ip);
@@ -786,6 +790,47 @@ mod tests {
         let h = 2.0 * m.pad_y + 3.0 * min_row(&m) + 0.5;
         let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
         assert_eq!(labels_of(&r), ["Link", "IPv4", "Gateway", "VPN", "Public", "Traffic"]);
+    }
+
+    /// The clip rect of every shape `Connection` paints into a `Ui` that
+    /// is not clipped to `rect`.
+    fn unclipped_clips(rect: Rect, size: Size, d: &Data) -> Vec<Rect> {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 600.0))),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                Connection.draw(&mut child, rect, size, d, Instant::now());
+            });
+            o.textures_delta.clear();
+            out = o.shapes.into_iter().map(|c| c.clip_rect).collect();
+        }
+        out
+    }
+
+    #[test]
+    fn below_one_line_the_rows_are_cut_at_the_edge() {
+        let addr = public();
+        let snap = sample();
+        let d = with_public(&snap, &addr);
+        let m = STATUS_SMALL;
+        let short = 2.0 * m.pad_y + 0.5 * min_row(&m);
+        for (size, h) in [(WIDE, short), (TALL, short), (TALL, 2.0 * m.pad_y + 1.5 * min_row(&m))] {
+            let rect = Rect::from_min_size(pos2(10.0, 50.0), vec2(f32::from(size.w) * 120.0, h));
+            let clips = unclipped_clips(rect, size, &d);
+            assert!(!clips.is_empty(), "{size} {h}: draws nothing");
+            for c in clips {
+                assert!(
+                    rect.expand(0.01).contains_rect(c),
+                    "{size} {h}: clip {c:?} past {rect:?}"
+                );
+            }
+        }
     }
 
     #[test]
