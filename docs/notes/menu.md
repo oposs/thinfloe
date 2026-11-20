@@ -279,8 +279,8 @@ address". Per interface a group `WiFi wlp58s0`
 connected), Network (the SSID), Signal (`strong (-55 dBm)`), Address (all
 of them, only when connected), Handshake (WireGuard: `42 s ago` or
 `none`), MAC address (an all-zero MAC is left out), Gateway (for the
-interface holding the default route), and for WiFi Chip and Driver
-(`device/driver` link name); an unknown row is left out. The chip is the
+interface holding the default route), Chip and Driver (`device/driver`
+link name; wired and WiFi alike, none for WireGuard, which has no device); an unknown row is left out. The chip is the
 PCI vendor and device name from `/usr/share/misc/pci.ids` (package
 `pciutils`), else `8086:2723`, or `USB 0bda:8179` for a USB adapter. After
 the interfaces a row "DNS in use" (`192.168.1.1, 9.9.9.9` or `none`) gives
