@@ -265,7 +265,8 @@ fn time(
     });
     match crate::timecfg::parse_servers(shown) {
         Err(e) => line(ui, &e),
-        Ok(_) => line(ui, "Empty: the servers DHCP sends and the Ubuntu pool."),
+        Ok(servers) if servers.is_empty() => line(ui, "Empty: the servers DHCP sends and the Ubuntu pool."),
+        Ok(_) => {}
     }
     if band.busy() {
         line(ui, "Applying…");
