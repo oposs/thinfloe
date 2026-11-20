@@ -344,7 +344,8 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     let kanshi_text = read_generated(dir, "kanshi")?;
     let wifi = read_generated(dir, "wifi.yaml")?;
     let wired = read_generated(dir, "ethernet.yaml")?;
-    if [&env, &screen, &kanshi_text, &wifi, &wired].iter().all(|f| f.is_none()) {
+    let time = read_generated(dir, "time")?;
+    if [&env, &screen, &kanshi_text, &wifi, &wired, &time].iter().all(|f| f.is_none()) {
         return Ok(None);
     }
     let mut cfg = ThinfloeConfig::default();
@@ -363,6 +364,9 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
         }
     }
     cfg.network = network_from_files(wifi.as_deref().map(strip_header), wired.as_deref().map(strip_header)).value;
+    if let Some(t) = &time {
+        cfg.time = crate::timecfg::from_body(strip_header(t));
+    }
     Ok(Some(cfg))
 }
 
@@ -679,6 +683,8 @@ mod tests {
             ..ThinfloeConfig::default()
         };
         c.screen.idle_timeout = 900;
+        c.time.zone = Some("Europe/Zurich".into());
+        c.time.ntp = vec!["ntp.example.ch".into(), "10.0.0.1".into()];
         let p = vec![crate::kanshi::Profile {
             outputs: vec![crate::kanshi::OutputSet {
                 criteria: "eDP-1".into(),
@@ -722,7 +728,7 @@ mod tests {
     fn from_generated_reads_back_what_render_wrote() {
         let d = TestDir::new("convert", "roundtrip");
         let cfg = sample();
-        for name in ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml"] {
+        for name in ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml", "time"] {
             let body = generated::render(&cfg, name, &inp()).unwrap();
             generated::write_if_changed(&d, name, body.as_deref()).unwrap();
         }

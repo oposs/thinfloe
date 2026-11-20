@@ -56,6 +56,7 @@ pub mod store;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;
+pub mod timecfg;
 pub mod ui;
 pub mod upgrade;
 pub mod upgrade_proto;

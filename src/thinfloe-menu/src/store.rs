@@ -19,7 +19,7 @@ const CONFIG_MODE: u32 = 0o600;
 pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Every generated file, in the order they are regenerated.
-const ALL_FILES: [&str; 5] = ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml"];
+const ALL_FILES: [&str; 6] = ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml", "time"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
