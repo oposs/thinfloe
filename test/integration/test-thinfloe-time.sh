@@ -124,6 +124,26 @@ check "retry_after_failed_reload: chrony reloaded" called "chronyc reload source
 apply apply
 check "retry_after_failed_reload: then no reload" not_called chronyc
 
+# --- a marker that cannot be written fails the apply before the servers
+# change, so the retry still reloads
+fresh; gen "${H}ntp=10.0.0.1\n"
+before=$(snapshot)
+: >"$SCRATCH/notadir"
+TF_TIME_PENDING="$SCRATCH/notadir/pending" \
+TF_TIME_HOME="$HOMED" TF_TIME_ETC="$ETC" TF_TIME_ZONEINFO="$ZI" \
+TF_TIME_TIMEDATECTL="$STUBS/timedatectl" TF_TIME_SYSTEMCTL="$STUBS/systemctl" \
+TF_TIME_CHRONYC="$STUBS/chronyc" TF_TIME_LOCK="$SCRATCH/lock" TF_TIME_CHRONY_DHCP="$SCRATCH/chrony-dhcp" \
+    python3 -I "$TOOL" apply >"$SCRATCH/out" 2>"$SCRATCH/err"; rc=$?
+rm -f "$SCRATCH/notadir"
+check "marker_write_fails: exit 1" test $rc -eq 1
+check "marker_write_fails: failed JSON" grep -q '"result": "failed"' "$SCRATCH/out"
+check "marker_write_fails: servers not installed" test "$(snapshot)" = "$before"
+check "marker_write_fails: no reload" not_called chronyc
+apply apply; rc=$?
+check "marker_write_fails: retry exit 0" test $rc -eq 0
+check "marker_write_fails: retry reloads" called "chronyc reload sources"
+check "marker_write_fails: retry clears the marker" test ! -e "$SCRATCH/pending"
+
 # --- automatic, zone only: a failing chronyc is not called and not fatal
 fresh; gen "${H}zone=Europe/Zurich\n"
 STUB_CHRONYC_RC=1 apply apply; rc=$?
