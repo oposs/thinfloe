@@ -143,6 +143,18 @@ apply apply
 check "automatic: DHCP servers file kept" test -f "$SCRATCH/chrony-dhcp/thinfloe.sources"
 check "automatic: no chrony reload" not_called chronyc
 
+# --- the menu's timeout covers the tool's worst case: the lock wait and
+# three tool calls (timedatectl, systemctl, chronyc)
+menu_timeout=$(sed -n 's/^pub const TIME_APPLY_TIMEOUT: Duration = Duration::from_secs(\([0-9]*\));/\1/p' "$REPO/src/thinfloe-menu/src/jobs.rs")
+lock_wait=$(sed -n 's/^LOCK_WAIT = \([0-9]*\)$/\1/p' "$TOOL")
+tool_timeout=$(sed -n 's/^TOOL_TIMEOUT = \([0-9]*\)$/\1/p' "$TOOL")
+calls=$(sed -n '/^def apply/,/^def /p' "$TOOL" | grep -c 'run(\[\(TIMEDATECTL\|SYSTEMCTL\|CHRONYC\)' )
+# timedatectl appears twice (zone, or UTC), only one of them runs
+calls=$((calls - 1))
+check "menu timeout ${menu_timeout:-?} s > lock ${lock_wait:-?} s + ${calls} x ${tool_timeout:-?} s" \
+    test -n "$menu_timeout" -a -n "$lock_wait" -a -n "$tool_timeout" -a $calls -eq 3 -a \
+        "${menu_timeout:-0}" -gt $(( ${lock_wait:-0} + calls * ${tool_timeout:-0} ))
+
 # --- hostile files: exit 1, nothing changed, nothing called
 hostile() { # label, setup command
     local label=$1; shift
