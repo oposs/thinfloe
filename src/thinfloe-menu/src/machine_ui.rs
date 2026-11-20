@@ -37,14 +37,20 @@ pub fn machine_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option
                 // one, in view without a scroll.
                 let (left, right): (Vec<&Panel>, Vec<&Panel>) = panels.iter().partition(|p| LEFT.contains(&p.title));
                 let col_w = (w - brand::INFO_COL_GAP) / 2.0;
+                // The gap between the columns only: inside them the
+                // spacing stays as on the other tabs, where it sets the
+                // gap between a panel's labels and values.
+                let inner = ui.spacing().item_spacing.x;
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = brand::INFO_COL_GAP;
                     ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.x = inner;
                         ui.set_width(col_w);
                         bands(ui, &t, col_w, &left);
                         copy_row(ui, &t, tab, &mut event);
                     });
                     ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.x = inner;
                         ui.set_width(col_w);
                         bands(ui, &t, col_w, &right);
                     });

@@ -4170,6 +4170,35 @@ mod tests {
         assert!(rect_of(&narrow, "Copy").top() > rect_of(&narrow, "not available").bottom());
     }
 
+    /// A panel looks the same on every tab: the gap between the columns of
+    /// This machine does not reach the label column inside them.
+    #[test]
+    fn a_panels_values_stand_as_far_from_their_labels_on_every_tab() {
+        // From a label's left edge to its value's, in the WiFi group.
+        let offset = |menu: &Menu| {
+            let rects = text_rects(&settings_shapes(menu, 1920.0, 1600.0));
+            let group = rects
+                .iter()
+                .find(|(t, _)| t == "WiFi wlp2s0")
+                .map(|(_, r)| *r)
+                .expect("the WiFi group");
+            let below = |name: &str| {
+                rects
+                    .iter()
+                    .filter(|(t, r)| t == name && r.top() > group.top())
+                    .map(|(_, r)| *r)
+                    .min_by(|a, b| a.top().total_cmp(&b.top()))
+                    .unwrap_or_else(|| panic!("{name} not in {rects:?}"))
+            };
+            below("iwlwifi").left() - below("Driver").left()
+        };
+        let mut menu = machine_settings();
+        let machine = offset(&menu);
+        menu.settings_tab = crate::settings::SettingsTab::Network;
+        let network = offset(&menu);
+        assert!((machine - network).abs() < 0.5, "This machine {machine}, Network {network}");
+    }
+
     /// The Graphics band closes the Screen tab: "Reading…" until the job
     /// answers, then each GPU and driver and the codecs under "Video
     /// processing", or why there are none, each value beside its label.
