@@ -371,9 +371,11 @@ value already on disk when the list changes is caught by the composer, see
 ## Switches
 
 Every switch in the menu (Keyboard tab, the public IP switch, Advanced on
-the Upgrade screen) is lyra's, square, with two edits in `brand::theme()`:
-the knob is the foreground colour in both positions, and it is 14 px with
-2 px of track around it on every side, the same gap at either end. lyra's
+the Upgrade screen) is lyra's, square, with these edits in `brand::theme()`:
+the knob is the foreground colour in both positions, and it is 14 points
+with 2 points of track around it on every side, the same gap at either end;
+the track has no border (lyra's transparent 1 px border is one device pixel
+at every scale and made the gaps unequal at a fractional scale). lyra's
 dark knob is `primary-foreground` when on, which the brand sets to
 `#04121f` for the ice button, next to the page's `#05070a`: on 4.6.0 the
 knob vanished into the page and the ice half of the track looked like a

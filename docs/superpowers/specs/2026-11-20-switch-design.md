@@ -46,11 +46,17 @@ change keeps that. The OSD sets `animation_time` 0 too (`osd/draw.rs`).
 The knob is the theme's `foreground` (`#fafafa`) in every state: in
 `brand::theme()`, `style.switch_thumb.bg = Prop::fixed(Paint::Role(Role::Foreground, 1.0))`.
 The track keeps lyra's colours (ice blue when on, `input` at 80 % when off).
-The knob is 14 px (lyra: 16) and steps 1 px in from the track's border at
-the off end (`shift_x` `Px(1)`) and by `calc(100% + 1px)` when on, so the
-track shows 2 px around it on every side, at either end the same gap
-(controller, 2026-11-20: the edge of the light knob must read against the
-ice track, 1.8:1).
+The knob is 14 points (lyra: 16) and steps 2 points in from the track's
+edge at the off end (`shift_x` `Px(2)`) and by `calc(100% + 2px)` when on,
+so the track shows 2 points around it on every side (controller,
+2026-11-20: the edge of the light knob must read against the ice track,
+1.8:1). The track's transparent 1 px border is dropped
+(`border_width` 0): it is one device pixel at every scale, so with it the
+gaps at the two ends differed by up to two pixels at a fractional scale.
+Now 2 + 14 + 14 + 2 is the track's 32 points; at a fractional scale the
+raster's pixel-centre rule may still round the two gaps one pixel apart,
+which only a thumb snapped to the pixel grid inside shadcn-egui would
+avoid. Keyboard focus still shows as lyra's ring outside the track.
 
 - *(architect)* One knob colour in both states, rather than a dark knob with
   a frame or a different track colour: a knob of constant colour is what
@@ -69,8 +75,11 @@ ice track, 1.8:1).
 ## Upstream (shadcn-egui)
 
 No defect in the crate: the Switch and its reduced-motion path work. The
-cause is the brand's palette meeting lyra's dark checked thumb. Nothing to
-report upstream.
+cause is the brand's palette meeting lyra's dark checked thumb. One
+possible upstream improvement: the thumb rect is not snapped to device
+pixels, so at a fractional scale its gaps to the two track ends can round
+one pixel apart; snapping the thumb inside the snapped track (as
+`on_pixels` does for the hidden part) would make them equal.
 
 ## Tests
 
@@ -84,7 +93,9 @@ In `brand.rs`'s tests, through the menu's own path (brand theme,
    its centre moves right by at least a third of the track width, and its
    contrast with the page background is at least 4.5:1; the track colour
    shows in a ring 2 px wide around the knob on all four sides, and the gap
-   at the off end equals the gap at the on end. Red before the fix (the on
+   at the off end equals the gap at the on end (at most 1 px apart at a
+   fractional scale); at scales 1, 1.25, 1.5, 1.75 and 2, with the switch
+   at whole and fractional positions. Red before the fix (the on
    knob is `#04121f`, contrast about 1.1:1; the inset was 1 px).
 2. `a_switch_click_damages_the_old_and_new_knob`: the tracker's damage for
    the click pass covers both knob rects. Green before and after; it pins
