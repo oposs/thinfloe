@@ -100,15 +100,18 @@ At most eight rows.
   both cell heights (large: 8 x 16 = 128 of 143 pt; small: 8 x 14 = 112
   of 121 pt).
 - *(architect)* **2x1**: two columns side by side, each the width of
-  half the rect minus padding, with `2 * pad_x` between them; the first
-  takes the first `ceil(n / 2)` rows, the second the rest (with all
-  eight: Link IPv4 Gateway DNS | VPN Public Traffic Uptime). Four rows
+  half the rect minus padding, with `2 * pad_x` between them; the left
+  holds the fixed rows (Link, IPv4, Gateway, DNS), the right the rows
+  that come and go and the measures (VPN, Public, Traffic, Uptime, in
+  that order), both from the top, so no row changes column when VPN or
+  Public appears (review, 2026-11-20; a `ceil(n / 2)` split moved DNS to
+  the right and back). Four rows
   per column fit (large: 4 x 16 = 64 of 64 pt; small: 4 x 13.5 of 54 pt,
   above `min_row` 12). Both columns use one row height, so the rows line
   up across.
-- `fit` keeps its rule, with the capacity `columns * floor(avail /
-  min_row)`; rows leave out by drop rank (Uptime, Traffic, DNS, Gateway,
-  Public, VPN); Link and IPv4 stay. At shipped sizes and cell heights
+- `fit`: rows leave out by drop rank (Uptime, Traffic, DNS, Gateway,
+  Public, VPN) while a column holds more than `floor(avail / min_row)`
+  rows; Link and IPv4 stay. At shipped sizes and cell heights
   nothing leaves out.
 - `label_in_row` stays: only on the tightest rows is a Geo label half a
   point smaller.
@@ -143,7 +146,8 @@ In `status/connection.rs` (rewritten where they pinned the column):
 - every label at the left padding; every row's last run ends at the right
   padding (within 0.5 pt) at both sizes and both cell heights;
 - the full sample draws the eight rows in order in 1x2, and in 2x1 the
-  first four in the left column and four in the right, rows level;
+  first four in the left column and four in the right, rows level; the
+  left column holds Link IPv4 Gateway DNS also without VPN or Public;
 - VPN down and absent: no VPN row;
 - unknown gateway and DNS: `none` in the warning colour; no counters, no
   uptime: no Traffic and no Uptime row;

@@ -10,12 +10,15 @@
 //! have a row, with a warning word when one is missing (a default route
 //! without a gateway, as on PPP or wwan, is no fault: `direct`); the measures
 //! (traffic, uptime) have a row only when known. The 1 x 2 size draws one
-//! column, the 2 x 1 size two, the first taking the first half of the rows,
-//! both at one row height so the rows line up.
+//! column, the 2 x 1 size two: the left holds the fixed rows (link, address,
+//! gateway, DNS), the right the others in their order (`Row::right`), both
+//! from the top at one row height, so the rows line up and none changes
+//! column when the VPN or public row comes or goes.
 //!
-//! Rows move closer together as far as `min_row`, then rows are left out in
-//! the order `Row::drop`: uptime, traffic, DNS, gateway, the public
-//! address, the VPN. The link and the address stay. A row too wide for its
+//! Rows move closer together as far as `min_row`, then, while a column holds
+//! more rows than fit, rows are left out in the order `Row::drop`: uptime,
+//! traffic, DNS, gateway, the public address, the VPN. The link and the
+//! address stay. A row too wide for its
 //! room leaves out the word `WiFi`; a value still too long starts after its
 //! label and is cut at the padding. Only in a rect squeezed below the
 //! shipped cell heights do the rows get so tight that the labels are half a
@@ -98,6 +101,9 @@ pub struct Row {
     pub runs: Vec<Run>,
     /// 0 stays. Of the others the highest is left out first.
     pub drop: u8,
+    /// In two columns the row is in the right one: the rows that come and
+    /// go (VPN, Public) and the measures; the left holds the fixed rows.
+    pub right: bool,
 }
 
 /// The rows in their order; `public` is the public IP lookup's answer, with
@@ -134,12 +140,21 @@ pub fn rows(snap: &Snapshot, public: Option<&crate::publicip::Answer>) -> Vec<Ro
         ],
         None => none(),
     };
-    let row = |label: &'static str, runs: Vec<Run>, drop: u8| Row { label, runs, drop };
+    let row = |label: &'static str, runs: Vec<Run>, drop: u8| Row {
+        label,
+        runs,
+        drop,
+        right: true,
+    };
+    let fixed = |label: &'static str, runs: Vec<Run>, drop: u8| Row {
+        right: false,
+        ..row(label, runs, drop)
+    };
     let mut out = vec![
-        row("Link", link, 0),
-        row("IPv4", ip, 0),
-        row("Gateway", gateway, 3),
-        row("DNS", dns, 4),
+        fixed("Link", link, 0),
+        fixed("IPv4", ip, 0),
+        fixed("Gateway", gateway, 3),
+        fixed("DNS", dns, 4),
     ];
     if i.vpn == Vpn::Up {
         out.push(row("VPN", vec![value(netstat::VPN_IF, fg), label("up", Tone::Good)], 1));
@@ -176,14 +191,32 @@ pub fn min_row(m: &StatusSizes) -> f32 {
     m.value + 1.0
 }
 
+/// The column of each of `rows` in `columns` columns and its line in it.
+pub fn places(rows: &[Row], columns: usize) -> Vec<(usize, usize)> {
+    let mut next = [0usize; 2];
+    rows.iter()
+        .map(|r| {
+            let c = usize::from(columns > 1 && r.right);
+            next[c] += 1;
+            (c, next[c] - 1)
+        })
+        .collect()
+}
+
+/// The lines the fullest column of `rows` needs.
+fn lines(rows: &[Row], columns: usize) -> usize {
+    places(rows, columns).iter().map(|p| p.1 + 1).max().unwrap_or(0)
+}
+
 /// The rows that fit `height` in `columns` columns and how high each is: as
 /// tall as a line when there is room, as tight as `min_row` before any row
-/// is left out.
+/// is left out. Rows leave in `Row::drop` order until no column holds more
+/// than fit.
 pub fn fit(mut rows: Vec<Row>, height: f32, columns: usize, m: &StatusSizes) -> (Vec<Row>, f32) {
-    let columns = columns.max(1);
+    let columns = columns.clamp(1, 2);
     let avail = (height - 2.0 * m.pad_y).max(0.0);
-    let fits = (avail / min_row(m)).floor() as usize * columns;
-    while rows.len() > fits {
+    let fits = (avail / min_row(m)).floor() as usize;
+    while lines(&rows, columns) > fits {
         let worst = rows
             .iter()
             .enumerate()
@@ -197,7 +230,7 @@ pub fn fit(mut rows: Vec<Row>, height: f32, columns: usize, m: &StatusSizes) -> 
             None => break,
         }
     }
-    let per = rows.len().div_ceil(columns).max(1);
+    let per = lines(&rows, columns).max(1);
     let row = (avail / per as f32).min(m.row).max(min_row(m));
     (rows, row)
 }
@@ -229,7 +262,8 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, public: Option<
     let m = sizes_for(cell_height(rect, size));
     let cols = columns(size);
     let (rows, row_h) = fit(rows(snap, public), rect.height(), cols, &m);
-    let per = rows.len().div_ceil(cols).max(1);
+    let at = places(&rows, cols);
+    let per = lines(&rows, cols).max(1);
     let width = |text: &str, font: &FontId| {
         p.layout_no_wrap(text.to_string(), font.clone(), Color32::TRANSPARENT)
             .size()
@@ -239,8 +273,7 @@ fn paint(ui: &egui::Ui, rect: Rect, size: Size, snap: &Snapshot, public: Option<
     let space = 0.35 * m.value;
     let label_font = crate::brand::geo(label_in_row(m.label, row_h));
     let top = rect.top() + (rect.height() - per as f32 * row_h) / 2.0;
-    for (i, row) in rows.iter().enumerate() {
-        let (c, line) = (i / per, i % per);
+    for (row, &(c, line)) in rows.iter().zip(&at) {
         let left = rect.left() + c as f32 * column_w + m.pad_x;
         let right = rect.left() + (c + 1) as f32 * column_w - m.pad_x;
         let mid = top + (line as f32 + 0.5) * row_h;
@@ -595,17 +628,42 @@ mod tests {
                     assert!((l - (mid + pad)).abs() < 0.01, "{h} {text}: {l}");
                 }
             }
-            // Seven rows: four on the left, three on the right.
-            let out = draw(&sample(), WIDE, h);
-            assert_eq!(lines_in(&out, f32::MIN, mid).len(), 4, "{h}");
-            assert_eq!(lines_in(&out, mid, f32::MAX).len(), 3, "{h}");
-            // Five rows: three and two.
+            // The left column holds the fixed rows whatever else shows, the
+            // right the others in their order, both from the top.
             let mut s = sample();
             s.info.vpn = Vpn::Absent;
-            s.uptime = None;
-            let out = draw(&s, WIDE, h);
-            assert_eq!(lines_in(&out, f32::MIN, mid).len(), 3, "{h}");
-            assert_eq!(lines_in(&out, mid, f32::MAX).len(), 2, "{h}");
+            let cases: [(&Snapshot, Option<&Answer>, &[&str]); 4] = [
+                (&sample(), None, &["VPN", "Traffic", "Uptime"]),
+                (&s, Some(&addr), &["Public", "Traffic", "Uptime"]),
+                (&s, None, &["Traffic", "Uptime"]),
+                (
+                    &Snapshot {
+                        uptime: None,
+                        totals: None,
+                        ..s.clone()
+                    },
+                    None,
+                    &[],
+                ),
+            ];
+            for (snap, public, want) in cases {
+                let d = Data {
+                    public_ip: public,
+                    ..data(snap)
+                };
+                let out = shapes(&Connection, rect, WIDE, &d, Instant::now());
+                let left = lines_in(&out, f32::MIN, mid);
+                let right = lines_in(&out, mid, f32::MAX);
+                assert_eq!(words(&left), FULL[..4], "{h} {want:?}");
+                let labels: Vec<String> = right
+                    .iter()
+                    .map(|l| l.0.split(' ').next().unwrap().to_string())
+                    .collect();
+                assert_eq!(labels, want, "{h}");
+                for (a, b) in left.iter().zip(&right) {
+                    assert!((a.1 - b.1).abs() < 0.5, "{h}: {} and {} not level", a.0, b.0);
+                }
+            }
         }
     }
 
@@ -659,8 +717,8 @@ mod tests {
                     seen.push(got);
                 }
             }
-            // In two columns rows leave two at a time; within a step the
-            // higher rank goes first.
+            // In two columns a step can take several rows; within a step
+            // the higher rank goes first.
             let rank = |l: &str| rows(&sample(), Some(&addr)).iter().find(|r| r.label == l).unwrap().drop;
             let gone: Vec<&str> = seen
                 .windows(2)
@@ -677,6 +735,24 @@ mod tests {
         let (r, h) = fit(rows(&sample(), Some(&addr)), eight, 1, &STATUS_LARGE);
         assert_eq!(r.len(), 8);
         assert!((h - min_row(&STATUS_LARGE)).abs() < 0.01, "{h}");
+    }
+
+    #[test]
+    fn in_two_columns_no_column_holds_more_rows_than_fit() {
+        let addr = public();
+        let m = STATUS_SMALL;
+        for lines in 1..=4 {
+            let h = 2.0 * m.pad_y + lines as f32 * min_row(&m) + 0.5;
+            let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
+            let left = r.iter().filter(|x| !x.right).count();
+            let right = r.iter().filter(|x| x.right).count();
+            assert!(left <= lines.max(2) && right <= lines, "{lines}: {:?}", labels_of(&r));
+        }
+        // Three lines: the left column loses DNS, so Uptime and Traffic,
+        // ranked above it, are gone too.
+        let h = 2.0 * m.pad_y + 3.0 * min_row(&m) + 0.5;
+        let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
+        assert_eq!(labels_of(&r), ["Link", "IPv4", "Gateway", "VPN", "Public"]);
     }
 
     #[test]
