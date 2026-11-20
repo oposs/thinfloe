@@ -936,6 +936,115 @@ install_local_network() {
     return 0
 }
 
+# tf_zone_known ZONEINFO ZONE: succeeds when ZONE is UTC or a zone of
+# ZONEINFO/zone.tab, and its file is there. The list decides, so a path, a
+# ".." or a link name cannot pass.
+tf_zone_known() {
+    local _tzk_zi="$1" _tzk_zone="$2" _tzk_tab _tzk_cc _tzk_co _tzk_name _tzk_rest
+    case $_tzk_zone in
+        ""|/*|*..*) return 1 ;;
+    esac
+    [ -f "$_tzk_zi/$_tzk_zone" ] || return 1
+    [ "$_tzk_zone" = UTC ] && return 0
+    [ -f "$_tzk_zi/zone.tab" ] || return 1
+    _tzk_tab=$(printf '\t')
+    while IFS="$_tzk_tab" read -r _tzk_cc _tzk_co _tzk_name _tzk_rest; do
+        case $_tzk_cc in "#"*) continue ;; esac
+        [ "$_tzk_name" = "$_tzk_zone" ] && return 0
+    done <"$_tzk_zi/zone.tab"
+    return 1
+}
+
+# install_local_time NEWROOT: install the zone and the NTP servers the menu
+# chose (~/.config/thinfloe/generated/time) before systemd starts in the new
+# root, so chrony starts with the servers and the clock with the zone.
+# Writes /etc/thinfloe/time (read by dhcp-timezone), the /etc/localtime
+# link, /etc/chrony/sources.d/thinfloe.sources and, with servers, renames
+# the Ubuntu pools file aside. thinfloe-time apply does the same live.
+#
+# Lenient where thinfloe-time is strict: a bad line is logged and skipped,
+# so the boot goes on in automatic mode for that part. A link anywhere on
+# the path is refused. Values are never logged (they may hold anything).
+#
+# ALWAYS returns 0; no exit (dracut sources the hooks into one shell).
+install_local_time() {
+    local _ilt_root="$1"
+    local _ilt_rel=".config/thinfloe/generated/time"
+    local _ilt_home="$_ilt_root/home/tfuser"
+    local _ilt_file="$_ilt_home/$_ilt_rel"
+    local _ilt_src="$_ilt_root/etc/chrony/sources.d"
+    local _ilt_p _ilt_line _ilt_v _ilt_zone="" _ilt_ntp="" _ilt_n=0 _ilt_s
+
+    for _ilt_p in .config .config/thinfloe .config/thinfloe/generated "$_ilt_rel"; do
+        if [ -L "$_ilt_home/$_ilt_p" ]; then
+            tf_log "thinfloe: ~/$_ilt_p is a link, time settings not installed"
+            return 0
+        fi
+    done
+    [ -f "$_ilt_file" ] || return 0
+
+    while IFS= read -r _ilt_line || [ -n "$_ilt_line" ]; do
+        case $_ilt_line in
+            ""|"#"*) ;;
+            zone=*)
+                _ilt_v=${_ilt_line#zone=}
+                if tf_zone_known "$_ilt_root/usr/share/zoneinfo" "$_ilt_v"; then
+                    _ilt_zone=$_ilt_v
+                else
+                    tf_log "thinfloe: generated/time names an unknown time zone, skipped"
+                fi
+                ;;
+            ntp=*)
+                _ilt_v=${_ilt_line#ntp=}
+                case $_ilt_v in
+                    ""|-*|*[!A-Za-z0-9.:-]*)
+                        tf_log "thinfloe: generated/time has a bad NTP server, skipped" ;;
+                    *)
+                        if [ "${#_ilt_v}" -gt 253 ] || [ "$_ilt_n" -ge 8 ]; then
+                            tf_log "thinfloe: generated/time has a bad NTP server, skipped"
+                        else
+                            _ilt_ntp="$_ilt_ntp $_ilt_v"
+                            _ilt_n=$((_ilt_n + 1))
+                        fi
+                        ;;
+                esac
+                ;;
+            *) tf_log "thinfloe: generated/time has an unknown line, skipped" ;;
+        esac
+    done <"$_ilt_file"
+
+    [ -n "$_ilt_zone" ] || [ -n "$_ilt_ntp" ] || return 0
+
+    if mkdir -p "$_ilt_root/etc/thinfloe" && {
+            [ -z "$_ilt_zone" ] || printf 'zone=%s\n' "$_ilt_zone"
+            for _ilt_s in $_ilt_ntp; do printf 'ntp=%s\n' "$_ilt_s"; done
+        } >"$_ilt_root/etc/thinfloe/time"; then
+        :
+    else
+        warn "thinfloe: could not write /etc/thinfloe/time"
+    fi
+    if [ -n "$_ilt_zone" ]; then
+        tf_log "thinfloe: time zone $_ilt_zone from the menu"
+        ln -sfn "../usr/share/zoneinfo/$_ilt_zone" "$_ilt_root/etc/localtime" \
+            || warn "thinfloe: could not set the time zone"
+    fi
+    if [ -n "$_ilt_ntp" ]; then
+        tf_log "thinfloe: NTP servers$_ilt_ntp from the menu"
+        if mkdir -p "$_ilt_src" && {
+                for _ilt_s in $_ilt_ntp; do printf 'server %s iburst\n' "$_ilt_s"; done
+            } >"$_ilt_src/thinfloe.sources"; then
+            if [ -e "$_ilt_src/ubuntu-ntp-pools.sources" ]; then
+                mv -f "$_ilt_src/ubuntu-ntp-pools.sources" \
+                    "$_ilt_src/ubuntu-ntp-pools.sources.thinfloe-off" \
+                    || warn "thinfloe: could not set the Ubuntu NTP pools aside"
+            fi
+        else
+            warn "thinfloe: could not install the NTP servers"
+        fi
+    fi
+    return 0
+}
+
 verify_squashfs() {
     local sqsh_path="$1"
 
