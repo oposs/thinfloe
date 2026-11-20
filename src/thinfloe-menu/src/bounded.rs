@@ -76,6 +76,18 @@ pub fn read_text(path: &Path, max_bytes: u64) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
+/// A kernel attribute file (sysfs) as text: a regular file, read to at
+/// most `max_bytes`. Its reported size is not trusted: sysfs reports every
+/// attribute as one page, 4096 bytes, whatever it holds, so the size check
+/// of `read_bounded` refuses them all. More than `max_bytes`, or not a
+/// regular file, is `None`; bytes that are not UTF-8 are replaced.
+pub fn read_attr(path: &Path, max_bytes: u64) -> Option<String> {
+    let file = open_regular(path, true).ok()?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max_bytes).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The error `read_bounded` gives for a file over `max_bytes`.
 pub fn too_large(max_bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
@@ -94,6 +106,55 @@ mod tests {
 
     fn tmpdir(tag: &str) -> TestDir {
         TestDir::new("bounded", tag)
+    }
+
+    /// sysfs reports every attribute as one page, 4096 bytes, whatever it
+    /// holds; a check of that size refused them all, and the Screen tab
+    /// found no GPU on any machine (thin client, 4.6.0).
+    #[test]
+    fn a_sysfs_attribute_reads_despite_its_reported_size() {
+        let online = Path::new("/sys/devices/system/cpu/online");
+        let Ok(meta) = fs::metadata(online) else {
+            return; // no sysfs on this host
+        };
+        assert!(meta.len() > 256, "sysfs reports {} bytes", meta.len());
+        assert_eq!(read_text(online, 256), None, "the size check refuses it");
+        let text = read_attr(online, 256).expect("read_attr reads it");
+        assert!(text.trim().starts_with('0'), "{text:?}");
+    }
+
+    #[test]
+    fn an_attribute_is_capped_by_what_it_holds() {
+        let d = tmpdir("attr");
+        fs::write(d.join("small"), b"0x8086\n").unwrap();
+        assert_eq!(read_attr(&d.join("small"), 256).as_deref(), Some("0x8086\n"));
+        fs::write(d.join("big"), vec![b'x'; 300]).unwrap();
+        assert_eq!(read_attr(&d.join("big"), 256), None);
+        fs::write(d.join("exact"), vec![b'x'; 256]).unwrap();
+        assert_eq!(read_attr(&d.join("exact"), 256).map(|t| t.len()), Some(256));
+        symlink(d.join("small"), d.join("link")).unwrap();
+        assert_eq!(read_attr(&d.join("link"), 256).as_deref(), Some("0x8086\n"));
+        fs::create_dir(d.join("dir")).unwrap();
+        assert_eq!(read_attr(&d.join("dir"), 256), None);
+        assert_eq!(read_attr(&d.join("missing"), 256), None);
+        assert_eq!(read_attr(Path::new("/dev/zero"), 256), None);
+        // A FIFO is refused at once, not waited on.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(d.join("fifo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let path = d.join("fifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_attr(&path, 256));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a FIFO blocked");
+        assert_eq!(got, None);
     }
 
     #[test]

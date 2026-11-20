@@ -1,0 +1,7 @@
+# Owner's test thin client, ThinFloe 4.6.0, read 2026-11-20 over ssh.
+# /sys/class/drm entry, its device (resolved, under /sys), vendor, device, driver.
+# Every attribute file there reports a size of 4096 bytes (stat -L).
+card1	devices/pci0000:00/0000:00:02.0	0x8086	0x1616	i915
+card1-DP-1	devices/pci0000:00/0000:00:02.0/drm/card1			
+card1-HDMI-A-1	devices/pci0000:00/0000:00:02.0/drm/card1			
+card1-HDMI-A-2	devices/pci0000:00/0000:00:02.0/drm/card1			

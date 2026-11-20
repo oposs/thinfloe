@@ -67,7 +67,7 @@ pub fn read(roots: &Roots, ifaces: &[Iface], pci_ids: &Path) -> Details {
 }
 
 fn attr(path: &Path) -> Option<String> {
-    bounded::read_text(path, ATTR_MAX).map(|s| s.trim().to_string())
+    bounded::read_attr(path, ATTR_MAX).map(|s| s.trim().to_string())
 }
 
 /// The name of the kernel driver bound to the sysfs device `dev`: the
@@ -174,6 +174,70 @@ mod tests {
         write(&dev.join("vendor"), "0x14c3\n");
         let got = read(&Roots::under(&d), &[iface(IfKind::Wifi, "wlan0")], &d.join("missing"));
         assert_eq!(got.ifaces[0].chip.as_deref(), Some("14c3:2723"));
+    }
+
+    /// The owner's thin client (4.6.0); there every attribute reports
+    /// 4096 bytes, and the MAC and the chip were missing.
+    #[test]
+    fn the_thin_clients_adapters() {
+        let d = TestDir::new("netdetail", "thinclient");
+        let mut list = Vec::new();
+        let mut want = Vec::new();
+        for line in include_str!("testdata/thinclient-drm/net.tsv").lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            let rel = f[1].strip_prefix("devices/").unwrap();
+            let dev = net_dev(&d, f[0], f[2], rel, f[5]);
+            write(&dev.join("vendor"), &format!("{}\n", f[3]));
+            write(&dev.join("device"), &format!("{}\n", f[4]));
+            let kind = if f[0].starts_with('w') {
+                IfKind::Wifi
+            } else {
+                IfKind::Wired
+            };
+            list.push(iface(kind, f[0]));
+            want.push((f[0].to_string(), f[2].to_string()));
+        }
+        let pci = d.join("pci.ids");
+        fs::write(&pci, "8086  Intel Corporation\n\t08b3  Wireless 3160\n").unwrap();
+        let got = read(&Roots::under(&d), &list, &pci);
+        let macs: Vec<(String, String)> = got
+            .ifaces
+            .iter()
+            .map(|i| (i.name.clone(), i.mac.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(macs, want);
+        let wifi = got.ifaces.iter().find(|i| i.name == "wlp2s0").unwrap();
+        assert_eq!(wifi.chip.as_deref(), Some("Intel Corporation Wireless 3160"));
+        assert_eq!(wifi.driver.as_deref(), Some("iwlwifi"));
+    }
+
+    /// The real `/sys` of the test host: an interface with a hardware
+    /// address shows it, although sysfs reports 4096 bytes for the file.
+    #[test]
+    fn a_mac_is_read_from_this_hosts_sysfs() {
+        let Ok(dir) = fs::read_dir("/sys/class/net") else {
+            return;
+        };
+        let names: Vec<String> = dir
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "lo")
+            .collect();
+        let Some(name) = names
+            .into_iter()
+            .find(|n| fs::read_to_string(format!("/sys/class/net/{n}/address")).is_ok_and(|a| mac(a.trim()).is_some()))
+        else {
+            return;
+        };
+        let got = read(
+            &Roots::under(Path::new("/")),
+            &[iface(IfKind::Wired, &name)],
+            Path::new("/nonexistent"),
+        );
+        assert!(got.ifaces[0].mac.is_some(), "{name}: {got:?}");
     }
 
     #[test]

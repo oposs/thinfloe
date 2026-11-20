@@ -399,6 +399,65 @@ vainfo: Supported profile and entrypoints
         assert_eq!(cards, ["card0", "card10"]);
     }
 
+    /// The owner's thin client (4.6.0): `card1`, no `card0`, three
+    /// connectors whose `device` is the card itself. Every attribute file
+    /// there reports 4096 bytes; the files here are as small as they hold.
+    #[test]
+    fn gpus_of_the_thin_client() {
+        let d = TestDir::new("graphics", "thinclient");
+        let sys = d.join("sys");
+        for line in include_str!("testdata/thinclient-drm/cards.tsv").lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            let dev = sys.join(f[1]);
+            fs::create_dir_all(&dev).unwrap();
+            if !f[2].is_empty() {
+                write(&dev.join("vendor"), &format!("{}\n", f[2]));
+                write(&dev.join("device"), &format!("{}\n", f[3]));
+            }
+            if !f[4].is_empty() {
+                let drv = sys.join("bus/pci/drivers").join(f[4]);
+                fs::create_dir_all(&drv).unwrap();
+                symlink(&drv, dev.join("driver")).unwrap();
+            }
+            let class = sys.join("class/drm").join(f[0]);
+            fs::create_dir_all(&class).unwrap();
+            symlink(&dev, class.join("device")).unwrap();
+        }
+        let pci_ids = d.join("pci.ids");
+        fs::write(&pci_ids, "8086  Intel Corporation\n\t1616  HD Graphics 5500\n").unwrap();
+        assert_eq!(
+            gpus(&sys, &pci_ids),
+            vec![Gpu {
+                card: "card1".into(),
+                ids: (0x8086, 0x1616),
+                name: Some("Intel Corporation HD Graphics 5500".into()),
+                driver: Some("i915".into()),
+            }]
+        );
+    }
+
+    /// On a host with a PCI GPU the real `/sys` names it: its attribute
+    /// files report 4096 bytes, which the reader must not trust.
+    #[test]
+    fn a_gpu_is_found_on_this_hosts_sysfs() {
+        let Ok(dir) = fs::read_dir("/sys/class/drm") else {
+            return;
+        };
+        let pci_card = dir.filter_map(|e| e.ok()).any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.strip_prefix("card")
+                .is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()))
+                && e.path().join("device/vendor").exists()
+        });
+        if !pci_card {
+            return;
+        }
+        assert!(!gpus(Path::new("/sys"), Path::new("/nonexistent")).is_empty());
+    }
+
     #[test]
     fn a_machine_without_drm_cards_has_no_gpu() {
         let d = TestDir::new("graphics", "no-drm");
