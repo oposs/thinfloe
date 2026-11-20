@@ -37,7 +37,7 @@ printf '# comment\nCH\t+4723+00832\tEurope/Zurich\nJP\t+353916+1394441\tAsia/Tok
 # fresh: a new /etc with the Ubuntu pools file, an empty home, no calls.
 fresh() {
     ETC="$SCRATCH/etc"; HOMED="$SCRATCH/home"
-    rm -rf "$ETC" "$HOMED" "$SCRATCH/calls" "$SCRATCH/lock"
+    rm -rf "$ETC" "$HOMED" "$SCRATCH/calls" "$SCRATCH/lock" "$SCRATCH/pending" "$SCRATCH/chrony-dhcp"
     mkdir -p "$ETC/chrony/sources.d" "$HOMED/.config/thinfloe/generated"
     echo "pool 1.ntp.ubuntu.com iburst" >"$ETC/chrony/sources.d/ubuntu-ntp-pools.sources"
     : >"$SCRATCH/calls"
@@ -47,6 +47,7 @@ apply() {
     TF_TIME_HOME="$HOMED" TF_TIME_ETC="$ETC" TF_TIME_ZONEINFO="$ZI" \
     TF_TIME_TIMEDATECTL="$STUBS/timedatectl" TF_TIME_SYSTEMCTL="$STUBS/systemctl" \
     TF_TIME_CHRONYC="$STUBS/chronyc" TF_TIME_LOCK="$SCRATCH/lock" \
+    TF_TIME_PENDING="$SCRATCH/pending" TF_TIME_CHRONY_DHCP="$SCRATCH/chrony-dhcp" \
         python3 -I "$TOOL" "$@" >"$SCRATCH/out" 2>"$SCRATCH/err"
 }
 called() { grep -qxF -- "$1" "$SCRATCH/calls"; }
@@ -64,7 +65,7 @@ check "zone: ok JSON" grep -qxF '{"result": "ok", "reason": ""}' "$SCRATCH/out"
 check "zone: timedatectl set-timezone" called "timedatectl set-timezone -- Europe/Zurich"
 check "zone: /etc/thinfloe/time" diff <(printf 'zone=Europe/Zurich\n') "$ETC/thinfloe/time"
 check "zone: watcher restarted" called "systemctl restart thinfloe-dhcp-timezone.service"
-check "zone: chrony reloaded" called "chronyc reload sources"
+check "zone: no chrony reload (servers unchanged)" not_called chronyc
 check "zone: pools untouched" test -f "$SRC/ubuntu-ntp-pools.sources"
 check "zone: mode 644" test "$(stat -c %a "$ETC/thinfloe/time")" = 644
 
@@ -91,6 +92,19 @@ check "servers: /etc/thinfloe/time" diff <(printf 'ntp=ntp.example.ch\nntp=10.1.
 check "servers: no zone change" not_called timedatectl
 check "servers: chrony reloaded" called "chronyc reload sources"
 
+# --- the same servers again: nothing about servers changed, no reload
+: >"$SCRATCH/calls"
+apply apply; rc=$?
+check "same servers: exit 0" test $rc -eq 0
+check "same servers: no chrony reload" not_called chronyc
+
+# --- a zone added to the same servers: no reload, so a failing chronyc does not matter
+: >"$SCRATCH/calls"; gen "${H}zone=Asia/Tokyo\nntp=ntp.example.ch\nntp=10.1.2.3\n"
+STUB_CHRONYC_RC=1 apply apply; rc=$?
+check "zone_only_change_skips_reload: exit 0" test $rc -eq 0
+check "zone_only_change_skips_reload: zone set" called "timedatectl set-timezone -- Asia/Tokyo"
+check "zone_only_change_skips_reload: no chrony reload" not_called chronyc
+
 # --- back to automatic restores the pools
 rm "$HOMED/.config/thinfloe/generated/time"
 apply apply
@@ -101,6 +115,33 @@ fresh; gen "${H}ntp=10.0.0.1\n"
 STUB_CHRONYC_RC=1 apply apply; rc=$?
 check "reload fails: exit 1" test $rc -eq 1
 check "reload fails: reason" grep -qF 'The time service did not take the servers.' "$SCRATCH/out"
+# the retry with the same servers reloads again: the failed reload is remembered
+: >"$SCRATCH/calls"
+apply apply; rc=$?
+check "retry_after_failed_reload: exit 0" test $rc -eq 0
+check "retry_after_failed_reload: chrony reloaded" called "chronyc reload sources"
+: >"$SCRATCH/calls"
+apply apply
+check "retry_after_failed_reload: then no reload" not_called chronyc
+
+# --- automatic, zone only: a failing chronyc is not called and not fatal
+fresh; gen "${H}zone=Europe/Zurich\n"
+STUB_CHRONYC_RC=1 apply apply; rc=$?
+check "zone only, chronyc broken: exit 0" test $rc -eq 0
+
+# --- menu servers remove the DHCP servers file, even when the watcher restart fails
+fresh; mkdir -p "$SCRATCH/chrony-dhcp"; echo "server 10.9.9.9 iburst" >"$SCRATCH/chrony-dhcp/thinfloe.sources"
+gen "${H}ntp=10.0.0.1\n"
+STUB_SYSTEMCTL_RC=1 apply apply; rc=$?
+check "menu_servers_remove_dhcp_file: exit 0" test $rc -eq 0
+check "menu_servers_remove_dhcp_file: file gone" test ! -e "$SCRATCH/chrony-dhcp/thinfloe.sources"
+check "menu_servers_remove_dhcp_file: chrony reloaded" called "chronyc reload sources"
+
+# --- automatic leaves the DHCP servers file to the watcher
+fresh; mkdir -p "$SCRATCH/chrony-dhcp"; echo "server 10.9.9.9 iburst" >"$SCRATCH/chrony-dhcp/thinfloe.sources"
+apply apply
+check "automatic: DHCP servers file kept" test -f "$SCRATCH/chrony-dhcp/thinfloe.sources"
+check "automatic: no chrony reload" not_called chronyc
 
 # --- hostile files: exit 1, nothing changed, nothing called
 hostile() { # label, setup command
