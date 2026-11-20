@@ -152,6 +152,14 @@ impl TimeBand {
         match e {
             TimeEvent::Region(i) => {
                 let zone = match i {
+                    // The select shows Automatic over an unknown zone
+                    // already; picking it saves the zone away.
+                    0 if self.unknown_zone().is_some() => {
+                        self.region_pick = None;
+                        let cfg = self.shown();
+                        self.cfg = cfg.clone();
+                        return Some(cfg);
+                    }
                     0 => None,
                     1 => Some(timecfg::UTC.to_string()),
                     i if i - FIRST_REGION < self.zones.regions.len() => {
@@ -367,6 +375,21 @@ mod tests {
             })
         );
         assert_eq!(b.unknown_zone(), None);
+        // Picking Automatic over an unknown zone saves it away.
+        let mut b = band();
+        b.set_cfg(TimeCfg {
+            zone: Some("Europe/Gone".into()),
+            ntp: vec!["a.ch".into()],
+        });
+        assert_eq!(
+            b.event(TimeEvent::Region(0)),
+            Some(TimeCfg {
+                zone: None,
+                ntp: vec!["a.ch".into()],
+            })
+        );
+        assert_eq!(b.unknown_zone(), None);
+        assert_eq!(b.event(TimeEvent::Region(0)), None);
         // Without a zone list nothing is unknown.
         let mut b = TimeBand::default();
         b.set_cfg(zone("Europe/Gone"));
