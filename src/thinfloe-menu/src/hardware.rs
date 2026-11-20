@@ -25,8 +25,8 @@ pub const EVERY: Duration = Duration::from_secs(5);
 pub const SOON: Duration = Duration::from_secs(1);
 /// How often a resting thread looks whether it may read again.
 const LOOK: Duration = Duration::from_secs(1);
-/// The most a sysfs attribute may hold here. Its reported size (4096 for
-/// every one) is not looked at: `read_attr` caps what it reads.
+/// The most a sysfs attribute may hold here. Its reported size (one page
+/// for every one) is not looked at: `read_attr` caps what it reads.
 const MAX_ATTR: u64 = 8 * 1024;
 /// /proc/stat and /proc/cpuinfo grow with the cores and interrupts; a larger
 /// one is not read and its value drops out.
@@ -770,15 +770,16 @@ mod tests {
         fs::write(p, text).unwrap();
     }
 
-    /// sysfs reports 4096 bytes for every attribute; the reader goes by
-    /// what the file holds, so a smaller cap would read it too.
+    /// sysfs reports one page for every attribute (4096 bytes, 64 KiB on
+    /// some hosts); the reader goes by what the file holds, so a smaller
+    /// cap would read it too.
     #[test]
     fn a_sysfs_attribute_reads_whatever_size_it_reports() {
         let online = Path::new("/sys/devices/system/cpu/online");
         let Ok(meta) = std::fs::metadata(online) else {
             return; // no sysfs on this host
         };
-        assert_eq!(meta.len(), 4096);
+        assert!(meta.len() > 64, "sysfs reports {} bytes", meta.len());
         assert!(attr(online).is_some_and(|t| t.trim().starts_with('0')));
         assert!(read_attr(online, 64).is_some());
     }
