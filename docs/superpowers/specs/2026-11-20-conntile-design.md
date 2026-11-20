@@ -49,7 +49,7 @@ leaves first):
 |---|---|---|---|
 | `Link` | `eth0 1 Gbit/s`, `wlan0 WiFi -61 dBm` | `no interface` (warn) | 0 |
 | `IPv4` | `192.168.1.23/24` | `no IPv4 address` (warn) | 0 |
-| `Gateway` | `192.168.1.1` | `none` (warn) | 3 |
+| `Gateway` | `192.168.1.1`, `direct` (muted) for a device route | `none` (warn) | 3 |
 | `DNS` | `192.168.1.1`, `9.9.9.9 +1` | `none` (warn) | 4 |
 | `VPN` | `wg0 up` (`up` in the good colour) | no row | 1 |
 | `Public` | `203.0.113.7`, `–` after a failure | no row while no answer | 2 |
@@ -61,7 +61,9 @@ At most eight rows.
 - *(architect)* **Unknown values.** Rows that say where the machine is on
   the network (Link, IPv4, Gateway, DNS) always show, with a warning word
   when the fact is missing: a missing gateway or DNS server is the fault
-  a user looks for. Rows that are measures (Traffic, Uptime) drop out
+  a user looks for. A default route without a gateway (a device route,
+  `RTF_GATEWAY` clear: PPP, wwan) is no fault: Gateway says a muted
+  `direct`; `none` is only for no default route. Rows that are measures (Traffic, Uptime) drop out
   with no placeholder, as values do in the hardware elements. VPN shows
   only when up (owner). Public keeps its #27 behaviour.
 - *(architect)* **DNS.** The first server in use (resolved's upstream
