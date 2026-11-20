@@ -4,10 +4,11 @@
 //! A thread of the menu (`spawn`) reads, once a second and without root,
 //! `/proc/net/route` (default route, gateway), the interface's
 //! `statistics/{rx,tx}_bytes`, `speed` and `/proc/net/wireless` (link),
-//! the addresses through `getifaddrs` and whether `wg0` is up. It keeps the
-//! last `WINDOW` rates per direction; the menu copies a `Snapshot` before
-//! each frame. The DNS servers in use (`dns_in_use`) are read on demand, not
-//! every second. Every path starts at a `Roots`, so tests read a directory.
+//! the addresses through `getifaddrs`, whether `wg0` is up and
+//! `/proc/uptime`. It keeps the last `WINDOW` rates per direction and the
+//! last byte counters; the menu copies a `Snapshot` before each frame. The
+//! DNS servers in use (`dns_in_use`) are read at most every `DNS_EVERY`
+//! (`DnsCache`). Every path starts at a `Roots`, so tests read a directory.
 
 use std::collections::VecDeque;
 use std::ffi::CStr;
@@ -27,6 +28,8 @@ const MIN_STEP: Duration = Duration::from_millis(200);
 /// Two readings further apart than this have a rest between them: no rate
 /// spans it.
 const GAP: Duration = Duration::from_secs(3);
+/// How often the sampler reads the DNS servers in use.
+pub const DNS_EVERY: Duration = Duration::from_secs(5);
 /// The most any of the read files may hold.
 const MAX_BYTES: u64 = 64 * 1024;
 /// DNS servers kept, and the longest one.
@@ -154,6 +157,27 @@ pub fn dns_in_use(roots: &Roots) -> Vec<String> {
         .filter(|d| !d.is_empty())
         .or_else(|| read(&roots.etc.join("resolv.conf")).map(|t| nameservers(&t)))
         .unwrap_or_default()
+}
+
+/// The DNS servers in use, read again at most every `DNS_EVERY`.
+#[derive(Debug, Default)]
+pub struct DnsCache {
+    last: Option<(Instant, Vec<String>)>,
+}
+
+impl DnsCache {
+    /// The servers at `now`: the last answer while it is younger than
+    /// `DNS_EVERY`, else a new read of `dns_in_use`.
+    pub fn get(&mut self, roots: &Roots, now: Instant) -> Vec<String> {
+        match &self.last {
+            Some((at, d)) if now.saturating_duration_since(*at) < DNS_EVERY => d.clone(),
+            _ => {
+                let d = dns_in_use(roots);
+                self.last = Some((now, d.clone()));
+                d
+            }
+        }
+    }
 }
 
 /// The `nameserver` lines of a resolv.conf, at most `MAX_DNS`.
@@ -294,6 +318,8 @@ pub struct Info {
     pub vpn: Vpn,
     /// Some interface but `lo` has an address that is not link-local.
     pub addressed: bool,
+    /// The DNS servers in use (`dns_in_use`), at most `MAX_DNS`.
+    pub dns: Vec<String>,
 }
 
 impl Info {
@@ -310,6 +336,8 @@ pub struct Reading {
     pub info: Info,
     /// rx and tx bytes of `info.iface`.
     pub counters: Option<(u64, u64)>,
+    /// The machine's uptime in seconds.
+    pub uptime: Option<u64>,
 }
 
 fn counter(path: &Path) -> Option<u64> {
@@ -319,6 +347,7 @@ fn counter(path: &Path) -> Option<u64> {
 /// Read everything once, with `addrs` the machine's addresses.
 pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
     let route = read(&roots.proc_.join("net/route")).and_then(|t| default_route(&t));
+    let uptime = read(&roots.proc_.join("uptime")).and_then(|t| crate::hardware::parse_uptime(&t));
     let addressed = addrs.iter().any(IfAddr::counts);
     let iface = match &route {
         Some(r) => Some(r.iface.clone()),
@@ -341,7 +370,11 @@ pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
         ..Info::default()
     };
     let Some(iface) = iface else {
-        return Reading { info, counters: None };
+        return Reading {
+            info,
+            counters: None,
+            uptime,
+        };
     };
     let dir = roots.net(&iface);
     let wireless = read(&roots.proc_.join("net/wireless"));
@@ -362,7 +395,7 @@ pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
         _ => None,
     });
     let counters = counter(&dir.join("statistics/rx_bytes")).zip(counter(&dir.join("statistics/tx_bytes")));
-    Reading { info, counters }
+    Reading { info, counters, uptime }
 }
 
 /// The rates of the last `WINDOW` seconds, fed one reading at a time.
@@ -374,6 +407,9 @@ pub struct Series {
     /// The last counters, when, and of which interface.
     last: Option<(Instant, String, u64, u64)>,
     info: Info,
+    /// The last reading's counters and uptime.
+    totals: Option<(u64, u64)>,
+    uptime: Option<u64>,
     /// A reading was taken: the element's data is known, if empty.
     read: bool,
 }
@@ -391,6 +427,8 @@ impl Series {
     /// than `GAP` after the last (the sampler rested).
     pub fn push(&mut self, now: Instant, r: Reading) {
         self.read = true;
+        self.totals = r.counters;
+        self.uptime = r.uptime;
         let iface = r.info.iface.clone();
         self.info = r.info;
         let (Some(iface), Some((rx, tx))) = (iface, r.counters) else {
@@ -440,6 +478,8 @@ impl Series {
             rx: self.rx.iter().copied().collect(),
             tx: self.tx.iter().copied().collect(),
             info: self.info.clone(),
+            totals: self.totals,
+            uptime: self.uptime,
         }
     }
 }
@@ -451,6 +491,10 @@ pub struct Snapshot {
     pub rx: Vec<f64>,
     pub tx: Vec<f64>,
     pub info: Info,
+    /// rx and tx bytes of `info.iface` as the kernel counts them.
+    pub totals: Option<(u64, u64)>,
+    /// The machine's uptime in seconds.
+    pub uptime: Option<u64>,
 }
 
 fn peak(v: &[f64]) -> f64 {
@@ -487,13 +531,15 @@ pub fn spawn(roots: Roots, on: Arc<AtomicBool>, wake: impl Fn() + Send + 'static
     let shared = series.clone();
     std::thread::spawn(move || {
         let mut visible = false;
+        let mut dns = DnsCache::default();
         loop {
             if !on.load(Ordering::Relaxed) {
                 std::thread::sleep(EVERY);
                 continue;
             }
             // Read outside the lock, so a frame never waits for the files.
-            let r = reading(&roots, &addresses());
+            let mut r = reading(&roots, &addresses());
+            r.info.dns = dns.get(&roots, Instant::now());
             let now_visible = r.info.visible();
             match shared.lock() {
                 Ok(mut s) => s.push(Instant::now(), r),
@@ -522,7 +568,7 @@ fn scaled(v: f64, unit: &str) -> String {
     }
     let mut x = v;
     let mut prefix = "";
-    for p in ["k", "M", "G"] {
+    for p in ["k", "M", "G", "T"] {
         if x < 999.5 {
             break;
         }
@@ -538,6 +584,12 @@ fn scaled(v: f64, unit: &str) -> String {
         format!("{x:.0}")
     };
     format!("{text} {prefix}{unit}")
+}
+
+/// `n` bytes with k, M, G or T, three digits: `850 B`, `12.3 kB`,
+/// `1.23 GB`.
+pub fn bytes(n: u64) -> String {
+    scaled(n as f64, "B")
 }
 
 /// A link speed in Mbit/s as `100 Mbit/s`, `1 Gbit/s`, `2.5 Gbit/s`.
@@ -701,6 +753,7 @@ mod tests {
                 gateway: gw(192, 168, 1, 1),
                 vpn: Vpn::Absent,
                 addressed: true,
+                dns: Vec::new(),
             }
         );
         // An unknown speed (-1) is no speed.
@@ -779,7 +832,78 @@ mod tests {
                 ..Info::default()
             },
             counters: Some((rx, tx)),
+            uptime: None,
         }
+    }
+
+    #[test]
+    fn bytes_are_three_digits_with_k_m_g_t() {
+        assert_eq!(bytes(0), "0 B");
+        assert_eq!(bytes(850), "850 B");
+        assert_eq!(bytes(12_300), "12.3 kB");
+        assert_eq!(bytes(1_200_000), "1.20 MB");
+        assert_eq!(bytes(456_000_000), "456 MB");
+        assert_eq!(bytes(1_230_000_000), "1.23 GB");
+        assert_eq!(bytes(1_500_000_000_000), "1.50 TB");
+    }
+
+    #[test]
+    fn a_reading_carries_counters_and_uptime() {
+        let d = TestDir::new("network", "uptime");
+        let roots = machine(&d);
+        let addrs = [addr("eth0", "192.168.1.23", 24)];
+        write(&d.join("proc/uptime"), "3725.31 7000.2\n");
+        let r = reading(&roots, &addrs);
+        assert_eq!(r.counters, Some((1000, 500)));
+        assert_eq!(r.uptime, Some(3725));
+        // The DNS servers come from the cache, not from every reading.
+        assert!(r.info.dns.is_empty());
+        write(&d.join("proc/uptime"), "junk\n");
+        assert_eq!(reading(&roots, &addrs).uptime, None);
+        // No interface: the uptime is still read.
+        let bare = TestDir::new("network", "uptime-bare");
+        write(&bare.join("proc/uptime"), "60.5 1.0\n");
+        let none = reading(&Roots::under(&bare), &[]);
+        assert_eq!(none.info.iface, None);
+        assert_eq!(none.uptime, Some(60));
+    }
+
+    #[test]
+    fn the_dns_cache_reads_the_file_at_most_every_five_seconds() {
+        let d = TestDir::new("network", "dnscache");
+        let roots = machine(&d);
+        let resolved = d.join("run/systemd/resolve/resolv.conf");
+        let mut cache = DnsCache::default();
+        let t0 = Instant::now();
+        assert_eq!(cache.get(&roots, t0), ["192.168.1.1"]);
+        write(&resolved, "nameserver 9.9.9.9\nnameserver 1.1.1.1\n");
+        assert_eq!(cache.get(&roots, t0 + Duration::from_secs(1)), ["192.168.1.1"]);
+        assert_eq!(cache.get(&roots, t0 + Duration::from_millis(4900)), ["192.168.1.1"]);
+        assert_eq!(cache.get(&roots, t0 + DNS_EVERY), ["9.9.9.9", "1.1.1.1"]);
+        assert_eq!(DNS_EVERY, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_last_totals_and_uptime() {
+        let mut s = Series::default();
+        let t0 = Instant::now();
+        let mut r = rd("eth0", 5000, 700);
+        r.uptime = Some(60);
+        s.push(t0, r);
+        let snap = s.snapshot();
+        assert_eq!(snap.totals, Some((5000, 700)));
+        assert_eq!(snap.uptime, Some(60));
+        // A counter that went back (the interface was replaced) shows at once.
+        s.push(t0 + Duration::from_secs(1), rd("eth0", 100, 50));
+        assert_eq!(s.snapshot().totals, Some((100, 50)));
+        assert_eq!(s.snapshot().uptime, None);
+        // Even a reading too soon for a rate updates the totals.
+        s.push(t0 + Duration::from_millis(1100), rd("eth0", 200, 60));
+        assert_eq!(s.snapshot().totals, Some((200, 60)));
+        let mut gone = rd("eth0", 0, 0);
+        gone.counters = None;
+        s.push(t0 + Duration::from_secs(2), gone);
+        assert_eq!(s.snapshot().totals, None);
     }
 
     #[test]
@@ -913,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn units_are_three_digits_with_k_m_g() {
+    fn units_are_three_digits_with_k_m_g_t() {
         assert_eq!(bits(0.0), "0 bit/s");
         assert_eq!(bits(850.0), "850 bit/s");
         assert_eq!(bits(999.0), "999 bit/s");
@@ -924,7 +1048,8 @@ mod tests {
         assert_eq!(bits(9_999_000.0), "10.0 Mbit/s");
         assert_eq!(bits(940_000_000.0), "940 Mbit/s");
         assert_eq!(bits(2.5e9), "2.50 Gbit/s");
-        assert_eq!(bits(4.0e12), "4000 Gbit/s", "G is the largest");
+        assert_eq!(bits(4.0e12), "4.00 Tbit/s");
+        assert_eq!(bits(4.0e15), "4000 Tbit/s", "T is the largest");
         assert_eq!(bits(f64::NAN), "0 bit/s");
         assert_eq!(bits(-5.0), "0 bit/s");
         assert_eq!(speed(100), "100 Mbit/s");

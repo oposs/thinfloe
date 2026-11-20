@@ -114,7 +114,17 @@ At most eight rows.
 
 ### Sampler (`netstat.rs`)
 
-- `Info` gets `dns: Vec<String>`, read in `reading()` with `dns_in_use`.
+- `Info` gets `dns: Vec<String>`.
+- *(architect)* **DNS source and rate.** The servers come from a file
+  read, never a subprocess: `netstat::dns_in_use`, which reads
+  systemd-resolved's `/run/systemd/resolve/resolv.conf` (else
+  `/etc/resolv.conf`). That file is what is in use: resolved writes into
+  it the servers it sends queries to, merged from every link (DHCP and
+  static, `wg0` included) and from the global `DNS=` of `resolved.conf`.
+  networkd's `/run/systemd/netif/links/<ifindex>` lists only one link's
+  own servers and misses the global ones and the VPN's. The sampler keeps
+  the answer in a `DnsCache` and reads the file at most every 5 s
+  (`DNS_EVERY`); the other values keep the one-second rate.
 - `Reading` gets `uptime: Option<u64>` (read with
   `hardware::parse_uptime` from `roots.proc_/uptime`).
 - `Series` keeps the last reading's counters and uptime; `Snapshot` gets

@@ -286,7 +286,10 @@ pub fn sample() -> Snapshot {
             gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
             vpn: Vpn::Up,
             addressed: true,
+            dns: vec!["192.168.1.1".into()],
         },
+        totals: Some((1_230_000_000, 456_000_000)),
+        uptime: Some(15_120),
     }
 }
 

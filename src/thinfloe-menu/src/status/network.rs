@@ -402,7 +402,9 @@ pub(crate) fn sample(n: usize) -> Snapshot {
             gateway: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
             vpn: Vpn::Up,
             addressed: true,
+            ..Info::default()
         },
+        ..Snapshot::default()
     }
 }
 
