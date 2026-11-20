@@ -306,7 +306,10 @@ mod tests {
             &pci_list(&d),
         );
         assert_eq!(got.ifaces[0].mac.as_deref(), Some("3c:52:82:00:00:01"));
-        assert_eq!(got.ifaces[0].chip.as_deref(), Some("Intel Corporation Ethernet Connection (13) I219-V"));
+        assert_eq!(
+            got.ifaces[0].chip.as_deref(),
+            Some("Intel Corporation Ethernet Connection (13) I219-V")
+        );
         assert_eq!(got.ifaces[0].driver.as_deref(), Some("e1000e"));
         assert_eq!(
             got.ifaces[1],

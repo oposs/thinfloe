@@ -4170,6 +4170,36 @@ mod tests {
         assert!(rect_of(&narrow, "Copy").top() > rect_of(&narrow, "not available").bottom());
     }
 
+    /// Until the machine's facts arrive, only their band waits: the
+    /// network and the graphics, read already, show.
+    #[test]
+    fn the_machine_tab_shows_what_is_read_while_the_facts_are_waited_for() {
+        let mut menu = machine_settings();
+        menu.machine = crate::machine::MachineTab::default();
+        let rects = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        let texts: Vec<&str> = rects.iter().map(|(t, _)| t.as_str()).collect();
+        for want in [
+            "This machine",
+            "Network",
+            "WiFi wlp2s0",
+            "iwlwifi",
+            "Graphics",
+            "i915",
+            "Copy",
+        ] {
+            assert!(texts.contains(&want), "{want} not in {texts:?}");
+        }
+        assert!(!texts.contains(&"Kernel"), "{texts:?}");
+        let reading: Vec<Rect> = rects.iter().filter(|(t, _)| t == "Reading…").map(|(_, r)| *r).collect();
+        let at = |name: &str| rects.iter().rev().find(|(t, _)| t == name).map(|(_, r)| *r).unwrap();
+        let (m, n) = (at("This machine"), at("Network"));
+        assert_eq!(reading.len(), 1, "{texts:?}");
+        assert!(
+            reading[0].top() > m.bottom() && reading[0].right() < n.left(),
+            "{reading:?}"
+        );
+    }
+
     /// A panel looks the same on every tab: the gap between the columns of
     /// This machine does not reach the label column inside them.
     #[test]
@@ -4196,7 +4226,10 @@ mod tests {
         let machine = offset(&menu);
         menu.settings_tab = crate::settings::SettingsTab::Network;
         let network = offset(&menu);
-        assert!((machine - network).abs() < 0.5, "This machine {machine}, Network {network}");
+        assert!(
+            (machine - network).abs() < 0.5,
+            "This machine {machine}, Network {network}"
+        );
     }
 
     /// The Graphics band closes the Screen tab: "Reading…" until the job
