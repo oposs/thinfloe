@@ -19,7 +19,7 @@ ntp=ntp.example.ch
 ntp=10.1.2.3
 ```
 
-A zone is UTC or a zone of `/usr/share/zoneinfo/zone.tab` (third column); the menu offers only those, and the root side checks the list, so a path, `..` or a link name cannot pass. A server is an IPv4 or IPv6 address or a host name (at most 253 characters, labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`); at most 8.
+A zone is UTC or a zone of `/usr/share/zoneinfo/zone.tab` (third column); the menu offers only those, and the root side checks the list, so a path, `..` or a link name cannot pass. A saved zone the image's `zone.tab` does not list (a hand edit, or tzdata dropped it) is left out of `generated/time`, so the servers are still installed and the zone falls back to DHCP or UTC; the menu notes it once at start (`config.toml: the time zone … is not in this system's zone list`), the band shows Automatic and a warning line naming the zone, and `config.toml` keeps it until the next change in the band. A server is an IPv4 or IPv6 address or a host name (at most 253 characters, labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`); at most 8.
 
 Two root tools install it, both into the same files:
 

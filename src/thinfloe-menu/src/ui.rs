@@ -5539,6 +5539,27 @@ mod tests {
         }
     }
 
+    /// A saved zone the image does not list is named in the band.
+    #[test]
+    fn the_time_band_names_an_unknown_zone() {
+        let mut net = two_networks();
+        net.time_mut()
+            .set_zones(crate::timecfg::parse_zone_tab("CH\t+0\tEurope/Zurich\n"));
+        net.time_mut().set_cfg(crate::config::TimeCfg {
+            zone: Some("Europe/Gone".into()),
+            ntp: Vec::new(),
+        });
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "Automatic"), "{texts:?}");
+        assert!(
+            has(
+                &texts,
+                "The saved time zone Europe/Gone is not known here; the automatic zone is used."
+            ),
+            "{texts:?}"
+        );
+    }
+
     /// The note on an empty server field goes once servers are typed.
     #[test]
     fn the_empty_servers_note_only_on_an_empty_field() {

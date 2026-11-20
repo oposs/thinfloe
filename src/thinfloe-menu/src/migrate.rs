@@ -649,6 +649,7 @@ mod tests {
             default_wired: DEFAULT_WIRED.into(),
             netboot: false,
             registry: None,
+            zones: None,
         }
     }
 
@@ -1131,6 +1132,7 @@ mod tests {
             default_wired: DEFAULT_WIRED.into(),
             netboot: true,
             registry: None,
+            zones: None,
         };
         let r = migrate_home(&h.home, &h.state, netboot, NOW)
             .unwrap()
@@ -1160,6 +1162,7 @@ mod tests {
             default_wired: "network:\n  version: 2\n".into(),
             netboot: false,
             registry: None,
+            zones: None,
         };
         let r = migrate_home(&h.home, &h.state, broken, NOW).unwrap().expect("a report");
         assert_eq!(h.cfg().network.kept_wired.as_deref(), Some(fixed));

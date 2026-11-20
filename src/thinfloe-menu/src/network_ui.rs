@@ -238,6 +238,16 @@ fn time(
             }
         });
     });
+    if let Some(z) = band.unknown_zone() {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            warn(
+                ui,
+                t,
+                format!("The saved time zone {z} is not known here; the automatic zone is used."),
+            );
+        });
+    }
     if net.status_known() {
         line(ui, &timetab::zone_line(st, jiff::Timestamp::now()));
     }

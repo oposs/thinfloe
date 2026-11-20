@@ -1542,6 +1542,7 @@ exit 0
             default_wired: SHIPPED_WIRED.to_string(),
             netboot,
             registry: None,
+            zones: None,
         }
     }
 

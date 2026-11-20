@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### New
-- The clock showed UTC on a network that sends no time zone. Settings → Network has a new Time band: pick the region and city of the time zone, which takes effect at once and is kept across restarts; Automatic keeps the zone DHCP sends, else UTC.
+- The clock showed UTC on a network that sends no time zone. Settings → Network has a new Time band: pick the region and city of the time zone, which takes effect at once and is kept across restarts; Automatic keeps the zone DHCP sends, else UTC. A saved zone this system does not know shows as Automatic with a line naming it, and the NTP servers still take effect.
 - The Time band has an "NTP servers" field: servers typed there are the only ones the machine asks for the time; left empty, it uses the servers DHCP sends and the Ubuntu pool. Below it the band says whether the clock is synchronised, with which server, and lists the servers in use.
 
 ### Changed

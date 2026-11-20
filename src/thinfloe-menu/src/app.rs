@@ -1783,6 +1783,7 @@ esac"#;
                     default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
                     netboot: false,
                     registry: None,
+                    zones: None,
                 },
                 crate::store::OpenMode::Session,
                 0,

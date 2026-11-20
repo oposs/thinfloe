@@ -180,6 +180,14 @@ pub fn open(dir: ConfigDir, inputs: Inputs, mode: OpenMode, now_epoch: i64) -> O
         store.cfg.keyboard = fixed;
     }
 
+    // Left out of generated/time, kept in config.toml: the user's next
+    // change in the Time band replaces it.
+    if let Some(z) = generated::unknown_zone(&store.cfg, &store.inputs) {
+        notes.push(format!(
+            "config.toml: the time zone {z} is not in this system's zone list; the automatic zone is used."
+        ));
+    }
+
     let mut kanshi_changed = false;
     for name in ALL_FILES {
         let body = match generated::render(&store.cfg, name, &store.inputs) {
@@ -342,6 +350,7 @@ mod tests {
             default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
             netboot: false,
             registry: None,
+            zones: None,
         }
     }
 
@@ -430,6 +439,32 @@ mod tests {
         assert_eq!(back.keyboard, want);
         let env = gen_text(&d, "environment").unwrap();
         assert!(env.contains("XKB_DEFAULT_LAYOUT=de\nXKB_DEFAULT_VARIANT=\n"), "{env}");
+    }
+
+    /// An unknown zone is noted once at open and left out of
+    /// generated/time; config.toml keeps it.
+    #[test]
+    fn an_unknown_zone_is_noted_and_kept_in_config_toml() {
+        let d = TestDir::new("store", "tz-unknown");
+        let mut c = ThinfloeConfig::default();
+        c.time.zone = Some("Europe/Gone".into());
+        c.time.ntp = vec!["10.0.0.1".into()];
+        fs::create_dir_all(cdir(&d).root).unwrap();
+        fs::write(cdir(&d).config_toml(), to_text(&c)).unwrap();
+        let inp = Inputs {
+            zones: Some(std::sync::Arc::new(crate::timecfg::parse_zone_tab(
+                "CH\t+0\tEurope/Zurich\n",
+            ))),
+            ..inputs()
+        };
+        let o = open(cdir(&d), inp, OpenMode::Session, NOW);
+        let hits: Vec<_> = o.notes.iter().filter(|n| n.contains("Europe/Gone")).collect();
+        assert_eq!(hits.len(), 1, "{:?}", o.notes);
+        assert_eq!(o.store.cfg.time, c.time);
+        let back = parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).unwrap();
+        assert_eq!(back.time, c.time);
+        let t = gen_text(&d, "time").unwrap();
+        assert!(t.ends_with("\nntp=10.0.0.1\n") && !t.contains("zone="), "{t}");
     }
 
     #[test]

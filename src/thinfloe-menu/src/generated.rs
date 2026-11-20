@@ -58,6 +58,9 @@ pub struct Inputs {
     /// The XKB layout list; `None` when it could not be read, and then
     /// only the names of a keyboard choice are checked.
     pub registry: Option<Arc<Registry>>,
+    /// The zones of the image's zone list; `None` when it could not be
+    /// read, and then a zone is not checked.
+    pub zones: Option<Arc<crate::timecfg::Zones>>,
 }
 
 fn ipv4_list(v: &[String]) -> Result<Vec<Ipv4Addr>, String> {
@@ -68,6 +71,15 @@ fn ipv4_list(v: &[String]) -> Result<Vec<Ipv4Addr>, String> {
 
 fn with_header(body: &str) -> String {
     format!("{HEADER}\n{body}")
+}
+
+/// The `[time]` zone when the image's zone list does not have it (a hand
+/// edit, or tzdata dropped it). `generated/time` leaves it out, so the
+/// servers still reach the system and the zone falls back to DHCP or UTC.
+pub fn unknown_zone<'a>(cfg: &'a ThinfloeConfig, inp: &Inputs) -> Option<&'a str> {
+    let zone = cfg.time.zone.as_deref()?;
+    let zones = inp.zones.as_deref()?;
+    (!zones.contains(zone)).then_some(zone)
 }
 
 /// The text of generated file `name`, or `None` when the file must be
@@ -127,7 +139,11 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             for s in &cfg.time.ntp {
                 crate::timecfg::check_server(s).map_err(|e| format!("Time: {e}"))?;
             }
-            Ok(crate::timecfg::body(&cfg.time).map(|b| with_header(&b)))
+            let mut time = cfg.time.clone();
+            if unknown_zone(cfg, inp).is_some() {
+                time.zone = None;
+            }
+            Ok(crate::timecfg::body(&time).map(|b| with_header(&b)))
         }
         other => Err(format!("No generated file named {other}")),
     }
@@ -180,6 +196,7 @@ mod tests {
             default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
             netboot: false,
             registry: None,
+            zones: None,
         }
     }
 
@@ -433,5 +450,38 @@ mod tests {
         assert_eq!(Table::Time.files(), ["time"]);
         cfg.time.ntp = vec!["a;b".into()];
         assert!(render(&cfg, "time", &inp()).unwrap_err().starts_with("Time: "));
+    }
+
+    /// A zone the image does not list does not block the servers: it is
+    /// left out, and the system falls back to the DHCP zone or UTC.
+    #[test]
+    fn an_unknown_zone_is_left_out_of_generated_time() {
+        let mut cfg = ThinfloeConfig::default();
+        cfg.time.zone = Some("Europe/Gone".into());
+        cfg.time.ntp = vec!["10.0.0.1".into()];
+        let with_zones = Inputs {
+            zones: Some(Arc::new(crate::timecfg::parse_zone_tab("CH\t+0\tEurope/Zurich\n"))),
+            ..inp()
+        };
+        assert_eq!(unknown_zone(&cfg, &with_zones), Some("Europe/Gone"));
+        assert_eq!(
+            render(&cfg, "time", &with_zones).unwrap().unwrap(),
+            format!("{HEADER}\nntp=10.0.0.1\n")
+        );
+        cfg.time.ntp.clear();
+        assert_eq!(render(&cfg, "time", &with_zones).unwrap(), None);
+        // UTC and a listed zone stay; without a zone list nothing is dropped.
+        cfg.time.zone = Some("UTC".into());
+        assert_eq!(unknown_zone(&cfg, &with_zones), None);
+        cfg.time.zone = Some("Europe/Zurich".into());
+        assert_eq!(unknown_zone(&cfg, &with_zones), None);
+        cfg.time.zone = Some("Europe/Gone".into());
+        assert_eq!(unknown_zone(&cfg, &inp()), None);
+        assert!(
+            render(&cfg, "time", &inp())
+                .unwrap()
+                .unwrap()
+                .contains("zone=Europe/Gone\n")
+        );
     }
 }

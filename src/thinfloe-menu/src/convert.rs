@@ -670,6 +670,7 @@ mod tests {
             default_wired: include_str!("../../../overlay/etc/netplan/ethernet.yaml").into(),
             netboot: false,
             registry: None,
+            zones: None,
         }
     }
 
