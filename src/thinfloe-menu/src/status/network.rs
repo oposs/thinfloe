@@ -402,9 +402,10 @@ pub(crate) fn sample(n: usize) -> Snapshot {
             gateway: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
             vpn: Vpn::Up,
             addressed: true,
-            ..Info::default()
+            dns: vec!["192.168.1.1".into()],
         },
-        ..Snapshot::default()
+        totals: Some((1_230_000_000, 456_000_000)),
+        uptime: Some(15_120),
     }
 }
 
