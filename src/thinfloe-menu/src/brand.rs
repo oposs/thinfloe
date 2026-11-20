@@ -611,4 +611,187 @@ mod tests {
         assert!(*xs.iter().max().unwrap() >= iw - 3, "right margin");
         assert!(ys[0] <= 2 && *ys.last().unwrap() >= ih - 3, "top/bottom margin");
     }
+
+    /// One rendered frame of a lone switch: the canvas, the tessellated
+    /// primitives and the switch's track rect.
+    struct SwitchFrame {
+        canvas: crate::raster::Canvas,
+        prims: Vec<egui::epaint::ClippedPrimitive>,
+        track: egui::Rect,
+        on: bool,
+    }
+
+    /// Four frames of a switch, as the menu draws them (brand theme,
+    /// animation off, the CPU raster over the page background): two off,
+    /// the click, one after it.
+    fn switch_frames() -> Vec<SwitchFrame> {
+        use shadcn_egui::components::switch::Switch;
+        let ctx = Context::default();
+        apply(&ctx);
+        ctx.options_mut(|o| o.tessellation_options.feathering = false);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let mut textures = crate::raster::Textures::default();
+        let mut on = false;
+        let mut track = egui::Rect::NOTHING;
+        let mut frames = vec![];
+        for (i, t) in [0.0, 0.1, 0.2, 0.3].into_iter().enumerate() {
+            let mut events = vec![];
+            if i == 2 {
+                let p = track.center();
+                let press = |pressed| egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                };
+                events = vec![egui::Event::PointerMoved(p), press(true), press(false)];
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0))),
+                events,
+                time: Some(t),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                track = ui.add(Switch::new(&mut on)).rect;
+            });
+            textures.apply_set(&out.textures_delta);
+            let prims = ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+            let mut canvas = crate::raster::Canvas::new(200, 100, theme().palette().background);
+            let all = canvas.bounds();
+            canvas.draw(&prims, &textures, out.pixels_per_point, all);
+            textures.apply_free(&out.textures_delta);
+            out.textures_delta.clear();
+            frames.push(SwitchFrame {
+                canvas,
+                prims,
+                track,
+                on,
+            });
+        }
+        frames
+    }
+
+    fn pixel(c: &crate::raster::Canvas, x: i32, y: i32) -> u32 {
+        c.pixels[y as usize * c.width + x as usize]
+    }
+
+    /// The bounding box, in pixels, of the pixels inside `area` for which
+    /// `want` holds.
+    fn bbox(c: &crate::raster::Canvas, area: egui::Rect, want: impl Fn(u32) -> bool) -> crate::raster::IRect {
+        let a = crate::raster::IRect::from_points(area, 1.0).intersect(&c.bounds());
+        let mut r = crate::raster::IRect::EMPTY;
+        for y in a.y0..a.y1 {
+            for x in a.x0..a.x1 {
+                if want(pixel(c, x, y)) {
+                    let p = crate::raster::IRect {
+                        x0: x,
+                        y0: y,
+                        x1: x + 1,
+                        y1: y + 1,
+                    };
+                    r = r.union(&p);
+                }
+            }
+        }
+        r
+    }
+
+    /// The knob of a frame: its colour (sampled 4 px inside the end it
+    /// sits at), its pixel box, the track's box and the track's colour
+    /// (sampled 4 px inside the other end).
+    fn knob(f: &SwitchFrame) -> (u32, crate::raster::IRect, crate::raster::IRect, u32) {
+        let c = &f.canvas;
+        let y = f.track.center().y as i32;
+        let (near, far) = (f.track.left() as i32 + 4, f.track.right() as i32 - 5);
+        let (k, t) = if f.on { (far, near) } else { (near, far) };
+        let knob_px = pixel(c, k, y);
+        let track_px = pixel(c, t, y);
+        let bg = theme().palette().background;
+        let page = (bg.r() as u32) << 16 | (bg.g() as u32) << 8 | bg.b() as u32;
+        let area = f.track.expand(3.0);
+        (
+            knob_px,
+            bbox(c, area, |p| p == knob_px),
+            bbox(c, area, |p| p != page),
+            track_px,
+        )
+    }
+
+    /// WCAG contrast ratio of two 0RGB pixels.
+    fn contrast(a: u32, b: u32) -> f32 {
+        let lum = |p: u32| {
+            let ch = |v: u32| {
+                let c = v as f32 / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(p >> 16 & 0xff) + 0.7152 * ch(p >> 8 & 0xff) + 0.0722 * ch(p & 0xff)
+        };
+        let (l1, l2) = (lum(a), lum(b));
+        (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05)
+    }
+
+    /// 4.6.0 field report: the "on" knob was the colour of the page, so the
+    /// ice half of the track read as a knob that had not moved.
+    #[test]
+    fn the_switch_knob_moves_and_reads_on_the_page() {
+        let frames = switch_frames();
+        let (off, on) = (&frames[1], &frames[3]);
+        assert!(!off.on && on.on, "the click turns the switch on");
+        let bg = theme().palette().background;
+        let page = (bg.r() as u32) << 16 | (bg.g() as u32) << 8 | bg.b() as u32;
+        let (k_off, r_off, t_off, track_off) = knob(off);
+        let (k_on, r_on, t_on, track_on) = knob(on);
+        assert_eq!(k_off, k_on, "the knob is one colour in both positions");
+        for (k, track) in [(k_off, track_off), (k_on, track_on)] {
+            assert_ne!(k, track, "the knob differs from its track");
+            assert!(contrast(k, page) >= 4.5, "knob {k:06x} on page {page:06x}");
+        }
+        let centre = |r: crate::raster::IRect| (r.x0 + r.x1) as f32 / 2.0;
+        assert!(
+            centre(r_on) - centre(r_off) >= off.track.width() / 3.0,
+            "the knob moves right: {r_off:?} -> {r_on:?}"
+        );
+        // The track shows around the knob on all four sides, at least 2 px
+        // wide, so the knob's edge reads against the ice track too.
+        for (f, k, r, t, track) in [(off, k_off, r_off, t_off, track_off), (on, k_on, r_on, t_on, track_on)] {
+            assert!(
+                r.x0 - t.x0 >= 2 && t.x1 - r.x1 >= 2 && r.y0 - t.y0 >= 2 && t.y1 - r.y1 >= 2,
+                "knob {r:?} inset in track {t:?} (on: {})",
+                f.on
+            );
+            for d in 1..=2 {
+                for x in r.x0 - d..r.x1 + d {
+                    for y in [r.y0 - d, r.y1 - 1 + d] {
+                        assert_eq!(pixel(&f.canvas, x, y), track, "track above/below the knob at {x},{y}");
+                    }
+                }
+                for y in r.y0 - d..r.y1 + d {
+                    for x in [r.x0 - d, r.x1 - 1 + d] {
+                        assert_eq!(pixel(&f.canvas, x, y), track, "track beside the knob at {x},{y}");
+                    }
+                }
+            }
+            assert_ne!(k, track);
+        }
+    }
+
+    /// The loop's damage tracker redraws both places of the knob on the
+    /// click: the move reaches the screen.
+    #[test]
+    fn a_switch_click_damages_the_old_and_new_knob() {
+        let frames = switch_frames();
+        let mut tracker = crate::damage::Tracker::default();
+        tracker.damage(&frames[1].prims, 1.0);
+        let dmg = tracker
+            .damage(&frames[2].prims, 1.0)
+            .expect("the click changes the frame");
+        for r in [knob(&frames[1]).1, knob(&frames[2]).1] {
+            assert_eq!(dmg.union(&r), dmg, "damage {dmg:?} covers the knob at {r:?}");
+        }
+    }
 }
