@@ -34,6 +34,9 @@ REPROG = 0x1B04
 SWID = 0x0B
 DIVERTABLE = 0x20       # getCidInfo flags: the control can be diverted
 RESCAN = 30.0           # how often the program looks for HID++ nodes and new slots
+LOCK_WAIT = 2.0         # how long a request waits for the battery reader's lock
+LOCK_POLL = 0.1
+PROBE_GAP = 5.0         # a slot that reports but is not diverted is probed this often at most
 
 EV_SYN, EV_KEY = 0, 1
 UI_SET_EVBIT = 0x40045564
@@ -59,14 +62,46 @@ pb = _load_battery()
 pb.SWID = SWID      # _feature_call reads the module global at call time
 
 
-def find_mic(t, slot: int, deadline: float) -> Optional[int]:
-    """The 0x1B04 feature index when the slot has a divertable MIC_CID, else
-    None. Asks only the root getFeature, getCount and getCidInfo. A reply that
-    fails mid-scan also gives None; the caller does not record the slot, so
-    the next rescan asks again."""
-    idx = pb._feature_index(t, slot, REPROG, deadline)
-    if not idx:
+def log(what: str, why: str) -> None:
+    print(f"thinfloe: logitech-keys: {what}: {why}", file=sys.stderr)
+
+
+def take_lock(state):
+    """The locked fd of the battery reader's lock file, waiting up to
+    LOCK_WAIT; None (logged) when it cannot be had. The wait is short so a
+    long battery read does not stall the key. Closing the fd frees the lock."""
+    lockpath = state / "lock"
+    try:
+        lockfd = os.open(str(lockpath), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        log(str(lockpath), e.strerror or str(e))
         return None
+    give_up = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lockfd
+        except BlockingIOError:
+            if time.monotonic() >= give_up:
+                os.close(lockfd)
+                log(str(lockpath), "lock busy")
+                return None
+            time.sleep(LOCK_POLL)
+        except OSError as e:
+            os.close(lockfd)
+            log(str(lockpath), e.strerror or str(e))
+            return None
+
+
+def scan_mic(t, slot: int, deadline: float):
+    """The 0x1B04 feature index when the slot has a divertable MIC_CID; False
+    when the device answered everything and has none; None when a reply
+    failed. Asks only the root getFeature, getCount and getCidInfo."""
+    idx = pb._feature_index(t, slot, REPROG, deadline)
+    if idx is None:
+        return None
+    if idx == 0:
+        return False
     r = pb._feature_call(t, slot, idx, 0, b"", deadline)
     if not r:
         return None
@@ -75,8 +110,15 @@ def find_mic(t, slot: int, deadline: float) -> Optional[int]:
         if not info or len(info) < 5:
             return None
         if (info[0] << 8 | info[1]) == MIC_CID:
-            return idx if info[4] & DIVERTABLE else None
-    return None
+            return idx if info[4] & DIVERTABLE else False
+    return False
+
+
+def find_mic(t, slot: int, deadline: float) -> Optional[int]:
+    """The 0x1B04 feature index when the slot has a divertable MIC_CID, else
+    None. A failed reply mid-scan also gives None; Keys does not record such
+    a slot, so the next rescan asks again."""
+    return scan_mic(t, slot, deadline) or None
 
 
 def set_divert(t, slot: int, idx: int, on: bool, deadline: float) -> bool:
@@ -133,8 +175,9 @@ class Keys:
     replaced for tests; the defaults are the battery reader's."""
 
     def __init__(self, uinput, find_nodes=None, open_listener=None,
-                 open_transport=None, wait=None):
+                 open_transport=None, wait=None, take_lock=take_lock):
         self.uinput = uinput
+        self.take_lock = take_lock
         self.find_nodes = find_nodes or (lambda: pb.find_hidpp_nodes(*pb._paths()[:2]))
         self.open_listener = open_listener or (lambda node: pb.open_listener(node))
         self.open_transport = open_transport or (lambda node: pb.open_transport(node))
@@ -144,28 +187,35 @@ class Keys:
         # (HID_PHYS, slot) -> (node, 0x1B04 index, 0x1D4B index)
         self.down: Set[Tuple[str, int]] = set()     # slots whose mic key is held
         self.f20 = False                            # F20 is down on the uinput device
-        self.warned: Set[str] = set()
+        self.no_mic: Set[Tuple[str, int]] = set()   # slots that answered fully and have no divertable mic
+        self.last_probe: Dict[Tuple[str, int], float] = {}
+        self.warned: Dict[str, str] = {}            # source -> the message logged for it
         self.next_scan = pb.monotonic()
 
     def _warn(self, what: str, why: str) -> None:
-        """One journal line per distinct message, so a repeating fault does
-        not fill the log."""
-        if f"{what}: {why}" not in self.warned:
-            self.warned.add(f"{what}: {why}")
-            pb.log(what, why)
+        """One journal line per fault, so a repeating fault does not fill the
+        log; _ok(what) lets the next fault of that source be logged again."""
+        if self.warned.get(what) != why:
+            self.warned[what] = why
+            log(what, why)
+
+    def _ok(self, what: str) -> None:
+        self.warned.pop(what, None)
 
     def _with_transport(self, node, work):
         """Run work(transport, deadline) under the battery reader's lock; the
         lock is let go before this returns. None when the lock is busy or the
         node cannot be opened (logged once)."""
-        lockfd = pb._take_lock(pb._paths()[3])
+        lockfd = self.take_lock(pb._paths()[3])
         if lockfd is None:
             self._warn(str(node), "lock busy, trying again later")
             return None
         t = None
         try:
             t = self.open_transport(node)
-            return work(t, pb.monotonic() + pb.RUN_BUDGET)
+            got = work(t, pb.monotonic() + pb.RUN_BUDGET)
+            self._ok(str(node))
+            return got
         except OSError as e:
             self._warn(str(node), e.strerror or str(e))
             return None
@@ -187,6 +237,7 @@ class Keys:
         self.f20 = want
         try:
             self.uinput.key(KEY_F20, want)
+            self._ok("uinput")
         except OSError as e:
             self._warn("uinput", e.strerror or str(e))
 
@@ -209,26 +260,33 @@ class Keys:
                     continue
             self._divert_new_slots(node, phys)
 
-    def _divert_new_slots(self, node, phys: str) -> None:
+    def _divert_new_slots(self, node, phys: str, only: Optional[int] = None) -> None:
         """Every paired slot (receiver register b5/50+n, as the battery reader
-        decides it) that is not recorded yet: find the control, divert it,
-        record it. A slot that fails stays unrecorded, so the next rescan asks
-        again."""
+        decides it) that is neither recorded nor known to have no mic key, or
+        just slot `only`: find the control, divert it, record it. A slot that
+        did not answer stays unrecorded, so the next rescan asks again; one
+        that answered fully without a divertable mic key is not asked again."""
         def work(t, deadline):
-            for slot in range(1, 7):
-                if (phys, slot) in self.slots:
+            for slot in ([only] if only else range(1, 7)):
+                key = (phys, slot)
+                if key in self.slots or key in self.no_mic:
                     continue
                 info = pb._receiver_register(t, 0x50 + slot, 0, deadline)
                 if info is False or info is None:
                     continue
-                idx = find_mic(t, slot, deadline)
+                idx = scan_mic(t, slot, deadline)
                 if idx is None:
+                    continue
+                if idx is False:
+                    self.no_mic.add(key)
                     continue
                 ws = pb._feature_index(t, slot, pb.WIRELESS_STATUS, deadline) or None
                 if not set_divert(t, slot, idx, True, deadline):
                     self._warn(f"{phys} slot {slot}", "no answer to the divert request")
                     continue
-                self.slots[(phys, slot)] = (node, idx, ws)
+                self._ok(f"{phys} slot {slot}")
+                self.slots[key] = (node, idx, ws)
+            return True
         try:
             self._with_transport(node, work)
         except Exception as e:  # noqa: BLE001 - device data is untrusted
@@ -237,29 +295,40 @@ class Keys:
     def _drop(self, node, why: Optional[str]) -> None:
         listener, phys = self.nodes.pop(node)
         if why:
-            pb.log(str(node), why)
+            log(str(node), why)
         try:
             listener.close()
         except OSError:
             pass
         for key in [k for k in self.slots if k[0] == phys]:
             del self.slots[key]
+        self.no_mic = {k for k in self.no_mic if k[0] != phys}
+        self.last_probe = {k: v for k, v in self.last_probe.items() if k[0] != phys}
         self._release(phys)
 
-    def _on_report(self, phys: str, rep: bytes) -> None:
+    def _on_report(self, node, phys: str, rep: bytes) -> None:
         head = pb.event_head(rep)
         if head is None:
             return
         key = (phys, head[0])
         if key not in self.slots:
+            # A keyboard that slept at start talks again: do not wait for the rescan.
+            now = pb.monotonic()
+            if key not in self.no_mic and now - self.last_probe.get(key, -PROBE_GAP) >= PROBE_GAP:
+                self.last_probe[key] = now
+                self._divert_new_slots(node, phys, only=head[0])
             return
         node, idx, ws = self.slots[key]
         if ws is not None and head[1] == ws:
             if rep[4] == 0x01:
                 # The keyboard woke up or reconnected and forgot the divert.
                 self._release(phys, head[0])
-                self._with_transport(node, lambda t, d: set_divert(t, head[0], idx, True, d)
-                                     or self._warn(f"{phys} slot {head[0]}", "no answer to the divert request"))
+                if self._with_transport(node, lambda t, d: set_divert(t, head[0], idx, True, d)):
+                    self._ok(f"{phys} slot {head[0]}")
+                else:
+                    # Forget the slot: the next rescan finds and diverts it again.
+                    del self.slots[key]
+                    self._warn(f"{phys} slot {head[0]}", "no answer to the divert request, trying again at the next rescan")
             return
         pressed = mic_down(rep, head[0], idx)
         if pressed is None:
@@ -278,7 +347,7 @@ class Keys:
             try:
                 self.rescan()
             except Exception as e:  # noqa: BLE001 - the program must keep running
-                pb.log("rescan", f"{type(e).__name__}: {e}")
+                log("rescan", f"{type(e).__name__}: {e}")
         by_listener = {lst: node for node, (lst, _) in self.nodes.items()}
         for lst in self.wait(list(by_listener), max(0.0, min(timeout, self.next_scan - pb.monotonic()))):
             node = by_listener[lst]
@@ -292,9 +361,9 @@ class Keys:
                 self._drop(node, e.strerror or str(e))
                 continue
             try:
-                self._on_report(self.nodes[node][1], rep)
+                self._on_report(node, self.nodes[node][1], rep)
             except Exception as e:  # noqa: BLE001 - device data is untrusted
-                pb.log(str(node), f"{type(e).__name__}: {e}")
+                log(str(node), f"{type(e).__name__}: {e}")
 
     def stop(self) -> None:
         """Give the key back: release a held F20, undivert every recorded
@@ -302,12 +371,20 @@ class Keys:
         the uinput device."""
         self.down.clear()
         self._sync_key()
-        by_node: Dict[object, List[Tuple[int, int]]] = {}
+        by_node: Dict[object, List[Tuple[str, int, int]]] = {}
         for (phys, slot), (node, idx, _) in self.slots.items():
-            by_node.setdefault(node, []).append((slot, idx))
+            by_node.setdefault(node, []).append((phys, slot, idx))
+
+        def undivert(items):
+            def work(t, deadline):
+                for phys, slot, idx in items:
+                    if not set_divert(t, slot, idx, False, deadline):
+                        self._warn(f"{phys} slot {slot}", "no answer to the undivert request")
+                return True
+            return work
         for node, items in by_node.items():
             try:
-                self._with_transport(node, lambda t, d: [set_divert(t, s, i, False, d) for s, i in items])
+                self._with_transport(node, undivert(items))
             except Exception as e:  # noqa: BLE001 - stopping must go on
                 self._warn(str(node), f"{type(e).__name__}: {e}")
         self.slots.clear()
@@ -320,7 +397,7 @@ class Keys:
         try:
             self.uinput.close()
         except OSError as e:
-            pb.log("uinput", e.strerror or str(e))
+            log("uinput", e.strerror or str(e))
 
 
 def main(argv: Sequence[str] = ()) -> int:
@@ -330,17 +407,17 @@ def main(argv: Sequence[str] = ()) -> int:
     try:
         uinput = Uinput()
     except OSError as e:
-        pb.log("uinput", e.strerror or str(e))
+        log("uinput", e.strerror or str(e))
         return 1
     keys = Keys(uinput)
     stopping = []
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: stopping.append(sig))
+        signal.signal(sig, lambda *_, s=sig: stopping.append(s))
     while not stopping:
         try:
             keys.step(1.0)
         except Exception as e:  # noqa: BLE001 - the program must keep running
-            pb.log("run", f"{type(e).__name__}: {e}")
+            log("run", f"{type(e).__name__}: {e}")
             time.sleep(1)
     keys.stop()
     return 0
