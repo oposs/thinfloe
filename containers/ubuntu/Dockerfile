@@ -67,6 +67,8 @@ RUN set -eu; \
     rustup toolchain install "$toolchain" --profile minimal; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
+    # A zero-filled copy was once seen on /scratch; compare, do not trust.
+    cmp target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     install -D -m 0644 -t /out/usr/share/thinfloe/icons icons/*.svg icons/LICENSE; \
     # Fonts linked into the menu, whose licences ask to travel with them:
     # egui's built-in set (Ubuntu Light, Hack, Noto Emoji, the emoji and
