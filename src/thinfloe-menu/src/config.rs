@@ -106,6 +106,7 @@ pub struct ThinfloeConfig {
     pub status: StatusCfg,
     pub monitors: MonitorsCfg,
     pub network: NetworkCfg,
+    pub time: TimeCfg,
     pub notice: NoticeCfg,
 }
 
@@ -118,6 +119,7 @@ impl Default for ThinfloeConfig {
             status: StatusCfg::default(),
             monitors: MonitorsCfg::default(),
             network: NetworkCfg::default(),
+            time: TimeCfg::default(),
             notice: NoticeCfg::default(),
         }
     }
@@ -428,6 +430,20 @@ impl MonitorsCfg {
             kept: None,
         }
     }
+}
+
+// ---- time ----
+
+/// The machine's time zone and NTP servers; see `timecfg`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct TimeCfg {
+    /// The zone; `None` is automatic (DHCP, else UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// The NTP servers; empty is automatic (DHCP and the Ubuntu pool).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ntp: Vec<String>,
 }
 
 // ---- network ----

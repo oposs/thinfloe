@@ -1,5 +1,6 @@
 //! The files derived from config.toml for readers that cannot parse TOML:
-//! the session (environment, screen), kanshi and netplan.
+//! the session (environment, screen), kanshi, netplan and the root side of
+//! the time setting (time).
 
 use std::fs;
 use std::io;
@@ -29,6 +30,8 @@ pub enum Table {
     Network,
     /// `public_ip` and `public_ip_url` of `[network]`; they feed no file.
     PublicIp,
+    /// `[time]`: the zone and the NTP servers.
+    Time,
     Notice,
 }
 
@@ -41,6 +44,7 @@ impl Table {
             Table::Status | Table::Notice | Table::PublicIp => &[],
             Table::Monitors => &["kanshi"],
             Table::Network => &["wifi.yaml", "ethernet.yaml"],
+            Table::Time => &["time"],
         }
     }
 }
@@ -118,6 +122,12 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             // fixed address on netboot is refused where it is planned.
             let wired = n.wired()?;
             Ok(render_wired(&inp.default_wired, &wired)?.map(|t| with_header(without_menu_header(&t))))
+        }
+        "time" => {
+            for s in &cfg.time.ntp {
+                crate::timecfg::check_server(s).map_err(|e| format!("Time: {e}"))?;
+            }
+            Ok(crate::timecfg::body(&cfg.time).map(|b| with_header(&b)))
         }
         other => Err(format!("No generated file named {other}")),
     }
@@ -407,5 +417,21 @@ mod tests {
         assert_eq!(Table::Network.files(), ["wifi.yaml", "ethernet.yaml"]);
         assert!(Table::Status.files().is_empty());
         assert!(Table::PublicIp.files().is_empty());
+    }
+
+    #[test]
+    fn time_file_rendered_with_header() {
+        let mut cfg = ThinfloeConfig::default();
+        assert_eq!(render(&cfg, "time", &inp()).unwrap(), None);
+        cfg.time.zone = Some("Europe/Zurich".into());
+        cfg.time.ntp = vec!["10.0.0.1".into()];
+        assert_eq!(
+            render(&cfg, "time", &inp()).unwrap().unwrap(),
+            format!("{HEADER}\nzone=Europe/Zurich\nntp=10.0.0.1\n")
+        );
+        assert_eq!(mode_of("time"), 0o644);
+        assert_eq!(Table::Time.files(), ["time"]);
+        cfg.time.ntp = vec!["a;b".into()];
+        assert!(render(&cfg, "time", &inp()).unwrap_err().starts_with("Time: "));
     }
 }
