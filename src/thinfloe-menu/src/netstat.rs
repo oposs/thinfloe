@@ -159,7 +159,9 @@ fn wireless_line<'a>(text: &'a str, iface: &str) -> Option<Vec<&'a str>> {
 /// (`/run/systemd/resolve/resolv.conf`), else those of `/etc/resolv.conf`,
 /// which under resolved names only its stub `127.0.0.53`. The one reader
 /// of the servers: the sampler calls it through `DnsCache`, the Network
-/// tab's job (`netdetail::read`) once per job, so both show the same list.
+/// tab's job (`netdetail::read`) once per job. Both read the same files the
+/// same way, but the tile's list can be up to `DNS_EVERY` older than the
+/// tab's, and both hold at most `MAX_DNS` servers (`nameservers`).
 pub fn dns_in_use(roots: &Roots) -> Vec<String> {
     read(&roots.run.join("systemd/resolve/resolv.conf"))
         .map(|t| nameservers(&t))
