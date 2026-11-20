@@ -561,7 +561,7 @@ impl Menu {
         }];
         if !addons.is_empty() {
             panels.push(Panel {
-                title: "Add-ons",
+                title: crate::machine::ADDONS_TITLE,
                 lines: addons,
             });
         }

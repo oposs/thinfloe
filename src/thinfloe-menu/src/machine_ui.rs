@@ -13,7 +13,7 @@ use shadcn_egui::components::button::{Button, ButtonVariant};
 use std::time::Instant;
 
 /// The panels of the left column; the others go right.
-const LEFT: [&str; 2] = [crate::machine::TITLE, "Add-ons"];
+const LEFT: [&str; 2] = [crate::machine::TITLE, crate::machine::ADDONS_TITLE];
 
 /// The tab's body; `MachineCopy` when *Copy* was clicked.
 pub fn machine_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {

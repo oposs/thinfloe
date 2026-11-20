@@ -59,6 +59,8 @@ pub fn read(roots: &Roots) -> Facts {
 
 /// The title of the tab's first panel.
 pub const TITLE: &str = "This machine";
+/// The title of the panel of installed add-ons.
+pub const ADDONS_TITLE: &str = "Add-ons";
 
 /// The machine's rows, label and value, in the order shown; what is
 /// unknown is left out. `uptime_now` is the uptime counted on to this
