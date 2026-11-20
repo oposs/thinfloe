@@ -133,6 +133,13 @@ pub fn default_route(text: &str) -> Option<Route> {
     best.map(|(_, r)| r)
 }
 
+/// The default route of the machine: `default_route` of `/proc/net/route`,
+/// read with the limit of every file here. The sampler and the Network
+/// tab's job (`netdetail::read`) both read it so.
+pub fn route(roots: &Roots) -> Option<Route> {
+    read(&roots.proc_.join("net/route")).and_then(|t| default_route(&t))
+}
+
 /// The signal of `iface` in `/proc/net/wireless`, in dBm; `None` when the
 /// interface is not listed or reports no level.
 pub fn wireless_level(text: &str, iface: &str) -> Option<i32> {
@@ -360,7 +367,7 @@ fn counter(path: &Path) -> Option<u64> {
 
 /// Read everything once, with `addrs` the machine's addresses.
 pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
-    let route = read(&roots.proc_.join("net/route")).and_then(|t| default_route(&t));
+    let route = route(roots);
     let uptime = read(&roots.proc_.join("uptime")).and_then(|t| crate::hardware::parse_uptime(&t));
     let addressed = addrs.iter().any(IfAddr::counts);
     let iface = match &route {
@@ -673,6 +680,19 @@ mod tests {
         assert_eq!(default_route("h\ngarbage\nx y z\n"), None);
         let hostile = "h\n../x\t00000000\t0101A8C0\t0003\t0\t0\t1\t00000000\n";
         assert_eq!(default_route(hostile), None, "no path out of a name");
+    }
+
+    #[test]
+    fn the_route_is_read_from_proc_with_one_limit() {
+        let d = TestDir::new("network", "route-file");
+        let roots = Roots::under(&d);
+        assert_eq!(route(&roots), None, "no file");
+        write(&d.join("proc/net/route"), ROUTE);
+        assert_eq!(route(&roots).map(|r| r.iface), Some("eth0".into()));
+        // A file past MAX_BYTES is not read.
+        let big = format!("{ROUTE}{}", "x".repeat(MAX_BYTES as usize));
+        write(&d.join("proc/net/route"), &big);
+        assert_eq!(route(&roots), None);
     }
 
     #[test]
