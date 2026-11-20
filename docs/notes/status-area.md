@@ -276,8 +276,9 @@ four cells holds the battery 1x1 and the graph and still has room.
   the top, so no row changes column when the VPN or Public row appears. All eight rows fit at both shipped sizes
   and both cell heights; only a rect squeezed below that first moves the
   rows together down to `min_row`, then, while a column holds more rows
-  than fit, leaves out Uptime, Traffic, DNS, Gateway, Public, VPN in that
-  order; Link and IPv4 stay. A row too wide
+  than fit, leaves out that column's rows in the order Uptime, Traffic,
+  DNS, Gateway, Public, VPN (at 2x1 with room for three lines: Link IPv4
+  Gateway | VPN Public Traffic); Link and IPv4 stay. A row too wide
   leaves out the word `WiFi`; a value still too long starts after its
   label and is cut at the padding. On the tightest rows the Geo labels are
   half a point smaller (`label_in_row`); the shipped sizes never get that
