@@ -79,6 +79,10 @@ restore_home "$NEWROOT" "$TF_STORAGE/efi" "$TF_STATE" \
 # ramroot URL tells it whether this is a netboot. Always returns 0.
 install_local_network "$NEWROOT" "$(cat /tmp/thinfloe-ramroot 2>/dev/null)" "$TF_STATE"
 
+# The zone and the NTP servers chosen in the menu, before chrony and the
+# clock start in the new root. Always returns 0.
+install_local_time "$NEWROOT"
+
 echo "$zram_dev" > "$TF_STATE/zram-device"
 
 return 0
