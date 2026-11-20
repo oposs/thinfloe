@@ -597,7 +597,9 @@ mod tests {
         let ran = || std::fs::read_to_string(&runs).map_or(0, |t| t.lines().count());
         let got = || answer.lock().unwrap().clone();
         wait_for("the first lookup fails", || got() == Some(Answer::Failed));
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        // The thread stores the answer, then wakes, so the frame it asks for
+        // sees the answer: the count may lag the answer by a moment.
+        wait_for("the failure wakes", || wakes.load(Ordering::SeqCst) == 1);
         // A new lookup address asks at once (a new route would wait
         // `ROUTE_PAUSE`).
         let url = |w: &Arc<Mutex<Want>>, u: &str| w.lock().unwrap().prefs.url = u.into();
