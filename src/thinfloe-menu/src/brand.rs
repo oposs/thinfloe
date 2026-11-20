@@ -241,13 +241,13 @@ pub static UBUNTU_LIGHT: FontFiles = FontFiles {
 /// a border, the chosen one (`Item::selected`) with the ice border.
 pub const CHOICE_ROW: AppVariant<ItemVariant> = ItemVariant::app("tf-choice");
 
-/// The switch knob's side, inside lyra's 32 x 18.4 track with its 1 px
-/// border: 2 px of track show around it.
+/// The switch knob's side in lyra's 32 x 18.4 track: 2 points of track
+/// show around it.
 const SWITCH_KNOB: f32 = 14.0;
-/// The knob's step in from the track's border at the off end. At the on end
-/// it moves by its own width plus this (`calc(100% + 1px)`), which leaves
-/// the same gap to the far border.
-const SWITCH_KNOB_INSET: f32 = 1.0;
+/// The knob's step in from the track's edge at the off end. At the on end
+/// it moves by its own width plus this (`calc(100% + 2px)`): 2 + 14 + 14 + 2
+/// is the track's 32, the same gap at either end at every scale.
+const SWITCH_KNOB_INSET: f32 = 2.0;
 
 pub fn theme() -> shadcn_egui::Theme {
     let mut p = Palette::dark();
@@ -270,9 +270,9 @@ pub fn theme() -> shadcn_egui::Theme {
     // lyra's dark knob is primary-foreground when on, which is about the
     // page colour here: on a square switch the ice half of the track read
     // as a knob that had not moved (4.6.0 field report). The knob is the
-    // foreground in both positions, 14 px in the 18 px track, so the track
-    // shows 2 px around it on every side and its edge reads against the
-    // ice too. `fixed`, not `set`: `set` keeps lyra's `dark:` and size rules.
+    // foreground in both positions, with the track showing 2 points around
+    // it on every side, so its edge reads against the ice too. `fixed`, not
+    // `set`: `set` keeps lyra's `dark:` and size rules.
     style.switch_thumb.bg = Prop::fixed(Paint::Role(Role::Foreground, 1.0));
     style.switch_thumb.width = Prop::fixed(SWITCH_KNOB);
     style.switch_thumb.height = Prop::fixed(SWITCH_KNOB);
@@ -281,6 +281,12 @@ pub fn theme() -> shadcn_egui::Theme {
         .switch_thumb
         .shift_x
         .on(State::CHECKED, Shift::Calc(1.0, SWITCH_KNOB_INSET));
+    // The knob starts after the track's transparent border, which is one
+    // device pixel at every scale (0.8 points at 1.25): with it the two
+    // gaps differed by up to two pixels at a fractional scale. Without it
+    // the gaps are equal in points; focus still shows as lyra's ring
+    // outside the track.
+    style.switch.border_width = Prop::fixed(0.0);
     shadcn_egui::Theme::new(style, p, p, 0.0)
         .fonts(&UBUNTU_LIGHT, None)
         .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
@@ -641,17 +647,21 @@ mod tests {
         prims: Vec<egui::epaint::ClippedPrimitive>,
         track: egui::Rect,
         on: bool,
+        ppp: f32,
     }
 
-    /// Four frames of a switch, as the menu draws them (brand theme,
-    /// animation off, the CPU raster over the page background): two off,
-    /// the click, one after it.
-    fn switch_frames() -> Vec<SwitchFrame> {
+    /// Four frames of a switch, as the menu draws them at scale `ppp` (brand
+    /// theme, animation off, the zoom factor the menu sets, the CPU raster
+    /// over the page background): two off, the click, one after it.
+    /// The switch stands `lead` points right of the screen's left edge, so
+    /// its edges fall between pixels as they do in the menu.
+    fn switch_frames(ppp: f32, lead: f32) -> Vec<SwitchFrame> {
         use shadcn_egui::components::switch::Switch;
         let ctx = Context::default();
         apply(&ctx);
         ctx.options_mut(|o| o.tessellation_options.feathering = false);
         ctx.global_style_mut(|s| s.animation_time = 0.0);
+        ctx.set_zoom_factor(ppp);
         let mut textures = crate::raster::Textures::default();
         let mut on = false;
         let mut track = egui::Rect::NOTHING;
@@ -675,7 +685,11 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                track = ui.add(Switch::new(&mut on)).rect;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(lead);
+                    track = ui.add(Switch::new(&mut on)).rect;
+                });
             });
             textures.apply_set(&out.textures_delta);
             let prims = ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
@@ -689,6 +703,7 @@ mod tests {
                 prims,
                 track,
                 on,
+                ppp: out.pixels_per_point,
             });
         }
         frames
@@ -724,14 +739,16 @@ mod tests {
     /// (sampled 4 px inside the other end).
     fn knob(f: &SwitchFrame) -> (u32, crate::raster::IRect, crate::raster::IRect, u32) {
         let c = &f.canvas;
-        let y = f.track.center().y as i32;
-        let (near, far) = (f.track.left() as i32 + 4, f.track.right() as i32 - 5);
+        let track = egui::Rect::from_min_max(f.track.min * f.ppp, f.track.max * f.ppp);
+        let y = track.center().y as i32;
+        let inside = (4.0 * f.ppp) as i32;
+        let (near, far) = (track.left() as i32 + inside, track.right() as i32 - inside - 1);
         let (k, t) = if f.on { (far, near) } else { (near, far) };
         let knob_px = pixel(c, k, y);
         let track_px = pixel(c, t, y);
         let bg = theme().palette().background;
         let page = (bg.r() as u32) << 16 | (bg.g() as u32) << 8 | bg.b() as u32;
-        let area = f.track.expand(3.0);
+        let area = track.expand(3.0 * f.ppp);
         (
             knob_px,
             bbox(c, area, |p| p == knob_px),
@@ -758,11 +775,22 @@ mod tests {
     }
 
     /// 4.6.0 field report: the "on" knob was the colour of the page, so the
-    /// ice half of the track read as a knob that had not moved.
+    /// ice half of the track read as a knob that had not moved. At whole
+    /// and fractional scales, with the switch at whole and fractional
+    /// positions.
     #[test]
     fn the_switch_knob_moves_and_reads_on_the_page() {
-        let frames = switch_frames();
+        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            for lead in [0.0, 0.2, 0.4, 0.6, 0.8] {
+                switch_knob_at(ppp, lead);
+            }
+        }
+    }
+
+    fn switch_knob_at(ppp: f32, lead: f32) {
+        let frames = switch_frames(ppp, lead);
         let (off, on) = (&frames[1], &frames[3]);
+        assert_eq!(off.ppp, ppp, "the zoom reached the frame");
         assert!(!off.on && on.on, "the click turns the switch on");
         let bg = theme().palette().background;
         let page = (bg.r() as u32) << 16 | (bg.g() as u32) << 8 | bg.b() as u32;
@@ -775,35 +803,52 @@ mod tests {
         }
         let centre = |r: crate::raster::IRect| (r.x0 + r.x1) as f32 / 2.0;
         assert!(
-            centre(r_on) - centre(r_off) >= off.track.width() / 3.0,
-            "the knob moves right: {r_off:?} -> {r_on:?}"
+            centre(r_on) - centre(r_off) >= off.track.width() * ppp / 3.0,
+            "the knob moves right at {ppp}+{lead}: {r_off:?} -> {r_on:?}"
         );
-        assert_eq!(
-            r_off.x0 - t_off.x0,
-            t_on.x1 - r_on.x1,
-            "the knob stands as far from either end: {r_off:?} in {t_off:?}, {r_on:?} in {t_on:?}"
+        // The same gap at either end. At a fractional scale the gap (2
+        // points) is no whole number of pixels, and the raster's
+        // pixel-centre rule rounds the two ends apart by one pixel, how
+        // depending on where the switch stands; no recipe geometry avoids
+        // that, only a thumb snapped to the pixel grid in shadcn-egui.
+        let (gap_off, gap_on) = (r_off.x0 - t_off.x0, t_on.x1 - r_on.x1);
+        let whole = ppp.fract() == 0.0;
+        assert!(
+            if whole {
+                gap_off == gap_on
+            } else {
+                (gap_off - gap_on).abs() <= 1
+            },
+            "the knob stands as far from either end at {ppp}+{lead}: {r_off:?} in {t_off:?}, {r_on:?} in {t_on:?}"
         );
         // The track shows around the knob on all four sides, at least 2 px
         // wide, so the knob's edge reads against the ice track too.
-        for (f, k, r, t, track) in [(off, k_off, r_off, t_off, track_off), (on, k_on, r_on, t_on, track_on)] {
+        for (f, r, t, track) in [(off, r_off, t_off, track_off), (on, r_on, t_on, track_on)] {
             assert!(
                 r.x0 - t.x0 >= 2 && t.x1 - r.x1 >= 2 && r.y0 - t.y0 >= 2 && t.y1 - r.y1 >= 2,
-                "knob {r:?} inset in track {t:?} (on: {})",
+                "knob {r:?} inset in track {t:?} at {ppp}+{lead} (on: {})",
                 f.on
             );
             for d in 1..=2 {
                 for x in r.x0 - d..r.x1 + d {
                     for y in [r.y0 - d, r.y1 - 1 + d] {
-                        assert_eq!(pixel(&f.canvas, x, y), track, "track above/below the knob at {x},{y}");
+                        assert_eq!(
+                            pixel(&f.canvas, x, y),
+                            track,
+                            "track above/below the knob at {x},{y} at {ppp}+{lead}"
+                        );
                     }
                 }
                 for y in r.y0 - d..r.y1 + d {
                     for x in [r.x0 - d, r.x1 - 1 + d] {
-                        assert_eq!(pixel(&f.canvas, x, y), track, "track beside the knob at {x},{y}");
+                        assert_eq!(
+                            pixel(&f.canvas, x, y),
+                            track,
+                            "track beside the knob at {x},{y} at {ppp}+{lead}"
+                        );
                     }
                 }
             }
-            assert_ne!(k, track);
         }
     }
 
@@ -811,7 +856,7 @@ mod tests {
     /// click: the move reaches the screen.
     #[test]
     fn a_switch_click_damages_the_old_and_new_knob() {
-        let frames = switch_frames();
+        let frames = switch_frames(1.0, 0.0);
         let mut tracker = crate::damage::Tracker::default();
         tracker.damage(&frames[1].prims, 1.0);
         let dmg = tracker
