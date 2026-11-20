@@ -10,7 +10,9 @@ the project's own workflows need on the runner.
 ## Runner
 
 - Image: `ubuntu-24.04`, version 20261101.360.1.
-- Cores: 4 (`nproc`), matching `BUILD_JOBS=4`.
+- Cores: 4 (`nproc`), matching `BUILD_JOBS=4` and the Makefile's default
+  `TEST_THREADS=4` (threads of the Rust tests). A larger runner raises both,
+  e.g. `make test-unit BUILD_JOBS=8 TEST_THREADS=8`.
 - Memory: 15 GiB, 2 GiB swap.
 - Disk: `/` is 145 GiB with 59 GiB used at start. `/mnt` is the same file
   system.
