@@ -4443,16 +4443,30 @@ mod tests {
         net.status_done(Ok(lines.to_vec()), details);
         let texts = net_texts(&network_settings(net));
         assert!(has(&texts, "Connections now"), "{texts:?}");
-        for i in &lines {
-            let line = crate::nettab::iface_line(i);
-            assert!(has(&texts, &line), "{line} not in {texts:?}");
+        // Every value beside its label, never a bare one joined by dots.
+        for want in [
+            "Wired enp1s0",
+            "WiFi wlp1",
+            "State",
+            "connected",
+            "Network",
+            "Home",
+            "Address",
+            "10.0.0.7/24",
+            "MAC address",
+            "3c:52:82:aa:bb:cc",
+            "Driver",
+            "iwlwifi",
+            "DNS in use",
+            "192.168.1.1",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
         }
-        assert!(has(&texts, "MAC 3c:52:82:aa:bb:cc · iwlwifi"), "{texts:?}");
-        assert!(has(&texts, "DNS in use 192.168.1.1"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains(" · iwlwifi")), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         // Before the first status answer nothing is known yet.
         let texts = net_texts(&network_settings(two_networks()));
-        assert!(!texts.iter().any(|t| t.starts_with("DNS in use")), "{texts:?}");
+        assert!(!has(&texts, "DNS in use"), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         assert!(has(&texts, "Looking for network adapters…"), "{texts:?}");
         let mut net = two_networks();

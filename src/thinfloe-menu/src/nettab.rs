@@ -2,7 +2,8 @@
 //! wired address form, and the text lines. The tool's JSON is untrusted
 //! input as far as the menu cares: rows are capped, text is cut.
 
-use crate::netdetail::IfDetail;
+use crate::infopanel::Line;
+use crate::netdetail::{Details, IfDetail};
 use crate::netfiles::{self, FileState, WifiFile, Wired};
 use serde_json::Value;
 use std::net::Ipv4Addr;
@@ -312,49 +313,86 @@ pub fn signal_line(dbm: i32) -> String {
     format!("{} · {dbm} dBm", signal_word(dbm))
 }
 
-/// One line for the status list, for example
-/// `WiFi wlp58s0 · Home Net · strong · 192.168.1.23/24`.
-pub fn iface_line(i: &Iface) -> String {
-    let label = match i.kind {
+/// The facts of the interfaces for the info panel: per interface a group
+/// `WiFi wlp58s0` with its rows (state, network, signal, addresses,
+/// WireGuard handshake, MAC address, gateway, chip, driver; unknown ones
+/// left out), then `DNS in use`. `known`: a status answer came; `error`:
+/// the last one failed. Before an answer, or after a failed one, the DNS
+/// row is left out: it would claim "none".
+pub fn info_lines(ifaces: &[Iface], details: &Details, known: bool, error: Option<&str>) -> Vec<Line> {
+    let mut out: Vec<Line> = ifaces
+        .iter()
+        .map(|i| {
+            let detail = details.ifaces.iter().find(|d| d.name == i.name);
+            Line::group(format!("{} {}", kind_word(i.kind), i.name), iface_rows(i, detail))
+        })
+        .collect();
+    if known && error.is_none() {
+        let dns = if details.dns_in_use.is_empty() {
+            "none".to_string()
+        } else {
+            details.dns_in_use.join(", ")
+        };
+        out.push(Line::row("DNS in use", dns));
+    }
+    match error {
+        Some(e) => out.push(Line::warn(e)),
+        None if !known => out.push(Line::note("Looking for network adapters…")),
+        None if ifaces.is_empty() => out.push(Line::note("No network adapter found")),
+        None => {}
+    }
+    out
+}
+
+fn kind_word(kind: IfKind) -> &'static str {
+    match kind {
         IfKind::Wired => "Wired",
         IfKind::Wifi => "WiFi",
         IfKind::Wireguard => "WireGuard",
+    }
+}
+
+fn iface_rows(i: &Iface, d: Option<&IfDetail>) -> Vec<Line> {
+    let state = match i.state {
+        IfState::Off => "off",
+        IfState::NoCable => "no cable",
+        IfState::NotConnected => "not connected",
+        IfState::Connected => "connected",
     };
-    let mut parts: Vec<String> = Vec::new();
-    match i.state {
-        IfState::Off => parts.push("off".to_string()),
-        IfState::NoCable => parts.push("no cable".to_string()),
-        IfState::NotConnected => parts.push("not connected".to_string()),
-        IfState::Connected => match i.kind {
-            IfKind::Wifi => {
-                if let Some(s) = &i.ssid {
-                    parts.push(s.clone());
-                }
-                if let Some(d) = i.signal_dbm {
-                    parts.push(signal_word(d).to_string());
-                }
-                if i.ssid.is_none() && i.signal_dbm.is_none() {
-                    parts.push("connected".to_string());
-                }
-            }
-            IfKind::Wired => {
-                if i.addresses.is_empty() {
-                    parts.push("connected".to_string());
-                }
-            }
-            IfKind::Wireguard => parts.push("connected".to_string()),
-        },
+    let mut rows = vec![Line::row("State", state)];
+    let connected = i.state == IfState::Connected;
+    if connected && i.kind == IfKind::Wifi {
+        if let Some(ssid) = &i.ssid {
+            rows.push(Line::row("Network", ssid.clone()));
+        }
+        if let Some(dbm) = i.signal_dbm {
+            rows.push(Line::row("Signal", signal_line(dbm)));
+        }
+    }
+    if connected && !i.addresses.is_empty() {
+        rows.push(Line::row("Address", i.addresses.join(", ")));
     }
     if i.kind == IfKind::Wireguard && i.state != IfState::Off {
-        parts.push(match i.handshake_age_s {
-            Some(s) => format!("handshake {s} s ago"),
-            None => "no handshake".to_string(),
-        });
+        let hs = i
+            .handshake_age_s
+            .map_or_else(|| "none".to_string(), |s| format!("{s} s ago"));
+        rows.push(Line::row("Handshake", hs));
     }
-    if i.state == IfState::Connected && !i.addresses.is_empty() {
-        parts.push(i.addresses.join(", "));
+    if let Some(d) = d {
+        if let Some(m) = &d.mac {
+            rows.push(Line::row("MAC address", m.clone()));
+        }
+        if let Some(g) = d.gateway {
+            rows.push(Line::row("Gateway", g.to_string()));
+        }
+        if let Some(c) = &d.chip {
+            rows.push(Line::row("Chip", c.clone()));
+        }
+        if let Some(drv) = &d.driver {
+            rows.push(Line::row("Driver", drv.clone()));
+        }
     }
-    format!("{label} {} · {}", i.name, parts.join(" · "))
+    rows
 }
 
 /// The menu's WiFi file names a device this machine does not have, and the
@@ -363,31 +401,6 @@ pub fn adapter_changed(wifi: &WifiFile, devices: &[String]) -> bool {
     wifi.state == FileState::Menu
         && !devices.is_empty()
         && wifi.device.as_deref().is_some_and(|d| !devices.iter().any(|x| x == d))
-}
-
-/// The fixed facts of one interface under its status line, for example
-/// `MAC 3c:52:82:aa:bb:cc · gateway 192.168.1.1 · Intel Corporation Wi-Fi 6
-/// AX201 · iwlwifi`; `None` when nothing is known.
-pub fn detail_line(d: &IfDetail) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(m) = &d.mac {
-        parts.push(format!("MAC {m}"));
-    }
-    if let Some(g) = d.gateway {
-        parts.push(format!("gateway {g}"));
-    }
-    parts.extend(d.chip.iter().chain(&d.driver).cloned());
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// The DNS servers the machine uses now: `DNS in use 192.168.1.1, 9.9.9.9`,
-/// or `DNS in use: none`.
-pub fn dns_in_use_line(dns: &[String]) -> String {
-    if dns.is_empty() {
-        "DNS in use: none".to_string()
-    } else {
-        format!("DNS in use {}", dns.join(", "))
-    }
 }
 
 #[cfg(test)]
@@ -600,37 +613,127 @@ mod tests {
         }
     }
 
+    fn group(lines: &[Line]) -> (&str, Vec<(&str, &str)>) {
+        match &lines[0] {
+            Line::Group { title, lines } => (
+                title.as_str(),
+                lines
+                    .iter()
+                    .map(|l| match l {
+                        Line::Row { label, value } => (label.as_str(), value.as_str()),
+                        other => panic!("{other:?}"),
+                    })
+                    .collect(),
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn lines_of(i: &Iface) -> Vec<Line> {
+        info_lines(std::slice::from_ref(i), &Details::default(), false, None)
+    }
+
     #[test]
-    fn iface_lines() {
+    fn each_interface_is_a_group_of_labelled_rows() {
         let mut w = iface_of(IfKind::Wifi, IfState::Connected, "wlp58s0");
         w.ssid = Some("Home Net".into());
         w.signal_dbm = Some(-50);
         w.addresses = vec!["192.168.1.23/24".into()];
-        assert_eq!(iface_line(&w), "WiFi wlp58s0 · Home Net · strong · 192.168.1.23/24");
+        assert_eq!(
+            group(&lines_of(&w)),
+            (
+                "WiFi wlp58s0",
+                vec![
+                    ("State", "connected"),
+                    ("Network", "Home Net"),
+                    ("Signal", "strong · -50 dBm"),
+                    ("Address", "192.168.1.23/24"),
+                ]
+            )
+        );
         let e = iface_of(IfKind::Wired, IfState::NoCable, "enp0s31f6");
-        assert_eq!(iface_line(&e), "Wired enp0s31f6 · no cable");
+        assert_eq!(group(&lines_of(&e)), ("Wired enp0s31f6", vec![("State", "no cable")]));
         let mut g = iface_of(IfKind::Wireguard, IfState::Connected, "wg0");
         g.handshake_age_s = Some(42);
         g.addresses = vec!["10.0.0.2/32".into()];
         assert_eq!(
-            iface_line(&g),
-            "WireGuard wg0 · connected · handshake 42 s ago · 10.0.0.2/32"
+            group(&lines_of(&g)),
+            (
+                "WireGuard wg0",
+                vec![
+                    ("State", "connected"),
+                    ("Address", "10.0.0.2/32"),
+                    ("Handshake", "42 s ago")
+                ]
+            )
         );
         g.handshake_age_s = None;
         g.state = IfState::NotConnected;
-        assert_eq!(iface_line(&g), "WireGuard wg0 · not connected · no handshake");
+        assert_eq!(
+            group(&lines_of(&g)).1,
+            vec![("State", "not connected"), ("Handshake", "none")]
+        );
+        g.state = IfState::Off;
+        assert_eq!(group(&lines_of(&g)).1, vec![("State", "off")]);
         let mut d = iface_of(IfKind::Wired, IfState::Connected, "eno1");
-        assert_eq!(iface_line(&d), "Wired eno1 · connected");
         d.addresses = vec!["1.2.3.4/24".into(), "5.6.7.8/24".into()];
-        assert_eq!(iface_line(&d), "Wired eno1 · 1.2.3.4/24, 5.6.7.8/24");
         assert_eq!(
-            iface_line(&iface_of(IfKind::Wifi, IfState::Off, "wlp1")),
-            "WiFi wlp1 · off"
+            group(&lines_of(&d)).1,
+            vec![("State", "connected"), ("Address", "1.2.3.4/24, 5.6.7.8/24")]
         );
+        // Addresses of an interface that is not connected are not shown.
+        let mut n = iface_of(IfKind::Wifi, IfState::NotConnected, "wlp1");
+        n.addresses = vec!["169.254.0.1/16".into()];
+        n.ssid = Some("Old".into());
+        assert_eq!(group(&lines_of(&n)).1, vec![("State", "not connected")]);
+    }
+
+    #[test]
+    fn the_details_are_labelled_rows_of_their_interface() {
+        let w = iface_of(IfKind::Wifi, IfState::Connected, "wlp58s0");
+        let details = Details {
+            ifaces: vec![IfDetail {
+                name: "wlp58s0".into(),
+                mac: Some("3c:52:82:aa:bb:cc".into()),
+                gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                chip: Some("Intel Corporation Wi-Fi 6 AX201".into()),
+                driver: Some("iwlwifi".into()),
+            }],
+            dns_in_use: vec!["192.168.1.1".into(), "9.9.9.9".into()],
+        };
+        let lines = info_lines(std::slice::from_ref(&w), &details, true, None);
         assert_eq!(
-            iface_line(&iface_of(IfKind::Wifi, IfState::NotConnected, "wlp1")),
-            "WiFi wlp1 · not connected"
+            group(&lines).1,
+            vec![
+                ("State", "connected"),
+                ("MAC address", "3c:52:82:aa:bb:cc"),
+                ("Gateway", "192.168.1.1"),
+                ("Chip", "Intel Corporation Wi-Fi 6 AX201"),
+                ("Driver", "iwlwifi"),
+            ]
         );
+        assert_eq!(lines[1], Line::row("DNS in use", "192.168.1.1, 9.9.9.9"));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn dns_and_notes_follow_the_status_answer() {
+        let none = Details::default();
+        // Before the first answer: no DNS row, a note.
+        assert_eq!(
+            info_lines(&[], &none, false, None),
+            vec![Line::note("Looking for network adapters…")]
+        );
+        // An answer without interfaces.
+        assert_eq!(
+            info_lines(&[], &none, true, None),
+            vec![Line::row("DNS in use", "none"), Line::note("No network adapter found")]
+        );
+        // A failed answer: the error, no DNS row.
+        let w = iface_of(IfKind::Wired, IfState::Connected, "eno1");
+        let lines = info_lines(std::slice::from_ref(&w), &none, true, Some("no answer"));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], Line::warn("no answer"));
     }
 
     fn wifi_file(state: FileState, device: Option<&str>) -> WifiFile {
@@ -658,51 +761,16 @@ mod tests {
     fn dns_in_use_from_a_fake_resolv_conf() {
         let d = TestDir::new("nettab", "dns");
         let roots = Roots::under(&d);
-        assert_eq!(dns_in_use_line(&netstat::dns_in_use(&roots)), "DNS in use: none");
+        assert!(netstat::dns_in_use(&roots).is_empty());
         std::fs::create_dir_all(d.join("etc")).unwrap();
         std::fs::write(d.join("etc/resolv.conf"), "nameserver 192.168.1.1\n").unwrap();
-        assert_eq!(dns_in_use_line(&netstat::dns_in_use(&roots)), "DNS in use 192.168.1.1");
+        assert_eq!(netstat::dns_in_use(&roots), ["192.168.1.1"]);
         std::fs::create_dir_all(d.join("run/systemd/resolve")).unwrap();
         std::fs::write(
             d.join("run/systemd/resolve/resolv.conf"),
             "# resolved\nnameserver 192.168.1.1\nnameserver 9.9.9.9\nsearch lan\n",
         )
         .unwrap();
-        assert_eq!(
-            dns_in_use_line(&netstat::dns_in_use(&roots)),
-            "DNS in use 192.168.1.1, 9.9.9.9"
-        );
-    }
-
-    #[test]
-    fn detail_line_joins_what_is_known() {
-        let full = IfDetail {
-            name: "wlp58s0".into(),
-            mac: Some("3c:52:82:aa:bb:cc".into()),
-            gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
-            chip: Some("Intel Corporation Wi-Fi 6 AX201".into()),
-            driver: Some("iwlwifi".into()),
-        };
-        assert_eq!(
-            detail_line(&full).as_deref(),
-            Some("MAC 3c:52:82:aa:bb:cc · gateway 192.168.1.1 · Intel Corporation Wi-Fi 6 AX201 · iwlwifi")
-        );
-        let mac_only = IfDetail {
-            name: "eno1".into(),
-            mac: Some("3c:52:82:00:00:01".into()),
-            ..IfDetail::default()
-        };
-        assert_eq!(detail_line(&mac_only).as_deref(), Some("MAC 3c:52:82:00:00:01"));
-        let driver_only = IfDetail {
-            name: "wlan0".into(),
-            driver: Some("iwlwifi".into()),
-            ..IfDetail::default()
-        };
-        assert_eq!(detail_line(&driver_only).as_deref(), Some("iwlwifi"));
-        let none = IfDetail {
-            name: "wg0".into(),
-            ..IfDetail::default()
-        };
-        assert_eq!(detail_line(&none), None);
+        assert_eq!(netstat::dns_in_use(&roots), ["192.168.1.1", "9.9.9.9"]);
     }
 }
