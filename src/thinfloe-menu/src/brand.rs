@@ -6,7 +6,7 @@ use egui::{Color32, ColorImage, Context, FontData, FontDefinitions, FontFamily, 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
 use shadcn_egui::components::item::ItemVariant;
-use shadcn_egui::style::{AppVariant, Paint, Radius, Role, Rung, State};
+use shadcn_egui::style::{AppVariant, Paint, Prop, Radius, Role, Rung, Shift, State};
 use shadcn_egui::{FontFiles, FontKind, FontSource, Palette, Style};
 
 // The palette. UI code reads these through the theme: the six that are
@@ -241,6 +241,14 @@ pub static UBUNTU_LIGHT: FontFiles = FontFiles {
 /// a border, the chosen one (`Item::selected`) with the ice border.
 pub const CHOICE_ROW: AppVariant<ItemVariant> = ItemVariant::app("tf-choice");
 
+/// The switch knob's side, inside lyra's 32 x 18.4 track with its 1 px
+/// border: 2 px of track show around it.
+const SWITCH_KNOB: f32 = 14.0;
+/// The knob's step in from the track's border at the off end. At the on end
+/// it moves by its own width plus this (`calc(100% + 1px)`), which leaves
+/// the same gap to the far border.
+const SWITCH_KNOB_INSET: f32 = 1.0;
+
 pub fn theme() -> shadcn_egui::Theme {
     let mut p = Palette::dark();
     p.background = BG;
@@ -259,6 +267,20 @@ pub fn theme() -> shadcn_egui::Theme {
     let mut style = Style::lyra();
     style.switch.radius.set(Radius::Rung(Rung::None));
     style.switch_thumb.radius.set(Radius::Rung(Rung::None));
+    // lyra's dark knob is primary-foreground when on, which is about the
+    // page colour here: on a square switch the ice half of the track read
+    // as a knob that had not moved (4.6.0 field report). The knob is the
+    // foreground in both positions, 14 px in the 18 px track, so the track
+    // shows 2 px around it on every side and its edge reads against the
+    // ice too. `fixed`, not `set`: `set` keeps lyra's `dark:` and size rules.
+    style.switch_thumb.bg = Prop::fixed(Paint::Role(Role::Foreground, 1.0));
+    style.switch_thumb.width = Prop::fixed(SWITCH_KNOB);
+    style.switch_thumb.height = Prop::fixed(SWITCH_KNOB);
+    style.switch_thumb.shift_x = Prop::fixed(Shift::Px(SWITCH_KNOB_INSET));
+    style
+        .switch_thumb
+        .shift_x
+        .on(State::CHECKED, Shift::Calc(1.0, SWITCH_KNOB_INSET));
     shadcn_egui::Theme::new(style, p, p, 0.0)
         .fonts(&UBUNTU_LIGHT, None)
         .color(role::TILE_ACTIVE, TILE_ACTIVE, TILE_ACTIVE)
@@ -755,6 +777,11 @@ mod tests {
         assert!(
             centre(r_on) - centre(r_off) >= off.track.width() / 3.0,
             "the knob moves right: {r_off:?} -> {r_on:?}"
+        );
+        assert_eq!(
+            r_off.x0 - t_off.x0,
+            t_on.x1 - r_on.x1,
+            "the knob stands as far from either end: {r_off:?} in {t_off:?}, {r_on:?} in {t_on:?}"
         );
         // The track shows around the knob on all four sides, at least 2 px
         // wide, so the knob's edge reads against the ice track too.
