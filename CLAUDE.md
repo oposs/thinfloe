@@ -60,7 +60,7 @@ release.
 - Home save: `overlay/usr/bin/thinfloe-save-home`; restore: `restore_home()` in `thinfloe-lib.sh`.
 - Stick writer and upgrades: `overlay/usr/bin/thinfloe-upgrade`.
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
-- Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units.
+- Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units. Bolt microphone mute key (HID++ divert, F20 through uinput): `overlay/usr/libexec/thinfloe/logitech-keys` and `thinfloe-logitech-keys.service`, started by the same udev rule.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
 - User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
 - Keyboard tab: `src/thinfloe-menu/src/` (`kbregistry.rs` layout list, `keyboard.rs` state, `keyboardtab_ui.rs` drawing, `jobs::keyboard_apply` the live apply).

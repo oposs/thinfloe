@@ -1,0 +1,19 @@
+[Unit]
+Description=Microphone mute key of Logitech Bolt keyboards
+# The mute key of a Logi Bolt keyboard (the MX Mechanical, for one) sends
+# nothing the kernel reports, so no program ever sees it. This asks the
+# keyboard to report the key to us and sends it on as F20 from a virtual
+# keyboard, which the labwc keybinding for the microphone mute switch picks
+# up; with that switch off F20 reaches the program in front. Not enabled:
+# the udev rule 90-thinfloe-peripheral-battery.rules starts it when a
+# Logitech hidraw node appears, at boot as well, so a machine without one
+# does not run it. Once started it stays, and finds a receiver plugged in
+# again by itself. No Before= on anything: a unit started after
+# basic.target must never declare Before= on a sysinit.target unit.
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/thinfloe/logitech-keys
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
