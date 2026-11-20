@@ -368,6 +368,20 @@ value already on disk when the list changes is caught by the composer, see
 [session.md](session.md). Guards: the `keyboard`, `generated`, `store` and
 `migrate` tests, `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`.
 
+## Switches
+
+Every switch in the menu (Keyboard tab, the public IP switch, Advanced on
+the Upgrade screen) is lyra's, square, with two edits in `brand::theme()`:
+the knob is the foreground colour in both positions, and it is 14 px with
+2 px of track around it on every side, the same gap at either end. lyra's
+dark knob is `primary-foreground` when on, which the brand sets to
+`#04121f` for the ice button, next to the page's `#05070a`: on 4.6.0 the
+knob vanished into the page and the ice half of the track looked like a
+knob that had not moved (field report, 2026-11-20). The knob jumps, as every
+animation in the menu does (`animation_time` 0, see `app.rs`). Guards:
+`the_switch_knob_moves_and_reads_on_the_page`,
+`a_switch_click_damages_the_old_and_new_knob` in `brand.rs`.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are
