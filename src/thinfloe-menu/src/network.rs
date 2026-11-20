@@ -19,6 +19,17 @@ use crate::publicip::{self, PublicIpPrefs};
 /// The status poll while the tab is open.
 pub const POLL: Duration = Duration::from_secs(2);
 
+/// What is on screen of the network state, for `NetTab::poll`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetView {
+    /// Neither the Network tab nor the This machine tab.
+    Hidden,
+    /// The Network tab: the files and the status.
+    Tab,
+    /// The This machine tab: the status only.
+    Facts,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
     /// The wired select: `true` is a fixed address.
@@ -550,14 +561,15 @@ impl NetTab {
         NetRequest::Apply(change)
     }
 
-    /// Called on every frame. `open`: the tab is on screen. The files are
-    /// read when it first opens and after an Apply or a take-over; the
-    /// status is asked for every `POLL` while it is open.
-    pub fn poll(&mut self, now: Instant, open: bool) -> Option<NetRequest> {
-        if !open {
+    /// Called on every frame with what shows the tab's state. The files
+    /// are read when the tab first opens and after an Apply or a take-over;
+    /// the status is asked for every `POLL` while the tab or the This
+    /// machine tab, which shows the same facts, is open.
+    pub fn poll(&mut self, now: Instant, view: NetView) -> Option<NetRequest> {
+        if view == NetView::Hidden {
             return None;
         }
-        if self.load_due && !self.loading {
+        if view == NetView::Tab && self.load_due && !self.loading {
             self.load_due = false;
             self.loading = true;
             return Some(NetRequest::Load);
@@ -924,16 +936,16 @@ mod tests {
     fn first_poll_loads_then_status_every_two_seconds() {
         let mut t = NetTab::new(false);
         let t0 = Instant::now();
-        assert_eq!(t.poll(t0, true), Some(NetRequest::Load));
-        assert_eq!(t.poll(t0, true), Some(NetRequest::Status));
-        assert_eq!(t.poll(t0, true), None, "a status call is in flight");
+        assert_eq!(t.poll(t0, NetView::Tab), Some(NetRequest::Load));
+        assert_eq!(t.poll(t0, NetView::Tab), Some(NetRequest::Status));
+        assert_eq!(t.poll(t0, NetView::Tab), None, "a status call is in flight");
         t.status_done(Ok(Vec::new()), Details::default());
-        assert_eq!(t.poll(t0 + Duration::from_secs(1), true), None);
-        assert_eq!(t.poll(t0 + POLL, true), Some(NetRequest::Status));
+        assert_eq!(t.poll(t0 + Duration::from_secs(1), NetView::Tab), None);
+        assert_eq!(t.poll(t0 + POLL, NetView::Tab), Some(NetRequest::Status));
         // The answer is late: no second call while one runs.
-        assert_eq!(t.poll(t0 + POLL * 3, true), None);
+        assert_eq!(t.poll(t0 + POLL * 3, NetView::Tab), None);
         t.status_done(Err("timeout".into()), Details::default());
-        assert_eq!(t.poll(t0 + POLL * 3, true), Some(NetRequest::Status));
+        assert_eq!(t.poll(t0 + POLL * 3, NetView::Tab), Some(NetRequest::Status));
         // Loaded once; not again on its own.
         t.loaded(
             wifi(FileState::Missing, None, Vec::new()),
@@ -941,19 +953,19 @@ mod tests {
             Vec::new(),
         );
         t.status_done(Ok(Vec::new()), Details::default());
-        assert_eq!(t.poll(t0 + POLL * 4, true), Some(NetRequest::Status));
+        assert_eq!(t.poll(t0 + POLL * 4, NetView::Tab), Some(NetRequest::Status));
     }
 
     #[test]
     fn no_status_poll_while_closed() {
         let mut t = NetTab::new(false);
         let t0 = Instant::now();
-        assert_eq!(t.poll(t0, false), None, "nothing before the tab opens");
-        assert_eq!(t.poll(t0 + POLL * 10, false), None);
-        assert_eq!(t.poll(t0 + POLL * 10, true), Some(NetRequest::Load));
-        assert_eq!(t.poll(t0 + POLL * 10, true), Some(NetRequest::Status));
+        assert_eq!(t.poll(t0, NetView::Hidden), None, "nothing before the tab opens");
+        assert_eq!(t.poll(t0 + POLL * 10, NetView::Hidden), None);
+        assert_eq!(t.poll(t0 + POLL * 10, NetView::Tab), Some(NetRequest::Load));
+        assert_eq!(t.poll(t0 + POLL * 10, NetView::Tab), Some(NetRequest::Status));
         t.status_done(Ok(Vec::new()), Details::default());
-        assert_eq!(t.poll(t0 + POLL * 20, false), None);
+        assert_eq!(t.poll(t0 + POLL * 20, NetView::Hidden), None);
     }
 
     #[test]
@@ -1416,7 +1428,7 @@ mod tests {
         );
         assert_eq!(t.event(NetEvent::TakeOver("wifi"), false), None, "one at a time");
         assert!(t.take_over_done(Ok(())), "a take-over saves the home");
-        assert_eq!(t.poll(Instant::now(), true), Some(NetRequest::Load));
+        assert_eq!(t.poll(Instant::now(), NetView::Tab), Some(NetRequest::Load));
         assert_eq!(
             t.event(NetEvent::TakeOver("wifi"), false),
             Some(NetRequest::TakeOver("wifi"))
@@ -1499,7 +1511,7 @@ mod tests {
         assert!(!t.applying());
         assert_eq!(t.pgid(), None);
         assert!(!t.dirty());
-        assert_eq!(t.poll(Instant::now(), true), Some(NetRequest::Load));
+        assert_eq!(t.poll(Instant::now(), NetView::Tab), Some(NetRequest::Load));
     }
 
     #[test]
@@ -1525,7 +1537,7 @@ mod tests {
     fn apply_failure_reloads_the_files() {
         let mut t = with_fixed_draft();
         let now = Instant::now();
-        assert_eq!(t.poll(now, true), Some(NetRequest::Load));
+        assert_eq!(t.poll(now, NetView::Tab), Some(NetRequest::Load));
         t.loaded(
             wifi(FileState::Menu, Some("wlp1"), vec![net("Home", Some("secret123"))]),
             wired(FileState::Menu, Wired::dhcp()),
@@ -1536,7 +1548,11 @@ mod tests {
             reason: "x".into(),
             home_changed: false
         })));
-        assert_eq!(t.poll(now, true), Some(NetRequest::Load), "the home was put back");
+        assert_eq!(
+            t.poll(now, NetView::Tab),
+            Some(NetRequest::Load),
+            "the home was put back"
+        );
         assert!(t.dirty(), "the draft is kept");
         assert_eq!(t.error(), Some("x"));
         t.loaded(
@@ -1551,7 +1567,7 @@ mod tests {
             reason: "x; generated/wifi.yaml could not be restored: busy".into(),
             home_changed: true
         })));
-        assert_eq!(t.poll(now, true), Some(NetRequest::Load));
+        assert_eq!(t.poll(now, NetView::Tab), Some(NetRequest::Load));
     }
 
     #[test]

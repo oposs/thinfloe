@@ -4030,6 +4030,105 @@ mod tests {
             .collect()
     }
 
+    /// The This machine tab with its facts, a WiFi interface and a GPU read.
+    fn machine_settings() -> Menu {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Machine;
+        let f = crate::machine::Facts {
+            maker: Some("HP".into()),
+            kernel: Some("7.0.0-38-generic".into()),
+            ..Default::default()
+        };
+        menu.machine.facts_done(f, Instant::now());
+        let wifi = crate::nettab::Iface {
+            name: "wlp2s0".into(),
+            kind: crate::nettab::IfKind::Wifi,
+            state: crate::nettab::IfState::Connected,
+            addresses: vec!["10.0.0.7/24".into()],
+            ssid: Some("Home".into()),
+            signal_dbm: None,
+            handshake_age_s: None,
+        };
+        let details = crate::netdetail::Details {
+            ifaces: vec![crate::netdetail::IfDetail {
+                name: "wlp2s0".into(),
+                driver: Some("iwlwifi".into()),
+                ..Default::default()
+            }],
+            dns_in_use: vec!["192.168.1.1".into()],
+        };
+        menu.network.status_done(Ok(vec![wifi]), details);
+        menu.graphics = Some(crate::graphics::Info {
+            gpus: vec![crate::graphics::Gpu {
+                card: "card1".into(),
+                ids: (0x8086, 0x1616),
+                name: None,
+                driver: Some("i915".into()),
+            }],
+            vaapi: crate::graphics::Vaapi::NotAvailable("x".into()),
+        });
+        menu
+    }
+
+    /// This machine shows what the Network and Screen tabs show, beside
+    /// the machine's facts on a wide panel, below them on a narrow one.
+    #[test]
+    fn the_machine_tab_has_two_columns_when_wide() {
+        // The first one below the tab bar, whose labels share the names.
+        let rect_of = |rects: &[(String, Rect)], name: &str| {
+            let tabs = rects
+                .iter()
+                .find(|(t, _)| t == "Packages")
+                .map_or(0.0, |(_, r)| r.bottom());
+            rects
+                .iter()
+                .find(|(t, r)| t == name && r.top() > tabs)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("{name} not in {rects:?}"))
+        };
+        let menu = machine_settings();
+        let wide = text_rects(&settings_shapes(&menu, 1920.0, 1080.0));
+        for want in [
+            "This machine",
+            "Maker",
+            "HP",
+            "Network",
+            "WiFi wlp2s0",
+            "Driver",
+            "iwlwifi",
+            "DNS in use",
+            "Graphics",
+            "GPU",
+            "8086:1616",
+            "i915",
+            "Video processing",
+            "not available",
+            "Copy",
+        ] {
+            rect_of(&wide, want);
+        }
+        let (m, n, g) = (
+            rect_of(&wide, "This machine"),
+            rect_of(&wide, "Network"),
+            rect_of(&wide, "Graphics"),
+        );
+        assert!(n.left() > m.right(), "Network beside: {m:?} {n:?}");
+        assert!((n.top() - m.top()).abs() < 1.0, "{m:?} {n:?}");
+        assert!(g.top() > n.bottom() && (g.left() - n.left()).abs() < 1.0, "{n:?} {g:?}");
+        // Copy under the short left column, beside the network.
+        let copy = rect_of(&wide, "Copy");
+        assert!(
+            copy.top() > rect_of(&wide, "Manual tool").bottom() && copy.right() < n.left(),
+            "{copy:?}"
+        );
+        let narrow = text_rects(&settings_shapes(&menu, 700.0, 1400.0));
+        let (m, n) = (rect_of(&narrow, "This machine"), rect_of(&narrow, "Network"));
+        assert!(n.top() > rect_of(&narrow, "Kernel").bottom(), "{m:?} {n:?}");
+        assert!((n.left() - m.left()).abs() < 1.0, "{m:?} {n:?}");
+        // One column: Copy after the last panel.
+        assert!(rect_of(&narrow, "Copy").top() > rect_of(&narrow, "not available").bottom());
+    }
+
     /// The Graphics band leads the Screen tab: "Reading…" until the job
     /// answers, then each GPU and driver and the codecs under "Video
     /// processing", or why there are none, each value beside its label.

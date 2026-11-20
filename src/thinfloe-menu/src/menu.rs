@@ -23,13 +23,14 @@
 
 use crate::addons::{AddonState, AddonStatus, valid_id};
 use crate::header::Header;
+use crate::infopanel::{Line, Panel};
 use crate::jobs::{JobId, JobResult, SaveOutcome, Signal};
 use crate::keyboard::KeyboardTab;
 use crate::log::{Kind, Log};
 use crate::machine::MachineTab;
 use crate::monitors::{MonEvent, MonRequest, MonTab};
 use crate::netfiles;
-use crate::network::{NetEvent, NetRequest, NetTab};
+use crate::network::{NetEvent, NetRequest, NetTab, NetView};
 use crate::screentab::{self, ScreenTab};
 use crate::settings::{RetryMarker, SettingsEvent, SettingsTab};
 use crate::statustab::StatusEvent;
@@ -533,23 +534,46 @@ impl Menu {
         self.header = h;
     }
 
-    /// The This machine tab's rows at `now`; empty until its facts are read.
-    pub fn machine_rows(&self, now: Instant) -> Vec<(String, String)> {
+    /// The This machine tab's panels at `now`: the machine's facts, the
+    /// installed add-ons (left out without one), the network and the
+    /// graphics, as their tabs show them. Empty until the facts are read.
+    pub fn machine_panels(&self, now: Instant) -> Vec<Panel> {
         let Some(facts) = self.machine.facts() else {
             return Vec::new();
         };
+        let row = |(label, value): (String, String)| Line::Row { label, value };
+        let machine = crate::machine::rows(facts, self.machine.uptime_at(now), &self.header, self.usb_boot);
         // In tile order, as the Packages tab lists them.
-        let addons: Vec<(String, String)> = self
+        let addons: Vec<Line> = self
             .tiles
             .iter()
             .filter(|t| t.addon)
             .filter_map(|t| {
                 let id = addon_id(t);
                 let s = self.addons().iter().find(|a| a.id == id && a.present())?;
-                Some((t.name.clone(), s.installed.clone()?))
+                Some(row((t.name.clone(), s.installed.clone()?)))
             })
             .collect();
-        crate::machine::rows(facts, self.machine.uptime_at(now), &self.header, self.usb_boot, &addons)
+        let net = &self.network;
+        let mut panels = vec![Panel {
+            title: crate::machine::TITLE,
+            lines: machine.into_iter().map(row).collect(),
+        }];
+        if !addons.is_empty() {
+            panels.push(Panel {
+                title: "Add-ons",
+                lines: addons,
+            });
+        }
+        panels.push(Panel {
+            title: "Network",
+            lines: crate::nettab::info_lines(net.ifaces(), net.details(), net.status_known(), net.status_error()),
+        });
+        panels.push(Panel {
+            title: "Graphics",
+            lines: crate::graphics::info_lines(self.graphics.as_ref()),
+        });
+        panels
     }
 
     /// A newer release than the installed one, when both are known.
@@ -856,11 +880,11 @@ impl Menu {
                 return Some(Effect::Start(Job::KeyboardApply(kb)));
             }
             SettingsEvent::MachineCopy => {
-                let rows = self.machine_rows(Instant::now());
-                if rows.is_empty() || !self.machine.start_copy() {
+                let panels = self.machine_panels(Instant::now());
+                if panels.is_empty() || !self.machine.start_copy() {
                     return None;
                 }
-                return Some(Effect::Start(Job::Copy(crate::machine::clipboard_text(&rows))));
+                return Some(Effect::Start(Job::Copy(crate::infopanel::text(&panels))));
             }
             SettingsEvent::DismissReport => {
                 return self
@@ -1578,23 +1602,31 @@ impl Menu {
         if let Some(r) = self.monitors.tick(now) {
             return Some(Menu::mon_request(r));
         }
-        let net_open =
-            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Network;
-        if let Some(r) = self.network.poll(now, net_open) {
-            return self.net_request(r);
-        }
-        let machine_open =
-            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Machine;
+        let on_tab = |tab| self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == tab;
+        let (net_open, machine_open, screen_open) = (
+            on_tab(SettingsTab::Network),
+            on_tab(SettingsTab::Machine),
+            on_tab(SettingsTab::Screen),
+        );
         if let Some(job) = self.machine.poll(machine_open) {
             return Some(Effect::Start(job));
         }
         // Asked here rather than at the tab click: leaving the Network tab
-        // may already answer that click with the public IP write.
-        let screen_open =
-            self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == SettingsTab::Screen;
-        if screen_open && !self.graphics_asked {
+        // may already answer that click with the public IP write. The This
+        // machine tab shows the graphics too.
+        if (screen_open || machine_open) && !self.graphics_asked {
             self.graphics_asked = true;
             return Some(Effect::Start(Job::Graphics));
+        }
+        let view = if net_open {
+            NetView::Tab
+        } else if machine_open {
+            NetView::Facts
+        } else {
+            NetView::Hidden
+        };
+        if let Some(r) = self.network.poll(now, view) {
+            return self.net_request(r);
         }
         if self.logout.is_none() && self.screen == Screen::Upgrade {
             let r = self.upgrade.poll(now)?;
@@ -3289,14 +3321,20 @@ mod tests {
         assert_eq!(m.tick(now), None, "Packages tab");
         assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Machine)), None);
         assert_eq!(m.tick(now), Some(Effect::Start(Job::MachineFacts)));
+        // It shows the graphics and the network too.
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::Graphics)));
+        assert_eq!(m.tick(now), Some(Effect::Start(Job::NetStatus)));
         assert_eq!(m.tick(now), None, "asked already");
-        assert!(m.machine_rows(now).is_empty(), "no answer yet");
+        assert!(m.machine_panels(now).is_empty(), "no answer yet");
         let f = crate::machine::Facts {
             kernel: Some("7.0.0".into()),
             ..Default::default()
         };
         assert_eq!(m.finished(JobResult::MachineFacts(f), now), None);
-        assert!(m.machine_rows(now).contains(&("Kernel".into(), "7.0.0".into())));
+        let panels = m.machine_panels(now);
+        let titles: Vec<&str> = panels.iter().map(|p| p.title).collect();
+        assert_eq!(titles, ["This machine", "Network", "Graphics"], "no add-on installed");
+        assert!(panels[0].lines.contains(&Line::row("Kernel", "7.0.0")));
         // Each opening reads again: the tab is left and opened again.
         m.settings(SettingsEvent::Tab(SettingsTab::Keyboard));
         assert_eq!(m.tick(now), None);
@@ -3310,7 +3348,34 @@ mod tests {
     }
 
     #[test]
-    fn copy_sends_the_rows_to_the_clipboard() {
+    fn the_machine_tab_follows_the_network_status_but_never_reads_its_files() {
+        let mut m = Menu::new(grid(), false);
+        let now = Instant::now();
+        m.screen = Screen::Settings;
+        m.settings(SettingsEvent::Tab(SettingsTab::Machine));
+        let mut seen = Vec::new();
+        for i in 0..6 {
+            let at = now + crate::network::POLL * i;
+            while let Some(e) = m.tick(at) {
+                if e == Effect::Start(Job::NetStatus) {
+                    m.finished(JobResult::NetStatus(Ok(Vec::new()), Default::default()), at);
+                }
+                seen.push(e);
+            }
+        }
+        let status = seen.iter().filter(|e| **e == Effect::Start(Job::NetStatus)).count();
+        assert_eq!(status, 6, "one status call per POLL: {seen:?}");
+        assert!(!seen.contains(&Effect::Start(Job::NetLoad)), "{seen:?}");
+        let graphics = seen.iter().filter(|e| **e == Effect::Start(Job::Graphics)).count();
+        assert_eq!(graphics, 1, "{seen:?}");
+        // The Network tab opened later still reads its files.
+        m.settings(SettingsEvent::Tab(SettingsTab::Network));
+        let later = now + crate::network::POLL * 10;
+        assert_eq!(m.tick(later), Some(Effect::Start(Job::NetLoad)));
+    }
+
+    #[test]
+    fn copy_sends_the_panels_to_the_clipboard() {
         let bin = crate::testdir::TestDir::new("menu", "machinecopy");
         let mut m = addon_menu(&bin);
         m.set_usb_boot(true);
@@ -3330,12 +3395,57 @@ mod tests {
             ..Default::default()
         };
         m.finished(JobResult::MachineFacts(f), now);
-        let rows = m.machine_rows(Instant::now());
-        assert_eq!(rows.last(), Some(&("ThinLinc".to_string(), "4.19.0".to_string())));
-        let text = crate::machine::clipboard_text(&rows);
+        let text = crate::infopanel::text(&m.machine_panels(now));
         assert_eq!(
             text,
-            "Maker: HP\nThinFloe version: 4.4.0\nBoot: USB\nHostname: thinfloe-a1b2c3\nThinLinc: 4.19.0\n"
+            "This machine\nMaker: HP\nThinFloe version: 4.4.0\nBoot: USB\nHostname: thinfloe-a1b2c3\n\n\
+             Add-ons\nThinLinc: 4.19.0\n\n\
+             Network\nLooking for network adapters…\n\n\
+             Graphics\nReading…\n"
+        );
+        // With the network and the graphics read, Copy takes them along.
+        let wifi = crate::nettab::Iface {
+            name: "wlp2s0".into(),
+            kind: crate::nettab::IfKind::Wifi,
+            state: crate::nettab::IfState::Connected,
+            addresses: vec!["10.0.0.7/24".into()],
+            ssid: Some("Home".into()),
+            signal_dbm: None,
+            handshake_age_s: None,
+        };
+        let details = crate::netdetail::Details {
+            ifaces: vec![crate::netdetail::IfDetail {
+                name: "wlp2s0".into(),
+                driver: Some("iwlwifi".into()),
+                ..Default::default()
+            }],
+            dns_in_use: vec!["192.168.1.1".into()],
+        };
+        m.finished(JobResult::NetStatus(Ok(vec![wifi]), details), now);
+        m.finished(
+            JobResult::Graphics(crate::graphics::Info {
+                gpus: vec![crate::graphics::Gpu {
+                    card: "card1".into(),
+                    ids: (0x8086, 0x1616),
+                    name: None,
+                    driver: Some("i915".into()),
+                }],
+                vaapi: crate::graphics::Vaapi::Codecs(vec![crate::graphics::Codec {
+                    name: "H.264",
+                    decode: true,
+                    encode: false,
+                }]),
+            }),
+            now,
+        );
+        let text = crate::infopanel::text(&m.machine_panels(now));
+        assert!(
+            text.ends_with(
+                "Network\nWiFi wlp2s0\n  State: connected\n  Network: Home\n  Address: 10.0.0.7/24\n  \
+                 Driver: iwlwifi\nDNS in use: 192.168.1.1\n\n\
+                 Graphics\nGPU: 8086:1616\nDriver: i915\nVideo processing\n  H.264: decode\n"
+            ),
+            "{text}"
         );
         assert_eq!(
             m.settings(SettingsEvent::MachineCopy),
@@ -3416,6 +3526,14 @@ mod tests {
         m.screen = Screen::Settings;
         m.settings_tab = SettingsTab::Screen;
         assert_eq!(m.tick(now), None);
+        // The This machine tab shares the one reading.
+        m.settings(SettingsEvent::Tab(SettingsTab::Machine));
+        while let Some(e) = m.tick(now) {
+            assert_ne!(e, Effect::Start(Job::Graphics));
+            if e == Effect::Start(Job::NetStatus) {
+                break;
+            }
+        }
     }
 
     #[test]

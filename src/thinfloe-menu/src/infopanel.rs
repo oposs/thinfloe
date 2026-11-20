@@ -116,6 +116,9 @@ fn widest(ui: &Ui, font: &egui::FontId, lines: &[Line]) -> f32 {
 pub fn draw(ui: &mut Ui, t: &Theme, lines: &[Line], label_w: f32) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = brand::INFO_ROW_GAP;
+        // A row is as high as its text, not as a button: nothing in a
+        // panel takes a click.
+        ui.spacing_mut().interact_size.y = 0.0;
         for line in lines {
             match line {
                 Line::Row { label, value } => {
@@ -266,6 +269,9 @@ mod tests {
             (a.left() - b.left()).abs() < 0.5 && (b.left() - c.left()).abs() < 0.5,
             "{a:?} {b:?} {c:?}"
         );
+        // One row follows the next by about a text line, not a button.
+        let step = at("Driver").top() - at("State").top();
+        assert!(step < 2.0 * at("State").height() + 2.0 * brand::INFO_ROW_GAP, "{step}");
         // Fitted to the labels: far tighter than the 240 pt form column.
         assert!(c.left() - at("DNS in use").left() < brand::FORM_LABEL_W, "{c:?}");
     }
