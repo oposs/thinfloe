@@ -113,7 +113,9 @@ At most eight rows.
   that column's row of the highest drop rank leaves (Uptime, Traffic,
   DNS, Gateway, Public, VPN; in 2x1 the left column loses DNS, then
   Gateway, the right Uptime, Traffic, Public, VPN, so at three lines
-  Link IPv4 Gateway | VPN Public Traffic stay); Link and IPv4 stay. At shipped sizes and cell heights
+  Link IPv4 Gateway | VPN Public Traffic stay); Link and IPv4 stay. With
+  room for one line only, IPv4 moves to the right column (Link | IPv4),
+  so nothing is drawn outside the element. At shipped sizes and cell heights
   nothing leaves out.
 - `label_in_row` stays: only on the tightest rows is a Geo label half a
   point smaller.

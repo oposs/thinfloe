@@ -18,7 +18,8 @@
 //! Rows move closer together as far as `min_row`, then, while a column holds
 //! more rows than fit, that column's rows are left out in the order
 //! `Row::drop`: uptime, traffic, DNS, gateway, the public address, the VPN.
-//! The link and the address stay. A row too wide for its
+//! The link and the address stay; with room for one line only, the 2 x 1
+//! size puts the address in the right column. A row too wide for its
 //! room leaves out the word `WiFi`; a value still too long starts after its
 //! label and is cut at the padding. Only in a rect squeezed below the
 //! shipped cell heights do the rows get so tight that the labels are half a
@@ -211,7 +212,8 @@ fn lines(rows: &[Row], columns: usize) -> usize {
 /// The rows that fit `height` in `columns` columns and how high each is: as
 /// tall as a line when there is room, as tight as `min_row` before any row
 /// is left out. While a column holds more rows than fit, its row of the
-/// highest `Row::drop` is left out.
+/// highest `Row::drop` is left out; when the left column holds only rows
+/// that stay and still too many, its last moves to the right column.
 pub fn fit(mut rows: Vec<Row>, height: f32, columns: usize, m: &StatusSizes) -> (Vec<Row>, f32) {
     let columns = columns.clamp(1, 2);
     let avail = (height - 2.0 * m.pad_y).max(0.0);
@@ -228,10 +230,20 @@ pub fn fit(mut rows: Vec<Row>, height: f32, columns: usize, m: &StatusSizes) -> 
                     .max_by_key(|(_, (r, _))| r.drop)
                     .map(|(i, _)| i)
             });
-        match worst {
-            Some(i) => {
-                rows.remove(i);
-            }
+        if let Some(i) = worst {
+            rows.remove(i);
+            continue;
+        }
+        // The left column holds only rows that stay and still too many
+        // (one line: Link and IPv4): its last goes to the top of the right
+        // column, as long as the right has room for what stays there.
+        let count = |c: usize| at.iter().filter(|p| p.0 == c).count();
+        let staying_right = rows.iter().zip(&at).filter(|(r, p)| p.0 == 1 && r.drop == 0).count();
+        let moved = (columns == 2 && count(0) > fits && staying_right < fits)
+            .then(|| rows.iter().rposition(|r| !r.right))
+            .flatten();
+        match moved {
+            Some(i) => rows[i].right = true,
             None => break,
         }
     }
@@ -767,13 +779,37 @@ mod tests {
             let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
             let left = r.iter().filter(|x| !x.right).count();
             let right = r.iter().filter(|x| x.right).count();
-            assert!(left <= lines.max(2) && right <= lines, "{lines}: {:?}", labels_of(&r));
+            assert!(left <= lines && right <= lines, "{lines}: {:?}", labels_of(&r));
         }
         // Three lines: each column loses its own highest rank, the left
         // DNS, the right Uptime; Traffic stays.
         let h = 2.0 * m.pad_y + 3.0 * min_row(&m) + 0.5;
         let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
         assert_eq!(labels_of(&r), ["Link", "IPv4", "Gateway", "VPN", "Public", "Traffic"]);
+    }
+
+    #[test]
+    fn with_one_line_the_wide_size_puts_link_and_ipv4_side_by_side() {
+        let addr = public();
+        let m = STATUS_SMALL;
+        let h = 2.0 * m.pad_y + min_row(&m) + 0.5;
+        let (r, _) = fit(rows(&sample(), Some(&addr)), h, 2, &m);
+        assert_eq!(labels_of(&r), ["Link", "IPv4"]);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(2.0 * 120.0, h));
+        let out = shapes(&Connection, rect, WIDE, &with_public(&sample(), &addr), Instant::now());
+        let mid = rect.center().x;
+        assert_eq!(drawn_words(&lines_in(&out, f32::MIN, mid)), ["Link eth0 1 Gbit/s"]);
+        assert_eq!(drawn_words(&lines_in(&out, mid, f32::MAX)), ["IPv4 192.168.1.23/24"]);
+        for s in &out {
+            assert!(
+                rect.expand(0.01).contains_rect(s.visual_bounding_rect()),
+                "{s:?} outside {rect:?}"
+            );
+        }
+    }
+
+    fn drawn_words(l: &[(String, f32, f32)]) -> Vec<String> {
+        l.iter().map(|x| x.0.clone()).collect()
     }
 
     #[test]
