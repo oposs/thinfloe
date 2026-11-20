@@ -237,3 +237,22 @@ and columns need a title line plus a row (about 66 px). So both info
 panels are the last band of their tab. Guard:
 `the_position_row_is_in_view_on_a_1080_screen`; the monitor click tests
 stay at 1920x1080.
+
+## Amendment (2026-11-20, after the review)
+
+- Copy: in two columns it stands under the left column, not below both.
+  The left column (the machine's facts and the add-ons) has a known,
+  short height; the right one grows with every interface and can run
+  past the screen, so Copy below both would need a scroll on a machine
+  with several adapters. Under the left column it stays in view, beside
+  the network. One column: Copy after the last panel, as specified.
+  Guard: `the_machine_tab_has_two_columns_when_wide`.
+- `INFO_COL_GAP` is the gap between the two columns only; inside them
+  the item spacing stays as on the Network and Screen tabs, so a
+  panel's label column and label-value gap are the same on every tab.
+  Guard: `a_panels_values_stand_as_far_from_their_labels_on_every_tab`.
+- Until the machine's facts are read, only the `This machine` panel
+  says "Reading…"; the add-ons, network and graphics show what they
+  have, and Copy stays off. Guards:
+  `the_machine_tab_shows_what_is_read_while_the_facts_are_waited_for`,
+  `the_machine_tab_reads_its_facts_when_it_opens`.
