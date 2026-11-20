@@ -13,8 +13,6 @@ use std::path::Path;
 
 /// The most a sysfs attribute file may hold here; they are a few bytes.
 const ATTR_MAX: u64 = 256;
-/// The most `/proc/net/route` may hold, as `netstat` reads it.
-const ROUTE_MAX: u64 = 64 * 1024;
 /// Longest MAC kept: an InfiniBand address, 20 bytes as hex pairs.
 const MAC_MAX: usize = 59;
 /// Longest driver name kept.
@@ -38,7 +36,7 @@ pub struct Details {
 /// The details of each interface of `ifaces`, in their order, and the DNS
 /// servers in use.
 pub fn read(roots: &Roots, ifaces: &[Iface], pci_ids: &Path) -> Details {
-    let route = bounded::read_text(&roots.proc_.join("net/route"), ROUTE_MAX).and_then(|t| netstat::default_route(&t));
+    let route = netstat::route(roots);
     let ifaces = ifaces
         .iter()
         .map(|i| {
