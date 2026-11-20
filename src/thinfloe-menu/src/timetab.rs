@@ -299,6 +299,9 @@ mod tests {
     fn tracking_not_synced() {
         let t = "00000000,,0,0.000000000,0.000000000,0.000000000,0.000000000,0.000,0.000,0.000,1.000000000,1.000000000,0.0,Not synchronised\n";
         assert_eq!(parse_tracking(t), None);
+        // A source and a stratum, but the leap status says unsynchronised.
+        let lost = TRACKING.replace(",Normal", ",Not synchronised");
+        assert_eq!(parse_tracking(&lost), None);
         assert_eq!(parse_tracking(""), None);
         assert_eq!(parse_tracking("a,b,c\n"), None);
     }
