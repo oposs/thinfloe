@@ -146,7 +146,11 @@ mod tests {
 
     fn pci_list(d: &Path) -> std::path::PathBuf {
         let p = d.join("pci.ids");
-        fs::write(&p, "8086  Intel Corporation\n\ta0f0  Wi-Fi 6 AX201\n").unwrap();
+        fs::write(
+            &p,
+            "8086  Intel Corporation\n\ta0f0  Wi-Fi 6 AX201\n\t15fc  Ethernet Connection (13) I219-V\n",
+        )
+        .unwrap();
         p
     }
 
@@ -289,7 +293,7 @@ mod tests {
         let d = TestDir::new("netdetail", "wired");
         let dev = net_dev(&d, "eno1", "3c:52:82:00:00:01", "pci0000:00/0000:00:1f.6", "e1000e");
         write(&dev.join("vendor"), "0x8086\n");
-        write(&dev.join("device"), "0xa0f0\n");
+        write(&dev.join("device"), "0x15fc\n");
         // WireGuard: an address file, no `device` link.
         write(&d.join("sys/class/net/wg0/address"), "\n");
         let got = read(
@@ -302,7 +306,7 @@ mod tests {
             &pci_list(&d),
         );
         assert_eq!(got.ifaces[0].mac.as_deref(), Some("3c:52:82:00:00:01"));
-        assert_eq!(got.ifaces[0].chip.as_deref(), Some("Intel Corporation Wi-Fi 6 AX201"));
+        assert_eq!(got.ifaces[0].chip.as_deref(), Some("Intel Corporation Ethernet Connection (13) I219-V"));
         assert_eq!(got.ifaces[0].driver.as_deref(), Some("e1000e"));
         assert_eq!(
             got.ifaces[1],
