@@ -294,6 +294,27 @@ opens and on each of its refreshes; it reads `/sys` and `/proc`, bounded,
 and starts no subprocess. A failed status call keeps the last list and the
 details read with it.
 
+**Network tab, "Time".** A band after DNS, before Public IP address
+(`timeband.rs` the state, `time()` in `network_ui.rs` the drawing). Like
+the public IP band it is outside the Apply group and saved at once.
+"Time zone" is two selects: the region (`Automatic`, `UTC`, then the
+regions of `zone.tab`) and, for a region, its cities (`_` shown as a
+space, placeholder "Choose a city"); type-ahead on the first letter makes
+both searchable, shadcn-egui has no combobox. `Automatic`, `UTC` and a
+city save at once; a region alone saves nothing. "NTP servers" saves on
+Enter, on focus loss and when the tab is left, Escape restores, and a
+refused value is named below the field and not saved, as the lookup
+address; the two fields share the pending-event slot. A save writes
+`[time]` and runs `sudo -n thinfloe-time apply` (`jobs::time_save`), one
+at a time with the newest one queued; the band is disabled meanwhile
+("Applying…"). A failed store write puts the stored setting back; a failed
+apply keeps it with "Saved, in effect after a restart: …". Below: the zone
+line ("In use: Europe/Zurich (UTC+01:00), set here." / ", from DHCP." /
+"UTC: DHCP sends no time zone."), a note when the session has its own
+`TZ`, and "Clock" with the sync line and the servers chrony uses (from
+`chronyc -c` on the status poll, `timetab.rs`). See
+[time-zone.md](time-zone.md).
+
 **Network tab, "Public IP address".** A band after DNS with the switch
 "Show the public IP address" and the field "Lookup address" (hint
 `https://api.ipify.org`, the address used while the field is empty). It is
