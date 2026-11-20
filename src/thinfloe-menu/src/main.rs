@@ -129,11 +129,14 @@ fn addon_last_check_path() -> PathBuf {
 /// What rendering the generated files needs besides the settings: the
 /// shipped wired default (unreadable: empty, and a fixed wired address then
 /// fails to render with its message), whether this is a netboot, and the
-/// XKB layout list (unreadable: only the names of a keyboard are checked).
+/// XKB layout list (unreadable: only the names of a keyboard are checked),
+/// and the zone list (unreadable or empty: a zone is not checked).
 fn config_inputs(registry: Option<&thinfloe_menu::kbregistry::Registry>) -> Inputs {
     let default_wired = thinfloe_menu::netfiles::Homes::from_env().default_wired;
+    let zones = thinfloe_menu::timecfg::read_zones();
     Inputs {
         registry: registry.cloned().map(std::sync::Arc::new),
+        zones: (!zones.regions.is_empty()).then(|| std::sync::Arc::new(zones)),
         default_wired: bounded::read_bounded(&default_wired, MIGRATE_MAX_BYTES, true)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default(),

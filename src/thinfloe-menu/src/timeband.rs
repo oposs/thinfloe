@@ -60,6 +60,22 @@ impl TimeBand {
         &self.cfg
     }
 
+    /// The saved zone when the zone list does not have it; the selects
+    /// show Automatic then, and `generated/time` leaves it out.
+    pub fn unknown_zone(&self) -> Option<&str> {
+        let z = self.cfg.zone.as_deref()?;
+        (!self.zones.regions.is_empty() && !self.zones.contains(z)).then_some(z)
+    }
+
+    /// The setting as the band shows it: an unknown zone is automatic.
+    fn shown(&self) -> TimeCfg {
+        let mut cfg = self.cfg.clone();
+        if self.unknown_zone().is_some() {
+            cfg.zone = None;
+        }
+        cfg
+    }
+
     /// The region select's entries.
     pub fn regions(&self) -> Vec<&str> {
         let mut v = vec![AUTOMATIC, timecfg::UTC];
@@ -124,7 +140,7 @@ impl TimeBand {
     }
 
     fn save(&mut self, cfg: TimeCfg) -> Option<TimeCfg> {
-        if cfg == self.cfg {
+        if cfg == self.shown() {
             return None;
         }
         self.cfg = cfg.clone();
@@ -148,10 +164,7 @@ impl TimeBand {
                     _ => return None,
                 };
                 self.region_pick = None;
-                self.save(TimeCfg {
-                    zone,
-                    ..self.cfg.clone()
-                })
+                self.save(TimeCfg { zone, ..self.shown() })
             }
             TimeEvent::City(c) => {
                 let region = self.region_name()?.to_string();
@@ -159,7 +172,7 @@ impl TimeBand {
                 self.region_pick = None;
                 self.save(TimeCfg {
                     zone: Some(zone),
-                    ..self.cfg.clone()
+                    ..self.shown()
                 })
             }
             TimeEvent::NtpCancel => {
@@ -172,10 +185,7 @@ impl TimeBand {
                     return None;
                 }
                 let ntp = timecfg::parse_servers(&self.ntp_text).ok()?;
-                self.save(TimeCfg {
-                    ntp,
-                    ..self.cfg.clone()
-                })
+                self.save(TimeCfg { ntp, ..self.shown() })
             }
         }
     }
@@ -329,6 +339,38 @@ mod tests {
         b.saved(&sent, Ok(()));
         assert_eq!(b.error(), None);
         assert_eq!(b.cfg(), &zone("UTC"));
+    }
+
+    /// A saved zone the list does not have: the select shows Automatic and
+    /// the band names it; the next real change saves without it.
+    #[test]
+    fn an_unknown_zone_shows_automatic_and_goes_with_the_next_change() {
+        let mut b = band();
+        b.set_cfg(TimeCfg {
+            zone: Some("Europe/Gone".into()),
+            ntp: vec!["a.ch".into()],
+        });
+        assert_eq!(b.region_index(), 0);
+        assert_eq!(b.unknown_zone(), Some("Europe/Gone"));
+        let typed = |t: &str| TimeEvent::NtpText {
+            text: t.into(),
+            commit: true,
+        };
+        // A commit of the same servers is no change.
+        assert_eq!(b.event(typed("a.ch")), None);
+        assert_eq!(b.unknown_zone(), Some("Europe/Gone"));
+        assert_eq!(
+            b.event(typed("b.ch")),
+            Some(TimeCfg {
+                zone: None,
+                ntp: vec!["b.ch".into()],
+            })
+        );
+        assert_eq!(b.unknown_zone(), None);
+        // Without a zone list nothing is unknown.
+        let mut b = TimeBand::default();
+        b.set_cfg(zone("Europe/Gone"));
+        assert_eq!(b.unknown_zone(), None);
     }
 
     #[test]
