@@ -366,7 +366,7 @@ fn iface_rows(i: &Iface, d: Option<&IfDetail>) -> Vec<Line> {
             rows.push(Line::row("Network", ssid.clone()));
         }
         if let Some(dbm) = i.signal_dbm {
-            rows.push(Line::row("Signal", signal_line(dbm)));
+            rows.push(Line::row("Signal", format!("{} ({dbm} dBm)", signal_word(dbm))));
         }
     }
     if connected && !i.addresses.is_empty() {
@@ -646,7 +646,7 @@ mod tests {
                 vec![
                     ("State", "connected"),
                     ("Network", "Home Net"),
-                    ("Signal", "strong · -50 dBm"),
+                    ("Signal", "strong (-50 dBm)"),
                     ("Address", "192.168.1.23/24"),
                 ]
             )

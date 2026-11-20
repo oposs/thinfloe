@@ -57,15 +57,14 @@ pub fn read(roots: &Roots) -> Facts {
     }
 }
 
-/// The tab's rows, label and value, in the order shown; what is unknown is
-/// left out. `uptime_now` is the uptime counted on to this frame.
-pub fn rows(
-    f: &Facts,
-    uptime_now: Option<u64>,
-    header: &Header,
-    usb_boot: bool,
-    addons: &[(String, String)],
-) -> Vec<(String, String)> {
+/// The title of the tab's first panel.
+pub const TITLE: &str = "This machine";
+
+/// The machine's rows, label and value, in the order shown; what is
+/// unknown is left out. `uptime_now` is the uptime counted on to this
+/// frame. The add-ons, the network and the graphics are panels of their
+/// own (`Menu::machine_panels`).
+pub fn rows(f: &Facts, uptime_now: Option<u64>, header: &Header, usb_boot: bool) -> Vec<(String, String)> {
     let host = Some(header.host.clone()).filter(|h| !h.is_empty());
     let boot = if usb_boot { "USB" } else { "Netboot" };
     [
@@ -82,15 +81,7 @@ pub fn rows(
     ]
     .into_iter()
     .filter_map(|(label, value)| Some((label.to_string(), value?)))
-    .chain(addons.iter().cloned())
     .collect()
-}
-
-/// The rows for the clipboard: one `Label: value` line each.
-pub fn clipboard_text(rows: &[(String, String)]) -> String {
-    rows.iter()
-        .map(|(label, value)| format!("{label}: {value}\n"))
-        .collect()
 }
 
 /// The tab's state between frames.
@@ -196,8 +187,7 @@ mod tests {
 
     #[test]
     fn rows_are_in_order_and_unknown_ones_left_out() {
-        let addons = [("ThinLinc".to_string(), "4.19.0".to_string())];
-        let r = rows(&full(), Some(3 * 3600 + 120), &header(), true, &addons);
+        let r = rows(&full(), Some(3 * 3600 + 120), &header(), true);
         assert_eq!(
             labels(&r),
             [
@@ -211,7 +201,6 @@ mod tests {
                 "Boot",
                 "Hostname",
                 "Uptime",
-                "ThinLinc",
             ]
         );
         let value = |r: &[(String, String)], l: &str| r.iter().find(|(k, _)| k == l).map(|(_, v)| v.clone());
@@ -222,15 +211,14 @@ mod tests {
         assert_eq!(value(&r, "Boot").as_deref(), Some("USB"));
         assert_eq!(value(&r, "Hostname").as_deref(), Some("thinfloe-a1b2c3"));
         assert_eq!(value(&r, "Uptime").as_deref(), Some("3 h 2 m"));
-        assert_eq!(r.last(), Some(&("ThinLinc".to_string(), "4.19.0".to_string())));
 
         let no_maker = Facts { maker: None, ..full() };
-        let r = rows(&no_maker, Some(100), &header(), false, &[]);
+        let r = rows(&no_maker, Some(100), &header(), false);
         assert!(!labels(&r).contains(&"Maker"), "{r:?}");
         assert_eq!(value(&r, "Boot").as_deref(), Some("Netboot"));
 
         // Nothing known but what the menu knows itself.
-        let r = rows(&Facts::default(), None, &Header::default(), false, &[]);
+        let r = rows(&Facts::default(), None, &Header::default(), false);
         assert_eq!(labels(&r), ["Boot"]);
         // Less than a GiB is in MiB.
         let small = Facts {
@@ -238,19 +226,9 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            value(&rows(&small, None, &Header::default(), true, &[]), "RAM").as_deref(),
+            value(&rows(&small, None, &Header::default(), true), "RAM").as_deref(),
             Some("512 MiB")
         );
-    }
-
-    #[test]
-    fn the_clipboard_text_is_label_colon_value_lines() {
-        let rows = vec![
-            ("Maker".to_string(), "HP".to_string()),
-            ("Boot".to_string(), "USB".to_string()),
-        ];
-        assert_eq!(clipboard_text(&rows), "Maker: HP\nBoot: USB\n");
-        assert_eq!(clipboard_text(&[]), "");
     }
 
     fn put(dir: &Path, name: &str, text: &str) {

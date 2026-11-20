@@ -172,7 +172,7 @@ pub const INFO_ROW_GAP: f32 = 2.0;
 pub const INFO_GROUP_GAP: f32 = 6.0;
 pub const INFO_INDENT: f32 = 12.0;
 pub const INFO_COL_GAP: f32 = 16.0;
-pub const INFO_TWO_COLUMNS_W: f32 = 900.0;
+pub const INFO_TWO_COLUMNS_W: f32 = 720.0;
 
 /// The widest an address field on the Network tab gets (points).
 pub const NET_FIELD_W: f32 = 320.0;
