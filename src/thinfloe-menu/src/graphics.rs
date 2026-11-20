@@ -4,6 +4,7 @@
 //! `vainfo` loads the GPU's VA driver, which takes a moment and must never
 //! stall the UI thread or a sampler.
 
+use crate::infopanel::Line;
 use crate::netdetail;
 use std::fs;
 use std::path::Path;
@@ -180,14 +181,42 @@ pub fn vaapi(cmd: &[String], timeout: Duration) -> Vaapi {
     }
 }
 
-/// `H.264 decode, encode`, `HEVC decode`, `AV1 encode`.
-pub fn codec_line(c: &Codec) -> String {
+/// What a codec can do: `decode, encode`, `decode`, `encode`.
+pub fn codec_ways(c: &Codec) -> String {
     let ways: Vec<&str> = [(c.decode, "decode"), (c.encode, "encode")]
         .iter()
         .filter(|(on, _)| *on)
         .map(|&(_, w)| w)
         .collect();
-    format!("{} {}", c.name, ways.join(", "))
+    ways.join(", ")
+}
+
+/// The band's lines: `Reading…` until the job answers; each GPU as rows
+/// `GPU` and `Driver` (or `GPU: none found`); then the codecs as a group
+/// `Video processing` with a row each, or `Video processing: not
+/// available` (the cause is for the log).
+pub fn info_lines(info: Option<&Info>) -> Vec<Line> {
+    let Some(info) = info else {
+        return vec![Line::note("Reading…")];
+    };
+    let mut out = Vec::new();
+    if info.gpus.is_empty() {
+        out.push(Line::row("GPU", "none found"));
+    }
+    for gpu in &info.gpus {
+        out.push(Line::row("GPU", gpu.shown_name()));
+        if let Some(driver) = &gpu.driver {
+            out.push(Line::row("Driver", driver.clone()));
+        }
+    }
+    match &info.vaapi {
+        Vaapi::Codecs(codecs) => out.push(Line::group(
+            "Video processing",
+            codecs.iter().map(|c| Line::row(c.name, codec_ways(c))).collect(),
+        )),
+        Vaapi::NotAvailable(_) => out.push(Line::row("Video processing", "not available")),
+    }
+    out
 }
 
 #[cfg(test)]
@@ -275,8 +304,8 @@ vainfo: Supported profile and entrypoints
             encode: false,
         };
         assert_eq!(parse_vainfo(SKYLAKE), vec![h264, decode("HEVC"), decode("VP9")]);
-        assert_eq!(codec_line(&h264), "H.264 decode, encode");
-        assert_eq!(codec_line(&decode("HEVC")), "HEVC decode");
+        assert_eq!(codec_ways(&h264), "decode, encode");
+        assert_eq!(codec_ways(&decode("HEVC")), "decode");
         // The order is fixed, not the listing's; an encoder alone counts.
         let av1 = "VAProfileAV1Profile0 : VAEntrypointEncSliceLP\nVAProfileVP9Profile2 : VAEntrypointVLD\n";
         let got = parse_vainfo(av1);
@@ -291,7 +320,7 @@ vainfo: Supported profile and entrypoints
                 }
             ]
         );
-        assert_eq!(codec_line(&got[1]), "AV1 encode");
+        assert_eq!(codec_ways(&got[1]), "encode");
         assert_eq!(parse_vainfo(""), Vec::new());
     }
 
@@ -456,6 +485,61 @@ vainfo: Supported profile and entrypoints
             return;
         }
         assert!(!gpus(Path::new("/sys"), Path::new("/nonexistent")).is_empty());
+    }
+
+    #[test]
+    fn the_band_lines_label_every_value() {
+        assert_eq!(info_lines(None), vec![Line::note("Reading…")]);
+        let gpu = |driver: Option<&str>| Gpu {
+            card: "card1".into(),
+            ids: (0x8086, 0x1616),
+            name: Some("Intel Corporation HD Graphics 5500".into()),
+            driver: driver.map(String::from),
+        };
+        let codecs = Vaapi::Codecs(vec![
+            Codec {
+                name: "H.264",
+                decode: true,
+                encode: true,
+            },
+            Codec {
+                name: "AV1",
+                decode: false,
+                encode: true,
+            },
+        ]);
+        assert_eq!(
+            info_lines(Some(&Info {
+                gpus: vec![gpu(Some("i915"))],
+                vaapi: codecs,
+            })),
+            vec![
+                Line::row("GPU", "Intel Corporation HD Graphics 5500"),
+                Line::row("Driver", "i915"),
+                Line::group(
+                    "Video processing",
+                    vec![Line::row("H.264", "decode, encode"), Line::row("AV1", "encode")]
+                ),
+            ]
+        );
+        let none = Vaapi::NotAvailable("vainfo exited with status 1".into());
+        assert_eq!(
+            info_lines(Some(&Info {
+                gpus: vec![gpu(None)],
+                vaapi: none.clone(),
+            })),
+            vec![
+                Line::row("GPU", "Intel Corporation HD Graphics 5500"),
+                Line::row("Video processing", "not available"),
+            ]
+        );
+        assert_eq!(
+            info_lines(Some(&Info {
+                gpus: Vec::new(),
+                vaapi: none,
+            }))[0],
+            Line::row("GPU", "none found")
+        );
     }
 
     #[test]
