@@ -5539,6 +5539,27 @@ mod tests {
         }
     }
 
+    /// The note on an empty server field goes once servers are typed.
+    #[test]
+    fn the_empty_servers_note_only_on_an_empty_field() {
+        use crate::network::NetEvent;
+        use crate::timeband::TimeEvent;
+        let mut net = two_networks();
+        net.event(
+            NetEvent::Time(TimeEvent::NtpText {
+                text: "ntp.example.ch".into(),
+                commit: false,
+            }),
+            false,
+        );
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "ntp.example.ch"), "{texts:?}");
+        assert!(
+            !has(&texts, "Empty: the servers DHCP sends and the Ubuntu pool."),
+            "{texts:?}"
+        );
+    }
+
     /// The clock line follows a status answer.
     #[test]
     fn the_time_band_shows_the_clock() {
