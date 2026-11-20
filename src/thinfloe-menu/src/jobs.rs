@@ -174,6 +174,8 @@ pub enum JobResult {
     StatusSaved(Result<(), String>),
     /// The public IP switch and lookup address were written.
     PublicIpSaved(Result<(), String>),
+    /// The time setting was written and handed to `thinfloe-time apply`.
+    TimeSaved(Result<(), TimeSaveFail>),
     /// An apply of the Keyboard tab ended; `kb` is what it applied.
     KeyboardApplied {
         kb: crate::config::Keyboard,
@@ -1101,6 +1103,56 @@ pub fn public_ip_save(paths: &Paths, prefs: &crate::publicip::PublicIpPrefs) -> 
             c.network.public_ip_url = prefs.url.clone();
         })
         .map(|_| ())
+}
+
+/// How a time save went wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeSaveFail {
+    /// `config.toml` was not written: nothing changed.
+    NotSaved(String),
+    /// Written, but the root tool failed: the initramfs installs it at the
+    /// next start.
+    NotApplied(String),
+}
+
+/// The tool's worst case: three tool calls of 20 s each.
+pub const TIME_APPLY_TIMEOUT: Duration = Duration::from_secs(70);
+const TIME_BYTES: usize = 64 * 1024;
+const TIME_LOG_SOURCE: &str = "time";
+
+/// Keep the time setting in `[time]` (and `generated/time`), then install
+/// it with `thinfloe-time apply` as root.
+pub fn time_save(paths: &Paths, cfg: &crate::config::TimeCfg, feed: &Arc<Feed>) -> Result<(), TimeSaveFail> {
+    lock(&paths.config)
+        .update(crate::generated::Table::Time, |c| c.time = cfg.clone())
+        .map_err(TimeSaveFail::NotSaved)?;
+    let (out, status, stderr) = capture_as(
+        &paths.time.tool,
+        &["apply".to_string()],
+        TIME_BYTES,
+        TIME_APPLY_TIMEOUT,
+        feed,
+        TIME_LOG_SOURCE,
+        |_| {},
+    )
+    .map_err(TimeSaveFail::NotApplied)?;
+    if status == Some(0) {
+        return Ok(());
+    }
+    Err(TimeSaveFail::NotApplied(
+        nettab::failed_reason(&out)
+            .or_else(|| {
+                stderr
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.chars().take(200).collect())
+            })
+            .unwrap_or_else(|| match status {
+                Some(n) => format!("The time tool did not answer (exit {n})."),
+                None => "The time tool did not answer (killed).".to_string(),
+            }),
+    ))
 }
 
 /// How long the composer or labwc may take to answer a keyboard change.
@@ -2650,6 +2702,47 @@ mod tests {
         let net = lock(&p.config).cfg.network.clone();
         assert!(net.public_ip);
         assert_eq!(net.nets(), home_net().nets(), "the rest of [network] stays");
+    }
+
+    /// The tool runs after generated/time is written, and its reason
+    /// reaches the caller; a refused store write never runs it.
+    #[test]
+    fn time_save_writes_then_applies() {
+        let d = dir("time-save");
+        let mut p = net_home(&d, FAILS, home_net());
+        let time_file = lock(&p.config).dir.generated_file("time");
+        let tool = d.join("thinfloe-time");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\ngrep -q '^zone=Europe/Zurich$' '{}' || exit 3\necho '{{\"result\": \"ok\", \"reason\": \"\"}}'\n",
+                time_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p.time.tool = vec![tool.to_string_lossy().into_owned()];
+        let feed = Arc::new(Feed::default());
+        let cfg = crate::config::TimeCfg {
+            zone: Some("Europe/Zurich".into()),
+            ntp: Vec::new(),
+        };
+        assert_eq!(time_save(&p, &cfg, &feed), Ok(()));
+        assert_eq!(lock(&p.config).cfg.time, cfg);
+        fs::write(
+            &tool,
+            "#!/bin/sh\necho '{\"result\": \"failed\", \"reason\": \"The time service did not take the servers.\"}'\nexit 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            time_save(&p, &crate::config::TimeCfg::default(), &feed),
+            Err(TimeSaveFail::NotApplied(
+                "The time service did not take the servers.".into()
+            ))
+        );
+        // Saved all the same: the next start installs it.
+        assert_eq!(lock(&p.config).cfg.time, crate::config::TimeCfg::default());
+        assert!(!time_file.exists());
     }
 
     /// `net_paths` with a shipped wired default and the settings `net`.

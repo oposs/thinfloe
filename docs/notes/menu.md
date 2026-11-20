@@ -302,7 +302,7 @@ regions of `zone.tab`) and, for a region, its cities (`_` shown as a
 space, placeholder "Choose a city"); type-ahead on the first letter makes
 both searchable, shadcn-egui has no combobox. `Automatic`, `UTC` and a
 city save at once; a region alone saves nothing. "NTP servers" saves on
-Enter, on focus loss and when the tab is left, Escape restores, and a
+Enter, on focus loss and when the tab is left, Escape and Back restore, and a
 refused value is named below the field and not saved, as the lookup
 address; the two fields share the pending-event slot. A save writes
 `[time]` and runs `sudo -n thinfloe-time apply` (`jobs::time_save`), one

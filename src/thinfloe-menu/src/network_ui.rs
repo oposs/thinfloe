@@ -1,5 +1,6 @@
 //! Drawing the Settings screen's Network tab: the connections now, the
-//! wired address, the saved WiFi networks and Apply, and the two dialogs
+//! wired address, the saved WiFi networks and Apply, the Time band, and
+//! the two dialogs
 //! over it (add a network, confirm an Apply during a remote session).
 //! Everything that decides something lives in network.rs; this file only
 //! paints it and reports clicks.
@@ -10,6 +11,8 @@ use crate::netfiles::FileState;
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
 use crate::publicip;
+use crate::timeband::TimeEvent;
+use crate::timetab;
 use crate::ui::{self, GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
 use egui::{Rect, RichText, Sense, Ui};
 use shadcn_egui::Theme;
@@ -76,8 +79,12 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
                     band(ui, &t, inner, between, "DNS", |ui| dns(ui, &t, net, &mut event));
                 });
             }
-            // Saved at once and unrelated to the network files: it takes
-            // clicks before they are read and while an Apply runs.
+            // The Time band and the public IP band are saved at once and
+            // unrelated to the network files: they take clicks before the
+            // files are read and while an Apply runs.
+            band(ui, &t, inner, between, "Time", |ui| {
+                time(ui, &t, net, pending.as_ref(), &mut event, &mut url)
+            });
             band(ui, &t, inner, between, "Public IP address", |ui| {
                 public_ip(ui, &t, net, pending.as_ref(), &mut event, &mut url)
             });
@@ -157,6 +164,14 @@ fn merge_url(kept: Option<NetEvent>, now: Option<NetEvent>) -> Option<NetEvent> 
     match (kept, now) {
         (kept, None) => kept,
         (Some(NetEvent::PublicIpUrlCancel), _) => Some(NetEvent::PublicIpUrlCancel),
+        (Some(NetEvent::Time(TimeEvent::NtpCancel)), _) => Some(NetEvent::Time(TimeEvent::NtpCancel)),
+        (
+            Some(NetEvent::Time(TimeEvent::NtpText { commit: was, .. })),
+            Some(NetEvent::Time(TimeEvent::NtpText { text, commit })),
+        ) => Some(NetEvent::Time(TimeEvent::NtpText {
+            text,
+            commit: was || commit,
+        })),
         (Some(NetEvent::PublicIpUrl { commit: was, .. }), Some(NetEvent::PublicIpUrl { text, commit })) => {
             Some(NetEvent::PublicIpUrl {
                 text,
@@ -180,6 +195,93 @@ fn url_field_event(changed: Option<String>, lost_focus: bool, escape: bool, show
         text: changed.unwrap_or_else(|| shown.to_string()),
         commit: lost_focus,
     })
+}
+
+/// `url_field_event` for the NTP servers field.
+fn ntp_field_event(changed: Option<String>, lost_focus: bool, escape: bool, shown: &str) -> Option<NetEvent> {
+    let e = match url_field_event(changed, lost_focus, escape, shown)? {
+        NetEvent::PublicIpUrl { text, commit } => TimeEvent::NtpText { text, commit },
+        _ => TimeEvent::NtpCancel,
+    };
+    Some(NetEvent::Time(e))
+}
+
+/// The Time band: the zone selects, the NTP servers field and the clock's
+/// sync. Saved at once; the field's event goes to `field`, as the lookup
+/// address's does, and `pending` is its event kept from the last frame.
+fn time(
+    ui: &mut Ui,
+    t: &Theme,
+    net: &NetTab,
+    pending: Option<&NetEvent>,
+    event: &mut Option<NetEvent>,
+    field: &mut Option<NetEvent>,
+) {
+    let band = net.time();
+    let st = &net.details().time;
+    let indent = brand::FORM_LABEL_W + ui.spacing().item_spacing.x;
+    let line = |ui: &mut Ui, text: &str| note(ui, indent, RichText::new(text).color(t.palette().muted_foreground));
+    ui.add_enabled_ui(!band.busy(), |ui| {
+        form_row(ui, t, "Time zone", |ui| {
+            let regions = band.regions();
+            let mut r = band.region_index();
+            if ui.add(Select::new("tf-net-tz-region", &mut r, &regions)).changed() {
+                *event = Some(NetEvent::Time(TimeEvent::Region(r)));
+            }
+            let cities = band.cities();
+            if !cities.is_empty() {
+                let mut c = band.city_index().unwrap_or(cities.len());
+                let select = Select::new("tf-net-tz-city", &mut c, &cities).placeholder("Choose a city");
+                if ui.add(select).changed() {
+                    *event = Some(NetEvent::Time(TimeEvent::City(c)));
+                }
+            }
+        });
+    });
+    if net.status_known() {
+        line(ui, &timetab::zone_line(st, jiff::Timestamp::now()));
+    }
+    if let Some(n) = timetab::session_tz_note(std::env::var("TZ").ok().as_deref()) {
+        line(ui, &n);
+    }
+    let shown = match pending {
+        Some(NetEvent::Time(TimeEvent::NtpText { text, .. })) => text.as_str(),
+        _ => band.ntp_text(),
+    };
+    ui.add_enabled_ui(!band.busy(), |ui| {
+        form_row(ui, t, "NTP servers", |ui| {
+            let mut text = shown.to_string();
+            let r = ui.add(
+                Input::new(&mut text)
+                    .hint("ntp.example.ch, 10.0.0.1")
+                    .max_width(brand::NET_FIELD_W)
+                    .id_salt("tf-net-ntp"),
+            );
+            let changed = r.changed().then_some(text);
+            if let Some(e) = ntp_field_event(changed, r.lost_focus(), escape(ui), shown) {
+                *field = Some(e);
+            }
+        });
+    });
+    match crate::timecfg::parse_servers(shown) {
+        Err(e) => line(ui, &e),
+        Ok(_) => line(ui, "Empty: the servers DHCP sends and the Ubuntu pool."),
+    }
+    if band.busy() {
+        line(ui, "Applying…");
+    }
+    if let Some(e) = band.error() {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            warn(ui, t, e);
+        });
+    }
+    if net.status_known() {
+        form_row(ui, t, "Clock", |ui| muted(ui, t, timetab::clock_line(st)));
+        if let Some(s) = timetab::servers_line(st) {
+            line(ui, &s);
+        }
+    }
 }
 
 /// A TILE band with its heading, as the rows of the Packages tab.
@@ -384,7 +486,10 @@ fn public_ip(
                 .id_salt("tf-net-public-ip-url"),
         );
         let changed = r.changed().then_some(text);
-        *url = url_field_event(changed, r.lost_focus(), escape(ui), shown);
+        // The Time band's field may have reported into the same slot.
+        if let Some(e) = url_field_event(changed, r.lost_focus(), escape(ui), shown) {
+            *url = Some(e);
+        }
     });
     let refused = !shown.is_empty() && !publicip::url_ok(shown);
     if refused {

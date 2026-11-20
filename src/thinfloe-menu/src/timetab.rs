@@ -374,7 +374,10 @@ mod tests {
             zone_line(&st("America/New_York", ZoneSource::Dhcp), winter),
             "In use: America/New_York (UTC-05:00), from DHCP."
         );
-        assert_eq!(zone_line(&st("UTC", ZoneSource::Default), winter), "UTC: DHCP sends no time zone.");
+        assert_eq!(
+            zone_line(&st("UTC", ZoneSource::Default), winter),
+            "UTC: DHCP sends no time zone."
+        );
         assert_eq!(
             zone_line(&st("Asia/Kolkata", ZoneSource::Default), winter),
             "In use: Asia/Kolkata (UTC+05:30)."
@@ -383,9 +386,18 @@ mod tests {
 
     #[test]
     fn sources_of_the_zone() {
-        assert_eq!(source_of("Europe/Zurich", Some("Europe/Zurich"), Some("Europe/Zurich")), ZoneSource::Menu);
-        assert_eq!(source_of("Europe/Zurich", None, Some("Europe/Zurich")), ZoneSource::Dhcp);
-        assert_eq!(source_of("Europe/Zurich", Some("Asia/Tokyo"), None), ZoneSource::Default);
+        assert_eq!(
+            source_of("Europe/Zurich", Some("Europe/Zurich"), Some("Europe/Zurich")),
+            ZoneSource::Menu
+        );
+        assert_eq!(
+            source_of("Europe/Zurich", None, Some("Europe/Zurich")),
+            ZoneSource::Dhcp
+        );
+        assert_eq!(
+            source_of("Europe/Zurich", Some("Asia/Tokyo"), None),
+            ZoneSource::Default
+        );
     }
 
     #[test]

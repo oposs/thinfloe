@@ -189,6 +189,8 @@ pub enum Job {
     StatusSave(Option<String>),
     /// Write the public IP switch and lookup address.
     PublicIpSave(crate::publicip::PublicIpPrefs),
+    /// Write `[time]` and install it as root.
+    TimeSave(crate::config::TimeCfg),
     /// Write the keyboard choice and tell the compositor.
     KeyboardApply(crate::config::Keyboard),
     /// Remove the migration report from `[notice]`.
@@ -306,6 +308,9 @@ pub struct Menu {
     public_ip_running: Option<crate::publicip::PublicIpPrefs>,
     /// The public IP write for when the running one ends.
     public_ip_next: Option<crate::publicip::PublicIpPrefs>,
+    /// The time save that runs, and the one waiting for it.
+    time_running: Option<crate::config::TimeCfg>,
+    time_next: Option<crate::config::TimeCfg>,
     /// A Save-On-Exit program ended while the end-of-session question
     /// waited for an add-on job: the save is done only if the person stays.
     deferred_save: bool,
@@ -387,6 +392,8 @@ impl Menu {
             status_next: None,
             public_ip_running: None,
             public_ip_next: None,
+            time_running: None,
+            time_next: None,
             deferred_save: false,
             last_check: None,
             retry_marker: RetryMarker::memory(),
@@ -415,8 +422,10 @@ impl Menu {
     pub fn set_usb_boot(&mut self, usb: bool) {
         self.usb_boot = usb;
         let public_ip = self.network.public_ip().clone();
+        let time = std::mem::take(self.network.time_mut());
         self.network = NetTab::new(!usb);
         self.network.set_public_ip(public_ip);
+        *self.network.time_mut() = time;
     }
 
     /// Show `tab` of the Settings screen. Leaving the Network tab is leaving
@@ -433,8 +442,30 @@ impl Menu {
             text: self.network.public_ip_url_text().to_string(),
             commit: true,
         };
-        let r = self.network.event(commit, false)?;
+        // Only the field that had the focus can hold uncommitted text.
+        let r = match self.network.event(commit, false) {
+            Some(r) => r,
+            None => {
+                let ntp = NetEvent::Time(crate::timeband::TimeEvent::NtpText {
+                    text: self.network.time().ntp_text().to_string(),
+                    commit: true,
+                });
+                self.network.event(ntp, false)?
+            }
+        };
         self.net_request(r)
+    }
+
+    /// Start a time save, or keep it for when the running one ends; a
+    /// later one replaces it, as for the public IP settings.
+    fn write_time(&mut self, cfg: crate::config::TimeCfg) -> Option<Effect> {
+        self.network.time_mut().set_busy(true);
+        if self.time_running.is_some() {
+            self.time_next = Some(cfg);
+            return None;
+        }
+        self.time_running = Some(cfg.clone());
+        Some(Effect::Start(Job::TimeSave(cfg)))
     }
 
     /// Start a public IP write, or keep it for when the running one ends;
@@ -457,6 +488,7 @@ impl Menu {
             NetRequest::Apply(change) => Job::NetApply { change },
             NetRequest::TakeOver(which) => Job::NetTakeOver { which },
             NetRequest::SavePublicIp(prefs) => return self.write_public_ip(prefs),
+            NetRequest::SaveTime(cfg) => return self.write_time(cfg),
         };
         Some(Effect::Start(job))
     }
@@ -1195,7 +1227,7 @@ impl Menu {
             self.logout = Some(Logout::Failed { message });
             return None;
         }
-        if self.save.running || self.status_writing || self.public_ip_running.is_some() {
+        if self.save.running || self.status_writing || self.public_ip_running.is_some() || self.time_running.is_some() {
             // The logout save follows; a queued one would only repeat it.
             // A status layout or public IP write still running (or queued
             // behind one) ends first: the save started beside it and the
@@ -1468,6 +1500,31 @@ impl Menu {
                 if let Some(next) = self.public_ip_next.take() {
                     return self.write_public_ip(next);
                 }
+                match self.logout {
+                    Some(Logout::WaitSave) if !self.save.running => self.logout_after_jobs(now),
+                    _ => None,
+                }
+            }
+            JobResult::TimeSaved(r) => {
+                use crate::jobs::TimeSaveFail;
+                match &r {
+                    Err(TimeSaveFail::NotSaved(e)) => self
+                        .log
+                        .note(Kind::Warn, format!("The time setting could not be saved: {e}.")),
+                    Err(TimeSaveFail::NotApplied(e)) => self
+                        .log
+                        .note(Kind::Warn, format!("The time setting was saved but not applied: {e}.")),
+                    Ok(()) => {}
+                }
+                let ran = self.time_running.take()?;
+                if matches!(r, Err(TimeSaveFail::NotSaved(_))) {
+                    self.time_next = None;
+                }
+                self.network.time_mut().saved(&ran, r);
+                if let Some(next) = self.time_next.take() {
+                    return self.write_time(next);
+                }
+                self.network.time_mut().set_busy(false);
                 match self.logout {
                     Some(Logout::WaitSave) if !self.save.running => self.logout_after_jobs(now),
                     _ => None,
@@ -2131,6 +2188,58 @@ mod tests {
         // Nothing typed: changing tabs saves nothing.
         assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Network)), None);
         assert_eq!(m.settings(SettingsEvent::Tab(SettingsTab::Keyboard)), None);
+    }
+
+    #[test]
+    fn leaving_the_network_tab_commits_the_ntp_servers() {
+        use crate::timeband::TimeEvent;
+        let mut m = net_menu(false);
+        let typed = NetEvent::Time(TimeEvent::NtpText {
+            text: "ntp.example.ch".into(),
+            commit: false,
+        });
+        assert_eq!(net(&mut m, typed), None);
+        assert_eq!(
+            m.settings(SettingsEvent::Tab(SettingsTab::Screen)),
+            Some(Effect::Start(Job::TimeSave(crate::config::TimeCfg {
+                zone: None,
+                ntp: vec!["ntp.example.ch".into()],
+            })))
+        );
+    }
+
+    #[test]
+    fn newer_time_save_waits_for_the_running_one() {
+        use crate::config::TimeCfg;
+        use crate::jobs::TimeSaveFail;
+        use crate::timeband::TimeEvent;
+        let now = Instant::now();
+        let mut m = net_menu(false);
+        let utc = TimeCfg {
+            zone: Some("UTC".into()),
+            ntp: Vec::new(),
+        };
+        assert_eq!(
+            net(&mut m, NetEvent::Time(TimeEvent::Region(1))),
+            Some(Effect::Start(Job::TimeSave(utc.clone())))
+        );
+        assert!(m.network.time().busy());
+        // Automatic while UTC is applied: it waits, then starts.
+        assert_eq!(net(&mut m, NetEvent::Time(TimeEvent::Region(0))), None);
+        assert_eq!(
+            m.finished(JobResult::TimeSaved(Ok(())), now),
+            Some(Effect::Start(Job::TimeSave(TimeCfg::default())))
+        );
+        assert_eq!(
+            m.finished(
+                JobResult::TimeSaved(Err(TimeSaveFail::NotSaved("disk full".into()))),
+                now
+            ),
+            None
+        );
+        assert!(!m.network.time().busy());
+        assert_eq!(m.network.time().error(), Some("disk full"));
+        assert_eq!(m.network.time().cfg(), &utc);
     }
 
     #[test]

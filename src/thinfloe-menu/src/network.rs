@@ -60,6 +60,8 @@ pub enum NetEvent {
     TakeOver(&'static str),
     /// The public IP switch; saved at once.
     PublicIp(bool),
+    /// The Time band; saved at once.
+    Time(crate::timeband::TimeEvent),
     /// The lookup address field as typed. `commit`: it lost focus or took
     /// Enter, and the address is saved unless it is refused. The text
     /// rides along so a change and a commit of the same frame are one
@@ -82,6 +84,8 @@ pub enum NetRequest {
     TakeOver(&'static str),
     /// Write the public IP switch and lookup address.
     SavePublicIp(PublicIpPrefs),
+    /// Write `[time]` and install it.
+    SaveTime(crate::config::TimeCfg),
 }
 
 /// The wired part as the form shows it: the select and the two texts.
@@ -209,6 +213,8 @@ pub struct NetTab {
     public_ip_url_text: String,
     /// The reason the last public IP save failed, while `error` shows it.
     public_ip_error: Option<String>,
+    /// The Time band.
+    time: crate::timeband::TimeBand,
 }
 
 impl NetTab {
@@ -240,7 +246,16 @@ impl NetTab {
             public_ip_stored: PublicIpPrefs::default(),
             public_ip_url_text: String::new(),
             public_ip_error: None,
+            time: crate::timeband::TimeBand::default(),
         }
+    }
+
+    pub fn time(&self) -> &crate::timeband::TimeBand {
+        &self.time
+    }
+
+    pub fn time_mut(&mut self) -> &mut crate::timeband::TimeBand {
+        &mut self.time
     }
 
     /// The public IP settings as `config.toml` holds them.
@@ -355,6 +370,10 @@ impl NetTab {
             NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel
         ) {
             return self.public_ip_event(e);
+        }
+        // The Time band, like the public IP band, needs no network file.
+        if let NetEvent::Time(t) = e {
+            return self.time.event(t).map(NetRequest::SaveTime);
         }
         if self.applying || self.taking_over.is_some() || self.wifi.is_none() || self.wired.is_none() {
             return None;
@@ -503,7 +522,9 @@ impl NetTab {
                 self.error = None;
                 Some(NetRequest::TakeOver(which))
             }
-            NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel => None,
+            NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel | NetEvent::Time(_) => {
+                None
+            }
         }
     }
 
@@ -734,6 +755,8 @@ impl NetTab {
         self.error = None;
         // A lookup address typed and not taken goes too; it was never saved.
         self.public_ip_url_text = self.public_ip.url.clone();
+        // So do NTP servers typed and not taken.
+        self.time.event(crate::timeband::TimeEvent::NtpCancel);
         dropped
     }
 
@@ -1816,5 +1839,41 @@ mod tests {
         t.drop_draft();
         assert_eq!(t.public_ip_url_text(), "");
         assert!(!t.public_ip_url_refused());
+    }
+
+    #[test]
+    fn the_time_band_works_outside_an_apply() {
+        use crate::config::TimeCfg;
+        use crate::timeband::TimeEvent;
+        let utc = TimeCfg {
+            zone: Some("UTC".into()),
+            ntp: Vec::new(),
+        };
+        // Before the files are read.
+        let mut t = NetTab::new(false);
+        assert_eq!(
+            t.event(NetEvent::Time(TimeEvent::Region(1)), false),
+            Some(NetRequest::SaveTime(utc.clone()))
+        );
+        // While an Apply runs.
+        let mut t = tab();
+        t.event(NetEvent::Forget("Home".into()), false);
+        assert!(matches!(t.event(NetEvent::Apply, false), Some(NetRequest::Apply(_))));
+        assert!(t.applying());
+        assert_eq!(
+            t.event(NetEvent::Time(TimeEvent::Region(1)), false),
+            Some(NetRequest::SaveTime(utc))
+        );
+        // Back drops servers that were typed and not taken.
+        let mut t = tab();
+        t.event(
+            NetEvent::Time(TimeEvent::NtpText {
+                text: "ntp.example.ch".into(),
+                commit: false,
+            }),
+            false,
+        );
+        t.drop_draft();
+        assert_eq!(t.time().ntp_text(), "");
     }
 }
