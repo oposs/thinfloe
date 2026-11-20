@@ -68,7 +68,8 @@ def log(what: str, why: str) -> None:
 
 def take_lock(state):
     """The locked fd of the battery reader's lock file, waiting up to
-    LOCK_WAIT; None (logged) when it cannot be had. The wait is short so a
+    LOCK_WAIT; None when it cannot be had. A busy lock is not logged here
+    (the caller logs it once per fault); a real open or flock error is. The wait is short so a
     long battery read does not stall the key. Closing the fd frees the lock."""
     lockpath = state / "lock"
     try:
@@ -84,7 +85,6 @@ def take_lock(state):
         except BlockingIOError:
             if time.monotonic() >= give_up:
                 os.close(lockfd)
-                log(str(lockpath), "lock busy")
                 return None
             time.sleep(LOCK_POLL)
         except OSError as e:
