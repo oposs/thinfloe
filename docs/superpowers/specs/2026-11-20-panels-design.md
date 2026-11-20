@@ -46,10 +46,23 @@ The same reader drops, on the Network tab, the MAC address
 driver showed, because it is a symlink, not an attribute read. This matches
 the owner's report: the Network panel showed a bare "iwlwifi".
 
-Thin-client evidence: the brief allows read-only ssh, but this session's
-permission system refused the call. The controller was asked for the
-listing; the plan's task 1 copies it into `testdata/` once it is there. The
-cause above does not depend on the GPU: any PCI GPU fails the same way.
+Thin-client evidence (owner's test thin client, 4.6.0, read-only ssh
+approved by the owner, 2026-11-20; listing in
+`/scratch/oetiker/claude-tmp/ui-round/panels/drm.txt`):
+
+- `/sys/class/drm`: `card1` (no `card0`), `card1-DP-1`, `card1-HDMI-A-1`,
+  `card1-HDMI-A-2`, `renderD128`, all under `pci0000:00/0000:00:02.0`.
+- `card1/device/vendor` is `0x8086`, `device` `0x1616` (Broadwell-U GT2,
+  HD Graphics 5500), driver `i915`; `stat -L` gives **4096** for `vendor`.
+- Network: `enp3s0` `fc:aa:14:da:04:d0`, `0x10ec:0x8168`, `r8169`;
+  `wlp2s0` `f4:06:69:0c:1d:c7`, `0x8086:0x08b3` (Wireless 3160),
+  `iwlwifi`; `address` also 4096.
+- `/dev/dri/card1` `root:video`, `renderD128` `root:render`, both with an
+  ACL (`+`); `vainfo --display drm` as tfuser works (iHD 26.1.2): H.264,
+  MPEG-2, JPEG, VP8 decode. So VA-API was fine; only the GPU rows were
+  missing. tfuser has logind session 1 on seat0, tty1.
+
+The cause does not depend on the GPU: any PCI GPU fails the same way.
 
 Not touched, reported: `status/hardware.rs` reads sysfs with an 8 KiB cap,
 which works only because 4096 < 8192 (`status/` belongs to another agent in
