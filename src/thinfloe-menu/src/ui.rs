@@ -5560,6 +5560,24 @@ mod tests {
         );
     }
 
+    /// A region picked over an unknown zone shows in the region select.
+    #[test]
+    fn a_region_picked_over_an_unknown_zone_shows() {
+        use crate::timeband::TimeEvent;
+        let mut net = two_networks();
+        net.time_mut()
+            .set_zones(crate::timecfg::parse_zone_tab("CH\t+0\tEurope/Zurich\n"));
+        net.time_mut().set_cfg(crate::config::TimeCfg {
+            zone: Some("Europe/Gone".into()),
+            ntp: Vec::new(),
+        });
+        assert_eq!(net.time_mut().event(TimeEvent::Region(2)), None);
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "Europe"), "{texts:?}");
+        assert!(has(&texts, "Choose a city"), "{texts:?}");
+        assert!(!has(&texts, "Automatic"), "{texts:?}");
+    }
+
     /// Over an unknown zone the region select shows Automatic, and picking
     /// Automatic in it is a change the band can save.
     #[test]

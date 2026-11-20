@@ -224,9 +224,10 @@ fn time(
     ui.add_enabled_ui(!band.busy(), |ui| {
         form_row(ui, t, "Time zone", |ui| {
             let regions = band.regions();
-            // Over an unknown zone no entry is chosen and the placeholder
-            // reads Automatic, so picking Automatic is a change.
-            let mut r = if band.unknown_zone().is_some() {
+            // Over an unknown zone, until a region is picked, no entry is
+            // chosen and the placeholder reads Automatic, so picking
+            // Automatic is a change.
+            let mut r = if band.unknown_zone().is_some() && !band.region_picked() {
                 regions.len()
             } else {
                 band.region_index()

@@ -67,6 +67,11 @@ impl TimeBand {
         (!self.zones.regions.is_empty() && !self.zones.contains(z)).then_some(z)
     }
 
+    /// A region is picked whose city is not chosen yet.
+    pub fn region_picked(&self) -> bool {
+        self.region_pick.is_some()
+    }
+
     /// The setting as the band shows it: an unknown zone is automatic.
     fn shown(&self) -> TimeCfg {
         let mut cfg = self.cfg.clone();
