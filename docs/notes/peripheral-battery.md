@@ -132,6 +132,14 @@ the lock, and a reading the watcher runs itself (its own listener fills
 with the reader's replies). A connect event lost beyond 64 waits for the
 timer.
 
+## Second user: the Bolt mic key
+
+`logitech-keys` (see [media-keys.md](media-keys.md), Logi Bolt keyboards)
+imports this program's HID++ code (node lookup, transport, receiver registers,
+feature lookup) and takes the same lock file, under its own software id
+`0x0B`, so replies to its requests are not taken for the reader's. A change to
+that code needs `test_logitech_keys.py` run as well.
+
 ## Tests
 
 `test/unit/test_peripheral_battery.py` (a fake receiver that answers as the

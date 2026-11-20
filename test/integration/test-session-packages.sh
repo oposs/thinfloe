@@ -1184,6 +1184,67 @@ else
     fail=1
 fi
 
+# Logi Bolt mic key: thinfloe-logitech-keys.service sends F20 through
+# /dev/uinput. Like the battery watcher it is not enabled (the udev rule
+# starts it), declares no Before= and has no [Install]. Without uinput in
+# the kernel it would restart for ever.
+LK="$DPKG_TMP/lk"
+if unsquashfs -no-xattrs -d "$LK" "$SQSH" \
+        etc/systemd/system/thinfloe-logitech-keys.service \
+        etc/udev/rules.d/90-thinfloe-peripheral-battery.rules \
+        usr/libexec/thinfloe/logitech-keys >/dev/null 2>&1 &&
+   [[ -f "$LK/etc/systemd/system/thinfloe-logitech-keys.service" ]]; then
+    LKU="$LK/etc/systemd/system/thinfloe-logitech-keys.service"
+    if [[ -x "$LK/usr/libexec/thinfloe/logitech-keys" ]]; then
+        echo "ok   - the Bolt key program is executable"
+    else
+        echo "FAIL - /usr/libexec/thinfloe/logitech-keys is missing or not executable"
+        fail=1
+    fi
+    if grep -qx 'Type=simple' "$LKU" &&
+       grep -qx 'ExecStart=/usr/libexec/thinfloe/logitech-keys' "$LKU" &&
+       grep -qx 'Restart=on-failure' "$LKU" &&
+       grep -qx 'RestartSec=5' "$LKU"; then
+        echo "ok   - the Bolt key service runs the program and restarts on failure"
+    else
+        echo "FAIL - the Bolt key service runs something else or does not restart on failure"
+        fail=1
+    fi
+    if grep -q '^Before=' "$LKU"; then
+        echo "FAIL - the Bolt key service declares Before= (ordering cycle risk)"
+        fail=1
+    else
+        echo "ok   - the Bolt key service declares no Before="
+    fi
+    if grep -q '^\[Install\]' "$LKU" || grep -qE 'etc/systemd/system/[^/]*\.wants/thinfloe-logitech-keys\.service$' "$LIST"; then
+        echo "FAIL - the Bolt key service is enabled or has [Install]; a machine with no Logitech device would run it"
+        fail=1
+    else
+        echo "ok   - the Bolt key service is not enabled; the udev rule starts it"
+    fi
+    if grep -qE '^ACTION!="remove".*ENV\{SYSTEMD_WANTS\}\+="thinfloe-logitech-keys\.service"' \
+            "$LK/etc/udev/rules.d/90-thinfloe-peripheral-battery.rules"; then
+        echo "ok   - the udev rule wants the Bolt key service"
+    else
+        echo "FAIL - the udev rule does not want thinfloe-logitech-keys.service"
+        fail=1
+    fi
+else
+    echo "FAIL - cannot extract the Bolt key service from $SQSH"
+    fail=1
+fi
+# uinput: built in (modules.builtin) or a module that has a devname alias,
+# which makes udev create /dev/uinput; else the service restarts for ever.
+if unsquashfs -no-xattrs -d "$DPKG_TMP/lkm" "$SQSH" 'usr/lib/modules/*/modules.builtin' \
+        'usr/lib/modules/*/modules.devname' >/dev/null 2>&1 &&
+   { grep -qs '/uinput\.ko' "$DPKG_TMP"/lkm/usr/lib/modules/*/modules.builtin ||
+     grep -qs '^uinput ' "$DPKG_TMP"/lkm/usr/lib/modules/*/modules.devname; }; then
+    echo "ok   - the kernel provides /dev/uinput (built in or by devname alias)"
+else
+    echo "FAIL - the kernel has no uinput built in or in modules.devname; the Bolt key service would restart for ever"
+    fail=1
+fi
+
 # The Keyboard tab reads the layout list from xkb-data; named in the Dockerfile.
 # usr/share/X11/xkb is a link to ../xkeyboard-config-2; without
 # -follow-symlinks unsquashfs extracts nothing and still exits 0.

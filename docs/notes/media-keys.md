@@ -216,6 +216,40 @@ for tfuser comes from the package's
 `/usr/lib/udev/rules.d/60-ddcutil-i2c.rules`, which tags the i2c devices of
 display-class PCI devices `uaccess`. The image has no polkit.
 
+## Logi Bolt keyboards
+
+The microphone mute key of a Logitech keyboard on a Logi Bolt receiver (the
+MX Mechanical, for one) sends no key code the kernel reports: the keyboard
+keeps it to itself until a program asks for it over HID++. So no keybinding
+and no program ever saw it. `/usr/libexec/thinfloe/logitech-keys` (a root
+program, unit `thinfloe-logitech-keys.service`) asks the keyboard to divert
+control `0x011C` (microphone mute) to the host, and sends `KEY_F20` through
+`/dev/uinput` (device "ThinFloe Logitech keys") while the key is down. The
+composer's microphone binding listens for F20 when "Volume keys control this
+machine" is on; with the switch off F20 reaches the program in front, which
+is how ThinLinc gets the key and passes XF86AudioMicMute to the remote side.
+F20, not `KEY_MICMUTE`: XKB maps both to XF86AudioMicMute (`<FK20>` and
+`<I256>`), but X11 key codes end at 255, so `<I256>` cannot reach Xwayland or
+ThinLinc; `<FK20>` is code 198. Laptops send their microphone key as F20 for
+the same reason.
+
+The unit is not enabled; `90-thinfloe-peripheral-battery.rules` starts it
+with the battery watcher when a Logitech hidraw node appears. It shares the
+battery reader's HID++ code and lock file; the kernel needs uinput (built
+in; `test-session-packages.sh` checks that `/dev/uinput` will exist). The
+diversion is undone when the service stops, and made again when the
+keyboard wakes or the receiver is plugged in again. Tests:
+`test/unit/test_logitech_keys.py` with fake nodes, `test-session-packages.sh`.
+
+Owner checks on hardware:
+
+- The key with the switch on: the OSD shows and the microphone mark appears
+  and goes.
+- The key with the switch off inside a ThinLinc session: the remote side sees
+  XF86AudioMicMute.
+- The key still works after the keyboard sleeps and wakes.
+- The key still works after the receiver is plugged in again.
+
 ## Tests
 
 - `src/thinfloe-menu/src/osd/` unit tests: placement and drawing (`surface.rs`,

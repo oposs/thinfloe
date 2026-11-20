@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- The microphone mute key of Logitech keyboards on a Logi Bolt receiver, such as the MX Mechanical, did nothing. It now mutes the microphones when "Volume keys control this machine" is on, and otherwise reaches the program in front, ThinLinc included.
 - In a fresh clone of the repository, `make` stopped at once with `mkdir: cannot create directory 'artifacts': File exists`, because `artifacts` was a link to a directory on the developer's machine. `artifacts` is now an ordinary directory that the build makes; a link to share it between checkouts can still be made by hand, and a link whose target is missing now stops `make` with a message that names the target.
 - `make clean && make`, as the README shows it, stopped after `make clean` with exit code 1 when `artifacts` is a link. `make clean` now exits 0: it removes the container stamps, leaves the link target alone unless `FORCE=1` is given, and the next `make` builds everything again.
 - A build could ship a damaged tile menu program without notice; the build now compares the installed program with the one it compiled and stops when they differ.
