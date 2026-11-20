@@ -116,6 +116,8 @@ mod tests {
         let mut spacing = None;
         let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
             let t = Theme::current(ui.ctx());
+            // Neither the bands' gap nor the theme's, or a leak would go unseen.
+            ui.spacing_mut().item_spacing.y = TILE_GAP + 7.0;
             let before = ui.spacing().item_spacing;
             bands(ui, &t, 400.0, &[&panel, &panel]);
             spacing = Some((before, ui.spacing().item_spacing));
