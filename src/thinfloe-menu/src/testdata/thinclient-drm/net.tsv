@@ -1,0 +1,4 @@
+# Owner's test thin client, ThinFloe 4.6.0, read 2026-11-20 over ssh.
+# /sys/class/net entry, its device (resolved, under /sys), address, vendor, device, driver.
+enp3s0	devices/pci0000:00/0000:00:1c.3/0000:03:00.0	fc:aa:14:da:04:d0	0x10ec	0x8168	r8169
+wlp2s0	devices/pci0000:00/0000:00:1c.2/0000:02:00.0	f4:06:69:0c:1d:c7	0x8086	0x08b3	iwlwifi

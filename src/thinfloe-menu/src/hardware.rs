@@ -13,7 +13,7 @@
 //! read a directory.
 
 use crate::battery::sanitise;
-use crate::bounded::read_text;
+use crate::bounded::{read_attr, read_text};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +25,8 @@ pub const EVERY: Duration = Duration::from_secs(5);
 pub const SOON: Duration = Duration::from_secs(1);
 /// How often a resting thread looks whether it may read again.
 const LOOK: Duration = Duration::from_secs(1);
-/// A sysfs attribute. The kernel reports 4096 for most of them.
+/// The most a sysfs attribute may hold here. Its reported size (4096 for
+/// every one) is not looked at: `read_attr` caps what it reads.
 const MAX_ATTR: u64 = 8 * 1024;
 /// /proc/stat and /proc/cpuinfo grow with the cores and interrupts; a larger
 /// one is not read and its value drops out.
@@ -90,7 +91,7 @@ impl Roots {
 }
 
 fn attr(path: &Path) -> Option<String> {
-    read_text(path, MAX_ATTR)
+    read_attr(path, MAX_ATTR)
 }
 
 /// A directory's entries that `name` accepts, at most `max` of them, sorted by
@@ -767,6 +768,19 @@ mod tests {
         let p = dir.join(name);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, text).unwrap();
+    }
+
+    /// sysfs reports 4096 bytes for every attribute; the reader goes by
+    /// what the file holds, so a smaller cap would read it too.
+    #[test]
+    fn a_sysfs_attribute_reads_whatever_size_it_reports() {
+        let online = Path::new("/sys/devices/system/cpu/online");
+        let Ok(meta) = std::fs::metadata(online) else {
+            return; // no sysfs on this host
+        };
+        assert_eq!(meta.len(), 4096);
+        assert!(attr(online).is_some_and(|t| t.trim().starts_with('0')));
+        assert!(read_attr(online, 64).is_some());
     }
 
     #[test]
