@@ -10,8 +10,10 @@ requests of a Bolt receiver's slots: the root feature and REPROG_CONTROLS_V4
 import importlib.machinery
 import importlib.util
 import os
+import io
 import struct
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -42,8 +44,9 @@ class FakeSlots:
     """slots: {slot: (index of 0x1B04 or None, [(cid, flags), ...])}.
     swids: the SWIDs of the replies to every request, sent in this order."""
 
-    def __init__(self, slots, swids=(0x0B,)):
+    def __init__(self, slots, swids=(0x0B,), ws=None):
         self.slots = slots
+        self.ws = ws or {}              # {slot: index of 0x1D4B}
         self.swids = list(swids)
         self.clock = Clock()
         self.pending = []
@@ -60,7 +63,15 @@ class FakeSlots:
             return None
         return self.pending.pop(0)
 
+    def close(self):
+        pass
+
     def _answer(self, msg, swid):
+        if msg[0] == 0x10 and msg[1] == 0xFF:       # receiver register b5/50+n
+            slot = msg[4] - 0x50
+            if slot in self.slots:
+                return bytes([0x10, 0xFF, 0x83, 0xB5, msg[4], 0x00, 0x00])
+            return bytes([0x10, 0xFF, 0x8F, 0x83, 0xB5, 0x08, 0x00])
         slot, feat, fsw = msg[1], msg[2], msg[3]
         func = fsw >> 4
         entry = self.slots.get(slot)
@@ -70,7 +81,8 @@ class FakeSlots:
         head = bytes([0x11, slot, feat, (func << 4) | swid])
         if feat == 0 and func == 0:
             fid = (msg[4] << 8) | msg[5]
-            return (head + bytes([idx if fid == 0x1B04 and idx else 0])).ljust(20, b"\0")
+            found = {0x1B04: idx, 0x1D4B: self.ws.get(slot)}.get(fid)
+            return (head + bytes([found or 0])).ljust(20, b"\0")
         if feat != idx:
             return None
         if func == 0:
@@ -83,49 +95,59 @@ class FakeSlots:
         return None
 
 
-def fake(slots, swids=(0x0B,)):
-    f = FakeSlots(slots, swids)
-    mod.pb.monotonic = f.clock
-    return f
+class Base(unittest.TestCase):
+    def fake(self, slots, swids=(0x0B,), ws=None):
+        f = FakeSlots(slots, swids, ws)
+        patcher = mock.patch.object(mod.pb, "monotonic", f.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return f
 
 
-class FindMic(unittest.TestCase):
+class FindMic(Base):
     def test_find_mic_on_keyboard(self):
-        t = fake({1: (8, [(0x00C7, 0x3A), (0x011C, 0x3A)])})
+        t = self.fake({1: (8, [(0x00C7, 0x3A), (0x011C, 0x3A)])})
         self.assertEqual(mod.find_mic(t, 1, 1e9), 8)
 
     def test_find_mic_skips_mouse(self):
-        t = fake({2: (10, [(0x0050, 0x3A), (0x00C4, 0x3A)])})
+        t = self.fake({2: (10, [(0x0050, 0x3A), (0x00C4, 0x3A)])})
         self.assertIsNone(mod.find_mic(t, 2, 1e9))
 
     def test_find_mic_not_divertable(self):
-        t = fake({1: (8, [(0x011C, 0x04)])})
+        t = self.fake({1: (8, [(0x011C, 0x04)])})
         self.assertIsNone(mod.find_mic(t, 1, 1e9))
 
     def test_find_mic_no_feature(self):
-        t = fake({1: (None, [])})
+        t = self.fake({1: (None, [])})
         self.assertIsNone(mod.find_mic(t, 1, 1e9))
 
     def test_find_mic_silent_slot(self):
-        t = fake({})
+        t = self.fake({})
         self.assertIsNone(mod.find_mic(t, 3, 1e9))
 
+    def test_failed_reply_mid_scan_is_none(self):
+        t = self.fake({1: (8, [(0x00C7, 0x3A), (0x011C, 0x3A)])})
+        real = t._answer
+        t._answer = lambda msg, swid: None if msg[2] == 8 and msg[3] >> 4 == 1 and msg[4] == 1 \
+            else real(msg, swid)
+        self.assertIsNone(mod.find_mic(t, 1, 1e9))
 
-class SetDivert(unittest.TestCase):
+
+class SetDivert(Base):
     def test_set_divert_bytes(self):
-        t = fake({1: (8, [(0x011C, 0x3A)])})
+        t = self.fake({1: (8, [(0x011C, 0x3A)])})
         self.assertTrue(mod.set_divert(t, 1, 8, True, 1e9))
         self.assertEqual(t.written[-1], bytes.fromhex("1101083b011c03").ljust(20, b"\0"))
         self.assertTrue(mod.set_divert(t, 1, 8, False, 1e9))
         self.assertEqual(t.written[-1], bytes.fromhex("1101083b011c02").ljust(20, b"\0"))
 
     def test_reply_with_other_swid_ignored(self):
-        t = fake({1: (8, [(0x011C, 0x3A)])}, swids=(0x0A, 0x0B))
+        t = self.fake({1: (8, [(0x011C, 0x3A)])}, swids=(0x0A, 0x0B))
         self.assertTrue(mod.set_divert(t, 1, 8, True, 1e9))
         self.assertEqual(len(t.written), 1)
 
     def test_no_reply_is_false(self):
-        t = fake({})
+        t = self.fake({})
         self.assertFalse(mod.set_divert(t, 1, 8, True, 1e9))
 
 
@@ -134,11 +156,15 @@ class MicDown(unittest.TestCase):
         return bytes.fromhex(hexs).ljust(20, b"\0")
 
     def test_mic_down(self):
-        self.assertIs(mod.mic_down(self.rep("1101080001 1c".replace(" ", "")), 8), True)
-        self.assertIs(mod.mic_down(self.rep("110108000000"), 8), False)
-        self.assertIs(mod.mic_down(self.rep("11010800 00c7011c".replace(" ", "")), 8), True)
-        self.assertIsNone(mod.mic_down(self.rep("1101080001 1c".replace(" ", "")), 7))
-        self.assertIsNone(mod.mic_down(self.rep("1101083b0000"), 8))
+        self.assertIs(mod.mic_down(self.rep("11010800011c"), 1, 8), True)
+        self.assertIs(mod.mic_down(self.rep("110108000000"), 1, 8), False)
+        self.assertIs(mod.mic_down(self.rep("1101080000c7011c"), 1, 8), True)
+        self.assertIsNone(mod.mic_down(self.rep("11010800011c"), 1, 7))
+        self.assertIsNone(mod.mic_down(self.rep("1101083b0000"), 1, 8))
+
+    def test_other_slot_does_not_count(self):
+        self.assertIsNone(mod.mic_down(self.rep("11020800011c"), 1, 8))
+        self.assertIs(mod.mic_down(self.rep("11020800011c"), 2, 8), True)
 
 
 class UinputEvents(unittest.TestCase):
@@ -166,6 +192,280 @@ class UinputEvents(unittest.TestCase):
             u.close()
             self.assertEqual(calls[-1][1], 0x5502)
             cl.assert_called_once_with(42)
+
+
+KBD = (8, [(0x00C7, 0x3A), (0x011C, 0x3A)])
+MOUSE = (10, [(0x0050, 0x3A), (0x00C4, 0x3A)])
+NODE = Path("/dev/hidraw0")
+
+
+class FakeUinput:
+    def __init__(self):
+        self.calls = []
+        self.fail = False
+        self.closed = False
+
+    def key(self, code, down):
+        if self.fail:
+            raise OSError(11, "Resource temporarily unavailable")
+        self.calls.append((code, down))
+
+    def close(self):
+        self.closed = True
+
+
+class FakeListener:
+    def __init__(self):
+        self.queue = []
+        self.closed = False
+
+    def read(self):
+        item = self.queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        self.closed = True
+
+
+def rep(hexs):
+    return bytes.fromhex(hexs).ljust(20, b"\0")
+
+
+DOWN1 = rep("11010800011c")
+UP1 = rep("110108000000")
+DOWN2 = rep("11020800011c")
+UP2 = rep("110208000000")
+RECONNECT1 = rep("1101040001")
+
+
+class KeysBase(Base):
+    def setUp(self):
+        self.uin = FakeUinput()
+        self.lst = FakeListener()
+        self.fds = []
+        self.nodes = [(NODE, "phys1")]
+        self.busy = False
+
+    def lock(self, state):
+        if self.busy:
+            return None
+        fd = os.open(os.devnull, os.O_RDONLY)
+        self.fds.append(fd)
+        return fd
+
+    def lock_is_open(self):
+        try:
+            os.fstat(self.fds[-1])
+            return True
+        except (OSError, IndexError):
+            return False
+
+    def keys(self, slots, ws=None):
+        self.f = self.fake(slots, ws=ws if ws is not None else {s: 4 for s in slots})
+        real_write = self.f.write
+
+        def write(data):
+            self.assertTrue(self.lock_is_open(), "request outside the lock")
+            real_write(data)
+        self.f.write = write
+        patcher = mock.patch.object(mod.pb, "_take_lock", self.lock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: [self._close(fd) for fd in self.fds])
+        return mod.Keys(uinput=self.uin, find_nodes=lambda: list(self.nodes),
+                        open_listener=lambda node: self.lst,
+                        open_transport=lambda node: self.f,
+                        wait=lambda ls, timeout: [l for l in ls if l.queue])
+
+    @staticmethod
+    def _close(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def diverts(self):
+        """(slot, params byte) of every setCidReporting request."""
+        return [(w[1], w[6]) for w in self.f.written
+                if w[2] in (8, 10) and w[3] >> 4 == 3]
+
+
+class KeysTests(KeysBase):
+    def test_rescan_diverts_keyboard_only(self):
+        k = self.keys({1: KBD, 2: MOUSE})
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_requests_take_the_lock(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.assertTrue(self.f.written)
+        self.assertFalse(self.lock_is_open(), "lock fd must be closed after the requests")
+        self.lst.queue.append(RECONNECT1)
+        k.step(0)
+        self.assertEqual(len(self.diverts()), 2)
+        self.assertFalse(self.lock_is_open())
+
+    def test_press_release_gives_f20(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue += [DOWN1, DOWN1, UP1, UP1]
+        for _ in range(4):
+            k.step(0)
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+
+    def test_reconnect_diverts_again(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(RECONNECT1)
+        k.step(0)
+        self.assertEqual(self.diverts(), [(1, 0x03), (1, 0x03)])
+
+    def test_other_status_does_not_divert_again(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(rep("1101040002"))
+        k.step(0)
+        self.assertEqual(len(self.diverts()), 1)
+
+    def test_rescan_does_not_divert_a_recorded_slot_again(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        k.rescan()
+        self.assertEqual(len(self.diverts()), 1)
+
+    def test_failed_slot_is_tried_again_by_rescan(self):
+        k = self.keys({1: (None, [])})
+        k.rescan()
+        self.assertEqual(self.diverts(), [])
+        self.f.slots[1] = KBD
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_busy_lock_skips_and_retries(self):
+        k = self.keys({1: KBD})
+        self.busy = True
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            k.rescan()
+            k.rescan()
+        self.assertEqual(self.diverts(), [])
+        self.assertEqual(buf.getvalue().count("lock busy"), 1)
+        self.busy = False
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_node_gone_releases_key(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue += [DOWN1, OSError(19, "No such device")]
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            k.step(0)
+            k.step(0)
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+        self.assertTrue(self.lst.closed)
+        self.assertEqual(buf.getvalue().count("No such device"), 1)
+        k.step(0)           # no node left, no exception
+        before = len(self.f.written)
+        self.f.clock.t += 60
+        k.rescan()          # the node is found again and diverted again
+        self.assertGreater(len(self.f.written), before)
+        self.assertEqual(len(self.diverts()), 2)
+
+    def test_vanished_node_is_dropped_by_rescan(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(DOWN1)
+        k.step(0)
+        self.nodes = []
+        k.rescan()
+        self.assertTrue(self.lst.closed)
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+
+    def test_two_keyboards_share_one_key(self):
+        k = self.keys({1: KBD, 2: KBD})
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03), (2, 0x03)])
+        for r in (DOWN2, DOWN1, UP2):
+            self.lst.queue.append(r)
+            k.step(0)
+        self.assertEqual(self.uin.calls, [(190, True)])
+        self.lst.queue.append(UP1)
+        k.step(0)
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+
+    def test_unrecorded_slot_report_is_ignored(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(DOWN2)
+        k.step(0)
+        self.assertEqual(self.uin.calls, [])
+
+    def test_reconnect_clears_a_held_slot(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue += [DOWN1, RECONNECT1]
+        k.step(0)
+        k.step(0)
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+
+    def test_uinput_error_is_logged_once_and_loop_goes_on(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.uin.fail = True
+        self.lst.queue += [DOWN1, UP1, DOWN1]
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            for _ in range(3):
+                k.step(0)
+        self.assertEqual(buf.getvalue().count("Resource temporarily unavailable"), 1)
+        self.uin.fail = False
+        self.lst.queue.append(UP1)
+        k.step(0)
+        self.assertEqual(self.uin.calls, [(190, False)])
+
+    def test_stop_undiverts_and_releases(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(DOWN1)
+        k.step(0)
+        k.stop()
+        self.assertEqual(self.diverts(), [(1, 0x03), (1, 0x02)])
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+        self.assertTrue(self.uin.closed)
+        self.assertTrue(self.lst.closed)
+        self.assertFalse(self.lock_is_open())
+
+    def test_stop_with_vanished_node(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.lst.queue.append(DOWN1)
+        k.step(0)
+
+        def gone(node):
+            raise OSError(19, "No such device")
+        k.open_transport = gone
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            k.stop()
+        self.assertEqual(self.uin.calls, [(190, True), (190, False)])
+        self.assertTrue(self.uin.closed)
+        self.assertIn("No such device", buf.getvalue())
+
+
+class Main(unittest.TestCase):
+    def test_main_rejects_arguments(self):
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(mod.main(["x"]), 2)
+
+    def test_main_exits_1_without_uinput(self):
+        with mock.patch.object(mod, "Uinput", side_effect=OSError(2, "No such file")), \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mod.main([]), 1)
+        self.assertIn("No such file", err.getvalue())
 
 
 if __name__ == "__main__":
