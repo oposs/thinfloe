@@ -223,3 +223,17 @@ Data for the tab:
 - CLAUDE.md: one new rule line under Menu: sysfs attribute files are read
   with `bounded::read_attr`, never a size-checked reader (sysfs reports
   4096 bytes for every attribute).
+
+## Amendment (2026-11-20, after the build)
+
+The controller ruled: keep the top only if the Screen tab still fits a
+1920x1080 screen with a full Graphics band, else both panels at the
+bottom. Measured: the page is visible to y=676; the Position select ended
+at about 700 under a one-line band and out of view under a full one; a
+band may take about 48 px, which is a single line with its title.
+"GPU Intel Corporation HD Graphics 5500 · Driver i915 · Video processing
+H.264: decode, encode · HEVC… · VP9…" is about 930 px on an 811 px line,
+and columns need a title line plus a row (about 66 px). So both info
+panels are the last band of their tab. Guard:
+`the_position_row_is_in_view_on_a_1080_screen`; the monitor click tests
+stay at 1920x1080.

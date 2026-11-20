@@ -254,12 +254,14 @@ label in the foreground colour and the value muted beside it ("Driver" /
 processing") indents its rows under its title. The label column is as
 wide as the widest label of the band, not the 240 pt form column, and a
 row is as high as its text (the interact height is set to 0 inside a
-panel): nothing in a panel takes a click. On the Network and Screen tabs
-the info panel is the first band (2026-11-20, asked for one place on both
-tabs; the facts are what a user reads before changing anything, and after
-an Apply on the Network tab the result shows there). Since then the
-Screen tab scrolls on a panel of about 730 pt, where the monitors' Position
-row used to fit. The producers are pure: `nettab::info_lines`,
+panel): nothing in a panel takes a click. On the Network and Screen tabs the info panel is
+the last band (2026-11-20, asked for one place on both tabs). The top was
+tried first and measured: on a 1920x1080 screen the Screen tab's page is
+visible to y=676, the monitors' Position select ended at about 700 even
+under a one-line Graphics band, and a full band (GPU, Driver, three
+codecs) pushed the row out of view; a band fits there only within about
+48 px, one line with its title, which a GPU name and three codecs do not.
+Guard: `the_position_row_is_in_view_on_a_1080_screen`. The producers are pure: `nettab::info_lines`,
 `graphics::info_lines`, `machine::rows`.
 
 **Sysfs sizes.** sysfs reports every attribute file as 4096 bytes,
@@ -271,7 +273,8 @@ ever read: the Graphics band said "No graphics device found" on every
 machine (owner's thin client: `card1`, `8086:1616`, `i915`, attribute
 size 4096). Its facts are in `src/thinfloe-menu/src/testdata/thinclient-drm/`.
 
-**Network tab, "Connections now".** Per interface a group `WiFi wlp58s0`
+**Network tab, "Connections now".** The last band, after "Public IP
+address". Per interface a group `WiFi wlp58s0`
 (`Wired`, `WireGuard`) with the rows State (connected, off, no cable, not
 connected), Network (the SSID), Signal (`strong (-55 dBm)`), Address (all
 of them, only when connected), Handshake (WireGuard: `42 s ago` or
@@ -307,7 +310,7 @@ them. A failed save puts the switch and the saved address back to what
 since the commit stays in the field. A network Apply or take-over keeps
 both keys. The lookup itself: [status-area.md](status-area.md#public-ip-lookup).
 
-**Screen tab, "Graphics".** The first band of the tab: per DRM card
+**Screen tab, "Graphics".** The last band of the tab: per DRM card
 (`/sys/class/drm/card<N>`, at most 16, a card without PCI ids such as
 simpledrm left out) a row GPU with the `pci.ids` name or the ids
 (`8086:1916`) and a row Driver (left out without a driver link), or `GPU:
