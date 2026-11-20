@@ -170,6 +170,14 @@ once 'NTP=evil;rm 1.2.3.4 a.b 999.1.1.1 1.2.3 ::g\n'
 grep -q "^thinfloe: ignored DHCP NTP server 'evil;rm': not an IP address" "$WORK/out" \
     || fail "hostile_ntp_dropped: no ignored line: $(cat "$WORK/out")"
 
+once 'NTP=: 1:2 :: :.: fd00::7 ::ffff:1.2.3.4\n'
+[[ "$(cat "$SRCS" 2>/dev/null)" == $'server fd00::7 iburst\nserver ::ffff:1.2.3.4 iburst' ]] \
+    || fail "implausible_ipv6_dropped: $(cat "$SRCS" 2>/dev/null)"
+for a in : 1:2 :: :.:; do
+    grep -qxF "thinfloe: ignored DHCP NTP server '$a': not an IP address" "$WORK/out" \
+        || fail "implausible_ipv6_dropped: no ignored line for '$a': $(cat "$WORK/out")"
+done
+
 once "NTP=$(echo 10.0.0.{1..10})\\n"
 [[ $(grep -c '^server ' "$SRCS" 2>/dev/null) -eq 8 ]] || fail "more than 8 DHCP NTP servers kept: $(cat "$SRCS" 2>/dev/null)"
 

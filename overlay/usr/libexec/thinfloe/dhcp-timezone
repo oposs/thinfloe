@@ -69,13 +69,17 @@ check() {
     return 0
 }
 
-# Fails unless $1 is an IPv4 or IPv6 address (networkd writes addresses).
+# Fails unless $1 is an IPv4 or a plausible IPv6 address (networkd writes
+# addresses). IPv6: hex digits, colons and the dots of a v4-mapped tail
+# only, at least two colons and at least one hex digit.
 ntp_ok() {
     local a=$1 o
     [ -n "$a" ] && [ "${#a}" -le 45 ] || return 1
     case $a in
         *:*)
             case $a in *[!0-9A-Fa-f:.]*|*:::*) return 1 ;; esac
+            case $a in *:*:*) ;; *) return 1 ;; esac
+            case $a in *[0-9A-Fa-f]*) ;; *) return 1 ;; esac
             return 0 ;;
         *[!0-9.]*|.*|*.|*..*) return 1 ;;
     esac
