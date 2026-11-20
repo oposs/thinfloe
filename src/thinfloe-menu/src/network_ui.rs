@@ -5,6 +5,7 @@
 //! paints it and reports clicks.
 
 use crate::brand::{self, role};
+use crate::infopanel;
 use crate::netfiles::FileState;
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
@@ -246,26 +247,12 @@ fn text_row(ui: &mut Ui, t: &Theme, label: &str, value: &str, hint: &'static str
     })
 }
 
-/// One muted line per interface, or why there is none.
+/// The interfaces as labelled rows, the DNS servers in use, or why there
+/// is no list.
 fn connections(ui: &mut Ui, t: &Theme, net: &NetTab) {
-    for i in net.ifaces() {
-        muted(ui, t, nettab::iface_line(i));
-        let detail = net.details().ifaces.iter().find(|d| d.name == i.name);
-        if let Some(line) = detail.and_then(nettab::detail_line) {
-            muted(ui, t, line);
-        }
-    }
-    // Only beside a list that is current; before the first answer, or
-    // after a failed one, it would claim "none".
-    if net.status_known() && net.status_error().is_none() {
-        muted(ui, t, nettab::dns_in_use_line(&net.details().dns_in_use));
-    }
-    match net.status_error() {
-        Some(e) => warn(ui, t, e),
-        None if !net.status_known() => muted(ui, t, "Looking for network adapters…"),
-        None if net.ifaces().is_empty() => muted(ui, t, "No network adapter found"),
-        None => {}
-    }
+    let lines = nettab::info_lines(net.ifaces(), net.details(), net.status_known(), net.status_error());
+    let w = infopanel::label_width(ui, &lines);
+    infopanel::draw(ui, t, &lines, w);
 }
 
 /// The wired address: the select and, for a fixed address, its fields.
