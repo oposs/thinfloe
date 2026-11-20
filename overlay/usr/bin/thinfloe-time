@@ -1,0 +1,336 @@
+#!/usr/bin/python3 -I
+"""
+thinfloe-time - install the time zone and NTP servers the menu chose
+
+The menu runs this as root (sudo -n) and reads one JSON line from stdout.
+
+Commands:
+  apply    {"result": "ok", "reason": ""}: reads generated/time in
+           ~/.config/thinfloe of tfuser (the home from the passwd entry,
+           never $HOME), checks every line, and installs it:
+             /etc/thinfloe/time        the checked copy (absent: automatic)
+             zone=<z>                  timedatectl set-timezone -- <z>
+             no zone, one before       timedatectl set-timezone UTC
+             ntp=<server> lines        /etc/chrony/sources.d/thinfloe.sources,
+                                       and the Ubuntu pools file renamed to
+                                       ubuntu-ntp-pools.sources.thinfloe-off
+             no ntp lines              the file removed, the pools back
+           then restarts thinfloe-dhcp-timezone.service (it reads the
+           leases again: the DHCP zone and the DHCP NTP servers, when the
+           menu set none) and runs chronyc reload sources.
+
+The file holds comment lines, at most one zone= line and at most eight
+ntp= lines, nothing else. A zone is UTC or a zone of zone.tab; a server is
+an IPv4 or IPv6 address or a host name. One bad line, a link, a file that
+is not regular or one over 64 KiB fails and changes nothing. The
+initramfs installs the same file at boot (install_local_time).
+
+Exit 0 on success, 1 on a failure, 2 on misuse. A failure prints
+{"result": "failed", "reason": "..."}. Log lines go to stderr and the journal.
+"""
+
+import errno
+import fcntl
+import ipaddress
+import json
+import os
+import pwd
+import stat
+import subprocess
+import sys
+import syslog
+import time
+from typing import List, Optional, Tuple
+
+# Module constants; the environment overrides them for the tests.
+HOME_DIR = os.environ.get("TF_TIME_HOME")
+ETC = os.environ.get("TF_TIME_ETC", "/etc")
+ZONEINFO = os.environ.get("TF_TIME_ZONEINFO", "/usr/share/zoneinfo")
+TIMEDATECTL = os.environ.get("TF_TIME_TIMEDATECTL", "timedatectl")
+SYSTEMCTL = os.environ.get("TF_TIME_SYSTEMCTL", "systemctl")
+CHRONYC = os.environ.get("TF_TIME_CHRONYC", "chronyc")
+LOCK = os.environ.get("TF_TIME_LOCK", "/run/thinfloe/time.lock")
+
+WATCHER = "thinfloe-dhcp-timezone.service"
+POOLS = "ubuntu-ntp-pools.sources"
+POOLS_OFF = POOLS + ".thinfloe-off"
+OURS = "thinfloe.sources"
+MAX_FILE = 64 * 1024
+MAX_SERVERS = 8
+TOOL_TIMEOUT = 20
+LOCK_WAIT = 30
+
+USAGE = "usage: thinfloe-time apply"
+
+
+class TimeError(Exception):
+    """A failure. The text is the reason the menu shows."""
+
+
+_syslog_open = False
+
+
+def log(text: str) -> None:
+    global _syslog_open
+    print("thinfloe-time: " + text, file=sys.stderr)
+    try:
+        if not _syslog_open:
+            syslog.openlog("thinfloe-time")
+            _syslog_open = True
+        syslog.syslog(syslog.LOG_INFO, text)
+    except OSError:
+        pass
+
+
+def run(cmd: List[str]) -> Tuple[int, str]:
+    try:
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=TOOL_TIMEOUT)
+    except FileNotFoundError:
+        return 127, "%s not found" % cmd[0]
+    except subprocess.TimeoutExpired:
+        return 124, "%s took too long" % cmd[0]
+    return p.returncode, (p.stderr or p.stdout).strip()
+
+
+# ============ reading the file ============
+
+def home_dir() -> str:
+    if HOME_DIR:
+        return HOME_DIR
+    try:
+        return pwd.getpwnam("tfuser").pw_dir
+    except KeyError:
+        raise TimeError("user tfuser does not exist")
+
+
+def generated_path() -> str:
+    """generated/time in the home of tfuser. A link at any directory on the
+    way is refused (O_NOFOLLOW guards only the last component)."""
+    path = home_dir()
+    for part in (".config", "thinfloe", "generated"):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            raise TimeError("%s is a link" % part)
+    return os.path.join(path, "time")
+
+
+def read_home_file(path: str) -> Optional[bytes]:
+    """The bytes of the file, None when it is missing."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK):
+            raise TimeError("generated/time is a link")
+        raise TimeError("cannot read generated/time: %s" % e.strerror)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise TimeError("generated/time is not a regular file")
+        data = b""
+        while len(data) <= MAX_FILE:
+            chunk = os.read(fd, MAX_FILE + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError as e:
+        raise TimeError("cannot read generated/time: %s" % e.strerror)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_FILE:
+        raise TimeError("generated/time is larger than 64 KiB")
+    return data
+
+
+def shown(value: str) -> str:
+    """A value cut to 64 printable characters for a reason or a log line."""
+    return "".join(c if c.isprintable() else "?" for c in value[:64])
+
+
+def known_zones() -> set:
+    zones = {"UTC"}
+    try:
+        with open(os.path.join(ZONEINFO, "zone.tab"), encoding="utf-8",
+                  errors="replace") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) >= 3:
+                    zones.add(cols[2])
+    except OSError as e:
+        raise TimeError("cannot read zone.tab: %s" % e.strerror)
+    return zones
+
+
+def zone_ok(zone: str, zones: set) -> bool:
+    return (zone in zones and ".." not in zone and not zone.startswith("/")
+            and os.path.isfile(os.path.join(ZONEINFO, zone)))
+
+
+def host_name_ok(s: str) -> bool:
+    if not s or len(s) > 253:
+        return False
+    for label in s.split("."):
+        if not label or len(label) > 63 or label[0] == "-" or label[-1] == "-":
+            return False
+        if not all(c.isascii() and (c.isalnum() or c == "-") for c in label):
+            return False
+    return True
+
+
+def server_ok(s: str) -> bool:
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return host_name_ok(s)
+
+
+def parse(data: bytes) -> Tuple[Optional[str], List[str]]:
+    """The zone and the servers of the file; any bad line fails."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise TimeError("generated/time is not UTF-8")
+    zones = known_zones()
+    zone = None
+    servers: List[str] = []
+    for line in text.split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if sep and key == "zone":
+            if zone is not None:
+                raise TimeError("generated/time has two zone lines")
+            if not zone_ok(value, zones):
+                raise TimeError("unknown time zone '%s'" % shown(value))
+            zone = value
+        elif sep and key == "ntp":
+            if not server_ok(value):
+                raise TimeError("'%s' is not a host name or address" % shown(value))
+            servers.append(value)
+            if len(servers) > MAX_SERVERS:
+                raise TimeError("more than %d NTP servers" % MAX_SERVERS)
+        else:
+            raise TimeError("generated/time has an unknown line '%s'" % shown(line))
+    return zone, servers
+
+
+# ============ installing ============
+
+def lock_file() -> int:
+    os.makedirs(os.path.dirname(LOCK), mode=0o755, exist_ok=True)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > deadline:
+                os.close(fd)
+                raise TimeError("Another time change is running")
+            time.sleep(0.1)
+
+
+def write_atomic(path: str, text: Optional[str]) -> None:
+    """Bring path to text (None: absent), mode 644, by a rename."""
+    if text is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o755, exist_ok=True)
+    tmp = os.path.join(d, ".%s.%d.tmp" % (os.path.basename(path), os.getpid()))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    try:
+        os.write(fd, text.encode())
+        os.fchmod(fd, 0o644)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp, path)
+
+
+def installed_zone(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("zone="):
+                    return line[5:].rstrip("\n")
+    except OSError:
+        pass
+    return None
+
+
+def install_sources(servers: List[str]) -> None:
+    d = os.path.join(ETC, "chrony", "sources.d")
+    pools, off = os.path.join(d, POOLS), os.path.join(d, POOLS_OFF)
+    if servers:
+        write_atomic(os.path.join(d, OURS), "".join("server %s iburst\n" % s for s in servers))
+        if os.path.exists(pools):
+            os.replace(pools, off)
+    else:
+        write_atomic(os.path.join(d, OURS), None)
+        if os.path.exists(off) and not os.path.exists(pools):
+            os.replace(off, pools)
+
+
+def apply() -> None:
+    data = read_home_file(generated_path())
+    zone, servers = parse(data) if data is not None else (None, [])
+    fd = lock_file()
+    try:
+        conf = os.path.join(ETC, "thinfloe", "time")
+        before = installed_zone(conf)
+        body = "".join(["zone=%s\n" % zone] if zone else []) + \
+            "".join("ntp=%s\n" % s for s in servers)
+        try:
+            write_atomic(conf, body or None)
+            install_sources(servers)
+        except OSError as e:
+            raise TimeError("cannot install the time settings: %s" % (e.strerror or e))
+        if zone:
+            rc, out = run([TIMEDATECTL, "set-timezone", "--", zone])
+            if rc != 0:
+                raise TimeError("cannot set the time zone: %s" % shown(out))
+            log("time zone %s from the menu" % zone)
+        elif before:
+            rc, out = run([TIMEDATECTL, "set-timezone", "UTC"])
+            if rc != 0:
+                raise TimeError("cannot set the time zone: %s" % shown(out))
+            log("time zone automatic")
+        log("NTP servers %s" % (" ".join(servers) if servers else "automatic"))
+        # In automatic mode the watcher sets the DHCP zone and the DHCP NTP
+        # servers again; otherwise it leaves both alone.
+        rc, out = run([SYSTEMCTL, "restart", WATCHER])
+        if rc != 0:
+            log("cannot restart %s: %s" % (WATCHER, shown(out)))
+        rc, out = run([CHRONYC, "reload", "sources"])
+        if rc != 0:
+            log("chronyc reload sources: %s" % shown(out))
+            raise TimeError("The time service did not take the servers.")
+    finally:
+        os.close(fd)
+
+
+def main(argv: List[str]) -> int:
+    if len(argv) != 2 or argv[1] != "apply":
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        apply()
+    except TimeError as e:
+        log("apply failed: %s" % e)
+        print(json.dumps({"result": "failed", "reason": str(e)}))
+        return 1
+    print(json.dumps({"result": "ok", "reason": ""}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -620,6 +620,7 @@ test: test-unit rootfs
 	@$(TEST_ENV) test/integration/test-save-home.sh
 	@$(TEST_ENV) test/integration/test-password.sh
 	@$(TEST_ENV) test/integration/test-dhcp-timezone.sh
+	@$(TEST_ENV) test/integration/test-thinfloe-time.sh
 	@$(TEST_ENV) test/integration/test-field-report.sh
 	@$(TEST_ENV) test/integration/test-cmdline.sh
 	@$(TEST_ENV) test/integration/test-session-lifecycle.sh
