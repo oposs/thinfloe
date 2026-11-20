@@ -1,12 +1,12 @@
 //! The fixed facts of the Network tab's "Connections now" band: per
-//! interface the MAC, the gateway of the default route and, for WiFi, the
-//! chip and its driver; and the DNS servers in use. Read in the
+//! interface the MAC, the gateway of the default route, the chip and its
+//! driver; and the DNS servers in use. Read in the
 //! `Job::NetStatus` job thread from files only (sysfs, procfs, resolv.conf,
 //! `pci.ids`); no program is started.
 
 use crate::bounded;
 use crate::netstat::{self, Roots};
-use crate::nettab::{IfKind, Iface};
+use crate::nettab::Iface;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -52,11 +52,11 @@ pub fn read(roots: &Roots, ifaces: &[Iface], pci_ids: &Path) -> Details {
             let dir = roots.sys.join("class/net").join(&i.name);
             d.mac = attr(&dir.join("address")).and_then(|a| mac(&a));
             d.gateway = route.as_ref().filter(|r| r.iface == i.name).and_then(|r| r.gateway);
-            if i.kind == IfKind::Wifi {
-                let dev = dir.join("device");
-                d.driver = driver(&dev);
-                d.chip = chip(&dev, pci_ids);
-            }
+            // Every interface with a device: wired and WiFi alike. A
+            // virtual one (WireGuard) has no `device` link and no chip.
+            let dev = dir.join("device");
+            d.driver = driver(&dev);
+            d.chip = chip(&dev, pci_ids);
             d
         })
         .collect();
@@ -109,7 +109,7 @@ fn chip(dev: &Path, pci_ids: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nettab::IfState;
+    use crate::nettab::{IfKind, IfState};
     use crate::testdir::TestDir;
     use std::os::unix::fs::symlink;
 
@@ -201,7 +201,12 @@ mod tests {
             want.push((f[0].to_string(), f[2].to_string()));
         }
         let pci = d.join("pci.ids");
-        fs::write(&pci, "8086  Intel Corporation\n\t08b3  Wireless 3160\n").unwrap();
+        fs::write(
+            &pci,
+            "10ec  Realtek Semiconductor Co., Ltd.\n\t8168  RTL8111/8168 PCI Express Gigabit Ethernet controller\n\
+             8086  Intel Corporation\n\t08b3  Wireless 3160\n",
+        )
+        .unwrap();
         let got = read(&Roots::under(&d), &list, &pci);
         let macs: Vec<(String, String)> = got
             .ifaces
@@ -212,6 +217,13 @@ mod tests {
         let wifi = got.ifaces.iter().find(|i| i.name == "wlp2s0").unwrap();
         assert_eq!(wifi.chip.as_deref(), Some("Intel Corporation Wireless 3160"));
         assert_eq!(wifi.driver.as_deref(), Some("iwlwifi"));
+        // The wired adapter names its chip and driver too.
+        let wired = got.ifaces.iter().find(|i| i.name == "enp3s0").unwrap();
+        assert_eq!(
+            wired.chip.as_deref(),
+            Some("Realtek Semiconductor Co., Ltd. RTL8111/8168 PCI Express Gigabit Ethernet controller")
+        );
+        assert_eq!(wired.driver.as_deref(), Some("r8169"));
     }
 
     /// The real `/sys` of the test host: an interface with a hardware
@@ -273,12 +285,13 @@ mod tests {
     }
 
     #[test]
-    fn a_wired_interface_has_no_chip_line() {
+    fn a_wired_interface_names_its_chip_and_a_virtual_one_none() {
         let d = TestDir::new("netdetail", "wired");
         let dev = net_dev(&d, "eno1", "3c:52:82:00:00:01", "pci0000:00/0000:00:1f.6", "e1000e");
         write(&dev.join("vendor"), "0x8086\n");
         write(&dev.join("device"), "0xa0f0\n");
-        net_dev(&d, "wg0", "00:00:00:00:00:00", "virtual/wg0", "none");
+        // WireGuard: an address file, no `device` link.
+        write(&d.join("sys/class/net/wg0/address"), "\n");
         let got = read(
             &Roots::under(&d),
             &[
@@ -289,8 +302,15 @@ mod tests {
             &pci_list(&d),
         );
         assert_eq!(got.ifaces[0].mac.as_deref(), Some("3c:52:82:00:00:01"));
-        assert_eq!((&got.ifaces[0].chip, &got.ifaces[0].driver), (&None, &None));
-        assert_eq!(got.ifaces[1].mac, None, "an all-zero MAC is dropped");
+        assert_eq!(got.ifaces[0].chip.as_deref(), Some("Intel Corporation Wi-Fi 6 AX201"));
+        assert_eq!(got.ifaces[0].driver.as_deref(), Some("e1000e"));
+        assert_eq!(
+            got.ifaces[1],
+            IfDetail {
+                name: "wg0".into(),
+                ..IfDetail::default()
+            }
+        );
         assert_eq!(
             got.ifaces[2],
             IfDetail {
