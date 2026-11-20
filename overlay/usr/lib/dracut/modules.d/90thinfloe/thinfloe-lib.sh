@@ -964,7 +964,8 @@ tf_zone_known() {
 #
 # Lenient where thinfloe-time is strict: a bad line is logged and skipped,
 # so the boot goes on in automatic mode for that part. A link anywhere on
-# the path is refused. Values are never logged (they may hold anything).
+# the path is refused. A rejected value is never logged (it may hold
+# anything); the checked zone and servers are.
 #
 # ALWAYS returns 0; no exit (dracut sources the hooks into one shell).
 install_local_time() {
