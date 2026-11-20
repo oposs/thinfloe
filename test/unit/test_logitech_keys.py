@@ -12,6 +12,8 @@ import importlib.util
 import os
 import io
 import struct
+import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -244,23 +246,29 @@ class KeysBase(Base):
     def setUp(self):
         self.uin = FakeUinput()
         self.lst = FakeListener()
-        self.fds = []
+        self.open_locks = set()
+        self.lock_count = 0
         self.nodes = [(NODE, "phys1")]
         self.busy = False
+        real_close = os.close
+
+        def close(fd):
+            self.open_locks.discard(fd)
+            real_close(fd)
+        patcher = mock.patch.object(mod.os, "close", close)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def lock(self, state):
         if self.busy:
             return None
         fd = os.open(os.devnull, os.O_RDONLY)
-        self.fds.append(fd)
+        self.open_locks.add(fd)
+        self.lock_count += 1
         return fd
 
     def lock_is_open(self):
-        try:
-            os.fstat(self.fds[-1])
-            return True
-        except (OSError, IndexError):
-            return False
+        return bool(self.open_locks)
 
     def keys(self, slots, ws=None):
         self.f = self.fake(slots, ws=ws if ws is not None else {s: 4 for s in slots})
@@ -270,11 +278,9 @@ class KeysBase(Base):
             self.assertTrue(self.lock_is_open(), "request outside the lock")
             real_write(data)
         self.f.write = write
-        patcher = mock.patch.object(mod.pb, "_take_lock", self.lock)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.addCleanup(lambda: [self._close(fd) for fd in self.fds])
-        return mod.Keys(uinput=self.uin, find_nodes=lambda: list(self.nodes),
+        self.addCleanup(lambda: [self._close(fd) for fd in list(self.open_locks)])
+        return mod.Keys(uinput=self.uin, take_lock=self.lock,
+                        find_nodes=lambda: list(self.nodes),
                         open_listener=lambda node: self.lst,
                         open_transport=lambda node: self.f,
                         wait=lambda ls, timeout: [l for l in ls if l.queue])
@@ -337,10 +343,11 @@ class KeysTests(KeysBase):
         self.assertEqual(len(self.diverts()), 1)
 
     def test_failed_slot_is_tried_again_by_rescan(self):
-        k = self.keys({1: (None, [])})
+        k = self.keys({1: KBD})
+        real = self.silence(lambda m: m[0] == 0x11)
         k.rescan()
         self.assertEqual(self.diverts(), [])
-        self.f.slots[1] = KBD
+        self.f._answer = real
         k.rescan()
         self.assertEqual(self.diverts(), [(1, 0x03)])
 
@@ -356,6 +363,124 @@ class KeysTests(KeysBase):
         self.busy = False
         k.rescan()
         self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def silence(self, what):
+        """Make the fake stop answering the requests for which what(msg) holds."""
+        real = self.f._answer
+        self.f._answer = lambda msg, swid: None if what(msg) else real(msg, swid)
+        return real
+
+    def test_failed_wake_divert_is_retried_by_rescan(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        real = self.silence(lambda m: m[0] == 0x11 and m[3] >> 4 == 3)
+        self.lst.queue.append(RECONNECT1)
+        with redirect_stderr(io.StringIO()):
+            k.step(0)
+        self.assertEqual(len(self.diverts()), 2)
+        self.f._answer = real
+        k.rescan()
+        self.assertEqual(len(self.diverts()), 3)
+
+    def test_wake_divert_without_lock_is_retried_by_rescan(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.busy = True
+        self.lst.queue.append(RECONNECT1)
+        with redirect_stderr(io.StringIO()):
+            k.step(0)
+        self.busy = False
+        k.rescan()
+        self.assertEqual(self.diverts(), [(1, 0x03), (1, 0x03)])
+
+    def test_slot_without_mic_is_not_probed_again(self):
+        k = self.keys({1: KBD, 2: MOUSE})
+        k.rescan()
+        before = len(self.f.written)
+        k.rescan()
+        asked = [w for w in self.f.written[before:] if w[0] == 0x11]
+        self.assertEqual(asked, [])
+
+    def test_silent_slot_is_probed_again(self):
+        k = self.keys({1: KBD})
+        self.silence(lambda m: m[0] == 0x11)
+        k.rescan()
+        before = len(self.f.written)
+        k.rescan()
+        self.assertTrue([w for w in self.f.written[before:] if w[0] == 0x11])
+
+    def test_dropped_node_forgets_no_mic_slots(self):
+        k = self.keys({2: MOUSE})
+        k.rescan()
+        self.nodes = []
+        k.rescan()
+        self.nodes = [(NODE, "phys1")]
+        before = len(self.f.written)
+        k.rescan()
+        self.assertTrue([w for w in self.f.written[before:] if w[0] == 0x11])
+
+    def test_report_of_an_unrecorded_slot_probes_it_at_once(self):
+        k = self.keys({1: KBD})
+        k.next_scan = self.f.clock.t + 1000
+        real = self.silence(lambda m: m[0] == 0x11)
+        k.rescan()
+        self.assertEqual(self.diverts(), [])
+        self.f._answer = real
+        self.lst.queue.append(rep("1101090000"))     # any report of the waking keyboard
+        k.step(0)
+        self.assertEqual(self.diverts(), [(1, 0x03)])
+
+    def test_probe_by_report_is_limited_to_one_per_5_seconds(self):
+        k = self.keys({1: KBD})
+        k.next_scan = self.f.clock.t + 1000
+        self.silence(lambda m: m[0] == 0x11)
+
+        def probes():
+            return len([w for w in self.f.written if w[0] == 0x11 and w[2] == 0])
+        k.rescan()
+        base = probes()
+        for _ in range(3):
+            self.lst.queue.append(rep("1101090000"))
+            k.step(0)
+        self.assertEqual(probes(), base + 1)
+        self.f.clock.t += 5
+        self.lst.queue.append(rep("1101090000"))
+        k.step(0)
+        self.assertEqual(probes(), base + 2)
+
+    def test_report_of_a_mouse_slot_is_not_probed(self):
+        k = self.keys({2: MOUSE})
+        k.next_scan = self.f.clock.t + 1000
+        k.rescan()
+        before = len(self.f.written)
+        self.lst.queue.append(rep("1102090000"))
+        k.step(0)
+        self.assertEqual(len(self.f.written), before)
+
+    def test_warning_comes_again_after_recovery(self):
+        k = self.keys({1: KBD})
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            self.busy = True
+            k.rescan()
+            self.busy = False
+            k.rescan()
+            self.busy = True
+            self.lst.queue.append(RECONNECT1)
+            k.step(0)
+        self.assertEqual(buf.getvalue().count("lock busy"), 2)
+        self.assertIn("thinfloe: logitech-keys: ", buf.getvalue())
+        self.assertNotIn("battery", buf.getvalue())
+
+    def test_stop_logs_undivert_without_answer(self):
+        k = self.keys({1: KBD})
+        k.rescan()
+        self.silence(lambda m: m[0] == 0x11 and m[3] >> 4 == 3)
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            k.stop()
+        self.assertIn("no answer to the undivert request", buf.getvalue())
+        self.assertTrue(self.uin.closed)
 
     def test_node_gone_releases_key(self):
         k = self.keys({1: KBD})
@@ -454,6 +579,30 @@ class KeysTests(KeysBase):
         self.assertEqual(self.uin.calls, [(190, True), (190, False)])
         self.assertTrue(self.uin.closed)
         self.assertIn("No such device", buf.getvalue())
+
+
+class TakeLock(unittest.TestCase):
+    def setUp(self):
+        td = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(td.cleanup)
+        self.state = Path(td.name)
+
+    def test_free_lock_is_taken(self):
+        fd = mod.take_lock(self.state)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    def test_held_lock_gives_up_after_the_wait(self):
+        other = os.open(str(self.state / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, other)
+        mod.fcntl.flock(other, mod.fcntl.LOCK_EX)
+        buf = io.StringIO()
+        start = time.monotonic()
+        with mock.patch.object(mod, "LOCK_WAIT", 0.3), redirect_stderr(buf):
+            self.assertIsNone(mod.take_lock(self.state))
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertIn("thinfloe: logitech-keys: ", buf.getvalue())
+        self.assertIn("lock busy", buf.getvalue())
 
 
 class Main(unittest.TestCase):
