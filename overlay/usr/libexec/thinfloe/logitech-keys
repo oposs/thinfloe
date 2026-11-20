@@ -8,8 +8,11 @@ CID 0x011C (measured on the MX Mechanical) of REPROG_CONTROLS_V4 (0x1B04).
 This program finds that control in a paired slot, diverts it (setCidReporting
 without the persist bits, so the keyboard forgets it at power-off) and turns
 each press of the diverted-buttons event into KEY_F20 on a uinput device
-named "ThinFloe Logitech keys". F20 is a key no keyboard has and no program
-binds, so it reaches the menu's mute handling unchanged.
+named "ThinFloe Logitech keys". XKB maps F20 to XF86AudioMicMute, which goes
+to the compositor's binding or the focused program. KEY_MICMUTE would map to
+the same symbol, but its X11 keycode (<I256>) is above X11's limit of 255 and
+cannot reach Xwayland or ThinLinc; F20 is <FK20>, code 198
+(docs/notes/media-keys.md).
 
 This file holds the HID++ and uinput parts. It reuses the transport and
 request code of peripheral-battery, under a software id of its own (0x0B;
@@ -33,7 +36,8 @@ KEY_F20 = 190
 REPROG = 0x1B04
 SWID = 0x0B
 DIVERTABLE = 0x20       # getCidInfo flags: the control can be diverted
-RESCAN = 30.0           # how often the program looks for HID++ nodes and new slots
+RESCAN = 5.0            # how often the program looks for new HID++ nodes (a replugged receiver)
+SLOT_RESCAN = 30.0      # how often it asks the slots of known nodes that are not diverted yet
 LOCK_WAIT = 2.0         # how long a request waits for the battery reader's lock
 LOCK_POLL = 0.1
 PROBE_GAP = 5.0         # a slot that reports but is not diverted is probed this often at most
@@ -191,6 +195,7 @@ class Keys:
         self.last_probe: Dict[Tuple[str, int], float] = {}
         self.warned: Dict[str, str] = {}            # source -> the message logged for it
         self.next_scan = pb.monotonic()
+        self.next_probe = self.next_scan    # when the slots of known nodes are asked next
 
     def _warn(self, what: str, why: str) -> None:
         """One journal line per fault, so a repeating fault does not fill the
@@ -247,7 +252,9 @@ class Keys:
 
     # -- nodes and slots
 
-    def rescan(self) -> None:
+    def rescan(self, probe_known: bool = True) -> None:
+        """Open new nodes and divert their slots; slots of nodes already known
+        are asked again only when probe_known is set."""
         found = dict(self.find_nodes())
         for node in [n for n in self.nodes if n not in found]:
             self._drop(node, None)
@@ -258,6 +265,8 @@ class Keys:
                 except OSError as e:
                     self._warn(str(node), e.strerror or str(e))
                     continue
+            elif not probe_known:
+                continue
             self._divert_new_slots(node, phys)
 
     def _divert_new_slots(self, node, phys: str, only: Optional[int] = None) -> None:
@@ -280,12 +289,16 @@ class Keys:
                 if idx is False:
                     self.no_mic.add(key)
                     continue
-                ws = pb._feature_index(t, slot, pb.WIRELESS_STATUS, deadline) or None
+                ws = pb._feature_index(t, slot, pb.WIRELESS_STATUS, deadline)
+                if ws is None:
+                    # Without the wake index a later sleep would end the key for good.
+                    self._warn(f"{phys} slot {slot}", "no answer to the wireless status lookup")
+                    continue
                 if not set_divert(t, slot, idx, True, deadline):
                     self._warn(f"{phys} slot {slot}", "no answer to the divert request")
                     continue
                 self._ok(f"{phys} slot {slot}")
-                self.slots[key] = (node, idx, ws)
+                self.slots[key] = (node, idx, ws or None)
             return True
         try:
             self._with_transport(node, work)
@@ -323,12 +336,15 @@ class Keys:
             if rep[4] == 0x01:
                 # The keyboard woke up or reconnected and forgot the divert.
                 self._release(phys, head[0])
-                if self._with_transport(node, lambda t, d: set_divert(t, head[0], idx, True, d)):
+                done = self._with_transport(node, lambda t, d: set_divert(t, head[0], idx, True, d))
+                if done:
                     self._ok(f"{phys} slot {head[0]}")
                 else:
                     # Forget the slot: the next rescan finds and diverts it again.
+                    # None means _with_transport logged the reason (lock, node).
                     del self.slots[key]
-                    self._warn(f"{phys} slot {head[0]}", "no answer to the divert request, trying again at the next rescan")
+                    if done is not None:
+                        self._warn(f"{phys} slot {head[0]}", "no answer to the divert request, trying again at the next rescan")
             return
         pressed = mic_down(rep, head[0], idx)
         if pressed is None:
@@ -343,9 +359,13 @@ class Keys:
         """Rescan when it is time, then handle the reports that arrive within
         timeout seconds."""
         if pb.monotonic() >= self.next_scan:
-            self.next_scan = pb.monotonic() + RESCAN
+            now = pb.monotonic()
+            self.next_scan = now + RESCAN
+            probe_known = now >= self.next_probe
+            if probe_known:
+                self.next_probe = now + SLOT_RESCAN
             try:
-                self.rescan()
+                self.rescan(probe_known)
             except Exception as e:  # noqa: BLE001 - the program must keep running
                 log("rescan", f"{type(e).__name__}: {e}")
         by_listener = {lst: node for node, (lst, _) in self.nodes.items()}
