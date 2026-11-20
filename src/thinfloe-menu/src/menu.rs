@@ -536,13 +536,17 @@ impl Menu {
 
     /// The This machine tab's panels at `now`: the machine's facts, the
     /// installed add-ons (left out without one), the network and the
-    /// graphics, as their tabs show them. Empty until the facts are read.
+    /// graphics, as their tabs show them. The machine's panel says
+    /// "Reading…" until its facts are read; the others show meanwhile.
     pub fn machine_panels(&self, now: Instant) -> Vec<Panel> {
-        let Some(facts) = self.machine.facts() else {
-            return Vec::new();
-        };
         let row = |(label, value): (String, String)| Line::Row { label, value };
-        let machine = crate::machine::rows(facts, self.machine.uptime_at(now), &self.header, self.usb_boot);
+        let machine = match self.machine.facts() {
+            Some(facts) => crate::machine::rows(facts, self.machine.uptime_at(now), &self.header, self.usb_boot)
+                .into_iter()
+                .map(row)
+                .collect(),
+            None => vec![Line::note("Reading…")],
+        };
         // In tile order, as the Packages tab lists them.
         let addons: Vec<Line> = self
             .tiles
@@ -557,7 +561,7 @@ impl Menu {
         let net = &self.network;
         let mut panels = vec![Panel {
             title: crate::machine::TITLE,
-            lines: machine.into_iter().map(row).collect(),
+            lines: machine,
         }];
         if !addons.is_empty() {
             panels.push(Panel {
@@ -880,10 +884,11 @@ impl Menu {
                 return Some(Effect::Start(Job::KeyboardApply(kb)));
             }
             SettingsEvent::MachineCopy => {
-                let panels = self.machine_panels(Instant::now());
-                if panels.is_empty() || !self.machine.start_copy() {
+                // Nothing to copy before the machine's facts are read.
+                if self.machine.facts().is_none() || !self.machine.start_copy() {
                     return None;
                 }
+                let panels = self.machine_panels(Instant::now());
                 return Some(Effect::Start(Job::Copy(crate::infopanel::text(&panels))));
             }
             SettingsEvent::DismissReport => {
@@ -3325,7 +3330,11 @@ mod tests {
         assert_eq!(m.tick(now), Some(Effect::Start(Job::Graphics)));
         assert_eq!(m.tick(now), Some(Effect::Start(Job::NetStatus)));
         assert_eq!(m.tick(now), None, "asked already");
-        assert!(m.machine_panels(now).is_empty(), "no answer yet");
+        // No answer yet: the other bands show, this one waits.
+        let panels = m.machine_panels(now);
+        let titles: Vec<&str> = panels.iter().map(|p| p.title).collect();
+        assert_eq!(titles, ["This machine", "Network", "Graphics"]);
+        assert_eq!(panels[0].lines, [Line::note("Reading…")]);
         let f = crate::machine::Facts {
             kernel: Some("7.0.0".into()),
             ..Default::default()

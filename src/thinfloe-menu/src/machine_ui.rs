@@ -2,7 +2,7 @@
 //! the graphics as info panels, in two columns on a wide panel, and *Copy*.
 
 use crate::brand::{self, role};
-use crate::infopanel::{self, Line, Panel};
+use crate::infopanel::{self, Panel};
 use crate::machine::MachineTab;
 use crate::menu::Menu;
 use crate::settings::SettingsEvent;
@@ -26,10 +26,6 @@ pub fn machine_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let w = ui.available_width().min(width);
-            if panels.is_empty() {
-                infopanel::band(ui, &t, w, crate::machine::TITLE, &[Line::note("Reading…")]);
-                return;
-            }
             if w >= brand::INFO_TWO_COLUMNS_W {
                 // The machine's facts are one block of known height, the
                 // network grows with the interfaces: each column keeps its
@@ -69,8 +65,9 @@ fn copy_row(ui: &mut Ui, t: &Theme, tab: &MachineTab, event: &mut Option<Setting
     ui.add_space(GAP / 2.0);
     ui.horizontal(|ui| {
         let copy = Button::new("Copy").variant(ButtonVariant::Secondary);
-        // Off while a copy runs: a second click would start a second job.
-        if ui.add_enabled(!tab.copying(), copy).clicked() {
+        // Off while a copy runs, a second click would start a second job,
+        // and until the machine's facts are read.
+        if ui.add_enabled(!tab.copying() && tab.facts().is_some(), copy).clicked() {
             *event = Some(SettingsEvent::MachineCopy);
         }
         match &tab.copied {
@@ -104,6 +101,7 @@ fn bands(ui: &mut Ui, t: &Theme, width: f32, panels: &[&Panel]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infopanel::Line;
 
     /// The bands' spacing stays with the bands: what follows them, *Copy*,
     /// stands as far below as anywhere else.
