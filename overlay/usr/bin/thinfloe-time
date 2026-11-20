@@ -15,9 +15,13 @@ Commands:
                                        and the Ubuntu pools file renamed to
                                        ubuntu-ntp-pools.sources.thinfloe-off
              no ntp lines              the file removed, the pools back
+             ntp=<server> lines        /run/chrony-dhcp/thinfloe.sources
+                                       (the DHCP servers) removed
            then restarts thinfloe-dhcp-timezone.service (it reads the
            leases again: the DHCP zone and the DHCP NTP servers, when the
-           menu set none) and runs chronyc reload sources.
+           menu set none) and, only when a sources file was written or
+           removed (or the last reload failed), runs chronyc reload
+           sources; a failed reload is then a failure.
 
 The file holds comment lines, at most one zone= line and at most eight
 ntp= lines, nothing else. A zone is UTC or a zone of zone.tab; a server is
@@ -50,6 +54,9 @@ TIMEDATECTL = os.environ.get("TF_TIME_TIMEDATECTL", "timedatectl")
 SYSTEMCTL = os.environ.get("TF_TIME_SYSTEMCTL", "systemctl")
 CHRONYC = os.environ.get("TF_TIME_CHRONYC", "chronyc")
 LOCK = os.environ.get("TF_TIME_LOCK", "/run/thinfloe/time.lock")
+# Present while a server change has not reached chrony.
+PENDING = os.environ.get("TF_TIME_PENDING", "/run/thinfloe/time.reload-pending")
+CHRONY_DHCP = os.environ.get("TF_TIME_CHRONY_DHCP", "/run/chrony-dhcp")
 
 WATCHER = "thinfloe-dhcp-timezone.service"
 POOLS = "ubuntu-ntp-pools.sources"
@@ -235,14 +242,25 @@ def lock_file() -> int:
             time.sleep(0.1)
 
 
-def write_atomic(path: str, text: Optional[str]) -> None:
-    """Bring path to text (None: absent), mode 644, by a rename."""
+def current(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def write_atomic(path: str, text: Optional[str]) -> bool:
+    """Bring path to text (None: absent), mode 644, by a rename. True when
+    the file was written or removed, False when it already was so."""
     if text is None:
         try:
             os.unlink(path)
         except FileNotFoundError:
-            pass
-        return
+            return False
+        return True
+    if current(path) == text.encode():
+        return False
     d = os.path.dirname(path)
     os.makedirs(d, mode=0o755, exist_ok=True)
     tmp = os.path.join(d, ".%s.%d.tmp" % (os.path.basename(path), os.getpid()))
@@ -254,6 +272,7 @@ def write_atomic(path: str, text: Optional[str]) -> None:
     finally:
         os.close(fd)
     os.rename(tmp, path)
+    return True
 
 
 def installed_zone(path: str) -> Optional[str]:
@@ -267,17 +286,25 @@ def installed_zone(path: str) -> Optional[str]:
     return None
 
 
-def install_sources(servers: List[str]) -> None:
+def install_sources(servers: List[str]) -> bool:
+    """True when a sources file chrony reads was written, renamed or
+    removed. Menu servers also remove the DHCP servers file here, so a
+    failed watcher restart cannot leave chrony on them."""
     d = os.path.join(ETC, "chrony", "sources.d")
     pools, off = os.path.join(d, POOLS), os.path.join(d, POOLS_OFF)
     if servers:
-        write_atomic(os.path.join(d, OURS), "".join("server %s iburst\n" % s for s in servers))
+        changed = write_atomic(os.path.join(d, OURS), "".join("server %s iburst\n" % s for s in servers))
         if os.path.exists(pools):
             os.replace(pools, off)
+            changed = True
+        if write_atomic(os.path.join(CHRONY_DHCP, OURS), None):
+            changed = True
     else:
-        write_atomic(os.path.join(d, OURS), None)
+        changed = write_atomic(os.path.join(d, OURS), None)
         if os.path.exists(off) and not os.path.exists(pools):
             os.replace(off, pools)
+            changed = True
+    return changed
 
 
 def apply() -> None:
@@ -291,7 +318,9 @@ def apply() -> None:
             "".join("ntp=%s\n" % s for s in servers)
         try:
             write_atomic(conf, body or None)
-            install_sources(servers)
+            changed = install_sources(servers) or os.path.exists(PENDING)
+            if changed:
+                write_atomic(PENDING, "")
         except OSError as e:
             raise TimeError("cannot install the time settings: %s" % (e.strerror or e))
         if zone:
@@ -310,10 +339,15 @@ def apply() -> None:
         rc, out = run([SYSTEMCTL, "restart", WATCHER])
         if rc != 0:
             log("cannot restart %s: %s" % (WATCHER, shown(out)))
-        rc, out = run([CHRONYC, "reload", "sources"])
-        if rc != 0:
-            log("chronyc reload sources: %s" % shown(out))
-            raise TimeError("The time service did not take the servers.")
+        if changed:
+            rc, out = run([CHRONYC, "reload", "sources"])
+            if rc != 0:
+                log("chronyc reload sources: %s" % shown(out))
+                raise TimeError("The time service did not take the servers.")
+            try:
+                os.unlink(PENDING)
+            except FileNotFoundError:
+                pass
     finally:
         os.close(fd)
 
