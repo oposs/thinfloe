@@ -670,7 +670,10 @@ fn job_result(
             // failed call is not read for: the tab keeps the last list and
             // the details read with it.
             let details = match &r {
-                Ok(list) => crate::netdetail::read(&paths.net_roots, list, &paths.pci_ids),
+                Ok(list) => crate::netdetail::Details {
+                    time: crate::timetab::read(&paths.time),
+                    ..crate::netdetail::read(&paths.net_roots, list, &paths.pci_ids)
+                },
                 Err(_) => crate::netdetail::Details::default(),
             };
             JobResult::NetStatus(r, details)
@@ -1009,6 +1012,7 @@ impl App {
             vainfo_cmd: self.cfg.paths.vainfo_cmd.clone(),
             wl_copy_cmd: self.cfg.paths.wl_copy_cmd.clone(),
             hardware_roots: self.cfg.paths.hardware_roots.clone(),
+            time: self.cfg.paths.time.clone(),
         };
         std::thread::spawn(move || {
             // The loop is gone only when the menu is exiting; nothing to tell.
@@ -1680,6 +1684,7 @@ mod tests {
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
+            time: crate::timetab::TimePaths::under(Path::new("/nonexistent/time")),
         }
     }
 
