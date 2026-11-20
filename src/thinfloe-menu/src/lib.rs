@@ -18,6 +18,7 @@ pub mod hardware;
 pub mod header;
 pub mod heads;
 pub mod icons;
+pub mod infopanel;
 pub mod jobs;
 pub mod kanshi;
 pub mod kbregistry;
