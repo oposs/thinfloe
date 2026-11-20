@@ -6,8 +6,11 @@
 
 ### Changed
 - The Connection tile in the status area shows each label on the left and its value on the right, and has four new lines: `Gateway`, `DNS` (the server in use, with `+1` and so on for more), `Traffic` (bytes received and sent, for example `↓ 1.23 GB ↑ 456 MB`) and `Uptime` (how long the machine has run). The `VPN` line shows only while the VPN is up; `wg0 down` and `no VPN` are no longer shown. A missing DNS server, or a missing default route, shows `none` in amber, and a connection without a gateway (a mobile modem or PPP link) shows `direct` in grey.
+- The facts on the Network and Screen tabs now carry a label each ("Driver: iwlwifi" instead of a bare "iwlwifi"), and both tabs show them at the top. The video formats are listed under "Video processing", one per line ("H.264: decode, encode").
+- The This machine tab also shows the network and graphics facts of the Network and Screen tabs, in two columns on a wide screen, and Copy puts them on the clipboard as well.
 
 ### Fixed
+- The Screen tab said "No graphics device found" on every machine, also when the picture worked. It now names the graphics chip and its driver. The Network tab now also shows the MAC address of each connection and the WiFi chip, which were missing for the same reason.
 - The microphone mute key of Logitech keyboards on a Logi Bolt receiver, such as the MX Mechanical, did nothing. It now mutes the microphones when "Volume keys control this machine" is on, and otherwise reaches the program in front, ThinLinc included.
 - On the switches in Settings, such as those of the Keyboard tab and "Show the public IP address", only the colour seemed to change when a switch was turned on, and the knob seemed to stay at the left. The knob is now light in both positions, with a margin of track colour around it, and shows at the right when the switch is on.
 - In a fresh clone of the repository, `make` stopped at once with `mkdir: cannot create directory 'artifacts': File exists`, because `artifacts` was a link to a directory on the developer's machine. `artifacts` is now an ordinary directory that the build makes; a link to share it between checkouts can still be made by hand, and a link whose target is missing now stops `make` with a message that names the target.

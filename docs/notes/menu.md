@@ -246,22 +246,50 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
 Facts that do not change while the machine runs live in Settings, not in
 the status area (see [status-area.md](status-area.md)).
 
-**Network tab, "Connections now".** Under each interface line a muted line
-(`nettab::detail_line`) joins with ` · ` what is known: `MAC
-3c:52:82:aa:bb:cc` (an all-zero MAC is left out), `gateway 192.168.1.1`
-for the interface holding the default route, and for WiFi the chip and the
-driver (`device/driver` link name). The chip is the PCI vendor and device
-name from `/usr/share/misc/pci.ids` (package `pciutils`), else `8086:2723`,
-or `USB 0bda:8179` for a USB adapter. Below the interfaces a row `DNS in
-use 192.168.1.1, 9.9.9.9` (or `DNS in use: none`) gives the servers the
-machine uses now, from `/run/systemd/resolve/resolv.conf`, else
-`/etc/resolv.conf`; it shows only after the first status answer without an
-error, so it never says "none" too early. The "DNS servers" field further
-down holds only configured servers. `netdetail::read` runs in the job
-thread after each successful `thinfloe-network status`, so the facts are
-read when the tab opens and on each of its refreshes; it reads `/sys` and
-`/proc`, bounded, and starts no subprocess. A failed status call keeps the
-last list and the details read with it.
+**Info panels.** The Network tab's "Connections now", the Screen tab's
+"Graphics" and the This machine tab draw their facts the same way
+(`infopanel.rs`): a card band with a title, then one row per fact, the
+label in the foreground colour and the value muted beside it ("Driver" /
+"iwlwifi", never a bare value). A group (an interface, "Video
+processing") indents its rows under its title. The label column is as
+wide as the widest label of the band, not the 240 pt form column, and a
+row is as high as its text (the interact height is set to 0 inside a
+panel): nothing in a panel takes a click. On the Network and Screen tabs
+the info panel is the first band (2026-11-20, asked for one place on both
+tabs; the facts are what a user reads before changing anything, and after
+an Apply on the Network tab the result shows there). Since then the
+Screen tab scrolls on a panel of about 730 pt, where the monitors' Position
+row used to fit. The producers are pure: `nettab::info_lines`,
+`graphics::info_lines`, `machine::rows`.
+
+**Sysfs sizes.** sysfs reports every attribute file as 4096 bytes,
+whatever it holds. `bounded::read_attr` reads it as a regular file to a
+byte cap and does not look at the reported size; `netdetail` and
+`hardware.rs` use it. In 4.6.0 the Network tab read attributes with a
+size-checked reader and a 256-byte cap, so no GPU id, MAC or WiFi chip was
+ever read: the Graphics band said "No graphics device found" on every
+machine (owner's thin client: `card1`, `8086:1616`, `i915`, attribute
+size 4096). Its facts are in `src/thinfloe-menu/src/testdata/thinclient-drm/`.
+
+**Network tab, "Connections now".** Per interface a group `WiFi wlp58s0`
+(`Wired`, `WireGuard`) with the rows State (connected, off, no cable, not
+connected), Network (the SSID), Signal (`strong (-55 dBm)`), Address (all
+of them, only when connected), Handshake (WireGuard: `42 s ago` or
+`none`), MAC address (an all-zero MAC is left out), Gateway (for the
+interface holding the default route), and for WiFi Chip and Driver
+(`device/driver` link name); an unknown row is left out. The chip is the
+PCI vendor and device name from `/usr/share/misc/pci.ids` (package
+`pciutils`), else `8086:2723`, or `USB 0bda:8179` for a USB adapter. After
+the interfaces a row "DNS in use" (`192.168.1.1, 9.9.9.9` or `none`) gives
+the servers the machine uses now (`netstat::dns_in_use`, also read by the
+status area): `/run/systemd/resolve/resolv.conf`, else `/etc/resolv.conf`;
+it shows only after the first status answer without an error, so it never
+says "none" too early. The "DNS servers" field further down holds only
+configured servers. `netdetail::read` runs in the job thread after each
+successful `thinfloe-network status`, so the facts are read when the tab
+opens and on each of its refreshes; it reads `/sys` and `/proc`, bounded,
+and starts no subprocess. A failed status call keeps the last list and the
+details read with it.
 
 **Network tab, "Public IP address".** A band after DNS with the switch
 "Show the public IP address" and the field "Lookup address" (hint
@@ -279,39 +307,50 @@ them. A failed save puts the switch and the saved address back to what
 since the commit stays in the field. A network Apply or take-over keeps
 both keys. The lookup itself: [status-area.md](status-area.md#public-ip-lookup).
 
-**Screen tab, "Graphics".** A band after the monitors: per DRM card
+**Screen tab, "Graphics".** The first band of the tab: per DRM card
 (`/sys/class/drm/card<N>`, at most 16, a card without PCI ids such as
-simpledrm left out) a row `GPU` with the `pci.ids` name or the ids
-(`8086:1916`) and a row `Driver` (left out without a driver link), then the
-VA-API codecs as muted lines such as `H.264 decode, encode`, `HEVC decode`
-(H.264, HEVC, VP9 and AV1 only, in that order), `VA-API not available`, or
-`No graphics device found`; `Reading…` until the job answers. The job runs
-once per menu run, when the Settings screen first shows the Screen tab
-(from `tick`, since the click that leaves the Network tab already carries
-the public IP write as its one effect). It runs `vainfo --display drm`
-(`TF_VAINFO_CMD` replaces `vainfo`) through `quiet::run`, 5 s timeout, at
-most 64 KiB of output. A failure, a timeout, a full cap or a listing
-without codecs is "not available", and the menu log gets one line `VA-API
-not available: <cause>.` under the source `graphics`. The codecs are those
-of libva's default render node, not tied to one GPU row on a machine with
-two. tfuser is not in the `render` or `video` group; the render node is
-reached through logind's `uaccess` ACL for the tty1 session (not verified
-on hardware).
+simpledrm left out) a row GPU with the `pci.ids` name or the ids
+(`8086:1916`) and a row Driver (left out without a driver link), or `GPU:
+none found`; then a group "Video processing" with a row per codec
+(`H.264: decode, encode`, `HEVC: decode`; H.264, HEVC, VP9 and AV1 only,
+in that order), or the row `Video processing: not available`; `Reading…`
+until the job answers. The job runs once per menu run, when the Settings
+screen first shows the Screen or the This machine tab (from `tick`, since
+the click that leaves the Network tab already carries the public IP write
+as its one effect). It runs `vainfo --display drm` (`TF_VAINFO_CMD`
+replaces `vainfo`) through `quiet::run`, 5 s timeout, at most 64 KiB of
+output. A failure, a timeout, a full cap or a listing without codecs is
+"not available", and the menu log gets one line `VA-API not available:
+<cause>.` under the source `graphics`. The codecs are those of libva's
+default render node, not tied to one GPU row on a machine with two. tfuser
+is not in the `render` or `video` group; the render node is reached
+through logind's ACL for the tty1 session (`/dev/dri` nodes carry an ACL,
+and `vainfo --display drm` as tfuser works on the owner's thin client,
+iHD driver, 2026-11-20).
 
-**This machine tab.** The last Settings tab. Rows: Maker, Model, CPU
-model, Cores, RAM, ThinFloe version, Kernel, Boot (`USB` or `Netboot`),
-Hostname, Uptime, then one row per installed add-on with its version; an
-unknown value leaves its row out. The facts (`machine::read`: DMI,
-`/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`,
-`/proc/sys/kernel/osrelease`, bounded) are read each time the tab opens;
-the uptime counts on from that reading and the loop wakes for it once a
-minute only while the tab is on screen. Copy puts all rows on the
-clipboard as `Label: value` lines with `wl-copy` (`TF_WL_COPY_CMD`), 3 s
-timeout; `wl-copy` forks a server that keeps the text, and the menu leaves
-that fork running. The button is off while a copy runs; then the band
-says "Copied" or shows the error in the warning colour, and a failure is
-also logged as "Could not copy to the clipboard: <error>." The tab changes
-nothing, so it stays enabled after a failed migration of the settings.
+**This machine tab.** The last Settings tab, four info panels: This
+machine (Maker, Model, CPU model, Cores, RAM, ThinFloe version, Kernel,
+Boot `USB` or `Netboot`, Hostname, Uptime), Add-ons (one row per installed
+add-on with its version; left out without one), Network and Graphics (the
+lines of the other two tabs). From a panel width of 720 pt
+(`INFO_TWO_COLUMNS_W`) there are two columns: This machine and Add-ons
+left with Copy under them, Network and Graphics right; narrower, one
+column with Copy at the end. An unknown value leaves its row out. The
+facts (`machine::read`: DMI, `/proc/cpuinfo`, `/proc/meminfo`,
+`/proc/uptime`, `/proc/sys/kernel/osrelease`, bounded) are read each time
+the tab opens; the uptime counts on from that reading and the loop wakes
+for it once a minute only while the tab is on screen. While the tab is
+open the network status is asked every 2 s as on the Network tab
+(`NetView::Facts`: the status only, never the network files). Copy puts
+the four panels on the clipboard (`infopanel::text`): each panel's title,
+its rows as `Label: value` lines, a group's rows indented by two spaces
+under its title, a blank line between panels. It runs `wl-copy`
+(`TF_WL_COPY_CMD`), 3 s timeout; `wl-copy` forks a server that keeps the
+text, and the menu leaves that fork running. The button is off while a
+copy runs; then it says "Copied" or shows the error in the warning colour,
+and a failure is also logged as "Could not copy to the clipboard:
+<error>." The tab changes nothing, so it stays enabled after a failed
+migration of the settings.
 
 ## Keyboard tab
 
