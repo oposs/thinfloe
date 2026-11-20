@@ -724,6 +724,10 @@ mod tests {
             gateway: Some("10.0.0.1".parse().unwrap()),
             dns: vec!["9.9.9.9".parse().unwrap()],
         });
+        c.time = crate::config::TimeCfg {
+            zone: Some("Europe/Zurich".into()),
+            ntp: vec!["ntp.example.ch".into(), "10.0.0.1".into()],
+        };
         c
     }
 
