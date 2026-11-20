@@ -86,14 +86,44 @@ fn copy_row(ui: &mut Ui, t: &Theme, tab: &MachineTab, event: &mut Option<Setting
 }
 
 /// `panels` one below the other, `TILE_GAP` apart as the bands of the
-/// other tabs; inside a band the spacing stays as it was.
+/// other tabs; inside a band, and after the last one, the spacing stays
+/// as it was.
 fn bands(ui: &mut Ui, t: &Theme, width: f32, panels: &[&Panel]) {
     let between = ui.spacing().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = TILE_GAP;
-    for p in panels {
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = between;
-            infopanel::band(ui, t, width, p.title, &p.lines);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = TILE_GAP;
+        for p in panels {
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = between;
+                infopanel::band(ui, t, width, p.title, &p.lines);
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bands' spacing stays with the bands: what follows them, *Copy*,
+    /// stands as far below as anywhere else.
+    #[test]
+    fn the_bands_leave_the_spacing_as_they_found_it() {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let panel = Panel {
+            title: crate::machine::TITLE,
+            lines: vec![Line::row("Maker", "HP")],
+        };
+        let mut spacing = None;
+        let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let t = Theme::current(ui.ctx());
+            let before = ui.spacing().item_spacing;
+            bands(ui, &t, 400.0, &[&panel, &panel]);
+            spacing = Some((before, ui.spacing().item_spacing));
         });
+        o.textures_delta.clear();
+        let (before, after) = spacing.expect("drawn");
+        assert_eq!(after, before);
     }
 }
