@@ -4560,11 +4560,16 @@ mod tests {
         menu
     }
 
-    /// The Network tab is drawn on a screen tall enough that every band
-    /// fits; on 1080p and smaller ones it can scroll (see
+    /// The height of the screen the Network tab tests draw on: tall
+    /// enough that every band fits, so none scrolls out of the test's
+    /// view. With the Time band the page no longer fits on 1600 points;
+    /// on 1080p and smaller screens it scrolls (see
     /// `every_network_control_scrolls_into_reach`).
+    const NET_SCREEN_H: f32 = 2400.0;
+
+    /// The Network tab's texts, drawn `NET_SCREEN_H` tall.
     fn net_texts(menu: &Menu) -> Vec<String> {
-        text_rects(&settings_shapes(menu, 1920.0, 1600.0))
+        text_rects(&settings_shapes(menu, 1920.0, NET_SCREEN_H))
             .into_iter()
             .map(|(t, _)| t)
             .collect()
@@ -4855,7 +4860,7 @@ mod tests {
         assert!(has(&texts, crate::publicip::DEFAULT_URL), "the hint: {texts:?}");
         assert!(!has(&texts, PUBLIC_IP_NOTE), "{texts:?}");
         // One line: the label fits its column.
-        let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 1600.0);
+        let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, NET_SCREEN_H);
         let rects = text_rects(&shapes);
         let height = |name: &str| rects.iter().find(|(t, _)| t == name).unwrap().1.height();
         assert!(height("Show the public IP address") < 1.5 * height("Lookup address"));
@@ -4962,6 +4967,9 @@ mod tests {
             "DNS servers",
             "Used for wired and WiFi. Empty: the servers DHCP sends.",
             "WiFi keeps the DNS servers from your old settings.",
+            "Time zone",
+            "NTP servers",
+            "Lookup address",
         ];
         // Before any scrolling something is out of reach: the tab does not
         // fit, so the scrolling below is what the test checks.
@@ -4973,7 +4981,7 @@ mod tests {
             !wanted.iter().all(|w| in_reach(&texts, w)),
             "the whole tab fits on 1080p: {texts:?}"
         );
-        let mut seen = [false; 6];
+        let mut seen = [false; 9];
         let mut clicked = None;
         for _ in 0..80 {
             let apply = find(&texts, "Apply").expect("Apply");
@@ -4990,7 +4998,7 @@ mod tests {
             }
             texts = frame(vec![egui::Event::PointerMoved(over), wheel.clone()]).0;
         }
-        assert_eq!(seen, [true; 6], "{wanted:?}");
+        assert_eq!(seen, [true; 9], "{wanted:?}");
         assert_eq!(
             clicked,
             Some(Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::TakeOver(
@@ -5323,8 +5331,8 @@ mod tests {
         assert_eq!(net_clicks(&menu, &["Cancel"]).0, [ev(NetEvent::CancelApply)]);
     }
 
-    /// Frames of the Network tab of `menu` on one context, at 1920x1600;
-    /// each gets its events and reports its event.
+    /// Frames of the Network tab of `menu` on one context, `NET_SCREEN_H`
+    /// tall; each gets its events and reports its event.
     fn net_frames(menu: &Menu, frames: Vec<Vec<egui::Event>>) -> (Vec<(String, Rect)>, Vec<Option<UiEvent>>) {
         let ctx = egui::Context::default();
         crate::brand::apply(&ctx);
@@ -5333,7 +5341,7 @@ mod tests {
         let mut events = vec![];
         for (i, input) in [vec![], vec![], vec![]].into_iter().chain(frames).enumerate() {
             let input = egui::RawInput {
-                screen_rect: Some(screen(1920.0, 1600.0)),
+                screen_rect: Some(screen(1920.0, NET_SCREEN_H)),
                 events: input,
                 time: Some(i as f64 * 0.1),
                 ..Default::default()
@@ -5360,7 +5368,7 @@ mod tests {
         let mut effects = vec![];
         for (i, input) in frames.into_iter().enumerate() {
             let input = egui::RawInput {
-                screen_rect: Some(screen(1920.0, 1600.0)),
+                screen_rect: Some(screen(1920.0, NET_SCREEN_H)),
                 events: input,
                 time: Some(i as f64 * 0.1),
                 ..Default::default()
@@ -5501,6 +5509,90 @@ mod tests {
                     text: typed.into(),
                     commit: true,
                 }),
+                None,
+            ]
+        );
+    }
+
+    /// The Time band sits between DNS and the public IP band, and its NTP
+    /// field commits like the lookup address.
+    #[test]
+    fn the_time_band_follows_dns() {
+        let texts = net_texts(&network_settings(two_networks()));
+        let at = |name: &str| {
+            texts
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("{name} not in {texts:?}"))
+        };
+        assert!(
+            at("DNS") < at("Time") && at("Time") < at("Public IP address"),
+            "{texts:?}"
+        );
+        for t in [
+            "Time zone",
+            "Automatic",
+            "NTP servers",
+            "Empty: the servers DHCP sends and the Ubuntu pool.",
+        ] {
+            assert!(has(&texts, t), "{t}: {texts:?}");
+        }
+    }
+
+    /// The clock line follows a status answer.
+    #[test]
+    fn the_time_band_shows_the_clock() {
+        let mut net = two_networks();
+        let details = crate::netdetail::Details {
+            time: crate::timetab::TimeStatus {
+                zone: "UTC".into(),
+                answered: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        net.status_done(Ok(Vec::new()), details);
+        let texts = net_texts(&network_settings(net));
+        assert!(has(&texts, "Not synchronised yet."), "{texts:?}");
+        assert!(has(&texts, "UTC: DHCP sends no time zone."), "{texts:?}");
+        assert!(has(&texts, "Servers: none."), "{texts:?}");
+    }
+
+    /// Typing servers, then clicking the public IP switch: the switch is
+    /// reported, and the field's commit on the next frame, as with Apply
+    /// and the lookup address.
+    #[test]
+    fn ntp_field_and_switch_in_one_frame() {
+        use crate::network::NetEvent;
+        use crate::timeband::TimeEvent;
+        let mut net = two_networks();
+        net.event(
+            NetEvent::Time(TimeEvent::NtpText {
+                text: "ntp.example.ch".into(),
+                commit: false,
+            }),
+            false,
+        );
+        let menu = network_settings(net);
+        let (texts, _) = net_frames(&menu, vec![]);
+        let at = |name: &str| texts.iter().find(|(t, _)| t == name).unwrap().1;
+        let field = at("ntp.example.ch").center();
+        // The switch sits in the value column, where the lookup address
+        // field below it starts, on the line of its label.
+        let label = at("Show the public IP address");
+        let column = at(crate::publicip::DEFAULT_URL).left();
+        let switch = egui::pos2(column + 4.0, label.center().y);
+        let (_, events) = net_frames(&menu, vec![click_at(field), click_at(switch), vec![], vec![]]);
+        let ev = |e| Some(UiEvent::Settings(SettingsEvent::Network(e)));
+        assert_eq!(
+            events,
+            [
+                None,
+                ev(NetEvent::PublicIp(true)),
+                ev(NetEvent::Time(TimeEvent::NtpText {
+                    text: "ntp.example.ch".into(),
+                    commit: true,
+                })),
                 None,
             ]
         );

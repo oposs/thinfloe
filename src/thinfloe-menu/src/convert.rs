@@ -345,7 +345,10 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     let wifi = read_generated(dir, "wifi.yaml")?;
     let wired = read_generated(dir, "ethernet.yaml")?;
     let time = read_generated(dir, "time")?;
-    if [&env, &screen, &kanshi_text, &wifi, &wired, &time].iter().all(|f| f.is_none()) {
+    if [&env, &screen, &kanshi_text, &wifi, &wired, &time]
+        .iter()
+        .all(|f| f.is_none())
+    {
         return Ok(None);
     }
     let mut cfg = ThinfloeConfig::default();

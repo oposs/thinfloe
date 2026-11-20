@@ -168,7 +168,10 @@ XX\t+0\tnoslash\n";
         assert_eq!(
             z.cities["America"],
             [
-                ("America/Argentina/Buenos_Aires".to_string(), "Argentina/Buenos Aires".to_string()),
+                (
+                    "America/Argentina/Buenos_Aires".to_string(),
+                    "Argentina/Buenos Aires".to_string()
+                ),
                 ("America/New_York".to_string(), "New York".to_string()),
             ]
         );
@@ -211,7 +214,10 @@ XX\t+0\tnoslash\n";
 
     #[test]
     fn field_text_splits_on_commas_and_spaces() {
-        assert_eq!(parse_servers(" a.ch, 10.0.0.1  b.ch,").unwrap(), ["a.ch", "10.0.0.1", "b.ch"]);
+        assert_eq!(
+            parse_servers(" a.ch, 10.0.0.1  b.ch,").unwrap(),
+            ["a.ch", "10.0.0.1", "b.ch"]
+        );
         assert_eq!(parse_servers("").unwrap(), Vec::<String>::new());
         assert!(parse_servers("a.ch, a;b").is_err());
     }

@@ -565,6 +565,7 @@ fn panic_result(job: &Job) -> JobResult {
         Job::MonTakeOver { .. } => JobResult::MonTakenOver(Err(e)),
         Job::StatusSave(_) => JobResult::StatusSaved(Err(e)),
         Job::PublicIpSave(_) => JobResult::PublicIpSaved(Err(e)),
+        Job::TimeSave(_) => JobResult::TimeSaved(Err(jobs::TimeSaveFail::NotApplied(e))),
         Job::KeyboardApply(kb) => JobResult::KeyboardApplied {
             kb: kb.clone(),
             result: Err(e),
@@ -705,6 +706,7 @@ fn job_result(
         }
         Job::StatusSave(text) => JobResult::StatusSaved(jobs::status_save(&paths.config, text.as_deref())),
         Job::PublicIpSave(prefs) => JobResult::PublicIpSaved(jobs::public_ip_save(paths, &prefs)),
+        Job::TimeSave(cfg) => JobResult::TimeSaved(jobs::time_save(paths, &cfg, feed)),
         Job::KeyboardApply(kb) => {
             let result = jobs::keyboard_apply(paths, &kb, feed);
             JobResult::KeyboardApplied { kb, result }

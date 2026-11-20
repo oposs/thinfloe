@@ -56,6 +56,7 @@ pub mod store;
 #[cfg(test)]
 mod testdir;
 pub mod tiles;
+pub mod timeband;
 pub mod timecfg;
 pub mod timetab;
 pub mod ui;
