@@ -4200,6 +4200,16 @@ mod tests {
         );
     }
 
+    /// Copy takes no click until the machine's facts are read.
+    #[test]
+    fn copy_takes_a_click_only_once_the_facts_are_read() {
+        let copy = Some(UiEvent::Settings(SettingsEvent::MachineCopy));
+        let mut menu = machine_settings();
+        assert_eq!(click_text(&menu, 1920.0, 1080.0, "Copy"), copy);
+        menu.machine = crate::machine::MachineTab::default();
+        assert_ne!(click_text(&menu, 1920.0, 1080.0, "Copy"), copy);
+    }
+
     /// A panel looks the same on every tab: the gap between the columns of
     /// This machine does not reach the label column inside them.
     #[test]
