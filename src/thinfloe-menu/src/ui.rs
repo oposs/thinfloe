@@ -1101,8 +1101,8 @@ fn packages_tab(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], width: f32) ->
     event
 }
 
-/// The Screen tab: the graphics, then when the screen turns off, then the
-/// monitors.
+/// The Screen tab: when the screen turns off, the monitors, then the
+/// graphics.
 /// Apply follows the bands, as on the Network tab; pinned to the foot of
 /// the panel only when the bands scroll.
 fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {
@@ -1119,11 +1119,6 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
             let between = ui.spacing().item_spacing.y;
             ui.spacing_mut().item_spacing.y = TILE_GAP;
             let band_w = ui.available_width().min(width);
-            // The facts lead, as on the Network tab.
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.y = between;
-                graphics_band(ui, menu.graphics.as_ref());
-            });
             let idle = ui
                 .scope(|ui| {
                     ui.spacing_mut().item_spacing.y = between;
@@ -1136,6 +1131,12 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
                     crate::monitors_ui::monitors_band(ui, &menu.monitors, now, band_w)
                 })
                 .inner;
+            // The facts close the tab, as on the Network tab: on top they
+            // pushed the monitors' Position row out of a 1080 screen.
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = between;
+                graphics_band(ui, menu.graphics.as_ref());
+            });
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
             idle.or(monitors.map(SettingsEvent::Monitors))
@@ -4070,6 +4071,46 @@ mod tests {
         menu
     }
 
+    /// On a 1920x1080 screen the monitors' Position row is in view without
+    /// a scroll, also with a full Graphics band (a GPU, its driver and
+    /// three codecs). With the band on top it was not (2026-11-20).
+    #[test]
+    fn the_position_row_is_in_view_on_a_1080_screen() {
+        use crate::graphics::{Codec, Gpu, Info, Vaapi};
+        let codec = |name| Codec {
+            name,
+            decode: true,
+            encode: true,
+        };
+        let mut menu = monitor_settings(two_monitors());
+        menu.graphics = Some(Info {
+            gpus: vec![Gpu {
+                card: "card1".into(),
+                ids: (0x8086, 0x1616),
+                name: Some("Intel Corporation HD Graphics 5500".into()),
+                driver: Some("i915".into()),
+            }],
+            vaapi: Vaapi::Codecs(vec![codec("H.264"), codec("HEVC"), codec("VP9")]),
+        });
+        let shapes = settings_shapes(&menu, 1920.0, 1080.0);
+        let side = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if ["Left of", "Right of", "Above", "Below"].contains(&t.galley.text()) => {
+                    Some((t.galley.rect.translate(t.pos.to_vec2()), c.clip_rect))
+                }
+                _ => None,
+            })
+            .expect("the Position row's select");
+        let (text, clip) = side;
+        // The select's box reaches about half a line past its text.
+        let select = text.expand2(egui::vec2(0.0, text.height() / 2.0));
+        assert!(
+            clip.contains_rect(select),
+            "select {select:?} outside the page {clip:?}"
+        );
+    }
+
     /// This machine shows what the Network and Screen tabs show, beside
     /// the machine's facts on a wide panel, below them on a narrow one.
     #[test]
@@ -4129,11 +4170,11 @@ mod tests {
         assert!(rect_of(&narrow, "Copy").top() > rect_of(&narrow, "not available").bottom());
     }
 
-    /// The Graphics band leads the Screen tab: "Reading…" until the job
+    /// The Graphics band closes the Screen tab: "Reading…" until the job
     /// answers, then each GPU and driver and the codecs under "Video
     /// processing", or why there are none, each value beside its label.
     #[test]
-    fn the_graphics_band_leads_the_screen_tab() {
+    fn the_graphics_band_closes_the_screen_tab() {
         use crate::graphics::{Codec, Gpu, Info, Vaapi};
         let texts = |menu: &Menu| -> Vec<String> {
             text_rects(&settings_shapes(menu, 1920.0, 1600.0))
@@ -4149,8 +4190,8 @@ mod tests {
         };
         let mut menu = screen_settings();
         let got = texts(&menu);
-        assert!(at(&got, "Graphics") < at(&got, "Turn the screen off after"), "{got:?}");
-        assert!(at(&got, "Graphics") < at(&got, "Monitors"), "{got:?}");
+        assert!(at(&got, "Turn the screen off after") < at(&got, "Graphics"), "{got:?}");
+        assert!(at(&got, "Monitors") < at(&got, "Graphics"), "{got:?}");
         assert!(at(&got, "Graphics") < at(&got, "Reading…"), "{got:?}");
         menu.graphics = Some(Info {
             gpus: vec![Gpu {
@@ -4499,7 +4540,14 @@ mod tests {
             dns_in_use: vec!["192.168.1.1".into()],
         };
         net.status_done(Ok(lines.to_vec()), details);
-        let texts = net_texts(&network_settings(net));
+        // The band closes the tab: a screen tall enough to show it whole.
+        let tall = |menu: &Menu| -> Vec<String> {
+            text_rects(&settings_shapes(menu, 1920.0, 2400.0))
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect()
+        };
+        let texts = tall(&network_settings(net));
         assert!(has(&texts, "Connections now"), "{texts:?}");
         // Every value beside its label, never a bare one joined by dots.
         for want in [
@@ -4523,13 +4571,13 @@ mod tests {
         assert!(!texts.iter().any(|t| t.contains(" · iwlwifi")), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         // Before the first status answer nothing is known yet.
-        let texts = net_texts(&network_settings(two_networks()));
+        let texts = tall(&network_settings(two_networks()));
         assert!(!has(&texts, "DNS in use"), "{texts:?}");
         assert!(!has(&texts, "No network adapter found"), "{texts:?}");
         assert!(has(&texts, "Looking for network adapters…"), "{texts:?}");
         let mut net = two_networks();
         net.status_done(Ok(Vec::new()), Default::default());
-        let texts = net_texts(&network_settings(net));
+        let texts = tall(&network_settings(net));
         assert!(has(&texts, "No network adapter found"), "{texts:?}");
     }
 
@@ -4971,8 +5019,8 @@ mod tests {
     #[test]
     fn apply_follows_the_bands_on_a_tall_screen() {
         let shapes = settings_shapes(&network_settings(two_networks()), 1920.0, 2400.0);
-        // The public IP band is the last one.
-        let band = card_of(&shapes, "Lookup address");
+        // "Connections now" is the last band.
+        let band = card_of(&shapes, "Connections now");
         let apply = text_rects(&shapes)
             .into_iter()
             .rfind(|(t, _)| t == "Apply")
@@ -6980,9 +7028,9 @@ mod tests {
         Some(UiEvent::Settings(SettingsEvent::Monitors(e)))
     }
 
-    /// The monitor tests' window: tall enough that the Screen tab, with
-    /// the Graphics band at its top, does not scroll.
-    const MON_WINDOW: (f32, f32) = (1920.0, 1300.0);
+    /// The monitor tests' window: a 1080 screen, on which the Position row
+    /// must be in view without a scroll.
+    const MON_WINDOW: (f32, f32) = (1920.0, 1080.0);
 
     fn mon_shapes(menu: &Menu) -> Vec<egui::epaint::ClippedShape> {
         settings_shapes(menu, MON_WINDOW.0, MON_WINDOW.1)

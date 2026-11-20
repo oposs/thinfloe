@@ -6,7 +6,7 @@
 
 ### Changed
 - The Connection tile in the status area shows each label on the left and its value on the right, and has four new lines: `Gateway`, `DNS` (the server in use, with `+1` and so on for more), `Traffic` (bytes received and sent, for example `↓ 1.23 GB ↑ 456 MB`) and `Uptime` (how long the machine has run). The `VPN` line shows only while the VPN is up; `wg0 down` and `no VPN` are no longer shown. A missing DNS server, or a missing default route, shows `none` in amber, and a connection without a gateway (a mobile modem or PPP link) shows `direct` in grey.
-- The facts on the Network and Screen tabs now carry a label each ("Driver: iwlwifi" instead of a bare "iwlwifi"), and both tabs show them at the top. The video formats are listed under "Video processing", one per line ("H.264: decode, encode").
+- The facts on the Network and Screen tabs now carry a label each ("Driver: iwlwifi" instead of a bare "iwlwifi"), and both tabs show them in the last band: "Connections now" moved from the top of the Network tab to its end. The video formats are listed under "Video processing", one per line ("H.264: decode, encode").
 - The This machine tab also shows the network and graphics facts of the Network and Screen tabs, in two columns on a wide screen, and Copy puts them on the clipboard as well.
 
 ### Fixed

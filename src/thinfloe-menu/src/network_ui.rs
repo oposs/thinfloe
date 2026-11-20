@@ -65,7 +65,6 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
             let inner = ui.available_width().min(width) - ROW_MARGIN_X;
             let between = ui.spacing().item_spacing.y;
             ui.spacing_mut().item_spacing.y = TILE_GAP;
-            band(ui, &t, inner, between, "Connections now", |ui| connections(ui, &t, net));
             // Nothing to edit before the files are read, nor while
             // an Apply or a take-over runs.
             if net.wifi_file().is_some() && net.wired_file().is_some() {
@@ -82,6 +81,8 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
             band(ui, &t, inner, between, "Public IP address", |ui| {
                 public_ip(ui, &t, net, pending.as_ref(), &mut event, &mut url)
             });
+            // The facts close the tab, as on the Screen tab.
+            band(ui, &t, inner, between, "Connections now", |ui| connections(ui, &t, net));
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
             event
