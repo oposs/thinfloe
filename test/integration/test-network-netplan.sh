@@ -22,7 +22,7 @@ FIXTURES="$SCRATCH/fixtures"
 mkdir -p "$FIXTURES"
 if ! (cd "$REPO/src/thinfloe-menu" \
         && TF_NETPLAN_FIXTURES="$FIXTURES" systemd-run --user --scope -q -p MemoryMax=4G -- \
-           cargo test --locked -j 4 --lib -- write_netplan_fixtures >"$SCRATCH/cargo.log" 2>&1); then
+           cargo test --locked -j 4 --lib -- --test-threads="${TEST_THREADS:-4}" write_netplan_fixtures >"$SCRATCH/cargo.log" 2>&1); then
     tail -20 "$SCRATCH/cargo.log"
     bad "the menu could not write the network files"
     echo "FAILED - network files and netplan"

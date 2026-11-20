@@ -13,6 +13,11 @@ CONTAINER_RUNTIME ?= podman
 # Parallelism cap. This machine is shared - never use more than this many
 # cores for compression, container builds or QEMU.
 BUILD_JOBS ?= 4
+# The same cap for the threads of the Rust tests: cargo test runs one per
+# core (128 here) unless told otherwise. Raise it with TEST_THREADS=n;
+# exported for the test scripts that call cargo test.
+TEST_THREADS ?= 4
+export TEST_THREADS
 
 # Directories
 ARTIFACT_DIR := artifacts
@@ -591,7 +596,7 @@ TEST_ENV := TMPDIR='$(TEST_TMPDIR)'
 test-unit:
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) python3 -m unittest discover -s test/unit -v
-	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS)
+	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
 
 test: test-unit rootfs
 	@mkdir -p '$(TEST_TMPDIR)'
