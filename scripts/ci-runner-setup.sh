@@ -20,15 +20,18 @@ MODE=$1
 
 cd "$(dirname "$0")/.."
 
-# 1. The committed artifacts symlink points at the development host's
-# scratch disk and dangles here; every make call would print "mkdir: cannot
-# create directory 'artifacts': File exists". skip-worktree keeps the
-# replaced link out of `git status`, which would otherwise give the dev
-# version .dirty.
+# 1. Up to 4.6.0 the repository committed `artifacts` as a link to the
+# development host's scratch disk, which dangles here; every make call
+# printed "mkdir: cannot create directory 'artifacts': File exists". A
+# checkout of such a ref still has the link: replace it with a directory, and
+# skip-worktree keeps the change out of `git status`, which would otherwise
+# give the dev version .dirty. Later refs do not track `artifacts`.
 echo "ci-runner-setup: artifacts directory"
 if [[ -L artifacts ]]; then rm artifacts; fi
 mkdir -p artifacts
-git update-index --skip-worktree artifacts
+if git ls-files --error-unmatch artifacts >/dev/null 2>&1; then
+    git update-index --skip-worktree artifacts
+fi
 
 if [[ $MODE == artifacts ]]; then
     exit 0

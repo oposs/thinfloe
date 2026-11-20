@@ -2,8 +2,9 @@
 # Offline tests for `make clean`.
 #
 # `rm -rf artifacts/*` follows a symlinked artifacts directory and empties its
-# target, which may hold other checkouts' builds. clean refuses a symlink
-# unless FORCE=1, and always removes this checkout's container stamps.
+# target, which may hold other checkouts' builds. clean leaves a link target
+# alone unless FORCE=1 and still exits 0, and always removes this checkout's
+# container stamps. A link whose target is gone stops make with its cause.
 #
 # Runs the real Makefile in a scratch tree, never in this checkout. The
 # container runtime is a stub that knows no images.
@@ -59,16 +60,16 @@ stamps_gone() {
 # ---------------------------------------------------------------- test 1
 setup link
 rc=$(run_clean)
-if [[ "$rc" != 0 ]] && [[ -e "$SHARED/rootfs/ramroot.sqsh" ]] &&
+if [[ "$rc" == 0 ]] && [[ -e "$SHARED/rootfs/ramroot.sqsh" ]] &&
    grep -qF "$SHARED" "$WORK/out" && grep -qF 'make clean FORCE=1' "$WORK/out"; then
-    ok "a symlinked artifacts directory is refused, naming its target and FORCE=1"
+    ok "a symlinked artifacts directory is left alone, naming its target and FORCE=1, and clean exits 0"
 else
     bad "symlinked artifacts: exit $rc, target $(ls -A "$SHARED"), output: $(cat "$WORK/out")"
 fi
 if stamps_gone; then
-    ok "the refusal still removes the container stamps"
+    ok "clean removes the container stamps also when it leaves the link target alone"
 else
-    bad "the refusal left the container stamps in place"
+    bad "clean left the container stamps in place"
 fi
 
 # ---------------------------------------------------------------- test 2
@@ -87,6 +88,26 @@ if [[ "$rc" == 0 ]] && [[ -z "$(ls -A "$TREE/artifacts")" ]] && stamps_gone; the
     ok "a real artifacts directory is cleaned without FORCE"
 else
     bad "real directory: exit $rc, left $(ls -A "$TREE/artifacts"), output: $(cat "$WORK/out")"
+fi
+
+# ---------------------------------------------------------------- test 4
+# A link whose target is gone (a checkout copied from another host) stops
+# the directory rule with the cause, not with mkdir's "File exists".
+setup link
+mv "$SHARED" "$WORK/gone"
+make -s -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" TF_VERSION=4.2.0-dev+abc artifacts/rootfs >"$WORK/out" 2>&1
+rc=$?
+if [[ "$rc" != 0 ]] && grep -qF "$SHARED, which does not exist" "$WORK/out" &&
+   ! grep -qF 'File exists' "$WORK/out"; then
+    ok "a dangling artifacts link stops make with its target named"
+else
+    bad "dangling link: exit $rc, output: $(cat "$WORK/out")"
+fi
+rc=$(run_clean)
+if [[ "$rc" == 0 ]] && stamps_gone; then
+    ok "clean still works on a dangling artifacts link"
+else
+    bad "clean on a dangling link: exit $rc, output: $(cat "$WORK/out")"
 fi
 
 exit $fail

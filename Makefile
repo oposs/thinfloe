@@ -63,6 +63,12 @@ endif
 # rewritten only when its content differs. A dev version so names the
 # commit the rootfs was last exported from.
 VERSION_KIND_STAMP := $(ROOTFS_DIR)/.version-kind
+# `artifacts` is a directory the build makes, or a link a developer made by
+# hand to share one directory between checkouts. A link whose target is gone
+# made the mkdir below fail with "File exists"; name the cause instead.
+ifeq ($(shell [ -L $(ARTIFACT_DIR) ] && [ ! -e $(ARTIFACT_DIR) ] && echo dangling),dangling)
+$(error $(ARTIFACT_DIR) is a link to $(shell readlink $(ARTIFACT_DIR)), which does not exist: create that directory, or remove the link to build into a directory here)
+endif
 ifeq ($(DRY_RUN),)
 $(shell [ "$$(cat $(VERSION_KIND_STAMP) 2>/dev/null)" = "$(VERSION_KIND)" ] || { mkdir -p $(ROOTFS_DIR) && echo "$(VERSION_KIND)" >$(VERSION_KIND_STAMP); })
 else ifneq ($(shell cat $(VERSION_KIND_STAMP) 2>/dev/null),$(VERSION_KIND))
@@ -641,16 +647,19 @@ test-runtime: rootfs
 
 # A symlinked artifacts directory points somewhere this checkout may not own
 # alone: `rm -rf artifacts/*` follows the link and empties the target, other
-# checkouts' builds included. clean therefore refuses it unless FORCE=1. The
-# stamps are this checkout's own and are always removed.
+# checkouts' builds included. clean therefore leaves a link target alone
+# unless FORCE=1, and says so. It is still a clean: without the stamps the
+# containers are built again, which changes every artifact key, so the next
+# make exports everything again. The stamps are this checkout's own and are
+# always removed.
 clean:
 	rm -f .ubuntu-container .image-builder-container .ipxe-container
 	@if [ -L "$(ARTIFACT_DIR)" ] && [ "$(FORCE)" != 1 ]; then \
 		echo "$(ARTIFACT_DIR) is a symlink to $$(readlink "$(ARTIFACT_DIR)") - not emptying it."; \
-		echo "Removed the container stamps only. To empty the link target too:"; \
-		echo "  make clean FORCE=1"; \
-		exit 1; \
+		echo "Removed the container stamps, so the next make builds everything again."; \
+		echo "To empty the link target too: make clean FORCE=1"; \
+	else \
+		rm -rf $(ARTIFACT_DIR)/*; \
+		echo "✓ Cleaned artifacts"; \
 	fi
-	rm -rf $(ARTIFACT_DIR)/*
-	@echo "✓ Cleaned artifacts"
 

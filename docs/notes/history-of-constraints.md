@@ -425,8 +425,9 @@ second line is a hash of the names, modes and contents of its inputs, and the
 `Makefile` drops the stamp when they differ. To force a rebuild, remove the
 stamp. `test-container-stamp.sh` guards this too.
 
-A third source is the artifacts directory. `artifacts` is a symlink in git,
-so every checkout on the development host writes one directory, and make
+A third source is the artifacts directory. `artifacts` was a symlink in git
+(after 4.6.0 it is untracked; a developer may still link it by hand), so
+every checkout on the development host wrote one directory, and make
 compared only mtimes: a rootfs another checkout exported was newer than this
 checkout's stamp, so make called it up to date and an image gate tested a
 rootfs without this checkout's changes (2026-11-19). Each export (rootfs,

@@ -117,12 +117,13 @@ first make target, and the `unit` job runs it with `artifacts` (item 1
 only). Each item exists because the build assumes the development host; the
 commands are in the script.
 
-1. Replace the `artifacts` symlink with a directory. The repository commits
+1. Make the `artifacts` directory. Up to 4.6.0 the repository committed
    `artifacts` as a link to `/home/oetiker/scratch/dbrrg-artifacts`, which
-   does not exist on the runner, and every make call would print
-   `mkdir: cannot create directory 'artifacts': File exists`.
-   `git update-index --skip-worktree artifacts` keeps the replaced link out
-   of `git status`, which would otherwise give the dev version `.dirty`.
+   does not exist on the runner, and every make call printed
+   `mkdir: cannot create directory 'artifacts': File exists`. For a checkout
+   of such a ref the script replaces the link with a directory, and
+   `git update-index --skip-worktree artifacts` keeps the change out of
+   `git status`, which would otherwise give the dev version `.dirty`.
 2. Set `TMPDIR` to `$RUNNER_TEMP/thinfloe-tests`. The test targets put
    their work dirs under `TMPDIR`; without one the `Makefile` uses `.tmp/`
    in the checkout.
