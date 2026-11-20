@@ -5,6 +5,7 @@
 ### New
 
 ### Changed
+- The Connection tile in the status area shows each label on the left and its value on the right, and has four new lines: `Gateway`, `DNS` (the server in use, with `+1` and so on for more), `Traffic` (bytes received and sent, for example `↓ 1.23 GB ↑ 456 MB`) and `Uptime` (how long the machine has run). The `VPN` line shows only while the VPN is up; `wg0 down` and `no VPN` are no longer shown. A missing gateway or DNS server shows `none` in orange.
 
 ### Fixed
 - The microphone mute key of Logitech keyboards on a Logi Bolt receiver, such as the MX Mechanical, did nothing. It now mutes the microphones when "Volume keys control this machine" is on, and otherwise reaches the program in front, ThinLinc included.

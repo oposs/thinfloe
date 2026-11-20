@@ -172,9 +172,14 @@ four cells holds the battery 1x1 and the graph and still has room.
   and no window covers the menu. No subprocess: `/proc/net/route` (lowest
   metric), `getifaddrs`, `statistics/{rx,tx}_bytes`, `speed` (`-1` is
   none), `/proc/net/wireless` or a `wireless/` directory, and `wg0`'s
-  `flags` (`IFF_UP`; its operstate is `unknown` while up). It reads no
-  resolv.conf: the DNS servers in use are on the Network tab
-  (`netstat::dns_in_use`, read with the tab's status). 300 samples per
+  `flags` (`IFF_UP`; its operstate is `unknown` while up), and
+  `/proc/uptime`. The DNS servers in use (`netstat::dns_in_use`:
+  systemd-resolved's `/run/systemd/resolve/resolv.conf`, else
+  `/etc/resolv.conf`) are read at most every 5 s (`DnsCache`,
+  `DNS_EVERY`). That file holds the servers resolved sends queries to,
+  merged from every link and from the global `DNS=`; networkd's
+  `/run/systemd/netif/links/<ifindex>` names one link's own servers only.
+  The snapshot carries the last byte counters and uptime. 300 samples per
   direction; a rate is the byte delta over the real elapsed time. A counter
   that goes back or a new interface starts the graph again with no spike.
   A reading more than 3 s after the last (the sampler rested while covered)
@@ -248,21 +253,35 @@ four cells holds the battery 1x1 and the graph and still has room.
   one row (3x1, 2x1) it is the graph alone edge to edge, with the rate
   labels (none for 0), unit and legend inside the plot on a backing and no
   time labels.
-- Connection: one fact per row, label in Geo, value from one column:
+- Connection: one fact per row, the label in Geo at the left padding, the
+  value ending at the right padding (its room starts after its own label):
   `Link` (`eth0 1 Gbit/s`, `wlan0 WiFi -56 dBm`; `no interface` in the
-  warning colour), `IPv4` (`192.168.1.23/24`; `no IPv4 address`), `VPN`
-  (`wg0 up`/`down`, `no VPN`), and `Public` while the lookup is on and has
-  answered (the address, or a muted `–` after a failure). The value column
-  starts after the widest of the four labels, so it does not move when
-  `Public` comes or goes. It has content when the graph has. The rates are
-  in the graph only; gateway and DNS are on the Network tab. All four rows
-  fit at both shipped sizes and both cell heights; only a rect squeezed
-  below that first moves the rows together down to `min_row`, then leaves
-  out `Public`, then `VPN`; `Link` and `IPv4` stay. A `Link` row too wide
-  leaves out the word `WiFi`; a value still too long is cut at the padding.
-  On the tightest rows the Geo labels are half a point smaller
-  (`label_in_row`); with at most four rows the shipped sizes never get
-  that tight.
+  warning colour), `IPv4` (`192.168.1.23/24`; `no IPv4 address`),
+  `Gateway` (`192.168.1.1`; `none`), `DNS` (the first server in use and a
+  muted `+N` for the others; `none`), `VPN` (`wg0 up`, only while `wg0` is
+  up), `Public` while the lookup is on and has answered (the address, or a
+  muted `–` after a failure), `Traffic` (`↓ 1.23 GB ↑ 456 MB`: the
+  kernel's byte counters of the measured interface, decimal units with
+  three digits, `netstat::bytes`) and `Uptime` (the machine's,
+  `4 h 12 m`, as on the This machine tab). Link, IPv4, Gateway and DNS
+  always have a row, with the warning word when missing; Traffic and
+  Uptime have none when unknown. Uptime is the machine's because the
+  kernel counts an interface's bytes since it appeared, for the built-in
+  NIC the boot, so the two rows cover one span; a connection uptime has no
+  source (the kernel keeps no time of the carrier coming up, and the menu
+  restarts at every log out). It has content when the graph has. 1x2 draws
+  one column; 2x1 draws two at one row height, the first taking the first
+  half of the rows (rounded up). All eight rows fit at both shipped sizes
+  and both cell heights; only a rect squeezed below that first moves the
+  rows together down to `min_row`, then leaves out Uptime, Traffic, DNS,
+  Gateway, Public, VPN in that order; Link and IPv4 stay. A row too wide
+  leaves out the word `WiFi`; a value still too long starts after its
+  label and is cut at the padding. On the tightest rows the Geo labels are
+  half a point smaller (`label_in_row`); the shipped sizes never get that
+  tight. History: PR #27 gave the values one column after the widest
+  label, showed `wg0 down` and `no VPN`, and left gateway, DNS and byte
+  totals to the Network tab; the owner reversed all three after testing
+  4.6.0 (2026-11-20).
 - Clock: `Time 14:05`, `Date Thu 5 Nov 2026` and `Zone Europe/Zurich` in
   the machine's zone, with English names whatever the locale; drawn again
   when the minute turns. The zone line is the zone's IANA name; a zone
@@ -286,7 +305,7 @@ four cells holds the battery 1x1 and the graph and still has room.
   out. The fan line goes first when lines run out. Sensors alone or fans
   alone are content. `cpu`: `CPU load`, `CPU clock`. `memory`: `RAM`,
   `zram` (`3.1 / 8.0 GiB`). Uptime, maker and model are on the This machine
-  tab.
+  tab; the uptime is also in Connection.
 - Temperature colours (`hardware::thresholds`): critical 5 C below `crit`;
   hot at `max` when that is below critical, else 15 C below `crit`; with
   `max` alone, critical 15 C above it; with no limit 80 and 95 C. Limits
