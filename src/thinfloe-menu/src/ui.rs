@@ -5560,6 +5560,69 @@ mod tests {
         );
     }
 
+    /// Over an unknown zone the region select shows Automatic, and picking
+    /// Automatic in it is a change the band can save.
+    #[test]
+    fn automatic_can_be_picked_over_an_unknown_zone() {
+        use crate::network::NetEvent;
+        use crate::timeband::TimeEvent;
+        let mut net = two_networks();
+        net.time_mut()
+            .set_zones(crate::timecfg::parse_zone_tab("CH\t+0\tEurope/Zurich\n"));
+        net.time_mut().set_cfg(crate::config::TimeCfg {
+            zone: Some("Europe/Gone".into()),
+            ntp: Vec::new(),
+        });
+        let menu = network_settings(net);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let mut i = 0;
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1920.0, NET_SCREEN_H)),
+                events,
+                time: Some(i as f64 * 0.1),
+                ..Default::default()
+            };
+            i += 1;
+            let mut ev = None;
+            let mut o = ctx.run_ui(input, |ui| {
+                ev = show(ui, &menu, &[None], &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            (text_rects(&o.shapes), ev)
+        };
+        let mut texts = vec![];
+        for _ in 0..3 {
+            texts = frame(vec![]).0;
+        }
+        let autos = |t: &[(String, Rect)]| -> Vec<Rect> {
+            t.iter().filter(|(s, _)| s == "Automatic").map(|(_, r)| *r).collect()
+        };
+        let button = autos(&texts)[0].center();
+        frame(click_at(button));
+        let mut open = vec![];
+        for _ in 0..2 {
+            open = frame(vec![]).0;
+        }
+        let items = autos(&open);
+        assert!(items.len() >= 2, "no popup: {open:?}");
+        let item = items
+            .iter()
+            .find(|r| (r.center() - button).length() > 1.0)
+            .unwrap()
+            .center();
+        let mut events = vec![frame(click_at(item)).1];
+        events.push(frame(vec![]).1);
+        assert!(
+            events.contains(&Some(UiEvent::Settings(SettingsEvent::Network(NetEvent::Time(
+                TimeEvent::Region(0)
+            ))))),
+            "{events:?}"
+        );
+    }
+
     /// The note on an empty server field goes once servers are typed.
     #[test]
     fn the_empty_servers_note_only_on_an_empty_field() {

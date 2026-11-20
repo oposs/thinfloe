@@ -224,8 +224,15 @@ fn time(
     ui.add_enabled_ui(!band.busy(), |ui| {
         form_row(ui, t, "Time zone", |ui| {
             let regions = band.regions();
-            let mut r = band.region_index();
-            if ui.add(Select::new("tf-net-tz-region", &mut r, &regions)).changed() {
+            // Over an unknown zone no entry is chosen and the placeholder
+            // reads Automatic, so picking Automatic is a change.
+            let mut r = if band.unknown_zone().is_some() {
+                regions.len()
+            } else {
+                band.region_index()
+            };
+            let select = Select::new("tf-net-tz-region", &mut r, &regions).placeholder(crate::timeband::AUTOMATIC);
+            if ui.add(select).changed() {
                 *event = Some(NetEvent::Time(TimeEvent::Region(r)));
             }
             let cities = band.cities();
