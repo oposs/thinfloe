@@ -257,7 +257,8 @@ four cells holds the battery 1x1 and the graph and still has room.
   value ending at the right padding (its room starts after its own label):
   `Link` (`eth0 1 Gbit/s`, `wlan0 WiFi -56 dBm`; `no interface` in the
   warning colour), `IPv4` (`192.168.1.23/24`; `no IPv4 address`),
-  `Gateway` (`192.168.1.1`; `none`), `DNS` (the first server in use and a
+  `Gateway` (`192.168.1.1`; a muted `direct` for a default route without
+  a gateway, as on PPP or wwan; `none` without a default route), `DNS` (the first server in use and a
   muted `+N` for the others; `none`), `VPN` (`wg0 up`, only while `wg0` is
   up), `Public` while the lookup is on and has answered (the address, or a
   muted `–` after a failure), `Traffic` (`↓ 1.23 GB ↑ 456 MB`: the

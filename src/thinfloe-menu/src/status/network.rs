@@ -400,6 +400,7 @@ pub(crate) fn sample(n: usize) -> Snapshot {
             link: Link::Wired(Some(1000)),
             ipv4: Some((std::net::Ipv4Addr::new(192, 168, 1, 23), 24)),
             gateway: Some(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            direct: false,
             vpn: Vpn::Up,
             addressed: true,
             dns: vec!["192.168.1.1".into()],

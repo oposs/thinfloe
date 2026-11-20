@@ -7,7 +7,8 @@
 //! `netstat::Snapshot` as the graph and has content when the graph has.
 //!
 //! The facts of where the machine is (link, address, gateway, DNS) always
-//! have a row, with a warning word when one is missing; the measures
+//! have a row, with a warning word when one is missing (a default route
+//! without a gateway, as on PPP or wwan, is no fault: `direct`); the measures
 //! (traffic, uptime) have a row only when known. The 1 x 2 size draws one
 //! column, the 2 x 1 size two, the first taking the first half of the rows,
 //! both at one row height so the rows line up.
@@ -122,6 +123,7 @@ pub fn rows(snap: &Snapshot, public: Option<&crate::publicip::Answer>) -> Vec<Ro
     };
     let gateway = match i.gateway {
         Some(g) => vec![value(g.to_string(), fg)],
+        None if i.direct => vec![label("direct", Tone::Muted)],
         None => none(),
     };
     let dns = match i.dns.split_first() {
@@ -325,6 +327,7 @@ pub fn sample() -> Snapshot {
             link: Link::Wired(Some(1000)),
             ipv4: Some((Ipv4Addr::new(192, 168, 1, 23), 24)),
             gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            direct: false,
             vpn: Vpn::Up,
             addressed: true,
             dns: vec!["192.168.1.1".into()],
@@ -529,6 +532,25 @@ mod tests {
         let out = tall(&gone, STATUS_CELL_LARGE_H);
         assert_eq!(drawn(&out)[0], "Link no interface");
         assert_eq!(colour_of(&out, "no interface"), t.role(role::WARN));
+    }
+
+    #[test]
+    fn a_device_route_has_a_direct_gateway() {
+        let t = theme();
+        let mut s = sample();
+        s.info.iface = Some("wwan0".into());
+        s.info.link = Link::Unknown;
+        s.info.gateway = None;
+        s.info.direct = true;
+        let out = tall(&s, STATUS_CELL_LARGE_H);
+        assert!(drawn(&out).contains(&"Gateway direct".to_string()), "{:?}", drawn(&out));
+        assert_eq!(colour_of(&out, "direct"), t.palette().muted_foreground);
+        // No default route at all: the warning stays.
+        s.info.default_route = false;
+        s.info.direct = false;
+        let out = tall(&s, STATUS_CELL_LARGE_H);
+        assert!(drawn(&out).contains(&"Gateway none".to_string()), "{:?}", drawn(&out));
+        assert_eq!(colour_of(&out, "none"), t.role(role::WARN));
     }
 
     #[test]

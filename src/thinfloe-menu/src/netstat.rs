@@ -38,6 +38,8 @@ const MAX_DNS_LEN: usize = 64;
 /// The WireGuard interface `~/wg0.conf` brings up.
 pub const VPN_IF: &str = "wg0";
 const IFF_UP: u32 = 0x1;
+/// The `/proc/net/route` flag of a route through a gateway.
+const RTF_GATEWAY: u32 = 0x2;
 
 /// Where /sys, /proc, /run and /etc are.
 #[derive(Debug, Clone)]
@@ -92,6 +94,9 @@ pub fn usable_name(name: &str) -> bool {
 pub struct Route {
     pub iface: String,
     pub gateway: Option<Ipv4Addr>,
+    /// A device route: `RTF_GATEWAY` is clear, the traffic goes straight
+    /// out of `iface` (PPP, wwan, WireGuard), so there is no gateway.
+    pub device: bool,
 }
 
 /// The default route in `/proc/net/route`: destination and mask 0, up; the
@@ -112,13 +117,15 @@ pub fn default_route(text: &str) -> Option<Route> {
         if dest != 0 || mask != 0 || flags & 0x1 == 0 {
             continue;
         }
-        let gateway = (flags & 0x2 != 0 && gw != 0).then(|| Ipv4Addr::from(gw.to_ne_bytes()));
+        let device = flags & RTF_GATEWAY == 0;
+        let gateway = (!device && gw != 0).then(|| Ipv4Addr::from(gw.to_ne_bytes()));
         if best.as_ref().is_none_or(|(m, _)| metric < *m) {
             best = Some((
                 metric,
                 Route {
                     iface: f[0].to_string(),
                     gateway,
+                    device,
                 },
             ));
         }
@@ -315,6 +322,9 @@ pub struct Info {
     /// The first IPv4 address of `iface` and its prefix.
     pub ipv4: Option<(Ipv4Addr, u8)>,
     pub gateway: Option<Ipv4Addr>,
+    /// The default route is a device route (`Route::device`): no gateway
+    /// is expected.
+    pub direct: bool,
     pub vpn: Vpn,
     /// Some interface but `lo` has an address that is not link-local.
     pub addressed: bool,
@@ -365,6 +375,7 @@ pub fn reading(roots: &Roots, addrs: &[IfAddr]) -> Reading {
         iface: iface.clone(),
         default_route: route.is_some(),
         gateway: route.as_ref().and_then(|r| r.gateway),
+        direct: route.as_ref().is_some_and(|r| r.device),
         vpn: vpn(roots),
         addressed,
         ..Info::default()
@@ -625,7 +636,8 @@ mod tests {
             default_route(ROUTE),
             Some(Route {
                 iface: "eth0".into(),
-                gateway: gw(192, 168, 1, 1)
+                gateway: gw(192, 168, 1, 1),
+                device: false,
             })
         );
         let only_net = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
@@ -638,9 +650,20 @@ mod tests {
             default_route(no_gw),
             Some(Route {
                 iface: "wg0".into(),
-                gateway: None
+                gateway: None,
+                device: true,
             }),
             "a point-to-point default route has no gateway"
+        );
+        // RTF_GATEWAY set but no address: not a device route, no gateway.
+        let zero_gw = "h\neth0\t00000000\t00000000\t0003\t0\t0\t0\t00000000\n";
+        assert_eq!(
+            default_route(zero_gw),
+            Some(Route {
+                iface: "eth0".into(),
+                gateway: None,
+                device: false,
+            })
         );
         assert_eq!(default_route(""), None);
         assert_eq!(default_route("h\ngarbage\nx y z\n"), None);
@@ -751,6 +774,7 @@ mod tests {
                 link: Link::Wired(Some(1000)),
                 ipv4: Some((Ipv4Addr::new(192, 168, 1, 23), 24)),
                 gateway: gw(192, 168, 1, 1),
+                direct: false,
                 vpn: Vpn::Absent,
                 addressed: true,
                 dns: Vec::new(),
@@ -760,6 +784,14 @@ mod tests {
         write(&d.join("sys/class/net/eth0/speed"), "-1\n");
         let r = reading(&roots, &addrs);
         assert_eq!(r.info.link, Link::Wired(None));
+        // A device route (wwan0, PPP): a default route without a gateway.
+        write(
+            &d.join("proc/net/route"),
+            "h\nwwan0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\n",
+        );
+        let r = reading(&roots, &[addr("wwan0", "10.64.1.2", 30)]);
+        assert!(r.info.default_route && r.info.direct);
+        assert_eq!(r.info.gateway, None);
     }
 
     #[test]
@@ -807,6 +839,7 @@ mod tests {
         assert_eq!(r.info.iface.as_deref(), Some("eth0"));
         assert!(!r.info.default_route && r.info.addressed);
         assert_eq!(r.info.gateway, None);
+        assert!(!r.info.direct, "no route is no device route");
         let s = Snapshot {
             info: r.info,
             ..Snapshot::default()
