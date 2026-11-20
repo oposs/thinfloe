@@ -1,6 +1,11 @@
 #!/bin/bash
 # Set the system time zone from the TIMEZONE= line (DHCP option 101) in
-# networkd's lease files. Runs as root on a value any DHCP server on the LAN
+# networkd's lease files, and hand the NTP= servers (DHCP option 42) to
+# chrony in /run/chrony-dhcp/thinfloe.sources (chrony reads that directory;
+# only dhclient hooks or NetworkManager would fill it otherwise). A zone or
+# NTP servers set in the menu (/etc/thinfloe/time, written by the initramfs
+# and thinfloe-time) win: the DHCP zone is then not set, and the DHCP
+# servers file is removed. Runs as root on a value any DHCP server on the LAN
 # can send, so the value is checked before anything uses it:
 #   - 1 to 64 characters from letters, digits and / _ + -
 #   - no ".." and no leading "/" or "-"
@@ -18,12 +23,17 @@
 # exits 1 when inotifywait ends or the directory goes, so systemd starts it
 # again; a stop (SIGTERM) exits 0.
 #
-# THINFLOE_LEASE_DIR and THINFLOE_ZONEINFO_DIR exist for the offline test.
+# The THINFLOE_*_DIR and THINFLOE_TIME_FILE variables exist for the
+# offline test.
 set -u
 export LC_ALL=C
 
 LEASE_DIR=${THINFLOE_LEASE_DIR:-/run/systemd/netif/leases}
 ZONEINFO=${THINFLOE_ZONEINFO_DIR:-/usr/share/zoneinfo}
+TIME_FILE=${THINFLOE_TIME_FILE:-/etc/thinfloe/time}
+STATE_DIR=${THINFLOE_STATE_DIR:-/run/thinfloe/state}
+CHRONY_DHCP=${THINFLOE_CHRONY_DHCP_DIR:-/run/chrony-dhcp}
+MAX_SERVERS=8
 
 # The value as one printable line cut to $2 (default 64) characters: no
 # control characters reach the journal.
@@ -59,22 +69,88 @@ check() {
     return 0
 }
 
-# The zone this process set last; scan logs only a different one.
+# Fails unless $1 is an IPv4 or IPv6 address (networkd writes addresses).
+ntp_ok() {
+    local a=$1 o
+    [ -n "$a" ] && [ "${#a}" -le 45 ] || return 1
+    case $a in
+        *:*)
+            case $a in *[!0-9A-Fa-f:.]*|*:::*) return 1 ;; esac
+            return 0 ;;
+        *[!0-9.]*|.*|*.|*..*) return 1 ;;
+    esac
+    local IFS=.
+    set -- $a
+    [ $# -eq 4 ] || return 1
+    for o in "$@"; do
+        [ "${#o}" -le 3 ] && [ "$((10#$o))" -le 255 ] || return 1
+    done
+}
+
+# The menu's setting: MENU_ZONE, and MENU_NTP=yes when it names servers.
+read_menu() {
+    local line
+    MENU_ZONE= MENU_NTP=
+    [ -f "$TIME_FILE" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+            zone=*) MENU_ZONE=${line#zone=} ;;
+            ntp=*) MENU_NTP=yes ;;
+        esac
+    done <"$TIME_FILE"
+}
+
+# Bring the DHCP sources file to $1 (empty: absent); reload chrony and log
+# on a change only.
+set_ntp() {
+    local want=$1 have= file=$CHRONY_DHCP/thinfloe.sources tmp
+    [ -f "$file" ] && have=$(<"$file")
+    [ "$want" = "$have" ] && return 0
+    if [ -z "$want" ]; then
+        rm -f -- "$file"
+        echo "thinfloe: no NTP servers from DHCP"
+    else
+        mkdir -p -- "$CHRONY_DHCP" && tmp=$(mktemp -- "$CHRONY_DHCP/.thinfloe.XXXXXX") \
+            && printf '%s\n' "$want" >"$tmp" && chmod 644 -- "$tmp" && mv -f -- "$tmp" "$file" \
+            || { echo "thinfloe: could not write $file"; rm -f -- "${tmp:-}"; return 0; }
+        echo "thinfloe: NTP servers ${NTP_LIST# } from DHCP"
+    fi
+    chronyc reload sources >/dev/null 2>&1 || echo "thinfloe: chronyc reload sources failed"
+}
+
+# The zone this process set last; scan logs only a different one. SKIPPED:
+# the DHCP zone last logged as not used.
 LAST=
+SKIPPED=
 
 # Read every lease and set the zone of the last one, in glob order, that
 # carries a valid zone: with two links that disagree, that zone is the one
 # left set, so it is the only one set and logged.
 scan() {
-    local lease value line why zone=
+    local lease value line why zone= ntp a want= n=0
+    local -a addrs
+    NTP_LIST=
+    read_menu
     for lease in "$LEASE_DIR"/*; do
         [ -f "$lease" ] || continue
-        value=
+        value= ntp=
         while IFS= read -r line || [ -n "$line" ]; do
             case $line in
-                TIMEZONE=*) value=${line#TIMEZONE=}; break ;;
+                TIMEZONE=*) value=${line#TIMEZONE=} ;;
+                NTP=*) ntp=${line#NTP=} ;;
             esac
         done <"$lease"
+        read -r -a addrs <<<"$ntp"
+        for a in "${addrs[@]}"; do
+            if ! ntp_ok "$a"; then
+                printf "thinfloe: ignored DHCP NTP server '%s': not an IP address\n" "$(safe "$a")"
+            elif [ "$n" -lt "$MAX_SERVERS" ]; then
+                case "$NTP_LIST " in
+                    *" $a "*) ;;
+                    *) NTP_LIST="$NTP_LIST $a"; n=$((n + 1)) ;;
+                esac
+            fi
+        done
         [ -n "$value" ] || continue
         if why=$(check "$value"); then
             zone=$value
@@ -82,11 +158,25 @@ scan() {
             ignored "$value" "$why"
         fi
     done
+    if [ -z "$MENU_NTP" ]; then
+        for a in $NTP_LIST; do
+            want="$want${want:+$'\n'}server $a iburst"
+        done
+    fi
+    set_ntp "$want"
     [ -n "$zone" ] || return 0
+    if [ -n "$MENU_ZONE" ]; then
+        [ "$zone" = "$SKIPPED" ] || echo "thinfloe: DHCP time zone $zone not used: the zone is set in the menu"
+        SKIPPED=$zone
+        return 0
+    fi
+    SKIPPED=
     if timedatectl set-timezone -- "$zone"; then
         # A renewal repeats the zone every few hours: log changes only.
         [ "$zone" = "$LAST" ] || echo "thinfloe: time zone $zone from DHCP"
         LAST=$zone
+        mkdir -p -- "$STATE_DIR" && printf '%s\n' "$zone" >"$STATE_DIR/dhcp-timezone.new" \
+            && mv -f -- "$STATE_DIR/dhcp-timezone.new" "$STATE_DIR/dhcp-timezone"
     else
         echo "thinfloe: could not set DHCP time zone '$zone'"
     fi

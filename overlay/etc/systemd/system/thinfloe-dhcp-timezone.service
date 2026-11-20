@@ -1,10 +1,13 @@
 [Unit]
-Description=Set the time zone the DHCP server sends
+Description=Set the time zone and NTP servers the DHCP server sends
 # Deliberately no Before= on anything in sysinit.target. This unit is
 # WantedBy=multi-user.target and so implicitly After=basic.target; see
 # CLAUDE.md, "A multi-user.target unit must never declare Before= on a
 # sysinit.target unit".
 After=systemd-networkd.service
+# chronyd reads /run/chrony-dhcp at start; after it, the reload of a later
+# change reaches a running daemon.
+After=chrony.service
 # Restarts after a failure must never hit the start limit and stop for the
 # rest of the boot.
 StartLimitIntervalSec=0

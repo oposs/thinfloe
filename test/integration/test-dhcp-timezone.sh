@@ -45,6 +45,16 @@ printf '%s\n' "\$*" >>"$WORK/calls"
 sleep "\${STUB_SLEEP:-0}"
 STUB
 chmod +x "$WORK/bin/timedatectl"
+cat >"$WORK/bin/chronyc" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >>"$WORK/chronyc"
+STUB
+chmod +x "$WORK/bin/chronyc"
+
+# The root side of the menu's setting, the state file and chrony's DHCP
+# directory: all in the scratch tree, never the host's /etc or /run.
+export THINFLOE_TIME_FILE="$WORK/time" THINFLOE_STATE_DIR="$WORK/state" \
+    THINFLOE_CHRONY_DHCP_DIR="$WORK/chrony-dhcp"
 
 fails=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
@@ -127,6 +137,56 @@ rm -f "$WORK"/leases/*
 
 # --watch: the service's mode. It must arm its watch before it reads the
 # leases and keep it armed while it reads, so no lease write is lost.
+# ---- the menu's zone, the state file and the DHCP NTP servers ----
+
+# once LEASE_TEXT: one lease with that text, one run.
+once() {
+    rm -f "$WORK"/leases/* "$WORK/calls" "$WORK/out"
+    printf '%b' "$1" >"$WORK/leases/2"
+    PATH="$WORK/bin:$PATH" THINFLOE_LEASE_DIR="$WORK/leases" \
+        THINFLOE_ZONEINFO_DIR="$WORK/zi" "$SCRIPT" >"$WORK/out" 2>&1
+    rc=$?
+}
+SRCS="$WORK/chrony-dhcp/thinfloe.sources"
+
+rm -rf "$WORK/state" "$WORK/chrony-dhcp" "$WORK/time" "$WORK/chronyc"
+once 'TIMEZONE=Europe/Zurich\n'
+[[ "$(cat "$WORK/state/dhcp-timezone" 2>/dev/null)" == "Europe/Zurich" ]] \
+    || fail "state_file_names_the_dhcp_zone: $(cat "$WORK/state/dhcp-timezone" 2>/dev/null)"
+[[ ! -e "$SRCS" && ! -e "$WORK/chronyc" ]] || fail "a lease without NTP= wrote chrony sources or reloaded"
+
+once 'NTP=10.0.0.5 fd00::7\n'
+[[ "$(cat "$SRCS" 2>/dev/null)" == $'server 10.0.0.5 iburst\nserver fd00::7 iburst' ]] \
+    || fail "dhcp_ntp_written: $(cat "$SRCS" 2>/dev/null)"
+[[ "$(cat "$WORK/chronyc" 2>/dev/null)" == "reload sources" ]] || fail "dhcp_ntp_written: no single reload"
+grep -qxF "thinfloe: NTP servers 10.0.0.5 fd00::7 from DHCP" "$WORK/out" || fail "dhcp_ntp_written: no log line: $(cat "$WORK/out")"
+
+once 'NTP=10.0.0.5 fd00::7\n'
+[[ $(grep -c . "$WORK/chronyc") -eq 1 ]] || fail "unchanged_ntp_no_reload: reloaded again"
+[[ ! -s "$WORK/out" ]] || fail "unchanged_ntp_no_reload: logged again: $(cat "$WORK/out")"
+
+once 'NTP=evil;rm 1.2.3.4 a.b 999.1.1.1 1.2.3 ::g\n'
+[[ "$(cat "$SRCS" 2>/dev/null)" == "server 1.2.3.4 iburst" ]] || fail "hostile_ntp_dropped: $(cat "$SRCS" 2>/dev/null)"
+grep -q "^thinfloe: ignored DHCP NTP server 'evil;rm': not an IP address" "$WORK/out" \
+    || fail "hostile_ntp_dropped: no ignored line: $(cat "$WORK/out")"
+
+once "NTP=$(echo 10.0.0.{1..10})\\n"
+[[ $(grep -c '^server ' "$SRCS" 2>/dev/null) -eq 8 ]] || fail "more than 8 DHCP NTP servers kept: $(cat "$SRCS" 2>/dev/null)"
+
+once 'ADDRESS=10.0.0.5\n'
+[[ ! -e "$SRCS" ]] || fail "a lease losing its NTP= kept the sources file"
+
+printf 'ntp=ntp.example.ch\n' >"$WORK/time"
+once 'NTP=10.0.0.5\n'
+[[ ! -e "$SRCS" ]] || fail "menu_servers_remove_dhcp_file: DHCP sources written"
+
+printf 'zone=Asia/Tokyo\n' >"$WORK/time"
+once 'TIMEZONE=Europe/Zurich\n'
+[[ ! -e "$WORK/calls" ]] || fail "menu zone: DHCP zone set: $(cat "$WORK/calls")"
+grep -qxF "thinfloe: DHCP time zone Europe/Zurich not used: the zone is set in the menu" "$WORK/out" \
+    || fail "menu zone: no 'not used' line: $(cat "$WORK/out")"
+rm -f "$WORK/time"
+
 # It needs inotifywait (inotify-tools) on the host, as in the image.
 if ! command -v inotifywait >/dev/null; then
     fail "inotifywait not found: install inotify-tools to test --watch"
@@ -318,6 +378,19 @@ rmdir "$WORK/gone"
 watch_exit_rc
 [[ $rc -ne 0 && $rc -ne 999 ]] || fail "watch, parent removed: rc $rc (999: still running)"
 if grep -q "unbound variable" "$WORK/watch.log"; then fail "watch, parent removed: unbound variable"; fi
+
+# The menu's zone wins over a renewal: never set, logged once.
+printf 'zone=Asia/Tokyo\n' >"$WORK/time"
+mkdir -p "$WORK/w5"
+lease "$WORK/w5/2" Europe/Zurich
+watch_start "$WORK/w5"
+wait_for "$WORK/watch.log" "not used" || fail "menu_zone_wins_over_a_renewal: no 'not used' line"
+lease "$WORK/w5/.tmp" Europe/Zurich && mv "$WORK/w5/.tmp" "$WORK/w5/2"
+sleep 1.5
+watch_stop
+[[ ! -e "$WORK/calls" ]] || fail "menu_zone_wins_over_a_renewal: zone set: $(cat "$WORK/calls")"
+[[ $(grep -c "not used" "$WORK/watch.log") -eq 1 ]] || fail "menu_zone_wins_over_a_renewal: logged $(grep -c "not used" "$WORK/watch.log") times"
+rm -f "$WORK/time"
 
 # Stopping the watcher leaves no inotifywait behind.
 mkdir -p "$WORK/w4"
