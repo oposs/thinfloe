@@ -644,8 +644,10 @@ mod tests {
             let id = ident::load_or_create(&env.identity, &env.hostname)?;
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
-            tx.send(listener.local_addr().unwrap().port()).unwrap();
+            // The port goes out once the command socket is bound: a test
+            // that sends a command right after start finds it.
             let sock = cmd::bind(&env.socket).unwrap();
+            tx.send(listener.local_addr().unwrap().port()).unwrap();
             let mut d = Daemon::new(env, cfg, &id, listener, sock, None);
             d.serve(&w, None)
         });
