@@ -16,6 +16,7 @@
 pub mod capture;
 pub mod clip;
 pub mod clipdata;
+pub mod clipsync;
 pub mod cmd;
 pub mod conn;
 pub mod edge;

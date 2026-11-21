@@ -20,6 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustls::ServerConfig;
 
 use super::capture::{CapEvent, Capture, OutputGeom, StripSpec};
+use super::clip::{Clip, ClipEvent};
+use super::clipsync::{ClipAct, ClipSync};
 use super::cmd::{self, Cmd};
 use super::conn::{Conn, Event};
 use super::edge::{self, Rect, Tracker};
@@ -76,6 +78,13 @@ pub fn run(env: RunEnv) -> Result<(), String> {
     let capture = Capture::connect().map_err(|e| fail(&env.state, e))?;
     let beat = Watchdog::start();
     let mut d = Daemon::new(env, cfg, &id, listener, sock, Some(capture));
+    d.clip = match Clip::connect() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("thinfloe-menu --deskflow: no clipboard sharing: {e}");
+            None
+        }
+    };
     d.serve(&wake, Some(&beat))
 }
 
@@ -316,6 +325,10 @@ struct Daemon {
     listener: TcpListener,
     sock: UnixDatagram,
     capture: Option<Capture>,
+    /// The clipboard bridge; none when the compositor has no data control
+    /// or the bridge failed.
+    clip: Option<Clip>,
+    sync: ClipSync,
     conns: Vec<Conn>,
     pending: Pending,
     /// The last DINF size of each (name, fingerprint).
@@ -358,6 +371,8 @@ impl Daemon {
             sock,
             outputs: capture.as_ref().map(Capture::outputs).unwrap_or_default(),
             capture,
+            clip: None,
+            sync: ClipSync::default(),
             conns: Vec::new(),
             pending: Pending::default(),
             screens: HashMap::new(),
@@ -411,17 +426,25 @@ impl Daemon {
         {
             return Next::Exit(Ok(()));
         }
+        if let Some(e) = self.clip.as_mut().and_then(|c| c.flush().err()) {
+            self.drop_clip(&e);
+        }
         const IN: libc::c_short = libc::POLLIN;
         let mut fds = vec![
             pollfd(wake.rd.as_raw_fd(), IN),
             pollfd(self.sock.as_raw_fd(), IN),
             pollfd(self.listener.as_raw_fd(), IN),
             pollfd(self.capture.as_ref().map_or(-1, |c| c.fd().as_raw_fd()), IN),
+            pollfd(self.clip.as_ref().map_or(-1, |c| c.fd().as_raw_fd()), IN),
         ];
         let fixed = fds.len();
         for c in &self.conns {
             let ev = if c.wants_write() { IN | libc::POLLOUT } else { IN };
             fds.push(pollfd(c.fd(), ev));
+        }
+        let pipes = fds.len();
+        if let Some(c) = &self.clip {
+            fds.extend(c.pipe_fds().into_iter().map(|(fd, ev)| pollfd(fd, ev)));
         }
         let timeout = self.poll_timeout(Instant::now());
         // SAFETY: fds is a valid array of its length for the call.
@@ -474,6 +497,7 @@ impl Daemon {
             let events = self.conns[i].on_readable(now);
             self.on_events(i, events, now);
         }
+        self.on_clip(ready(4).then_some(fds[4].revents), &fds[pipes..], now);
         if ready(2) {
             self.accept(now);
         }
@@ -498,6 +522,10 @@ impl Daemon {
             Mode::Idle => None,
             Mode::Locking { since, .. } => Some(*since + LOCK_WAIT),
             Mode::Active(a) => a.deadline(),
+        };
+        let due = match (due, self.clip.as_ref().and_then(Clip::deadline)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         };
         let wait = due.map_or(TURN, |d| d.saturating_duration_since(now).min(TURN));
         // Rounded up, so the loop does not spin before the deadline.
@@ -633,11 +661,89 @@ impl Daemon {
         let entry = edge::entry_point(out, side, at, dev);
         let device = strip as usize;
         let mods = self.kb.mask();
-        let Some(c) = self.conns.iter_mut().find(|c| c.id() == device && c.trusted()) else {
+        let Some(i) = self.conns.iter().position(|c| c.id() == device && c.trusted()) else {
             return self.release("connection closed");
         };
-        c.enter(entry.0, entry.1, mods);
+        let shares = self.shares_clipboard(&self.conns[i]);
+        self.conns[i].enter(entry.0, entry.1, mods);
         self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry));
+        let acts = self.sync.on_enter(device, shares);
+        self.clip_acts(acts);
+    }
+
+    /// The device's Clipboard switch; off for a connection without one.
+    fn shares_clipboard(&self, c: &Conn) -> bool {
+        self.cfg
+            .devices
+            .iter()
+            .find(|d| c.name() == Some(&d.name) && c.fingerprint() == Some(&d.fingerprint))
+            .is_some_and(|d| d.clipboard)
+    }
+
+    /// The trusted connections and their Clipboard switch, for ClipSync.
+    fn clip_live(&self) -> Vec<(usize, bool)> {
+        self.conns
+            .iter()
+            .filter(|c| c.trusted())
+            .map(|c| (c.id(), self.shares_clipboard(c)))
+            .collect()
+    }
+
+    /// The bridge's descriptor and pipes, as poll left them. An error
+    /// drops the bridge; the daemon serves on without a clipboard.
+    fn on_clip(&mut self, revents: Option<libc::c_short>, pipes: &[libc::pollfd], now: Instant) {
+        let Some(clip) = self.clip.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        if let Some(r) = revents {
+            if r & (libc::POLLERR | libc::POLLHUP) != 0 {
+                return self.drop_clip("the compositor closed the connection");
+            }
+            match clip.dispatch(now) {
+                Ok(ev) => events = ev,
+                Err(e) => return self.drop_clip(&e),
+            }
+        }
+        for p in pipes.iter().filter(|p| p.revents != 0) {
+            events.extend(clip.on_pipe_ready(p.fd, now));
+        }
+        events.extend(clip.tick(now));
+        let active = match &self.mode {
+            Mode::Active(a) => Some(a.device),
+            _ => None,
+        };
+        for ClipEvent::Changed(text) in events {
+            let acts = self.sync.on_local(text, active, &self.clip_live());
+            self.clip_acts(acts);
+        }
+    }
+
+    fn drop_clip(&mut self, why: &str) {
+        eprintln!("thinfloe-menu --deskflow: clipboard sharing ends: {why}");
+        self.clip = None;
+    }
+
+    fn clip_acts(&mut self, acts: Vec<ClipAct>) {
+        for act in acts {
+            match act {
+                ClipAct::Send { conn, text } => {
+                    if let Some(c) = self.conns.iter_mut().find(|c| c.id() == conn) {
+                        c.clipboard(&text);
+                    }
+                }
+                ClipAct::Grab { conn } => {
+                    if let Some(c) = self.conns.iter_mut().find(|c| c.id() == conn) {
+                        c.grab();
+                    }
+                }
+                ClipAct::SetLocal(text) => {
+                    if let Some(c) = self.clip.as_mut() {
+                        c.set_text(text);
+                    }
+                }
+            }
+        }
     }
 
     fn forward(&mut self, acts: Vec<Action>) {
@@ -814,6 +920,14 @@ impl Daemon {
                         self.screens.insert(key, (w.max(0) as u32, h.max(0) as u32));
                     }
                 }
+                Event::Clipboard(text) => {
+                    let acts = self.sync.on_remote(self.conns[i].id(), text);
+                    self.clip_acts(acts);
+                }
+                Event::Grabbed => {
+                    let acts = self.sync.on_grabbed(self.conns[i].id(), &self.clip_live());
+                    self.clip_acts(acts);
+                }
             }
         }
     }
@@ -841,6 +955,10 @@ impl Daemon {
             }
         }
         self.conns[i].set_verdict(v, now);
+        if let Verdict::Trusted(_) = v {
+            let shares = self.shares_clipboard(&self.conns[i]);
+            self.conns[i].set_clipboard(shares);
+        }
     }
 
     fn commands(&mut self) -> Next {
@@ -889,6 +1007,12 @@ impl Daemon {
         }
         self.pending.forget_trusted(&cfg.devices);
         self.cfg = cfg;
+        for i in 0..self.conns.len() {
+            if self.conns[i].trusted() {
+                let shares = self.shares_clipboard(&self.conns[i]);
+                self.conns[i].set_clipboard(shares);
+            }
+        }
         Next::Go
     }
 
@@ -1008,11 +1132,20 @@ mod tests {
     }
 
     fn write_cfg(path: &Path, listen: bool, port: u16, devices: &[(&str, &str)]) {
+        let devices: Vec<_> = devices.iter().map(|&(n, f)| (n, f, true)).collect();
+        write_cfg_clip(path, listen, port, &devices);
+    }
+
+    /// As write_cfg, with each device's Clipboard switch.
+    fn write_cfg_clip(path: &Path, listen: bool, port: u16, devices: &[(&str, &str, bool)]) {
         let mut t = format!("[deskflow]\nlisten = {listen}\nport = {port}\n");
-        for (i, (name, fp)) in devices.iter().enumerate() {
+        for (i, (name, fp, clipboard)) in devices.iter().enumerate() {
             t.push_str(&format!(
                 "\n[[deskflow.device]]\nname = \"{name}\"\nfingerprint = \"{fp}\"\noutput = \"DP-{i}\"\nside = \"right-of\"\n"
             ));
+            if !clipboard {
+                t.push_str("clipboard = false\n");
+            }
         }
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, t).unwrap();
@@ -1215,6 +1348,97 @@ mod tests {
         assert_eq!(goodbye, Some(Msg::Cbye));
         let st = statefile::parse(&std::fs::read_to_string(&state).unwrap());
         assert_eq!(line(&st, "laptop", &fp1).unwrap().state, DevState::Offline);
+    }
+
+    /// The next message that is not a keep-alive.
+    fn next_msg(c: &mut Client) -> Msg {
+        std::iter::repeat_with(|| read_msg(c))
+            .find(|m| *m != Msg::Calv)
+            .unwrap()
+    }
+
+    /// The messages other than keep-alives within `wait`.
+    fn quiet_for(c: &mut Client, wait: Duration) -> Vec<Msg> {
+        c.sock.set_read_timeout(Some(wait)).unwrap();
+        std::iter::from_fn(|| read_payload(c).ok())
+            .map(|p| proto::decode(&p).unwrap())
+            .filter(|m| *m != Msg::Calv)
+            .collect()
+    }
+
+    fn dinf() -> Msg {
+        Msg::Dinf {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            warp: 0,
+            mx: 0,
+            my: 0,
+        }
+    }
+
+    #[test]
+    fn the_clipboard_switch_reaches_the_device_on_reload() {
+        let (d, s) = (TestDir::new("deskflow-run", "clipsw"), TestDir::sockets("dfc"));
+        let env = test_env(&d, &s);
+        let (state, gen_path, socket) = (env.state.clone(), env.generated.clone(), env.socket.clone());
+        let laptop = cert("laptop");
+        let fp = fp_of(&laptop);
+        write_cfg_clip(&gen_path, true, 24800, &[("laptop", &fp, false)]);
+        let r = start(env);
+        let mut c = connect(r.port, &laptop);
+        assert_eq!(hello(&mut c, "laptop"), Msg::Qinf);
+        send(&mut c, &dinf());
+        assert_eq!(
+            [read_msg(&mut c), read_msg(&mut c), read_msg(&mut c)],
+            [
+                Msg::Ciak,
+                Msg::Crop,
+                Msg::Dsop(crate::deskflow::clipdata::options(false))
+            ]
+        );
+        wait_state(&state, |s| {
+            line(s, "laptop", &fp).is_some_and(|l| l.state == DevState::Connected)
+        });
+        for on in [true, false] {
+            write_cfg_clip(&gen_path, true, 24800, &[("laptop", &fp, on)]);
+            cmd::send(&socket, &Cmd::Reload).unwrap();
+            assert_eq!(next_msg(&mut c), Msg::Dsop(crate::deskflow::clipdata::options(on)));
+        }
+        r.wake.send(libc::SIGTERM);
+        assert_eq!(r.done.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_grab_from_one_device_reaches_the_others_that_share() {
+        let (d, s) = (TestDir::new("deskflow-run", "clipgrab"), TestDir::sockets("dfg"));
+        let env = test_env(&d, &s);
+        let gen_path = env.generated.clone();
+        let (a, b, off) = (cert("a"), cert("b"), cert("off"));
+        let (fa, fb, foff) = (fp_of(&a), fp_of(&b), fp_of(&off));
+        write_cfg_clip(
+            &gen_path,
+            true,
+            24800,
+            &[("a", &fa, true), ("b", &fb, true), ("off", &foff, false)],
+        );
+        let r = start(env);
+        let mut ca = connect(r.port, &a);
+        assert_eq!(hello(&mut ca, "a"), Msg::Qinf);
+        let mut cb = connect(r.port, &b);
+        assert_eq!(hello(&mut cb, "b"), Msg::Qinf);
+        let mut coff = connect(r.port, &off);
+        assert_eq!(hello(&mut coff, "off"), Msg::Qinf);
+        send(&mut ca, &Msg::Cclp { id: 0, seq: 1 });
+        assert!(matches!(next_msg(&mut cb), Msg::Cclp { id: 0, .. }));
+        // The device with the switch off hears nothing of it, and its own
+        // grab reaches nobody.
+        send(&mut coff, &Msg::Cclp { id: 0, seq: 1 });
+        assert_eq!(quiet_for(&mut coff, Duration::from_millis(300)), []);
+        assert_eq!(quiet_for(&mut ca, Duration::from_millis(300)), []);
+        r.wake.send(libc::SIGTERM);
+        assert_eq!(r.done.join().unwrap(), Ok(()));
     }
 
     #[test]

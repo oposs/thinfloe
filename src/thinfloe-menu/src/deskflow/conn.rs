@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use rustls::{ServerConfig, ServerConnection};
 
+use super::clipdata;
 use super::pair::Verdict;
 use super::proto::{self, Framer, Msg};
 use super::session::{Out, Session};
@@ -27,6 +28,10 @@ pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// Deskflow 1.26 client that sees the end of the stream with the message
 /// drops the message and does not log the refusal.
 pub const LINGER: Duration = Duration::from_secs(2);
+/// What TLS may hold for the client before it counts as not reading: a
+/// whole clipboard transfer fits, with room for the input around it.
+/// rustls's own default, 64 KiB, cut a larger clipboard short.
+pub const SEND_BUFFER: usize = 2 * clipdata::CLIP_MAX;
 
 /// What a connection tells the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +41,10 @@ pub enum Event {
     Named(String),
     /// The size of the client's screen, from its DINF.
     Screen { w: i16, h: i16 },
+    /// The client's text clipboard, received in full.
+    Clipboard(Vec<u8>),
+    /// The client took the clipboard.
+    Grabbed,
 }
 
 pub struct Conn {
@@ -64,7 +73,8 @@ pub struct Conn {
 impl Conn {
     pub fn new(id: usize, stream: TcpStream, cfg: Arc<ServerConfig>, now: Instant) -> io::Result<Conn> {
         stream.set_nonblocking(true)?;
-        let tls = ServerConnection::new(cfg).map_err(io::Error::other)?;
+        let mut tls = ServerConnection::new(cfg).map_err(io::Error::other)?;
+        tls.set_buffer_limit(Some(SEND_BUFFER));
         Ok(Conn {
             id,
             stream,
@@ -233,8 +243,8 @@ impl Conn {
                     events.push(Event::Screen { w, h });
                 }
                 Out::Close(why) => self.end(why, now),
-                // Wired up by the daemon in a later step.
-                Out::Clipboard { .. } | Out::Grabbed => {}
+                Out::Clipboard { text } => events.push(Event::Clipboard(text)),
+                Out::Grabbed => events.push(Event::Grabbed),
             }
         }
     }
@@ -288,7 +298,31 @@ impl Conn {
         }
     }
 
-    /// The bytes of the session's answer (enter and send make no other).
+    /// Turns clipboard sharing on or off (DSOP to an active client).
+    pub fn set_clipboard(&mut self, on: bool) {
+        if let Some(s) = self.session.as_mut() {
+            let out = s.set_clipboard(on);
+            self.apply_sends(out);
+        }
+    }
+
+    /// CCLP and DCLP: the client gets ThinFloe's text.
+    pub fn clipboard(&mut self, text: &[u8]) {
+        if let Some(s) = self.session.as_mut() {
+            let out = s.clipboard(text);
+            self.apply_sends(out);
+        }
+    }
+
+    /// CCLP: the client learns that someone else owns the clipboard.
+    pub fn grab(&mut self) {
+        if let Some(s) = self.session.as_mut() {
+            let out = s.grab();
+            self.apply_sends(out);
+        }
+    }
+
+    /// The bytes of the session's answer (these calls make no other).
     fn apply_sends(&mut self, out: Vec<Out>) {
         for o in out {
             if let Out::Send(bytes) = o {
@@ -345,5 +379,85 @@ impl Conn {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deskflow::proto::{self, Msg};
+    use crate::deskflow::tls::testclient;
+    use crate::deskflow::{ident, tls};
+    use std::net::TcpListener;
+
+    fn read_msg(c: &mut impl Read) -> Msg {
+        let mut len = [0u8; 4];
+        c.read_exact(&mut len).unwrap();
+        let mut p = vec![0u8; u32::from_be_bytes(len) as usize];
+        c.read_exact(&mut p).unwrap();
+        proto::decode(&p).unwrap()
+    }
+
+    #[test]
+    fn a_clipboard_larger_than_the_tls_default_reaches_the_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let cert = rcgen::generate_simple_self_signed(vec!["big".to_string()]).unwrap();
+            let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let conn = rustls::ClientConnection::new(testclient::config(&cert), testclient::server_name()).unwrap();
+            let mut c = rustls::StreamOwned::new(conn, tcp);
+            let mut len = [0u8; 4];
+            c.read_exact(&mut len).unwrap();
+            let mut hello = vec![0u8; u32::from_be_bytes(len) as usize];
+            c.read_exact(&mut hello).unwrap();
+            let back = Msg::HelloBack {
+                major: 1,
+                minor: 8,
+                name: b"big".to_vec(),
+            };
+            c.write_all(&proto::frame(&proto::encode(&back, 8))).unwrap();
+            c.flush().unwrap();
+            assert_eq!(read_msg(&mut c), Msg::Qinf);
+            let mut asm = clipdata::Assembler::default();
+            loop {
+                match read_msg(&mut c) {
+                    Msg::Cclp { .. } => {}
+                    Msg::Dclp { id, seq, mark, data } => {
+                        if let clipdata::Asm::Finished(m) = asm.push(id, seq, mark, &data) {
+                            return clipdata::unmarshal_text(&m).unwrap();
+                        }
+                    }
+                    m => panic!("{m:?}"),
+                }
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let id = ident::load_or_create(
+            &crate::testdir::TestDir::new("deskflow-conn", "big").join("identity.pem"),
+            "test",
+        )
+        .unwrap();
+        let mut c = Conn::new(1, stream, tls::server_config(&id), Instant::now()).unwrap();
+        let text = vec![b'x'; 900 * 1024];
+        let mut sent = false;
+        let end = Instant::now() + Duration::from_secs(10);
+        while !client.is_finished() && Instant::now() < end {
+            let now = Instant::now();
+            for ev in c.on_readable(now) {
+                if let Event::Named(_) = ev {
+                    c.set_verdict(Verdict::Trusted(0), now);
+                }
+            }
+            if c.trusted() && !sent {
+                c.clipboard(&text);
+                sent = true;
+            }
+            c.flush();
+            assert_eq!(c.closing(), None);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(client.join().unwrap(), text);
     }
 }
