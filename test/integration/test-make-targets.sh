@@ -63,4 +63,43 @@ else
     bad "make test still runs the unit and the integration tests"
 fi
 
+# PREBUILT=1: the smoke targets run on files that are already there (CI smoke
+# jobs download them; no container image, no container stamp).
+rm -f "$TREE"/.*-container
+: >"$TREE/artifacts/rootfs/vmlinuz"; : >"$TREE/artifacts/rootfs/initrd.img"; : >"$TREE/artifacts/rootfs/ramroot.sqsh"
+echo x | zstd -q -o "$TREE/artifacts/images/thinfloe-usb.img.zst"
+: >"$TREE/artifacts/images/thinfloe-usb.img.zst.sha256"
+for goal in qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot \
+            qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot; do
+    out=$(dry "$goal" PREBUILT=1)
+    if ! grep -qE 'podman build|export-rootfs\.sh|make-bootable-image\.sh' <<<"$out"; then
+        ok "PREBUILT $goal builds nothing"
+    else
+        bad "PREBUILT $goal builds nothing"
+    fi
+done
+
+out=$(dry qemu-smoke-upgrade PREBUILT=1)
+if grep -q 'zstd -d' <<<"$out"; then
+    ok "PREBUILT makes the raw image from the .zst"
+else
+    bad "PREBUILT makes the raw image from the .zst"
+fi
+
+mv "$TREE/artifacts/rootfs/vmlinuz" "$WORK/vmlinuz.keep"
+out=$(dry qemu-smoke PREBUILT=1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'No rule to make target' <<<"$out"; then
+    ok "PREBUILT with a missing kernel stops"
+else
+    bad "PREBUILT with a missing kernel stops"
+fi
+mv "$WORK/vmlinuz.keep" "$TREE/artifacts/rootfs/vmlinuz"
+
+out=$(dry qemu-smoke)
+if grep -q 'export-rootfs.sh' <<<"$out"; then
+    ok "without PREBUILT the build rules stand"
+else
+    bad "without PREBUILT the build rules stand"
+fi
+
 exit $fail
