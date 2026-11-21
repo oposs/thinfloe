@@ -24,6 +24,10 @@ yaml-rust2 = { version = "0.13", default-features = false }
 toml = "1.2.1"
 serde = { version = "1.0.229", features = ["derive"] }
 roxmltree = "0.21"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+ring = { version = "0.17.14", default-features = false }
+rustls-pki-types = { version = "1.16.0", default-features = false }
 
 [profile.dev]
 debug = "line-tables-only"

@@ -9,7 +9,9 @@
 
 pub mod capture;
 pub mod edge;
+pub mod ident;
 pub mod proto;
+pub mod tls;
 
 use std::ffi::{CStr, OsString};
 use std::fs::File;
