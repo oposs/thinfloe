@@ -94,7 +94,8 @@ The split changes as follows (decision 17, revised 2026-11-12):
 - `ci.yml` (every pull request, every push to `main`, the release branch)
   runs two jobs through `ci-local.yml`:
   - `unit`: `make test-unit MEMCAP=`, for a result within minutes.
-  - `image`: `make test MEMCAP=`, `make image`, the nine smoke targets, and
+  - `image`: `make test-integration MEMCAP=` (the unit tests run only in
+    `unit`), `make image`, the nine smoke targets, and
     `make test-runtime`, in one job so the rootfs is built once. About 25
     minutes.
 - `release-build.yml` stays as decision 17 describes it: `make image` with
