@@ -31,7 +31,9 @@ use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::log::Kind;
 use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
 use thinfloe_menu::store::{self, OpenMode};
-use thinfloe_menu::{bounded, keyboard, migrate, osd, release, screentab, settings, status, tiles, ui, windows};
+use thinfloe_menu::{
+    bounded, deskflow, keyboard, migrate, osd, release, screentab, settings, status, tiles, ui, windows,
+};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -497,6 +499,9 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == osd::OSD_KEY_ARG) {
         return osd::osd_key_main(&args[2..]);
+    }
+    if args.get(1).is_some_and(|a| a == deskflow::DESKFLOW_ARG) {
+        return deskflow::deskflow_main(&args[2..]);
     }
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();

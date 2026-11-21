@@ -2246,8 +2246,10 @@ dependencies = [
  "softbuffer",
  "toml",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
  "winit",
+ "xkbcommon-dl",
  "yaml-rust2",
 ]
 

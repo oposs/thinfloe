@@ -10,6 +10,7 @@ pub mod config;
 pub mod convert;
 pub mod damage;
 pub mod density;
+pub mod deskflow;
 pub mod desktop;
 pub mod drives;
 pub mod generated;

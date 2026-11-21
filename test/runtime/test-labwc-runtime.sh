@@ -14,7 +14,9 @@
 # output without taking its focus or its clicks, and that the volume and
 # brightness keys work end to end: the Keyboard tab's switches decide whether
 # labwc takes the keys, the OSD shows the level, the microphone mark and
-# "not supported" without DDC/CI, and survives an output going away.
+# "not supported" without DDC/CI, and survives an output going away, and
+# that a Deskflow capture strip takes the pointer lock and the keys from a
+# fullscreen X11 window holding a keyboard grab and gives them back.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -1627,5 +1629,103 @@ mk_check $? "without a sound server pactl subscribe starts again after 1 s, then
 [[ "$(mk_val resync)" == yes && "$(mk_val subscribe_left)" == no ]]
 mk_check $? "once pactl subscribe runs again, a speaker that drifted is put back at the shared state" \
     "resync '$(mk_val resync)', subscribe left '$(mk_val subscribe_left)'"
+
+
+# Deskflow edge capture over a fullscreen X11 window holding a keyboard grab,
+# as ThinLinc does (the spec's Risk 1). 'thinfloe-menu --deskflow
+# --probe-capture HEADLESS-1 right-of' puts a 1 px overlay strip on the right
+# edge of HEADLESS-1, prints one line per capture event and starts the
+# capture at once on 'enter': first the pointer lock, then exclusive keyboard
+# interactivity, since labwc activates a lock on a layer surface only when
+# the keyboard focus moves to it. Escape ends the capture. wtype starts first
+# (Xwayland installs its grab hook only when the seat has a keyboard) and
+# types x, Escape, y through one virtual keyboard, so they are its key codes
+# 1, 2, 3 (X 9, 10, 11; --keymap names them for the X window); the probe
+# names a key from the keymap it gets. x must reach the probe and not the X
+# window, y the X window after Escape. TF_RUNTIME_MENU
+# names a host-built thinfloe-menu to use instead of the image's (iteration
+# only; the evidence is a run without it).
+# shellcheck disable=SC2016 # expands inside the container
+cp_script='wtype -s 9000 x -s 1500 -k Escape -s 1500 y &
+sleep 0.5
+python3 /usr/local/bin/x11-probe.py --grab --fullscreen --keymap x,Escape,y --keys 16 >/tmp/xkeys 2>&1 &
+xprobe=$!
+sleep 5
+wlrctl toplevel find app_id:thinfloe-probe state:active && echo x_before=active || echo x_before=inactive
+thinfloe-menu --deskflow --probe-capture HEADLESS-1 right-of >/tmp/cap.out 2>/tmp/cap.err &
+cap=$!
+sleep 1.5
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 5000 360
+sleep 6.5
+wlrctl toplevel find app_id:thinfloe-probe state:active && echo x_after=active || echo x_after=inactive
+kill $cap
+wait $cap
+echo cap_rc=$?
+wait $xprobe
+sed "s/^/cap: /" /tmp/cap.out
+sed "s/^/caperr: /" /tmp/cap.err | head -40
+sed "s/^/x11: /" /tmp/xkeys
+wait
+exit 0'
+run_capture_probe_case() {
+    local name="thinfloe-runtime-test-cap-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CP_SCRIPT="$cp_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CP_SCRIPT" >/tmp/cp.sh &&
+               WAYLAND_DEBUG=server labwc -C /etc/thinfloe/labwc -S "sh /tmp/cp.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the capture probe)"
+        grep -E '^(cap|caperr|x11): |^x_|^cap_rc=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local cap x11 diag
+    cap=$(grep '^cap: ' <<<"$out" | cut -c6-)
+    x11=$(grep '^x11: ' <<<"$out" | cut -c6- | tr '\n' ' ')
+    diag="probe: $(tr '\n' '|' <<<"$cap") stderr: $(grep '^caperr: ' <<<"$out" | cut -c9- | tr '\n' '|') X window: '$x11' $(grep -E '^(x_before|x_after|cap_rc)=' <<<"$out" | tr '\n' ' ')"
+    if ! grep -Eq 'zwp_xwayland_keyboard_grab_manager_v1[@#][0-9]+\.grab_keyboard\(' <<<"$out"; then
+        echo "FAIL - the X window took no keyboard grab, so the capture case proves nothing: $diag"
+        fail=1
+        return
+    fi
+    # enter, then locked, then the x key, in that order.
+    if awk '/^enter / && !e {e=NR} /^locked$/ && e && !l {l=NR} / down x$/ && l && !k {k=NR} END {exit !(e && l && k)}' <<<"$cap"; then
+        echo "ok   - over a fullscreen X11 window with a keyboard grab the strip gets the pointer lock, then the keys"
+    else
+        echo "FAIL - no enter, locked, x key in that order at the capture strip: $diag"
+        fail=1
+    fi
+    if [[ " $x11" == *" KEY x "* ]]; then
+        echo "FAIL - the x typed while captured reached the X window: $diag"
+        fail=1
+    else
+        echo "ok   - the x typed while captured did not reach the X window"
+    fi
+    if awk '/ down Escape$/ && !s {s=NR} /^unlocked$/ && s {u=1} END {exit !u}' <<<"$cap" &&
+        [[ " $x11" == *" KEY y "* ]] && grep -qx 'x_before=active' <<<"$out" && grep -qx 'x_after=active' <<<"$out"; then
+        echo "ok   - Escape ends the capture: the probe reports unlocked, y reaches the X window and it is active again"
+    else
+        echo "FAIL - after Escape: $diag"
+        fail=1
+    fi
+    if grep -qx 'cap_rc=0' <<<"$out"; then
+        echo "ok   - the capture probe ends with 0 on SIGTERM"
+    else
+        echo "FAIL - the capture probe did not end with 0 on SIGTERM: $diag"
+        fail=1
+    fi
+}
+run_capture_probe_case
 
 exit $fail

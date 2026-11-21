@@ -15,6 +15,8 @@ With --background RRGGBB the window is filled with that colour.
 With --buttons it prints "BUTTON <x> <y>" (window coordinates) for every
 mouse button press, and with --hold SECONDS it stays fullscreen that long
 after printing GEOMETRY.
+With --fullscreen and --keys the window asks for fullscreen before it
+prints the keys.
 """
 import sys
 import time
@@ -30,6 +32,7 @@ background = None
 if "--background" in sys.argv:
     background = int(sys.argv[sys.argv.index("--background") + 1], 16)
 buttons = "--buttons" in sys.argv
+fullscreen_keys = "--fullscreen" in sys.argv
 hold = 0.0
 if "--hold" in sys.argv:
     hold = float(sys.argv[sys.argv.index("--hold") + 1])
@@ -87,7 +90,21 @@ if keymap:
     d.change_keyboard_mapping(9, syms)
     d.sync()
 
+def ask_fullscreen():
+    net_wm_state = d.intern_atom("_NET_WM_STATE")
+    fullscreen = d.intern_atom("_NET_WM_STATE_FULLSCREEN")
+    # _NET_WM_STATE_ADD = 1, source = 1 (normal application)
+    d.screen().root.send_event(
+        event.ClientMessage(window=win, client_type=net_wm_state,
+                            data=(32, [1, fullscreen, 0, 1, 0])),
+        event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+    d.sync()
+    time.sleep(2)
+
+
 if keys is not None:
+    if fullscreen_keys:
+        ask_fullscreen()
     win.change_attributes(event_mask=X.StructureNotifyMask | X.KeyPressMask)
     d.sync()
     end = time.monotonic() + keys
@@ -103,15 +120,7 @@ if keys is not None:
         time.sleep(0.05)
     sys.exit(0)
 
-net_wm_state = d.intern_atom("_NET_WM_STATE")
-fullscreen = d.intern_atom("_NET_WM_STATE_FULLSCREEN")
-# _NET_WM_STATE_ADD = 1, source = 1 (normal application)
-d.screen().root.send_event(
-    event.ClientMessage(window=win, client_type=net_wm_state,
-                        data=(32, [1, fullscreen, 0, 1, 0])),
-    event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-d.sync()
-time.sleep(2)
+ask_fullscreen()
 
 geom = win.get_geometry()
 print("GEOMETRY %dx%d" % (geom.width, geom.height), flush=True)
