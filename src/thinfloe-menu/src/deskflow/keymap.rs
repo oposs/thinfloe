@@ -218,7 +218,7 @@ impl Xkb {
 
     /// A keymap for the layout name from the system's XKB data (tests).
     #[cfg(test)]
-    fn from_layout(layout: &str) -> Result<Xkb, String> {
+    pub(crate) fn from_layout(layout: &str) -> Result<Xkb, String> {
         let lib = xkbcommon_dl::xkbcommon_option().ok_or("libxkbcommon is not available")?;
         let layout = std::ffi::CString::new(layout).map_err(|e| e.to_string())?;
         let names = xkbcommon_dl::xkb_rule_names {
@@ -283,6 +283,26 @@ impl Xkb {
     pub fn keysym(&self, evdev: u32) -> u32 {
         // SAFETY: state is valid until Drop.
         unsafe { (self.lib.xkb_state_key_get_one_sym)(self.state, evdev + 8) }
+    }
+
+    /// The keysym on the key's first level in its current layout, whatever
+    /// the modifiers; 0 for none. Ctrl+Alt+F1 gives `XF86Switch_VT_1` in
+    /// the current state and `F1` here.
+    pub fn keysym_level0(&self, evdev: u32) -> u32 {
+        // SAFETY: state and keymap are valid until Drop; syms points into
+        // the keymap and is read only when the count says it holds one.
+        unsafe {
+            let layout = (self.lib.xkb_state_key_get_layout)(self.state, evdev + 8);
+            let mut syms: *const u32 = std::ptr::null();
+            let n = (self.lib.xkb_keymap_key_get_syms_by_level)(self.keymap, evdev + 8, layout, 0, &mut syms);
+            if n == 1 && !syms.is_null() { *syms } else { 0 }
+        }
+    }
+
+    /// Whether the keymap lets the key repeat (modifiers do not).
+    pub fn repeats(&self, evdev: u32) -> bool {
+        // SAFETY: keymap is valid until Drop.
+        unsafe { (self.lib.xkb_keymap_key_repeats)(self.keymap, evdev + 8) > 0 }
     }
 
     /// The Unicode character the key gives in the current state; 0 for none.
@@ -455,6 +475,23 @@ mod tests {
         assert_eq!(x.mods().mask(), 0x1000);
         x.update_mask(0, 0, 0, 0);
         assert_eq!(x.mods(), Mods::default());
+    }
+
+    #[test]
+    fn level0_ignores_the_modifiers_and_only_keys_repeat() {
+        const KEY_F1: u32 = 59;
+        const KEY_LEFTCTRL: u32 = 29;
+        let mut x =
+            Xkb::from_layout("us").expect("libxkbcommon and the xkeyboard-config data are needed for this test");
+        x.update_mask(4 | 8, 0, 0, 0); // Control, Mod1
+        assert_eq!(x.keysym(KEY_F1), 0x1008_fe01); // XF86Switch_VT_1
+        assert_eq!(key_id(x.keysym(KEY_F1), x.utf32(KEY_F1)), None);
+        assert_eq!(x.keysym_level0(KEY_F1), 0xffbe); // F1
+        x.update_mask(1, 0, 0, 0); // Shift
+        assert_eq!(x.keysym(KEY_A), 0x41);
+        assert_eq!(x.keysym_level0(KEY_A), 0x61);
+        assert!(x.repeats(KEY_A));
+        assert!(!x.repeats(KEY_LEFTCTRL));
     }
 
     #[test]

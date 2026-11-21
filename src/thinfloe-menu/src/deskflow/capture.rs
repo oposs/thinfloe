@@ -41,14 +41,31 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use super::edge::Rect;
 
-/// One output in the compositor's logical layout (`zxdg_output_v1`).
+/// One output in the compositor's logical layout: position and size from
+/// `zxdg_output_v1` (logical, so scale and rotation are applied), name and
+/// description from `wl_output` v4.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputGeom {
     pub name: String,
+    /// wlroots makes it "<make> <model> <serial> (<name>)".
+    pub description: String,
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+impl OutputGeom {
+    /// Whether this is the monitor a `[monitors]` criteria string names:
+    /// the output name, or "<make> <model> <serial>" (`kanshi::criteria`),
+    /// which starts the description.
+    pub fn matches(&self, criteria: &str) -> bool {
+        self.name == criteria
+            || self
+                .description
+                .strip_prefix(criteria)
+                .is_some_and(|rest| rest.starts_with(" ("))
+    }
 }
 
 /// A strip to show: `rect` in the layout coordinates of `OutputGeom`,
@@ -72,9 +89,18 @@ pub enum CapEvent {
     Leave {
         strip: u32,
     },
+    /// The pointer moved on a strip, in layout coordinates.
+    Motion {
+        x: f64,
+        y: f64,
+    },
+    /// Relative motion: `dx`, `dy` with the pointer acceleration, the
+    /// `_unaccel` pair without.
     Relative {
         dx: f64,
         dy: f64,
+        dx_unaccel: f64,
+        dy_unaccel: f64,
     },
     Locked,
     /// The capture is over: the compositor cancelled the lock, it could
@@ -122,6 +148,14 @@ impl CapEvent {
     }
 }
 
+/// Whether an event reaches the caller: while a capture waits for its lock
+/// (`captured` and not `locked`), no input does, so nothing typed or
+/// clicked before the lock reaches a device, and a key pressed then is
+/// never released on it either.
+pub fn passes(captured: bool, locked: bool, ev: &CapEvent) -> bool {
+    !(ev.is_input() && captured && !locked)
+}
+
 type Margins = (i32, i32, i32, i32);
 
 /// Where a layer surface for `rect` sits on `out`: anchor, margins (top,
@@ -152,6 +186,7 @@ struct Output {
     wl: wl_output::WlOutput,
     xdg: zxdg_output_v1::ZxdgOutputV1,
     name: Option<String>,
+    description: String,
     pos: Option<(i32, i32)>,
     size: Option<(i32, i32)>,
 }
@@ -161,6 +196,7 @@ impl Output {
         let ((x, y), (w, h)) = (self.pos?, self.size?);
         Some(OutputGeom {
             name: self.name.clone()?,
+            description: self.description.clone(),
             x,
             y,
             w,
@@ -189,6 +225,27 @@ struct Wheel {
     v120: (i32, i32),
     /// `axis_discrete` steps, all a seat before version 8 sends.
     discrete: (i32, i32),
+    /// Continuous scrolling (touchpads, virtual pointers) in surface
+    /// pixels, when the frame has neither of the above.
+    continuous: (f64, f64),
+}
+
+/// Continuous scrolling per wheel step: libinput's 15 px.
+const PX_PER_STEP: f64 = 15.0;
+
+impl Wheel {
+    /// The frame's motion in 1/120 steps.
+    fn v120(&self) -> (i32, i32) {
+        if self.v120 != (0, 0) {
+            return self.v120;
+        }
+        if self.discrete != (0, 0) {
+            return (self.discrete.0.saturating_mul(120), self.discrete.1.saturating_mul(120));
+        }
+        // `as` saturates and maps NaN to 0.
+        let step = |px: f64| (px * 120.0 / PX_PER_STEP).round() as i32;
+        (step(self.continuous.0), step(self.continuous.1))
+    }
 }
 
 struct State {
@@ -205,6 +262,8 @@ struct State {
     /// By the output's global name.
     outputs: BTreeMap<u32, Output>,
     strips: Vec<Strip>,
+    /// The strip under the pointer.
+    hover: Option<u32>,
     /// The strip being captured, its lock, and whether the lock is active.
     captured: Option<u32>,
     lock: Option<zwp_locked_pointer_v1::ZwpLockedPointerV1>,
@@ -245,6 +304,7 @@ impl Capture {
             keyboard: None,
             outputs: BTreeMap::new(),
             strips: Vec::new(),
+            hover: None,
             captured: None,
             lock: None,
             locked: false,
@@ -363,16 +423,17 @@ impl Capture {
     }
 
     /// Give pointer and keyboard back: the lock goes and the strip takes
-    /// no keys again. Reports `Unlocked` when a capture was on.
-    pub fn end_capture(&mut self) {
-        self.state.end_capture();
+    /// no keys again. Reports `Unlocked` when a capture was on, and then
+    /// returns true.
+    pub fn end_capture(&mut self) -> bool {
+        self.state.end_capture()
     }
 }
 
 impl State {
-    fn end_capture(&mut self) {
+    fn end_capture(&mut self) -> bool {
         let Some(id) = self.captured.take() else {
-            return;
+            return false;
         };
         if let Some(lock) = self.lock.take() {
             lock.destroy();
@@ -384,14 +445,14 @@ impl State {
             st.surface.commit();
         }
         self.events.push(CapEvent::Unlocked);
+        true
     }
 
     /// An event for the caller; input during a capture waits for the lock.
     fn push(&mut self, e: CapEvent) {
-        if e.is_input() && self.captured.is_some() && !self.locked {
-            return;
+        if passes(self.captured.is_some(), self.locked, &e) {
+            self.events.push(e);
         }
-        self.events.push(e);
     }
 
     fn strip_of(&self, surface: &wl_surface::WlSurface) -> Option<&Strip> {
@@ -401,6 +462,9 @@ impl State {
     fn remove_strip(&mut self, s: Strip) {
         if self.captured == Some(s.spec.id) {
             self.end_capture();
+        }
+        if self.hover == Some(s.spec.id) {
+            self.hover = None;
         }
         s.destroy();
     }
@@ -464,6 +528,7 @@ impl State {
                 wl,
                 xdg,
                 name: None,
+                description: String::new(),
                 pos: None,
                 size: None,
             },
@@ -559,12 +624,15 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event
-            && let Some(out) = state.outputs.get_mut(id)
-        {
-            out.name = Some(name);
-            state.outputs_changed = true;
+        let Some(out) = state.outputs.get_mut(id) else {
+            return;
+        };
+        match event {
+            wl_output::Event::Name { name } => out.name = Some(name),
+            wl_output::Event::Description { description } => out.description = description,
+            _ => return,
         }
+        state.outputs_changed = true;
     }
 }
 
@@ -662,13 +730,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 if let Some(s) = state.strip_of(&surface) {
                     let (strip, r) = (s.spec.id, s.spec.rect);
                     let (x, y) = (f64::from(r.x) + surface_x, f64::from(r.y) + surface_y);
+                    state.hover = Some(strip);
                     state.push(CapEvent::Enter { strip, x, y });
                 }
             }
             Event::Leave { surface, .. } => {
                 if let Some(s) = state.strip_of(&surface) {
                     let strip = s.spec.id;
+                    if state.hover == Some(strip) {
+                        state.hover = None;
+                    }
                     state.push(CapEvent::Leave { strip });
+                }
+            }
+            Event::Motion {
+                surface_x, surface_y, ..
+            } => {
+                let at = state.hover.and_then(|h| state.strips.iter().find(|s| s.spec.id == h));
+                if let Some(r) = at.map(|s| s.spec.rect) {
+                    let (x, y) = (f64::from(r.x) + surface_x, f64::from(r.y) + surface_y);
+                    state.push(CapEvent::Motion { x, y });
                 }
             }
             Event::Button { button, state: b, .. } => {
@@ -680,18 +761,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 WEnum::Value(Axis::VerticalScroll) => state.wheel.v120.1 += value120,
                 _ => {}
             },
+            Event::Axis { axis, value, .. } => match axis {
+                WEnum::Value(Axis::HorizontalScroll) => state.wheel.continuous.0 += value,
+                WEnum::Value(Axis::VerticalScroll) => state.wheel.continuous.1 += value,
+                _ => {}
+            },
             Event::AxisDiscrete { axis, discrete } => match axis {
                 WEnum::Value(Axis::HorizontalScroll) => state.wheel.discrete.0 += discrete,
                 WEnum::Value(Axis::VerticalScroll) => state.wheel.discrete.1 += discrete,
                 _ => {}
             },
             Event::Frame => {
-                let w = std::mem::take(&mut state.wheel);
-                let (x, y) = if w.v120 == (0, 0) {
-                    (w.discrete.0 * 120, w.discrete.1 * 120)
-                } else {
-                    w.v120
-                };
+                let (x, y) = std::mem::take(&mut state.wheel).v120();
                 if (x, y) != (0, 0) {
                     state.push(CapEvent::Axis { v120_x: x, v120_y: y });
                 }
@@ -711,12 +792,18 @@ impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let zwp_relative_pointer_v1::Event::RelativeMotion {
-            dx_unaccel, dy_unaccel, ..
+            dx,
+            dy,
+            dx_unaccel,
+            dy_unaccel,
+            ..
         } = event
         {
             state.push(CapEvent::Relative {
-                dx: dx_unaccel,
-                dy: dy_unaccel,
+                dx,
+                dy,
+                dx_unaccel,
+                dy_unaccel,
             });
         }
     }
@@ -740,7 +827,9 @@ impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for State {
                 state.events.push(CapEvent::Locked);
             }
             // A oneshot lock is dead once it is deactivated.
-            zwp_locked_pointer_v1::Event::Unlocked => state.end_capture(),
+            zwp_locked_pointer_v1::Event::Unlocked => {
+                state.end_capture();
+            }
             _ => {}
         }
     }
@@ -835,6 +924,7 @@ mod tests {
     fn out() -> OutputGeom {
         OutputGeom {
             name: "HEADLESS-1".into(),
+            description: "Dell Inc. DELL U2720Q 7XK0T13 (HEADLESS-1)".into(),
             x: 1280,
             y: 0,
             w: 1920,
@@ -875,7 +965,16 @@ mod tests {
             }
             .is_input()
         );
-        assert!(CapEvent::Relative { dx: 1.0, dy: 0.0 }.is_input());
+        assert!(
+            CapEvent::Relative {
+                dx: 1.0,
+                dy: 0.0,
+                dx_unaccel: 1.0,
+                dy_unaccel: 0.0
+            }
+            .is_input()
+        );
+        assert!(!CapEvent::Motion { x: 1.0, y: 2.0 }.is_input());
         assert!(
             CapEvent::Button {
                 button: 272,
@@ -900,5 +999,67 @@ mod tests {
             group: 0,
         };
         assert!(!m.is_input());
+    }
+
+    #[test]
+    fn input_waits_for_the_lock_and_nothing_else_does() {
+        let key = CapEvent::Key {
+            code: 30,
+            pressed: true,
+        };
+        let wheel = CapEvent::Axis { v120_x: 0, v120_y: 120 };
+        // Idle: motion and keys pass (edge resistance needs the motion).
+        assert!(passes(false, false, &key));
+        // Waiting for the lock: no input.
+        assert!(!passes(true, false, &key));
+        assert!(!passes(true, false, &wheel));
+        // Locked: all of it.
+        assert!(passes(true, true, &key));
+        assert!(passes(true, true, &wheel));
+        // The lock itself, the keymap and the modifiers always pass.
+        for ev in [
+            CapEvent::Locked,
+            CapEvent::Unlocked,
+            CapEvent::KeyboardLeft,
+            CapEvent::RepeatInfo { rate: 25, delay: 600 },
+        ] {
+            assert!(passes(true, false, &ev), "{ev:?}");
+        }
+    }
+
+    #[test]
+    fn an_output_matches_its_name_or_its_kanshi_criteria() {
+        let o = out();
+        assert!(o.matches("HEADLESS-1"));
+        assert!(o.matches("Dell Inc. DELL U2720Q 7XK0T13"));
+        assert!(!o.matches("Dell Inc. DELL U2720Q"));
+        assert!(!o.matches("HEADLESS-2"));
+        assert!(!o.matches(""));
+    }
+
+    #[test]
+    fn the_wheel_prefers_v120_then_steps_then_pixels() {
+        let w = Wheel {
+            v120: (0, 60),
+            discrete: (0, 1),
+            continuous: (0.0, 15.0),
+        };
+        assert_eq!(w.v120(), (0, 60));
+        let w = Wheel {
+            discrete: (-1, 2),
+            continuous: (3.0, 15.0),
+            ..Wheel::default()
+        };
+        assert_eq!(w.v120(), (-120, 240));
+        let w = Wheel {
+            continuous: (-7.5, 30.0),
+            ..Wheel::default()
+        };
+        assert_eq!(w.v120(), (-60, 240));
+        let w = Wheel {
+            continuous: (f64::NAN, f64::INFINITY),
+            ..Wheel::default()
+        };
+        assert_eq!(w.v120(), (0, i32::MAX));
     }
 }

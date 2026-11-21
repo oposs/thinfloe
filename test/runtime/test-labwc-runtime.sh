@@ -1412,7 +1412,7 @@ osd | bright)
         pa set-source-mute mic_a 1
         px mark --within 2 m1=1265,49@c79a4a m2=2545,49@c79a4a
         # The mark follows the microphone, on every output, also when one goes.
-        wlr-randr --output HEADLESS-2 --off
+        wlr-randr --output HEADLESS-1 --off
         sleep 1
         kill -0 "$osd" 2>/dev/null && echo osd_alive=yes || echo osd_alive=no
         px unplug m1=1265,49
@@ -1847,5 +1847,185 @@ run_deskflow_pairing_case() {
     df_check $? "'listen = false' and a reload end the daemon with 0 and nothing listens on 24800"
 }
 run_deskflow_pairing_case
+
+
+# Deskflow forwarding and every way back, against the stock client of the
+# pairing case, with two outputs: labwc puts HEADLESS-1 right of
+# HEADLESS-2, so the right edge of HEADLESS-2 is not free (edge-busy) and
+# the device is attached right of HEADLESS-1. What the device gets is what the client
+# injects into labwc's Xwayland, seen through the RECORD extension
+# (x11-probe.py --record: KEY, BUTTON, MOTION lines), since deskflow-core
+# 1.26 logs no input; ThinFloe's side is wev, a Wayland window that has
+# the keyboard focus whenever no capture has it. The daemon logs each
+# release as 'thinfloe-deskflow: released (<reason>)'. Edge resistance is
+# low (15 px): one move onto the edge does not capture, pushes of 10 px do.
+# shellcheck disable=SC2016 # expands inside the container
+fw_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+head="[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+attach() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"%s\"\nside = \"right-of\"\n" "$c1" "$1" >$gen; reload; }
+run_client() { env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+    timeout 150 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >>/tmp/c1/log 2>&1 & }
+free_edge() { st | grep -q "	connected	[0-9]*	[0-9]*	[0-9]*	$"; }
+released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
+wev_has() { grep -q "sym: $1 " /tmp/wev.log; }
+rec_has() { grep -qx "$1" /tmp/xrec; }
+# Three pushes of 10 px, closer together than the 300 ms after which the
+# resistance starts again.
+push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+ms() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
+stdbuf -oL wev -f wl_keyboard:key >/tmp/wev.log 2>&1 &
+python3 /usr/local/bin/x11-probe.py --record 160 >/tmp/xrec 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 5 wlrctl toplevel find app_id:wev state:active && echo wev_focus=active || echo wev_focus=inactive
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+attach HEADLESS-2
+run_client
+upto 15 state connected
+st | grep -q "	edge-busy$" && echo busy=yes || echo busy=no
+attach HEADLESS-1
+upto 5 free_edge && echo connected=yes || echo connected=no
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 2559 360
+sleep 1
+state active && echo touch=active || echo touch=idle
+push && echo push=active || echo push=idle
+st | sed "s/^/pushstate: /"
+sleep 0.3
+echo "mark=$(wc -l </tmp/xrec)"
+wlrctl pointer move 40 30
+# Xwayland drops the first XTest button press and release the client
+# fakes (whichever button; the RECORD of its XTest requests shows them):
+# a first click on the right button takes that loss.
+wlrctl pointer click right
+wlrctl pointer click left
+wlrctl pointer click middle
+wlrctl pointer click right
+wlrctl pointer scroll 15 0
+# The client forgets the keys it holds when the X keymap changes, and
+# never releases them. Xwayland changes it under the first XTest key of the
+# client (its keyboard switches device), and again whenever a wtype call
+# ends (wtype brings a keymap of its own): a first x takes the first
+# change (it stays down until the second x releases it), and the pause
+# after each key keeps the keymap until the key up reached the client.
+wtype -s 300 x -s 500
+wtype -s 300 x -s 500
+upto 5 rec_has "KEY x" && echo xkey=yes || echo xkey=no
+upto 5 rec_has "KEYUP x" && echo xup=yes || echo xup=no
+upto 2 rec_has "BUTTON 5"
+wev_has x && echo xlocal=yes || echo xlocal=no
+wtype -s 300 -M ctrl -M alt -M shift -k Escape -m shift -m alt -m ctrl
+upto 5 released "escape chord" && echo esc=released || echo esc=held
+wtype -s 300 e
+upto 5 wev_has e && echo elocal=yes || echo elocal=no
+rec_has "KEY Escape" && echo escfwd=yes || echo escfwd=no
+push && echo push2=active || echo push2=idle
+t=$(date +%s%N)
+pkill -KILL -f "deskflow-core client"
+upto 2 released "connection closed"
+wtype -s 300 y
+upto 3 wev_has y && echo "ylocal_ms=$(ms $t)" || echo ylocal_ms=none
+run_client
+upto 15 state connected
+push && echo push3=active || echo push3=idle
+wlr-randr --output HEADLESS-1 --off
+upto 5 released "output gone" && echo gone=released || echo gone=held
+upto 5 state offline && echo gone_state=offline || echo gone_state=other
+wtype -s 300 o
+upto 5 wev_has o && echo olocal=yes || echo olocal=no
+wlr-randr --output HEADLESS-1 --on --pos 1280,0
+upto 15 free_edge
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 2559 360
+push && echo push4=active || echo push4=idle
+kill -TERM $dpid
+wait $dpid
+echo d_rc=$?
+released SIGTERM && echo term=released || echo term=held
+wtype -s 300 t
+upto 5 wev_has t && echo tlocal=yes || echo tlocal=no
+upto 5 grep -q "disconnected from server" /tmp/c1/log && echo c_disc=yes || echo c_disc=no
+st | sed "s/^/state: /"
+sed "s/^/rec: /" /tmp/xrec | grep -v "^rec: MOTION\|^rec: XTEST 6 " | head -40
+grep -n MOTION /tmp/xrec | sed "s/^/rec: /" | head -60
+grep "sym:" /tmp/wev.log | sed "s/^/wev: /" | head -20
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+wlr-randr | sed "s/^/randr: /" | head -12
+exit 0'
+run_deskflow_forward_case() {
+    local name="thinfloe-runtime-test-fw-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=2 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e FW_SCRIPT="$fw_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$FW_SCRIPT" >/tmp/fw.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/fw.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow forwarding case)"
+        grep -E '^(state|rec|wev|derr|c1|randr): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|rec|wev|derr|randr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    fw_ok() { grep -qx "$1" <<<"$out"; }
+    fw_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    fw_ok busy=yes && fw_ok connected=yes
+    fw_check $? "a device at an edge that touches another output gets no strip and shows edge-busy; attached at a free edge it is connected"
+    fw_ok touch=idle
+    fw_check $? "touch_without_push_stays: one move onto the edge leaves the pointer on ThinFloe"
+    # After the mark: the entry at the left edge of the device, level with
+    # where the pointer left (y 360 of 720), then 40 right and 30 down
+    # (one more push of 10 may land after the lock).
+    local rec
+    rec=$(grep '^rec: ' <<<"$out" | cut -c6-)
+    fw_ok push=active && grep -Eq '^[0-9]+:MOTION 0 360$' <<<"$rec" && grep -Eq '^[0-9]+:MOTION (40|50) 390$' <<<"$rec"
+    fw_check $? "pointer_reaches_client: pushing into the edge moves the pointer onto the device at the matching height, and motion follows"
+    grep -qx 'BUTTON 1' <<<"$rec" && grep -qx 'BUTTON 2' <<<"$rec" && grep -qx 'BUTTON 3' <<<"$rec" && grep -qx 'BUTTON 5' <<<"$rec"
+    fw_check $? "the left, middle and right buttons reach the device as X buttons 1, 2 and 3, the wheel turned down as 5"
+    fw_ok xkey=yes && fw_ok xup=yes && fw_ok xlocal=no
+    fw_check $? "a key typed while captured reaches the device, goes up there again, and does not reach the local window"
+    fw_ok esc=released && fw_ok elocal=yes && fw_ok escfwd=no
+    fw_check $? "escape_chord_releases: Ctrl+Alt+Shift+Escape gives the keyboard back, and the device never sees the Escape"
+    local yms
+    yms=$(grep -o '^ylocal_ms=[0-9]*$' <<<"$out" | cut -d= -f2)
+    fw_ok push2=active && [[ -n "$yms" && $yms -le 1000 ]]
+    fw_check $? "client_killed_releases: a key reaches the local window within 1 s of the client's death (${yms:-never} ms)"
+    fw_ok push3=active && fw_ok gone=released && fw_ok gone_state=offline && fw_ok olocal=yes
+    fw_check $? "output_gone_releases: switching off the device's output while captured gives keyboard and pointer back at once, and the device shows offline"
+    fw_ok push4=active && fw_ok d_rc=0 && fw_ok term=released && fw_ok tlocal=yes && fw_ok c_disc=yes
+    fw_check $? "sigterm_while_captured: SIGTERM releases the capture, the daemon ends with 0, local keys work and the client disconnects"
+}
+run_deskflow_forward_case
 
 exit $fail

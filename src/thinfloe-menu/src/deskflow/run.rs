@@ -19,14 +19,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustls::ServerConfig;
 
-use super::capture::Capture;
+use super::capture::{CapEvent, Capture, OutputGeom, StripSpec};
 use super::cmd::{self, Cmd};
 use super::conn::{Conn, Event};
+use super::edge::{self, Rect, Tracker};
+use super::forward::{self, Action, Active, Keyboard};
 use super::ident::{self, Identity};
 use super::pair::{self, Pending, PendingKind, Verdict};
+use super::proto::Msg;
 use super::statefile::{self, DevLine, DevState, Head, StateFile};
 use super::tls;
 use crate::config::DeskflowCfg;
+use crate::kanshi::Side;
 
 /// The paths and the host name the daemon works with.
 pub struct RunEnv {
@@ -46,6 +50,11 @@ const STALL: Duration = Duration::from_secs(2);
 const STALL_EXIT: i32 = 70;
 /// At most this many connections may be in TLS, Hello or the verdict.
 const MAX_HANDSHAKES: usize = 4;
+/// At most this many connections are taken from the listener per turn.
+const MAX_ACCEPTS: usize = 64;
+/// A capture whose pointer lock is not active this long after it was
+/// asked for is given up.
+const LOCK_WAIT: Duration = Duration::from_millis(500);
 /// The largest generated/deskflow read.
 const CONFIG_MAX: u64 = 256 * 1024;
 
@@ -255,6 +264,36 @@ enum Next {
     Exit(Result<(), String>),
 }
 
+/// A strip shown for a connected device, with what the capture needs of
+/// it. Its id is the connection's.
+struct Strip {
+    spec: StripSpec,
+    /// The output's logical rectangle.
+    out: Rect,
+    side: Side,
+    /// The device's screen, from its DINF.
+    dev: (i16, i16),
+}
+
+/// The pointer on a strip: where, and the push into the edge so far.
+struct Hover {
+    strip: u32,
+    at: (f64, f64),
+    push: edge::Resistance,
+}
+
+/// Who has the keyboard and the pointer.
+enum Mode {
+    /// ThinFloe.
+    Idle,
+    /// A capture of this strip waits for its pointer lock.
+    Locking {
+        strip: u32,
+        since: Instant,
+    },
+    Active(Active),
+}
+
 struct Daemon {
     env: RunEnv,
     cfg: DeskflowCfg,
@@ -271,6 +310,20 @@ struct Daemon {
     since: HashMap<(String, String), (DevState, i64)>,
     /// The text last written to the state file.
     written: Option<String>,
+    /// The id the next connection gets.
+    next_id: usize,
+    /// The compositor's outputs, as of the last `OutputsChanged`.
+    outputs: Vec<OutputGeom>,
+    strips: Vec<Strip>,
+    /// Connected devices without a strip: their output is missing, or
+    /// their edge touches another output.
+    offline: Vec<usize>,
+    busy: Vec<usize>,
+    hover: Option<Hover>,
+    mode: Mode,
+    kb: Keyboard,
+    /// The `Unlocked` events that our own `end_capture` calls queued.
+    own_unlocks: usize,
 }
 
 impl Daemon {
@@ -289,12 +342,21 @@ impl Daemon {
             fingerprint: ident::fingerprint(&id.cert_der),
             listener,
             sock,
+            outputs: capture.as_ref().map(Capture::outputs).unwrap_or_default(),
             capture,
             conns: Vec::new(),
             pending: Pending::default(),
             screens: HashMap::new(),
             since: HashMap::new(),
             written: None,
+            next_id: 1,
+            strips: Vec::new(),
+            offline: Vec::new(),
+            busy: Vec::new(),
+            hover: None,
+            mode: Mode::Idle,
+            kb: Keyboard::default(),
+            own_unlocks: 0,
         }
     }
 
@@ -310,8 +372,18 @@ impl Daemon {
                 break r;
             }
         };
-        // Every connection ends with the daemon; a failure has written its
-        // head already.
+        // Every connection ends with the daemon, the device that has the
+        // pointer first gets its keys and buttons up and COUT, then each a
+        // CBYE; a failure has written its head already.
+        self.release("the daemon ends");
+        for c in &mut self.conns {
+            c.send(Msg::Cbye);
+            c.close("the daemon ends");
+            c.flush();
+        }
+        if let Some(c) = self.capture.as_mut() {
+            let _ = c.flush();
+        }
         self.conns.clear();
         if result.is_ok() {
             self.write_state();
@@ -337,14 +409,9 @@ impl Daemon {
             let ev = if c.wants_write() { IN | libc::POLLOUT } else { IN };
             fds.push(pollfd(c.fd(), ev));
         }
+        let timeout = self.poll_timeout(Instant::now());
         // SAFETY: fds is a valid array of its length for the call.
-        let r = unsafe {
-            libc::poll(
-                fds.as_mut_ptr(),
-                fds.len() as libc::nfds_t,
-                TURN.as_millis() as libc::c_int,
-            )
-        };
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if r < 0 {
             let e = io::Error::last_os_error();
             if e.kind() == ErrorKind::Interrupted {
@@ -353,10 +420,14 @@ impl Daemon {
             return Next::Exit(Err(fail(&self.env.state, format!("poll: {e}"))));
         }
         let ready = |i: usize| fds[i].revents != 0;
+        let now = Instant::now();
         if ready(0) {
             for sig in wake.take() {
                 let next = match sig {
-                    libc::SIGTERM => Next::Exit(Ok(())),
+                    libc::SIGTERM => {
+                        self.release("SIGTERM");
+                        Next::Exit(Ok(()))
+                    }
                     libc::SIGHUP => self.reload(),
                     _ => Next::Go,
                 };
@@ -370,16 +441,16 @@ impl Daemon {
         {
             return Next::Exit(r);
         }
-        if ready(3)
-            && let Some(c) = self.capture.as_mut()
-        {
+        if ready(3) && self.capture.is_some() {
             // Wayland gone: labwc has ended, and the session with it.
-            if fds[3].revents & (libc::POLLERR | libc::POLLHUP) != 0 || c.dispatch().is_err() {
+            if fds[3].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
                 return Next::Exit(Ok(()));
             }
-            // The edge strips come with the forwarding (Task 10).
+            match self.capture.as_mut().map(Capture::dispatch) {
+                Some(Ok(events)) => self.on_capture(events, now),
+                _ => return Next::Exit(Ok(())),
+            }
         }
-        let now = Instant::now();
         let known = self.conns.len();
         for i in 0..known {
             let revents = fds[fixed + i].revents;
@@ -387,13 +458,18 @@ impl Daemon {
                 continue;
             }
             let events = self.conns[i].on_readable(now);
-            self.on_events(i, events);
+            self.on_events(i, events, now);
         }
         if ready(2) {
             self.accept(now);
         }
+        self.timers(now);
         for c in &mut self.conns {
             c.tick(now);
+        }
+        self.check_device();
+        self.update_strips();
+        for c in &mut self.conns {
             c.flush();
         }
         self.conns.retain(|c| c.closing().is_none());
@@ -401,8 +477,296 @@ impl Daemon {
         Next::Go
     }
 
+    /// The poll timeout: a turn, or less when a key repeat or the lock
+    /// deadline is due sooner.
+    fn poll_timeout(&self, now: Instant) -> libc::c_int {
+        let due = match &self.mode {
+            Mode::Idle => None,
+            Mode::Locking { since, .. } => Some(*since + LOCK_WAIT),
+            Mode::Active(a) => a.deadline(),
+        };
+        let wait = due.map_or(TURN, |d| d.saturating_duration_since(now).min(TURN));
+        // Rounded up, so the loop does not spin before the deadline.
+        wait.as_micros().div_ceil(1000) as libc::c_int
+    }
+
+    /// The lock deadline and the key repeat.
+    fn timers(&mut self, now: Instant) {
+        match &mut self.mode {
+            Mode::Idle => {}
+            Mode::Locking { since, .. } => {
+                if now.saturating_duration_since(*since) >= LOCK_WAIT {
+                    self.release("no pointer lock within 500 ms");
+                }
+            }
+            Mode::Active(a) => {
+                let acts = forward::tick(a, &self.kb, now);
+                self.forward(acts);
+            }
+        }
+    }
+
+    /// The events of the Wayland connection. A changed output layout is
+    /// taken first, so a capture whose output went is released for that
+    /// reason.
+    fn on_capture(&mut self, events: Vec<CapEvent>, now: Instant) {
+        if events.iter().any(|e| matches!(e, CapEvent::OutputsChanged)) {
+            if let Some(c) = &self.capture {
+                self.outputs = c.outputs();
+            }
+            self.update_strips();
+        }
+        for ev in &events {
+            self.on_cap_event(ev, now);
+        }
+    }
+
+    fn on_cap_event(&mut self, ev: &CapEvent, now: Instant) {
+        match *ev {
+            CapEvent::Enter { strip, x, y } => {
+                self.hover = Some(Hover {
+                    strip,
+                    at: (x, y),
+                    push: edge::Resistance::new(self.cfg.edge_resistance.px()),
+                });
+            }
+            CapEvent::Motion { x, y } => {
+                if let Some(h) = self.hover.as_mut() {
+                    h.at = (x, y);
+                }
+            }
+            CapEvent::Leave { strip } => {
+                if self.hover.as_ref().is_some_and(|h| h.strip == strip) {
+                    self.hover = None;
+                }
+            }
+            // The one our own end_capture reported.
+            CapEvent::Unlocked if self.own_unlocks > 0 => {
+                self.own_unlocks -= 1;
+                return;
+            }
+            _ => {}
+        }
+        match &mut self.mode {
+            Mode::Active(a) => {
+                let acts = forward::on_cap_event(a, ev, &mut self.kb, now);
+                self.forward(acts);
+            }
+            Mode::Locking { .. } => {
+                self.kb.update(ev);
+                match ev {
+                    CapEvent::Locked => self.enter_device(),
+                    CapEvent::Unlocked => self.release("unlocked"),
+                    _ => {}
+                }
+            }
+            Mode::Idle => {
+                self.kb.update(ev);
+                match *ev {
+                    CapEvent::Enter { .. } => self.push_edge(0.0, 0.0, now),
+                    CapEvent::Relative {
+                        dx_unaccel, dy_unaccel, ..
+                    } if dx_unaccel.is_finite() && dy_unaccel.is_finite() => {
+                        self.push_edge(dx_unaccel, dy_unaccel, now)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Motion on a strip pushes into its edge; enough of it begins the
+    /// capture.
+    fn push_edge(&mut self, dx: f64, dy: f64, now: Instant) {
+        let Some(h) = self.hover.as_mut() else {
+            return;
+        };
+        let Some(s) = self.strips.iter().find(|s| s.spec.id == h.strip) else {
+            return;
+        };
+        if !h.push.push(s.side, dx, dy, now) {
+            return;
+        }
+        h.push.reset();
+        let strip = h.strip;
+        if let Some(c) = self.capture.as_mut() {
+            c.begin_capture(strip);
+        }
+        self.mode = Mode::Locking { strip, since: now };
+    }
+
+    /// The lock is active: CINN where the pointer left the edge.
+    fn enter_device(&mut self) {
+        let Mode::Locking { strip, .. } = self.mode else {
+            return;
+        };
+        let Some((out, side, dev, rect)) = self
+            .strips
+            .iter()
+            .find(|s| s.spec.id == strip)
+            .map(|s| (s.out, s.side, s.dev, s.spec.rect))
+        else {
+            return self.release("the strip went");
+        };
+        let middle = (
+            f64::from(rect.x) + f64::from(rect.w) / 2.0,
+            f64::from(rect.y) + f64::from(rect.h) / 2.0,
+        );
+        let at = self
+            .hover
+            .as_ref()
+            .filter(|h| h.strip == strip)
+            .map_or(middle, |h| h.at);
+        let entry = edge::entry_point(out, side, at, dev);
+        let device = strip as usize;
+        let mods = self.kb.mask();
+        let Some(c) = self.conns.iter_mut().find(|c| c.id() == device && c.trusted()) else {
+            return self.release("connection closed");
+        };
+        c.enter(entry.0, entry.1, mods);
+        self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry));
+    }
+
+    fn forward(&mut self, acts: Vec<Action>) {
+        for act in acts {
+            match act {
+                Action::Send(m) => {
+                    let Mode::Active(a) = &self.mode else {
+                        return;
+                    };
+                    let id = a.device;
+                    if let Some(c) = self.conns.iter_mut().find(|c| c.id() == id) {
+                        c.send(m);
+                    }
+                }
+                Action::Release(why) => self.release(why),
+            }
+        }
+    }
+
+    /// Gives keyboard and pointer back to ThinFloe at once: the device gets
+    /// a key up for every key and button sent down and COUT, the lock and
+    /// the keyboard focus go.
+    fn release(&mut self, reason: &str) {
+        match std::mem::replace(&mut self.mode, Mode::Idle) {
+            Mode::Idle => return,
+            Mode::Locking { .. } => {}
+            Mode::Active(mut a) => {
+                let msgs = forward::release(&mut a, &self.kb);
+                if let Some(c) = self.conns.iter_mut().find(|c| c.id() == a.device) {
+                    for m in msgs {
+                        c.send(m);
+                    }
+                }
+            }
+        }
+        if let Some(c) = self.capture.as_mut()
+            && c.end_capture()
+        {
+            self.own_unlocks += 1;
+        }
+        if let Some(h) = self.hover.as_mut() {
+            h.push.reset();
+        }
+        eprintln!("thinfloe-deskflow: released ({reason})");
+    }
+
+    /// The device of a capture must still be connected.
+    fn check_device(&mut self) {
+        let id = match &self.mode {
+            Mode::Idle => return,
+            Mode::Locking { strip, .. } => *strip as usize,
+            Mode::Active(a) => a.device,
+        };
+        if !self.conns.iter().any(|c| c.id() == id && c.trusted()) {
+            self.release("connection closed");
+        }
+    }
+
+    /// The strips the devices need now: one per connected device whose
+    /// output exists and whose edge is free. Also the ids of the connected
+    /// devices without an output and of those whose edge is not free.
+    fn wanted_strips(&self) -> (Vec<Strip>, Vec<usize>, Vec<usize>) {
+        let rect = |o: &OutputGeom| Rect {
+            x: o.x,
+            y: o.y,
+            w: o.w,
+            h: o.h,
+        };
+        let (mut strips, mut offline, mut busy) = (Vec::new(), Vec::new(), Vec::new());
+        for c in self.conns.iter().filter(|c| c.trusted()) {
+            let Some((w, h)) = c.screen().filter(|(w, h)| *w > 0 && *h > 0) else {
+                continue;
+            };
+            let Some(d) = self
+                .cfg
+                .devices
+                .iter()
+                .find(|d| c.name() == Some(&d.name) && c.fingerprint() == Some(&d.fingerprint))
+            else {
+                continue;
+            };
+            let Some(o) = self.outputs.iter().find(|o| o.matches(&d.output)) else {
+                offline.push(c.id());
+                continue;
+            };
+            let others: Vec<Rect> = self.outputs.iter().filter(|p| p.name != o.name).map(rect).collect();
+            if !edge::edge_free(rect(o), d.side, &others) {
+                busy.push(c.id());
+                continue;
+            }
+            strips.push(Strip {
+                spec: StripSpec {
+                    id: c.id() as u32,
+                    output: o.name.clone(),
+                    rect: edge::strip_rect(rect(o), d.side),
+                },
+                out: rect(o),
+                side: d.side,
+                dev: (w, h),
+            });
+        }
+        (strips, offline, busy)
+    }
+
+    /// Shows the strips the devices need; a capture whose strip goes or
+    /// moves is released first.
+    fn update_strips(&mut self) {
+        let (strips, offline, busy) = self.wanted_strips();
+        let spec = |all: &[Strip], id: u32| all.iter().find(|s| s.spec.id == id).map(|s| s.spec.clone());
+        let captured = match &self.mode {
+            Mode::Idle => None,
+            Mode::Locking { strip, .. } => Some(*strip),
+            Mode::Active(a) => Some(a.device as u32),
+        };
+        if let Some(id) = captured {
+            let now = spec(&strips, id);
+            if now != spec(&self.strips, id) {
+                let why = match now {
+                    Some(_) => "the output changed",
+                    None if offline.contains(&(id as usize)) => "output gone",
+                    None if busy.contains(&(id as usize)) => "the edge is not free",
+                    None => "the device went",
+                };
+                self.release(why);
+            }
+        }
+        if let Some(h) = &self.hover
+            && (spec(&strips, h.strip).is_none() || spec(&strips, h.strip) != spec(&self.strips, h.strip))
+        {
+            self.hover = None;
+        }
+        let specs: Vec<StripSpec> = strips.iter().map(|s| s.spec.clone()).collect();
+        if self.strips.iter().map(|s| &s.spec).ne(specs.iter())
+            && let Some(c) = self.capture.as_mut()
+        {
+            c.set_strips(&specs);
+        }
+        (self.strips, self.offline, self.busy) = (strips, offline, busy);
+    }
+
     fn accept(&mut self, now: Instant) {
-        loop {
+        for _ in 0..MAX_ACCEPTS {
             let stream: TcpStream = match self.listener.accept() {
                 Ok((s, _)) => s,
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
@@ -416,17 +780,19 @@ impl Daemon {
                 drop(stream);
                 continue;
             }
-            match Conn::new(stream, self.tls.clone(), now) {
+            let id = self.next_id;
+            self.next_id += 1;
+            match Conn::new(id, stream, self.tls.clone(), now) {
                 Ok(c) => self.conns.push(c),
                 Err(e) => eprintln!("thinfloe-menu --deskflow: {e}"),
             }
         }
     }
 
-    fn on_events(&mut self, i: usize, events: Vec<Event>) {
+    fn on_events(&mut self, i: usize, events: Vec<Event>, now: Instant) {
         for ev in events {
             match ev {
-                Event::Named(name) => self.judge(i, &name),
+                Event::Named(name) => self.judge(i, &name, now),
                 Event::Screen { w, h } => {
                     if let Some(fp) = self.conns[i].fingerprint() {
                         let key = (name_of(&self.conns[i]), fp.to_string());
@@ -438,7 +804,7 @@ impl Daemon {
     }
 
     /// The verdict on a named connection, given in the same pass.
-    fn judge(&mut self, i: usize, name: &str) {
+    fn judge(&mut self, i: usize, name: &str, now: Instant) {
         let fp = self.conns[i].fingerprint().unwrap_or_default().to_string();
         let v = pair::judge(&self.cfg.devices, name, &fp);
         match v {
@@ -449,7 +815,7 @@ impl Daemon {
                     .enumerate()
                     .any(|(j, c)| j != i && c.trusted() && c.name() == Some(name));
                 if busy {
-                    self.conns[i].refuse_busy(Instant::now());
+                    self.conns[i].refuse_busy(now);
                     return;
                 }
             }
@@ -459,7 +825,7 @@ impl Daemon {
                     .note(name, &fp, PendingKind::FingerprintChanged, epoch_now() as u64)
             }
         }
-        self.conns[i].set_verdict(v, Instant::now());
+        self.conns[i].set_verdict(v, now);
     }
 
     fn commands(&mut self) -> Next {
@@ -515,15 +881,25 @@ impl Daemon {
     fn state(&mut self) -> StateFile {
         let now = epoch_now();
         let mut lines: Vec<(String, String, DevState, Vec<String>)> = Vec::new();
+        let active = match &self.mode {
+            Mode::Active(a) => Some(a.device),
+            _ => None,
+        };
         for d in &self.cfg.devices {
-            let on = self.conns.iter().any(|c| {
+            let on = self.conns.iter().find(|c| {
                 c.trusted()
                     && c.screen().is_some()
                     && c.name() == Some(&d.name)
                     && c.fingerprint() == Some(&d.fingerprint)
             });
-            let state = if on { DevState::Connected } else { DevState::Offline };
-            lines.push((d.name.clone(), d.fingerprint.clone(), state, Vec::new()));
+            let (state, flags) = match on.map(Conn::id) {
+                None => (DevState::Offline, Vec::new()),
+                Some(id) if active == Some(id) => (DevState::Active, Vec::new()),
+                Some(id) if self.offline.contains(&id) => (DevState::Offline, Vec::new()),
+                Some(id) if self.busy.contains(&id) => (DevState::Connected, vec!["edge-busy".to_string()]),
+                Some(_) => (DevState::Connected, Vec::new()),
+            };
+            lines.push((d.name.clone(), d.fingerprint.clone(), state, flags));
         }
         for e in self.pending.entries() {
             let flags = match e.kind {
@@ -649,6 +1025,15 @@ mod tests {
             let sock = cmd::bind(&env.socket).unwrap();
             tx.send(listener.local_addr().unwrap().port()).unwrap();
             let mut d = Daemon::new(env, cfg, &id, listener, sock, None);
+            // The monitor of the first attached device (write_cfg).
+            d.outputs = vec![OutputGeom {
+                name: "DP-0".into(),
+                description: String::new(),
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            }];
             d.serve(&w, None)
         });
         let port = rx.recv().unwrap();
@@ -802,12 +1187,40 @@ mod tests {
         assert_eq!(line(&st, "laptop", &fp2).unwrap().state, DevState::Rejected);
         assert_eq!(st.devices.len(), 2, "{st:?}");
 
-        // SIGTERM: exit 0, and the device is offline.
+        // SIGTERM: CBYE to the client, exit 0, and the device is offline.
         r.wake.send(libc::SIGTERM);
         assert_eq!(r.done.join().unwrap(), Ok(()));
+        let goodbye = std::iter::from_fn(|| read_payload(&mut c).ok())
+            .map(|p| proto::decode(&p).unwrap())
+            .find(|m| *m != Msg::Calv);
+        assert_eq!(goodbye, Some(Msg::Cbye));
         let st = statefile::parse(&std::fs::read_to_string(&state).unwrap());
         assert_eq!(line(&st, "laptop", &fp1).unwrap().state, DevState::Offline);
-        drop(c);
+    }
+
+    #[test]
+    fn a_reload_with_another_port_listens_there() {
+        let (d, s) = (TestDir::new("deskflow-run", "port2"), TestDir::sockets("dfr"));
+        let env = test_env(&d, &s);
+        let (state, gen_path, socket) = (env.state.clone(), env.generated.clone(), env.socket.clone());
+        write_cfg(&gen_path, true, 24800, &[]);
+        let r = start(env);
+        let port = TcpListener::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        write_cfg(&gen_path, true, port, &[]);
+        cmd::send(&socket, &Cmd::Reload).unwrap();
+        let want = format!("0.0.0.0:{port}");
+        let st = wait_state(
+            &state,
+            |s| matches!(&s.head, Head::SelfInfo { listen, .. } if *listen == want),
+        );
+        assert!(
+            matches!(&st.head, Head::SelfInfo { listen, .. } if *listen == want),
+            "{st:?}"
+        );
+        let mut c = connect(port, &cert("moved"));
+        assert!(read_payload(&mut c).unwrap().starts_with(b"Barrier"));
+        r.wake.send(libc::SIGTERM);
+        assert_eq!(r.done.join().unwrap(), Ok(()));
     }
 
     #[test]

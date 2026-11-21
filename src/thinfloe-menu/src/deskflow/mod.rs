@@ -13,6 +13,7 @@ pub mod capture;
 pub mod cmd;
 pub mod conn;
 pub mod edge;
+pub mod forward;
 pub mod ident;
 pub mod keymap;
 pub mod pair;
@@ -187,7 +188,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
                     None => code == KEY_ESC,
                 };
                 if escape {
-                    cap.end_capture();
+                    let _ = cap.end_capture();
                 }
             }
         }
@@ -202,7 +203,8 @@ fn probe_line(ev: &CapEvent, keys: Option<&Xkb>) -> String {
     match ev {
         CapEvent::Enter { strip, x, y } => format!("enter {strip} {x:.0} {y:.0}"),
         CapEvent::Leave { strip } => format!("leave {strip}"),
-        CapEvent::Relative { dx, dy } => format!("relative {dx:.2} {dy:.2}"),
+        CapEvent::Motion { x, y } => format!("motion {x:.0} {y:.0}"),
+        CapEvent::Relative { dx, dy, .. } => format!("relative {dx:.2} {dy:.2}"),
         CapEvent::Locked => "locked".into(),
         CapEvent::Unlocked => "unlocked".into(),
         CapEvent::Key { code, pressed } => {
@@ -235,6 +237,7 @@ mod tests {
     fn the_probe_strip_lies_on_the_named_edge() {
         let out = OutputGeom {
             name: "HEADLESS-1".into(),
+            description: String::new(),
             x: 1280,
             y: 0,
             w: 1280,

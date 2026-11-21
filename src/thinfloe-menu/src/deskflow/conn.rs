@@ -39,6 +39,8 @@ pub enum Event {
 }
 
 pub struct Conn {
+    /// The daemon's number for it, unique for the life of the process.
+    id: usize,
     stream: TcpStream,
     tls: ServerConnection,
     framer: Framer,
@@ -60,10 +62,11 @@ pub struct Conn {
 }
 
 impl Conn {
-    pub fn new(stream: TcpStream, cfg: Arc<ServerConfig>, now: Instant) -> io::Result<Conn> {
+    pub fn new(id: usize, stream: TcpStream, cfg: Arc<ServerConfig>, now: Instant) -> io::Result<Conn> {
         stream.set_nonblocking(true)?;
         let tls = ServerConnection::new(cfg).map_err(io::Error::other)?;
         Ok(Conn {
+            id,
             stream,
             tls,
             framer: Framer::default(),
@@ -76,6 +79,10 @@ impl Conn {
             ending: None,
             closing: None,
         })
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     pub fn fd(&self) -> RawFd {
@@ -261,6 +268,31 @@ impl Conn {
             self.trusted = true;
         }
         self.apply(out, now, &mut Vec::new());
+    }
+
+    /// CINN: the pointer enters the client's screen at (x, y).
+    pub fn enter(&mut self, x: i16, y: i16, mods: u16) {
+        if let Some(s) = self.session.as_mut() {
+            let out = s.enter(x, y, mods);
+            self.apply_sends(out);
+        }
+    }
+
+    /// A message for a client that is past the handshake; dropped before.
+    pub fn send(&mut self, m: Msg) {
+        if let Some(s) = self.session.as_mut() {
+            let out = s.send(m);
+            self.apply_sends(out);
+        }
+    }
+
+    /// The bytes of the session's answer (enter and send make no other).
+    fn apply_sends(&mut self, out: Vec<Out>) {
+        for o in out {
+            if let Out::Send(bytes) = o {
+                self.write(&bytes);
+            }
+        }
     }
 
     /// Another connection holds this client's name: EBSY, then the end.
