@@ -1192,7 +1192,7 @@ impl App {
         if needs_backdrop(self.cfg.menu.dialog(), self.frozen, live.painted, settling) {
             let mut under = input.clone();
             under.events.clear();
-            let out = self.ctx.run_ui(under, |ui| {
+            let mut out = self.ctx.run_ui(under, |ui| {
                 ui::show_screen(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
             });
             live.textures.apply_set(&out.textures_delta);
@@ -1201,9 +1201,10 @@ impl App {
             live.canvas.restore_background(all);
             live.canvas.draw(&prims, &live.textures, out.pixels_per_point, all);
             live.textures.apply_free(&out.textures_delta);
+            out.textures_delta.clear();
             live.painted = true;
         }
-        let out = self.ctx.run_ui(input, |ui| {
+        let mut out = self.ctx.run_ui(input, |ui| {
             event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
         live.egui.handle_platform_output(&live.window, out.platform_output);
@@ -1231,6 +1232,7 @@ impl App {
             // Nothing of this pass reaches the screen; the textures were
             // taken above, so the font atlas upload is not lost.
             live.textures.apply_free(&out.textures_delta);
+            out.textures_delta.clear();
             live.window.request_redraw();
             return;
         }
@@ -1261,6 +1263,7 @@ impl App {
             }
         }
         live.textures.apply_free(&out.textures_delta);
+        out.textures_delta.clear();
 
         // Honour egui's own repaint requests. Ignoring them leaves the first
         // screen in fallback fonts until the mouse moves, because the font
