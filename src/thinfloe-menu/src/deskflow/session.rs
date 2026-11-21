@@ -1,0 +1,515 @@
+//! One connection's protocol state machine (spec, Protocol subset and
+//! Connection flow). Sans-IO: the daemon feeds it payloads cut by
+//! [`proto::Framer`], the current time and the pairing verdict, and writes
+//! the [`Out::Send`] bytes to the TLS stream. It never reads a clock.
+
+use std::time::{Duration, Instant};
+
+use super::pair::Verdict;
+use super::proto::{self, Msg};
+
+/// The version the server offers.
+const MAJOR: u16 = 1;
+const MINOR_MAX: u16 = 8;
+const MINOR_MIN: u16 = 6;
+/// The longest client name kept, in bytes.
+pub const NAME_MAX: usize = 64;
+/// The client must answer the Hello within this time of `new`.
+const HELLO_DEADLINE: Duration = Duration::from_secs(10);
+const CALV_EVERY: Duration = Duration::from_secs(3);
+/// A trusted client that sent nothing for this long is gone.
+const DEAD_AFTER: Duration = Duration::from_secs(9);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Out {
+    /// Framed bytes for the TLS stream.
+    Send(Vec<u8>),
+    /// The client's name (capped, control characters replaced by `?`); the
+    /// caller answers with [`Session::set_verdict`].
+    Named { name: String },
+    /// The size of the client's screen, from its DINF.
+    Screen { w: i16, h: i16 },
+    /// End the connection after the bytes before this were written.
+    Close(&'static str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// The Hello is out; no HelloBack yet.
+    AwaitHello,
+    /// HelloBack accepted, the caller owes a verdict.
+    AwaitVerdict,
+    /// Trusted: QINF sent, DINF not yet seen.
+    Trusted,
+    /// The first DINF has been answered.
+    Active,
+    Closed,
+}
+
+pub struct Session {
+    state: State,
+    minor: u16,
+    created: Instant,
+    last_rx: Instant,
+    last_calv: Instant,
+    seq: u32,
+}
+
+fn send(m: &Msg, minor: u16) -> Out {
+    Out::Send(proto::frame(&proto::encode(m, minor)))
+}
+
+/// The client's name as shown: at most 64 raw bytes, lossily decoded, every
+/// control character replaced by `?`, cut again at 64 bytes on a character
+/// boundary (the replacement character takes three bytes).
+fn clean_name(raw: &[u8]) -> String {
+    let raw = &raw[..raw.len().min(NAME_MAX)];
+    let mut s: String = String::from_utf8_lossy(raw)
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    let mut end = s.len().min(NAME_MAX);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s
+}
+
+impl Session {
+    pub fn new(now: Instant) -> (Session, Vec<Out>) {
+        let s = Session {
+            state: State::AwaitHello,
+            minor: MINOR_MAX,
+            created: now,
+            last_rx: now,
+            last_calv: now,
+            seq: 0,
+        };
+        let hello = send(
+            &Msg::Hello {
+                major: MAJOR,
+                minor: MINOR_MAX,
+            },
+            MINOR_MAX,
+        );
+        (s, vec![hello])
+    }
+
+    /// The negotiated minor version (the server's until the HelloBack).
+    pub fn minor(&self) -> u16 {
+        self.minor
+    }
+
+    fn close(&mut self, why: &'static str) -> Vec<Out> {
+        self.state = State::Closed;
+        vec![Out::Close(why)]
+    }
+
+    pub fn on_payload(&mut self, p: &[u8], now: Instant) -> Vec<Out> {
+        if self.state == State::Closed {
+            return Vec::new();
+        }
+        self.last_rx = now;
+        match self.state {
+            State::AwaitHello => self.hello_back(p),
+            State::AwaitVerdict | State::Closed => Vec::new(),
+            State::Trusted | State::Active => self.message(p),
+        }
+    }
+
+    fn hello_back(&mut self, p: &[u8]) -> Vec<Out> {
+        let Ok(Msg::HelloBack { major, minor, name }) = proto::decode_hello_back(p) else {
+            return self.close("bad hello");
+        };
+        if major != MAJOR || !(MINOR_MIN..=MINOR_MAX).contains(&minor) {
+            let mut out = vec![send(
+                &Msg::Eicv {
+                    major: MAJOR,
+                    minor: MINOR_MAX,
+                },
+                MINOR_MAX,
+            )];
+            out.extend(self.close("incompatible version"));
+            return out;
+        }
+        let name = clean_name(&name);
+        if name.is_empty() {
+            return self.close("empty client name");
+        }
+        self.minor = minor;
+        self.state = State::AwaitVerdict;
+        vec![Out::Named { name }]
+    }
+
+    fn message(&mut self, p: &[u8]) -> Vec<Out> {
+        let Ok(m) = proto::decode(p) else {
+            return self.close("bad message");
+        };
+        match m {
+            Msg::Calv => vec![send(&Msg::Calv, self.minor)],
+            Msg::Dinf { w, h, .. } => {
+                let mut out = vec![send(&Msg::Ciak, self.minor)];
+                if self.state == State::Trusted {
+                    self.state = State::Active;
+                    out.push(send(&Msg::Crop, self.minor));
+                    out.push(send(&Msg::Dsop(Vec::new()), self.minor));
+                }
+                out.push(Out::Screen { w, h });
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Time passes: the Hello deadline, the keep-alive and the dead-client
+    /// check.
+    pub fn tick(&mut self, now: Instant) -> Vec<Out> {
+        match self.state {
+            State::AwaitHello => {
+                if now.saturating_duration_since(self.created) >= HELLO_DEADLINE {
+                    return self.close("no hello");
+                }
+            }
+            State::Trusted | State::Active => {
+                if now.saturating_duration_since(self.last_rx) >= DEAD_AFTER {
+                    return self.close("keep-alive lost");
+                }
+                if now.saturating_duration_since(self.last_calv) >= CALV_EVERY {
+                    self.last_calv = now;
+                    return vec![send(&Msg::Calv, self.minor)];
+                }
+            }
+            State::AwaitVerdict | State::Closed => {}
+        }
+        Vec::new()
+    }
+
+    /// The pairing decision for the name given by [`Out::Named`].
+    pub fn set_verdict(&mut self, v: Verdict) -> Vec<Out> {
+        if self.state != State::AwaitVerdict {
+            return Vec::new();
+        }
+        match v {
+            Verdict::Trusted(_) => {
+                self.state = State::Trusted;
+                // The keep-alive runs from the HelloBack.
+                self.last_calv = self.last_rx;
+                vec![send(&Msg::Qinf, self.minor)]
+            }
+            Verdict::Pending | Verdict::FingerprintChanged => {
+                let why = if v == Verdict::Pending {
+                    "not paired"
+                } else {
+                    "fingerprint changed"
+                };
+                let mut out = vec![send(&Msg::Eunk, self.minor)];
+                out.extend(self.close(why));
+                out
+            }
+        }
+    }
+
+    fn live(&self) -> bool {
+        matches!(self.state, State::Trusted | State::Active)
+    }
+
+    /// CINN: the pointer enters the client's screen at (x, y).
+    pub fn enter(&mut self, x: i16, y: i16, mods: u16) -> Vec<Out> {
+        if !self.live() {
+            return Vec::new();
+        }
+        self.seq = self.seq.wrapping_add(1);
+        let seq = self.seq;
+        vec![send(&Msg::Cinn { x, y, seq, mods }, self.minor)]
+    }
+
+    /// COUT: the pointer leaves the client's screen.
+    pub fn leave(&mut self) -> Vec<Out> {
+        if !self.live() {
+            return Vec::new();
+        }
+        vec![send(&Msg::Cout, self.minor)]
+    }
+
+    /// Any other message for the client, in the form its minor needs.
+    pub fn send(&mut self, m: Msg) -> Vec<Out> {
+        if !self.live() {
+            return Vec::new();
+        }
+        vec![send(&m, self.minor)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    fn hello_back(minor: u16, name: &[u8]) -> Vec<u8> {
+        proto::encode(
+            &Msg::HelloBack {
+                major: 1,
+                minor,
+                name: name.to_vec(),
+            },
+            8,
+        )
+    }
+
+    fn dinf(w: i16, h: i16) -> Vec<u8> {
+        proto::encode(
+            &Msg::Dinf {
+                x: 0,
+                y: 0,
+                w,
+                h,
+                warp: 0,
+                mx: 0,
+                my: 0,
+            },
+            8,
+        )
+    }
+
+    /// The messages in the Send outputs, decoded.
+    fn sent(out: &[Out]) -> Vec<Msg> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Send(b) => {
+                    assert_eq!(u32::from_be_bytes(b[..4].try_into().unwrap()) as usize, b.len() - 4);
+                    Some(proto::decode(&b[4..]).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closes(out: &[Out]) -> Option<&'static str> {
+        out.iter().find_map(|o| match o {
+            Out::Close(w) => Some(*w),
+            _ => None,
+        })
+    }
+
+    /// A session past HelloBack with the verdict Trusted.
+    fn trusted(minor: u16, t0: Instant) -> Session {
+        let (mut se, _) = Session::new(t0);
+        se.on_payload(&hello_back(minor, b"laptop"), t0);
+        se.set_verdict(Verdict::Trusted(0));
+        se
+    }
+
+    #[test]
+    fn hello_first() {
+        let (se, out) = Session::new(Instant::now());
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out,
+            [Out::Send(proto::frame(&proto::encode(
+                &Msg::Hello { major: 1, minor: 8 },
+                8
+            )))]
+        );
+        assert_eq!(se.minor(), 8);
+    }
+
+    #[test]
+    fn old_minor_gets_eicv() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        let out = se.on_payload(&hello_back(5, b"laptop"), t);
+        assert_eq!(sent(&out), [Msg::Eicv { major: 1, minor: 8 }]);
+        assert_eq!(closes(&out), Some("incompatible version"));
+        // A wrong major as well, and a minor above 8.
+        for (major, minor) in [(2u16, 8u16), (1, 9)] {
+            let (mut se, _) = Session::new(t);
+            let p = proto::encode(
+                &Msg::HelloBack {
+                    major,
+                    minor,
+                    name: b"x".to_vec(),
+                },
+                8,
+            );
+            assert!(closes(&se.on_payload(&p, t)).is_some());
+        }
+    }
+
+    #[test]
+    fn garbage_hello_back_closes() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        assert_eq!(closes(&se.on_payload(b"Bar", t)), Some("bad hello"));
+        assert!(se.on_payload(&hello_back(8, b"x"), t).is_empty());
+    }
+
+    #[test]
+    fn hello_back_negotiates_down() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        let out = se.on_payload(&hello_back(6, b"laptop"), t);
+        assert_eq!(out, [Out::Named { name: "laptop".into() }]);
+        assert_eq!(se.minor(), 6);
+    }
+
+    #[test]
+    fn hello_back_name_capped() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        let out = se.on_payload(&hello_back(8, &vec![b'a'; 10_000]), t);
+        match &out[..] {
+            [Out::Named { name }] => assert_eq!(name.len(), 64),
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn name_is_made_safe() {
+        assert_eq!(clean_name(b"a\tb\r\nc\x7fd\x1b[0m"), "a?b??c?d?[0m");
+        assert_eq!(clean_name("a\u{85}b".as_bytes()), "a?b");
+        // A cut in the middle of a character, and invalid bytes grown to
+        // three-byte replacement characters, stay within 64 bytes.
+        let mut raw = vec![b'a'; 63];
+        raw.extend("\u{e9}".as_bytes());
+        let n = clean_name(&raw);
+        assert!(n.len() <= 64 && n.starts_with(&"a".repeat(63)));
+        let n = clean_name(&[0xff; 100]);
+        assert!(n.len() <= 64 && n.chars().all(|c| c == '\u{fffd}'));
+        assert_eq!(clean_name("l\u{e4}ptop".as_bytes()), "l\u{e4}ptop");
+    }
+
+    #[test]
+    fn empty_name_closes_without_naming() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        let out = se.on_payload(&hello_back(8, b""), t);
+        assert_eq!(out, [Out::Close("empty client name")]);
+    }
+
+    #[test]
+    fn trusted_gets_qinf_then_ciak_after_dinf() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        se.on_payload(&hello_back(8, b"laptop"), t);
+        let out = se.set_verdict(Verdict::Trusted(0));
+        assert_eq!(sent(&out), [Msg::Qinf]);
+        let out = se.on_payload(&dinf(1920, 1080), t);
+        assert_eq!(sent(&out), [Msg::Ciak, Msg::Crop, Msg::Dsop(vec![])]);
+        assert_eq!(out.last(), Some(&Out::Screen { w: 1920, h: 1080 }));
+        let out = se.on_payload(&dinf(1280, 720), t);
+        assert_eq!(sent(&out), [Msg::Ciak]);
+        assert_eq!(out.last(), Some(&Out::Screen { w: 1280, h: 720 }));
+    }
+
+    #[test]
+    fn pending_gets_eunk_and_close() {
+        for (v, why) in [
+            (Verdict::Pending, "not paired"),
+            (Verdict::FingerprintChanged, "fingerprint changed"),
+        ] {
+            let t = Instant::now();
+            let (mut se, _) = Session::new(t);
+            se.on_payload(&hello_back(8, b"laptop"), t);
+            let out = se.set_verdict(v);
+            assert_eq!(sent(&out), [Msg::Eunk]);
+            assert_eq!(closes(&out), Some(why));
+            assert!(se.on_payload(&dinf(1, 1), t).is_empty());
+            assert!(se.send(Msg::Calv).is_empty());
+        }
+    }
+
+    #[test]
+    fn nothing_goes_out_before_a_verdict() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        se.on_payload(&hello_back(8, b"laptop"), t);
+        assert!(se.on_payload(&dinf(1, 1), t).is_empty());
+        assert!(se.enter(1, 1, 0).is_empty());
+        assert!(se.tick(t + s(8)).is_empty());
+    }
+
+    #[test]
+    fn hello_deadline_10s() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        assert!(se.tick(t + s(9)).is_empty());
+        assert_eq!(se.tick(t + s(10)), [Out::Close("no hello")]);
+    }
+
+    #[test]
+    fn keepalive_every_3s_dead_after_9s() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        assert!(se.tick(t + s(2)).is_empty());
+        assert_eq!(sent(&se.tick(t + s(3))), [Msg::Calv]);
+        assert!(se.tick(t + s(5)).is_empty());
+        assert_eq!(sent(&se.tick(t + s(6))), [Msg::Calv]);
+        let out = se.tick(t + s(9));
+        assert_eq!(closes(&out), Some("keep-alive lost"));
+        assert!(se.tick(t + s(12)).is_empty());
+    }
+
+    #[test]
+    fn any_message_postpones_the_dead_check() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        se.on_payload(&proto::encode(&Msg::Cnop, 8), t + s(8));
+        assert!(closes(&se.tick(t + s(9))).is_none());
+        assert!(closes(&se.tick(t + s(16))).is_none());
+        assert!(closes(&se.tick(t + s(17))).is_some());
+    }
+
+    #[test]
+    fn calv_is_answered() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        let out = se.on_payload(&proto::encode(&Msg::Calv, 8), t);
+        assert_eq!(sent(&out), [Msg::Calv]);
+    }
+
+    #[test]
+    fn undecodable_message_closes() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        assert_eq!(closes(&se.on_payload(b"DINF", t)), Some("bad message"));
+    }
+
+    #[test]
+    fn enter_leave_and_seq() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        let a = sent(&se.enter(10, 20, 3));
+        let b = sent(&se.enter(11, 21, 0));
+        assert_eq!(
+            a,
+            [Msg::Cinn {
+                x: 10,
+                y: 20,
+                seq: 1,
+                mods: 3
+            }]
+        );
+        assert!(matches!(b[0], Msg::Cinn { seq: 2, .. }));
+        assert_eq!(sent(&se.leave()), [Msg::Cout]);
+    }
+
+    #[test]
+    fn key_form_follows_minor() {
+        let t = Instant::now();
+        let key = Msg::KeyDown {
+            id: 97,
+            mods: 0,
+            button: 38,
+        };
+        let code = |se: &mut Session| match &se.send(key.clone())[0] {
+            Out::Send(b) => b[4..8].to_vec(),
+            o => panic!("{o:?}"),
+        };
+        assert_eq!(code(&mut trusted(7, t)), b"DKDN");
+        assert_eq!(code(&mut trusted(8, t)), b"DKDL");
+    }
+}

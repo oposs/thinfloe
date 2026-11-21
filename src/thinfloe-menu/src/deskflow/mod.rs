@@ -10,7 +10,9 @@
 pub mod capture;
 pub mod edge;
 pub mod ident;
+pub mod pair;
 pub mod proto;
+pub mod session;
 pub mod tls;
 
 use std::ffi::{CStr, OsString};
