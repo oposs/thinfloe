@@ -117,7 +117,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-integration test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -142,7 +142,8 @@ help:
 	@echo "  qemu-smoke-write  - Headless write of a USB stick from a boot server, then boot it"
 	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
-	@echo "  test              - Run integration guard tests against rootfs"
+	@echo "  test-integration  - Run integration guard tests against rootfs"
+	@echo "  test              - test-unit, then test-integration"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
 	@echo "  clean             - Remove artifacts (FORCE=1 if artifacts is a symlink)"
 	@echo "  help              - Show this help"
@@ -598,7 +599,9 @@ test-unit:
 	@$(TEST_ENV) python3 -m unittest discover -s test/unit -v
 	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
 
-test: test-unit rootfs
+test: test-unit test-integration
+
+test-integration: rootfs
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) test/integration/test-firmware.sh
 	@$(TEST_ENV) test/integration/test-wifi-stack.sh
@@ -637,6 +640,7 @@ test: test-unit rootfs
 	@$(TEST_ENV) test/integration/test-make-mounts.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
+	@$(TEST_ENV) test/integration/test-make-targets.sh
 
 # Runtime session tests. Needs network (installs python3-xlib into a
 # test-only image) and runs a compositor, so it is deliberately not part of

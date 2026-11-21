@@ -14,7 +14,8 @@ Boot in short: syslinux loads the kernel with `ramroot=` (a path on the stick's 
 make image               # all stages, bootable files in artifacts/
 make rootfs              # Ubuntu container; kernel, initrd, ramroot.sqsh to artifacts/rootfs/
 make ipxe                # iPXE loaders to artifacts/rootfs/
-make test                # test-unit, then the integration tests against the built image
+make test                # test-unit, then test-integration
+make test-integration    # the integration tests alone against the built image (CI's image job)
 make test-unit           # Python unit tests in test/unit/ and the menu's cargo test
 make test-runtime        # labwc and the menu headless
 make qemu-smoke          # boot the USB image in QEMU (also: -addons, -write, -upgrade,

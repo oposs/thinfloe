@@ -1,8 +1,9 @@
 name: CI (ThinFloe)
 
 # ThinFloe's own CI jobs, called from ci.yml (docs/release-ci.md, "CI
-# split"). `unit` gives a result within minutes; `image` builds the rootfs
-# once and runs the integration tests, the image, the nine QEMU smoke tests
+# split"). `unit` runs the unit tests and gives a result within minutes;
+# `image` builds the rootfs once and runs the integration tests (not the unit
+# tests again), the image, the nine QEMU smoke tests
 # and the runtime tests on it. scripts/ci-runner-setup.sh prepares the
 # runner (docs/release-ci.md, "Runner setup for the project's workflows").
 on:
@@ -48,8 +49,8 @@ jobs:
       - name: Prepare the runner
         run: scripts/ci-runner-setup.sh all
 
-      - name: make test
-        run: make test MEMCAP=
+      - name: make test-integration
+        run: make test-integration MEMCAP=
 
       - name: make image
         run: make image MEMCAP=
