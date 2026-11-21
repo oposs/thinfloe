@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### New
-- Settings → Screen has a switch "Let other computers use this keyboard and mouse (Deskflow)". Computers that run the Deskflow client then show up there; after you compare the fingerprint and attach one beside a monitor, pushing the pointer past that edge moves keyboard and mouse to it, and Ctrl+Alt+Shift+Escape always brings them back.
+- Settings → Screen has a switch "Let other computers use this keyboard and mouse (Deskflow)", off by default. Once it is on, computers that run the Deskflow client show up there, and after you compare the fingerprint you attach one beside a monitor. Pushing the pointer past that edge then moves keyboard and mouse to the computer, and Ctrl+Alt+Shift+Escape always brings them back.
 
 ### Changed
 

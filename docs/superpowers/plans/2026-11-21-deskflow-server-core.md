@@ -19,7 +19,7 @@
 - No new labwc keybinding and no labwc patch in step 1.
 - English for code, comments, keys; UI text in Simplified Technical English.
 - Defaults pinned by the spec: listen `false`, port `24800`, edge_resistance `medium` (off 0 / low 15 / medium 40 / high 100 logical px), resistance reset after 300 ms without outward push, keep-alive 3 s with 3 misses, watchdog stall 2 s, TLS+Hello deadline 10 s, ≤ 4 simultaneous handshakes, ≤ 8 pending devices, message cap 1 MiB, client name cap 64 bytes, protocol minor 6–8 (send 8, Hello name `Barrier`), escape `Ctrl+Alt+Shift+Escape`, restart back-off 1, 2, 4 … 60 s.
-- Identity: ECDSA P-256 self-signed, CN `ThinFloe <hostname>`, 10 years, `~/.config/thinfloe/deskflow/identity.pem` mode 0600; fingerprint `v2:sha256:<lowercase hex>` over the DER certificate.
+- Identity: ECDSA P-256 self-signed, CN `ThinFloe <hostname>`, valid 2000-01-01 to 2099-12-31, `~/.config/thinfloe/deskflow/identity.pem` mode 0600; fingerprint `v2:sha256:<lowercase hex>` over the DER certificate.
 - Every behaviour change gets a `CHANGES.md` line under `## [Unreleased]` (Task 13); no release headers.
 - Commit after each task with a Conventional-Commit subject and the `Co-Authored-By` trailer.
 

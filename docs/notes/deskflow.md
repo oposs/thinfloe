@@ -36,10 +36,19 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 
 - For each attached, connected device the daemon puts a 1 px layer-shell strip on the overlay layer along the attached edge. Only edges that touch no other monitor qualify.
 - Edge resistance: the pointer goes to the device only after the user keeps pushing outward. Outward motion from the relative pointer is summed, and the sum resets when the pointer leaves the strip or stops pushing for 300 ms. Thresholds: `off` 0, `low` 15, `medium` 40 (default), `high` 100 logical pixels.
-- At the threshold the daemon creates the pointer lock first, then takes exclusive keyboard focus with a shortcuts inhibitor, waits for `locked`, and only then sends CINN. labwc 0.9.3 activates a new lock only for the active view or on a focus change, so the lock must exist before the focus moves.
+- Only motion outward starts a capture, at every level: with `off` the first outward motion on the strip does. Reaching the strip, and motion inward or along the edge, never do, so the pointer that comes back from a device stays on ThinFloe although it still sits on the strip.
+- At the threshold the daemon creates the pointer lock first, then takes exclusive keyboard focus on the strip, waits for `locked`, and only then sends CINN. The strip has no keyboard-shortcuts inhibitor yet (step 3, patch 0007). labwc 0.9.3 activates a new lock only for the active view or on a focus change, so the lock must exist before the focus moves.
 - The pointer returns when the tracked position crosses back over the attached edge (no resistance).
-- Release always wins and does not wait for the client: Ctrl+Alt+Shift+Escape on the ThinFloe keyboard (seen by the strip's own keyboard focus, not a compositor binding), a missed keep-alive (3 s, 3 misses) or a failing socket, the lock cancelled, the strip losing focus or its output going away, and the watchdog.
+- Release always wins and does not wait for the client: Ctrl+Alt+Shift+Escape on the ThinFloe keyboard (seen by the strip's own keyboard focus, not a compositor binding; by key code when the keymap cannot be read), a missed keep-alive (3 s, 3 misses) or a failing socket, the lock cancelled, the strip losing focus or its output going away, and the watchdog.
 - Keys held at entry are not sent; keys held at exit get DKUP before COUT. Repeats are generated at the compositor's rate and delay. Ctrl+Alt+Fn falls back to the level-0 keysym, as Deskflow does.
+
+## Clients that send a certificate
+
+ThinFloe needs a client that presents a TLS client certificate. The first releases that do, from their release notes and source history (only Deskflow 1.26.0 is tested):
+
+- `Deskflow 1.20.0` (2025-03-03): "Peer Id Checking", deskflow/deskflow#7931, the fix for CVE-2021-42072 and CVE-2021-42073. Deskflow 1.17.0 to 1.19.0 are not checked.
+- `Barrier 2.4.0` (2021-11-01): "Implement client identity verification" (debauchee/barrier commit 229abab), the same CVE fix. It is Barrier's last release.
+- `Input Leap 3.0.0` (2024-10-04): the first Input Leap release; its history contains the Barrier commit.
 
 ## Verified against Deskflow 1.26.0
 
@@ -49,6 +58,7 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 
 ## Known limits
 
+- While Deskflow is on, the strip covers the outermost row or column of pixels at each edge where a connected device is attached. A click there reaches the strip and does nothing, and a full-screen ThinLinc or OxuLnk session never sees the pointer in that row: an auto-hide taskbar, a hot corner or a close button in the corner at that edge does not react. Other edges are not affected. The owner decides on hardware whether this stays (Task 14).
 - No clipboard yet. The spec's per-device "Clipboard on/off" switch comes with the clipboard (step 2).
 - Media keys act on ThinFloe while the pointer is on a device (step 3 adds patch 0007 and the microphone rule).
 - A client that sends no certificate is not supported.

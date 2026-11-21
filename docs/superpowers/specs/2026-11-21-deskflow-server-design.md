@@ -23,9 +23,9 @@ where it attaches, exactly like placing a monitor.
   clients on Linux, macOS and Windows that present a TLS client
   certificate: current Deskflow, and Input Leap and Barrier releases that
   send one. Clients that send no certificate are not supported (see
-  Identity and pairing). *Builder: find the first Deskflow, Input Leap and
-  Barrier releases that send a client certificate and name them in the user
-  notes; the interop test runs current Deskflow.*
+  Identity and pairing). The first Deskflow, Input Leap and Barrier
+  releases that send a client certificate are named in
+  `docs/notes/deskflow.md`; the interop test runs current Deskflow.
 - Pairing at the machine: a connecting device appears as *pending* with its
   name and fingerprint; the user attaches it to a side of a ThinFloe
   monitor, or rejects it. Nothing connects without that step.
@@ -137,7 +137,8 @@ MIT, so no code is copied from it or from Deskflow.
 ### Identity and pairing
 
 - First start: the daemon makes a self-signed certificate (ECDSA P-256,
-  CN `ThinFloe <hostname>`, 10-year validity) and stores key and certificate
+  CN `ThinFloe <hostname>`, valid 2000-01-01 to 2099-12-31 so that the
+  boot clock does not shape it) and stores key and certificate
   in `~/.config/thinfloe/deskflow/identity.pem` (mode 600). This path goes
   into `IDENTITY_EXCLUDES` of `thinfloe-upgrade`; a fresh stick gets its own.
   Guard: an assertion in `test_upgrade_image.py`; the fresh-install rule in
@@ -234,8 +235,11 @@ The Position control offers the edges that are free in the active profile.
   surface under the pointer), the daemon sums the outward component of the
   relative motion. The sum resets when the pointer leaves the strip or stops
   pushing outward for 300 ms. When it reaches the threshold, capture starts.
-  This keeps scrollbars, an auto-hide taskbar and hot corners of a
-  full-screen remote desktop at that edge usable.
+  A brush against the edge thus stays on ThinFloe. The strip still covers
+  the edge pixel: a click there, and the pointer in the last row of a
+  full-screen remote desktop at that edge (an auto-hide taskbar, a hot
+  corner), reach the strip. Step 1 keeps this; the owner decides on
+  hardware (notes, Known limits).
   - Setting `[deskflow] edge_resistance`: `off` (0 px), `low` (15),
     `medium` (40, default), `high` (100), in logical pixels of unaccelerated
     motion. One value for all devices, shown as a select in the Deskflow band.
