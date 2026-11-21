@@ -6,9 +6,6 @@
 //! Decoding takes input from a peer that may be hostile: it never panics
 //! and never allocates more than the frame it is given holds.
 
-// Task 5 (session) and Task 7 (run) use the items that are not used yet.
-#![allow(dead_code)]
-
 /// The largest message payload the framer accepts.
 pub const MAX_MSG: usize = 1 << 20;
 

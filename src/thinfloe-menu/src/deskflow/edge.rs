@@ -161,7 +161,9 @@ impl Resistance {
         }
     }
 
-    /// True when the outward sum has reached the threshold.
+    /// True when this motion pushes outward and the outward sum has reached
+    /// the threshold; motion inward, sideways or none never fires, so a
+    /// pointer that came back from the device stays home.
     pub fn push(&mut self, side: Side, dx: f64, dy: f64, now: Instant) -> bool {
         if let Some(last) = self.last_outward
             && now.saturating_duration_since(last) >= RESISTANCE_RESET
@@ -174,10 +176,11 @@ impl Resistance {
             Side::Below => dy,
             Side::Above => -dy,
         };
-        if outward > 0.0 {
-            self.sum += outward;
-            self.last_outward = Some(now);
+        if outward <= 0.0 {
+            return false;
         }
+        self.sum += outward;
+        self.last_outward = Some(now);
         self.sum >= self.threshold
     }
 
@@ -321,9 +324,34 @@ mod tests {
     }
 
     #[test]
-    fn resistance_off_fires_at_once() {
+    fn resistance_off_fires_at_once_on_outward_motion() {
+        let t = Instant::now();
         let mut r = Resistance::new(0.0);
-        assert!(r.push(Side::RightOf, 0.0, 0.0, Instant::now()));
-        assert!(r.push(Side::Above, 3.0, 0.0, Instant::now()));
+        assert!(r.push(Side::RightOf, 0.1, 0.0, t));
+        let mut r = Resistance::new(0.0);
+        assert!(r.push(Side::Above, 0.0, -1.0, t));
+    }
+
+    #[test]
+    fn inward_sideways_and_still_never_fire_at_any_level() {
+        // After a release by moving back the pointer is still on the strip:
+        // only a push outward may begin the next capture.
+        let t = Instant::now();
+        for th in [0.0, 15.0, 40.0, 100.0] {
+            for side in [Side::RightOf, Side::LeftOf, Side::Above, Side::Below] {
+                let mut r = Resistance::new(th);
+                let (ox, oy) = match side {
+                    Side::RightOf => (1.0, 0.0),
+                    Side::LeftOf => (-1.0, 0.0),
+                    Side::Below => (0.0, 1.0),
+                    Side::Above => (0.0, -1.0),
+                };
+                for _ in 0..50 {
+                    assert!(!r.push(side, 0.0, 0.0, t), "still, {th} {side:?}");
+                    assert!(!r.push(side, -ox * 200.0, -oy * 200.0, t), "inward, {th} {side:?}");
+                    assert!(!r.push(side, oy * 200.0, ox * 200.0, t), "sideways, {th} {side:?}");
+                }
+            }
+        }
     }
 }

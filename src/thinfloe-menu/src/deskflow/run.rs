@@ -577,7 +577,6 @@ impl Daemon {
             Mode::Idle => {
                 self.kb.update(ev);
                 match *ev {
-                    CapEvent::Enter { .. } => self.push_edge(0.0, 0.0, now),
                     CapEvent::Relative {
                         dx_unaccel, dy_unaccel, ..
                     } if dx_unaccel.is_finite() && dy_unaccel.is_finite() => {
@@ -771,10 +770,12 @@ impl Daemon {
             self.hover = None;
         }
         let specs: Vec<StripSpec> = strips.iter().map(|s| s.spec.clone()).collect();
-        if self.strips.iter().map(|s| &s.spec).ne(specs.iter())
-            && let Some(c) = self.capture.as_mut()
-        {
-            c.set_strips(&specs);
+        if let Some(c) = self.capture.as_mut() {
+            // A strip the compositor closed counts as missing.
+            let closed = c.take_closed(Instant::now());
+            if closed || self.strips.iter().map(|s| &s.spec).ne(specs.iter()) {
+                c.set_strips(&specs);
+            }
         }
         (self.strips, self.offline, self.busy) = (strips, offline, busy);
     }

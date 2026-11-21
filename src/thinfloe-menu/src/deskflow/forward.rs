@@ -14,6 +14,16 @@ use super::proto::Msg;
 /// Escape's keysym: with Ctrl, Alt and Shift down it releases.
 const XK_ESCAPE: u32 = 0xff1b;
 
+// The escape chord's keys, linux/input-event-codes.h: what decides it
+// when the keymap could not be read.
+const KEY_ESC: u32 = 1;
+const KEY_LEFTCTRL: u32 = 29;
+const KEY_RIGHTCTRL: u32 = 97;
+const KEY_LEFTALT: u32 = 56;
+const KEY_RIGHTALT: u32 = 100;
+const KEY_LEFTSHIFT: u32 = 42;
+const KEY_RIGHTSHIFT: u32 = 54;
+
 // Pointer buttons, linux/input-event-codes.h.
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -53,12 +63,25 @@ pub struct Keyboard {
     /// Repeats per second (0: none) and the delay before the first, in ms.
     rate: i32,
     delay: i32,
+    /// The evdev codes of the keys down, as the key events tell.
+    down: Vec<u32>,
 }
 
 impl Keyboard {
     /// Takes a keymap, modifier or repeat event; true when `ev` was one.
     pub fn update(&mut self, ev: &CapEvent) -> bool {
         match ev {
+            CapEvent::Key { code, pressed } => {
+                self.down.retain(|c| c != code);
+                if *pressed {
+                    self.down.push(*code);
+                }
+                return false;
+            }
+            CapEvent::Unlocked | CapEvent::KeyboardLeft => {
+                self.down.clear();
+                return false;
+            }
             CapEvent::Keymap { fd, size } => {
                 self.xkb = match Xkb::from_keymap_fd(fd, *size) {
                     Ok(x) => Some(x),
@@ -97,10 +120,15 @@ impl Keyboard {
         keymap::key_id(x.keysym(code), x.utf32(code)).or_else(|| keymap::key_id(x.keysym_level0(code), 0))
     }
 
-    /// Escape while Ctrl, Alt and Shift are down.
+    /// Escape while Ctrl, Alt and Shift are down. Without a keymap the
+    /// evdev codes decide, so the way back never depends on it.
     fn escape_chord(&self, code: u32) -> bool {
         let Some(x) = self.xkb.as_ref() else {
-            return false;
+            let down = |a: u32, b: u32| self.down.iter().any(|c| *c == a || *c == b);
+            return code == KEY_ESC
+                && down(KEY_LEFTCTRL, KEY_RIGHTCTRL)
+                && down(KEY_LEFTALT, KEY_RIGHTALT)
+                && down(KEY_LEFTSHIFT, KEY_RIGHTSHIFT);
         };
         let m = x.mods();
         m.ctrl && m.alt && m.shift && (x.keysym(code) == XK_ESCAPE || x.keysym_level0(code) == XK_ESCAPE)
@@ -229,12 +257,16 @@ fn key_down(a: &mut Active, kb: &Keyboard, code: u32, now: Instant) -> Vec<Actio
         return Vec::new();
     }
     a.held.push((id, button));
-    a.repeat = kb.repeat_of(code).map(|(every, delay)| Repeat {
-        id,
-        button,
-        next: now + delay,
-        every,
-    });
+    // A key that does not repeat (a modifier) leaves the repeat of the
+    // key held, as the X server does.
+    if let Some((every, delay)) = kb.repeat_of(code) {
+        a.repeat = Some(Repeat {
+            id,
+            button,
+            next: now + delay,
+            every,
+        });
+    }
     vec![Action::Send(Msg::KeyDown {
         id,
         mods: kb.mask(),
@@ -299,11 +331,7 @@ mod tests {
     use super::*;
     use crate::kanshi::Side;
 
-    const KEY_ESC: u32 = 1;
     const KEY_A: u32 = 30;
-    const KEY_LEFTCTRL: u32 = 29;
-    const KEY_LEFTSHIFT: u32 = 42;
-    const KEY_LEFTALT: u32 = 56;
     const KEY_F1: u32 = 59;
     // Real modifier bits of an XKB keymap.
     const SHIFT: u32 = 1;
@@ -317,6 +345,7 @@ mod tests {
             ),
             rate: 25,
             delay: 600,
+            down: Vec::new(),
         }
     }
 
@@ -600,6 +629,60 @@ mod tests {
         kb.update(&CapEvent::RepeatInfo { rate: 0, delay: 500 });
         on_cap_event(&mut a, &key(KEY_A, true), &mut kb, t);
         assert_eq!(a.deadline(), None);
+    }
+
+    #[test]
+    fn without_a_keymap_the_escape_chord_still_releases() {
+        for (c, al, sh) in [
+            (KEY_LEFTCTRL, KEY_LEFTALT, KEY_LEFTSHIFT),
+            (KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT),
+        ] {
+            let mut a = active();
+            let mut kb = Keyboard::default();
+            let evs = [key(c, true), key(al, true), key(sh, true), key(KEY_ESC, true)];
+            let (out, why) = run(&mut a, &mut kb, &evs);
+            assert_eq!(why, Some("escape chord"));
+            assert_eq!(out, [Msg::Cout]);
+        }
+        // Two of the three, or a modifier let go, is no chord.
+        let mut a = active();
+        let mut kb = Keyboard::default();
+        let evs = [
+            key(KEY_LEFTCTRL, true),
+            key(KEY_LEFTALT, true),
+            key(KEY_ESC, true),
+            key(KEY_LEFTSHIFT, true),
+            key(KEY_LEFTSHIFT, false),
+            key(KEY_ESC, true),
+        ];
+        assert_eq!(run(&mut a, &mut kb, &evs).1, None);
+    }
+
+    #[test]
+    fn a_modifier_pressed_does_not_stop_the_repeat_of_a_held_key() {
+        const KEY_RIGHT: u32 = 106;
+        let (mut a, mut kb) = (active(), us());
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        on_cap_event(&mut a, &key(KEY_RIGHT, true), &mut kb, t);
+        assert_eq!(a.deadline(), Some(t + ms(600)));
+        on_cap_event(&mut a, &key(KEY_LEFTSHIFT, true), &mut kb, t + ms(100));
+        on_cap_event(&mut a, &mods(SHIFT), &mut kb, t + ms(100));
+        assert_eq!(a.deadline(), Some(t + ms(600)));
+        match tick(&mut a, &kb, t + ms(600)).as_slice() {
+            [
+                Action::Send(Msg::KeyRepeat {
+                    mods, button, count: 1, ..
+                }),
+            ] => {
+                assert_eq!(*button, keymap::button(KEY_RIGHT));
+                assert_eq!(*mods, 0x0001);
+            }
+            o => panic!("{o:?}"),
+        }
+        // Another key that repeats takes the repeat over.
+        on_cap_event(&mut a, &key(KEY_A, true), &mut kb, t + ms(700));
+        assert_eq!(a.deadline(), Some(t + ms(1300)));
     }
 
     #[test]

@@ -59,9 +59,6 @@ fn send(m: &Msg, minor: u16) -> Out {
     Out::Send(proto::frame(&proto::encode(m, minor)))
 }
 
-/// The client's name as shown: at most 64 raw bytes, lossily decoded, every
-/// control character replaced by `?`, cut again at 64 bytes on a character
-/// boundary (the replacement character takes three bytes).
 /// Unicode format characters (category Cf) and the line and paragraph
 /// separators: invisible, and some reorder the text around them.
 fn is_format_char(c: char) -> bool {
@@ -73,6 +70,9 @@ fn is_format_char(c: char) -> bool {
         | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
+/// The client's name as shown: at most 64 raw bytes, lossily decoded, every
+/// control or format character replaced by `?`, cut again at 64 bytes on a
+/// character boundary (the replacement character takes three bytes).
 fn clean_name(raw: &[u8]) -> String {
     let raw = &raw[..raw.len().min(NAME_MAX)];
     let mut s: String = String::from_utf8_lossy(raw)
@@ -158,7 +158,9 @@ impl Session {
             return self.close("bad message");
         };
         match m {
-            Msg::Calv => vec![send(&Msg::Calv, self.minor)],
+            // The client echoes the server's keep-alive; answering its own
+            // would start an endless exchange. It only shows the client lives.
+            Msg::Calv => Vec::new(),
             Msg::Dinf { w, h, .. } => {
                 let mut out = vec![send(&Msg::Ciak, self.minor)];
                 if self.state == State::Trusted {
@@ -497,11 +499,38 @@ mod tests {
     }
 
     #[test]
-    fn calv_is_answered() {
+    fn a_client_calv_is_not_echoed() {
+        // The stock client echoes every CALV it gets; an answer from the
+        // server would start an endless exchange.
         let t = Instant::now();
         let mut se = trusted(8, t);
-        let out = se.on_payload(&proto::encode(&Msg::Calv, 8), t);
-        assert_eq!(sent(&out), [Msg::Calv]);
+        assert!(se.on_payload(&proto::encode(&Msg::Calv, 8), t + s(1)).is_empty());
+        let mut active = trusted(8, t);
+        active.on_payload(
+            &proto::encode(
+                &Msg::Dinf {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                    warp: 0,
+                    mx: 0,
+                    my: 0,
+                },
+                8,
+            ),
+            t,
+        );
+        assert!(active.on_payload(&proto::encode(&Msg::Calv, 8), t + s(1)).is_empty());
+    }
+
+    #[test]
+    fn a_client_calv_postpones_the_dead_check() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        se.on_payload(&proto::encode(&Msg::Calv, 8), t + s(8));
+        assert!(closes(&se.tick(t + s(16))).is_none());
+        assert!(closes(&se.tick(t + s(17))).is_some());
     }
 
     #[test]

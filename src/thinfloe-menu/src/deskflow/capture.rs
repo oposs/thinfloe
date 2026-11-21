@@ -233,6 +233,15 @@ struct Wheel {
 /// Continuous scrolling per wheel step: libinput's 15 px.
 const PX_PER_STEP: f64 = 15.0;
 
+/// A strip the compositor closed is made again this long after, so a
+/// compositor that keeps closing it does not keep the loop busy.
+const RECREATE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A strip closed at `closed_at` counts as missing by `now`.
+fn recreate_due(closed_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    closed_at.is_some_and(|t| now.saturating_duration_since(t) >= RECREATE_AFTER)
+}
+
 impl Wheel {
     /// The frame's motion in 1/120 steps.
     fn v120(&self) -> (i32, i32) {
@@ -271,6 +280,8 @@ struct State {
     wheel: Wheel,
     events: Vec<CapEvent>,
     outputs_changed: bool,
+    /// When the compositor last closed a strip, until it is made again.
+    closed_at: Option<std::time::Instant>,
 }
 
 pub struct Capture {
@@ -311,6 +322,7 @@ impl Capture {
             wheel: Wheel::default(),
             events: Vec::new(),
             outputs_changed: false,
+            closed_at: None,
         };
         for g in globals.contents().clone_list() {
             if g.interface == "wl_output" {
@@ -392,6 +404,17 @@ impl Capture {
                 self.state.strips.push(strip);
             }
         }
+    }
+
+    /// True once, when a strip the compositor closed is due to be made
+    /// again: the caller passes its strips to `set_strips` then, although
+    /// they did not change.
+    pub fn take_closed(&mut self, now: std::time::Instant) -> bool {
+        if recreate_due(self.state.closed_at, now) {
+            self.state.closed_at = None;
+            return true;
+        }
+        false
     }
 
     /// Take pointer and keyboard on `strip`: the lock first, then the
@@ -683,9 +706,12 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, u32> for State {
                     eprintln!("thinfloe-menu --deskflow: strip {id}: {e}");
                 }
             }
+            // Gone without being asked: `set_strips` makes it again once
+            // `take_closed` says so.
             zwlr_layer_surface_v1::Event::Closed => {
                 let s = state.strips.remove(pos);
                 state.remove_strip(s);
+                state.closed_at.get_or_insert_with(std::time::Instant::now);
             }
             _ => {}
         }
@@ -934,6 +960,16 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn a_closed_strip_counts_as_missing_a_second_later() {
+        let t = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        assert!(!recreate_due(None, t + ms(5000)), "nothing closed");
+        assert!(!recreate_due(Some(t), t + ms(999)));
+        assert!(recreate_due(Some(t), t + ms(1000)));
+        assert!(recreate_due(Some(t), t + ms(60_000)));
     }
 
     #[test]
