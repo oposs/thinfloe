@@ -62,11 +62,22 @@ fn send(m: &Msg, minor: u16) -> Out {
 /// The client's name as shown: at most 64 raw bytes, lossily decoded, every
 /// control character replaced by `?`, cut again at 64 bytes on a character
 /// boundary (the replacement character takes three bytes).
+/// Unicode format characters (category Cf) and the line and paragraph
+/// separators: invisible, and some reorder the text around them.
+fn is_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}'
+        | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
 fn clean_name(raw: &[u8]) -> String {
     let raw = &raw[..raw.len().min(NAME_MAX)];
     let mut s: String = String::from_utf8_lossy(raw)
         .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| if c.is_control() || is_format_char(c) { '?' } else { c })
         .collect();
     let mut end = s.len().min(NAME_MAX);
     while !s.is_char_boundary(end) {
@@ -180,7 +191,12 @@ impl Session {
                     return vec![send(&Msg::Calv, self.minor)];
                 }
             }
-            State::AwaitVerdict | State::Closed => {}
+            State::AwaitVerdict => {
+                if now.saturating_duration_since(self.created) >= HELLO_DEADLINE {
+                    return self.close("no verdict");
+                }
+            }
+            State::Closed => {}
         }
         Vec::new()
     }
@@ -371,6 +387,11 @@ mod tests {
     fn name_is_made_safe() {
         assert_eq!(clean_name(b"a\tb\r\nc\x7fd\x1b[0m"), "a?b??c?d?[0m");
         assert_eq!(clean_name("a\u{85}b".as_bytes()), "a?b");
+        for c in [
+            '\u{202e}', '\u{200b}', '\u{200f}', '\u{2066}', '\u{2069}', '\u{feff}', '\u{2028}', '\u{2029}',
+        ] {
+            assert_eq!(clean_name(format!("a{c}b").as_bytes()), "a?b", "{c:?}");
+        }
         // A cut in the middle of a character, and invalid bytes grown to
         // three-byte replacement characters, stay within 64 bytes.
         let mut raw = vec![b'a'; 63];
@@ -438,6 +459,18 @@ mod tests {
         let (mut se, _) = Session::new(t);
         assert!(se.tick(t + s(9)).is_empty());
         assert_eq!(se.tick(t + s(10)), [Out::Close("no hello")]);
+        assert!(se.tick(t + s(11)).is_empty());
+        assert!(se.on_payload(&hello_back(8, b"x"), t + s(11)).is_empty());
+    }
+
+    #[test]
+    fn verdict_deadline_10s() {
+        let t = Instant::now();
+        let (mut se, _) = Session::new(t);
+        se.on_payload(&hello_back(8, b"laptop"), t + s(1));
+        assert!(se.tick(t + s(9)).is_empty());
+        assert_eq!(se.tick(t + s(10)), [Out::Close("no verdict")]);
+        assert!(se.set_verdict(Verdict::Trusted(0)).is_empty());
     }
 
     #[test]
