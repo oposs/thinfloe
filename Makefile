@@ -656,6 +656,7 @@ test-integration: rootfs
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-addon-deps.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) test/integration/test-network-netplan.sh
 	@$(TEST_ENV) test/integration/test-make-targets.sh
+	@$(TEST_ENV) test/integration/test-ci-check-prebuilt.sh
 
 # Runtime session tests. Needs network (installs python3-xlib into a
 # test-only image) and runs a compositor, so it is deliberately not part of
