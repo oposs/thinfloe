@@ -223,12 +223,20 @@ SLIM_FILES := $(filter-out %~ %/__pycache__,$(wildcard containers/ubuntu/slim/*)
 # change an mtime either, and is caught the same way.
 image_id = $(CONTAINER_RUNTIME) image inspect --format '{{.Id}}' $(1)
 drop_stale_stamp = $(shell id=$$($(call image_id,$(1)) 2>/dev/null); [ -n "$$id" ] && [ "$$id" = "$$(sed -n 1p $(2) 2>/dev/null)" ] || rm -f $(2))
+# PREBUILT=1 is for the CI smoke jobs (guard: test/integration/test-make-targets.sh):
+# they download artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh} and
+# artifacts/images/thinfloe-usb.img.zst{,.sha256} and have no container image
+# or stamp. The container stamps and the build rules for those files are
+# left out; the raw image comes from the .zst, and a missing file is a
+# "No rule to make target" error.
+ifneq ($(PREBUILT),1)
 UBUNTU_INPUTS := $(sort containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES))
 UBUNTU_INPUTS_HASH := $(shell { stat -c '%a %n' $(UBUNTU_INPUTS); sha256sum $(UBUNTU_INPUTS); } 2>&1 | sha256sum | cut -d' ' -f1)
 $(shell [ "$$(sed -n 2p .ubuntu-container 2>/dev/null)" = "$(UBUNTU_INPUTS_HASH)" ] || rm -f .ubuntu-container)
 $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
+endif
 
 .ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(SLIM_FILES) containers/ubuntu/slim $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
@@ -258,6 +266,7 @@ IPXE_KEY = cat .ipxe-container
 USB_KEY_FILE := $(IMAGE_DIR)/.built-from
 USB_KEY = cat $(ROOTFS_KEY_FILE) .image-builder-container configs/syslinux.cfg scripts/make-bootable-image.sh scripts/lib/common.sh; echo '$(EFI_PARTITION_SIZE) $(PROJECT_NAME)'
 
+ifneq ($(PREBUILT),1)
 $(KERNEL) $(INITRD) $(SQUASHFS) &: .ubuntu-container $(VERSION_KIND_STAMP) scripts/export-rootfs.sh scripts/lib/common.sh $(call stale_key,$(ROOTFS_KEY),$(ROOTFS_KEY_FILE)) | $(ROOTFS_DIR)
 	@echo "Exporting rootfs artifacts..."
 	rm -f $(ROOTFS_KEY_FILE)
@@ -272,6 +281,7 @@ $(KERNEL) $(INITRD) $(SQUASHFS) &: .ubuntu-container $(VERSION_KIND_STAMP) scrip
 		$(UBUNTU_IMAGE) \
 		/scripts/export-rootfs.sh
 	$(call artifact_key,$(ROOTFS_KEY)) >$(ROOTFS_KEY_FILE)
+endif
 
 rootfs: $(KERNEL) $(INITRD) $(SQUASHFS)
 
@@ -306,6 +316,10 @@ ipxe: $(IPXE_PXE) $(IPXE_KPXE) $(IPXE_EFI)
 # The files the image is built from, not the phony `rootfs`: through that,
 # every target needing the image (qemu-smoke, qemu-test) built it again with
 # new random GPT GUIDs, and the .zst from `make image` no longer matched it.
+ifeq ($(PREBUILT),1)
+$(USB_IMAGE): $(USB_IMAGE_COMPRESSED)
+	zstd -d -f $< -o $@
+else
 $(USB_IMAGE): $(KERNEL) $(INITRD) $(SQUASHFS) configs/syslinux.cfg \
 		scripts/make-bootable-image.sh scripts/lib/common.sh \
 		.image-builder-container $(call stale_key,$(USB_KEY),$(USB_KEY_FILE)) | $(IMAGE_DIR)
@@ -335,6 +349,7 @@ $(USB_CHECKSUM): $(USB_IMAGE_COMPRESSED)
 # in this repo.
 	@cd $(IMAGE_DIR) && sha256sum $(notdir $(USB_IMAGE_COMPRESSED)) > $(notdir $(USB_CHECKSUM))
 	@echo "✓ Checksum created"
+endif
 
 image: $(USB_IMAGE_COMPRESSED) $(USB_CHECKSUM)
 	@echo ""
