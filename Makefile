@@ -10,6 +10,19 @@ BUILD_ID := $(shell date -u +%Y%m%d-%H%M%S)
 
 CONTAINER_RUNTIME ?= podman
 
+# PREBUILT=1 (see below) is for the smoke targets only; stop before any
+# other check runs.
+ifeq ($(PREBUILT),1)
+PREBUILT_GOALS := qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot
+ifneq ($(strip $(MAKECMDGOALS)),)
+ifneq ($(filter-out $(PREBUILT_GOALS),$(MAKECMDGOALS)),)
+$(error PREBUILT=1 is for the smoke targets only: $(PREBUILT_GOALS))
+endif
+else
+$(error PREBUILT=1 needs a goal: $(PREBUILT_GOALS))
+endif
+endif
+
 # Parallelism cap. This machine is shared - never use more than this many
 # cores for compression, container builds or QEMU.
 BUILD_JOBS ?= 4
@@ -133,6 +146,7 @@ help:
 	@echo "  release-assets    - Collect the GitHub release assets (TF_VERSION=X.Y.Z)"
 	@echo "  qemu-test         - Test boot image in QEMU (EFI)"
 	@echo "  qemu-smoke        - Headless USB-style boot smoke test"
+	@echo "                      (all qemu-smoke* targets: PREBUILT=1 uses the files in artifacts/ as they are)"
 	@echo "  qemu-smoke-netboot - Headless HTTP netboot smoke test"
 	@echo "  qemu-smoke-timezone - Headless boot with a DHCP time zone (option 101)"
 	@echo "  qemu-smoke-timezone-netboot - Same, netbooted (the initramfs lease)"

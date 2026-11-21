@@ -47,6 +47,14 @@ echo 4.2.0 >"$TREE/RELEASE"
 dry() {
     env -u MAKEFLAGS -u MAKELEVEL make -n -C "$TREE" CONTAINER_RUNTIME="$RUNTIME" \
         TF_VERSION=4.2.0-dev+abc "$@" 2>&1
+    DRY_RC=$?
+    return "$DRY_RC"
+}
+# dry runs in a command substitution (a subshell), so the status travels in
+# the output: dry_rc prints "rc=N" as the last line.
+dry_rc() {
+    dry "$@"
+    echo "rc=$DRY_RC"
 }
 
 out=$(dry test-integration)
@@ -71,8 +79,9 @@ echo x | zstd -q -o "$TREE/artifacts/images/thinfloe-usb.img.zst"
 : >"$TREE/artifacts/images/thinfloe-usb.img.zst.sha256"
 for goal in qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot \
             qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot; do
-    out=$(dry "$goal" PREBUILT=1)
-    if ! grep -qE 'podman build|export-rootfs\.sh|make-bootable-image\.sh' <<<"$out"; then
+    out=$(dry_rc "$goal" PREBUILT=1)
+    if [ "$(tail -n1 <<<"$out")" = "rc=0" ] \
+        && ! grep -qE 'podman build|export-rootfs\.sh|make-bootable-image\.sh' <<<"$out"; then
         ok "PREBUILT $goal builds nothing"
     else
         bad "PREBUILT $goal builds nothing"
@@ -102,12 +111,36 @@ else
     bad "without PREBUILT the build rules stand"
 fi
 
-out=$(dry test-menu)
-if grep -q 'cargo fmt --check' <<<"$out" && grep -q 'cargo clippy' <<<"$out" && grep -q 'cargo test' <<<"$out" \
+out=$(dry_rc test-menu)
+if [ "$(tail -n1 <<<"$out")" = "rc=0" ] && grep -q 'cargo fmt --check' <<<"$out" && grep -q 'cargo clippy' <<<"$out" && grep -q 'cargo test' <<<"$out" \
     && ! grep -qE 'podman|export-rootfs\.sh|unittest' <<<"$out"; then
     ok "test-menu needs no image"
 else
     bad "test-menu needs no image"
+fi
+
+out=$(dry_rc release-assets PREBUILT=1)
+if [ "$(tail -n1 <<<"$out")" != "rc=0" ] && grep -q 'PREBUILT=1 is for the smoke targets only' <<<"$out"; then
+    ok "PREBUILT with another goal stops"
+else
+    bad "PREBUILT with another goal stops"
+fi
+
+# The smoke targets the Makefile knows and the ones CI's smoke matrix runs
+# must be the same set.
+make_set=$(sed -n 's/^\.PHONY: //p' "$REPO/Makefile" | tr ' ' '\n' | grep '^qemu-smoke' | sort)
+ci_set=$(python3 -I -c '
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+t = set()
+for e in d["jobs"]["smoke"]["strategy"]["matrix"]["include"]:
+    t.update(e["targets"].split())
+print("\n".join(sorted(t)))' "$REPO/.github/workflows/ci-local.yml")
+if [ -n "$make_set" ] && [ "$make_set" = "$ci_set" ]; then
+    ok "the smoke targets of the Makefile and of CI's matrix are the same"
+else
+    bad "the smoke targets of the Makefile and of CI's matrix are the same"
+    diff <(echo "$make_set") <(echo "$ci_set") | sed 's/^/     /'
 fi
 
 exit $fail
