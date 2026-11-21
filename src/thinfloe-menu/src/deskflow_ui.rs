@@ -88,8 +88,8 @@ pub fn band(
                 }
                 ui.label(RichText::new(LISTEN_TEXT).color(t.palette().foreground));
             });
-            if let Some(why) = &tab.stopped {
-                warn(ui, t, &format!("Deskflow stopped: {why}"));
+            if let Some(line) = deskflowtab::stopped_line(tab) {
+                warn(ui, t, &line);
             }
             if let Some(line) = deskflowtab::self_line(tab, ipv4) {
                 ui.label(RichText::new(line).color(t.palette().foreground));
@@ -115,19 +115,7 @@ pub fn band(
                     event = Some(e);
                 }
             }
-            // The selected device, and those the arrangement cannot draw
-            // (their monitor is off or missing), so they can be moved or
-            // forgotten.
-            let drawn = |d: &DeviceCfg| {
-                mon.layout()
-                    .is_some_and(|l| l.outputs.iter().any(|o| o.enabled && o.criteria == d.output))
-            };
-            for d in tab
-                .cfg
-                .devices
-                .iter()
-                .filter(|d| tab.selected.as_deref() == Some(d.name.as_str()) || !drawn(d))
-            {
+            for d in deskflowtab::band_devices(tab, mon.layout(), mon.heads()) {
                 if let Some(e) = device_rows(ui, t, tab, mon, d) {
                     event = Some(e);
                 }

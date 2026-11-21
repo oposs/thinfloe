@@ -167,6 +167,23 @@ pub fn arranged(mon: &MonTab, layout: &Profile, devices: &[DevPlace], area: Rect
             Side::Above => (x, y - dh),
             Side::Below => (x, y + h),
         };
+        // An inactive device whose box lies on a monitor (another monitor
+        // took its edge) is not drawn: the monitor would cover it and take
+        // its clicks. The band lists it instead.
+        let overlaps = |(ax, ay, aw, ah): (i32, i32, i32, i32)| {
+            let (ax, ay, aw, ah) = (i64::from(ax), i64::from(ay), i64::from(aw), i64::from(ah));
+            rects
+                .iter()
+                .zip(&placed)
+                .filter(|(_, p)| p.is_some())
+                .any(|(&(bx, by, bw, bh), _)| {
+                    let (bx, by, bw, bh) = (i64::from(bx), i64::from(by), i64::from(bw), i64::from(bh));
+                    ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+                })
+        };
+        if d.inactive && overlaps((at.0, at.1, dw, dh)) {
+            continue;
+        }
         dev_rects.push((d, (at.0, at.1, dw, dh)));
     }
     // A device left of or above the monitors moves them right or down.
@@ -664,6 +681,27 @@ mod tests {
         let (m, d) = arranged(&mon, &layout, &[dev(Side::LeftOf, "DP-1")], area);
         assert_eq!(d[0].rect.min, egui::pos2(0.0, 0.0));
         assert_eq!(m[0].rect.min, egui::pos2(960.0, 0.0));
+        // A device whose edge another monitor took is not drawn over it.
+        let mut docked = layout.clone();
+        docked.outputs.push(OutputSet {
+            criteria: "DP-2".into(),
+            enabled: true,
+            mode: mode(1920, 1080, 60_000),
+            rotation: Rotation::Normal,
+            place: Place::Next {
+                to: "DP-1".into(),
+                side: Side::RightOf,
+            },
+        });
+        let mut busy = dev(Side::RightOf, "DP-1");
+        busy.inactive = true;
+        let (m, d) = arranged(&mon, &docked, &[busy.clone()], area);
+        assert!(d.is_empty(), "the laptop box would lie inside DP-2");
+        assert_eq!(m, boxes(&mon, &docked, area));
+        // An inactive device that overlaps nothing is still drawn.
+        let mut free = dev(Side::LeftOf, "DP-1");
+        free.inactive = true;
+        assert_eq!(arranged(&mon, &docked, &[free], area).1.len(), 1);
         // A device at a missing monitor is not drawn, and changes nothing.
         let (m, d) = arranged(&mon, &layout, &[dev(Side::LeftOf, "HDMI-1")], area);
         assert!(d.is_empty());

@@ -282,6 +282,32 @@ pub fn inactive(profile: &Profile, heads: &[Head], devices: &[DeviceCfg], dev: &
         .any(|(c, s)| *c == dev.output && *s == dev.side)
 }
 
+/// The attached devices the band lists with their rows: the selected
+/// one, and those the arrangement does not show at their edge (their
+/// monitor off or missing, or the edge not free), so they can be moved
+/// or forgotten.
+pub fn band_devices<'a>(tab: &'a DeskflowTab, profile: Option<&Profile>, heads: &[Head]) -> Vec<&'a DeviceCfg> {
+    let shown = |d: &DeviceCfg| {
+        profile.is_some_and(|p| {
+            p.outputs.iter().any(|o| o.enabled && o.criteria == d.output) && !inactive(p, heads, &tab.cfg.devices, d)
+        })
+    };
+    tab.cfg
+        .devices
+        .iter()
+        .filter(|d| tab.selected.as_deref() == Some(d.name.as_str()) || !shown(d))
+        .collect()
+}
+
+/// "Deskflow stopped: <reason>" while the daemon does not run and its last
+/// run failed.
+pub fn stopped_line(tab: &DeskflowTab) -> Option<String> {
+    if tab.running {
+        return None;
+    }
+    tab.stopped.as_ref().map(|why| format!("Deskflow stopped: {why}"))
+}
+
 /// "Right of DP-1".
 pub fn edge_label(side: Side, monitor: &str) -> String {
     let word = match side {
@@ -539,6 +565,51 @@ mod tests {
         let mut off = two();
         off.outputs[1].enabled = false;
         assert_eq!(free_edges(&off, &[], &[], None).len(), 4);
+    }
+
+    #[test]
+    fn the_band_lists_a_device_whose_edge_another_monitor_took() {
+        let mut tab = DeskflowTab::default();
+        tab.cfg.devices = vec![
+            device("laptop", FP_A, "DP-1", Side::RightOf),
+            device("mac", FP_B, "DP-2", Side::RightOf),
+        ];
+        let names = |tab: &DeskflowTab, p: Option<&Profile>| {
+            band_devices(tab, p, &[])
+                .iter()
+                .map(|d| d.name.clone())
+                .collect::<Vec<_>>()
+        };
+        // DP-2 docked right of DP-1 takes the laptop's edge.
+        assert_eq!(names(&tab, Some(&two())), vec!["laptop".to_string()]);
+        // The selected device is listed too.
+        tab.selected = Some("mac".into());
+        assert_eq!(names(&tab, Some(&two())), vec!["laptop".to_string(), "mac".to_string()]);
+        tab.selected = None;
+        // DP-1 alone: the laptop's edge is free, DP-2 is missing.
+        let mut one = two();
+        one.outputs.truncate(1);
+        assert_eq!(names(&tab, Some(&one)), vec!["mac".to_string()]);
+        // No arrangement: every device is listed.
+        assert_eq!(names(&tab, None).len(), 2);
+    }
+
+    #[test]
+    fn the_stopped_line_shows_only_while_the_daemon_does_not_run() {
+        let mut tab = DeskflowTab {
+            stopped: Some("port 24800 is in use".into()),
+            running: false,
+            ..DeskflowTab::default()
+        };
+        assert_eq!(
+            stopped_line(&tab).as_deref(),
+            Some("Deskflow stopped: port 24800 is in use")
+        );
+        tab.running = true;
+        assert_eq!(stopped_line(&tab), None);
+        tab.running = false;
+        tab.stopped = None;
+        assert_eq!(stopped_line(&tab), None);
     }
 
     #[test]
