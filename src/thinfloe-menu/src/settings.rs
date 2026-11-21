@@ -34,6 +34,9 @@ pub enum SettingsEvent {
     Network(NetEvent),
     /// Something on the monitor part of the Screen tab.
     Monitors(crate::monitors::MonEvent),
+    /// Something on the Deskflow band of the Screen tab, or a device in
+    /// the monitor arrangement.
+    Deskflow(crate::deskflowtab::DeskflowEvent),
     /// Something on the Status tab.
     Status(crate::statustab::StatusEvent),
     /// *Dismiss* on the migration report.

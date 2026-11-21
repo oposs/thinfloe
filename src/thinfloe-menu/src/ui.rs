@@ -1125,12 +1125,35 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
                     idle_band(ui, menu)
                 })
                 .inner;
+            let devices = crate::deskflow_ui::places(&menu.deskflow, &menu.monitors);
             let monitors = ui
                 .scope(|ui| {
                     ui.spacing_mut().item_spacing.y = between;
-                    crate::monitors_ui::monitors_band(ui, &menu.monitors, now, band_w)
+                    crate::monitors_ui::monitors_band(
+                        ui,
+                        &menu.monitors,
+                        &devices,
+                        menu.deskflow.selected.as_deref(),
+                        now,
+                        band_w,
+                    )
                 })
-                .inner;
+                .inner
+                .map(|e| match e {
+                    crate::monitors_ui::BandEvent::Mon(e) => SettingsEvent::Monitors(e),
+                    crate::monitors_ui::BandEvent::Device(name) => {
+                        SettingsEvent::Deskflow(crate::deskflowtab::DeskflowEvent::Select(name))
+                    }
+                });
+            let ipv4 = menu.netstat.as_ref().and_then(|s| s.info.ipv4).map(|(ip, _)| ip);
+            let deskflow = ui
+                .scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = between;
+                    let t = Theme::current(ui.ctx());
+                    crate::deskflow_ui::band(ui, &t, &menu.deskflow, &menu.monitors, ipv4, band_w)
+                })
+                .inner
+                .map(SettingsEvent::Deskflow);
             // The facts close the tab, as on the Network tab: on top they
             // pushed the monitors' Position row out of a 1080 screen.
             ui.scope(|ui| {
@@ -1139,7 +1162,7 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
             });
             // The footer's gap belongs to the page.
             ui.add_space(GAP);
-            idle.or(monitors.map(SettingsEvent::Monitors))
+            idle.or(monitors).or(deskflow)
         },
     );
     edit.or(apply.map(SettingsEvent::Monitors))
