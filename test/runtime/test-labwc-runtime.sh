@@ -1412,7 +1412,7 @@ osd | bright)
         pa set-source-mute mic_a 1
         px mark --within 2 m1=1265,49@c79a4a m2=2545,49@c79a4a
         # The mark follows the microphone, on every output, also when one goes.
-        wlr-randr --output HEADLESS-1 --off
+        wlr-randr --output HEADLESS-2 --off
         sleep 1
         kill -0 "$osd" 2>/dev/null && echo osd_alive=yes || echo osd_alive=no
         px unplug m1=1265,49
