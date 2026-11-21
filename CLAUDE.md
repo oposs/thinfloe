@@ -22,7 +22,9 @@ make test-runtime        # labwc and the menu headless
 make qemu-smoke          # boot the USB image in QEMU (also: -addons, -write, -upgrade,
                          #   -netboot, -two-sticks, -grow, -timezone, -timezone-netboot)
 make qemu-smoke PREBUILT=1  # any smoke target on artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh}
-                         #   and artifacts/images/thinfloe-usb.img.zst(.sha256); no container, no export
+                         #   and artifacts/images/thinfloe-usb.img.zst(.sha256); no container, no export.
+                         #   The files are used as they are: no stale or source-key check (on the dev
+                         #   host artifacts is shared between checkouts). Other goals are refused.
 make qemu-test           # QEMU with boot, target and empty drives for upgrade tests
 dd if=artifacts/images/thinfloe-usb.img of=/dev/sdX bs=1M status=progress conv=fsync
 make release-assets TF_VERSION=X.Y.Z  # the six release assets to artifacts/release/
@@ -81,8 +83,8 @@ Not standing constraints, but each has broken something or is guarded by a test.
 ### Workflow
 
 - A round of several feature branches goes through one `round/<date>` branch and one PR to `main`: the branches are rebased onto it in turn, the full gates run once on it. A branch that is ready alone with no round open is its own PR.
-- Gates: the full set (`make test-unit`, `make test`, `make test-runtime` for session or menu changes, the smoke tests the change touches) before a branch's first push. After a rebase with no conflict outside `CHANGES.md` only `make test-menu`; after a code conflict the full set again.
-- Review per branch, before it joins the round: one whole-branch review, one fix wave, one scoped re-review of the fixes. Later findings go to the follow-up list in the PR body (one heading per branch) unless they are a real bug: wrong behaviour, data loss, security, a broken constraint.
+- Gates: the full set (`make test-unit`, `make test`, `make test-runtime` for session or menu changes, the smoke tests the change touches) before a branch's first push. In a round, a feature branch runs them before it joins the round branch, and the round branch runs the full set once before the round PR's push. After a rebase with no conflict outside `CHANGES.md` only `make test-menu`; after a code conflict the full set again.
+- Review per branch, before it joins the round: one whole-branch review, one fix wave, one scoped re-review of the fixes. Later findings go to the follow-up list in the PR body (one heading per branch) unless they are a real bug: wrong behaviour, data loss, security, a broken constraint. The round branch gets no second whole review; only the conflict resolutions made during the rebases are checked. After the merge the controller offers the follow-up lists to the owner.
 
 ### Build
 

@@ -113,7 +113,7 @@ jobs:
           path: artifacts
 
       - name: make ${{ matrix.targets }}
-        run: make PREBUILT=1 MEMCAP= ${{ matrix.targets }}
+        run: make -k PREBUILT=1 MEMCAP= ${{ matrix.targets }}
 
       - name: Check that nothing was rebuilt
         if: success() || failure()
