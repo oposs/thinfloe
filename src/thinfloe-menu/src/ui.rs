@@ -4080,7 +4080,7 @@ mod tests {
                 ..Default::default()
             }],
             dns_in_use: vec!["192.168.1.1".into()],
-            time: Default::default(),
+            ..Default::default()
         };
         menu.network.status_done(Ok(vec![wifi]), details);
         menu.graphics = Some(crate::graphics::Info {
