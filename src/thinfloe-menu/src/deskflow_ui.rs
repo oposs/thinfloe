@@ -29,6 +29,7 @@ const BLOCK_GAP: f32 = 8.0;
 /// Bytes of the colon hex on one line: two lines for 32 bytes.
 const HEX_BYTES_PER_LINE: usize = 16;
 
+const CLIPBOARD_TEXT: &str = "Share the clipboard";
 const LISTEN_TEXT: &str = "Let other computers use this keyboard and mouse (Deskflow)";
 const CHECK_NOTE: &str = "Check this fingerprint on the other computer before you trust it there.";
 const NOT_FREE: &str = "This edge is not free in the current arrangement.";
@@ -203,6 +204,16 @@ fn device_rows(ui: &mut Ui, t: &Theme, tab: &DeskflowTab, mon: &MonTab, d: &Devi
     if inactive {
         warn(ui, t, NOT_FREE);
     }
+    let mut share = d.clipboard;
+    ui.horizontal(|ui| {
+        if ui.add(Switch::new(&mut share)).changed() {
+            event = Some(DeskflowEvent::Clipboard {
+                name: d.name.clone(),
+                on: share,
+            });
+        }
+        ui.label(RichText::new(CLIPBOARD_TEXT).color(t.palette().foreground));
+    });
     if ui
         .add(Button::new("Forget").variant(ButtonVariant::Secondary))
         .clicked()

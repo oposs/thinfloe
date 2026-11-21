@@ -86,6 +86,11 @@ pub enum DeskflowEvent {
     Forget {
         name: String,
     },
+    /// The clipboard switch of an attached device.
+    Clipboard {
+        name: String,
+        on: bool,
+    },
     CancelAttach,
     /// A device box clicked in the arrangement.
     Select(String),
@@ -162,6 +167,14 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
                 tab.attaching = None;
             }
             Some(DeskflowRequest::Send(Cmd::Reject { name, fingerprint: fp }))
+        }
+        DeskflowEvent::Clipboard { name, on } => {
+            let d = tab.cfg.devices.iter_mut().find(|d| d.name == name)?;
+            if d.clipboard == on {
+                return None;
+            }
+            d.clipboard = on;
+            save(tab)
         }
         DeskflowEvent::Forget { name } => {
             let before = tab.cfg.devices.len();
@@ -536,6 +549,32 @@ mod tests {
         );
         assert_eq!(tab.attaching, None, "a rejected device's Position control closes");
         assert!(tab.cfg.devices.is_empty());
+    }
+
+    #[test]
+    fn clipboard_switch_writes_device() {
+        let mut tab = DeskflowTab::default();
+        tab.cfg.devices = vec![
+            device("laptop", FP_A, "DP-1", Side::LeftOf),
+            device("mac", FP_B, "DP-2", Side::RightOf),
+        ];
+        let r = apply(
+            &mut tab,
+            DeskflowEvent::Clipboard {
+                name: "laptop".into(),
+                on: false,
+            },
+        );
+        let Some(DeskflowRequest::Save(cfg)) = r else {
+            panic!("no save: {r:?}");
+        };
+        assert!(!cfg.devices[0].clipboard);
+        assert!(cfg.devices[1].clipboard, "only the named device changes");
+        let again = DeskflowEvent::Clipboard {
+            name: "laptop".into(),
+            on: false,
+        };
+        assert_eq!(apply(&mut tab, again), None);
     }
 
     #[test]
