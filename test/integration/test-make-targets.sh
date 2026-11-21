@@ -50,14 +50,14 @@ dry() {
 }
 
 out=$(dry test-integration)
-if grep -q 'test-firmware.sh' <<<"$out" && ! grep -qE 'unittest|cargo test' <<<"$out"; then
+if grep -q 'test-firmware.sh' <<<"$out" && ! grep -qE 'unittest|run-unit-tests|cargo test' <<<"$out"; then
     ok "test-integration runs no unit tests"
 else
     bad "test-integration runs no unit tests"
 fi
 
 out=$(dry test)
-if grep -q 'unittest' <<<"$out" && grep -q 'cargo test' <<<"$out" && grep -q 'test-firmware.sh' <<<"$out"; then
+if grep -q 'run-unit-tests.py' <<<"$out" && grep -q 'cargo test' <<<"$out" && grep -q 'test-firmware.sh' <<<"$out"; then
     ok "make test still runs the unit and the integration tests"
 else
     bad "make test still runs the unit and the integration tests"

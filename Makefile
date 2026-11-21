@@ -611,7 +611,7 @@ TEST_TMPDIR := $(or $(TMPDIR),$(CURDIR)/.tmp)
 TEST_ENV := TMPDIR='$(TEST_TMPDIR)'
 test-unit:
 	@mkdir -p '$(TEST_TMPDIR)'
-	@$(TEST_ENV) python3 -m unittest discover -s test/unit -v
+	@$(TEST_ENV) python3 scripts/run-unit-tests.py -j $(TEST_THREADS) test/unit
 	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
 
 test: test-unit test-integration
