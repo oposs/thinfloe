@@ -109,7 +109,7 @@ MIT, so no code is copied from it or from Deskflow.
   sends the daemon SIGTERM and waits up to 1 s.
 - The daemon also exits by itself when its Wayland connection closes, so a
   menu crash (labwc kept up by the failure window) or the end of labwc never
-  leaves a daemon holding port 24800. Guard: `test-session-lifecycle.sh`
+  leaves a daemon holding port 24800. Guard: `test-labwc-runtime.sh`
   (no `--deskflow` process and no listener on 24800 after logout, restart
   and a killed menu).
 - The **daemon** (`--deskflow`) owns: the TCP listener, TLS, the protocol,

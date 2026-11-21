@@ -424,6 +424,19 @@ class TestHomeArchiveExcludes(unittest.TestCase):
         )
         self.assertIn("./.config/thinfloe/password", members)
 
+    def test_fresh_install_skips_deskflow_identity(self):
+        argv = ui.home_archive_argv(str(self.home), str(self.dest), "new")
+        self.assertIn("--exclude=./.config/thinfloe/deskflow", argv)
+        dfdir = self.home / ".config" / "thinfloe" / "deskflow"
+        dfdir.mkdir(parents=True)
+        (dfdir / "identity.pem").write_text("PRIVATE KEY")
+        (self.home / ".config" / "thinfloe" / "password").write_text("hash\n")
+        subprocess.run(argv, check=True)
+        with tarfile.open(self.dest, "r:gz") as tf:
+            members = tf.getnames()
+        self.assertEqual([m for m in members if "deskflow" in m], [])
+        self.assertIn("./.config/thinfloe/password", members)
+
     def test_no_exclude_file_at_all_still_archives(self):
         self.assertIn("./.keep/f", self._members())
 
