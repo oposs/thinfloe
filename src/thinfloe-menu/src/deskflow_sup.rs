@@ -129,10 +129,7 @@ impl Supervisor {
                     }
                     return None;
                 }
-                Err(e) => {
-                    eprintln!("thinfloe-menu: the Deskflow daemon cannot be waited for: {e}");
-                    return None;
-                }
+                Err(e) => self.lost(e, now),
             }
         }
         if !self.wanted {
@@ -257,6 +254,25 @@ impl Supervisor {
         }
         if self.wanted {
             self.schedule(now);
+        }
+    }
+
+    /// `try_wait` failed: the child is beyond reach (reaped elsewhere, so
+    /// its pid may already be another process's). It counts as ended and is
+    /// never signalled again; a start again follows as after a failure.
+    fn lost(&mut self, e: std::io::Error, now: Instant) {
+        let Some(r) = self.running.take() else { return };
+        let why = format!("the Deskflow daemon cannot be waited for: {e}");
+        eprintln!("thinfloe-menu: {why}");
+        if r.kill_at.is_none() {
+            self.failure = Some(why);
+        }
+        if self.wanted {
+            if r.kill_at.is_some() {
+                self.start_at = Some(now);
+            } else {
+                self.schedule(now);
+            }
         }
     }
 
@@ -585,6 +601,31 @@ mod tests {
         until_ended(&mut s, now);
         let text = std::fs::read_to_string(&out).unwrap();
         assert_eq!(text.trim(), format!("--deskflow {pid} {pid} {}", std::process::id()));
+    }
+
+    #[test]
+    fn a_daemon_that_cannot_be_waited_for_counts_as_ended() {
+        let d = TestDir::new("deskflow-sup", "wait-err");
+        let mut s = sup(&d, "exit 0");
+        let now = Instant::now();
+        s.want(true, now);
+        s.tick(now);
+        let pid = s.pid().expect("started");
+        assert!(gone_within(pid, Duration::from_secs(5)), "the stand-in did not end");
+        // Someone else reaps it: try_wait fails from now on (ECHILD).
+        let mut status = 0;
+        // SAFETY: waitpid on our own child, with a valid status pointer.
+        assert_eq!(
+            unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) },
+            pid as libc::pid_t
+        );
+        let at = s.tick(now).expect("a start again is due");
+        assert_eq!(at - now, Duration::from_secs(1));
+        assert_eq!(s.pid(), None, "the lost child is dropped, never signalled again");
+        assert!(s.last_failure().is_some_and(|f| f.contains("cannot be waited for")));
+        s.tick(at);
+        assert!(s.pid().is_some(), "started again when due");
+        s.stop(Duration::from_secs(1));
     }
 
     #[test]
