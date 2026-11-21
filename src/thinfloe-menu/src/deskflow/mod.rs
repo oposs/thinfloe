@@ -10,6 +10,7 @@
 //! `--deskflow` alone is the daemon ([`run`]).
 
 pub mod capture;
+pub mod clipdata;
 pub mod cmd;
 pub mod conn;
 pub mod edge;

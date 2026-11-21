@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::clipdata::{self, Asm, Assembler};
 use super::pair::Verdict;
 use super::proto::{self, Msg};
 
@@ -29,6 +30,10 @@ pub enum Out {
     Named { name: String },
     /// The size of the client's screen, from its DINF.
     Screen { w: i16, h: i16 },
+    /// A finished inbound text clipboard (id 0), only while sharing is on.
+    Clipboard { text: Vec<u8> },
+    /// The client took the clipboard (CCLP for id 0), only while sharing is on.
+    Grabbed,
     /// End the connection after the bytes before this were written.
     Close(&'static str),
 }
@@ -53,6 +58,9 @@ pub struct Session {
     last_rx: Instant,
     last_calv: Instant,
     seq: u32,
+    clipboard: bool,
+    clip_seq: u32,
+    asm: Assembler,
 }
 
 fn send(m: &Msg, minor: u16) -> Out {
@@ -96,6 +104,9 @@ impl Session {
             last_rx: now,
             last_calv: now,
             seq: 0,
+            clipboard: true,
+            clip_seq: 0,
+            asm: Assembler::default(),
         };
         let hello = send(
             &Msg::Hello {
@@ -166,11 +177,19 @@ impl Session {
                 if self.state == State::Trusted {
                     self.state = State::Active;
                     out.push(send(&Msg::Crop, self.minor));
-                    out.push(send(&Msg::Dsop(Vec::new()), self.minor));
+                    out.push(send(&Msg::Dsop(clipdata::options(self.clipboard)), self.minor));
                 }
                 out.push(Out::Screen { w, h });
                 out
             }
+            Msg::Cclp { id: 0, .. } if self.clipboard => vec![Out::Grabbed],
+            Msg::Dclp { id, seq, mark, data } => match self.asm.push(id, seq, mark, &data) {
+                Asm::Error => self.close("bad clipboard"),
+                Asm::Finished(m) if id == 0 && self.clipboard => clipdata::unmarshal_text(&m)
+                    .map(|text| vec![Out::Clipboard { text }])
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
@@ -230,6 +249,47 @@ impl Session {
 
     fn live(&self) -> bool {
         matches!(self.state, State::Trusted | State::Active)
+    }
+
+    /// Turn clipboard sharing on or off; an active session tells the client.
+    pub fn set_clipboard(&mut self, on: bool) -> Vec<Out> {
+        if self.clipboard == on {
+            return Vec::new();
+        }
+        self.clipboard = on;
+        if self.state == State::Active {
+            vec![send(&Msg::Dsop(clipdata::options(on)), self.minor)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// CCLP only: an inactive device learns that ThinFloe owns the clipboard.
+    pub fn grab(&mut self) -> Vec<Out> {
+        if !self.live() || !self.clipboard {
+            return Vec::new();
+        }
+        self.clip_seq = self.clip_seq.wrapping_add(1);
+        vec![send(
+            &Msg::Cclp {
+                id: 0,
+                seq: self.clip_seq,
+            },
+            self.minor,
+        )]
+    }
+
+    /// CCLP and the DCLP transfer of `text` (clipboard id 0).
+    pub fn clipboard(&mut self, text: &[u8]) -> Vec<Out> {
+        let m = clipdata::marshal_text(text);
+        if !self.live() || !self.clipboard || m.len() > clipdata::CLIP_MAX {
+            return Vec::new();
+        }
+        self.clip_seq = self.clip_seq.wrapping_add(1);
+        let seq = self.clip_seq;
+        let mut out = vec![send(&Msg::Cclp { id: 0, seq }, self.minor)];
+        out.extend(clipdata::chunks(0, seq, &m).iter().map(|c| send(c, self.minor)));
+        out
     }
 
     /// CINN: the pointer enters the client's screen at (x, y).
@@ -421,7 +481,7 @@ mod tests {
         let out = se.set_verdict(Verdict::Trusted(0));
         assert_eq!(sent(&out), [Msg::Qinf]);
         let out = se.on_payload(&dinf(1920, 1080), t);
-        assert_eq!(sent(&out), [Msg::Ciak, Msg::Crop, Msg::Dsop(vec![])]);
+        assert_eq!(sent(&out), [Msg::Ciak, Msg::Crop, Msg::Dsop(clipdata::options(true))]);
         assert_eq!(out.last(), Some(&Out::Screen { w: 1920, h: 1080 }));
         let out = se.on_payload(&dinf(1280, 720), t);
         assert_eq!(sent(&out), [Msg::Ciak]);
@@ -573,5 +633,116 @@ mod tests {
         };
         assert_eq!(code(&mut trusted(7, t)), b"DKDN");
         assert_eq!(code(&mut trusted(8, t)), b"DKDL");
+    }
+
+    /// An Active session with the setup output drained.
+    fn active(t: Instant) -> Session {
+        let mut se = trusted(8, t);
+        se.on_payload(&dinf(1920, 1080), t);
+        se
+    }
+
+    fn dclp(id: u8, mark: u8, data: &[u8]) -> Vec<u8> {
+        proto::encode(
+            &Msg::Dclp {
+                id,
+                seq: 1,
+                mark,
+                data: data.to_vec(),
+            },
+            8,
+        )
+    }
+
+    fn feed_transfer(se: &mut Session, id: u8, text: &[u8], t: Instant) -> Vec<Out> {
+        let m = clipdata::marshal_text(text);
+        let mut out = Vec::new();
+        for c in clipdata::chunks(id, 1, &m) {
+            out.extend(se.on_payload(&proto::encode(&c, 8), t));
+        }
+        out
+    }
+
+    #[test]
+    fn dsop_carries_clipboard_option() {
+        let t = Instant::now();
+        let mut se = trusted(8, t);
+        let out = se.on_payload(&dinf(10, 10), t);
+        assert!(sent(&out).contains(&Msg::Dsop(vec![clipdata::CLPS, 1, clipdata::CLSZ, 1024])));
+    }
+
+    #[test]
+    fn set_clipboard_resends_dsop_when_active() {
+        let t = Instant::now();
+        let mut se = active(t);
+        assert_eq!(sent(&se.set_clipboard(false)), [Msg::Dsop(vec![clipdata::CLPS, 0])]);
+        assert!(se.set_clipboard(false).is_empty());
+        assert_eq!(sent(&se.set_clipboard(true)), [Msg::Dsop(clipdata::options(true))]);
+        // Before the first DINF only the flag is stored.
+        let mut se = trusted(8, t);
+        assert!(se.set_clipboard(false).is_empty());
+        let out = se.on_payload(&dinf(10, 10), t);
+        assert!(sent(&out).contains(&Msg::Dsop(vec![clipdata::CLPS, 0])));
+    }
+
+    #[test]
+    fn inbound_transfer_yields_clipboard() {
+        let t = Instant::now();
+        let mut se = active(t);
+        let out = feed_transfer(&mut se, 0, b"h\xc3\xa4llo", t);
+        assert_eq!(
+            out,
+            [Out::Clipboard {
+                text: b"h\xc3\xa4llo".to_vec()
+            }]
+        );
+        let out = se.on_payload(&proto::encode(&Msg::Cclp { id: 0, seq: 2 }, 8), t);
+        assert_eq!(out, [Out::Grabbed]);
+        // The selection (id 1) is assembled and dropped, never an error.
+        assert!(feed_transfer(&mut se, 1, b"sel", t).is_empty());
+        let out = se.on_payload(&proto::encode(&Msg::Cclp { id: 1, seq: 3 }, 8), t);
+        assert!(out.is_empty());
+        assert_eq!(feed_transfer(&mut se, 0, b"x", t).len(), 1);
+    }
+
+    #[test]
+    fn inbound_ignored_when_off() {
+        let t = Instant::now();
+        let mut se = active(t);
+        se.set_clipboard(false);
+        assert!(feed_transfer(&mut se, 0, b"x", t).is_empty());
+        let out = se.on_payload(&proto::encode(&Msg::Cclp { id: 0, seq: 2 }, 8), t);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bad_chunk_closes() {
+        let t = Instant::now();
+        let mut se = active(t);
+        let out = se.on_payload(&dclp(0, 2, b"data without start"), t);
+        assert_eq!(closes(&out), Some("bad clipboard"));
+    }
+
+    #[test]
+    fn clipboard_out_sends_cclp_then_dclp() {
+        let t = Instant::now();
+        let mut se = active(t);
+        let msgs = sent(&se.clipboard(b"hi"));
+        let m = clipdata::marshal_text(b"hi");
+        assert_eq!(msgs[0], Msg::Cclp { id: 0, seq: 1 });
+        assert_eq!(msgs[1..], clipdata::chunks(0, 1, &m)[..]);
+        assert_eq!(sent(&se.grab()), [Msg::Cclp { id: 0, seq: 2 }]);
+        // Not live: nothing.
+        let (mut se, _) = Session::new(t);
+        assert!(se.clipboard(b"hi").is_empty() && se.grab().is_empty());
+    }
+
+    #[test]
+    fn clipboard_over_cap_sends_nothing() {
+        let t = Instant::now();
+        let mut se = active(t);
+        assert!(se.clipboard(&vec![b'a'; clipdata::CLIP_MAX]).is_empty());
+        se.set_clipboard(false);
+        assert!(se.clipboard(b"hi").is_empty());
     }
 }

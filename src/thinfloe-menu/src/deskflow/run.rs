@@ -1161,7 +1161,11 @@ mod tests {
         send(&mut c, &dinf);
         assert_eq!(
             [read_msg(&mut c), read_msg(&mut c), read_msg(&mut c)],
-            [Msg::Ciak, Msg::Crop, Msg::Dsop(vec![])]
+            [
+                Msg::Ciak,
+                Msg::Crop,
+                Msg::Dsop(crate::deskflow::clipdata::options(true))
+            ]
         );
         let st = wait_state(&state, |s| {
             line(s, "laptop", &fp1).is_some_and(|l| l.state == DevState::Connected)

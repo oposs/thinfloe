@@ -233,6 +233,8 @@ impl Conn {
                     events.push(Event::Screen { w, h });
                 }
                 Out::Close(why) => self.end(why, now),
+                // Wired up by the daemon in a later step.
+                Out::Clipboard { .. } | Out::Grabbed => {}
             }
         }
     }
