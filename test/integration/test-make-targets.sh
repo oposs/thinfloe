@@ -102,4 +102,12 @@ else
     bad "without PREBUILT the build rules stand"
 fi
 
+out=$(dry test-menu)
+if grep -q 'cargo fmt --check' <<<"$out" && grep -q 'cargo clippy' <<<"$out" && grep -q 'cargo test' <<<"$out" \
+    && ! grep -qE 'podman|export-rootfs\.sh|unittest' <<<"$out"; then
+    ok "test-menu needs no image"
+else
+    bad "test-menu needs no image"
+fi
+
 exit $fail
