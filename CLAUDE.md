@@ -17,6 +17,7 @@ make ipxe                # iPXE loaders to artifacts/rootfs/
 make test                # test-unit, then test-integration
 make test-integration    # the integration tests alone against the built image (CI's image job)
 make test-unit           # Python unit tests in test/unit/ and the menu's cargo test
+make test-menu           # fmt, clippy and cargo test of the menu; no image
 make test-runtime        # labwc and the menu headless
 make qemu-smoke          # boot the USB image in QEMU (also: -addons, -write, -upgrade,
                          #   -netboot, -two-sticks, -grow, -timezone, -timezone-netboot)

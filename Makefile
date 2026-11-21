@@ -117,7 +117,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-integration test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-menu test-integration test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -142,6 +142,7 @@ help:
 	@echo "  qemu-smoke-write  - Headless write of a USB stick from a boot server, then boot it"
 	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
+	@echo "  test-menu         - Menu crate: cargo fmt --check, clippy, cargo test (no image)"
 	@echo "  test-integration  - Run integration guard tests against rootfs"
 	@echo "  test              - test-unit, then test-integration"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -609,10 +610,19 @@ MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
 # pass it to the test scripts only, not to the image builds.
 TEST_TMPDIR := $(or $(TMPDIR),$(CURDIR)/.tmp)
 TEST_ENV := TMPDIR='$(TEST_TMPDIR)'
+MENU_CARGO_TEST = cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
+
 test-unit:
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) python3 scripts/run-unit-tests.py -j $(TEST_THREADS) test/unit
-	cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
+	$(MENU_CARGO_TEST)
+
+# The menu crate alone: format, lints, tests. No image, no Python.
+test-menu:
+	@mkdir -p '$(TEST_TMPDIR)'
+	cd $(MENU_DIR) && cargo fmt --check
+	cd $(MENU_DIR) && CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo clippy --locked --all-targets -j $(BUILD_JOBS) -- -D warnings
+	$(MENU_CARGO_TEST)
 
 test: test-unit test-integration
 
