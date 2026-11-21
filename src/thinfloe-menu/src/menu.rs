@@ -3572,7 +3572,7 @@ mod tests {
                 ..Default::default()
             }],
             dns_in_use: vec!["192.168.1.1".into()],
-            time: Default::default(),
+            ..Default::default()
         };
         m.finished(JobResult::NetStatus(Ok(vec![wifi]), details), now);
         m.finished(

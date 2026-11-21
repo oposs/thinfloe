@@ -169,9 +169,9 @@ mod tests {
             vec![IfDetail {
                 name: "wlan0".into(),
                 mac: Some("3c:52:82:aa:bb:cc".into()),
-                gateway: None,
                 chip: Some("Intel Corporation Wi-Fi 6 AX201".into()),
                 driver: Some("iwlwifi".into()),
+                ..Default::default()
             }]
         );
         // Not in the list, or no list: the ids.
