@@ -1728,4 +1728,124 @@ run_capture_probe_case() {
 }
 run_capture_probe_case
 
+
+# Deskflow interop: the stock Deskflow client (deskflow-core 1.26.0 of the
+# image's universe) against 'thinfloe-menu --deskflow', in one labwc.
+# deskflow-core has no flags for the connection: 'deskflow-core client
+# --new-instance -s <dir>/Deskflow.conf' takes every setting from that INI
+# file (client/remoteHost, core/port, core/computerName,
+# security/tlsEnabled, log/level DEBUG2), logs to stdout, and
+# --new-instance lets a
+# second client run beside the first. Settings::tlsDir() is the directory of
+# that file plus /tls: the client's certificate and key are
+# <dir>/tls/deskflow.pem (deskflow-core does not make one, the GUI does), the
+# servers it trusts <dir>/tls/trusted-servers, one 'v2:sha256:<hex>' per
+# line. Without XDG_SESSION_TYPE=wayland the client drives X11, here
+# labwc's Xwayland, whose root window is the 1280x720 output.
+# The case: ThinFloe's fingerprint from the state file goes into the trust
+# file; the client appears as pending; an attach in generated/deskflow and
+# 'reload' on the command socket let its next try in (connected, with its
+# screen size); a second 'laptop' with another certificate stays out
+# (fp-changed) while the first stays connected; 'listen = false' and a
+# reload end the daemon with 0 and nothing listens on 24800 any more.
+# The client's console shows only its NOTE and IPC lines, whatever
+# log/level says.
+# shellcheck disable=SC2016 # expands inside the container
+df_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+printf "[deskflow]\nlisten = true\nport = 24800\n" >$gen
+upto() { n=$(($1 * 5)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.2; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+line() { st | awk -F "\t" -v n="$1" -v f="$2" -v s="$3" "\$1 == n && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+client() {
+    d=$1; mkdir -p $d/tls
+    printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n[log]\nlevel=DEBUG2\n" >$d/Deskflow.conf
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout $d/key.pem -out $d/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+    cat $d/cert.pem $d/key.pem >$d/tls/deskflow.pem
+    echo "$fp" >$d/tls/trusted-servers
+    echo "v2:sha256:$(openssl x509 -in $d/cert.pem -outform DER | sha256sum | cut -d" " -f1)" >$d/fp
+    env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+        timeout 60 deskflow-core client --new-instance -s $d/Deskflow.conf >$d/log 2>&1 &
+}
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\"" && echo head=yes || echo head=no
+fp=$(st | head -1 | cut -f2)
+echo "fp=$fp"
+client /tmp/c1
+c1=$(cat /tmp/c1/fp)
+upto 15 line laptop "$c1" pending && echo pending=yes || echo pending=no
+printf "\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\n" "$c1" >>$gen
+reload
+upto 15 line laptop "$c1" connected && echo connected=yes || echo connected=no
+upto 5 grep -q "connected to server" /tmp/c1/log && echo c1_log=yes || echo c1_log=no
+client /tmp/c2
+c2=$(cat /tmp/c2/fp)
+upto 15 line laptop "$c2" pending && echo pending2=yes || echo pending2=no
+line laptop "$c1" connected && echo still=yes || echo still=no
+st | sed "s/^/state: /"
+printf "[deskflow]\nlisten = false\nport = 24800\n" >$gen
+reload
+upto 15 sh -c "! kill -0 $dpid 2>/dev/null"
+wait $dpid
+echo d_rc=$?
+ss -Hltn "sport = :24800" | grep -q . && echo listening=yes || echo listening=no
+sed "s/^/c1: /" /tmp/c1/log | tail -60
+sed "s/^/c2: /" /tmp/c2/log | tail -30
+sed "s/^/derr: /" /tmp/d.err | head -40
+exit 0'
+run_deskflow_pairing_case() {
+    local name="thinfloe-runtime-test-df-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e DF_SCRIPT="$df_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$DF_SCRIPT" >/tmp/df.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/df.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow case)"
+        grep -E '^(state|c1|c2|derr): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|derr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client 1: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -15 | tr '\n' '|')"
+    df_ok() { grep -qx "$1" <<<"$out"; }
+    df_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    df_ok head=yes && grep -Eq '^fp=v2:sha256:[0-9a-f]{64}$' <<<"$out"
+    df_check $? "the Deskflow daemon writes its fingerprint to the state file"
+    # Deskflow 1.26 logs only its NOTE and IPC lines here, so the refusal
+    # shows as a retry without "disconnected from server": a dropped
+    # connection logs that line, a refusal (EUNK) does not.
+    df_ok pending=yes && awk '/^c1: .*IPC: peer fingerprint/ && !p {p=NR; next} p && /IPC: disconnected from server/ && !c {d=1}
+        p && /IPC: connecting to/ {c=1} END {exit !(p && c && !d)}' <<<"$out"
+    df_check $? "a Deskflow client that trusts ThinFloe is refused with EUNK, tries again, and shows as pending with the fingerprint of its certificate"
+    df_ok connected=yes && grep -Eq $'^state: laptop\tv2:sha256:[0-9a-f]{64}\tconnected\t[0-9]+\t1280\t720\t' <<<"$out"
+    df_check $? "after the attach and a reload the client's next try connects, with its 1280x720 screen"
+    df_ok c1_log=yes
+    df_check $? "the Deskflow client logs that it connected to the server"
+    df_ok pending2=yes && df_ok still=yes && grep -Eq $'^state: laptop\tv2:sha256:[0-9a-f]{64}\tpending\t[0-9]+\t0\t0\tfp-changed$' <<<"$out"
+    df_check $? "a second 'laptop' with another certificate stays out as pending, fp-changed, and the first stays connected"
+    df_ok d_rc=0 && df_ok listening=no
+    df_check $? "'listen = false' and a reload end the daemon with 0 and nothing listens on 24800"
+}
+run_deskflow_pairing_case
+
 exit $fail

@@ -7,7 +7,6 @@ use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -15,8 +14,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 /// The largest identity file read: a P-256 key and certificate take about
 /// 1 KiB.
 const IDENTITY_MAX: u64 = 64 * 1024;
-/// How long the certificate is valid: ten years.
-const VALIDITY: Duration = Duration::from_secs(3652 * 24 * 3600);
+/// The certificate's validity, fixed: a first boot with a clock that is
+/// off must not shorten a certificate that is kept for good. Deskflow
+/// clients do not check the dates (their verify callback accepts any
+/// certificate; trust is the fingerprint).
+const NOT_BEFORE: (i32, u8, u8) = (2000, 1, 1);
+const NOT_AFTER: (i32, u8, u8) = (2099, 12, 31);
 /// The prefix of a fingerprint, as Deskflow writes it in its trust files.
 const FP_PREFIX: &str = "v2:sha256:";
 
@@ -57,9 +60,8 @@ fn generate(hostname: &str) -> Result<(Identity, String), String> {
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, format!("ThinFloe {hostname}"));
     params.distinguished_name = dn;
-    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
-    params.not_before = rcgen::date_time_ymd(today.year().into(), today.month() as u8, today.day() as u8);
-    params.not_after = params.not_before + VALIDITY;
+    params.not_before = rcgen::date_time_ymd(NOT_BEFORE.0, NOT_BEFORE.1, NOT_BEFORE.2);
+    params.not_after = rcgen::date_time_ymd(NOT_AFTER.0, NOT_AFTER.1, NOT_AFTER.2);
     let cert = params.self_signed(&key).map_err(err)?;
     let pem = format!("{}{}", cert.pem(), key.serialize_pem());
     let id = Identity {
@@ -203,6 +205,16 @@ mod tests {
         let id = load_or_create(&d.join("identity.pem"), "thinfloe-0a1b2c").unwrap();
         let cn = b"ThinFloe thinfloe-0a1b2c";
         assert!(id.cert_der.windows(cn.len()).any(|w| w == cn));
+    }
+
+    #[test]
+    fn the_certificate_has_fixed_dates() {
+        let d = TestDir::new("deskflow-ident", "dates");
+        let id = load_or_create(&d.join("identity.pem"), "host").unwrap();
+        // notBefore as UTCTime, notAfter (after 2049) as GeneralizedTime.
+        let has = |s: &[u8]| id.cert_der.windows(s.len()).any(|w| w == s);
+        assert!(has(b"000101000000Z"), "not before 2000-01-01");
+        assert!(has(b"20991231000000Z"), "not after 2099-12-31");
     }
 
     #[test]

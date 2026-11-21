@@ -85,19 +85,21 @@ impl ClientCertVerifier for AnyClient {
     }
 }
 
+/// A client for the tests that takes any server certificate, as a
+/// Deskflow client that trusts the server by fingerprint does.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::deskflow::ident::{self, fingerprint};
-    use crate::testdir::TestDir;
+pub(crate) mod testclient {
+    use std::sync::Arc;
+
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::CryptoProvider;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-    use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme};
+    use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
 
     /// A Deskflow client trusts the server by fingerprint too; the test
     /// client takes any server certificate (signatures still checked).
     #[derive(Debug)]
-    struct AnyServer(Arc<CryptoProvider>);
+    pub(crate) struct AnyServer(pub(crate) Arc<CryptoProvider>);
 
     impl ServerCertVerifier for AnyServer {
         fn verify_server_cert(
@@ -130,6 +132,37 @@ mod tests {
             self.0.signature_verification_algorithms.supported_schemes()
         }
     }
+
+    /// TLS 1.3 and 1.2, with this client certificate.
+    pub(crate) fn config(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Arc<ClientConfig> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cfg = ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
+            .with_client_auth_cert(
+                vec![cert.cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())),
+            )
+            .unwrap();
+        Arc::new(cfg)
+    }
+
+    pub(crate) fn server_name() -> ServerName<'static> {
+        ServerName::try_from("thinfloe").unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deskflow::ident::{self, fingerprint};
+    use crate::testdir::TestDir;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::{ClientConfig, ClientConnection, Error, SignatureScheme};
+
+    use super::testclient::AnyServer;
 
     fn server_identity(tag: &str) -> (TestDir, ident::Identity) {
         let d = TestDir::new("deskflow-tls", tag);

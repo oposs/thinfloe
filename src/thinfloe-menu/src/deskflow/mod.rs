@@ -6,13 +6,17 @@
 //! runtime tests: it puts one strip on that edge of the output, prints one
 //! line per capture event, begins a capture as soon as the pointer enters
 //! the strip and ends it on Escape, until SIGTERM.
+//!
+//! `--deskflow` alone is the daemon ([`run`]).
 
 pub mod capture;
 pub mod cmd;
+pub mod conn;
 pub mod edge;
 pub mod ident;
 pub mod pair;
 pub mod proto;
+pub mod run;
 pub mod session;
 pub mod statefile;
 pub mod tls;
@@ -65,8 +69,49 @@ pub fn deskflow_main(args: &[OsString]) -> ExitCode {
             }
         };
     }
-    eprintln!("usage: thinfloe-menu --deskflow --probe-capture <output> <left-of|right-of|above|below>");
+    if args.is_empty() {
+        return daemon();
+    }
+    eprintln!("usage: thinfloe-menu --deskflow [--probe-capture <output> <left-of|right-of|above|below>]");
     ExitCode::from(2)
+}
+
+/// The daemon, with the paths of the session.
+fn daemon() -> ExitCode {
+    let fail = |e: &str| {
+        eprintln!("thinfloe-menu --deskflow: {e}");
+        ExitCode::from(1)
+    };
+    // The menu starts the daemon; it must not outlive it.
+    // SAFETY: prctl with integer arguments only.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0) } != 0 {
+        return fail(&format!("PR_SET_PDEATHSIG: {}", std::io::Error::last_os_error()));
+    }
+    let (Some(state), Some(socket)) = (statefile::path(), cmd::socket_path()) else {
+        return fail("XDG_RUNTIME_DIR is not set");
+    };
+    let dir = crate::config::ConfigDir::from_env();
+    let env = run::RunEnv {
+        generated: dir.generated_file("deskflow"),
+        identity: dir.root.join("deskflow").join("identity.pem"),
+        state,
+        socket,
+        hostname: hostname(),
+    };
+    match run::run(env) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&e),
+    }
+}
+
+/// The host name for the certificate, from /etc/hostname (the initramfs
+/// writes it).
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "thinfloe".into())
 }
 
 /// The 1 px strip along `side` of `out`, in layout coordinates.
