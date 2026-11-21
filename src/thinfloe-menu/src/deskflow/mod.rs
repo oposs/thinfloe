@@ -14,6 +14,7 @@ pub mod cmd;
 pub mod conn;
 pub mod edge;
 pub mod ident;
+pub mod keymap;
 pub mod pair;
 pub mod proto;
 pub mod run;
@@ -21,16 +22,15 @@ pub mod session;
 pub mod statefile;
 pub mod tls;
 
-use std::ffi::{CStr, OsString};
-use std::fs::File;
+use std::ffi::OsString;
 use std::io::ErrorKind;
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::FileExt;
+use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use capture::{CapEvent, Capture, OutputGeom, StripSpec};
 use edge::Rect;
+use keymap::{Xkb, keysym_name};
 
 pub const DESKFLOW_ARG: &str = "--deskflow";
 const PROBE_CAPTURE_ARG: &str = "--probe-capture";
@@ -39,8 +39,6 @@ const PROBE_CAPTURE_ARG: &str = "--probe-capture";
 const KEY_ESC: u32 = 1;
 /// Escape's keysym.
 const XK_ESCAPE: u32 = 0xff1b;
-/// The largest keymap the probe reads.
-const KEYMAP_MAX: u32 = 1 << 20;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -150,7 +148,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
         output: output.to_string(),
         rect,
     }]);
-    let mut keys: Option<Keymap> = None;
+    let mut keys: Option<Xkb> = None;
     while !STOP.load(Ordering::SeqCst) {
         cap.flush()?;
         let mut fds = [libc::pollfd {
@@ -173,7 +171,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
         for ev in cap.dispatch()? {
             match &ev {
                 CapEvent::Enter { strip, .. } => cap.begin_capture(*strip),
-                CapEvent::Keymap { fd, size } => match Keymap::read(fd, *size) {
+                CapEvent::Keymap { fd, size } => match Xkb::from_keymap_fd(fd, *size) {
                     Ok(k) => keys = Some(k),
                     Err(e) => {
                         eprintln!("thinfloe-menu --deskflow: keymap: {e}");
@@ -185,7 +183,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
             println!("{}", probe_line(&ev, keys.as_ref()));
             if let CapEvent::Key { code, pressed: true } = ev {
                 let escape = match &keys {
-                    Some(k) => k.keysym(code) == Some(XK_ESCAPE),
+                    Some(k) => k.keysym(code) == XK_ESCAPE,
                     None => code == KEY_ESC,
                 };
                 if escape {
@@ -199,7 +197,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
 
 /// The probe's line for one event; a key also shows its keysym's name,
 /// "-" without a keymap.
-fn probe_line(ev: &CapEvent, keys: Option<&Keymap>) -> String {
+fn probe_line(ev: &CapEvent, keys: Option<&Xkb>) -> String {
     let updown = |p: bool| if p { "down" } else { "up" };
     match ev {
         CapEvent::Enter { strip, x, y } => format!("enter {strip} {x:.0} {y:.0}"),
@@ -209,7 +207,8 @@ fn probe_line(ev: &CapEvent, keys: Option<&Keymap>) -> String {
         CapEvent::Unlocked => "unlocked".into(),
         CapEvent::Key { code, pressed } => {
             let name = keys
-                .and_then(|k| k.keysym(*code))
+                .map(|k| k.keysym(*code))
+                .filter(|s| *s != 0)
                 .map_or_else(|| "-".into(), keysym_name);
             format!("key {code} {} {name}", updown(*pressed))
         }
@@ -226,83 +225,6 @@ fn probe_line(ev: &CapEvent, keys: Option<&Keymap>) -> String {
         CapEvent::KeyboardLeft => "keyboard-left".into(),
         CapEvent::OutputsChanged => "outputs-changed".into(),
     }
-}
-
-/// The compositor's keymap, compiled by libxkbcommon, for the probe's key
-/// names.
-struct Keymap {
-    xkb: &'static xkbcommon_dl::XkbCommon,
-    ctx: *mut xkbcommon_dl::xkb_context,
-    keymap: *mut xkbcommon_dl::xkb_keymap,
-}
-
-impl Keymap {
-    fn read(fd: &OwnedFd, size: u32) -> Result<Keymap, String> {
-        let xkb = xkbcommon_dl::xkbcommon_option().ok_or("libxkbcommon is not available")?;
-        if size == 0 || size > KEYMAP_MAX {
-            return Err(format!("a keymap of {size} bytes"));
-        }
-        let file = File::from(fd.try_clone().map_err(|e| format!("dup: {e}"))?);
-        let mut text = vec![0u8; size as usize];
-        file.read_exact_at(&mut text, 0).map_err(|e| format!("read: {e}"))?;
-        while text.last() == Some(&0) {
-            text.pop();
-        }
-        text.push(0);
-        let text = CStr::from_bytes_until_nul(&text).map_err(|e| e.to_string())?;
-        // SAFETY: plain libxkbcommon calls on pointers checked for NULL;
-        // the context and keymap are owned by the Keymap and freed in Drop.
-        unsafe {
-            let ctx = (xkb.xkb_context_new)(xkbcommon_dl::xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
-            if ctx.is_null() {
-                return Err("xkb_context_new failed".into());
-            }
-            let keymap = (xkb.xkb_keymap_new_from_string)(
-                ctx,
-                text.as_ptr(),
-                xkbcommon_dl::xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
-                xkbcommon_dl::xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS,
-            );
-            if keymap.is_null() {
-                (xkb.xkb_context_unref)(ctx);
-                return Err("the keymap does not compile".into());
-            }
-            Ok(Keymap { xkb, ctx, keymap })
-        }
-    }
-
-    /// The first keysym of an evdev code, in the first layout and level.
-    fn keysym(&self, code: u32) -> Option<u32> {
-        let mut syms: *const u32 = std::ptr::null();
-        // SAFETY: the keymap is valid; libxkbcommon points syms into it.
-        let n = unsafe { (self.xkb.xkb_keymap_key_get_syms_by_level)(self.keymap, code + 8, 0, 0, &mut syms) };
-        // SAFETY: n > 0 means syms points to n keysyms.
-        (n > 0 && !syms.is_null()).then(|| unsafe { *syms })
-    }
-}
-
-impl Drop for Keymap {
-    fn drop(&mut self) {
-        // SAFETY: both were made in Keymap::read and are freed only here.
-        unsafe {
-            (self.xkb.xkb_keymap_unref)(self.keymap);
-            (self.xkb.xkb_context_unref)(self.ctx);
-        }
-    }
-}
-
-fn keysym_name(sym: u32) -> String {
-    let Some(xkb) = xkbcommon_dl::xkbcommon_option() else {
-        return format!("0x{sym:x}");
-    };
-    let mut buf = [0 as std::ffi::c_char; 64];
-    // SAFETY: the buffer and its length match; libxkbcommon NUL-terminates.
-    let n = unsafe { (xkb.xkb_keysym_get_name)(sym, buf.as_mut_ptr(), buf.len()) };
-    if n <= 0 {
-        return format!("0x{sym:x}");
-    }
-    // SAFETY: a NUL-terminated string in buf.
-    unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
