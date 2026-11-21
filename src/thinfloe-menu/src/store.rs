@@ -19,7 +19,15 @@ const CONFIG_MODE: u32 = 0o600;
 pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Every generated file, in the order they are regenerated.
-const ALL_FILES: [&str; 6] = ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml", "time"];
+const ALL_FILES: [&str; 7] = [
+    "environment",
+    "screen",
+    "kanshi",
+    "wifi.yaml",
+    "ethernet.yaml",
+    "time",
+    "deskflow",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
@@ -465,6 +473,59 @@ mod tests {
         assert_eq!(back.time, c.time);
         let t = gen_text(&d, "time").unwrap();
         assert!(t.ends_with("\nntp=10.0.0.1\n") && !t.contains("zone="), "{t}");
+    }
+
+    /// A broken config.toml does not lose the pairings: they come back
+    /// from generated/deskflow.
+    #[test]
+    fn broken_config_keeps_deskflow_devices() {
+        let d = TestDir::new("store", "deskflow-broken");
+        let mut c = ThinfloeConfig::default();
+        c.deskflow.listen = true;
+        c.deskflow.devices = vec![crate::config::DeviceCfg {
+            name: "laptop".into(),
+            fingerprint: format!("v2:sha256:{}", "cd".repeat(32)),
+            output: "DP-1".into(),
+            side: crate::kanshi::Side::RightOf,
+            clipboard: true,
+        }];
+        let mut o = open_session(&d);
+        o.store
+            .update(Table::Deskflow, |x| x.deskflow = c.deskflow.clone())
+            .unwrap();
+        let mode = fs::metadata(cdir(&d).generated_file("deskflow")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode.permissions()) & 0o777,
+            0o600
+        );
+        fs::write(cdir(&d).config_toml(), "this is [not toml").unwrap();
+        let o = open_session(&d);
+        assert_eq!(o.store.cfg.deskflow, c.deskflow);
+        assert!(
+            o.notes.iter().any(|n| n.contains("rebuilt from generated/")),
+            "{:?}",
+            o.notes
+        );
+        let back = parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).unwrap();
+        assert_eq!(back.deskflow, c.deskflow);
+    }
+
+    #[test]
+    fn a_bad_deskflow_device_is_refused_and_writes_nothing() {
+        let d = TestDir::new("store", "deskflow-bad");
+        let mut o = open_session(&d);
+        let r = o.store.update(Table::Deskflow, |c| {
+            c.deskflow.devices = vec![crate::config::DeviceCfg {
+                name: "x".into(),
+                fingerprint: "nope".into(),
+                output: "DP-1".into(),
+                side: crate::kanshi::Side::Above,
+                clipboard: true,
+            }];
+        });
+        assert!(r.is_err());
+        assert!(gen_text(&d, "deskflow").is_none());
+        assert!(o.store.cfg.deskflow.devices.is_empty());
     }
 
     #[test]

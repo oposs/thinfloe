@@ -32,6 +32,8 @@ pub enum Table {
     PublicIp,
     /// `[time]`: the zone and the NTP servers.
     Time,
+    /// `[deskflow]`: the listener switch, the port and the paired devices.
+    Deskflow,
     Notice,
 }
 
@@ -45,6 +47,7 @@ impl Table {
             Table::Monitors => &["kanshi"],
             Table::Network => &["wifi.yaml", "ethernet.yaml"],
             Table::Time => &["time"],
+            Table::Deskflow => &["deskflow"],
         }
     }
 }
@@ -145,15 +148,25 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             }
             Ok(crate::timecfg::body(&time).map(|b| with_header(&b)))
         }
+        "deskflow" => {
+            crate::deskflowcfg::validate(&cfg.deskflow)?;
+            // Nothing is shared and nothing changed: no file; the daemon
+            // reads an absent file as the defaults.
+            if cfg.deskflow == crate::config::DeskflowCfg::default() {
+                return Ok(None);
+            }
+            Ok(Some(with_header(&crate::deskflowcfg::render(&cfg.deskflow))))
+        }
         other => Err(format!("No generated file named {other}")),
     }
 }
 
 /// The file mode of generated file `name`: the netplan files hold
-/// passwords.
+/// passwords, the Deskflow file the pairings.
 pub fn mode_of(name: &str) -> u32 {
     match name {
-        "wifi.yaml" | "ethernet.yaml" => 0o600,
+        // The device fingerprints are the pairings.
+        "wifi.yaml" | "ethernet.yaml" | "deskflow" => 0o600,
         _ => 0o644,
     }
 }
