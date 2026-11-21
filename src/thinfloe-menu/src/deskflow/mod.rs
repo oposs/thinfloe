@@ -9,6 +9,7 @@
 
 pub mod capture;
 pub mod edge;
+pub mod proto;
 
 use std::ffi::{CStr, OsString};
 use std::fs::File;
