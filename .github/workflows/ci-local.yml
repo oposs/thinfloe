@@ -2,10 +2,13 @@ name: CI (ThinFloe)
 
 # ThinFloe's own CI jobs, called from ci.yml (docs/release-ci.md, "CI
 # split"). `unit` runs the unit tests and gives a result within minutes;
-# `image` builds the rootfs once and runs the integration tests (not the unit
-# tests again), the image, the nine QEMU smoke tests
-# and the runtime tests on it. scripts/ci-runner-setup.sh prepares the
-# runner (docs/release-ci.md, "Runner setup for the project's workflows").
+# `image` builds the rootfs once, runs the integration tests (not the unit
+# tests again), builds the image, uploads the five files the smoke tests
+# read as the artifact `prebuilt` and runs the runtime tests. `smoke` runs
+# the nine QEMU smoke tests in three parallel jobs on those files
+# (PREBUILT=1, no rebuild; scripts/ci-check-prebuilt.sh checks that).
+# scripts/ci-runner-setup.sh prepares each runner (docs/release-ci.md,
+# "Runner setup for the project's workflows").
 on:
   workflow_call:
     inputs:
@@ -55,35 +58,66 @@ jobs:
       - name: make image
         run: make image MEMCAP=
 
-      - name: make qemu-smoke
-        run: make qemu-smoke MEMCAP=
+      - name: Record the prebuilt files
+        run: scripts/ci-check-prebuilt.sh record
 
-      - name: make qemu-smoke-netboot
-        run: make qemu-smoke-netboot MEMCAP=
-
-      - name: make qemu-smoke-upgrade
-        run: make qemu-smoke-upgrade MEMCAP=
-
-      - name: make qemu-smoke-write
-        run: make qemu-smoke-write MEMCAP=
-
-      - name: make qemu-smoke-grow
-        run: make qemu-smoke-grow MEMCAP=
-
-      - name: make qemu-smoke-two-sticks
-        run: make qemu-smoke-two-sticks MEMCAP=
-
-      - name: make qemu-smoke-addons
-        run: make qemu-smoke-addons MEMCAP=
-
-      - name: make qemu-smoke-timezone
-        run: make qemu-smoke-timezone MEMCAP=
-
-      - name: make qemu-smoke-timezone-netboot
-        run: make qemu-smoke-timezone-netboot MEMCAP=
+      # The files the smoke jobs read, and their manifest. Already
+      # compressed, so no further compression.
+      - name: Upload the prebuilt files
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilt
+          path: |
+            artifacts/rootfs/vmlinuz
+            artifacts/rootfs/initrd.img
+            artifacts/rootfs/ramroot.sqsh
+            artifacts/images/thinfloe-usb.img.zst
+            artifacts/images/thinfloe-usb.img.zst.sha256
+            artifacts/prebuilt.sha256
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
 
       - name: make test-runtime
         run: make test-runtime MEMCAP=
+
+  smoke:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BUILD_JOBS: "4"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: upgrade
+            targets: qemu-smoke-upgrade
+          - group: sticks
+            targets: qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow
+          - group: boot
+            targets: qemu-smoke qemu-smoke-netboot qemu-smoke-addons qemu-smoke-timezone qemu-smoke-timezone-netboot
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # qemu, KVM, user namespaces and podman unshare (time zone smoke test).
+      - name: Prepare the runner
+        run: scripts/ci-runner-setup.sh all
+
+      - name: Download the prebuilt files
+        uses: actions/download-artifact@v8
+        with:
+          name: prebuilt
+          path: artifacts
+
+      - name: make ${{ matrix.targets }}
+        run: make PREBUILT=1 MEMCAP= ${{ matrix.targets }}
+
+      - name: Check that nothing was rebuilt
+        if: success() || failure()
+        run: scripts/ci-check-prebuilt.sh verify
 
       # The serial console logs of the smoke tests, their .1 and .2 boots and
       # the write test's HTTP log; the console tail alone rarely says why a
@@ -92,6 +126,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: ci-logs
+          name: ci-logs-${{ matrix.group }}
           path: artifacts/images/*.log*
           if-no-files-found: ignore
