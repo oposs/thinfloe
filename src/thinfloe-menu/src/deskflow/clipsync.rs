@@ -20,31 +20,33 @@ pub enum ClipAct {
 pub struct ClipSync {
     /// ThinFloe's text as last seen, local or from a device.
     text: Option<Vec<u8>>,
-    /// The device that text came from: it has it already.
-    from: Option<usize>,
+    /// The devices that hold that text: the one it came from and those it
+    /// was sent to. They are not sent it again.
+    holders: Vec<usize>,
 }
 
 impl ClipSync {
     /// ThinFloe's selection changed: the device with the pointer gets the
-    /// text, every other device learns of the grab. The same bytes a device
-    /// just gave are not sent back to it.
+    /// text, every other device learns of the grab. A device that holds
+    /// the same bytes already (it gave them) gets neither.
     pub fn on_local(&mut self, text: Vec<u8>, active: Option<usize>, live: &[(usize, bool)]) -> Vec<ClipAct> {
         if self.text.as_ref() != Some(&text) {
-            self.from = None;
+            self.holders.clear();
         }
         let mut acts = Vec::new();
         if let Some(a) = active
-            && Some(a) != self.from
+            && !self.holders.contains(&a)
             && live.contains(&(a, true))
         {
             acts.push(ClipAct::Send {
                 conn: a,
                 text: text.clone(),
             });
+            self.holders.push(a);
         }
         acts.extend(
             live.iter()
-                .filter(|&&(c, on)| on && Some(c) != active && Some(c) != self.from)
+                .filter(|&&(c, on)| on && Some(c) != active && !self.holders.contains(&c))
                 .map(|&(conn, _)| ClipAct::Grab { conn }),
         );
         self.text = Some(text);
@@ -52,26 +54,33 @@ impl ClipSync {
     }
 
     /// The pointer entered a device: it gets ThinFloe's text, unless it
-    /// gave it.
+    /// holds it already.
     pub fn on_enter(&mut self, conn: usize, clipboard: bool) -> Vec<ClipAct> {
         match &self.text {
-            Some(text) if clipboard && self.from != Some(conn) => vec![ClipAct::Send {
-                conn,
-                text: text.clone(),
-            }],
+            Some(text) if clipboard && !self.holders.contains(&conn) => {
+                self.holders.push(conn);
+                vec![ClipAct::Send {
+                    conn,
+                    text: text.clone(),
+                }]
+            }
             _ => Vec::new(),
         }
     }
 
-    /// A device sent its text: it becomes ThinFloe's selection.
+    /// A device sent its text: it becomes ThinFloe's selection, and that
+    /// device is the only one holding it.
     pub fn on_remote(&mut self, conn: usize, text: Vec<u8>) -> Vec<ClipAct> {
         self.text = Some(text.clone());
-        self.from = Some(conn);
+        self.holders = vec![conn];
         vec![ClipAct::SetLocal(text)]
     }
 
-    /// A device took the clipboard: the others learn of it.
+    /// A device took the clipboard: the others learn of it. None holds
+    /// ThinFloe's text now (a Deskflow client empties its clipboard on a
+    /// grab), so the next enter sends it again.
     pub fn on_grabbed(&mut self, conn: usize, live: &[(usize, bool)]) -> Vec<ClipAct> {
+        self.holders.clear();
         live.iter()
             .filter(|&&(c, on)| on && c != conn)
             .map(|&(conn, _)| ClipAct::Grab { conn })
@@ -98,14 +107,8 @@ mod tests {
                 text: t("hello")
             }]
         );
-        // Each enter sends it again: the device may have changed its own.
-        assert_eq!(
-            s.on_enter(1, true),
-            [ClipAct::Send {
-                conn: 1,
-                text: t("hello")
-            }]
-        );
+        // The device holds it now: the next enter sends nothing.
+        assert!(s.on_enter(1, true).is_empty());
     }
 
     #[test]
@@ -174,13 +177,23 @@ mod tests {
                 ClipAct::Grab { conn: 2 }
             ]
         );
-        assert_eq!(
-            s.on_enter(1, true),
-            [ClipAct::Send {
-                conn: 1,
-                text: t("new")
-            }]
-        );
+        assert!(s.on_enter(1, true).is_empty());
+    }
+
+    #[test]
+    fn a_grab_or_remote_text_clears_what_a_device_holds() {
+        let mut s = ClipSync::default();
+        let live = [(1, true), (2, true)];
+        s.on_local(t("x"), None, &live);
+        assert_eq!(s.on_enter(1, true), [ClipAct::Send { conn: 1, text: t("x") }]);
+        assert!(s.on_enter(1, true).is_empty());
+        // Device 1 takes the clipboard: its copy of "x" is gone.
+        s.on_grabbed(1, &live);
+        assert_eq!(s.on_enter(1, true), [ClipAct::Send { conn: 1, text: t("x") }]);
+        // Device 2's text: device 1 no longer holds ThinFloe's text.
+        s.on_remote(2, t("y"));
+        assert_eq!(s.on_enter(1, true), [ClipAct::Send { conn: 1, text: t("y") }]);
+        assert!(s.on_enter(2, true).is_empty());
     }
 
     #[test]
