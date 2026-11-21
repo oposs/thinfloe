@@ -7,9 +7,14 @@
 //! line per capture event, begins a capture as soon as the pointer enters
 //! the strip and ends it on Escape, until SIGTERM.
 //!
+//! `--deskflow --probe-clip` is a test hook for the clipboard bridge: it
+//! prints `changed <len> <sha256-hex>` for each text another client puts on
+//! the clipboard and sets the clipboard from stdin lines `set <text>`.
+//!
 //! `--deskflow` alone is the daemon ([`run`]).
 
 pub mod capture;
+pub mod clip;
 pub mod clipdata;
 pub mod cmd;
 pub mod conn;
@@ -29,6 +34,7 @@ use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use capture::{CapEvent, Capture, OutputGeom, StripSpec};
 use edge::Rect;
@@ -38,6 +44,7 @@ pub const DESKFLOW_ARG: &str = "--deskflow";
 /// The pid of the menu that started the daemon (`deskflow_sup`).
 pub const PARENT_ENV: &str = "TF_DESKFLOW_PARENT";
 const PROBE_CAPTURE_ARG: &str = "--probe-capture";
+const PROBE_CLIP_ARG: &str = "--probe-clip";
 
 /// The evdev code of Escape, for a keymap that cannot be read.
 const KEY_ESC: u32 = 1;
@@ -71,10 +78,21 @@ pub fn deskflow_main(args: &[OsString]) -> ExitCode {
             }
         };
     }
+    if arg(0) == Some(PROBE_CLIP_ARG) {
+        return match probe_clip() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("thinfloe-menu --deskflow: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if args.is_empty() {
         return daemon();
     }
-    eprintln!("usage: thinfloe-menu --deskflow [--probe-capture <output> <left-of|right-of|above|below>]");
+    eprintln!(
+        "usage: thinfloe-menu --deskflow [--probe-capture <output> <left-of|right-of|above|below> | --probe-clip]"
+    );
     ExitCode::from(2)
 }
 
@@ -202,6 +220,80 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
                 };
                 if escape {
                     let _ = cap.end_capture();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn probe_clip() -> Result<(), String> {
+    install_sigterm();
+    let mut clip = clip::Clip::connect()?;
+    let mut input = Vec::new();
+    let mut stdin_open = true;
+    while !STOP.load(Ordering::SeqCst) {
+        clip.flush()?;
+        let now = Instant::now();
+        let mut fds = vec![
+            libc::pollfd {
+                fd: clip.fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if stdin_open { 0 } else { -1 },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        fds.extend(
+            clip.pipe_fds()
+                .into_iter()
+                .map(|(fd, events)| libc::pollfd { fd, events, revents: 0 }),
+        );
+        let wait = clip
+            .deadline()
+            .map_or(500, |d| d.saturating_duration_since(now).as_millis().min(500) as i32);
+        // SAFETY: fds is valid for fds.len() entries for the call.
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("poll: {e}"));
+        }
+        let now = Instant::now();
+        if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+            return Err("the compositor closed the connection".into());
+        }
+        let mut events = clip.dispatch(now)?;
+        for p in &fds[2..] {
+            if p.revents != 0 {
+                events.extend(clip.on_pipe_ready(p.fd, now));
+            }
+        }
+        events.extend(clip.tick(now));
+        for ev in events {
+            let clip::ClipEvent::Changed(text) = ev;
+            let digest = ring::digest::digest(&ring::digest::SHA256, &text);
+            let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+            println!("changed {} {hex}", text.len());
+        }
+        if fds[1].revents != 0 {
+            let mut buf = [0u8; 4096];
+            // SAFETY: buf is valid for buf.len() bytes.
+            let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            if n > 0 {
+                input.extend_from_slice(&buf[..n as usize]);
+            } else if n == 0 {
+                stdin_open = false;
+            }
+            while let Some(i) = input.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = input.drain(..=i).collect();
+                if let Some(text) = line.strip_prefix(b"set ") {
+                    clip.set_text(text.strip_suffix(b"\n").unwrap_or(text).to_vec());
                 }
             }
         }

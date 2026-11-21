@@ -1729,6 +1729,90 @@ run_capture_probe_case() {
 run_capture_probe_case
 
 
+# Deskflow clipboard bridge: 'thinfloe-menu --deskflow --probe-clip' on its
+# own Wayland connection against labwc's data-control protocol. wl-copy puts
+# a text on the clipboard and the probe prints 'changed <len> <sha256>'; a
+# 'set <text>' line on the probe's stdin makes that text the selection, which
+# wl-paste then reads; a 3 MB text (over the 1 MiB cap) produces no line, and
+# the probe still answers the next copy. The probe's stdin is a fifo the
+# script holds open. TF_RUNTIME_MENU names a host-built thinfloe-menu to use
+# instead of the image's (iteration only).
+# shellcheck disable=SC2016 # expands inside the container
+cl_script='mkfifo /tmp/clip.in
+thinfloe-menu --deskflow --probe-clip </tmp/clip.in >/tmp/clip.out 2>/tmp/clip.err &
+clip=$!
+exec 3>/tmp/clip.in
+sleep 2
+printf "hello clip" | wl-copy
+sleep 1.5
+echo "set text from the probe" >&3
+sleep 1.5
+wl-paste -n </dev/null >/tmp/pasted 2>&1
+echo "pasted: $(cat /tmp/pasted)"
+yes | head -c 3000000 | wl-copy
+sleep 3
+printf "after the big one" | wl-copy
+sleep 1.5
+kill $clip
+wait $clip
+echo clip_rc=$?
+sed "s/^/clip: /" /tmp/clip.out
+sed "s/^/cliperr: /" /tmp/clip.err | head -20
+exit 0'
+run_clip_probe_case() {
+    local name="thinfloe-runtime-test-clip-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CL_SCRIPT="$cl_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CL_SCRIPT" >/tmp/cl.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/cl.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after $RUNTIME_TIMEOUT s (labwc hang during the clipboard probe)"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag h1 h3 n
+    diag=$(grep -E '^(clip|cliperr): |^pasted: |^clip_rc=' <<<"$out" | tr '\n' '|')
+    h1=$(printf 'hello clip' | sha256sum | cut -d' ' -f1)
+    h3=$(printf 'after the big one' | sha256sum | cut -d' ' -f1)
+    if grep -qx "clip: changed 10 $h1" <<<"$out"; then
+        echo "ok   - a text another client copies reaches the clipboard bridge in full"
+    else
+        echo "FAIL - the probe did not report the copied text: $diag"
+        fail=1
+    fi
+    if grep -qx 'pasted: text from the probe' <<<"$out" && ! grep -q '^clip: changed 19 ' <<<"$out"; then
+        echo "ok   - the text the bridge sets is what wl-paste reads, and the bridge does not report its own selection"
+    else
+        echo "FAIL - the bridge's own text: $diag"
+        fail=1
+    fi
+    n=$(grep -c '^clip: changed ' <<<"$out")
+    if [[ $n -eq 2 ]] && grep -qx "clip: changed 17 $h3" <<<"$out"; then
+        echo "ok   - a 3 MB copy produces no event and the bridge answers the next copy"
+    else
+        echo "FAIL - after the 3 MB copy: $diag"
+        fail=1
+    fi
+    if grep -qx 'clip_rc=0' <<<"$out"; then
+        echo "ok   - the clipboard probe ends with 0 on SIGTERM"
+    else
+        echo "FAIL - the clipboard probe did not end with 0 on SIGTERM: $diag"
+        fail=1
+    fi
+}
+run_clip_probe_case
+
+
 # Deskflow interop: the stock Deskflow client (deskflow-core 1.26.0 of the
 # image's universe) against 'thinfloe-menu --deskflow', in one labwc.
 # deskflow-core has no flags for the connection: 'deskflow-core client
