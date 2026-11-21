@@ -177,9 +177,18 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
     }
 }
 
-/// The pending lines of the state file, in its order.
-pub fn pending(state: &StateFile) -> Vec<&DevLine> {
-    state.devices.iter().filter(|d| d.state == DevState::Pending).collect()
+/// The pending lines of the state file, in its order, while the daemon
+/// runs: a file left from an earlier run lists devices that can be neither
+/// attached nor rejected.
+pub fn pending(tab: &DeskflowTab) -> Vec<&DevLine> {
+    if !tab.running {
+        return Vec::new();
+    }
+    tab.state
+        .devices
+        .iter()
+        .filter(|d| d.state == DevState::Pending)
+        .collect()
 }
 
 /// The state file's line of an attached device: same name and fingerprint.
@@ -272,6 +281,13 @@ pub fn free_edges(
         }
     }
     free
+}
+
+/// The edges the Position control of the device `name` offers: the free
+/// ones and the edge a device of that name holds, so a device attached
+/// again under a new fingerprint can keep its edge.
+pub fn position_edges(profile: &Profile, heads: &[Head], devices: &[DeviceCfg], name: &str) -> Vec<(String, Side)> {
+    free_edges(profile, heads, devices, Some(name))
 }
 
 /// The edge of `dev` is not free in `profile` (its monitor missing or
@@ -693,6 +709,26 @@ mod tests {
         );
         assert_eq!(self_line(&tab, None).as_deref(), Some("This computer: 0.0.0.0:24800"));
         assert_eq!(self_fingerprint(&tab), Some(FP_A));
+    }
+
+    #[test]
+    fn pending_rows_show_only_while_the_daemon_runs() {
+        // A state file left from an earlier run lists a device that can be
+        // neither attached nor rejected.
+        let mut tab = with_pending();
+        assert!(pending(&tab).is_empty());
+        tab.running = true;
+        assert_eq!(pending(&tab).len(), 1);
+    }
+
+    #[test]
+    fn a_device_attached_again_may_keep_its_own_edge() {
+        let p = two();
+        let devs = [device("laptop", FP_B, "DP-2", Side::RightOf)];
+        let own = ("DP-2".to_string(), Side::RightOf);
+        // The pending line of the laptop's new fingerprint.
+        assert!(position_edges(&p, &[], &devs, "laptop").contains(&own));
+        assert!(!position_edges(&p, &[], &devs, "mac").contains(&own));
     }
 
     #[test]

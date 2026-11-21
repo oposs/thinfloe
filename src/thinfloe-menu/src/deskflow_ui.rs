@@ -110,7 +110,7 @@ pub fn band(
                     event = Some(DeskflowEvent::Resistance(r));
                 }
             });
-            for line in deskflowtab::pending(&tab.state) {
+            for line in deskflowtab::pending(tab) {
                 if let Some(e) = pending_row(ui, t, tab, mon, line) {
                     event = Some(e);
                 }
@@ -224,7 +224,7 @@ fn position(
     current: Option<&DeviceCfg>,
 ) -> Option<(String, Side)> {
     let free = mon.layout().map_or(Vec::new(), |l| {
-        deskflowtab::free_edges(l, mon.heads(), &tab.cfg.devices, current.map(|d| d.name.as_str()))
+        deskflowtab::position_edges(l, mon.heads(), &tab.cfg.devices, name)
     });
     if free.is_empty() && current.is_none() {
         muted(ui, t, NO_FREE_EDGE);
