@@ -92,7 +92,7 @@ class T(unittest.TestCase):
     def test_sleep(self):
         with open(%r, "a") as f:
             f.write("start %%f\\n" %% time.time())
-        time.sleep(0.5)
+        time.sleep(1.0)
         with open(%r, "a") as f:
             f.write("stop %%f\\n" %% time.time())
 """ % (str(log), str(log))
@@ -107,7 +107,20 @@ class T(unittest.TestCase):
         for _, delta in sorted(events, key=lambda e: (e[0], e[1])):
             live += delta
             peak = max(peak, live)
-        self.assertEqual(peak, 2)
+        self.assertLessEqual(peak, 2)
+        self.assertGreaterEqual(peak, 2)
+
+    def test_fast_module_is_printed_before_a_slower_earlier_one(self):
+        self.module("test_a.py", "import time, unittest\n"
+                    "class T(unittest.TestCase):\n"
+                    "    def test_slow(self):\n"
+                    "        time.sleep(2)\n")
+        self.module("test_b.py", PASS)
+        p = self.run_runner("-j", "2")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        order = [l.split()[1] for l in p.stdout.splitlines()
+                 if l.startswith("=== ")]
+        self.assertEqual(order, ["test_b.py:", "test_a.py:"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Usage: run-unit-tests.py [-j N] DIR
 Runs `python3 -m unittest -v <module>` for every DIR/test_*.py (top level
 only, sorted) with DIR as the working directory, at most N at a time (default
 4). Each module's output (stdout and stderr merged) is printed whole, under a
-header, when the module ends, so the output of two modules never mixes.
+header, as soon as the module ends, so the output of two modules never mixes.
 
 Exit status: 0 all modules passed, 1 a module failed, 2 no module found or
 DIR is not a directory.
@@ -15,7 +15,7 @@ import argparse
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -46,8 +46,8 @@ def main():
     failed = []
     with ThreadPoolExecutor(max_workers=max(1, args.j)) as pool:
         futures = [pool.submit(run_module, directory, n) for n in names]
-        # Print in module order: output stays readable and is deterministic.
-        for future in futures:
+        # Print as each module ends, so a slow module holds nothing back.
+        for future in as_completed(futures):
             name, passed, secs, output = future.result()
             if not passed:
                 failed.append(name)
