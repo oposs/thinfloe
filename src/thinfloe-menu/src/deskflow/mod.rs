@@ -8,11 +8,13 @@
 //! the strip and ends it on Escape, until SIGTERM.
 
 pub mod capture;
+pub mod cmd;
 pub mod edge;
 pub mod ident;
 pub mod pair;
 pub mod proto;
 pub mod session;
+pub mod statefile;
 pub mod tls;
 
 use std::ffi::{CStr, OsString};
