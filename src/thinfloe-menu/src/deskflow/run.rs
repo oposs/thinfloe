@@ -70,10 +70,24 @@ pub fn run(env: RunEnv) -> Result<(), String> {
     let sock = cmd::bind(&env.socket).map_err(|e| fail(&env.state, format!("command socket: {e}")))?;
     let wake = Wake::new().map_err(|e| fail(&env.state, e))?;
     wake.install_signals();
+    // The menu starts the daemon with SIGHUP blocked, so a reload before
+    // the handler was set waits for it instead of ending the daemon.
+    unblock_sighup();
     let capture = Capture::connect().map_err(|e| fail(&env.state, e))?;
     let beat = Watchdog::start();
     let mut d = Daemon::new(env, cfg, &id, listener, sock, Some(capture));
     d.serve(&wake, Some(&beat))
+}
+
+/// Unblock SIGHUP for this thread; a reload that waited arrives now.
+fn unblock_sighup() {
+    // SAFETY: a sigset on the stack, filled by sigemptyset and sigaddset.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
 }
 
 /// Writes the error head and hands the text back.

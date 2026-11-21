@@ -65,7 +65,13 @@ pub enum Wake {
     PublicIp,
     /// The status layout file changed.
     Status,
+    /// The Deskflow daemon ended.
+    Deskflow,
 }
+
+/// Before the menu exits, how long the Deskflow daemon has after SIGTERM
+/// (spec, Processes); SIGKILL follows.
+const DESKFLOW_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How often the add-on files are looked at, while the window is visible.
 const ADDON_POLL: Duration = Duration::from_secs(1);
@@ -176,6 +182,8 @@ pub struct App {
     /// last frame: what `sync_samplers` decides from.
     covered: bool,
     height: f32,
+    /// The Deskflow daemon, run while `[deskflow] listen` is on.
+    deskflow: crate::deskflow_sup::Supervisor,
 }
 
 /// Starts a sampler thread with its `on` flag and returns its shared copy.
@@ -384,7 +392,18 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
             }),
         )
     };
+    // Spawned from this thread only (tick in about_to_wait): the daemon's
+    // PR_SET_PDEATHSIG follows the thread that forked it, and the event
+    // loop's thread lives as long as the menu.
+    let deskflow = {
+        let waker = event_loop.create_proxy();
+        let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/thinfloe-menu"));
+        crate::deskflow_sup::Supervisor::new(program).with_notify(move || {
+            let _ = waker.send_event(Wake::Deskflow);
+        })
+    };
     let mut app = App {
+        deskflow,
         samplers,
         covered: false,
         height: ui::SHORT_SCREEN_H,
@@ -407,7 +426,12 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     // Before the first frame, so a sampler the layout needs has a reading
     // by the time the area shows. The first frame corrects the height.
     app.sync_samplers();
-    event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
+    app.deskflow_changed();
+    let ran = event_loop.run_app(&mut app).map_err(|e| e.to_string());
+    // Every way out, also an exit 0, 10 or 11 after its save: the daemon
+    // must not hold port 24800 into the next session.
+    app.deskflow.stop(DESKFLOW_STOP_WAIT);
+    ran?;
     app.exit
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
 }
@@ -835,6 +859,15 @@ fn frame_wanted(covered: bool, frame_due: Option<Instant>, now: Instant) -> bool
     !covered || frame_due.is_some_and(|due| due <= now)
 }
 
+/// Wake the loop at `at` at the latest, keeping an earlier deadline.
+fn wake_by(event_loop: &ActiveEventLoop, at: Instant) {
+    match event_loop.control_flow() {
+        ControlFlow::WaitUntil(t) if t <= at => {}
+        ControlFlow::Poll => {}
+        _ => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+    }
+}
+
 fn wake_flow(at: Option<Instant>) -> ControlFlow {
     at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
@@ -918,6 +951,24 @@ impl App {
             self.height,
             menu.netstat.as_ref(),
         );
+    }
+
+    /// `[deskflow]` was written (or the menu starts): a running daemon
+    /// reads its file again, and it runs as the switch says. Call after
+    /// each successful `store.update(Table::Deskflow, …)`. The reload comes
+    /// first: a daemon started now reads the new file anyway.
+    fn deskflow_changed(&mut self) {
+        let listen = self
+            .cfg
+            .paths
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cfg
+            .deskflow
+            .listen;
+        self.deskflow.reload();
+        self.deskflow.want(listen, Instant::now());
     }
 
     /// Read the status layout file again: the person or the menu changed it.
@@ -1471,12 +1522,12 @@ impl ApplicationHandler<Wake> for App {
         self.sync_menu_output(event_loop);
         let now = Instant::now();
         if let Some(d) = self.menu_move.next_wake(now) {
-            let at = now + d;
-            match event_loop.control_flow() {
-                ControlFlow::WaitUntil(t) if t <= at => {}
-                ControlFlow::Poll => {}
-                _ => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-            }
+            wake_by(event_loop, now + d);
+        }
+        // A daemon that ended wakes the loop (Wake::Deskflow); a start or a
+        // SIGKILL that is due sets a deadline.
+        if let Some(at) = self.deskflow.tick(now) {
+            wake_by(event_loop, at);
         }
     }
 
@@ -1525,6 +1576,8 @@ impl ApplicationHandler<Wake> for App {
                     self.apply(effect, event_loop);
                 }
             }
+            // about_to_wait reaps it and starts it again.
+            Wake::Deskflow => {}
             Wake::Output | Wake::Network | Wake::Hardware | Wake::PublicIp => {}
         }
         if let Some(live) = self.live.as_ref() {

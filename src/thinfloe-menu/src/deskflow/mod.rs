@@ -34,6 +34,8 @@ use edge::Rect;
 use keymap::{Xkb, keysym_name};
 
 pub const DESKFLOW_ARG: &str = "--deskflow";
+/// The pid of the menu that started the daemon (`deskflow_sup`).
+pub const PARENT_ENV: &str = "TF_DESKFLOW_PARENT";
 const PROBE_CAPTURE_ARG: &str = "--probe-capture";
 
 /// The evdev code of Escape, for a keymap that cannot be read.
@@ -81,10 +83,20 @@ fn daemon() -> ExitCode {
         eprintln!("thinfloe-menu --deskflow: {e}");
         ExitCode::from(1)
     };
-    // The menu starts the daemon; it must not outlive it.
-    // SAFETY: prctl with integer arguments only.
+    // The menu starts the daemon; it must not outlive it. A parent that
+    // died before the prctl sends nothing, so the parent is checked after
+    // it: the menu's pid from the environment, else the parent at start.
+    // SAFETY: getppid and prctl take no pointers.
+    let parent = std::env::var(PARENT_ENV)
+        .ok()
+        .and_then(|p| p.parse::<libc::pid_t>().ok())
+        .unwrap_or_else(|| unsafe { libc::getppid() });
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0) } != 0 {
         return fail(&format!("PR_SET_PDEATHSIG: {}", std::io::Error::last_os_error()));
+    }
+    if unsafe { libc::getppid() } != parent {
+        eprintln!("thinfloe-menu --deskflow: the menu that started it is gone");
+        return ExitCode::SUCCESS;
     }
     let (Some(state), Some(socket)) = (statefile::path(), cmd::socket_path()) else {
         return fail("XDG_RUNTIME_DIR is not set");

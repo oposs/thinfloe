@@ -11,6 +11,7 @@ pub mod convert;
 pub mod damage;
 pub mod density;
 pub mod deskflow;
+pub mod deskflow_sup;
 pub mod deskflowcfg;
 pub mod desktop;
 pub mod drives;

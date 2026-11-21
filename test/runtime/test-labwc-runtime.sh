@@ -2028,4 +2028,105 @@ run_deskflow_forward_case() {
 }
 run_deskflow_forward_case
 
+# The menu runs the Deskflow daemon (spec, Processes): with '[deskflow]
+# listen = true' in config.toml it starts 'thinfloe-menu --deskflow' in a
+# process group of its own, which listens on 24800. Log out (exit 0) and
+# Restart (exit 10) end the daemon before the menu's status reaches the
+# session; a menu killed with SIGKILL takes it along (PR_SET_PDEATHSIG);
+# a daemon killed with SIGKILL is started again after the first back-off
+# of 1 s. After an exit 0 or 10 the daemon is gone already: the menu
+# waited for it. The only tile is the one clicked (the centre of the grid's first
+# row, 640,240 on the 1280x720 output); TF_SAVE_HOME=/bin/true is a save
+# that succeeds.
+# shellcheck disable=SC2016 # expands inside the container
+lc_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_MENU_SHIPPED_DIR=/tmp/tiles TF_MENU_USER_DIR=/tmp/utiles TF_SAVE_HOME=/bin/true TF_STATE_DIR=/tmp/state
+mkdir -p $TF_CONFIG_DIR /tmp/tiles /tmp/utiles /tmp/state
+printf "[deskflow]\nlisten = true\nport = 24800\n" >$TF_CONFIG_DIR/config.toml
+upto() { n=$(($1 * 10)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.1; n=$((n - 1)); done; return 1; }
+daemon() { pgrep -f "^/usr/bin/thinfloe-menu --deskflow\$"; }
+up() { daemon >/dev/null && ss -Hltn "sport = :24800" | grep -q .; }
+down() { ! daemon >/dev/null && ! ss -Hltn "sport = :24800" | grep -q .; }
+fresh() { p=$(daemon) && [ "$p" != "$d" ]; }
+tile() { printf "[Desktop Entry]\nType=Application\nName=%s\nIcon=log-out\nX-TF-Action=%s\n" "$1" "$2" >/tmp/tiles/90-end.desktop; }
+start() { thinfloe-menu >>/tmp/m.err 2>&1 & mpid=$!; }
+click() { wlrctl pointer move -5000 -5000; wlrctl pointer move 640 240; wlrctl pointer click left; }
+tile "Log out" logout
+start
+upto 15 up && echo up1=yes || echo up1=no
+d=$(daemon)
+[ -n "$d" ] && [ "$(ps -o pgid= -p "$d" | tr -d " ")" = "$d" ] && echo group=yes || echo group=no
+click
+wait $mpid
+echo logout_rc=$?
+down && echo logout_gone=yes || echo logout_gone=no
+tile Restart reboot
+start
+upto 15 up && echo up2=yes || echo up2=no
+click
+wait $mpid
+echo restart_rc=$?
+down && echo restart_gone=yes || echo restart_gone=no
+start
+upto 15 up && echo up3=yes || echo up3=no
+kill -9 $mpid
+upto 2 down && echo killed_gone=yes || echo killed_gone=no
+start
+upto 15 up && echo up4=yes || echo up4=no
+d=$(daemon)
+kill -9 "$d"
+upto 2 fresh && echo again=yes || echo again=no
+upto 5 up && echo up5=yes || echo up5=no
+kill $mpid
+wait $mpid
+upto 2 down && echo end_gone=yes || echo end_gone=no
+sed "s/^/merr: /" /tmp/m.err | grep -v "^merr: thinfloe-menu: icon" | tail -30
+exit 0'
+run_deskflow_lifecycle_case() {
+    local name="thinfloe-runtime-test-lc-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e LC_SCRIPT="$lc_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$LC_SCRIPT" >/tmp/lc.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/lc.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow lifecycle case)"
+        grep -E '^merr: |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^merr: |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|')"
+    lc_ok() { grep -qx "$1" <<<"$out"; }
+    lc_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    lc_ok up1=yes && lc_ok group=yes
+    lc_check $? "deskflow_lifecycle: with listen = true the menu runs 'thinfloe-menu --deskflow' in a process group of its own, listening on 24800"
+    lc_ok up1=yes && lc_ok logout_rc=0 && lc_ok logout_gone=yes
+    lc_check $? "deskflow_lifecycle: after Log out (exit 0) no --deskflow process and no listener on 24800"
+    lc_ok up2=yes && lc_ok restart_rc=10 && lc_ok restart_gone=yes
+    lc_check $? "deskflow_lifecycle: after Restart (exit 10) no --deskflow process and no listener on 24800"
+    lc_ok up3=yes && lc_ok killed_gone=yes
+    lc_check $? "deskflow_lifecycle: a menu killed with SIGKILL takes the daemon along within 2 s"
+    lc_ok up4=yes && lc_ok again=yes && lc_ok up5=yes
+    lc_check $? "deskflow_lifecycle: a daemon killed with SIGKILL is started again within 2 s and listens again"
+    lc_ok up5=yes && lc_ok end_gone=yes
+    lc_check $? "deskflow_lifecycle: a menu ended by SIGTERM leaves no daemon behind"
+}
+run_deskflow_lifecycle_case
+
 exit $fail
