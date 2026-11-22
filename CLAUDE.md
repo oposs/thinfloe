@@ -208,7 +208,8 @@ defines none, and `containers/ubuntu/patches/0005-no-default-keybinds.patch`
 removes that fallback. `thinfloe-compose-labwc-config` adds bindings only
 when a switch in Settings → Keyboard is on, and then exactly the six media
 keys with `allowWhenInhibited="yes"` (patch `0006`), which pass a ThinLinc
-grab or an OxuLnk inhibitor; every other key reaches the focused program.
+grab or an OxuLnk inhibitor but not the Deskflow capture strip's inhibitor
+(patch `0007`); every other key reaches the focused program.
 Adding any other binding is a deliberate decision followed by `make
 test-runtime`. Guards: `test-session-packages.sh`,
 `test-labwc-config-merge.sh`, `test-labwc-runtime.sh` (no `load default key
@@ -237,7 +238,8 @@ Guards: `scripts/check-boot-smoke.sh` (any `Found ordering cycle`),
 The Dockerfile builds `labwc_0.9.3-1+thinfloe1` with
 `containers/ubuntu/patches/` (fullscreen across outputs,
 `LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`;
-no default keybindings, `0005`; `allowWhenInhibited` on a keybind, `0006`).
+no default keybindings, `0005`; `allowWhenInhibited` on a keybind, `0006`; a layer-surface inhibitor
+blocks every keybinding, `0007`).
 The archive package silently loses all of them. Patches, overlay and brand
 directories are `Makefile` prerequisites. Guards: `make test`, `make
 test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.

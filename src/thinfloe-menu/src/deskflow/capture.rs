@@ -34,6 +34,9 @@ use wayland_client::protocol::{
     wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
+    zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
+};
 use wayland_protocols::wp::pointer_constraints::zv1::client::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
 use wayland_protocols::wp::relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
@@ -264,6 +267,9 @@ struct State {
     xdg_outputs: zxdg_output_manager_v1::ZxdgOutputManagerV1,
     constraints: zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
     relative_mgr: zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+    /// None on a compositor without it: the capture works, but the
+    /// compositor's media keys still run while it is on.
+    inhibit_mgr: Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
     seat: wl_seat::WlSeat,
     pointer: Option<wl_pointer::WlPointer>,
     relative: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
@@ -277,6 +283,10 @@ struct State {
     captured: Option<u32>,
     lock: Option<zwp_locked_pointer_v1::ZwpLockedPointerV1>,
     locked: bool,
+    /// The captured strip's shortcuts inhibitor: ThinFloe's labwc runs no
+    /// keybinding, not even a media key, while the strip has the keyboard
+    /// (patch 0007), so every key goes to the device.
+    inhibitor: Option<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1>,
     wheel: Wheel,
     events: Vec<CapEvent>,
     outputs_changed: bool,
@@ -309,6 +319,7 @@ impl Capture {
             relative_mgr: globals
                 .bind(&qh, 1..=1, ())
                 .map_err(err("zwp_relative_pointer_manager_v1"))?,
+            inhibit_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             seat: globals.bind(&qh, 5..=8, ()).map_err(err("wl_seat v5"))?,
             pointer: None,
             relative: None,
@@ -319,6 +330,7 @@ impl Capture {
             captured: None,
             lock: None,
             locked: false,
+            inhibitor: None,
             wheel: Wheel::default(),
             events: Vec::new(),
             outputs_changed: false,
@@ -440,6 +452,10 @@ impl Capture {
         ));
         st.layer
             .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        s.inhibitor = s
+            .inhibit_mgr
+            .as_ref()
+            .map(|m| m.inhibit_shortcuts(&st.surface, &s.seat, &qh, ()));
         st.surface.commit();
         s.captured = Some(strip);
         s.locked = false;
@@ -460,6 +476,9 @@ impl State {
         };
         if let Some(lock) = self.lock.take() {
             lock.destroy();
+        }
+        if let Some(inhibitor) = self.inhibitor.take() {
+            inhibitor.destroy();
         }
         self.locked = false;
         if let Some(st) = self.strips.iter().find(|x| x.spec.id == id) {
@@ -939,7 +958,9 @@ no_events!(
     zwlr_layer_shell_v1::ZwlrLayerShellV1,
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-    zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+    zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
+    zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1
 );
 
 #[cfg(test)]

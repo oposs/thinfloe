@@ -926,8 +926,10 @@ fi
 # default keymap in this rig does not). Under the grab only the marked binding runs and the
 # plain key reaches the probe; the control run without the grab runs both
 # bindings, which proves the rig sends both keys.
-# No client in this rig creates a zwp_keyboard_shortcuts_inhibitor_v1; the
-# OxuLnk path rests on the same line of labwc and stays an owner check.
+# No client in this rig creates a zwp_keyboard_shortcuts_inhibitor_v1 on a
+# window; the OxuLnk path rests on the same line of labwc and stays an owner
+# check. (The layer inhibitor case after the capture case puts one on a layer
+# surface.)
 # shellcheck disable=SC2016 # expands inside the container
 gb_rcxml='<?xml version="1.0"?>
 <labwc_config>
@@ -1729,6 +1731,109 @@ run_capture_probe_case() {
     fi
 }
 run_capture_probe_case
+
+# While the Deskflow capture strip holds the keyboard, every key belongs to
+# the device, the volume and brightness keys too
+# (containers/ubuntu/patches/0007-layer-inhibitor-blocks-all-keybinds.patch).
+# The capture probe takes the strip's keyboard exclusively and puts a
+# zwp_keyboard_shortcuts_inhibitor_v1 on it; THINFLOE_VOLUME_KEYS=on composes
+# the media key bindings (allowWhenInhibited="yes") with TF_OSD_KEY_CMD
+# pointing at a recorder that appends its argument to /tmp/hits. wtype sends
+# XF86AudioRaiseVolume while the strip is captured (the probe must get it,
+# the recorder must not run), Escape (the probe ends the capture), the key
+# again (the recorder runs) and, after the probe has exited, once more (the
+# recorder runs). The grab run does the same over a fullscreen X11 window
+# holding a keyboard grab, which alone lets the media keys pass (0006): the
+# strip's inhibitor still wins, and the X window gets none of the keys. As
+# in the capture case, wtype starts first and --keymap names its key codes
+# (1 XF86AudioRaiseVolume, 2 Escape). TF_RUNTIME_MENU names a host-built
+# thinfloe-menu to use instead of the image's (iteration only).
+# shellcheck disable=SC2016 # expands inside the container
+li_script='wtype -s 9000 -k XF86AudioRaiseVolume -s 1500 -k Escape -s 1500 -k XF86AudioRaiseVolume -s 2500 -k XF86AudioRaiseVolume &
+sleep 0.5
+if [ "$LI_MODE" = grab ]; then
+    python3 /usr/local/bin/x11-probe.py --grab --fullscreen --keymap XF86AudioRaiseVolume,Escape --keys 16 >/tmp/xkeys 2>&1 &
+fi
+sleep 5
+thinfloe-menu --deskflow --probe-capture HEADLESS-1 right-of >/tmp/cap.out 2>/tmp/cap.err &
+cap=$!
+sleep 1.5
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 5000 360
+sleep 2.7
+echo "hits_captured=$(tr "\n" " " </tmp/hits)"
+sleep 3
+echo "hits_released=$(tr "\n" " " </tmp/hits)"
+kill $cap
+wait $cap
+echo cap_rc=$?
+sleep 2.2
+echo "hits_exited=$(tr "\n" " " </tmp/hits)"
+wait
+sed "s/^/cap: /" /tmp/cap.out
+sed "s/^/caperr: /" /tmp/cap.err | head -40
+[ -e /tmp/xkeys ] && sed "s/^/x11: /" /tmp/xkeys
+exit 0'
+run_layer_inhibit_case() {
+    local mode="$1" name="thinfloe-runtime-test-li-$1-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e TF_OSD_KEY_CMD="sh /tmp/rec.sh" \
+        -e LI_MODE="$mode" \
+        -e LI_SCRIPT="$li_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/cfg/generated && chmod 700 /tmp/xdg && touch /tmp/hits &&
+               printf "echo \"\$1\" >>/tmp/hits\n" >/tmp/rec.sh &&
+               printf "%s\n" "$LI_SCRIPT" >/tmp/li.sh &&
+               printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/cfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/cfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               WAYLAND_DEBUG=server labwc -C /tmp/xdg/thinfloe-labwc -S "sh /tmp/li.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the layer inhibitor case, $mode)"
+        grep -E '^(cap|caperr|x11): |^hits_|^cap_rc=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local cap x11 diag
+    cap=$(grep '^cap: ' <<<"$out" | cut -c6-)
+    x11=$(grep '^x11: ' <<<"$out" | cut -c6- | tr '\n' ' ')
+    diag="probe: $(tr '\n' '|' <<<"$cap") stderr: $(grep '^caperr: ' <<<"$out" | cut -c9- | tr '\n' '|') X window: '$x11' $(grep -E '^(hits_[a-z]*|cap_rc)=' <<<"$out" | tr '\n' ' ')"
+    if [[ $mode == grab ]] && ! grep -Eq 'zwp_xwayland_keyboard_grab_manager_v1[@#][0-9]+\.grab_keyboard\(' <<<"$out"; then
+        echo "FAIL - the X window took no keyboard grab, so the layer inhibitor case ($mode) proves nothing: $diag"
+        fail=1
+        return
+    fi
+    if ! grep -Eq 'zwp_keyboard_shortcuts_inhibit_manager_v1[@#][0-9]+\.inhibit_shortcuts\(' <<<"$out"; then
+        echo "FAIL - the capture strip asked for no shortcuts inhibitor ($mode): $diag"
+        fail=1
+    fi
+    if awk '/^locked$/ && !l {l=NR} / down XF86AudioRaiseVolume$/ && l {k=1} END {exit !k}' <<<"$cap" &&
+        grep -qx 'hits_captured=' <<<"$out"; then
+        echo "ok   - while the strip is captured ($mode) the volume key reaches the probe and runs no binding"
+    else
+        echo "FAIL - volume key while captured ($mode): $diag"
+        fail=1
+    fi
+    if grep -qx 'hits_released=volume-up ' <<<"$out" && grep -qx 'hits_exited=volume-up volume-up ' <<<"$out"; then
+        echo "ok   - once the capture ends and once the probe exits ($mode) the volume key runs its binding again"
+    else
+        echo "FAIL - volume key after the capture ($mode): $diag"
+        fail=1
+    fi
+    if [[ $mode == grab && " $x11" == *" KEY XF86AudioRaiseVolume "* ]]; then
+        echo "FAIL - the volume key reached the grabbing X window ($mode): $diag"
+        fail=1
+    fi
+}
+run_layer_inhibit_case plain
+run_layer_inhibit_case grab
 
 
 # Deskflow clipboard bridge: 'thinfloe-menu --deskflow --probe-clip' on its
