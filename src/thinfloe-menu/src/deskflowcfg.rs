@@ -133,6 +133,7 @@ mod tests {
             output: output.into(),
             side,
             clipboard: true,
+            compose: false,
         }
     }
 
@@ -264,5 +265,21 @@ mod tests {
     #[test]
     fn generated_mode_0600() {
         assert_eq!(crate::generated::mode_of("deskflow"), 0o600);
+    }
+
+    #[test]
+    fn compose_defaults_false_and_roundtrips() {
+        let absent = "[[deskflow.device]]\nname = \"a\"\nfingerprint = \"x\"\noutput = \"o\"\nside = \"above\"\n";
+        let c = crate::config::parse(absent).unwrap();
+        assert!(!c.deskflow.devices[0].compose);
+
+        let on = format!("{absent}compose = true\n");
+        let c = crate::config::parse(&on).unwrap();
+        assert!(c.deskflow.devices[0].compose);
+        let again = crate::config::parse(&crate::config::to_text(&c)).unwrap();
+        assert!(again.deskflow.devices[0].compose);
+
+        let g = parse(&render(&c.deskflow, false)).unwrap();
+        assert!(g.deskflow.devices[0].compose);
     }
 }

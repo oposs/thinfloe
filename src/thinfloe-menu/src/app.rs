@@ -2690,6 +2690,7 @@ esac"#;
             output: "DP-1".into(),
             side: crate::kanshi::Side::RightOf,
             clipboard: true,
+            compose: false,
         });
         let (written, next) = apply_deskflow(cfg.clone(), &store, &mut menu);
         assert!(written);

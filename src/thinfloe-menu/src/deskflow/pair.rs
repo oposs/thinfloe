@@ -128,6 +128,7 @@ mod tests {
             output: "DP-1".into(),
             side: Side::RightOf,
             clipboard: true,
+            compose: false,
         }
     }
 

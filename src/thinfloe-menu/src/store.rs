@@ -497,6 +497,7 @@ mod tests {
             output: "DP-1".into(),
             side: crate::kanshi::Side::RightOf,
             clipboard: true,
+            compose: false,
         }];
         let mut o = open_session(&d);
         o.store
@@ -576,6 +577,7 @@ mod tests {
                 output: "DP-1".into(),
                 side: crate::kanshi::Side::Above,
                 clipboard: true,
+                compose: false,
             }];
         });
         assert!(r.is_err());

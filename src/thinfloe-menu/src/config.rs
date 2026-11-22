@@ -485,6 +485,8 @@ pub struct DeviceCfg {
     pub side: Side,
     #[serde(default = "default_true")]
     pub clipboard: bool,
+    #[serde(default)]
+    pub compose: bool,
 }
 
 fn default_true() -> bool {

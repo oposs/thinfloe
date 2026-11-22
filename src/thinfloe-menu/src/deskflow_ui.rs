@@ -30,6 +30,7 @@ const BLOCK_GAP: f32 = 8.0;
 const HEX_BYTES_PER_LINE: usize = 16;
 
 const CLIPBOARD_TEXT: &str = "Share the clipboard";
+const COMPOSE_TEXT: &str = "Handle Compose key on ThinFloe";
 const LISTEN_TEXT: &str = "Let other computers use this keyboard and mouse (Deskflow)";
 const CHECK_NOTE: &str = "Check this fingerprint on the other computer before you trust it there.";
 const NOT_FREE: &str = "This edge is not free in the current arrangement.";
@@ -204,16 +205,18 @@ fn device_rows(ui: &mut Ui, t: &Theme, tab: &DeskflowTab, mon: &MonTab, d: &Devi
     if inactive {
         warn(ui, t, NOT_FREE);
     }
-    let mut share = d.clipboard;
-    ui.horizontal(|ui| {
-        if ui.add(Switch::new(&mut share)).changed() {
-            event = Some(DeskflowEvent::Clipboard {
-                name: d.name.clone(),
-                on: share,
-            });
-        }
-        ui.label(RichText::new(CLIPBOARD_TEXT).color(t.palette().foreground));
-    });
+    if let Some(on) = switch_row(ui, t, d.clipboard, CLIPBOARD_TEXT) {
+        event = Some(DeskflowEvent::Clipboard {
+            name: d.name.clone(),
+            on,
+        });
+    }
+    if let Some(on) = switch_row(ui, t, d.compose, COMPOSE_TEXT) {
+        event = Some(DeskflowEvent::Compose {
+            name: d.name.clone(),
+            on,
+        });
+    }
     if ui
         .add(Button::new("Forget").variant(ButtonVariant::Secondary))
         .clicked()
@@ -221,6 +224,18 @@ fn device_rows(ui: &mut Ui, t: &Theme, tab: &DeskflowTab, mon: &MonTab, d: &Devi
         event = Some(DeskflowEvent::Forget { name: d.name.clone() });
     }
     event
+}
+
+/// A labeled switch row; returns the new state when toggled.
+fn switch_row(ui: &mut Ui, t: &Theme, mut on: bool, label: &str) -> Option<bool> {
+    let mut next = None;
+    ui.horizontal(|ui| {
+        if ui.add(Switch::new(&mut on)).changed() {
+            next = Some(on);
+        }
+        ui.label(RichText::new(label).color(t.palette().foreground));
+    });
+    next
 }
 
 /// The Position control: one select of the free edges ("Right of DP-1").
