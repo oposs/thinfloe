@@ -8,6 +8,7 @@ use crate::addons::{self, AddonLog};
 use crate::battery;
 use crate::damage::Tracker;
 use crate::density::{self, OutputInfo};
+use crate::deskflowtab::DeskflowRequest;
 use crate::icons::IconRoots;
 use crate::jobs::{self, JobResult, Paths};
 use crate::log::Feed;
@@ -65,7 +66,15 @@ pub enum Wake {
     PublicIp,
     /// The status layout file changed.
     Status,
+    /// The Deskflow daemon ended.
+    Deskflow,
+    /// The Deskflow daemon's state file changed.
+    DeskflowState,
 }
+
+/// Before the menu exits, how long the Deskflow daemon has after SIGTERM
+/// (spec, Processes); SIGKILL follows.
+const DESKFLOW_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How often the add-on files are looked at, while the window is visible.
 const ADDON_POLL: Duration = Duration::from_secs(1);
@@ -176,6 +185,8 @@ pub struct App {
     /// last frame: what `sync_samplers` decides from.
     covered: bool,
     height: f32,
+    /// The Deskflow daemon, run while `[deskflow] listen` is on.
+    deskflow: crate::deskflow_sup::Supervisor,
 }
 
 /// Starts a sampler thread with its `on` flag and returns its shared copy.
@@ -384,7 +395,18 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
             }),
         )
     };
+    // Spawned from this thread only (tick in about_to_wait): the daemon's
+    // PR_SET_PDEATHSIG follows the thread that forked it, and the event
+    // loop's thread lives as long as the menu.
+    let deskflow = {
+        let waker = event_loop.create_proxy();
+        let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/thinfloe-menu"));
+        crate::deskflow_sup::Supervisor::new(program).with_notify(move || {
+            let _ = waker.send_event(Wake::Deskflow);
+        })
+    };
     let mut app = App {
+        deskflow,
         samplers,
         covered: false,
         height: ui::SHORT_SCREEN_H,
@@ -407,7 +429,12 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     // Before the first frame, so a sampler the layout needs has a reading
     // by the time the area shows. The first frame corrects the height.
     app.sync_samplers();
-    event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
+    app.deskflow_changed();
+    let ran = event_loop.run_app(&mut app).map_err(|e| e.to_string());
+    // Every way out, also an exit 0, 10 or 11 after its save: the daemon
+    // must not hold port 24800 into the next session.
+    app.deskflow.stop(DESKFLOW_STOP_WAIT);
+    ran?;
     app.exit
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
 }
@@ -424,6 +451,9 @@ struct Watch {
     battery: battery::Watcher,
     /// A stamp watcher like the battery file's.
     status: battery::Watcher,
+    /// The Deskflow daemon's state file, looked at like the battery file.
+    deskflow_state: Option<PathBuf>,
+    deskflow: battery::Watcher,
 }
 
 impl Watch {
@@ -440,6 +470,8 @@ impl Watch {
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
             status: battery::Watcher::default(),
+            deskflow_state: crate::deskflow::statefile::path(),
+            deskflow: battery::Watcher::default(),
         }
     }
 
@@ -457,6 +489,11 @@ impl Watch {
         }
         if self.status.tick(&self.config_toml) {
             wakes.push(Wake::Status);
+        }
+        if let Some(p) = self.deskflow_state.as_ref()
+            && self.deskflow.tick(p)
+        {
+            wakes.push(Wake::DeskflowState);
         }
         wakes
     }
@@ -835,6 +872,15 @@ fn frame_wanted(covered: bool, frame_due: Option<Instant>, now: Instant) -> bool
     !covered || frame_due.is_some_and(|due| due <= now)
 }
 
+/// Wake the loop at `at` at the latest, keeping an earlier deadline.
+fn wake_by(event_loop: &ActiveEventLoop, at: Instant) {
+    match event_loop.control_flow() {
+        ControlFlow::WaitUntil(t) if t <= at => {}
+        ControlFlow::Poll => {}
+        _ => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+    }
+}
+
 fn wake_flow(at: Option<Instant>) -> ControlFlow {
     at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
@@ -920,6 +966,24 @@ impl App {
         );
     }
 
+    /// `[deskflow]` was written (or the menu starts): a running daemon
+    /// reads its file again, and it runs as the switch says. Call after
+    /// each successful `store.update(Table::Deskflow, …)`. The reload comes
+    /// first: a daemon started now reads the new file anyway.
+    fn deskflow_changed(&mut self) {
+        let listen = self
+            .cfg
+            .paths
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cfg
+            .deskflow
+            .listen;
+        self.deskflow.reload();
+        self.deskflow.want(listen, Instant::now());
+    }
+
     /// Read the status layout file again: the person or the menu changed it.
     fn refresh_status(&mut self) {
         reload_status(
@@ -929,6 +993,12 @@ impl App {
             self.covered,
             self.height,
         );
+    }
+
+    /// Read the Deskflow daemon's state file again.
+    fn refresh_deskflow_state(&mut self) {
+        self.cfg.menu.deskflow.state = crate::deskflow::statefile::path()
+            .map_or_else(crate::deskflowtab::no_state, |p| crate::deskflowtab::read_state(&p));
     }
 
     /// Read the battery file again.
@@ -1040,6 +1110,19 @@ impl App {
                 let next = apply_screen(idle, &self.cfg.screen, &self.cfg.paths.config, &mut self.cfg.menu);
                 self.apply(next, event_loop);
             }
+            Some(Effect::Deskflow(DeskflowRequest::Save(cfg))) => {
+                // The store writes generated/deskflow before config.toml,
+                // so the daemon reads the new table once it is signalled.
+                let (written, next) = apply_deskflow(cfg, &self.cfg.paths.config, &mut self.cfg.menu);
+                if written {
+                    self.deskflow_changed();
+                }
+                self.apply(next, event_loop);
+            }
+            Some(Effect::Deskflow(DeskflowRequest::Send(cmd))) => {
+                let error = send_deskflow(&cmd).err();
+                self.cfg.menu.deskflow_sent(error);
+            }
             None => {}
         }
     }
@@ -1072,6 +1155,9 @@ impl App {
         live.chrome.clock = crate::header::clock_text_in(wall, &zone);
         live.chrome.covered = covered;
         self.cfg.menu.set_clock(wall, zone);
+        // The Deskflow band says whether the daemon runs and why it stopped.
+        self.cfg.menu.deskflow.running = self.deskflow.pid().is_some();
+        self.cfg.menu.deskflow.stopped = self.deskflow.last_failure();
         // The sampler's latest copy, taken under its lock for as long as a
         // copy of 600 numbers takes.
         let (network, hardware) = self.samplers.copies();
@@ -1106,7 +1192,7 @@ impl App {
         if needs_backdrop(self.cfg.menu.dialog(), self.frozen, live.painted, settling) {
             let mut under = input.clone();
             under.events.clear();
-            let out = self.ctx.run_ui(under, |ui| {
+            let mut out = self.ctx.run_ui(under, |ui| {
                 ui::show_screen(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
             });
             live.textures.apply_set(&out.textures_delta);
@@ -1115,9 +1201,10 @@ impl App {
             live.canvas.restore_background(all);
             live.canvas.draw(&prims, &live.textures, out.pixels_per_point, all);
             live.textures.apply_free(&out.textures_delta);
+            out.textures_delta.clear();
             live.painted = true;
         }
-        let out = self.ctx.run_ui(input, |ui| {
+        let mut out = self.ctx.run_ui(input, |ui| {
             event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
         });
         live.egui.handle_platform_output(&live.window, out.platform_output);
@@ -1145,6 +1232,7 @@ impl App {
             // Nothing of this pass reaches the screen; the textures were
             // taken above, so the font atlas upload is not lost.
             live.textures.apply_free(&out.textures_delta);
+            out.textures_delta.clear();
             live.window.request_redraw();
             return;
         }
@@ -1175,6 +1263,7 @@ impl App {
             }
         }
         live.textures.apply_free(&out.textures_delta);
+        out.textures_delta.clear();
 
         // Honour egui's own repaint requests. Ignoring them leaves the first
         // screen in fallback fonts until the mouse moves, because the font
@@ -1471,12 +1560,12 @@ impl ApplicationHandler<Wake> for App {
         self.sync_menu_output(event_loop);
         let now = Instant::now();
         if let Some(d) = self.menu_move.next_wake(now) {
-            let at = now + d;
-            match event_loop.control_flow() {
-                ControlFlow::WaitUntil(t) if t <= at => {}
-                ControlFlow::Poll => {}
-                _ => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-            }
+            wake_by(event_loop, now + d);
+        }
+        // A daemon that ended wakes the loop (Wake::Deskflow); a start or a
+        // SIGKILL that is due sets a deadline.
+        if let Some(at) = self.deskflow.tick(now) {
+            wake_by(event_loop, at);
         }
     }
 
@@ -1508,10 +1597,16 @@ impl ApplicationHandler<Wake> for App {
                 // The status changed with the job; the watcher would see it
                 // only a second later.
                 let addon = matches!(result, JobResult::Addon { .. });
+                // A saved keyboard choice rewrote generated/deskflow when
+                // the volume key switch changed (mic_mute_local).
+                let keyboard = matches!(result, JobResult::KeyboardApplied { result: Ok(_), .. });
                 let effect = self.cfg.menu.finished(result, Instant::now());
                 self.apply(effect, event_loop);
                 if addon {
                     self.refresh_addons();
+                }
+                if keyboard {
+                    self.deskflow.reload();
                 }
             }
             Wake::Addons => self.refresh_addons(),
@@ -1525,6 +1620,9 @@ impl ApplicationHandler<Wake> for App {
                     self.apply(effect, event_loop);
                 }
             }
+            // about_to_wait reaps it and starts it again.
+            Wake::Deskflow => {}
+            Wake::DeskflowState => self.refresh_deskflow_state(),
             Wake::Output | Wake::Network | Wake::Hardware | Wake::PublicIp => {}
         }
         if let Some(live) = self.live.as_ref() {
@@ -1616,6 +1714,34 @@ fn apply_screen(idle: u32, screen: &ScreenFile, store: &crate::store::Shared, me
         }
         Err(message) => menu.screen_written(Err(message), false),
     }
+}
+
+/// Carry out `DeskflowRequest::Save`: keep `cfg` as the `[deskflow]`
+/// table (the store renders `generated/deskflow` first) and report to the
+/// menu. Whether it was written (the caller then tells the daemon), and
+/// what the menu asks next.
+fn apply_deskflow(
+    cfg: crate::config::DeskflowCfg,
+    store: &crate::store::Shared,
+    menu: &mut Menu,
+) -> (bool, Option<Effect>) {
+    let (result, stored) = {
+        let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = store.update(crate::generated::Table::Deskflow, |c| c.deskflow = cfg);
+        (result, store.cfg.deskflow.clone())
+    };
+    let written = result.is_ok();
+    (written, menu.deskflow_written(stored, result.err()))
+}
+
+/// Send `cmd` to the Deskflow daemon's socket.
+fn send_deskflow(cmd: &crate::deskflow::cmd::Cmd) -> Result<(), String> {
+    use crate::deskflow::cmd::{self, SendError};
+    let path = cmd::socket_path().ok_or("Deskflow: no runtime directory for its socket")?;
+    cmd::send(&path, cmd).map_err(|e| match e {
+        SendError::NoServer => "Deskflow does not run.".to_string(),
+        SendError::Io(e) => format!("Deskflow did not get the command: {e}"),
+    })
 }
 
 /// Tell the idle helper to read the screen file again.
@@ -1935,6 +2061,8 @@ esac"#;
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
             status: battery::Watcher::default(),
+            deskflow_state: None,
+            deskflow: battery::Watcher::default(),
         };
         let is_release = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Release)).count();
         // The first look reads both, whatever the files hold.
@@ -2182,6 +2310,8 @@ esac"#;
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
             status: battery::Watcher::default(),
+            deskflow_state: None,
+            deskflow: battery::Watcher::default(),
         };
         let is_status = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Status)).count();
         // The first look reads it, also when there is none.
@@ -2541,6 +2671,58 @@ esac"#;
         let next = apply_screen(60, &screen, &store, &mut menu);
         assert_eq!(next, Some(Effect::Start(Job::Save)));
         assert!(menu.log.lines().any(|l| l.plain() == crate::menu::NEXT_SESSION));
+    }
+
+    #[test]
+    fn a_deskflow_save_writes_the_generated_file_and_config_and_saves_the_home() {
+        let d = TestDir::new("app", "write-deskflow");
+        let store = crate::store::test_shared(&d);
+        let mut menu = screen_menu();
+        let mut cfg = crate::config::DeskflowCfg {
+            listen: true,
+            ..Default::default()
+        };
+        cfg.devices.push(crate::config::DeviceCfg {
+            name: "laptop".into(),
+            fingerprint: format!("v2:sha256:{}", "a".repeat(64)),
+            output: "DP-1".into(),
+            side: crate::kanshi::Side::RightOf,
+            clipboard: true,
+        });
+        let (written, next) = apply_deskflow(cfg.clone(), &store, &mut menu);
+        assert!(written);
+        assert_eq!(next, Some(Effect::Start(Job::Save)));
+        assert_eq!(menu.deskflow.cfg, cfg);
+        assert_eq!(menu.deskflow.error, None);
+        let generated = std::fs::read_to_string(d.join("generated/deskflow")).unwrap();
+        assert_eq!(crate::deskflowcfg::parse(&generated).unwrap().deskflow, cfg);
+        let text = std::fs::read_to_string(d.join("config.toml")).unwrap();
+        assert_eq!(crate::config::parse(&text).unwrap().deskflow, cfg);
+    }
+
+    #[test]
+    fn a_deskflow_save_the_store_refuses_keeps_the_stored_table() {
+        let d = TestDir::new("app", "write-deskflow-bad");
+        let store = crate::store::test_shared(&d);
+        let mut menu = screen_menu();
+        let cfg = crate::config::DeskflowCfg {
+            port: 0,
+            ..Default::default()
+        };
+        menu.deskflow.cfg = cfg.clone();
+        let (written, next) = apply_deskflow(cfg, &store, &mut menu);
+        assert!(!written);
+        assert_eq!(next, None);
+        assert_eq!(
+            menu.deskflow.cfg,
+            crate::config::DeskflowCfg::default(),
+            "the tab shows what is kept"
+        );
+        assert!(
+            menu.deskflow.error.as_deref().is_some_and(|e| e.contains("port")),
+            "{:?}",
+            menu.deskflow.error
+        );
     }
 
     #[test]

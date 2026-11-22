@@ -237,6 +237,9 @@ pub enum Effect {
     WriteScreen {
         idle: u32,
     },
+    /// Keep the `[deskflow]` table or send the daemon a command, then
+    /// report with `deskflow_written` or `deskflow_sent`.
+    Deskflow(crate::deskflowtab::DeskflowRequest),
 }
 
 /// What the Settings screen tells about the config directory, in the order
@@ -331,6 +334,8 @@ pub struct Menu {
     pub settings_tab: SettingsTab,
     /// The screen timeout, as the Screen tab shows it.
     pub screen_tab: ScreenTab,
+    /// The Deskflow band of the Screen tab.
+    pub deskflow: crate::deskflowtab::DeskflowTab,
     /// The Network tab, and the Apply it runs.
     pub network: NetTab,
     /// The monitors of the Screen tab, and the Apply it runs.
@@ -403,6 +408,7 @@ impl Menu {
             usb_boot: false,
             settings_tab: SettingsTab::Packages,
             screen_tab: ScreenTab::default(),
+            deskflow: crate::deskflowtab::DeskflowTab::default(),
             // Until `set_usb_boot` says otherwise: netboot offers less.
             network: NetTab::new(true),
             monitors: MonTab::default(),
@@ -878,6 +884,7 @@ impl Menu {
                 SettingsEvent::IdleTimeout(_)
                     | SettingsEvent::Network(_)
                     | SettingsEvent::Monitors(_)
+                    | SettingsEvent::Deskflow(_)
                     | SettingsEvent::Status(_)
                     | SettingsEvent::Keyboard(_)
                     | SettingsEvent::DismissReport
@@ -909,7 +916,16 @@ impl Menu {
                 let r = self.network.event(e, self.remote_running())?;
                 return self.net_request(r);
             }
-            SettingsEvent::Monitors(e) => return self.monitors_event(e, Instant::now()),
+            SettingsEvent::Monitors(e) => {
+                // A monitor or a device is selected, never both.
+                if matches!(e, crate::monitors::MonEvent::Select(_)) {
+                    self.deskflow.selected = None;
+                }
+                return self.monitors_event(e, Instant::now());
+            }
+            SettingsEvent::Deskflow(e) => {
+                return crate::deskflowtab::apply(&mut self.deskflow, e).map(Effect::Deskflow);
+            }
             SettingsEvent::Status(e) => return self.status_event(e),
             SettingsEvent::Keyboard(e) => {
                 let kb = self.keyboard.event(e)?;
@@ -1182,6 +1198,24 @@ impl Menu {
             self.log.note(Kind::Event, NEXT_SESSION);
         }
         self.save_after_change()
+    }
+
+    /// The `[deskflow]` write ended: `stored` is the table as the store
+    /// holds it now, `error` why the write failed. `config.toml` lives in
+    /// the home, so a change is saved, as `screen_written` does.
+    pub fn deskflow_written(&mut self, stored: crate::config::DeskflowCfg, error: Option<String>) -> Option<Effect> {
+        self.deskflow.cfg = stored;
+        if let Some(message) = &error {
+            self.log.note(Kind::Warn, message.clone());
+        }
+        let ok = error.is_none();
+        self.deskflow.error = error;
+        if ok { self.save_after_change() } else { None }
+    }
+
+    /// A command to the daemon was sent, or why not.
+    pub fn deskflow_sent(&mut self, error: Option<String>) {
+        self.deskflow.error = error;
     }
 
     /// A file of the home changed: save, or say why not.
@@ -4692,6 +4726,39 @@ mod tests {
         m.finished(JobResult::StatusSaved(Ok(())), now);
         m.set_status_layout(crate::status::layout::parse(b"-clock 1x1\n", &crate::status::offered));
         assert!(!m.status.layout.choices[0].shown);
+    }
+
+    #[test]
+    fn a_deskflow_event_asks_for_its_request_and_a_monitor_click_drops_the_device() {
+        use crate::deskflowtab::{DeskflowEvent, DeskflowRequest};
+        let (_d, mut m) = settings_menu("deskflow-event");
+        let Some(Effect::Deskflow(DeskflowRequest::Save(cfg))) =
+            m.settings(SettingsEvent::Deskflow(DeskflowEvent::Listen(true)))
+        else {
+            panic!("no save");
+        };
+        assert!(cfg.listen);
+        m.settings(SettingsEvent::Deskflow(DeskflowEvent::Select("laptop".into())));
+        assert_eq!(m.deskflow.selected.as_deref(), Some("laptop"));
+        m.settings(SettingsEvent::Monitors(crate::monitors::MonEvent::Select(
+            "DP-1".into(),
+        )));
+        assert_eq!(
+            m.deskflow.selected, None,
+            "a monitor or a device is selected, never both"
+        );
+        let mut lm = legacy_menu();
+        assert_eq!(lm.settings(SettingsEvent::Deskflow(DeskflowEvent::Listen(true))), None);
+        assert!(!lm.deskflow.cfg.listen);
+    }
+
+    #[test]
+    fn a_failed_deskflow_write_is_logged_and_shown() {
+        let (_d, mut m) = settings_menu("deskflow-written");
+        let next = m.deskflow_written(crate::config::DeskflowCfg::default(), Some("read-only".into()));
+        assert_eq!(next, None);
+        assert_eq!(m.deskflow.error.as_deref(), Some("read-only"));
+        assert!(m.log.lines().any(|l| l.plain() == "read-only"));
     }
 
     fn legacy_menu() -> Menu {

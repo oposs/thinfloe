@@ -431,6 +431,8 @@ mod tests {
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
             ("network_ui.rs", include_str!("network_ui.rs")),
             ("monitors_ui.rs", include_str!("monitors_ui.rs")),
+            ("deskflow_ui.rs", include_str!("deskflow_ui.rs")),
+            ("deskflowtab.rs", include_str!("deskflowtab.rs")),
             ("keyboardtab_ui.rs", include_str!("keyboardtab_ui.rs")),
             ("machine.rs", include_str!("machine.rs")),
             ("machine_ui.rs", include_str!("machine_ui.rs")),

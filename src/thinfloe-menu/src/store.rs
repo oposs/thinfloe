@@ -19,7 +19,15 @@ const CONFIG_MODE: u32 = 0o600;
 pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Every generated file, in the order they are regenerated.
-const ALL_FILES: [&str; 6] = ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml", "time"];
+const ALL_FILES: [&str; 7] = [
+    "environment",
+    "screen",
+    "kanshi",
+    "wifi.yaml",
+    "ethernet.yaml",
+    "time",
+    "deskflow",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
@@ -237,13 +245,22 @@ impl ConfigStore {
     }
 
     /// Render all files of `table` from `cfg`; one failing render fails
-    /// the lot before anything is written.
+    /// the lot before anything is written. generated/deskflow fails only
+    /// an update of `[deskflow]`: for another table (the volume key switch
+    /// of `[keyboard]` feeds it too) a `[deskflow]` that does not validate
+    /// leaves the file as it is, so it never blocks that table's save.
     fn render_table(&self, table: Table, cfg: &ThinfloeConfig) -> Result<Vec<(&'static str, Option<String>)>, String> {
-        table
-            .files()
-            .iter()
-            .map(|&n| generated::render(cfg, n, &self.inputs).map(|b| (n, b)))
-            .collect()
+        let mut out = Vec::new();
+        for &n in table.files() {
+            match generated::render(cfg, n, &self.inputs) {
+                Ok(b) => out.push((n, b)),
+                Err(e) if n == "deskflow" && table != Table::Deskflow => {
+                    eprintln!("thinfloe-menu: generated/deskflow was not regenerated: {e}");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
     }
 
     /// Apply `f` to a copy, regenerate the files of `table`, then write
@@ -465,6 +482,105 @@ mod tests {
         assert_eq!(back.time, c.time);
         let t = gen_text(&d, "time").unwrap();
         assert!(t.ends_with("\nntp=10.0.0.1\n") && !t.contains("zone="), "{t}");
+    }
+
+    /// A broken config.toml does not lose the pairings: they come back
+    /// from generated/deskflow.
+    #[test]
+    fn broken_config_keeps_deskflow_devices() {
+        let d = TestDir::new("store", "deskflow-broken");
+        let mut c = ThinfloeConfig::default();
+        c.deskflow.listen = true;
+        c.deskflow.devices = vec![crate::config::DeviceCfg {
+            name: "laptop".into(),
+            fingerprint: format!("v2:sha256:{}", "cd".repeat(32)),
+            output: "DP-1".into(),
+            side: crate::kanshi::Side::RightOf,
+            clipboard: true,
+        }];
+        let mut o = open_session(&d);
+        o.store
+            .update(Table::Deskflow, |x| x.deskflow = c.deskflow.clone())
+            .unwrap();
+        let mode = fs::metadata(cdir(&d).generated_file("deskflow")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode.permissions()) & 0o777,
+            0o600
+        );
+        fs::write(cdir(&d).config_toml(), "this is [not toml").unwrap();
+        let o = open_session(&d);
+        assert_eq!(o.store.cfg.deskflow, c.deskflow);
+        assert!(
+            o.notes.iter().any(|n| n.contains("rebuilt from generated/")),
+            "{:?}",
+            o.notes
+        );
+        let back = parse(&fs::read_to_string(cdir(&d).config_toml()).unwrap()).unwrap();
+        assert_eq!(back.deskflow, c.deskflow);
+    }
+
+    #[test]
+    fn volume_switch_regenerates_deskflow() {
+        let d = TestDir::new("store", "deskflow-volume");
+        let mut o = open_session(&d);
+        o.store.update(Table::Deskflow, |c| c.deskflow.listen = true).unwrap();
+        let mic = |d: &TestDir| {
+            crate::deskflowcfg::parse(&gen_text(d, "deskflow").unwrap())
+                .unwrap()
+                .mic_mute_local
+        };
+        assert!(!mic(&d));
+        let changed = o
+            .store
+            .update(Table::Keyboard, |c| c.keyboard.volume_keys = true)
+            .unwrap();
+        assert!(changed.contains(&"deskflow"), "{changed:?}");
+        assert!(mic(&d));
+        // Another keyboard change leaves the file alone.
+        let changed = o.store.update(Table::Keyboard, |c| c.keyboard.numlock = false).unwrap();
+        assert!(!changed.contains(&"deskflow"), "{changed:?}");
+    }
+
+    #[test]
+    fn an_invalid_deskflow_table_does_not_block_a_keyboard_save() {
+        let d = TestDir::new("store", "deskflow-invalid-keyboard");
+        let mut o = open_session(&d);
+        o.store.update(Table::Deskflow, |c| c.deskflow.listen = true).unwrap();
+        let before = gen_text(&d, "deskflow").unwrap();
+        // A hand edit the store keeps: port 0 does not validate.
+        let mut c = o.store.cfg.clone();
+        c.deskflow.port = 0;
+        fs::write(cdir(&d).config_toml(), crate::config::to_text(&c)).unwrap();
+        let mut o = open_session(&d);
+        assert_eq!(o.store.cfg.deskflow.port, 0);
+        let changed = o
+            .store
+            .update(Table::Keyboard, |c| c.keyboard.volume_keys = true)
+            .unwrap();
+        assert!(!changed.contains(&"deskflow"), "{changed:?}");
+        assert!(o.store.cfg.keyboard.volume_keys);
+        assert!(gen_text(&d, "environment").unwrap().contains("THINFLOE_VOLUME_KEYS=on"));
+        assert_eq!(gen_text(&d, "deskflow").unwrap(), before);
+        // The Deskflow table's own update still refuses it.
+        assert!(o.store.update(Table::Deskflow, |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_bad_deskflow_device_is_refused_and_writes_nothing() {
+        let d = TestDir::new("store", "deskflow-bad");
+        let mut o = open_session(&d);
+        let r = o.store.update(Table::Deskflow, |c| {
+            c.deskflow.devices = vec![crate::config::DeviceCfg {
+                name: "x".into(),
+                fingerprint: "nope".into(),
+                output: "DP-1".into(),
+                side: crate::kanshi::Side::Above,
+                clipboard: true,
+            }];
+        });
+        assert!(r.is_err());
+        assert!(gen_text(&d, "deskflow").is_none());
+        assert!(o.store.cfg.deskflow.devices.is_empty());
     }
 
     #[test]

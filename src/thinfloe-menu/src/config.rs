@@ -107,6 +107,7 @@ pub struct ThinfloeConfig {
     pub monitors: MonitorsCfg,
     pub network: NetworkCfg,
     pub time: TimeCfg,
+    pub deskflow: DeskflowCfg,
     pub notice: NoticeCfg,
 }
 
@@ -120,6 +121,7 @@ impl Default for ThinfloeConfig {
             monitors: MonitorsCfg::default(),
             network: NetworkCfg::default(),
             time: TimeCfg::default(),
+            deskflow: DeskflowCfg::default(),
             notice: NoticeCfg::default(),
         }
     }
@@ -444,6 +446,49 @@ pub struct TimeCfg {
     /// The NTP servers; empty is automatic (DHCP and the Ubuntu pool).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ntp: Vec<String>,
+}
+
+// ---- deskflow ----
+
+/// Other computers that use this keyboard and mouse; see `deskflowcfg`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeskflowCfg {
+    /// The switch.
+    pub listen: bool,
+    pub port: u16,
+    pub edge_resistance: crate::deskflowcfg::Resistance,
+    /// The paired computers, `[[deskflow.device]]`.
+    #[serde(rename = "device", skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceCfg>,
+}
+
+impl Default for DeskflowCfg {
+    fn default() -> Self {
+        DeskflowCfg {
+            listen: false,
+            port: crate::deskflowcfg::DEFAULT_PORT,
+            edge_resistance: crate::deskflowcfg::Resistance::default(),
+            devices: Vec::new(),
+        }
+    }
+}
+
+/// A paired computer and the edge of a monitor it sits at.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeviceCfg {
+    pub name: String,
+    /// `v2:sha256:` and 64 hex digits.
+    pub fingerprint: String,
+    /// The monitor, by its criteria string as in `[monitors]`.
+    pub output: String,
+    pub side: Side,
+    #[serde(default = "default_true")]
+    pub clipboard: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---- network ----

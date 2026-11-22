@@ -134,6 +134,9 @@ SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
 #    stick without them generates its own on first boot. Both layouts and
 #    both 3.x names: a save on a 3.x fallback boot leaves a real
 #    ~/.dbrrg-ssh-host-keys in the home.
+#  - the Deskflow identity (~/.config/thinfloe/deskflow/identity.pem): the
+#    private key that makes this machine the Deskflow server the paired
+#    computers trust; two machines sharing it would pass for each other.
 #  - the WireGuard config: it holds the machine's private key, and two peers
 #    sharing one key break both tunnels.
 #  - the same files inside ~/cfg-attic, where the migration to the
@@ -144,6 +147,7 @@ SAVE_HOME_EXCLUDE_DEFAULT = "/etc/thinfloe/save-home-exclude"
 IDENTITY_EXCLUDES = (
     "./.config/thinfloe/ssh-host-keys",
     "./.config/thinfloe/wg0.conf",
+    "./.config/thinfloe/deskflow",
     "./.thinfloe-ssh-host-keys",
     "./.dbrrg-ssh-host-keys",
     "./wg0.conf",

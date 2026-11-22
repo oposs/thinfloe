@@ -62,6 +62,7 @@ release.
 - Stick writer and upgrades: `overlay/usr/bin/thinfloe-upgrade`.
 - Time zone and NTP: `overlay/usr/bin/thinfloe-time` (live, as root), `install_local_time()` in `thinfloe-lib.sh` (boot), `overlay/usr/libexec/thinfloe/dhcp-timezone` (DHCP zone and NTP servers), the Time band in `timeband.rs`/`network_ui.rs`. Notes: [docs/notes/time-zone.md](docs/notes/time-zone.md).
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
+- Deskflow server: `src/thinfloe-menu/src/deskflow/` (daemon, `thinfloe-menu --deskflow`), `deskflow_sup.rs` (the menu's supervision), `deskflowtab.rs`/`deskflow_ui.rs` (the Deskflow band). Notes: [docs/notes/deskflow.md](docs/notes/deskflow.md).
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units. Bolt microphone mute key (HID++ divert, F20 through uinput): `overlay/usr/libexec/thinfloe/logitech-keys` and `thinfloe-logitech-keys.service`, started by the same udev rule.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
 - User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
@@ -99,7 +100,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - labwc runs with `-C` on a directory composed by `thinfloe-compose-labwc-config` (system files symlinked, `environment` = system defaults, then `generated/environment`, then the user's file). Pointing `-C` at `/etc/thinfloe/labwc` again makes labwc reset user keys to the system values. Guards: `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`. Story: [docs/notes/session.md](docs/notes/session.md).
 - `thinfloe-save-home` takes the home from `getent passwd tfuser`, never `$HOME` (`sudo` sets `HOME=/root`), and every read under `/run/thinfloe/state` ends in `|| true` (`set -e`). On USB it writes only to the ESP mounted at `/run/thinfloe/storage/efi` (tested with `mountpoint -q`), atomically; the netboot upload uses `curl -f`. Exit codes 0 to 5 are a contract. Guard: `test-save-home.sh`.
 - The remote-access password hash (`~/.config/thinfloe/password`) and the SSH host keys (`~/.config/thinfloe/ssh-host-keys`) ride the home archive in the clear: on the FAT ESP, or POSTed over plain HTTP on netboot. Accepted; see [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
-- A fresh install's home copy always leaves out `~/.config/thinfloe/ssh-host-keys` and `wg0.conf`, their 4.x paths, `~/.dbrrg-ssh-host-keys` and the attic copies in `~/cfg-attic/` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
+- A fresh install's home copy always leaves out `~/.config/thinfloe/ssh-host-keys`, `wg0.conf` and `deskflow/` (the Deskflow private key), their 4.x paths, `~/.dbrrg-ssh-host-keys` and the attic copies in `~/cfg-attic/` (`IDENTITY_EXCLUDES`). Guard: `test_upgrade_image.py`.
 - Reboot and power off from the session need `sudo systemctl ...`: the image has no polkit.
 - Screen blanking uses `swayidle` and `wlopm`, never `wlr-randr --off`, which changes the monitor layout. No lock screen: tfuser has no password.
 - No keybinding for a terminal or screenshots (see the keybinding constraint); from a VT: `XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 foot` (or `grim`).
@@ -114,6 +115,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - A `[keyboard]` value reaches `generated/environment` only through `keyboard::validate`, and values from outside the tab through `keyboard::repair`; the composer checks again with `thinfloe-menu --check-keyboard`. labwc 0.9.3 segfaults at start on a pair XKB cannot build. See [docs/notes/menu.md](docs/notes/menu.md) (Keyboard tab).
 - The scale file `$XDG_RUNTIME_DIR/thinfloe-scale` is written atomically (one number and a newline); `labwc-scale`, `thinfloe-terminal` and the OSD read it.
 - The OSD never takes focus or a click (layer overlay, empty input region, keyboard interactivity none), and only the composer writes `allowWhenInhibited`. See [docs/notes/media-keys.md](docs/notes/media-keys.md).
+- Deskflow: the daemon is its own process (`thinfloe-menu --deskflow`) and reads only `generated/deskflow`, never `config.toml`; the menu is the only writer of `[deskflow]`. The state file `$XDG_RUNTIME_DIR/thinfloe-deskflow.state` (first line `self` or `error`, then `name<TAB>fingerprint<TAB>state<TAB>since<TAB>width<TAB>height<TAB>flags`) and the command socket `thinfloe-deskflow.sock` are a contract between daemon and menu; readers ignore unknown trailing fields. Getting back to ThinFloe never waits for the network or the client (Ctrl+Alt+Shift+Escape, watchdog, keep-alive), and no daemon may outlive the menu. Guard: `test-labwc-runtime.sh`. Notes: [docs/notes/deskflow.md](docs/notes/deskflow.md).
 - Status area: an element is one module in `status/` plus a line in `status::ELEMENTS`; `draw` is pure and stays in its rect. The layout is `[status]` in `config.toml`, written only by the menu. Notes: [docs/notes/status-area.md](docs/notes/status-area.md).
 - sysfs attribute files are read with `bounded::read_attr`, never a size-checked reader: sysfs reports one page (4096 bytes on most hosts) for every attribute, and a 256-byte check hid every GPU, MAC and WiFi chip in 4.6.0. Facts on the Network, Screen and This machine tabs are `infopanel::Line`s, labelled. Guards: `bounded`, `graphics` and `netdetail` tests (on the host's real `/sys`). See [docs/notes/menu.md](docs/notes/menu.md) (Settings facts).
 - The battery file `/run/thinfloe/peripherals/battery` is a contract between the root reader and the menu: one line per device, `name<TAB>percent<TAB>state<TAB>read_epoch<TAB>kind`; the menu still reads a 4-field line (kind unknown). See [docs/notes/peripheral-battery.md](docs/notes/peripheral-battery.md).
@@ -206,7 +208,8 @@ defines none, and `containers/ubuntu/patches/0005-no-default-keybinds.patch`
 removes that fallback. `thinfloe-compose-labwc-config` adds bindings only
 when a switch in Settings → Keyboard is on, and then exactly the six media
 keys with `allowWhenInhibited="yes"` (patch `0006`), which pass a ThinLinc
-grab or an OxuLnk inhibitor; every other key reaches the focused program.
+grab or an OxuLnk inhibitor but not the Deskflow capture strip's inhibitor
+(patch `0007`); every other key reaches the focused program.
 Adding any other binding is a deliberate decision followed by `make
 test-runtime`. Guards: `test-session-packages.sh`,
 `test-labwc-config-merge.sh`, `test-labwc-runtime.sh` (no `load default key
@@ -235,7 +238,8 @@ Guards: `scripts/check-boot-smoke.sh` (any `Found ordering cycle`),
 The Dockerfile builds `labwc_0.9.3-1+thinfloe1` with
 `containers/ubuntu/patches/` (fullscreen across outputs,
 `LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`;
-no default keybindings, `0005`; `allowWhenInhibited` on a keybind, `0006`).
+no default keybindings, `0005`; `allowWhenInhibited` on a keybind,
+`0006`; a layer-surface inhibitor blocks every keybinding, `0007`).
 The archive package silently loses all of them. Patches, overlay and brand
 directories are `Makefile` prerequisites. Guards: `make test`, `make
 test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.
@@ -365,6 +369,7 @@ and hardware results:
 - [peripheral-battery.md](docs/notes/peripheral-battery.md): the battery reader, its units, the HID++ details and hardware results.
 - [session.md](docs/notes/session.md): session startup, the user files, the labwc config merge, audio volume, screen blanking, GPU wait, terminals, screenshots.
 - [time-zone.md](docs/notes/time-zone.md): the Time band, the precedence of menu, DHCP and `TZ=`, chrony and the DHCP NTP servers, and their tests.
+- [deskflow.md](docs/notes/deskflow.md): the Deskflow server, pairing, capture and the way back, the state file and socket, known limits.
 - [home-persistence.md](docs/notes/home-persistence.md): home restore and save, the archive, the password file, exit codes.
 - [esp-and-upgrade.md](docs/notes/esp-and-upgrade.md): `thinfloe-upgrade`: home copy, size check, the batch interface, check timers.
 - [network-boot.md](docs/notes/network-boot.md): netboot networking and its smoke test.

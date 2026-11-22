@@ -14,7 +14,12 @@
 # output without taking its focus or its clicks, and that the volume and
 # brightness keys work end to end: the Keyboard tab's switches decide whether
 # labwc takes the keys, the OSD shows the level, the microphone mark and
-# "not supported" without DDC/CI, and survives an output going away.
+# "not supported" without DDC/CI, and survives an output going away, and
+# that a Deskflow capture strip takes the pointer lock and the keys from a
+# fullscreen X11 window holding a keyboard grab and gives them back, and
+# that the stock Deskflow client pairs, gets the pointer and the keys (the
+# volume keys too, while the microphone mute key stays on ThinFloe), and
+# shares the text clipboard with ThinFloe.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -922,8 +927,10 @@ fi
 # default keymap in this rig does not). Under the grab only the marked binding runs and the
 # plain key reaches the probe; the control run without the grab runs both
 # bindings, which proves the rig sends both keys.
-# No client in this rig creates a zwp_keyboard_shortcuts_inhibitor_v1; the
-# OxuLnk path rests on the same line of labwc and stays an owner check.
+# No client in this rig creates a zwp_keyboard_shortcuts_inhibitor_v1 on a
+# window; the OxuLnk path rests on the same line of labwc and stays an owner
+# check. (The layer inhibitor case after the capture case puts one on a layer
+# surface.)
 # shellcheck disable=SC2016 # expands inside the container
 gb_rcxml='<?xml version="1.0"?>
 <labwc_config>
@@ -1627,5 +1634,914 @@ mk_check $? "without a sound server pactl subscribe starts again after 1 s, then
 [[ "$(mk_val resync)" == yes && "$(mk_val subscribe_left)" == no ]]
 mk_check $? "once pactl subscribe runs again, a speaker that drifted is put back at the shared state" \
     "resync '$(mk_val resync)', subscribe left '$(mk_val subscribe_left)'"
+
+
+# Deskflow edge capture over a fullscreen X11 window holding a keyboard grab,
+# as ThinLinc does (the spec's Risk 1). 'thinfloe-menu --deskflow
+# --probe-capture HEADLESS-1 right-of' puts a 1 px overlay strip on the right
+# edge of HEADLESS-1, prints one line per capture event and starts the
+# capture at once on 'enter': first the pointer lock, then exclusive keyboard
+# interactivity, since labwc activates a lock on a layer surface only when
+# the keyboard focus moves to it. Escape ends the capture. wtype starts first
+# (Xwayland installs its grab hook only when the seat has a keyboard) and
+# types x, Escape, y through one virtual keyboard, so they are its key codes
+# 1, 2, 3 (X 9, 10, 11; --keymap names them for the X window); the probe
+# names a key from the keymap it gets. x must reach the probe and not the X
+# window, y the X window after Escape. TF_RUNTIME_MENU
+# names a host-built thinfloe-menu to use instead of the image's (iteration
+# only; the evidence is a run without it).
+# shellcheck disable=SC2016 # expands inside the container
+cp_script='wtype -s 9000 x -s 1500 -k Escape -s 1500 y &
+sleep 0.5
+python3 /usr/local/bin/x11-probe.py --grab --fullscreen --keymap x,Escape,y --keys 16 >/tmp/xkeys 2>&1 &
+xprobe=$!
+sleep 5
+wlrctl toplevel find app_id:thinfloe-probe state:active && echo x_before=active || echo x_before=inactive
+thinfloe-menu --deskflow --probe-capture HEADLESS-1 right-of >/tmp/cap.out 2>/tmp/cap.err &
+cap=$!
+sleep 1.5
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 5000 360
+sleep 6.5
+wlrctl toplevel find app_id:thinfloe-probe state:active && echo x_after=active || echo x_after=inactive
+kill $cap
+wait $cap
+echo cap_rc=$?
+wait $xprobe
+sed "s/^/cap: /" /tmp/cap.out
+sed "s/^/caperr: /" /tmp/cap.err | head -40
+sed "s/^/x11: /" /tmp/xkeys
+wait
+exit 0'
+run_capture_probe_case() {
+    local name="thinfloe-runtime-test-cap-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CP_SCRIPT="$cp_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CP_SCRIPT" >/tmp/cp.sh &&
+               WAYLAND_DEBUG=server labwc -C /etc/thinfloe/labwc -S "sh /tmp/cp.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the capture probe)"
+        grep -E '^(cap|caperr|x11): |^x_|^cap_rc=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local cap x11 diag
+    cap=$(grep '^cap: ' <<<"$out" | cut -c6-)
+    x11=$(grep '^x11: ' <<<"$out" | cut -c6- | tr '\n' ' ')
+    diag="probe: $(tr '\n' '|' <<<"$cap") stderr: $(grep '^caperr: ' <<<"$out" | cut -c9- | tr '\n' '|') X window: '$x11' $(grep -E '^(x_before|x_after|cap_rc)=' <<<"$out" | tr '\n' ' ')"
+    if ! grep -Eq 'zwp_xwayland_keyboard_grab_manager_v1[@#][0-9]+\.grab_keyboard\(' <<<"$out"; then
+        echo "FAIL - the X window took no keyboard grab, so the capture case proves nothing: $diag"
+        fail=1
+        return
+    fi
+    # enter, then locked, then the x key, in that order.
+    if awk '/^enter / && !e {e=NR} /^locked$/ && e && !l {l=NR} / down x$/ && l && !k {k=NR} END {exit !(e && l && k)}' <<<"$cap"; then
+        echo "ok   - over a fullscreen X11 window with a keyboard grab the strip gets the pointer lock, then the keys"
+    else
+        echo "FAIL - no enter, locked, x key in that order at the capture strip: $diag"
+        fail=1
+    fi
+    if [[ " $x11" == *" KEY x "* ]]; then
+        echo "FAIL - the x typed while captured reached the X window: $diag"
+        fail=1
+    else
+        echo "ok   - the x typed while captured did not reach the X window"
+    fi
+    if awk '/ down Escape$/ && !s {s=NR} /^unlocked$/ && s {u=1} END {exit !u}' <<<"$cap" &&
+        [[ " $x11" == *" KEY y "* ]] && grep -qx 'x_before=active' <<<"$out" && grep -qx 'x_after=active' <<<"$out"; then
+        echo "ok   - Escape ends the capture: the probe reports unlocked, y reaches the X window and it is active again"
+    else
+        echo "FAIL - after Escape: $diag"
+        fail=1
+    fi
+    if grep -qx 'cap_rc=0' <<<"$out"; then
+        echo "ok   - the capture probe ends with 0 on SIGTERM"
+    else
+        echo "FAIL - the capture probe did not end with 0 on SIGTERM: $diag"
+        fail=1
+    fi
+}
+run_capture_probe_case
+
+# While the Deskflow capture strip holds the keyboard, every key belongs to
+# the device, the volume and brightness keys too
+# (containers/ubuntu/patches/0007-layer-inhibitor-blocks-all-keybinds.patch).
+# The capture probe takes the strip's keyboard exclusively and puts a
+# zwp_keyboard_shortcuts_inhibitor_v1 on it; THINFLOE_VOLUME_KEYS=on composes
+# the media key bindings (allowWhenInhibited="yes") with TF_OSD_KEY_CMD
+# pointing at a recorder that appends its argument to /tmp/hits. wtype sends
+# XF86AudioRaiseVolume while the strip is captured (the probe must get it,
+# the recorder must not run), Escape (the probe ends the capture), the key
+# again (the recorder runs) and, after the probe has exited, once more (the
+# recorder runs). The grab run does the same over a fullscreen X11 window
+# holding a keyboard grab, which alone lets the media keys pass (0006): the
+# strip's inhibitor still wins, and the X window gets none of the keys. As
+# in the capture case, wtype starts first and --keymap names its key codes
+# (1 XF86AudioRaiseVolume, 2 Escape). TF_RUNTIME_MENU names a host-built
+# thinfloe-menu to use instead of the image's (iteration only).
+# shellcheck disable=SC2016 # expands inside the container
+li_script='wtype -s 9000 -k XF86AudioRaiseVolume -s 1500 -k Escape -s 1500 -k XF86AudioRaiseVolume -s 2500 -k XF86AudioRaiseVolume &
+sleep 0.5
+if [ "$LI_MODE" = grab ]; then
+    python3 /usr/local/bin/x11-probe.py --grab --fullscreen --keymap XF86AudioRaiseVolume,Escape --keys 16 >/tmp/xkeys 2>&1 &
+fi
+sleep 5
+thinfloe-menu --deskflow --probe-capture HEADLESS-1 right-of >/tmp/cap.out 2>/tmp/cap.err &
+cap=$!
+sleep 1.5
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 5000 360
+sleep 2.7
+echo "hits_captured=$(tr "\n" " " </tmp/hits)"
+sleep 3
+echo "hits_released=$(tr "\n" " " </tmp/hits)"
+kill $cap
+wait $cap
+echo cap_rc=$?
+sleep 2.2
+echo "hits_exited=$(tr "\n" " " </tmp/hits)"
+wait
+sed "s/^/cap: /" /tmp/cap.out
+sed "s/^/caperr: /" /tmp/cap.err | head -40
+[ -e /tmp/xkeys ] && sed "s/^/x11: /" /tmp/xkeys
+exit 0'
+run_layer_inhibit_case() {
+    local mode="$1" name="thinfloe-runtime-test-li-$1-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e TF_OSD_KEY_CMD="sh /tmp/rec.sh" \
+        -e LI_MODE="$mode" \
+        -e LI_SCRIPT="$li_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/cfg/generated && chmod 700 /tmp/xdg && touch /tmp/hits &&
+               printf "echo \"\$1\" >>/tmp/hits\n" >/tmp/rec.sh &&
+               printf "%s\n" "$LI_SCRIPT" >/tmp/li.sh &&
+               printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/cfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/cfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               WAYLAND_DEBUG=server labwc -C /tmp/xdg/thinfloe-labwc -S "sh /tmp/li.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the layer inhibitor case, $mode)"
+        grep -E '^(cap|caperr|x11): |^hits_|^cap_rc=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local cap x11 diag
+    cap=$(grep '^cap: ' <<<"$out" | cut -c6-)
+    x11=$(grep '^x11: ' <<<"$out" | cut -c6- | tr '\n' ' ')
+    diag="probe: $(tr '\n' '|' <<<"$cap") stderr: $(grep '^caperr: ' <<<"$out" | cut -c9- | tr '\n' '|') X window: '$x11' $(grep -E '^(hits_[a-z]*|cap_rc)=' <<<"$out" | tr '\n' ' ')"
+    if [[ $mode == grab ]] && ! grep -Eq 'zwp_xwayland_keyboard_grab_manager_v1[@#][0-9]+\.grab_keyboard\(' <<<"$out"; then
+        echo "FAIL - the X window took no keyboard grab, so the layer inhibitor case ($mode) proves nothing: $diag"
+        fail=1
+        return
+    fi
+    if ! grep -Eq 'zwp_keyboard_shortcuts_inhibit_manager_v1[@#][0-9]+\.inhibit_shortcuts\(' <<<"$out"; then
+        echo "FAIL - the capture strip asked for no shortcuts inhibitor ($mode): $diag"
+        fail=1
+    fi
+    if awk '/^locked$/ && !l {l=NR} / down XF86AudioRaiseVolume$/ && l {k=1} END {exit !k}' <<<"$cap" &&
+        grep -qx 'hits_captured=' <<<"$out"; then
+        echo "ok   - while the strip is captured ($mode) the volume key reaches the probe and runs no binding"
+    else
+        echo "FAIL - volume key while captured ($mode): $diag"
+        fail=1
+    fi
+    if grep -qx 'hits_released=volume-up ' <<<"$out" && grep -qx 'hits_exited=volume-up volume-up ' <<<"$out"; then
+        echo "ok   - once the capture ends and once the probe exits ($mode) the volume key runs its binding again"
+    else
+        echo "FAIL - volume key after the capture ($mode): $diag"
+        fail=1
+    fi
+    if [[ $mode == grab && " $x11" == *" KEY XF86AudioRaiseVolume "* ]]; then
+        echo "FAIL - the volume key reached the grabbing X window ($mode): $diag"
+        fail=1
+    fi
+}
+run_layer_inhibit_case plain
+run_layer_inhibit_case grab
+
+
+# Deskflow clipboard bridge: 'thinfloe-menu --deskflow --probe-clip' on its
+# own Wayland connection against labwc's data-control protocol. wl-copy puts
+# a text on the clipboard and the probe prints 'changed <len> <sha256>'; a
+# 'set <text>' line on the probe's stdin makes that text the selection, which
+# wl-paste then reads; a 3 MB text (over the 1 MiB cap) produces 'cleared'
+# and no 'changed' line, and the probe still answers the next copy. The probe's stdin is a fifo the
+# script holds open. TF_RUNTIME_MENU names a host-built thinfloe-menu to use
+# instead of the image's (iteration only).
+# shellcheck disable=SC2016 # expands inside the container
+cl_script='mkfifo /tmp/clip.in
+thinfloe-menu --deskflow --probe-clip </tmp/clip.in >/tmp/clip.out 2>/tmp/clip.err &
+clip=$!
+exec 3>/tmp/clip.in
+sleep 2
+printf "hello clip" | wl-copy
+sleep 1.5
+echo "set text from the probe" >&3
+sleep 1.5
+wl-paste -n </dev/null >/tmp/pasted 2>&1
+echo "pasted: $(cat /tmp/pasted)"
+yes | head -c 3000000 | wl-copy
+sleep 3
+printf "after the big one" | wl-copy
+sleep 1.5
+kill $clip
+wait $clip
+echo clip_rc=$?
+sed "s/^/clip: /" /tmp/clip.out
+sed "s/^/cliperr: /" /tmp/clip.err | head -20
+exit 0'
+run_clip_probe_case() {
+    local name="thinfloe-runtime-test-clip-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CL_SCRIPT="$cl_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CL_SCRIPT" >/tmp/cl.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/cl.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after $RUNTIME_TIMEOUT s (labwc hang during the clipboard probe)"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag h1 h3 n
+    diag=$(grep -E '^(clip|cliperr): |^pasted: |^clip_rc=' <<<"$out" | tr '\n' '|')
+    h1=$(printf 'hello clip' | sha256sum | cut -d' ' -f1)
+    h3=$(printf 'after the big one' | sha256sum | cut -d' ' -f1)
+    if grep -qx "clip: changed 10 $h1" <<<"$out"; then
+        echo "ok   - a text another client copies reaches the clipboard bridge in full"
+    else
+        echo "FAIL - the probe did not report the copied text: $diag"
+        fail=1
+    fi
+    if grep -qx 'pasted: text from the probe' <<<"$out" && ! grep -q '^clip: changed 19 ' <<<"$out"; then
+        echo "ok   - the text the bridge sets is what wl-paste reads, and the bridge does not report its own selection"
+    else
+        echo "FAIL - the bridge's own text: $diag"
+        fail=1
+    fi
+    n=$(grep -c '^clip: changed ' <<<"$out")
+    if [[ $n -eq 2 ]] && [[ $(grep -cx 'clip: cleared' <<<"$out") -eq 1 ]] &&
+        grep -qx "clip: changed 17 $h3" <<<"$out"; then
+        echo "ok   - a 3 MB copy is reported as cleared, not as a text, and the bridge answers the next copy"
+    else
+        echo "FAIL - after the 3 MB copy: $diag"
+        fail=1
+    fi
+    if grep -qx 'clip_rc=0' <<<"$out"; then
+        echo "ok   - the clipboard probe ends with 0 on SIGTERM"
+    else
+        echo "FAIL - the clipboard probe did not end with 0 on SIGTERM: $diag"
+        fail=1
+    fi
+}
+run_clip_probe_case
+
+
+# Deskflow interop: the stock Deskflow client (deskflow-core 1.26.0 of the
+# image's universe) against 'thinfloe-menu --deskflow', in one labwc.
+# deskflow-core has no flags for the connection: 'deskflow-core client
+# --new-instance -s <dir>/Deskflow.conf' takes every setting from that INI
+# file (client/remoteHost, core/port, core/computerName,
+# security/tlsEnabled, log/level DEBUG2), logs to stdout, and
+# --new-instance lets a
+# second client run beside the first. Settings::tlsDir() is the directory of
+# that file plus /tls: the client's certificate and key are
+# <dir>/tls/deskflow.pem (deskflow-core does not make one, the GUI does), the
+# servers it trusts <dir>/tls/trusted-servers, one 'v2:sha256:<hex>' per
+# line. Without XDG_SESSION_TYPE=wayland the client drives X11, here
+# labwc's Xwayland, whose root window is the 1280x720 output.
+# The case: ThinFloe's fingerprint from the state file goes into the trust
+# file; the client appears as pending; an attach in generated/deskflow and
+# 'reload' on the command socket let its next try in (connected, with its
+# screen size); a second 'laptop' with another certificate stays out
+# (fp-changed) while the first stays connected; 'listen = false' and a
+# reload end the daemon with 0 and nothing listens on 24800 any more.
+# The client's console shows only its NOTE and IPC lines, whatever
+# log/level says.
+# shellcheck disable=SC2016 # expands inside the container
+df_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+printf "[deskflow]\nlisten = true\nport = 24800\n" >$gen
+upto() { n=$(($1 * 5)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.2; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+line() { st | awk -F "\t" -v n="$1" -v f="$2" -v s="$3" "\$1 == n && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+client() {
+    d=$1; mkdir -p $d/tls
+    printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n[log]\nlevel=DEBUG2\n" >$d/Deskflow.conf
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout $d/key.pem -out $d/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+    cat $d/cert.pem $d/key.pem >$d/tls/deskflow.pem
+    echo "$fp" >$d/tls/trusted-servers
+    echo "v2:sha256:$(openssl x509 -in $d/cert.pem -outform DER | sha256sum | cut -d" " -f1)" >$d/fp
+    env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+        timeout 60 deskflow-core client --new-instance -s $d/Deskflow.conf >$d/log 2>&1 &
+}
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\"" && echo head=yes || echo head=no
+fp=$(st | head -1 | cut -f2)
+echo "fp=$fp"
+client /tmp/c1
+c1=$(cat /tmp/c1/fp)
+upto 15 line laptop "$c1" pending && echo pending=yes || echo pending=no
+printf "\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\n" "$c1" >>$gen
+reload
+upto 15 line laptop "$c1" connected && echo connected=yes || echo connected=no
+upto 5 grep -q "connected to server" /tmp/c1/log && echo c1_log=yes || echo c1_log=no
+client /tmp/c2
+c2=$(cat /tmp/c2/fp)
+upto 15 line laptop "$c2" pending && echo pending2=yes || echo pending2=no
+line laptop "$c1" connected && echo still=yes || echo still=no
+st | sed "s/^/state: /"
+printf "[deskflow]\nlisten = false\nport = 24800\n" >$gen
+reload
+upto 15 sh -c "! kill -0 $dpid 2>/dev/null"
+wait $dpid
+echo d_rc=$?
+ss -Hltn "sport = :24800" | grep -q . && echo listening=yes || echo listening=no
+sed "s/^/c1: /" /tmp/c1/log | tail -60
+sed "s/^/c2: /" /tmp/c2/log | tail -30
+sed "s/^/derr: /" /tmp/d.err | head -40
+exit 0'
+run_deskflow_pairing_case() {
+    local name="thinfloe-runtime-test-df-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e DF_SCRIPT="$df_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$DF_SCRIPT" >/tmp/df.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/df.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow case)"
+        grep -E '^(state|c1|c2|derr): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|derr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client 1: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -15 | tr '\n' '|')"
+    df_ok() { grep -qx "$1" <<<"$out"; }
+    df_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    df_ok head=yes && grep -Eq '^fp=v2:sha256:[0-9a-f]{64}$' <<<"$out"
+    df_check $? "the Deskflow daemon writes its fingerprint to the state file"
+    # Deskflow 1.26 logs only its NOTE and IPC lines here, so the refusal
+    # shows as a retry without "disconnected from server": a dropped
+    # connection logs that line, a refusal (EUNK) does not.
+    df_ok pending=yes && awk '/^c1: .*IPC: peer fingerprint/ && !p {p=NR; next} p && /IPC: disconnected from server/ && !c {d=1}
+        p && /IPC: connecting to/ {c=1} END {exit !(p && c && !d)}' <<<"$out"
+    df_check $? "a Deskflow client that trusts ThinFloe is refused with EUNK, tries again, and shows as pending with the fingerprint of its certificate"
+    df_ok connected=yes && grep -Eq $'^state: laptop\tv2:sha256:[0-9a-f]{64}\tconnected\t[0-9]+\t1280\t720\t' <<<"$out"
+    df_check $? "after the attach and a reload the client's next try connects, with its 1280x720 screen"
+    df_ok c1_log=yes
+    df_check $? "the Deskflow client logs that it connected to the server"
+    df_ok pending2=yes && df_ok still=yes && grep -Eq $'^state: laptop\tv2:sha256:[0-9a-f]{64}\tpending\t[0-9]+\t0\t0\tfp-changed$' <<<"$out"
+    df_check $? "a second 'laptop' with another certificate stays out as pending, fp-changed, and the first stays connected"
+    df_ok d_rc=0 && df_ok listening=no
+    df_check $? "'listen = false' and a reload end the daemon with 0 and nothing listens on 24800"
+}
+run_deskflow_pairing_case
+
+
+# Deskflow forwarding and every way back, against the stock client of the
+# pairing case, with two outputs: labwc puts HEADLESS-1 right of
+# HEADLESS-2, so the right edge of HEADLESS-2 is not free (edge-busy) and
+# the device is attached right of HEADLESS-1. What the device gets is what the client
+# injects into labwc's Xwayland, seen through the RECORD extension
+# (x11-probe.py --record: KEY, BUTTON, MOTION lines), since deskflow-core
+# 1.26 logs no input; ThinFloe's side is wev, a Wayland window that has
+# the keyboard focus whenever no capture has it. The daemon logs each
+# release as 'thinfloe-deskflow: released (<reason>)'. Edge resistance is
+# low (15 px): one move onto the edge does not capture, pushes of 10 px do.
+# shellcheck disable=SC2016 # expands inside the container
+fw_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+head="[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+attach() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"%s\"\nside = \"right-of\"\n" "$c1" "$1" >$gen; reload; }
+run_client() { env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+    timeout 150 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >>/tmp/c1/log 2>&1 & }
+free_edge() { st | grep -q "	connected	[0-9]*	[0-9]*	[0-9]*	$"; }
+released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
+wev_has() { grep -q "sym: $1 " /tmp/wev.log; }
+rec_has() { grep -qx "$1" /tmp/xrec; }
+# Three pushes of 10 px, closer together than the 300 ms after which the
+# resistance starts again.
+push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+ms() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
+stdbuf -oL wev -f wl_keyboard:key >/tmp/wev.log 2>&1 &
+python3 /usr/local/bin/x11-probe.py --record 160 >/tmp/xrec 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 5 wlrctl toplevel find app_id:wev state:active && echo wev_focus=active || echo wev_focus=inactive
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+attach HEADLESS-2
+run_client
+upto 15 state connected
+st | grep -q "	edge-busy$" && echo busy=yes || echo busy=no
+attach HEADLESS-1
+upto 5 free_edge && echo connected=yes || echo connected=no
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 2559 360
+sleep 1
+state active && echo touch=active || echo touch=idle
+push && echo push=active || echo push=idle
+st | sed "s/^/pushstate: /"
+sleep 0.3
+echo "mark=$(wc -l </tmp/xrec)"
+wlrctl pointer move 40 30
+# Xwayland drops the first XTest button press and release the client
+# fakes (whichever button; the RECORD of its XTest requests shows them):
+# a first click on the right button takes that loss.
+wlrctl pointer click right
+wlrctl pointer click left
+wlrctl pointer click middle
+wlrctl pointer click right
+wlrctl pointer scroll 15 0
+# The client forgets the keys it holds when the X keymap changes, and
+# never releases them. Xwayland changes it under the first XTest key of the
+# client (its keyboard switches device), and again whenever a wtype call
+# ends (wtype brings a keymap of its own): a first x takes the first
+# change (it stays down until the second x releases it), and the pause
+# after each key keeps the keymap until the key up reached the client.
+wtype -s 300 x -s 500
+wtype -s 300 x -s 500
+upto 5 rec_has "KEY x" && echo xkey=yes || echo xkey=no
+upto 5 rec_has "KEYUP x" && echo xup=yes || echo xup=no
+upto 2 rec_has "BUTTON 5"
+wev_has x && echo xlocal=yes || echo xlocal=no
+wtype -s 300 -M ctrl -M alt -M shift -k Escape -m shift -m alt -m ctrl
+upto 5 released "escape chord" && echo esc=released || echo esc=held
+wtype -s 300 e
+upto 5 wev_has e && echo elocal=yes || echo elocal=no
+rec_has "KEY Escape" && echo escfwd=yes || echo escfwd=no
+push && echo push2=active || echo push2=idle
+t=$(date +%s%N)
+pkill -KILL -f "deskflow-core client"
+upto 2 released "connection closed"
+wtype -s 300 y
+upto 3 wev_has y && echo "ylocal_ms=$(ms $t)" || echo ylocal_ms=none
+run_client
+upto 15 state connected
+push && echo push3=active || echo push3=idle
+wlr-randr --output HEADLESS-1 --off
+upto 5 released "output gone" && echo gone=released || echo gone=held
+upto 5 state offline && echo gone_state=offline || echo gone_state=other
+wtype -s 300 o
+upto 5 wev_has o && echo olocal=yes || echo olocal=no
+wlr-randr --output HEADLESS-1 --on --pos 1280,0
+upto 15 free_edge
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 2559 360
+push && echo push4=active || echo push4=idle
+kill -TERM $dpid
+wait $dpid
+echo d_rc=$?
+released SIGTERM && echo term=released || echo term=held
+wtype -s 300 t
+upto 5 wev_has t && echo tlocal=yes || echo tlocal=no
+upto 5 grep -q "disconnected from server" /tmp/c1/log && echo c_disc=yes || echo c_disc=no
+st | sed "s/^/state: /"
+sed "s/^/rec: /" /tmp/xrec | grep -v "^rec: MOTION\|^rec: XTEST 6 " | head -40
+grep -n MOTION /tmp/xrec | sed "s/^/rec: /" | head -60
+grep "sym:" /tmp/wev.log | sed "s/^/wev: /" | head -20
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+wlr-randr | sed "s/^/randr: /" | head -12
+exit 0'
+run_deskflow_forward_case() {
+    local name="thinfloe-runtime-test-fw-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=2 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e FW_SCRIPT="$fw_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$FW_SCRIPT" >/tmp/fw.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/fw.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow forwarding case)"
+        grep -E '^(state|rec|wev|derr|c1|randr): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|rec|wev|derr|randr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    fw_ok() { grep -qx "$1" <<<"$out"; }
+    fw_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    fw_ok busy=yes && fw_ok connected=yes
+    fw_check $? "a device at an edge that touches another output gets no strip and shows edge-busy; attached at a free edge it is connected"
+    fw_ok touch=idle
+    fw_check $? "touch_without_push_stays: one move onto the edge leaves the pointer on ThinFloe"
+    # After the mark: the entry at the left edge of the device, level with
+    # where the pointer left (y 360 of 720), then 40 right and 30 down
+    # (one more push of 10 may land after the lock).
+    local rec
+    rec=$(grep '^rec: ' <<<"$out" | cut -c6-)
+    fw_ok push=active && grep -Eq '^[0-9]+:MOTION 0 360$' <<<"$rec" && grep -Eq '^[0-9]+:MOTION (40|50) 390$' <<<"$rec"
+    fw_check $? "pointer_reaches_client: pushing into the edge moves the pointer onto the device at the matching height, and motion follows"
+    grep -qx 'BUTTON 1' <<<"$rec" && grep -qx 'BUTTON 2' <<<"$rec" && grep -qx 'BUTTON 3' <<<"$rec" && grep -qx 'BUTTON 5' <<<"$rec"
+    fw_check $? "the left, middle and right buttons reach the device as X buttons 1, 2 and 3, the wheel turned down as 5"
+    fw_ok xkey=yes && fw_ok xup=yes && fw_ok xlocal=no
+    fw_check $? "a key typed while captured reaches the device, goes up there again, and does not reach the local window"
+    fw_ok esc=released && fw_ok elocal=yes && fw_ok escfwd=no
+    fw_check $? "escape_chord_releases: Ctrl+Alt+Shift+Escape gives the keyboard back, and the device never sees the Escape"
+    local yms
+    yms=$(grep -o '^ylocal_ms=[0-9]*$' <<<"$out" | cut -d= -f2)
+    fw_ok push2=active && [[ -n "$yms" && $yms -le 1000 ]]
+    fw_check $? "client_killed_releases: a key reaches the local window within 1 s of the client's death (${yms:-never} ms)"
+    fw_ok push3=active && fw_ok gone=released && fw_ok gone_state=offline && fw_ok olocal=yes
+    fw_check $? "output_gone_releases: switching off the device's output while captured gives keyboard and pointer back at once, and the device shows offline"
+    fw_ok push4=active && fw_ok d_rc=0 && fw_ok term=released && fw_ok tlocal=yes && fw_ok c_disc=yes
+    fw_check $? "sigterm_while_captured: SIGTERM releases the capture, the daemon ends with 0, local keys work and the client disconnects"
+}
+run_deskflow_forward_case
+
+# Deskflow media keys, against the stock client of the pairing case: while
+# the device has the keyboard the volume key goes to the device and the
+# microphone mute key stays on ThinFloe. THINFLOE_VOLUME_KEYS=on composes
+# the media key bindings with TF_OSD_KEY_CMD pointing at a recorder that
+# appends its argument to /tmp/hits, and generated/deskflow says
+# mic_mute_local = true (what the menu writes with the switch on), so the
+# daemon runs the same recorder for the microphone key. While captured,
+# XF86AudioRaiseVolume must reach the device (x11-probe.py --record sees
+# the client's key; kKeyAudioUp, 0xE0AF) and not the recorder;
+# XF86AudioMicMute must reach the recorder as mic-mute and not the device.
+# After the escape chord the volume key runs its binding again. As in the
+# forwarding case, a first x takes the client's keymap change.
+# shellcheck disable=SC2016 # expands inside the container
+mk_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+head="mic_mute_local = true\n\n[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
+rec_has() { grep -qx "$1" /tmp/xrec; }
+hits() { tr "\n" " " </tmp/hits; }
+hit() { grep -qx "$1" /tmp/hits; }
+push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+python3 /usr/local/bin/x11-probe.py --record 90 >/tmp/xrec 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\n" "$c1" >$gen
+reload
+env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+    timeout 80 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >/tmp/c1/log 2>&1 &
+upto 15 state connected
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 1279 360
+push && echo push=active || echo push=idle
+wtype -s 300 x -s 500
+wtype -s 300 x -s 500
+wtype -s 300 -k XF86AudioRaiseVolume -s 500
+upto 5 rec_has "KEY XF86AudioRaiseVolume" && echo volfwd=yes || echo volfwd=no
+sleep 0.5
+echo "hits_vol=$(hits)"
+wtype -s 300 -k XF86AudioMicMute -s 500
+upto 5 hit mic-mute
+echo "hits_mic=$(hits)"
+rec_has "KEY XF86AudioMicMute" && echo micfwd=yes || echo micfwd=no
+state active && echo still=active || echo still=idle
+wtype -s 300 -M ctrl -M alt -M shift -k Escape -m shift -m alt -m ctrl
+upto 5 released "escape chord" && echo esc=released || echo esc=held
+wtype -s 300 -k XF86AudioRaiseVolume -s 300
+upto 5 hit volume-up
+echo "hits_after=$(hits)"
+kill -TERM $dpid
+wait $dpid
+echo d_rc=$?
+sed "s/^/rec: /" /tmp/xrec | grep -v "^rec: MOTION\|^rec: XTEST 6 " | head -40
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+exit 0'
+run_deskflow_media_case() {
+    local name="thinfloe-runtime-test-mk-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e TF_OSD_KEY_CMD="sh /tmp/rec.sh" \
+        -e MK_SCRIPT="$mk_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/tfcfg/generated && chmod 700 /tmp/xdg && touch /tmp/hits &&
+               printf "echo \"\$1\" >>/tmp/hits\n" >/tmp/rec.sh &&
+               printf "%s\n" "$MK_SCRIPT" >/tmp/mk.sh &&
+               printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/tfcfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/tfcfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               labwc -C /tmp/xdg/thinfloe-labwc -S "sh /tmp/mk.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow media key case)"
+        grep -E '^(rec|derr|c1): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(rec|derr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    mk_ok() { grep -qx "$1" <<<"$out"; }
+    mk_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    mk_ok push=active && mk_ok volfwd=yes && mk_ok 'hits_vol='
+    mk_check $? "while a device has the keyboard the volume key reaches the device and runs no ThinFloe binding"
+    mk_ok 'hits_mic=mic-mute ' && mk_ok micfwd=no && mk_ok still=active
+    mk_check $? "while a device has the keyboard the microphone mute key mutes ThinFloe (mic-mute) and the device sees nothing"
+    mk_ok esc=released && mk_ok 'hits_after=mic-mute volume-up ' && mk_ok d_rc=0
+    mk_check $? "after the escape chord the volume key runs ThinFloe's binding again"
+}
+run_deskflow_media_case
+
+# Deskflow clipboard, against the stock client of the pairing case. The
+# client runs on an Xvfb of its own: on labwc's Xwayland the compositor
+# itself would carry the text between the X and the Wayland clipboard, and
+# the case would pass without Deskflow. The client's clipboard is read and
+# set with xclip on that display. The 1.26 X11 client notices a copy on
+# its side only when it owned the clipboard before (the SelectionClear it
+# gets), so (b) runs after (a) made it the owner; it sends the text on
+# leave. The pointer goes back by moving left past the device's edge
+# ('released (back)').
+# shellcheck disable=SC2016 # expands inside the container
+cb_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+head="[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+attach() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\nclipboard = %s\n" "$c1" "$1" >$gen; reload; }
+xc() { DISPLAY=:99 xclip -o -selection clipboard 2>/dev/null; }
+xc_is() { [ "$(xc)" = "$1" ]; }
+wl_is() { [ "$(wl-paste -n </dev/null 2>/dev/null)" = "$1" ]; }
+backs() { grep -c "^thinfloe-deskflow: released (back)$" /tmp/d.err; }
+enter() { wlrctl pointer move -5000 -5000; wlrctl pointer move 1279 360
+    wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+back_after() { [ "$(backs)" -gt "$1" ]; }
+leave() { b=$(backs); wlrctl pointer move -100 0; upto 3 back_after $b && upto 3 state connected; }
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+attach true
+upto 5 test -e /tmp/.X11-unix/X99
+env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen DISPLAY=:99 \
+    timeout 90 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >/tmp/c1/log 2>&1 &
+upto 15 state connected && echo connected=yes || echo connected=no
+printf "from thinfloe" | wl-copy
+sleep 0.5
+enter && echo a_enter=active || echo a_enter=idle
+upto 5 xc_is "from thinfloe" && echo a_clip=yes || echo a_clip=no
+echo "a_seen=$(xc)"
+printf "from laptop" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
+sleep 0.5
+leave && echo b_leave=yes || echo b_leave=no
+upto 5 wl_is "from laptop" && echo b_paste=yes || echo b_paste=no
+echo "b_seen=$(wl-paste -n </dev/null 2>/dev/null)"
+attach false
+sleep 0.5
+printf "not for the laptop" | wl-copy
+sleep 0.5
+enter && echo c_enter=active || echo c_enter=idle
+sleep 1.5
+echo "c_seen=$(xc)"
+leave && echo c_leave=yes || echo c_leave=no
+st | sed "s/^/state: /"
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+sed "s/^/xvfb: /" /tmp/xvfb.log | tail -5
+exit 0'
+run_deskflow_clipboard_case() {
+    local name="thinfloe-runtime-test-cb-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CB_SCRIPT="$cb_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CB_SCRIPT" >/tmp/cb.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/cb.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow clipboard case)"
+        grep -E '^(state|derr|c1|xvfb): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|derr|xvfb): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    cb_ok() { grep -qx "$1" <<<"$out"; }
+    cb_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    cb_ok connected=yes && cb_ok a_enter=active && cb_ok a_clip=yes
+    cb_check $? "clipboard_to_device: a text copied on ThinFloe is on the device's clipboard once the pointer enters it"
+    cb_ok b_leave=yes && cb_ok b_paste=yes
+    cb_check $? "clipboard_from_device: a text copied on the device while the pointer is there is on ThinFloe's clipboard once the pointer comes back"
+    cb_ok c_enter=active && cb_ok 'c_seen=from laptop' && cb_ok c_leave=yes
+    cb_check $? "clipboard_switch_off: with clipboard = false the device's clipboard keeps its own text when the pointer enters it"
+}
+run_deskflow_clipboard_case
+
+# The menu runs the Deskflow daemon (spec, Processes): with '[deskflow]
+# listen = true' in config.toml it starts 'thinfloe-menu --deskflow' in a
+# process group of its own, which listens on 24800. Log out (exit 0) and
+# Restart (exit 10) end the daemon before the menu's status reaches the
+# session; a menu killed with SIGKILL takes it along (PR_SET_PDEATHSIG);
+# a daemon killed with SIGKILL is started again after the first back-off
+# of 1 s. After an exit 0 or 10 the daemon is gone already: the menu
+# waited for it. The only tile is the one clicked (the centre of the grid's first
+# row, 640,240 on the 1280x720 output); TF_SAVE_HOME=/bin/true is a save
+# that succeeds.
+# shellcheck disable=SC2016 # expands inside the container
+lc_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_MENU_SHIPPED_DIR=/tmp/tiles TF_MENU_USER_DIR=/tmp/utiles TF_SAVE_HOME=/bin/true TF_STATE_DIR=/tmp/state
+mkdir -p $TF_CONFIG_DIR /tmp/tiles /tmp/utiles /tmp/state
+printf "[deskflow]\nlisten = true\nport = 24800\n" >$TF_CONFIG_DIR/config.toml
+upto() { n=$(($1 * 10)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.1; n=$((n - 1)); done; return 1; }
+daemon() { pgrep -f "^/usr/bin/thinfloe-menu --deskflow\$"; }
+up() { daemon >/dev/null && ss -Hltn "sport = :24800" | grep -q .; }
+down() { ! daemon >/dev/null && ! ss -Hltn "sport = :24800" | grep -q .; }
+fresh() { p=$(daemon) && [ "$p" != "$d" ]; }
+tile() { printf "[Desktop Entry]\nType=Application\nName=%s\nIcon=log-out\nX-TF-Action=%s\n" "$1" "$2" >/tmp/tiles/90-end.desktop; }
+start() { thinfloe-menu >>/tmp/m.err 2>&1 & mpid=$!; }
+click() { wlrctl pointer move -5000 -5000; wlrctl pointer move 640 240; wlrctl pointer click left; }
+tile "Log out" logout
+start
+upto 15 up && echo up1=yes || echo up1=no
+d=$(daemon)
+[ -n "$d" ] && [ "$(ps -o pgid= -p "$d" | tr -d " ")" = "$d" ] && echo group=yes || echo group=no
+click
+wait $mpid
+echo logout_rc=$?
+down && echo logout_gone=yes || echo logout_gone=no
+tile Restart reboot
+start
+upto 15 up && echo up2=yes || echo up2=no
+click
+wait $mpid
+echo restart_rc=$?
+down && echo restart_gone=yes || echo restart_gone=no
+start
+upto 15 up && echo up3=yes || echo up3=no
+kill -9 $mpid
+upto 2 down && echo killed_gone=yes || echo killed_gone=no
+start
+upto 15 up && echo up4=yes || echo up4=no
+d=$(daemon)
+kill -9 "$d"
+upto 2 fresh && echo again=yes || echo again=no
+upto 5 up && echo up5=yes || echo up5=no
+kill $mpid
+wait $mpid
+upto 2 down && echo end_gone=yes || echo end_gone=no
+sed "s/^/merr: /" /tmp/m.err | grep -v "^merr: thinfloe-menu: icon" | tail -30
+exit 0'
+run_deskflow_lifecycle_case() {
+    local name="thinfloe-runtime-test-lc-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e LC_SCRIPT="$lc_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$LC_SCRIPT" >/tmp/lc.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/lc.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow lifecycle case)"
+        grep -E '^merr: |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^merr: |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|')"
+    lc_ok() { grep -qx "$1" <<<"$out"; }
+    lc_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    lc_ok up1=yes && lc_ok group=yes
+    lc_check $? "deskflow_lifecycle: with listen = true the menu runs 'thinfloe-menu --deskflow' in a process group of its own, listening on 24800"
+    lc_ok up1=yes && lc_ok logout_rc=0 && lc_ok logout_gone=yes
+    lc_check $? "deskflow_lifecycle: after Log out (exit 0) no --deskflow process and no listener on 24800"
+    lc_ok up2=yes && lc_ok restart_rc=10 && lc_ok restart_gone=yes
+    lc_check $? "deskflow_lifecycle: after Restart (exit 10) no --deskflow process and no listener on 24800"
+    lc_ok up3=yes && lc_ok killed_gone=yes
+    lc_check $? "deskflow_lifecycle: a menu killed with SIGKILL takes the daemon along within 2 s"
+    lc_ok up4=yes && lc_ok again=yes && lc_ok up5=yes
+    lc_check $? "deskflow_lifecycle: a daemon killed with SIGKILL is started again within 2 s and listens again"
+    lc_ok up5=yes && lc_ok end_gone=yes
+    lc_check $? "deskflow_lifecycle: a menu ended by SIGTERM leaves no daemon behind"
+}
+run_deskflow_lifecycle_case
 
 exit $fail

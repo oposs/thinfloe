@@ -9,7 +9,9 @@
 # default keybindings when rc.xml defines none
 # (0005-no-default-keybinds.patch), and a keybinding marked
 # allowWhenInhibited="yes" still runs under a keyboard grab or shortcuts
-# inhibitor (0006-keybind-allow-when-inhibited.patch);
+# inhibitor (0006-keybind-allow-when-inhibited.patch), but no keybinding
+# runs while a layer surface with a shortcuts inhibitor, the Deskflow
+# capture strip, has the keyboard (0007-layer-inhibitor-blocks-all-keybinds.patch);
 # see docs/superpowers/specs/2026-07-27-labwc-multimonitor-fullscreen-design.md.
 #
 # Patches live in containers/ubuntu/patches/ and are appended to the source

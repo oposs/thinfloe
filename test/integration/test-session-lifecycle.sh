@@ -325,6 +325,10 @@ run_session 'kill -9 $$'
 rc=$?
 [[ $rc -eq 137 && ! -e "$WORK/saved" ]] && ok "menu killed: no save, status 137" \
     || bad "menu killed: rc=$rc saved=$([[ -e $WORK/saved ]] && echo yes || echo no)"
+# No Deskflow daemon outlives the menu (spec, Processes: after a logout, a
+# restart and a killed menu). The real menu and daemon need a compositor,
+# so that guard is the deskflow_lifecycle case of
+# test/runtime/test-labwc-runtime.sh.
 
 # --- idle timeout ------------------------------------------------------
 # The session runs swayidle in a helper loop and tells the menu its PID

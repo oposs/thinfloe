@@ -4,6 +4,7 @@
 //! lives in monitors.rs; this file only paints it and reports clicks.
 
 use crate::brand::{self, role};
+use crate::deskflow::statefile::DevState;
 use crate::heads::{Mode, Rotation};
 use crate::kanshi::{self, OutputSet, Place, Profile, Side};
 use crate::monitors::{MonEvent, MonSource, MonTab};
@@ -30,6 +31,9 @@ const NO_MODE: (i32, i32) = (1920, 1080);
 const BAND_PAD: i8 = 12;
 /// Before the buttons of a dialog, as the other dialogs.
 const BUTTON_GAP: f32 = 8.0;
+/// The radius of a device's status dot, and its gap to the name.
+const DOT_R: f32 = 4.0;
+const DOT_GAP: f32 = 4.0;
 /// Between the On tick box and *Show the menu here* on its row.
 const MENU_BUTTON_GAP: f32 = 24.0;
 
@@ -72,10 +76,46 @@ pub struct MonBox {
     pub rect: Rect,
 }
 
+/// An attached Deskflow device as the arrangement draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevPlace {
+    pub name: String,
+    /// The monitor it sits beside, by criteria.
+    pub output: String,
+    pub side: Side,
+    /// Its screen in its own pixels.
+    pub size: (u32, u32),
+    pub state: DevState,
+    /// Its edge is not free: it gets no strip.
+    pub inactive: bool,
+}
+
+/// Where a device's box goes in the drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevBox {
+    pub place: DevPlace,
+    pub rect: Rect,
+}
+
+/// What a click in the monitor band asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BandEvent {
+    Mon(MonEvent),
+    /// A device box, by name.
+    Device(String),
+}
+
 /// The boxes of `layout` fitted into `area`, all at one scale. The
 /// monitors that are on sit where the arrangement puts them; those that
 /// are off follow in a row to their right, at the size of their mode.
 pub fn boxes(mon: &MonTab, layout: &Profile, area: Rect) -> Vec<MonBox> {
+    arranged(mon, layout, &[], area).0
+}
+
+/// `boxes`, and the devices beside the monitors that are on: one scale for
+/// all, so a device's box shows its size against the monitors. A device
+/// whose monitor is off or missing is not drawn.
+pub fn arranged(mon: &MonTab, layout: &Profile, devices: &[DevPlace], area: Rect) -> (Vec<MonBox>, Vec<DevBox>) {
     // An arrangement that cannot be placed shows its monitors in a row.
     let placed = kanshi::place_all(layout).unwrap_or_else(|_| vec![None; layout.outputs.len()]);
     let size_of = |o: &OutputSet| {
@@ -110,30 +150,91 @@ pub fn boxes(mon: &MonTab, layout: &Profile, area: Rect) -> Vec<MonBox> {
             cursor += w + gap;
         }
     }
-    let total_w = rects.iter().map(|r| r.0 + r.2).max().unwrap_or(0).max(1) as f32;
-    let total_h = rects.iter().map(|r| r.1 + r.3).max().unwrap_or(0).max(1) as f32;
+    let mut dev_rects = Vec::new();
+    for d in devices {
+        let Some(i) = layout.outputs.iter().position(|o| o.criteria == d.output) else {
+            continue;
+        };
+        if placed[i].is_none() {
+            continue;
+        }
+        let (x, y, w, h) = rects[i];
+        let dw = i32::try_from(d.size.0).unwrap_or(i32::MAX / 4).min(i32::MAX / 4);
+        let dh = i32::try_from(d.size.1).unwrap_or(i32::MAX / 4).min(i32::MAX / 4);
+        let at = match d.side {
+            Side::RightOf => (x + w, y),
+            Side::LeftOf => (x - dw, y),
+            Side::Above => (x, y - dh),
+            Side::Below => (x, y + h),
+        };
+        // An inactive device whose box lies on a monitor (another monitor
+        // took its edge) is not drawn: the monitor would cover it and take
+        // its clicks. The band lists it instead.
+        let overlaps = |(ax, ay, aw, ah): (i32, i32, i32, i32)| {
+            let (ax, ay, aw, ah) = (i64::from(ax), i64::from(ay), i64::from(aw), i64::from(ah));
+            rects
+                .iter()
+                .zip(&placed)
+                .filter(|(_, p)| p.is_some())
+                .any(|(&(bx, by, bw, bh), _)| {
+                    let (bx, by, bw, bh) = (i64::from(bx), i64::from(by), i64::from(bw), i64::from(bh));
+                    ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+                })
+        };
+        if d.inactive && overlaps((at.0, at.1, dw, dh)) {
+            continue;
+        }
+        dev_rects.push((d, (at.0, at.1, dw, dh)));
+    }
+    // A device left of or above the monitors moves them right or down.
+    let all = || rects.iter().chain(dev_rects.iter().map(|(_, r)| r));
+    let min_x = all().map(|r| r.0).min().unwrap_or(0).min(0);
+    let min_y = all().map(|r| r.1).min().unwrap_or(0).min(0);
+    let total_w = all().map(|r| r.0 + r.2 - min_x).max().unwrap_or(0).max(1) as f32;
+    let total_h = all().map(|r| r.1 + r.3 - min_y).max().unwrap_or(0).max(1) as f32;
     let scale = (area.width() / total_w).min(area.height() / total_h);
     let offset = vec2((area.width() - total_w * scale) / 2.0, 0.0);
-    layout
+    let to_area = |(x, y, w, h): (i32, i32, i32, i32)| {
+        Rect::from_min_size(
+            area.min + offset + vec2((x - min_x) as f32 * scale, (y - min_y) as f32 * scale),
+            vec2(w as f32 * scale, h as f32 * scale),
+        )
+    };
+    let mons = layout
         .outputs
         .iter()
-        .zip(rects)
-        .map(|(o, (x, y, w, h))| MonBox {
+        .zip(rects.iter())
+        .map(|(o, r)| MonBox {
             criteria: o.criteria.clone(),
             enabled: o.enabled,
-            rect: Rect::from_min_size(
-                area.min + offset + vec2(x as f32 * scale, y as f32 * scale),
-                vec2(w as f32 * scale, h as f32 * scale),
-            ),
+            rect: to_area(*r),
         })
-        .collect()
+        .collect();
+    let devs = dev_rects
+        .iter()
+        .map(|(d, r)| DevBox {
+            place: (*d).clone(),
+            rect: to_area(*r),
+        })
+        .collect();
+    (mons, devs)
 }
 
 /// The monitor band of the Screen tab, `width` wide as the panel, under
 /// the screen timeout: the boxes and the selected monitor's settings.
 /// Apply follows in `monitors_footer`. `now` keeps the countdown's
 /// wake-up honest.
-pub fn monitors_band(ui: &mut Ui, mon: &MonTab, now: Instant, width: f32) -> Option<MonEvent> {
+///
+/// `devices` are drawn beside their monitors; `device` is the one
+/// selected.
+pub fn monitors_band(
+    ui: &mut Ui,
+    mon: &MonTab,
+    devices: &[DevPlace],
+    device: Option<&str>,
+    now: Instant,
+    width: f32,
+) -> Option<BandEvent> {
     let t = Theme::current(ui.ctx());
     if let Some(d) = mon.next_wake(now) {
         ui.ctx().request_repaint_after(d);
@@ -160,9 +261,7 @@ pub fn monitors_band(ui: &mut Ui, mon: &MonTab, now: Instant, width: f32) -> Opt
                 return;
             };
             let hand = mon.source() == MonSource::Kept;
-            if let Some(c) = arrangement(ui, &t, mon, layout, !hand) {
-                event = Some(MonEvent::Select(c));
-            }
+            event = arrangement(ui, &t, mon, layout, !hand, devices, device);
             if hand {
                 muted(ui, &t, HAND_LINE);
                 if ui
@@ -172,10 +271,12 @@ pub fn monitors_band(ui: &mut Ui, mon: &MonTab, now: Instant, width: f32) -> Opt
                     )
                     .clicked()
                 {
-                    event = Some(MonEvent::TakeOver);
+                    event = Some(BandEvent::Mon(MonEvent::TakeOver));
                 }
-            } else if let Some(e) = selected_rows(ui, &t, mon, layout) {
-                event = Some(e);
+            } else if device.is_none()
+                && let Some(e) = selected_rows(ui, &t, mon, layout)
+            {
+                event = Some(BandEvent::Mon(e));
             }
         });
     event
@@ -232,20 +333,35 @@ fn name_of<'a>(mon: &'a MonTab, criteria: &'a str) -> &'a str {
     mon.head(criteria).map_or(criteria, |h| h.name.as_str())
 }
 
-/// The boxes; returns the criteria of a box clicked. `pick`: a click
-/// selects, else the boxes only show.
-fn arrangement(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile, pick: bool) -> Option<String> {
+/// The boxes; returns what a click on one asks for. `pick`: a click on a
+/// monitor selects it, else the monitors only show. A device box always
+/// takes a click.
+fn arrangement(
+    ui: &mut Ui,
+    t: &Theme,
+    mon: &MonTab,
+    layout: &Profile,
+    pick: bool,
+    devices: &[DevPlace],
+    device: Option<&str>,
+) -> Option<BandEvent> {
     let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), ARRANGE_H), Sense::hover());
     let mut clicked = None;
     let p = t.palette();
     let sense = if pick { Sense::click() } else { Sense::hover() };
-    for b in boxes(mon, layout, area) {
+    let (mons, devs) = arranged(mon, layout, devices, area);
+    for d in &devs {
+        if let Some(name) = device_box(ui, t, d, device == Some(d.place.name.as_str())) {
+            clicked = Some(BandEvent::Device(name));
+        }
+    }
+    for b in mons {
         let resp = ui.interact(b.rect, egui::Id::unique(("tf-mon-box", &b.criteria)), sense);
         if resp.clicked() {
-            clicked = Some(b.criteria.clone());
+            clicked = Some(BandEvent::Mon(MonEvent::Select(b.criteria.clone())));
         }
         let drawn = b.rect.shrink(BOX_GAP / 2.0);
-        let selected = pick && mon.selected() == Some(b.criteria.as_str());
+        let selected = pick && device.is_none() && mon.selected() == Some(b.criteria.as_str());
         let fill = match (b.enabled, pick && resp.hovered()) {
             (true, true) => p.accent,
             (true, false) => p.muted,
@@ -288,6 +404,53 @@ fn arrangement(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile, pick: boo
         }
     }
     clicked
+}
+
+/// One device box: outlined, its name and a status dot. Returns its name
+/// when clicked.
+fn device_box(ui: &mut Ui, t: &Theme, d: &DevBox, selected: bool) -> Option<String> {
+    let p = t.palette();
+    let name = &d.place.name;
+    let resp = ui.interact(d.rect, egui::Id::unique(("tf-dev-box", name)), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, name));
+    let drawn = d.rect.shrink(BOX_GAP / 2.0);
+    let fill = if resp.hovered() { p.accent } else { Color32::TRANSPARENT };
+    let stroke = if selected {
+        Stroke::new(2.0, p.primary)
+    } else {
+        Stroke::new(1.0, p.border)
+    };
+    ui.painter().rect(drawn, 0.0, fill, stroke, StrokeKind::Inside);
+    let dot = match d.place.state {
+        DevState::Active => p.primary,
+        DevState::Connected => t.role(role::GOOD),
+        _ => p.muted_foreground,
+    };
+    let inside = drawn.shrink(BOX_PAD);
+    if inside.width() > 0.0 && inside.height() > 0.0 {
+        let centre = egui::pos2(inside.right() - DOT_R, inside.top() + DOT_R);
+        ui.painter().circle_filled(centre, DOT_R, dot);
+        let text_rect = Rect::from_min_max(
+            inside.min,
+            egui::pos2(inside.right() - 2.0 * DOT_R - DOT_GAP, inside.bottom()),
+        );
+        if text_rect.width() > 0.0 {
+            let mut c = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(text_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            c.set_clip_rect(text_rect.intersect(ui.clip_rect()));
+            c.style_mut().interaction.selectable_labels = false;
+            let colour = if d.place.inactive {
+                p.muted_foreground
+            } else {
+                p.foreground
+            };
+            c.add(egui::Label::new(RichText::new(name).color(colour)).truncate());
+        }
+    }
+    resp.clicked().then(|| name.clone())
 }
 
 fn opposite(s: Side) -> Side {
@@ -479,6 +642,70 @@ mod tests {
         assert_eq!(mode_label(&mode(1280, 1024, 75_025)), "1280 × 1024 @ 75.03 Hz");
         assert_eq!(mode_label(&mode(1920, 1080, 59_999)), "1920 × 1080 @ 60 Hz");
         assert_eq!(mode_label(&mode(1920, 1080, 0)), "1920 × 1080");
+    }
+
+    #[test]
+    fn a_device_sits_beside_its_monitor_at_the_monitors_scale() {
+        use crate::heads::Rotation;
+        use crate::kanshi::OutputSet;
+        let layout = Profile {
+            outputs: vec![OutputSet {
+                criteria: "DP-1".into(),
+                enabled: true,
+                mode: mode(1920, 1080, 60_000),
+                rotation: Rotation::Normal,
+                place: Place::Origin,
+            }],
+            menu_output: None,
+        };
+        let dev = |side, output: &str| DevPlace {
+            name: "laptop".into(),
+            output: output.into(),
+            side,
+            size: (960, 540),
+            state: DevState::Connected,
+            inactive: false,
+        };
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(2880.0, 1080.0));
+        let mon = MonTab::default();
+        let (m, d) = arranged(&mon, &layout, &[dev(Side::RightOf, "DP-1")], area);
+        assert_eq!(
+            m[0].rect,
+            Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(1920.0, 1080.0))
+        );
+        assert_eq!(
+            d[0].rect,
+            Rect::from_min_size(egui::pos2(1920.0, 0.0), vec2(960.0, 540.0))
+        );
+        // Left of the monitor: the monitor moves right.
+        let (m, d) = arranged(&mon, &layout, &[dev(Side::LeftOf, "DP-1")], area);
+        assert_eq!(d[0].rect.min, egui::pos2(0.0, 0.0));
+        assert_eq!(m[0].rect.min, egui::pos2(960.0, 0.0));
+        // A device whose edge another monitor took is not drawn over it.
+        let mut docked = layout.clone();
+        docked.outputs.push(OutputSet {
+            criteria: "DP-2".into(),
+            enabled: true,
+            mode: mode(1920, 1080, 60_000),
+            rotation: Rotation::Normal,
+            place: Place::Next {
+                to: "DP-1".into(),
+                side: Side::RightOf,
+            },
+        });
+        let mut busy = dev(Side::RightOf, "DP-1");
+        busy.inactive = true;
+        let (m, d) = arranged(&mon, &docked, &[busy.clone()], area);
+        assert!(d.is_empty(), "the laptop box would lie inside DP-2");
+        assert_eq!(m, boxes(&mon, &docked, area));
+        // An inactive device that overlaps nothing is still drawn.
+        let mut free = dev(Side::LeftOf, "DP-1");
+        free.inactive = true;
+        assert_eq!(arranged(&mon, &docked, &[free], area).1.len(), 1);
+        // A device at a missing monitor is not drawn, and changes nothing.
+        let (m, d) = arranged(&mon, &layout, &[dev(Side::LeftOf, "HDMI-1")], area);
+        assert!(d.is_empty());
+        assert_eq!(m, boxes(&mon, &layout, area));
     }
 
     #[test]

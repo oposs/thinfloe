@@ -31,7 +31,9 @@ use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::log::Kind;
 use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
 use thinfloe_menu::store::{self, OpenMode};
-use thinfloe_menu::{bounded, keyboard, migrate, osd, release, screentab, settings, status, tiles, ui, windows};
+use thinfloe_menu::{
+    bounded, deskflow, keyboard, migrate, osd, release, screentab, settings, status, tiles, ui, windows,
+};
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -246,6 +248,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         on: opened.store.cfg.network.public_ip,
         url: opened.store.cfg.network.public_ip_url.clone(),
     };
+    let deskflow_tab = thinfloe_menu::deskflowtab::from_config(&opened.store.cfg.deskflow);
     let (screen_tab, status_layout) = (
         screentab::from_config(&opened.store.cfg.screen),
         status::layout_from(&opened.store.cfg.status),
@@ -290,6 +293,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
+    menu.deskflow = deskflow_tab;
     menu.network.set_public_ip(public_ip);
     menu.network.time_mut().set_zones(thinfloe_menu::timecfg::read_zones());
     menu.network.time_mut().set_cfg(time_cfg);
@@ -497,6 +501,9 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == osd::OSD_KEY_ARG) {
         return osd::osd_key_main(&args[2..]);
+    }
+    if args.get(1).is_some_and(|a| a == deskflow::DESKFLOW_ARG) {
+        return deskflow::deskflow_main(&args[2..]);
     }
     if args.get(1).is_some_and(|a| a == "--check") {
         return check();

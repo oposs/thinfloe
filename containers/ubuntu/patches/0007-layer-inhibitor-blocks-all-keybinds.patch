@@ -1,0 +1,134 @@
+Description: a layer-surface inhibitor blocks every keybinding
+ The Deskflow capture strip of thinfloe-menu is an overlay layer surface
+ that takes the keyboard exclusively while the pointer is on an attached
+ device. With 0004 an inhibitor on a layer surface was ignored, and the
+ media key bindings carry allowWhenInhibited="yes" (0006), so the volume
+ and brightness keys changed the local machine instead of reaching the
+ device, even over an X11 keyboard grab.
+ .
+ An inhibitor on a layer surface is now activated and stays in the wlroots
+ manager's list until it or its surface goes. While the seat's keyboard
+ focus is a layer surface with such an inhibitor, no keybinding runs,
+ allowWhenInhibited ones included, and every key goes to that surface.
+ Inhibitors on views behave as before.
+ .
+ thinfloe-specific: not proposed for upstream inclusion, see Forwarded below.
+Author: ThinFloe maintainers
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/include/labwc.h b/include/labwc.h
+index f4dfd8e..c0bc4ae 100644
+--- a/include/labwc.h
++++ b/include/labwc.h
+@@ -452,6 +452,7 @@ void server_finish(struct server *server);
+ 
+ void xwayland_keyboard_grab_manager_create(struct server *server);
+ void keyboard_shortcuts_inhibit_create(struct server *server);
++bool keyboard_shortcuts_inhibited_by_layer(struct seat *seat);
+ 
+ void create_constraint(struct wl_listener *listener, void *data);
+ void constrain_cursor(struct server *server, struct wlr_pointer_constraint_v1
+diff --git a/src/input/keyboard.c b/src/input/keyboard.c
+index e6f82a4..cb6bec1 100644
+--- a/src/input/keyboard.c
++++ b/src/input/keyboard.c
+@@ -538,6 +538,16 @@ handle_compositor_keybindings(struct keyboard *keyboard,
+ 		}
+ 	}
+ 
++	/*
++	 * thinfloe (0007): a layer surface with the keyboard focus and a
++	 * shortcuts inhibitor gets every key; no binding runs, not even an
++	 * allowWhenInhibited one.
++	 */
++	if (keyboard_shortcuts_inhibited_by_layer(seat)) {
++		cur_keybind = NULL;
++		return LAB_KEY_HANDLED_FALSE;
++	}
++
+ 	/*
+ 	 * Handle compositor keybinds
+ 	 */
+diff --git a/src/protocols/keyboard-shortcuts-inhibit.c b/src/protocols/keyboard-shortcuts-inhibit.c
+index 38a0936..8397c31 100644
+--- a/src/protocols/keyboard-shortcuts-inhibit.c
++++ b/src/protocols/keyboard-shortcuts-inhibit.c
+@@ -20,6 +20,8 @@
+ #include <wayland-server-core.h>
+ #include <wlr/types/wlr_compositor.h>
+ #include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
++#include <wlr/types/wlr_layer_shell_v1.h>
++#include <wlr/types/wlr_seat.h>
+ #include <wlr/util/log.h>
+ #include "common/mem.h"
+ #include "labwc.h"
+@@ -33,6 +35,8 @@ struct lab_shortcuts_inhibitor {
+ 
+ static struct wl_listener on_new_inhibitor;
+ static struct wl_listener on_manager_destroy;
++/* thinfloe (0007): to find the inhibitors of a focused layer surface */
++static struct wlr_keyboard_shortcuts_inhibit_manager_v1 *inhibit_manager;
+ 
+ static void
+ handle_view_destroy(struct wl_listener *listener, void *data)
+@@ -66,7 +70,15 @@ handle_new_inhibitor(struct wl_listener *listener, void *data)
+ 		wlr_surface_get_root_surface(inhibitor->surface);
+ 	struct view *view = root ? view_from_wlr_surface(root) : NULL;
+ 	if (!view) {
+-		/* No window (e.g. a layer surface): nothing to inhibit for. */
++		/*
++		 * thinfloe (0007): no window. An inhibitor on a layer surface
++		 * needs no count: wlroots keeps it in the manager's list until
++		 * it or its surface goes, and keyboard_shortcuts_inhibited_by_
++		 * layer() looks it up there while the layer has the focus.
++		 */
++		if (root && wlr_layer_surface_v1_try_from_wlr_surface(root)) {
++			wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
++		}
+ 		return;
+ 	}
+ 
+@@ -87,6 +99,33 @@ handle_manager_destroy(struct wl_listener *listener, void *data)
+ {
+ 	wl_list_remove(&on_new_inhibitor.link);
+ 	wl_list_remove(&on_manager_destroy.link);
++	inhibit_manager = NULL;
++}
++
++/*
++ * thinfloe (0007): true while the seat's keyboard focus is a layer surface
++ * with an inhibitor. A layer surface that takes the keyboard exclusively
++ * and asks for the inhibition (the Deskflow capture strip) gets every key,
++ * so no keybinding runs, allowWhenInhibited ones included: the volume and
++ * brightness keys go to the client that holds the keyboard.
++ */
++bool
++keyboard_shortcuts_inhibited_by_layer(struct seat *seat)
++{
++	struct wlr_surface *focused = seat->seat->keyboard_state.focused_surface;
++	if (!inhibit_manager || !focused
++			|| !wlr_layer_surface_v1_try_from_wlr_surface(focused)) {
++		return false;
++	}
++	struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor;
++	wl_list_for_each(inhibitor, &inhibit_manager->inhibitors, link) {
++		if (inhibitor->seat == seat->seat
++				&& wlr_surface_get_root_surface(inhibitor->surface)
++					== focused) {
++			return true;
++		}
++	}
++	return false;
+ }
+ 
+ void
+@@ -99,6 +138,7 @@ keyboard_shortcuts_inhibit_create(struct server *server)
+ 		wlr_log(WLR_ERROR, "cannot create the keyboard shortcuts inhibit manager");
+ 		return;
+ 	}
++	inhibit_manager = manager;
+ 	on_new_inhibitor.notify = handle_new_inhibitor;
+ 	wl_signal_add(&manager->events.new_inhibitor, &on_new_inhibitor);
+ 	on_manager_destroy.notify = handle_manager_destroy;

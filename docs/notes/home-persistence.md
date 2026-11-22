@@ -101,6 +101,7 @@ cannot parse TOML, read files the menu derives from it into `generated/`.
 | `sessionrc` | by hand | `thinfloe-session` | commands run at session start |
 | `menu/*.desktop`, `addons` | by hand, `thinfloe-addon` | the menu, `thinfloe-addon` | user tiles, ticked add-ons |
 | `password`, `ssh-host-keys/`, `wg0.conf`, `save-home-exclude` | root tools, by hand | the same, the initramfs, `thinfloe-save-home`, `thinfloe-upgrade` | remote-access hash, SSH host keys, WireGuard, save exclude list |
+| `deskflow/identity.pem` | the Deskflow daemon | the daemon | private key of the Deskflow server; rides the home archive in the clear like the SSH host keys, and a fresh install leaves `deskflow/` out |
 | `home-version` | the migration | the initramfs | marks the new layout (`2`) |
 
 The menu writes the generated files first and renames `config.toml` last, and

@@ -17,7 +17,7 @@ pub enum Side {
 }
 
 impl Side {
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Side::LeftOf => "left-of",
             Side::RightOf => "right-of",
@@ -26,7 +26,7 @@ impl Side {
         }
     }
 
-    fn from_word(w: &str) -> Option<Side> {
+    pub(crate) fn from_word(w: &str) -> Option<Side> {
         Some(match w {
             "left-of" => Side::LeftOf,
             "right-of" => Side::RightOf,

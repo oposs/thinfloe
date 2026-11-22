@@ -32,6 +32,9 @@ pub enum Table {
     PublicIp,
     /// `[time]`: the zone and the NTP servers.
     Time,
+    /// `[deskflow]`: the listener switch, the port and the paired devices.
+    /// Its file also follows the volume key switch of `[keyboard]`.
+    Deskflow,
     Notice,
 }
 
@@ -39,12 +42,14 @@ impl Table {
     /// The generated files this table feeds.
     pub fn files(self) -> &'static [&'static str] {
         match self {
-            Table::Keyboard => &["environment"],
+            // The volume key switch decides `mic_mute_local` there.
+            Table::Keyboard => &["environment", "deskflow"],
             Table::Screen => &["screen"],
             Table::Status | Table::Notice | Table::PublicIp => &[],
             Table::Monitors => &["kanshi"],
             Table::Network => &["wifi.yaml", "ethernet.yaml"],
             Table::Time => &["time"],
+            Table::Deskflow => &["deskflow"],
         }
     }
 }
@@ -145,15 +150,28 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
             }
             Ok(crate::timecfg::body(&time).map(|b| with_header(&b)))
         }
+        "deskflow" => {
+            crate::deskflowcfg::validate(&cfg.deskflow)?;
+            // Nothing is shared and nothing changed: no file; the daemon
+            // reads an absent file as the defaults.
+            if cfg.deskflow == crate::config::DeskflowCfg::default() {
+                return Ok(None);
+            }
+            Ok(Some(with_header(&crate::deskflowcfg::render(
+                &cfg.deskflow,
+                cfg.keyboard.volume_keys,
+            ))))
+        }
         other => Err(format!("No generated file named {other}")),
     }
 }
 
 /// The file mode of generated file `name`: the netplan files hold
-/// passwords.
+/// passwords, the Deskflow file the pairings.
 pub fn mode_of(name: &str) -> u32 {
     match name {
-        "wifi.yaml" | "ethernet.yaml" => 0o600,
+        // The device fingerprints are the pairings.
+        "wifi.yaml" | "ethernet.yaml" | "deskflow" => 0o600,
         _ => 0o644,
     }
 }
@@ -256,6 +274,24 @@ mod tests {
         c.keyboard.numlock = false;
         let t = render(&c, "environment", &inp()).unwrap().unwrap();
         assert!(t.contains("\nTHINFLOE_NUMLOCK=off\n"), "{t}");
+    }
+
+    #[test]
+    fn generated_deskflow_carries_mic_mute_local() {
+        let mut c = ThinfloeConfig::default();
+        c.deskflow.listen = true;
+        for on in [false, true] {
+            c.keyboard.volume_keys = on;
+            let t = render(&c, "deskflow", &inp()).unwrap().unwrap();
+            assert!(t.contains(&format!("\nmic_mute_local = {on}\n")), "{t}");
+            let g = crate::deskflowcfg::parse(&t).unwrap();
+            assert_eq!((g.deskflow, g.mic_mute_local), (c.deskflow.clone(), on));
+        }
+        // No Deskflow settings: still no file, whatever the switch.
+        let mut c = ThinfloeConfig::default();
+        c.keyboard.volume_keys = true;
+        assert_eq!(render(&c, "deskflow", &inp()).unwrap(), None);
+        assert!(Table::Keyboard.files().contains(&"deskflow"));
     }
 
     #[test]

@@ -345,7 +345,8 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     let wifi = read_generated(dir, "wifi.yaml")?;
     let wired = read_generated(dir, "ethernet.yaml")?;
     let time = read_generated(dir, "time")?;
-    if [&env, &screen, &kanshi_text, &wifi, &wired, &time]
+    let deskflow = read_generated(dir, "deskflow")?;
+    if [&env, &screen, &kanshi_text, &wifi, &wired, &time, &deskflow]
         .iter()
         .all(|f| f.is_none())
     {
@@ -369,6 +370,10 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     cfg.network = network_from_files(wifi.as_deref().map(strip_header), wired.as_deref().map(strip_header)).value;
     if let Some(t) = &time {
         cfg.time = crate::timecfg::from_body(strip_header(t));
+    }
+    // A broken file is an error, not defaults: the pairings stay on disk.
+    if let Some(t) = &deskflow {
+        cfg.deskflow = crate::deskflowcfg::parse(t)?.deskflow;
     }
     Ok(Some(cfg))
 }
@@ -729,6 +734,14 @@ mod tests {
             zone: Some("Europe/Zurich".into()),
             ntp: vec!["ntp.example.ch".into(), "10.0.0.1".into()],
         };
+        c.deskflow.listen = true;
+        c.deskflow.devices = vec![crate::config::DeviceCfg {
+            name: "laptop".into(),
+            fingerprint: format!("v2:sha256:{}", "ab".repeat(32)),
+            output: "eDP-1".into(),
+            side: crate::kanshi::Side::LeftOf,
+            clipboard: false,
+        }];
         c
     }
 
@@ -736,7 +749,15 @@ mod tests {
     fn from_generated_reads_back_what_render_wrote() {
         let d = TestDir::new("convert", "roundtrip");
         let cfg = sample();
-        for name in ["environment", "screen", "kanshi", "wifi.yaml", "ethernet.yaml", "time"] {
+        for name in [
+            "environment",
+            "screen",
+            "kanshi",
+            "wifi.yaml",
+            "ethernet.yaml",
+            "time",
+            "deskflow",
+        ] {
             let body = generated::render(&cfg, name, &inp()).unwrap();
             generated::write_if_changed(&d, name, body.as_deref()).unwrap();
         }
