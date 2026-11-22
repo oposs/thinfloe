@@ -89,15 +89,27 @@ tests add under 7 minutes to a pull request run that already spends 8 minutes
 on the rootfs for `make test`. Hosted runner minutes on a public repository
 cost nothing.
 
-The split changes as follows (decision 17, revised 2026-11-12):
+The split changes as follows (decision 17, revised 2026-11-12 and 2026-11-22):
 
 - `ci.yml` (every pull request, every push to `main`, the release branch)
-  runs two jobs through `ci-local.yml`:
-  - `unit`: `make test-unit MEMCAP=`, for a result within minutes.
-  - `image`: `make test-integration MEMCAP=` (the unit tests run only in
-    `unit`), `make image`, the nine smoke targets, and
-    `make test-runtime`, in one job so the rootfs is built once. About 25
-    minutes.
+  runs three jobs through `ci-local.yml`:
+  - `unit`: `make test-unit MEMCAP=` (the unit tests run only here), for a
+    result within minutes.
+  - `image`: `make test-integration MEMCAP=`, `make image`,
+    `scripts/ci-check-prebuilt.sh record`, upload of the `prebuilt` artifact
+    (`artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh}`,
+    `artifacts/images/thinfloe-usb.img.zst{,.sha256}` and
+    `artifacts/prebuilt.sha256`), and `make test-runtime`.
+  - `smoke` (`needs: image`, `fail-fast: false`): three parallel matrix jobs
+    that download `prebuilt` and run `make -k PREBUILT=1 MEMCAP=` on those
+    files without building the container or exporting the rootfs:
+    - `upgrade`: `qemu-smoke-upgrade`.
+    - `sticks`: `qemu-smoke-two-sticks`, `qemu-smoke-write`, `qemu-smoke-grow`.
+    - `boot`: `qemu-smoke`, `qemu-smoke-netboot`, `qemu-smoke-addons`,
+      `qemu-smoke-timezone`, `qemu-smoke-timezone-netboot`.
+    Each smoke job runs `scripts/ci-check-prebuilt.sh verify` afterwards to
+    fail if any downloaded file changed or a `thinfloe-ubuntu` container
+    image exists, and uploads `ci-logs-<group>` on failure.
 - `release-build.yml` stays as decision 17 describes it: `make image` with
   the release version, the nine smoke tests on exactly the bytes it uploads,
   then the six assets. These are the bytes that ship, so the smoke tests run
@@ -107,10 +119,40 @@ The split changes as follows (decision 17, revised 2026-11-12):
 Reason: a pull request that breaks the image or a boot then fails its own
 `ci-passed`, instead of surfacing only when someone starts a release.
 `make test-runtime` passed on the runner, so it joins `ci.yml`, as decision 17
-foresaw for that case.
+foresaw for that case. `make test-runtime` stays inside `image` because it
+bases its test container on the `thinfloe-ubuntu` podman image; moving it to a
+separate job would require exporting and loading a multi-gigabyte container
+image.
 
-No cache is needed at 25 minutes. If the run grows, the first candidate is
-the container build inside `make rootfs`.
+### Parallel smoke measurements (2026-11-22)
+
+Measured on `oposs/thinfloe` (`local` wall time from the first `local / *` job
+`startedAt` to the last `completedAt`), comparing two `main` runs after PR #40
+(sequential smoke tests inside `image`) against two PR #45 runs (parallel
+`smoke` jobs):
+
+| Run | Ref | `local` wall time | `image` | Smokes (total or max job) | `unit` |
+|---|---|---|---|---|---|
+| 45013960608 | `main` (`712689f`) | 30m32s | 30m32s (`test-integration` 11m52s, `test-runtime` 6m55s) | 9m31s (sequential) | 5m08s |
+| 45016706044 | `main` (`8c40f25`) | 30m09s | 30m09s (`test-integration` 11m47s, `test-runtime` 6m26s) | 9m32s (sequential) | 4m50s |
+| 45024962472 (attempt 1) | PR #45 (`6844df0`) | 28m38s | 23m57s (`test-integration` 14m28s, `test-runtime` 6m28s) | 4m39s (`upgrade`, `sticks` 4m19s, `boot` 2m53s) | 4m54s |
+| 45024962472 (attempt 2) | PR #45 (`6844df0`) | 26m21s | 21m57s (`test-integration` 12m45s, `test-runtime` 6m36s) | 4m22s (`upgrade`, `sticks` 4m12s, `boot` 3m02s) | 4m02s |
+
+The failure path was verified on throwaway draft PR #46 (run 45027809938,
+`exit 1` at the top of `scripts/run-qemu-grow-smoke.sh`): `local / smoke
+(sticks)` failed, `boot` and `upgrade` succeeded, and `ci-passed` failed.
+
+The parallel split cuts the smoke phase from 9m32s to 4m22s-4m39s (about 5
+minutes). Because `smoke` (`needs: image`) starts only after `make
+test-runtime` finishes rather than overlapping it, and `make test-integration`
+varied by 2m40s across runners (11m47s to 14m28s), mean `local` wall time
+dropped from 30m20s to 27m30s (kept by owner decision).
+
+Because `local` stays above 20 minutes, the next candidate to cut CI time is
+caching podman container layers inside `make rootfs`: either an Actions cache
+of podman storage (within the 10 GB repository cache limit) or a registry
+cache, which needs `packages: write` in a `repo-infra` caller workflow and
+therefore goes through `repo-infra` first.
 
 ## Runner setup for the project's workflows
 
@@ -154,6 +196,6 @@ only to `make image`: a call without it computes a dev version, exports the
 rootfs again as a dev build, and the smoke tests and assets would carry that
 one. It also records the checksums of the four built files after
 `make image` and fails before the uploads when `artifacts/release/SHA256SUMS`
-names other ones. On a failure, both image jobs upload
-`artifacts/images/*.log*` (the smoke tests' serial logs and the write test's
-HTTP log) as `ci-logs` or `release-build-logs`.
+names other ones. On a failure, each CI smoke job uploads `artifacts/images/*.log*` (the smoke
+tests' serial logs and the write test's HTTP log) as `ci-logs-<group>`, and
+`release-build-local.yml` uploads them as `release-build-logs`.
