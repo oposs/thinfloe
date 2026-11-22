@@ -19,6 +19,7 @@
 # LABEL current's own APPEND options, so the boot is visible in LOG.<n>.
 
 set -uo pipefail
+exit 1
 
 USB_IMAGE="${1:?usage: run-qemu-grow-smoke.sh USB_IMAGE WORK_PREFIX LOG TIMEOUT GRACE APPEND}"
 PREFIX="${2:?missing WORK_PREFIX}"
