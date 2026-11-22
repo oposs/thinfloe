@@ -13,6 +13,9 @@ use super::proto::Msg;
 
 /// Escape's keysym: with Ctrl, Alt and Shift down it releases.
 const XK_ESCAPE: u32 = 0xff1b;
+/// The microphone mute key stays on ThinFloe: Deskflow has no key id for
+/// it, and the device's microphone is not the one at the desk.
+const XF86_AUDIO_MIC_MUTE: u32 = 0x1008_ffb2;
 
 // The escape chord's keys, linux/input-event-codes.h: what decides it
 // when the keymap could not be read.
@@ -53,6 +56,8 @@ pub enum Action {
     Send(Msg),
     /// End the capture ([`release`] first).
     Release(&'static str),
+    /// The microphone mute key was released: ThinFloe's microphone.
+    LocalMicMute,
 }
 
 /// The keyboard as the compositor describes it: its keymap and modifier
@@ -134,6 +139,13 @@ impl Keyboard {
         m.ctrl && m.alt && m.shift && (x.keysym(code) == XK_ESCAPE || x.keysym_level0(code) == XK_ESCAPE)
     }
 
+    /// The key is the microphone mute key, at any level.
+    fn mic_mute(&self, code: u32) -> bool {
+        self.xkb
+            .as_ref()
+            .is_some_and(|x| x.keysym(code) == XF86_AUDIO_MIC_MUTE || x.keysym_level0(code) == XF86_AUDIO_MIC_MUTE)
+    }
+
     /// The repeat period and delay for a key, when it repeats.
     fn repeat_of(&self, code: u32) -> Option<(Duration, Duration)> {
         let x = self.xkb.as_ref()?;
@@ -170,6 +182,8 @@ pub struct Active {
     /// The position last sent.
     pos: (i16, i16),
     repeat: Option<Repeat>,
+    /// The microphone mute key went down during the capture.
+    mic_down: bool,
 }
 
 impl Active {
@@ -182,6 +196,7 @@ impl Active {
             buttons: Vec::new(),
             pos: at,
             repeat: None,
+            mic_down: false,
         }
     }
 
@@ -249,6 +264,10 @@ fn key_down(a: &mut Active, kb: &Keyboard, code: u32, now: Instant) -> Vec<Actio
     if kb.escape_chord(code) {
         return vec![Action::Release("escape chord")];
     }
+    if kb.mic_mute(code) {
+        a.mic_down = true;
+        return Vec::new();
+    }
     let button = keymap::button(code);
     let Some(id) = kb.key_id(code) else {
         return Vec::new();
@@ -275,6 +294,15 @@ fn key_down(a: &mut Active, kb: &Keyboard, code: u32, now: Instant) -> Vec<Actio
 }
 
 fn key_up(a: &mut Active, kb: &Keyboard, code: u32) -> Vec<Action> {
+    // On the release, as labwc's binding (onRelease); a press before the
+    // capture was ThinFloe's.
+    if kb.mic_mute(code) {
+        return if std::mem::take(&mut a.mic_down) {
+            vec![Action::LocalMicMute]
+        } else {
+            Vec::new()
+        };
+    }
     let button = keymap::button(code);
     let Some(i) = a.held.iter().position(|h| h.1 == button) else {
         return Vec::new();
@@ -378,6 +406,7 @@ mod tests {
                         out.extend(release(a, kb));
                         return (out, Some(why));
                     }
+                    Action::LocalMicMute => {}
                 }
             }
         }
@@ -398,6 +427,27 @@ mod tests {
             mods,
             button: keymap::button(code),
         }
+    }
+
+    #[test]
+    fn mic_mute_release_is_local_and_not_sent() {
+        // linux/input-event-codes.h
+        const KEY_VOLUMEUP: u32 = 115;
+        const KEY_MICMUTE: u32 = 248;
+        let (mut a, mut kb) = (active(), us());
+        let now = Instant::now();
+        assert_eq!(on_cap_event(&mut a, &key(KEY_MICMUTE, true), &mut kb, now), Vec::new());
+        assert_eq!(
+            on_cap_event(&mut a, &key(KEY_MICMUTE, false), &mut kb, now),
+            vec![Action::LocalMicMute]
+        );
+        // A release whose press the capture did not see does nothing.
+        assert_eq!(on_cap_event(&mut a, &key(KEY_MICMUTE, false), &mut kb, now), Vec::new());
+        // The volume keys go to the device: kKeyAudioUp.
+        let (out, why) = run(&mut a, &mut kb, &[key(KEY_VOLUMEUP, true), key(KEY_VOLUMEUP, false)]);
+        assert_eq!(why, None);
+        assert_eq!(out, vec![down(0xE0AF, 0, KEY_VOLUMEUP), up(0xE0AF, 0, KEY_VOLUMEUP)]);
+        assert_eq!(release(&mut a, &kb), vec![Msg::Cout]);
     }
 
     #[test]

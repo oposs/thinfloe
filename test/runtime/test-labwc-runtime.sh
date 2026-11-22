@@ -17,7 +17,8 @@
 # "not supported" without DDC/CI, and survives an output going away, and
 # that a Deskflow capture strip takes the pointer lock and the keys from a
 # fullscreen X11 window holding a keyboard grab and gives them back, and
-# that the stock Deskflow client pairs, gets the pointer and the keys, and
+# that the stock Deskflow client pairs, gets the pointer and the keys (the
+# volume keys too, while the microphone mute key stays on ThinFloe), and
 # shares the text clipboard with ThinFloe.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
@@ -2218,6 +2219,120 @@ run_deskflow_forward_case() {
     fw_check $? "sigterm_while_captured: SIGTERM releases the capture, the daemon ends with 0, local keys work and the client disconnects"
 }
 run_deskflow_forward_case
+
+# Deskflow media keys, against the stock client of the pairing case: while
+# the device has the keyboard the volume key goes to the device and the
+# microphone mute key stays on ThinFloe. THINFLOE_VOLUME_KEYS=on composes
+# the media key bindings with TF_OSD_KEY_CMD pointing at a recorder that
+# appends its argument to /tmp/hits, and generated/deskflow says
+# mic_mute_local = true (what the menu writes with the switch on), so the
+# daemon runs the same recorder for the microphone key. While captured,
+# XF86AudioRaiseVolume must reach the device (x11-probe.py --record sees
+# the client's key; kKeyAudioUp, 0xE0AF) and not the recorder;
+# XF86AudioMicMute must reach the recorder as mic-mute and not the device.
+# After the escape chord the volume key runs its binding again. As in the
+# forwarding case, a first x takes the client's keymap change.
+# shellcheck disable=SC2016 # expands inside the container
+mk_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+head="mic_mute_local = true\n\n[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
+rec_has() { grep -qx "$1" /tmp/xrec; }
+hits() { tr "\n" " " </tmp/hits; }
+hit() { grep -qx "$1" /tmp/hits; }
+push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+python3 /usr/local/bin/x11-probe.py --record 90 >/tmp/xrec 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\n" "$c1" >$gen
+reload
+env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
+    timeout 80 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >/tmp/c1/log 2>&1 &
+upto 15 state connected
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 1279 360
+push && echo push=active || echo push=idle
+wtype -s 300 x -s 500
+wtype -s 300 x -s 500
+wtype -s 300 -k XF86AudioRaiseVolume -s 500
+upto 5 rec_has "KEY XF86AudioRaiseVolume" && echo volfwd=yes || echo volfwd=no
+sleep 0.5
+echo "hits_vol=$(hits)"
+wtype -s 300 -k XF86AudioMicMute -s 500
+upto 5 hit mic-mute
+echo "hits_mic=$(hits)"
+rec_has "KEY XF86AudioMicMute" && echo micfwd=yes || echo micfwd=no
+state active && echo still=active || echo still=idle
+wtype -s 300 -M ctrl -M alt -M shift -k Escape -m shift -m alt -m ctrl
+upto 5 released "escape chord" && echo esc=released || echo esc=held
+wtype -s 300 -k XF86AudioRaiseVolume -s 300
+upto 5 hit volume-up
+echo "hits_after=$(hits)"
+kill -TERM $dpid
+wait $dpid
+echo d_rc=$?
+sed "s/^/rec: /" /tmp/xrec | grep -v "^rec: MOTION\|^rec: XTEST 6 " | head -40
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+exit 0'
+run_deskflow_media_case() {
+    local name="thinfloe-runtime-test-mk-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e TF_OSD_KEY_CMD="sh /tmp/rec.sh" \
+        -e MK_SCRIPT="$mk_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/tfcfg/generated && chmod 700 /tmp/xdg && touch /tmp/hits &&
+               printf "echo \"\$1\" >>/tmp/hits\n" >/tmp/rec.sh &&
+               printf "%s\n" "$MK_SCRIPT" >/tmp/mk.sh &&
+               printf "THINFLOE_VOLUME_KEYS=on\n" >/tmp/tfcfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/tfcfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               labwc -C /tmp/xdg/thinfloe-labwc -S "sh /tmp/mk.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow media key case)"
+        grep -E '^(rec|derr|c1): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(rec|derr): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    mk_ok() { grep -qx "$1" <<<"$out"; }
+    mk_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    mk_ok push=active && mk_ok volfwd=yes && mk_ok 'hits_vol='
+    mk_check $? "while a device has the keyboard the volume key reaches the device and runs no ThinFloe binding"
+    mk_ok 'hits_mic=mic-mute ' && mk_ok micfwd=no && mk_ok still=active
+    mk_check $? "while a device has the keyboard the microphone mute key mutes ThinFloe (mic-mute) and the device sees nothing"
+    mk_ok esc=released && mk_ok 'hits_after=mic-mute volume-up ' && mk_ok d_rc=0
+    mk_check $? "after the escape chord the volume key runs ThinFloe's binding again"
+}
+run_deskflow_media_case
 
 # Deskflow clipboard, against the stock client of the pairing case. The
 # client runs on an Xvfb of its own: on labwc's Xwayland the compositor

@@ -32,6 +32,7 @@ use super::proto::Msg;
 use super::statefile::{self, DevLine, DevState, Head, StateFile};
 use super::tls;
 use crate::config::DeskflowCfg;
+use crate::deskflowcfg::Generated;
 use crate::kanshi::Side;
 
 /// The paths and the host name the daemon works with.
@@ -42,6 +43,34 @@ pub struct RunEnv {
     pub state: PathBuf,
     pub socket: PathBuf,
     pub hostname: String,
+    /// The OSD key command without its key ([`osd_key_command`]).
+    pub osd_key: Vec<String>,
+}
+
+/// The OSD key command of labwc's media key bindings.
+const OSD_KEY_CMD: &str = "/usr/bin/thinfloe-menu --osd-key";
+
+/// The command the microphone key runs while a device has the keyboard,
+/// without its key: `TF_OSD_KEY_CMD` (`value`) when set, as
+/// thinfloe-compose-labwc-config takes it, else the menu's `--osd-key`.
+pub fn osd_key_command(value: Option<&str>) -> Vec<String> {
+    let v = value.filter(|v| !v.trim().is_empty()).unwrap_or(OSD_KEY_CMD);
+    v.split_whitespace().map(str::to_string).collect()
+}
+
+/// Starts `cmd key` in a process group of its own, stdin from /dev/null;
+/// the caller reaps it.
+fn spawn_osd_key(cmd: &[String], key: &str) -> io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let (prog, args) = cmd
+        .split_first()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no OSD key command"))?;
+    std::process::Command::new(prog)
+        .args(args)
+        .arg(key)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .spawn()
 }
 
 /// The longest poll; the watchdog's heartbeat is stored once per turn.
@@ -63,12 +92,12 @@ const CONFIG_MAX: u64 = 256 * 1024;
 pub fn run(env: RunEnv) -> Result<(), String> {
     let _lock = lock(&env.state)?;
     let cfg = read_config(&env.generated).map_err(|e| fail(&env.state, e))?;
-    if !cfg.listen {
+    if !cfg.deskflow.listen {
         return Ok(());
     }
     let id =
         ident::load_or_create(&env.identity, &env.hostname).map_err(|e| fail(&env.state, format!("identity: {e}")))?;
-    let listener = listen(cfg.port).map_err(|e| fail(&env.state, e))?;
+    let listener = listen(cfg.deskflow.port).map_err(|e| fail(&env.state, e))?;
     let sock = cmd::bind(&env.socket).map_err(|e| fail(&env.state, format!("command socket: {e}")))?;
     let wake = Wake::new().map_err(|e| fail(&env.state, e))?;
     wake.install_signals();
@@ -139,14 +168,14 @@ fn lock(state: &Path) -> Result<File, String> {
 
 /// The configuration in generated/deskflow; none there means the switch
 /// is off.
-fn read_config(path: &Path) -> Result<DeskflowCfg, String> {
+fn read_config(path: &Path) -> Result<Generated, String> {
     let Some(bytes) = crate::atomic::read(path, CONFIG_MAX).map_err(|e| format!("generated/deskflow: {e}"))? else {
-        return Ok(DeskflowCfg::default());
+        return Ok(Generated::default());
     };
     let text = String::from_utf8(bytes).map_err(|_| "generated/deskflow: not UTF-8".to_string())?;
-    let cfg = crate::deskflowcfg::parse(&text)?;
-    crate::deskflowcfg::validate(&cfg)?;
-    Ok(cfg)
+    let g = crate::deskflowcfg::parse(&text)?;
+    crate::deskflowcfg::validate(&g.deskflow)?;
+    Ok(g)
 }
 
 fn listen(port: u16) -> Result<TcpListener, String> {
@@ -320,6 +349,10 @@ enum Mode {
 struct Daemon {
     env: RunEnv,
     cfg: DeskflowCfg,
+    /// generated/deskflow's `mic_mute_local`.
+    mic_mute_local: bool,
+    /// The OSD key commands started and not yet reaped.
+    osd_keys: Vec<std::process::Child>,
     tls: Arc<ServerConfig>,
     fingerprint: String,
     listener: TcpListener,
@@ -356,7 +389,7 @@ struct Daemon {
 impl Daemon {
     fn new(
         env: RunEnv,
-        cfg: DeskflowCfg,
+        cfg: Generated,
         id: &Identity,
         listener: TcpListener,
         sock: UnixDatagram,
@@ -364,7 +397,9 @@ impl Daemon {
     ) -> Daemon {
         Daemon {
             env,
-            cfg,
+            cfg: cfg.deskflow,
+            mic_mute_local: cfg.mic_mute_local,
+            osd_keys: Vec::new(),
             tls: tls::server_config(id),
             fingerprint: ident::fingerprint(&id.cert_der),
             listener,
@@ -421,6 +456,7 @@ impl Daemon {
     }
 
     fn turn(&mut self, wake: &Wake) -> Next {
+        self.reap();
         if let Some(c) = self.capture.as_mut()
             && c.flush().is_err()
         {
@@ -759,8 +795,27 @@ impl Daemon {
                     }
                 }
                 Action::Release(why) => self.release(why),
+                Action::LocalMicMute => self.local_mic_mute(),
             }
         }
+    }
+
+    /// The microphone key while a device has the keyboard: labwc's binding
+    /// cannot act, so the daemon runs it, when the volume keys are on. It
+    /// does not wait; `reap` collects the command.
+    fn local_mic_mute(&mut self) {
+        if !self.mic_mute_local {
+            return;
+        }
+        match spawn_osd_key(&self.env.osd_key, "mic-mute") {
+            Ok(c) => self.osd_keys.push(c),
+            Err(e) => eprintln!("thinfloe-menu --deskflow: the microphone key: {e}"),
+        }
+    }
+
+    /// Collects the OSD key commands that ended.
+    fn reap(&mut self) {
+        self.osd_keys.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
     }
 
     /// Gives keyboard and pointer back to ThinFloe at once: the device gets
@@ -983,10 +1038,14 @@ impl Daemon {
 
     /// Reads generated/deskflow again.
     fn reload(&mut self) -> Next {
-        let cfg = match read_config(&self.env.generated) {
+        let Generated {
+            deskflow: cfg,
+            mic_mute_local,
+        } = match read_config(&self.env.generated) {
             Ok(c) => c,
             Err(e) => return Next::Exit(Err(fail(&self.env.state, e))),
         };
+        self.mic_mute_local = mic_mute_local;
         if !cfg.listen {
             return Next::Exit(Ok(()));
         }
@@ -1128,7 +1187,36 @@ mod tests {
             state: d.join("state"),
             socket: s.socket("s"),
             hostname: "test".into(),
+            osd_key: osd_key_command(None),
         }
+    }
+
+    #[test]
+    fn the_osd_key_command_follows_tf_osd_key_cmd() {
+        assert_eq!(osd_key_command(None), ["/usr/bin/thinfloe-menu", "--osd-key"]);
+        assert_eq!(osd_key_command(Some(" ")), ["/usr/bin/thinfloe-menu", "--osd-key"]);
+        assert_eq!(osd_key_command(Some("sh /tmp/rec.sh")), ["sh", "/tmp/rec.sh"]);
+    }
+
+    #[test]
+    fn the_osd_key_runs_with_its_key_in_a_group_of_its_own() {
+        let d = TestDir::new("deskflow-run", "osd-key");
+        let out = d.join("key");
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".into(),
+            "printf %s \"$1\" >\"$0\"".into(),
+            out.to_string_lossy().into_owned(),
+        ];
+        let mut c = spawn_osd_key(&cmd, "mic-mute").unwrap();
+        let pid = c.id() as libc::pid_t;
+        // SAFETY: getpgid takes no pointers.
+        let pgid = unsafe { libc::getpgid(pid) };
+        assert!(c.wait().unwrap().success());
+        // The group was read before the reap, or the child had gone.
+        assert!(pgid == pid || pgid == -1, "pgid {pgid}, pid {pid}");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "mic-mute");
+        assert!(spawn_osd_key(&[], "mic-mute").is_err());
     }
 
     fn write_cfg(path: &Path, listen: bool, port: u16, devices: &[(&str, &str)]) {

@@ -373,7 +373,7 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     }
     // A broken file is an error, not defaults: the pairings stay on disk.
     if let Some(t) = &deskflow {
-        cfg.deskflow = crate::deskflowcfg::parse(t)?;
+        cfg.deskflow = crate::deskflowcfg::parse(t)?.deskflow;
     }
     Ok(Some(cfg))
 }

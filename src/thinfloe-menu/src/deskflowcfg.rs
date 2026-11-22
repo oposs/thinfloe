@@ -1,6 +1,7 @@
 //! The `[deskflow]` table of config.toml and the body of
 //! `generated/deskflow`, which the Deskflow daemon reads instead of
-//! config.toml. The generated file holds the same TOML table.
+//! config.toml. The generated file holds the same TOML table and
+//! `mic_mute_local`, which the Keyboard tab's volume key switch decides.
 
 use std::collections::HashSet;
 
@@ -87,25 +88,35 @@ pub fn validate(cfg: &DeskflowCfg) -> Result<(), String> {
     Ok(())
 }
 
-/// The TOML text of the table (no generated header).
-pub fn render(cfg: &DeskflowCfg) -> String {
-    #[derive(Serialize)]
-    struct Wrap<'a> {
-        deskflow: &'a DeskflowCfg,
-    }
-    toml::to_string(&Wrap { deskflow: cfg }).expect("the Deskflow table serialises to TOML")
+/// What generated/deskflow holds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct Generated {
+    /// The microphone mute key mutes ThinFloe while a device has the
+    /// keyboard: the volume key switch is on, and labwc's binding cannot
+    /// act then. Not part of `[deskflow]`.
+    pub mic_mute_local: bool,
+    pub deskflow: DeskflowCfg,
 }
 
-/// Reads what `render` wrote (a generated header line is a comment).
-pub fn parse(text: &str) -> Result<DeskflowCfg, String> {
-    #[derive(Deserialize, Default)]
-    #[serde(default)]
-    struct Wrap {
-        deskflow: DeskflowCfg,
+/// The TOML text of the file (no generated header).
+pub fn render(cfg: &DeskflowCfg, mic_mute_local: bool) -> String {
+    #[derive(Serialize)]
+    struct Wrap<'a> {
+        mic_mute_local: bool,
+        deskflow: &'a DeskflowCfg,
     }
-    toml::from_str::<Wrap>(text)
-        .map(|w| w.deskflow)
-        .map_err(|e| format!("generated/deskflow: {}", e.message()))
+    toml::to_string(&Wrap {
+        mic_mute_local,
+        deskflow: cfg,
+    })
+    .expect("the Deskflow table serialises to TOML")
+}
+
+/// Reads what `render` wrote (a generated header line is a comment); a
+/// file without `mic_mute_local` reads as false.
+pub fn parse(text: &str) -> Result<Generated, String> {
+    toml::from_str::<Generated>(text).map_err(|e| format!("generated/deskflow: {}", e.message()))
 }
 
 #[cfg(test)]
@@ -176,15 +187,28 @@ mod tests {
     #[test]
     fn render_parse_roundtrip() {
         let c = sample();
-        let body = render(&c);
+        let body = render(&c, true);
         assert!(
-            body.contains("[[deskflow.device]]") && body.contains("side = \"right-of\""),
+            body.starts_with("mic_mute_local = true\n")
+                && body.contains("[[deskflow.device]]")
+                && body.contains("side = \"right-of\""),
             "{body}"
         );
-        assert_eq!(parse(&body).unwrap(), c);
+        let g = Generated {
+            mic_mute_local: true,
+            deskflow: c.clone(),
+        };
+        assert_eq!(parse(&body).unwrap(), g);
         let with_header = format!("{}\n{body}", crate::generated::HEADER);
-        assert_eq!(parse(&with_header).unwrap(), c);
-        assert_eq!(parse(&render(&DeskflowCfg::default())).unwrap(), DeskflowCfg::default());
+        assert_eq!(parse(&with_header).unwrap(), g);
+        assert_eq!(
+            parse(&render(&DeskflowCfg::default(), false)).unwrap(),
+            Generated::default()
+        );
+        // A file written before the key: the microphone key is not local.
+        let old = body.replacen("mic_mute_local = true\n", "", 1);
+        assert_eq!(parse(&old).unwrap().deskflow, c);
+        assert!(!parse(&old).unwrap().mic_mute_local);
     }
 
     #[test]

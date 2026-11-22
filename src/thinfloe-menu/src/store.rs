@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[test]
+    fn volume_switch_regenerates_deskflow() {
+        let d = TestDir::new("store", "deskflow-volume");
+        let mut o = open_session(&d);
+        o.store.update(Table::Deskflow, |c| c.deskflow.listen = true).unwrap();
+        let mic = |d: &TestDir| {
+            crate::deskflowcfg::parse(&gen_text(d, "deskflow").unwrap())
+                .unwrap()
+                .mic_mute_local
+        };
+        assert!(!mic(&d));
+        let changed = o
+            .store
+            .update(Table::Keyboard, |c| c.keyboard.volume_keys = true)
+            .unwrap();
+        assert!(changed.contains(&"deskflow"), "{changed:?}");
+        assert!(mic(&d));
+        // Another keyboard change leaves the file alone.
+        let changed = o.store.update(Table::Keyboard, |c| c.keyboard.numlock = false).unwrap();
+        assert!(!changed.contains(&"deskflow"), "{changed:?}");
+    }
+
+    #[test]
     fn a_bad_deskflow_device_is_refused_and_writes_nothing() {
         let d = TestDir::new("store", "deskflow-bad");
         let mut o = open_session(&d);

@@ -1597,10 +1597,16 @@ impl ApplicationHandler<Wake> for App {
                 // The status changed with the job; the watcher would see it
                 // only a second later.
                 let addon = matches!(result, JobResult::Addon { .. });
+                // A saved keyboard choice rewrote generated/deskflow when
+                // the volume key switch changed (mic_mute_local).
+                let keyboard = matches!(result, JobResult::KeyboardApplied { result: Ok(_), .. });
                 let effect = self.cfg.menu.finished(result, Instant::now());
                 self.apply(effect, event_loop);
                 if addon {
                     self.refresh_addons();
+                }
+                if keyboard {
+                    self.deskflow.reload();
                 }
             }
             Wake::Addons => self.refresh_addons(),
@@ -2689,7 +2695,7 @@ esac"#;
         assert_eq!(menu.deskflow.cfg, cfg);
         assert_eq!(menu.deskflow.error, None);
         let generated = std::fs::read_to_string(d.join("generated/deskflow")).unwrap();
-        assert_eq!(crate::deskflowcfg::parse(&generated).unwrap(), cfg);
+        assert_eq!(crate::deskflowcfg::parse(&generated).unwrap().deskflow, cfg);
         let text = std::fs::read_to_string(d.join("config.toml")).unwrap();
         assert_eq!(crate::config::parse(&text).unwrap().deskflow, cfg);
     }

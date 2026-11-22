@@ -336,6 +336,11 @@ impl Capture {
             outputs_changed: false,
             closed_at: None,
         };
+        if state.inhibit_mgr.is_none() {
+            eprintln!(
+                "thinfloe-menu --deskflow: no zwp_keyboard_shortcuts_inhibit_manager_v1: the compositor's keys still act while a device has the keyboard"
+            );
+        }
         for g in globals.contents().clone_list() {
             if g.interface == "wl_output" {
                 state.bind_output(globals.registry(), g.name, g.version, &qh);

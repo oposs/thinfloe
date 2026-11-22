@@ -128,6 +128,7 @@ fn daemon() -> ExitCode {
         state,
         socket,
         hostname: hostname(),
+        osd_key: run::osd_key_command(std::env::var("TF_OSD_KEY_CMD").ok().as_deref()),
     };
     match run::run(env) {
         Ok(()) => ExitCode::SUCCESS,

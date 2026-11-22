@@ -4,10 +4,10 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 
 ## Processes
 
-- The daemon is `thinfloe-menu --deskflow`, a process of its own. The menu starts it when `[deskflow] listen = true`, restarts it after a crash with a back-off (1 s doubling to 60 s), sends SIGHUP after each write of `[deskflow]`, SIGTERM when the switch goes off, and SIGTERM before it exits 0, 10 or 11 (waiting up to 1 s). The menu shows "Deskflow stopped: <reason>" when the daemon keeps failing.
+- The daemon is `thinfloe-menu --deskflow`, a process of its own. The menu starts it when `[deskflow] listen = true`, restarts it after a crash with a back-off (1 s doubling to 60 s), sends SIGHUP after each write of `[deskflow]` and after each saved keyboard choice, SIGTERM when the switch goes off, and SIGTERM before it exits 0, 10 or 11 (waiting up to 1 s). The menu shows "Deskflow stopped: <reason>" when the daemon keeps failing.
 - The daemon ends by itself when its parent dies or its Wayland connection closes, so no daemon keeps port 24800 after a logout, a restart or a killed menu. Guard: `test/runtime/test-labwc-runtime.sh` (`test-session-lifecycle.sh` runs stub menus without Wayland and only points there).
 - A watchdog thread ends the daemon when its event loop stalls for 2 s. All capture state lives in Wayland objects the daemon owns, so a crash returns pointer and keyboard to ThinFloe.
-- The daemon reads `~/.config/thinfloe/generated/deskflow` (derived by the menu from `[deskflow]` in `config.toml`), never `config.toml`. An absent file means the switch is off. It writes only its state file and its identity.
+- The daemon reads `~/.config/thinfloe/generated/deskflow` (derived by the menu from `[deskflow]` in `config.toml`, plus `mic_mute_local`, the volume key switch of `[keyboard]`), never `config.toml`. An absent file means the switch is off; a file without `mic_mute_local` reads as false. It writes only its state file and its identity.
 
 ## Contracts
 
@@ -42,6 +42,13 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 - Release always wins and does not wait for the client: Ctrl+Alt+Shift+Escape on the ThinFloe keyboard (seen by the strip's own keyboard focus, not a compositor binding; by key code when the keymap cannot be read), a missed keep-alive (3 s, 3 misses) or a failing socket, the lock cancelled, the strip losing focus or its output going away, and the watchdog.
 - Keys held at entry are not sent; keys held at exit get DKUP before COUT. Repeats are generated at the compositor's rate and delay. Ctrl+Alt+Fn falls back to the level-0 keysym, as Deskflow does.
 
+## Media keys
+
+- While a device has the keyboard, the strip's inhibitor keeps labwc's media key bindings from running, so the volume, mute and brightness keys go to the device (Deskflow key ids `0xE0AD` to `0xE0B9`) and ThinFloe shows no OSD for them.
+- The microphone mute key (`XF86AudioMicMute`) has no Deskflow key id and stays on ThinFloe: its press and release are never sent, and on the release, when `mic_mute_local` is true, the daemon runs `thinfloe-menu --osd-key mic-mute` (`TF_OSD_KEY_CMD` replaces `thinfloe-menu --osd-key`, as for the composer) in a process group of its own without waiting; the loop reaps it. A release whose press came before the capture does nothing.
+- The menu writes `mic_mute_local` with the volume key switch (`Table::Keyboard` renders `generated/deskflow` too) and sends the daemon SIGHUP after a saved keyboard choice.
+- Runtime test (`test-labwc-runtime.sh`, Deskflow media keys): with the stock client attached and captured, `XF86AudioRaiseVolume` reaches the client and not the recorder, `XF86AudioMicMute` reaches the recorder as `mic-mute` and not the client, and after the escape chord the volume key runs the binding again.
+
 ## Clipboard
 
 - Text only. The daemon watches ThinFloe's clipboard through the data-control protocol (ext_data_control_v1, else zwlr_data_control_v1) on a Wayland connection of its own, so a clipboard fault never touches the capture. It reads a selection as UTF-8 text (`text/plain;charset=utf-8`, `UTF8_STRING`, `text/plain`, `STRING`, `TEXT`), and offers a device's text under the same types plus `application/x-thinfloe-deskflow`. A selection carrying that marker is the daemon's own and is not reported back.
@@ -72,7 +79,6 @@ ThinFloe needs a client that presents a TLS client certificate. The first releas
 - Clipboard, text only: images, files and rich text are not bridged, nor is the primary selection (select and middle-click). Text over 1 MiB is not carried.
 - Clipboard, stale text: after a device took the clipboard and before its text arrives (while the pointer is still on it, or for the moment its DCLP is on the way), ThinFloe's clipboard still holds the old text.
 - Clipboard, switch turned on again: a device that held ThinFloe's text when its switch went off is still counted as holding it after the switch goes on, so the next entry sends it nothing; it keeps what it copied in between until ThinFloe's clipboard changes.
-- Media keys act on ThinFloe while the pointer is on a device (step 3 adds patch 0007 and the microphone rule).
 - A client that sends no certificate is not supported.
 - First contact needs the order above: trust ThinFloe on the client first.
 - Layout mismatches between ThinFloe and a client are a Deskflow limit (keys travel by key id).
