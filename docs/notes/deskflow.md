@@ -18,7 +18,7 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 ## Pairing
 
 - The fingerprint is the SHA-256 of the DER certificate, shown as Deskflow's picture and as colon hex.
-- The server always asks for a client certificate and drops a client without one: approving by name alone would let any computer on the LAN take over an attached slot. Trust is the fingerprint; the chain is not checked.
+- The server always asks for a client certificate and drops a client without one: approving by name alone would let any computer on the LAN take over an attached slot. Trust is the fingerprint; neither the chain nor the certificate's version is checked. The Deskflow GUI (1.26) makes X.509 v1 certificates, which webpki refuses, so the handshake signature is checked against the certificate's public key alone (`tls.rs`). Guards: `a_deskflow_gui_v1_certificate_is_taken`, the interop cases with `test/runtime/deskflow-gui-certs/`.
 - After Hello and HelloBack, a known (name, fingerprint) pair proceeds. An unknown pair is recorded as `pending` and answered with EUNK. A known name with another fingerprint is refused the same way and marked `fp-changed`; the user must attach it again. A second connection under an attached name gets EBSY.
 - A refused connection stays open up to 2 s after EUNK. Without that, the 1.26 client never parses EUNK and treats the close as a network failure.
 - Limits: 8 pending devices (the oldest drops), 4 connections in the TLS and Hello phase, 10 s to finish both, messages up to 1 MiB.

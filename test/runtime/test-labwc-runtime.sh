@@ -1931,7 +1931,10 @@ run_clip_probe_case
 # --new-instance lets a
 # second client run beside the first. Settings::tlsDir() is the directory of
 # that file plus /tls: the client's certificate and key are
-# <dir>/tls/deskflow.pem (deskflow-core does not make one, the GUI does), the
+# <dir>/tls/deskflow.pem (deskflow-core does not make one, the GUI does:
+# key and X.509 v1 certificate without extensions, which the image's
+# OpenSSL 3.5 command line cannot make; deskflow-gui-certs/ holds two, made
+# with 'openssl x509 -req -signkey' of OpenSSL 3.0), the
 # servers it trusts <dir>/tls/trusted-servers, one 'v2:sha256:<hex>' per
 # line. Without XDG_SESSION_TYPE=wayland the client drives X11, here
 # labwc's Xwayland, whose root window is the 1280x720 output.
@@ -1955,10 +1958,10 @@ reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.
 client() {
     d=$1; mkdir -p $d/tls
     printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n[log]\nlevel=DEBUG2\n" >$d/Deskflow.conf
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout $d/key.pem -out $d/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
-    cat $d/cert.pem $d/key.pem >$d/tls/deskflow.pem
+    cp /usr/local/share/deskflow-gui-certs/${d##*/}.pem $d/tls/deskflow.pem
+    openssl x509 -in $d/tls/deskflow.pem -noout -text | grep -q "Version: 1 " && echo "${d##*/}_v1=yes" || echo "${d##*/}_v1=no"
     echo "$fp" >$d/tls/trusted-servers
-    echo "v2:sha256:$(openssl x509 -in $d/cert.pem -outform DER | sha256sum | cut -d" " -f1)" >$d/fp
+    echo "v2:sha256:$(openssl x509 -in $d/tls/deskflow.pem -outform DER | sha256sum | cut -d" " -f1)" >$d/fp
     env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
         timeout 60 deskflow-core client --new-instance -s $d/Deskflow.conf >$d/log 2>&1 &
 }
@@ -2024,6 +2027,8 @@ run_deskflow_pairing_case() {
     }
     df_ok head=yes && grep -Eq '^fp=v2:sha256:[0-9a-f]{64}$' <<<"$out"
     df_check $? "the Deskflow daemon writes its fingerprint to the state file"
+    df_ok c1_v1=yes && df_ok c2_v1=yes
+    df_check $? "the clients' certificates are X.509 v1, as the Deskflow GUI makes them"
     # Deskflow 1.26 logs only its NOTE and IPC lines here, so the refusal
     # shows as a retry without "disconnected from server": a dropped
     # connection logs that line, a refusal (EUNK) does not.
@@ -2082,10 +2087,9 @@ upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
 fp=$(st | head -1 | cut -f2)
 mkdir -p /tmp/c1/tls
 printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
-openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
-cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+cp /usr/local/share/deskflow-gui-certs/c1.pem /tmp/c1/tls/deskflow.pem
 echo "$fp" >/tmp/c1/tls/trusted-servers
-c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/tls/deskflow.pem -outform DER | sha256sum | cut -d" " -f1)"
 attach HEADLESS-2
 run_client
 upto 15 state connected
@@ -2254,10 +2258,9 @@ upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
 fp=$(st | head -1 | cut -f2)
 mkdir -p /tmp/c1/tls
 printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
-openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
-cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+cp /usr/local/share/deskflow-gui-certs/c1.pem /tmp/c1/tls/deskflow.pem
 echo "$fp" >/tmp/c1/tls/trusted-servers
-c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/tls/deskflow.pem -outform DER | sha256sum | cut -d" " -f1)"
 printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\n" "$c1" >$gen
 reload
 env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen \
@@ -2369,10 +2372,9 @@ upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
 fp=$(st | head -1 | cut -f2)
 mkdir -p /tmp/c1/tls
 printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
-openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
-cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+cp /usr/local/share/deskflow-gui-certs/c1.pem /tmp/c1/tls/deskflow.pem
 echo "$fp" >/tmp/c1/tls/trusted-servers
-c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/tls/deskflow.pem -outform DER | sha256sum | cut -d" " -f1)"
 attach true
 upto 5 test -e /tmp/.X11-unix/X99
 env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen DISPLAY=:99 \

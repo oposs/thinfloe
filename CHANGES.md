@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- A Mac, Windows or Linux computer whose Deskflow certificate was made by the Deskflow app could not connect: the client logged `tls error occurred (generic failure)` and `ssl/tls alert certificate unknown`, and Settings → Screen never showed it. Such a computer now shows up there for its fingerprint to be compared.
 
 ## 4.8.0 - 2026-11-22
 ### New
