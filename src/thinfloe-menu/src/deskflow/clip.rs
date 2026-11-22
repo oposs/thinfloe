@@ -50,6 +50,11 @@ const PREFERRED: [&str; 5] = [
 pub enum ClipEvent {
     /// Another client set the selection: its text, at most [CLIP_MAX] bytes.
     Changed(Vec<u8>),
+    /// Another client set a selection the bridge does not carry: no text
+    /// mime, an empty text, more than [CLIP_MAX] bytes, or a read that
+    /// failed or ran out of time. The text seen before is no longer
+    /// ThinFloe's clipboard.
+    Cleared,
 }
 
 /// The mime type to read from an offer, or None when it has no text.
@@ -229,6 +234,8 @@ struct State {
     own: Option<(Source, Rc<Vec<u8>>)>,
     transfers: Vec<Transfer>,
     now: Instant,
+    /// Events of the Wayland callbacks, until [Clip::dispatch] returns them.
+    events: Vec<ClipEvent>,
 }
 
 pub struct Clip {
@@ -275,6 +282,11 @@ impl State {
         };
         let mime = match pick_mime(&mimes) {
             Some(m) if !is_own(&mimes) => m.to_string(),
+            None if !is_own(&mimes) => {
+                offer.destroy();
+                self.events.push(ClipEvent::Cleared);
+                return;
+            }
             _ => {
                 offer.destroy();
                 return;
@@ -292,6 +304,7 @@ impl State {
             Err(e) => {
                 eprintln!("thinfloe-menu --deskflow: clipboard: {e}");
                 offer.destroy();
+                self.events.push(ClipEvent::Cleared);
             }
         }
     }
@@ -358,6 +371,7 @@ impl Clip {
             own: None,
             transfers: Vec::new(),
             now: Instant::now(),
+            events: Vec::new(),
         };
         queue
             .roundtrip(&mut state)
@@ -379,8 +393,8 @@ impl Clip {
 
     /// Reads what the compositor sent, without blocking, and acts on it: a
     /// foreign selection starts a read, a request for our text starts a
-    /// write. The text itself arrives through [Clip::on_pipe_ready], so no
-    /// event comes from here; the Vec is for the poll loop's symmetry.
+    /// write. The text itself arrives through [Clip::on_pipe_ready]; from
+    /// here comes only [ClipEvent::Cleared] for a selection without text.
     pub fn dispatch(&mut self, now: Instant) -> Result<Vec<ClipEvent>, String> {
         self.state.now = now;
         self.flush()?;
@@ -398,7 +412,7 @@ impl Clip {
             .dispatch_pending(&mut self.state)
             .map_err(|e| format!("Wayland dispatch: {e}"))?;
         self.flush()?;
-        Ok(Vec::new())
+        Ok(std::mem::take(&mut self.state.events))
     }
 
     pub fn flush(&mut self) -> Result<(), String> {
@@ -422,8 +436,9 @@ impl Clip {
     }
 
     /// A pipe from [Clip::pipe_fds] is ready: moves what it can. A text read
-    /// in full is the event; a transfer that failed or went over the cap
-    /// is dropped.
+    /// in full is the event; a read that failed or went over the cap is
+    /// dropped and reported as [ClipEvent::Cleared]; a failed write is
+    /// dropped.
     pub fn on_pipe_ready(&mut self, fd: RawFd, now: Instant) -> Vec<ClipEvent> {
         let Some(i) = self.state.transfers.iter().position(|t| t.fd() == fd) else {
             return Vec::new();
@@ -439,20 +454,26 @@ impl Clip {
                     if n > 0 {
                         read.feed(&buf[..n as usize]);
                         if read.state(now) == ReadState::Over {
+                            events.push(ClipEvent::Cleared);
                             break false;
                         }
                     } else if n == 0 {
                         let text = std::mem::replace(read, CappedRead::new(now)).into_bytes();
-                        if !text.is_empty() {
-                            events.push(ClipEvent::Changed(text));
-                        }
+                        events.push(if text.is_empty() {
+                            ClipEvent::Cleared
+                        } else {
+                            ClipEvent::Changed(text)
+                        });
                         break false;
                     } else {
                         let e = std::io::Error::last_os_error().kind();
                         match e {
                             std::io::ErrorKind::WouldBlock => break true,
                             std::io::ErrorKind::Interrupted => {}
-                            _ => break false,
+                            _ => {
+                                events.push(ClipEvent::Cleared);
+                                break false;
+                            }
                         }
                     }
                 }
@@ -493,14 +514,20 @@ impl Clip {
             .min()
     }
 
-    /// Drops the transfers older than the timeout.
+    /// Drops the transfers older than the timeout; a read that ran out of
+    /// time is reported as [ClipEvent::Cleared].
     pub fn tick(&mut self, now: Instant) -> Vec<ClipEvent> {
         let (old, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.state.transfers)
             .into_iter()
             .partition(|t| now.saturating_duration_since(t.started()) >= TRANSFER_TIMEOUT);
         self.state.transfers = keep;
+        let events = old
+            .iter()
+            .filter(|t| matches!(t, Transfer::Read { .. }))
+            .map(|_| ClipEvent::Cleared)
+            .collect();
         old.into_iter().for_each(Transfer::finish);
-        Vec::new()
+        events
     }
 
     /// Makes this text the selection; a reader's pipe is served from the

@@ -238,8 +238,8 @@ Guards: `scripts/check-boot-smoke.sh` (any `Found ordering cycle`),
 The Dockerfile builds `labwc_0.9.3-1+thinfloe1` with
 `containers/ubuntu/patches/` (fullscreen across outputs,
 `LABWC_FULLSCREEN_SPAN_OUTPUTS`; `zwp_xwayland_keyboard_grab_manager_v1`;
-no default keybindings, `0005`; `allowWhenInhibited` on a keybind, `0006`; a layer-surface inhibitor
-blocks every keybinding, `0007`).
+no default keybindings, `0005`; `allowWhenInhibited` on a keybind,
+`0006`; a layer-surface inhibitor blocks every keybinding, `0007`).
 The archive package silently loses all of them. Patches, overlay and brand
 directories are `Makefile` prerequisites. Guards: `make test`, `make
 test-runtime`, `test-container-inputs.sh`, `test-container-stamp.sh`.

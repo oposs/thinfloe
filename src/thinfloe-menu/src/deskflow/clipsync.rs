@@ -76,6 +76,26 @@ impl ClipSync {
         vec![ClipAct::SetLocal(text)]
     }
 
+    /// ThinFloe's selection became something the bridge does not carry (an
+    /// image, a file list, a text over the cap). The text seen before is
+    /// forgotten, so no device gets it later, and every sharing device
+    /// learns of the grab, the active one too: a Deskflow client empties
+    /// its clipboard on a grab.
+    pub fn on_cleared(&mut self, live: &[(usize, bool)]) -> Vec<ClipAct> {
+        self.text = None;
+        self.holders.clear();
+        live.iter()
+            .filter(|&&(_, on)| on)
+            .map(|&(conn, _)| ClipAct::Grab { conn })
+            .collect()
+    }
+
+    /// The device's Clipboard switch changed: it no longer counts as
+    /// holding ThinFloe's text, so the next entry sends it again.
+    pub fn forget(&mut self, conn: usize) {
+        self.holders.retain(|&c| c != conn);
+    }
+
     /// A device took the clipboard: the others learn of it. None holds
     /// ThinFloe's text now (a Deskflow client empties its clipboard on a
     /// grab), so the next enter sends it again.
@@ -194,6 +214,51 @@ mod tests {
         s.on_remote(2, t("y"));
         assert_eq!(s.on_enter(1, true), [ClipAct::Send { conn: 1, text: t("y") }]);
         assert!(s.on_enter(2, true).is_empty());
+    }
+
+    #[test]
+    fn an_uncarried_selection_forgets_the_old_text() {
+        let mut s = ClipSync::default();
+        let live = [(1, true), (2, false), (3, true)];
+        s.on_local(t("secret"), Some(1), &live);
+        // An image or a text over the cap on ThinFloe: every sharing
+        // device, the active one too, learns of the grab.
+        assert_eq!(
+            s.on_cleared(&live),
+            [ClipAct::Grab { conn: 1 }, ClipAct::Grab { conn: 3 }]
+        );
+        // The old text is never sent later.
+        assert!(s.on_enter(1, true).is_empty());
+        assert!(s.on_enter(3, true).is_empty());
+        // The next text goes out again, to the device that held the old one too.
+        assert_eq!(
+            s.on_local(t("secret"), Some(1), &live),
+            [
+                ClipAct::Send {
+                    conn: 1,
+                    text: t("secret")
+                },
+                ClipAct::Grab { conn: 3 }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cleared_remote_text_is_not_sent_either() {
+        let mut s = ClipSync::default();
+        s.on_remote(1, t("from laptop"));
+        s.on_cleared(&[(1, true), (2, true)]);
+        assert!(s.on_enter(2, true).is_empty());
+    }
+
+    #[test]
+    fn a_forgotten_holder_gets_the_text_on_its_next_entry() {
+        let mut s = ClipSync::default();
+        s.on_local(t("x"), Some(1), &[(1, true)]);
+        assert!(s.on_enter(1, true).is_empty());
+        // Its switch went off and on again: it may hold something else.
+        s.forget(1);
+        assert_eq!(s.on_enter(1, true), [ClipAct::Send { conn: 1, text: t("x") }]);
     }
 
     #[test]

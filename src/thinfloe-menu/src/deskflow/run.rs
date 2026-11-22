@@ -60,6 +60,27 @@ pub fn osd_key_command(value: Option<&str>) -> Vec<String> {
 
 /// Starts `cmd key` in a process group of its own, stdin from /dev/null;
 /// the caller reaps it.
+/// At most this many OSD key commands run at once; a press beyond them is
+/// dropped, so a hung command cannot pile up children.
+const OSD_KEYS_MAX: usize = 4;
+
+/// A media key the daemon runs itself: nothing when `enabled` (the volume
+/// key switch) is off or [OSD_KEYS_MAX] commands are still running.
+fn press_osd_key(enabled: bool, cmd: &[String], running: &mut Vec<std::process::Child>, key: &str) {
+    if !enabled {
+        return;
+    }
+    running.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+    if running.len() >= OSD_KEYS_MAX {
+        eprintln!("thinfloe-menu --deskflow: the {key} key: {OSD_KEYS_MAX} commands still run");
+        return;
+    }
+    match spawn_osd_key(cmd, key) {
+        Ok(c) => running.push(c),
+        Err(e) => eprintln!("thinfloe-menu --deskflow: the {key} key: {e}"),
+    }
+}
+
 fn spawn_osd_key(cmd: &[String], key: &str) -> io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     let (prog, args) = cmd
@@ -749,8 +770,11 @@ impl Daemon {
             Mode::Active(a) => Some(a.device),
             _ => None,
         };
-        for ClipEvent::Changed(text) in events {
-            let acts = self.sync.on_local(text, active, &self.clip_live());
+        for ev in events {
+            let acts = match ev {
+                ClipEvent::Changed(text) => self.sync.on_local(text, active, &self.clip_live()),
+                ClipEvent::Cleared => self.sync.on_cleared(&self.clip_live()),
+            };
             self.clip_acts(acts);
         }
     }
@@ -804,13 +828,7 @@ impl Daemon {
     /// cannot act, so the daemon runs it, when the volume keys are on. It
     /// does not wait; `reap` collects the command.
     fn local_mic_mute(&mut self) {
-        if !self.mic_mute_local {
-            return;
-        }
-        match spawn_osd_key(&self.env.osd_key, "mic-mute") {
-            Ok(c) => self.osd_keys.push(c),
-            Err(e) => eprintln!("thinfloe-menu --deskflow: the microphone key: {e}"),
-        }
+        press_osd_key(self.mic_mute_local, &self.env.osd_key, &mut self.osd_keys, "mic-mute");
     }
 
     /// Collects the OSD key commands that ended.
@@ -1065,7 +1083,13 @@ impl Daemon {
             }
         }
         self.pending.forget_trusted(&cfg.devices);
+        let before = self.clip_live();
         self.cfg = cfg;
+        for (conn, shares) in self.clip_live() {
+            if !before.contains(&(conn, shares)) {
+                self.sync.forget(conn);
+            }
+        }
         for i in 0..self.conns.len() {
             if self.conns[i].trusted() {
                 let shares = self.shares_clipboard(&self.conns[i]);
@@ -1205,18 +1229,56 @@ mod tests {
         let cmd = vec![
             "sh".to_string(),
             "-c".into(),
-            "printf %s \"$1\" >\"$0\"".into(),
+            "printf %s \"$1\" >\"$0\"; exec sleep 1".into(),
             out.to_string_lossy().into_owned(),
         ];
         let mut c = spawn_osd_key(&cmd, "mic-mute").unwrap();
         let pid = c.id() as libc::pid_t;
-        // SAFETY: getpgid takes no pointers.
+        // SAFETY: getpgid takes no pointers. The child sleeps, and is not
+        // reaped before the wait below, so its group is there to read.
         let pgid = unsafe { libc::getpgid(pid) };
         assert!(c.wait().unwrap().success());
-        // The group was read before the reap, or the child had gone.
-        assert!(pgid == pid || pgid == -1, "pgid {pgid}, pid {pid}");
+        assert_eq!(pgid, pid);
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "mic-mute");
         assert!(spawn_osd_key(&[], "mic-mute").is_err());
+    }
+
+    #[test]
+    fn the_microphone_key_runs_nothing_with_the_volume_keys_off() {
+        let d = TestDir::new("deskflow-run", "osd-off");
+        let out = d.join("key");
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".into(),
+            "printf %s \"$1\" >\"$0\"".into(),
+            out.to_string_lossy().into_owned(),
+        ];
+        let mut running = Vec::new();
+        press_osd_key(false, &cmd, &mut running, "mic-mute");
+        assert!(running.is_empty());
+        press_osd_key(true, &cmd, &mut running, "mic-mute");
+        assert_eq!(running.len(), 1);
+        assert!(running[0].wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "mic-mute");
+    }
+
+    #[test]
+    fn at_most_four_osd_key_commands_run_at_once() {
+        let cmd = vec!["sh".to_string(), "-c".into(), "exec sleep 5".into()];
+        let mut running = Vec::new();
+        for _ in 0..6 {
+            press_osd_key(true, &cmd, &mut running, "mic-mute");
+        }
+        assert_eq!(running.len(), OSD_KEYS_MAX);
+        for c in &mut running {
+            c.kill().unwrap();
+            c.wait().unwrap();
+        }
+        // The reaped ones make room again.
+        press_osd_key(true, &cmd, &mut running, "mic-mute");
+        assert_eq!(running.len(), 1);
+        running[0].kill().unwrap();
+        running[0].wait().unwrap();
     }
 
     fn write_cfg(path: &Path, listen: bool, port: u16, devices: &[(&str, &str)]) {

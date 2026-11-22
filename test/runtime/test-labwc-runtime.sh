@@ -1841,8 +1841,8 @@ run_layer_inhibit_case grab
 # own Wayland connection against labwc's data-control protocol. wl-copy puts
 # a text on the clipboard and the probe prints 'changed <len> <sha256>'; a
 # 'set <text>' line on the probe's stdin makes that text the selection, which
-# wl-paste then reads; a 3 MB text (over the 1 MiB cap) produces no line, and
-# the probe still answers the next copy. The probe's stdin is a fifo the
+# wl-paste then reads; a 3 MB text (over the 1 MiB cap) produces 'cleared'
+# and no 'changed' line, and the probe still answers the next copy. The probe's stdin is a fifo the
 # script holds open. TF_RUNTIME_MENU names a host-built thinfloe-menu to use
 # instead of the image's (iteration only).
 # shellcheck disable=SC2016 # expands inside the container
@@ -1905,8 +1905,9 @@ run_clip_probe_case() {
         fail=1
     fi
     n=$(grep -c '^clip: changed ' <<<"$out")
-    if [[ $n -eq 2 ]] && grep -qx "clip: changed 17 $h3" <<<"$out"; then
-        echo "ok   - a 3 MB copy produces no event and the bridge answers the next copy"
+    if [[ $n -eq 2 ]] && [[ $(grep -cx 'clip: cleared' <<<"$out") -eq 1 ]] &&
+        grep -qx "clip: changed 17 $h3" <<<"$out"; then
+        echo "ok   - a 3 MB copy is reported as cleared, not as a text, and the bridge answers the next copy"
     else
         echo "FAIL - after the 3 MB copy: $diag"
         fail=1

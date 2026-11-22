@@ -9,7 +9,8 @@
 //!
 //! `--deskflow --probe-clip` is a test hook for the clipboard bridge: it
 //! prints `changed <len> <sha256-hex>` for each text another client puts on
-//! the clipboard and sets the clipboard from stdin lines `set <text>`.
+//! the clipboard, `cleared` for a selection it does not carry (no text, or
+//! over the cap), and sets the clipboard from stdin lines `set <text>`.
 //!
 //! `--deskflow` alone is the daemon ([`run`]).
 
@@ -278,10 +279,14 @@ fn probe_clip() -> Result<(), String> {
         }
         events.extend(clip.tick(now));
         for ev in events {
-            let clip::ClipEvent::Changed(text) = ev;
-            let digest = ring::digest::digest(&ring::digest::SHA256, &text);
-            let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-            println!("changed {} {hex}", text.len());
+            match ev {
+                clip::ClipEvent::Changed(text) => {
+                    let digest = ring::digest::digest(&ring::digest::SHA256, &text);
+                    let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+                    println!("changed {} {hex}", text.len());
+                }
+                clip::ClipEvent::Cleared => println!("cleared"),
+            }
         }
         if fds[1].revents != 0 {
             let mut buf = [0u8; 4096];
