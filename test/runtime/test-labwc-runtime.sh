@@ -18,7 +18,8 @@
 # that a Deskflow capture strip takes the pointer lock and the keys from a
 # fullscreen X11 window holding a keyboard grab and gives them back, and
 # that the stock Deskflow client pairs, gets the pointer and the keys (the
-# volume keys too, while the microphone mute key stays on ThinFloe), and
+# volume keys too, while the microphone mute key stays on ThinFloe),
+# handles local Multi_key Compose and proportional pointer re-entry, and
 # shares the text clipboard with ThinFloe.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
@@ -2552,5 +2553,177 @@ run_deskflow_lifecycle_case() {
     lc_check $? "deskflow_lifecycle: a menu ended by SIGTERM leaves no daemon behind"
 }
 run_deskflow_lifecycle_case
+
+# Deskflow per-device local Compose and proportional pointer re-entry
+# (Approach 2B: zwlr_virtual_pointer_v1::motion_absolute after unlock +
+# hover.at update), against the stock 1.26 client on one 1280x720 output.
+# deskflow-core and x11-probe.py --record run on Xvfb :99 (-noreset so the
+# server keeps its XKB map after setxkbmap disconnects) with
+# 'setxkbmap -layout de -option compose:ralt' (headless Xwayland has no
+# physical keyboard and keeps a us layout without Compose, whereas Xvfb :99
+# carries adiaeresis, dead_acute, and Multi_key on RALT cleanly). A
+# fullscreen x11-probe.py --buttons window stays on labwc's Xwayland to
+# measure the returned Wayland cursor coordinates; moving inward in two
+# steps after leaving the layer-shell strip gives Xwayland a motion event
+# inside the window before the click. Pointer re-entry runs before wtype so
+# virtual-keyboard teardown in headless labwc does not disturb the capture.
+# As in the forwarding case, two warmup x keys clear XTest's initial keymap
+# switch.
+# shellcheck disable=SC2016 # expands inside the container
+cr_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+head="[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+write_cfg() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\ncompose = %s\n" "$c1" "$1" >$gen; reload; }
+backs() { grep -c "^thinfloe-deskflow: released (back)$" /tmp/d.err; }
+back_after() { [ "$(backs)" -gt "$1" ]; }
+btn_after() { [ "$(grep -c "^BUTTON " /tmp/xbtn)" -gt "$1" ]; }
+push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+rec_since() { tail -n +"$(( $1 + 1 ))" /tmp/xrec; }
+rec_since_has() { rec_since "$1" | grep -qx "$2"; }
+rec_since_match() { rec_since "$1" | grep -Eq "$2"; }
+
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp -noreset >/tmp/xvfb.log 2>&1 &
+xpid=$!
+python3 /usr/local/bin/x11-probe.py --background ff0000 --buttons --hold 90 >/tmp/xbtn 2>&1 &
+btnpid=$!
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+dpid=$!
+upto 5 test -e /tmp/.X11-unix/X99
+DISPLAY=:99 setxkbmap -layout de -option compose:ralt >/tmp/xkb.log 2>&1 && echo xkb_set=yes || echo xkb_set=no
+DISPLAY=:99 python3 /usr/local/bin/x11-probe.py --record 90 >/tmp/xrec 2>&1 &
+recpid=$!
+upto 10 grep -q "^GEOMETRY 1280x720$" /tmp/xbtn && echo btn_geom=yes || echo btn_geom=no
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+cp /usr/local/share/deskflow-gui-certs/c1.pem /tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/tls/deskflow.pem -outform DER | sha256sum | cut -d" " -f1)"
+write_cfg true
+env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen DISPLAY=:99 \
+    timeout 80 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >/tmp/c1/log 2>&1 &
+cpid=$!
+upto 15 state connected && echo connected=yes || echo connected=no
+
+# 1. Pointer re-entry (Approach 2B): enter at (1279, 100), move down to y = 600 on client, return, verify no bounce, click and re-enter.
+wlrctl pointer move -5000 -5000
+wlrctl pointer move 1279 100
+sleep 0.5
+push && echo push1=active || echo push1=idle
+m2=$(wc -l </tmp/xrec)
+wlrctl pointer move 0 500
+upto 3 rec_since_match "$m2" "^MOTION [0-9]+ 600$" && echo moved_down=yes || echo moved_down=no
+b=$(backs)
+wlrctl pointer move -100 0
+upto 3 back_after "$b" && upto 3 state connected && echo back1=yes || echo back1=no
+wlrctl pointer move 0 10
+wlrctl pointer move -90 0
+wlrctl pointer move -10 0
+sleep 0.3
+state connected && echo nobounce=connected || echo nobounce=other
+bn=$(grep -c "^BUTTON " /tmp/xbtn)
+wlrctl pointer click left
+upto 5 btn_after "$bn"
+echo "btn_last=$(grep "^BUTTON " /tmp/xbtn | tail -1)"
+m2r=$(wc -l </tmp/xrec)
+wlrctl pointer move 5000 0
+sleep 0.5
+state connected && echo edge_touch=connected || echo edge_touch=other
+push && echo push2=active || echo push2=idle
+upto 3 rec_since_match "$m2r" "^MOTION 0 [0-9]+$"
+echo "reentry_motion=$(rec_since "$m2r" | grep -E "^MOTION 0 [0-9]+$" | head -1)"
+
+# 2. Compose on (compose = true): warm up, Multi_key sequence and dead_acute.
+wtype -s 300 x -s 500
+wtype -s 300 x -s 500
+upto 5 grep -qx "KEY x" /tmp/xrec
+sleep 0.2
+m1=$(wc -l </tmp/xrec)
+wtype -s 300 -k Multi_key -s 100 -k quotedbl -s 100 a -s 500
+upto 5 rec_since_has "$m1" "KEY adiaeresis" && echo comp_down=yes || echo comp_down=no
+upto 5 rec_since_has "$m1" "KEYUP adiaeresis" && echo comp_up=yes || echo comp_up=no
+rec_since_has "$m1" "KEY Multi_key" && echo comp_multikey=yes || echo comp_multikey=no
+wtype -s 300 -k dead_acute -s 500
+upto 5 rec_since_has "$m1" "KEY dead_acute" && echo dead_key=yes || echo dead_key=no
+
+# 3. Compose off (compose = false): reload and forward Multi_key.
+m3=$(wc -l </tmp/xrec)
+write_cfg false
+sleep 0.5
+wtype -s 300 -k Multi_key -s 500
+upto 5 rec_since_has "$m3" "KEY Multi_key" && echo off_multikey=yes || echo off_multikey=no
+
+kill -TERM $dpid
+wait $dpid
+echo d_rc=$?
+kill $cpid $recpid $btnpid $xpid 2>/dev/null
+st | sed "s/^/state: /"
+sed "s/^/btn: /" /tmp/xbtn | head -20
+tail -n +"$((m1 + 1))" /tmp/xrec | sed "s/^/rec1: /" | grep -v "^rec1: MOTION\|^rec1: XTEST 6 " | head -40
+grep -n "^MOTION " /tmp/xrec | sed "s/^/mot: /" | head -40
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+sed "s/^/xvfb: /" /tmp/xvfb.log /tmp/xkb.log 2>/dev/null | tail -10
+exit 0'
+run_deskflow_compose_reentry_case() {
+    local name="thinfloe-runtime-test-cr-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CR_SCRIPT="$cr_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg /tmp/tfcfg/generated && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CR_SCRIPT" >/tmp/cr.sh &&
+               printf "XKB_DEFAULT_LAYOUT=de\n" >/tmp/tfcfg/generated/environment &&
+               thinfloe-compose-labwc-config /etc/thinfloe/labwc /tmp/tfcfg/generated/environment /nonexistent /tmp/xdg/thinfloe-labwc &&
+               labwc -C /tmp/xdg/thinfloe-labwc -S "sh /tmp/cr.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow compose/re-entry case)"
+        grep -E '^(state|btn|rec1|mot|derr|c1|xvfb): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag btn_coords bx by ry
+    diag="$(grep -E '^(state|btn|rec1|mot|derr|xvfb): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    cr_ok() { grep -qx "$1" <<<"$out"; }
+    cr_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    cr_ok btn_geom=yes && cr_ok xkb_set=yes && cr_ok connected=yes && cr_ok push1=active &&
+        cr_ok comp_down=yes && cr_ok comp_up=yes && cr_ok comp_multikey=no
+    cr_check $? "deskflow_compose: with compose = true, Multi_key + quotedbl + a produces adiaeresis without forwarding Multi_key"
+    cr_ok dead_key=yes
+    cr_check $? "deskflow_compose: with compose = true, dead_acute bypasses local compose and reaches the client"
+    cr_ok moved_down=yes && cr_ok back1=yes && cr_ok nobounce=connected
+    cr_check $? "deskflow_reentry: crossing back across the edge releases the capture and sideways/inward motion does not bounce"
+    btn_coords=$(grep -E '^btn_last=BUTTON [0-9]+ [0-9]+$' <<<"$out" | tail -1)
+    bx=$(awk '{print $2}' <<<"$btn_coords")
+    by=$(awk '{print $3}' <<<"$btn_coords")
+    [[ -n "$bx" && "$bx" -ge 1150 && "$bx" -le 1200 && -n "$by" && "$by" -ge 550 && "$by" -le 670 ]]
+    cr_check $? "deskflow_reentry: local click after returning lands at the returned edge and height (pos=${bx:-none},${by:-none}, expected x=1150..=1200 y=550..=670; Approach 2B)"
+    ry=$(grep -E '^reentry_motion=MOTION 0 [0-9]+$' <<<"$out" | tail -1 | awk '{print $3}')
+    cr_ok edge_touch=connected && cr_ok push2=active && [[ -n "$ry" && "$ry" -ge 550 && "$ry" -le 670 ]]
+    cr_check $? "deskflow_reentry: pushing back onto the device enters at the returned height (MOTION 0 ${ry:-none}, expected 550..=670)"
+    cr_ok off_multikey=yes && cr_ok d_rc=0
+    cr_check $? "deskflow_compose: after reloading compose = false, Multi_key forwards to the client and SIGTERM ends the daemon with 0"
+}
+run_deskflow_compose_reentry_case
 
 exit $fail

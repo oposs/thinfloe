@@ -71,6 +71,7 @@ def record(seconds):
     ctl = display.Display()
     names = display.Display()
     XK.load_keysym_group("xf86")
+    XK.load_keysym_group("xkb")
     xtest = ctl.query_extension("XTEST").major_opcode
     ctx = ctl.record_create_context(0, [rec.AllClients], [{
         "core_requests": (0, 0), "core_replies": (0, 0),
@@ -142,6 +143,7 @@ if grab:
     time.sleep(1)
 
 XK.load_keysym_group("xf86")
+XK.load_keysym_group("xkb")
 if keymap:
     syms = []
     for name in keymap:
