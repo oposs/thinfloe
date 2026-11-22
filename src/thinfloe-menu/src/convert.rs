@@ -741,6 +741,7 @@ mod tests {
             output: "eDP-1".into(),
             side: crate::kanshi::Side::LeftOf,
             clipboard: false,
+            compose: false,
         }];
         c
     }
