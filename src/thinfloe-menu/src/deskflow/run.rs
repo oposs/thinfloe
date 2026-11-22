@@ -25,6 +25,7 @@ use super::clipsync::{ClipAct, ClipSync};
 use super::cmd::{self, Cmd};
 use super::conn::{Conn, Event};
 use super::edge::{self, Rect, Tracker};
+use super::faillog::{self, FailLog};
 use super::forward::{self, Action, Active, Keyboard};
 use super::ident::{self, Identity};
 use super::pair::{self, Pending, PendingKind, Verdict};
@@ -393,6 +394,8 @@ struct Daemon {
     written: Option<String>,
     /// The id the next connection gets.
     next_id: usize,
+    /// Failures before pairing logged lately.
+    failed: FailLog,
     /// The compositor's outputs, as of the last `OutputsChanged`.
     outputs: Vec<OutputGeom>,
     strips: Vec<Strip>,
@@ -435,6 +438,7 @@ impl Daemon {
             since: HashMap::new(),
             written: None,
             next_id: 1,
+            failed: FailLog::default(),
             strips: Vec::new(),
             offline: Vec::new(),
             busy: Vec::new(),
@@ -566,6 +570,16 @@ impl Daemon {
         self.update_strips();
         for c in &mut self.conns {
             c.flush();
+        }
+        // A connection that ends before its client is named shows nowhere
+        // else: not in the state file, not in Settings.
+        for c in &self.conns {
+            if let Some(why) = c.closing()
+                && c.name().is_none()
+                && self.failed.should_log(c.peer(), why, now)
+            {
+                eprintln!("thinfloe-menu --deskflow: {}", faillog::line(c.peer(), why));
+            }
         }
         self.conns.retain(|c| c.closing().is_none());
         self.write_state();

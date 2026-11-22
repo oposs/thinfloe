@@ -21,6 +21,7 @@ pub mod clipsync;
 pub mod cmd;
 pub mod conn;
 pub mod edge;
+pub mod faillog;
 pub mod forward;
 pub mod ident;
 pub mod keymap;

@@ -51,6 +51,9 @@ pub struct Conn {
     /// The daemon's number for it, unique for the life of the process.
     id: usize,
     stream: TcpStream,
+    /// The client's address, read at the accept: a reset socket no longer
+    /// knows it.
+    peer: Option<std::net::IpAddr>,
     tls: ServerConnection,
     framer: Framer,
     /// Made when the TLS handshake is done.
@@ -77,6 +80,7 @@ impl Conn {
         tls.set_buffer_limit(Some(SEND_BUFFER));
         Ok(Conn {
             id,
+            peer: stream.peer_addr().ok().map(|a| a.ip()),
             stream,
             tls,
             framer: Framer::default(),
@@ -110,6 +114,11 @@ impl Conn {
 
     pub fn fingerprint(&self) -> Option<&str> {
         self.fingerprint.as_deref()
+    }
+
+    /// The client's address, as of the accept.
+    pub fn peer(&self) -> Option<std::net::IpAddr> {
+        self.peer
     }
 
     pub fn name(&self) -> Option<&str> {

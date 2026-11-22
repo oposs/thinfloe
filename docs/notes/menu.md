@@ -538,7 +538,8 @@ starts):
 `HH:MM:SS  source | text`, in local time. It shows every tile start and
 exit (with the exit status or signal), each save and its outcome, and every
 line a tile's program or `thinfloe-save-home` writes to stdout or stderr, with
-the tile name or `save-home` as source. Program output is untrusted, so the
+the tile name or `save-home` as source, and what the Deskflow daemon writes
+to stderr, as `deskflow`. Program output is untrusted, so the
 bounds are fixed in `src/thinfloe-menu/src/log.rs`: lines are cut at 1 KiB, the
 log and the queue from the reader threads keep 500 lines each, and output
 wakes the menu at most ten times a second. A program's last lines appear
