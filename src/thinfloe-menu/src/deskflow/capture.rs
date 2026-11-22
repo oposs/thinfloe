@@ -41,6 +41,7 @@ use wayland_protocols::wp::pointer_constraints::zv1::client::{zwp_locked_pointer
 use wayland_protocols::wp::relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use wayland_protocols_wlr::virtual_pointer::v1::client::{zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1};
 
 use super::edge::Rect;
 
@@ -185,6 +186,51 @@ fn placement(out: &OutputGeom, rect: &Rect) -> (zwlr_layer_surface_v1::Anchor, M
     }
 }
 
+/// Output-local pixel-center coordinates `(x, y, x_extent, y_extent)` for
+/// `zwlr_virtual_pointer_v1::motion_absolute`, mapping pixel `p` on length
+/// `len` to `(2*p + 1) / (2*len)` so `1279` on `1280` stays inside pixel `1279`.
+pub fn virtual_pointer_coords(out: &OutputGeom, layout: (f64, f64)) -> Option<(u32, u32, u32, u32)> {
+    if out.w <= 0 || out.h <= 0 || !layout.0.is_finite() || !layout.1.is_finite() {
+        return None;
+    }
+    let ox = (layout.0 - f64::from(out.x)).clamp(0.0, f64::from(out.w - 1));
+    let oy = (layout.1 - f64::from(out.y)).clamp(0.0, f64::from(out.h - 1));
+    Some((
+        (ox.round() as u32) * 2 + 1,
+        (oy.round() as u32) * 2 + 1,
+        (out.w as u32) * 2,
+        (out.h as u32) * 2,
+    ))
+}
+
+/// Full-layout bounding rectangle across outputs with positive size, used when
+/// `zwlr_virtual_pointer_manager_v1` is below version 2 (no output binding).
+fn layout_bounding_box(outputs: &[OutputGeom]) -> Option<OutputGeom> {
+    let mut iter = outputs.iter().filter(|o| o.w > 0 && o.h > 0);
+    let first = iter.next()?;
+    let (mut min_x, mut min_y) = (i64::from(first.x), i64::from(first.y));
+    let (mut max_x, mut max_y) = (min_x + i64::from(first.w), min_y + i64::from(first.h));
+    for o in iter {
+        min_x = min_x.min(i64::from(o.x));
+        min_y = min_y.min(i64::from(o.y));
+        max_x = max_x.max(i64::from(o.x) + i64::from(o.w));
+        max_y = max_y.max(i64::from(o.y) + i64::from(o.h));
+    }
+    Some(OutputGeom {
+        name: String::new(),
+        description: String::new(),
+        x: i32::try_from(min_x).ok()?,
+        y: i32::try_from(min_y).ok()?,
+        w: i32::try_from(max_x - min_x).ok()?,
+        h: i32::try_from(max_y - min_y).ok()?,
+    })
+}
+
+fn virtual_pointer_layout_coords(outputs: &[OutputGeom], layout: (f64, f64)) -> Option<(u32, u32, u32, u32)> {
+    let bounds = layout_bounding_box(outputs)?;
+    virtual_pointer_coords(&bounds, layout)
+}
+
 struct Output {
     wl: wl_output::WlOutput,
     xdg: zxdg_output_v1::ZxdgOutputV1,
@@ -270,6 +316,7 @@ struct State {
     /// None on a compositor without it: the capture works, but the
     /// compositor's media keys still run while it is on.
     inhibit_mgr: Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
+    virtual_pointer_mgr: Option<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1>,
     seat: wl_seat::WlSeat,
     pointer: Option<wl_pointer::WlPointer>,
     relative: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
@@ -320,6 +367,7 @@ impl Capture {
                 .bind(&qh, 1..=1, ())
                 .map_err(err("zwp_relative_pointer_manager_v1"))?,
             inhibit_mgr: globals.bind(&qh, 1..=1, ()).ok(),
+            virtual_pointer_mgr: globals.bind(&qh, 1..=2, ()).ok(),
             seat: globals.bind(&qh, 5..=8, ()).map_err(err("wl_seat v5"))?,
             pointer: None,
             relative: None,
@@ -468,39 +516,72 @@ impl Capture {
 
     /// Give pointer and keyboard back: the lock goes and the strip takes
     /// no keys again. Reports `Unlocked` when a capture was on, and then
-    /// returns true. When `hint` is given and the lock is active, sets the
-    /// cursor position hint in surface coordinates before destroying the lock.
-    pub fn end_capture(&mut self, hint: Option<(f64, f64)>) -> bool {
-        self.state.end_capture(hint)
+    /// returns true. When `warp` is given (in layout coordinates) and the
+    /// lock was active, warps the pointer there with `zwlr_virtual_pointer_v1`
+    /// after releasing the lock.
+    pub fn end_capture(&mut self, warp: Option<(f64, f64)>) -> bool {
+        let qh = self.queue.handle();
+        self.state.end_capture(warp, Some(&qh))
     }
 }
 
 impl State {
-    fn end_capture(&mut self, hint: Option<(f64, f64)>) -> bool {
+    fn end_capture(&mut self, warp: Option<(f64, f64)>, qh: Option<&QueueHandle<State>>) -> bool {
         let Some(id) = self.captured.take() else {
             return false;
         };
+        let was_locked = self.locked;
         if let Some(lock) = self.lock.take() {
-            if let Some((sx, sy)) = hint
-                && self.locked
-                && let Some(st) = self.strips.iter().find(|x| x.spec.id == id)
-            {
-                lock.set_cursor_position_hint(sx, sy);
-                st.surface.commit();
-            }
             lock.destroy();
         }
         if let Some(inhibitor) = self.inhibitor.take() {
             inhibitor.destroy();
         }
         self.locked = false;
-        if let Some(st) = self.strips.iter().find(|x| x.spec.id == id) {
+        let strip_output = if let Some(st) = self.strips.iter().find(|x| x.spec.id == id) {
             st.layer
                 .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
             st.surface.commit();
+            Some(st.spec.output.clone())
+        } else {
+            None
+        };
+        if was_locked
+            && let Some(layout) = warp
+            && let Some(qh) = qh
+            && let Some(out_name) = strip_output
+        {
+            self.warp_cursor(&out_name, layout, qh);
         }
         self.events.push(CapEvent::Unlocked);
         true
+    }
+
+    fn warp_cursor(&self, output: &str, layout: (f64, f64), qh: &QueueHandle<State>) {
+        let Some(mgr) = self.virtual_pointer_mgr.as_ref() else {
+            return;
+        };
+        let (vp, (x, y, x_ext, y_ext)) = if mgr.version() >= 2 {
+            let Some(out) = self.outputs.values().find(|o| o.name.as_deref() == Some(output)) else {
+                return;
+            };
+            let Some(coords) = out.geom().and_then(|g| virtual_pointer_coords(&g, layout)) else {
+                return;
+            };
+            (
+                mgr.create_virtual_pointer_with_output(Some(&self.seat), Some(&out.wl), qh, ()),
+                coords,
+            )
+        } else {
+            let geoms: Vec<OutputGeom> = self.outputs.values().filter_map(Output::geom).collect();
+            let Some(coords) = virtual_pointer_layout_coords(&geoms, layout) else {
+                return;
+            };
+            (mgr.create_virtual_pointer(Some(&self.seat), qh, ()), coords)
+        };
+        vp.motion_absolute(0, x, y, x_ext, y_ext);
+        vp.frame();
+        vp.destroy();
     }
 
     /// An event for the caller; input during a capture waits for the lock.
@@ -516,7 +597,7 @@ impl State {
 
     fn remove_strip(&mut self, s: Strip) {
         if self.captured == Some(s.spec.id) {
-            self.end_capture(None);
+            self.end_capture(None, None);
         }
         if self.hover == Some(s.spec.id) {
             self.hover = None;
@@ -886,7 +967,7 @@ impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for State {
             }
             // A oneshot lock is dead once it is deactivated.
             zwp_locked_pointer_v1::Event::Unlocked => {
-                state.end_capture(None);
+                state.end_capture(None, None);
             }
             _ => {}
         }
@@ -969,6 +1050,8 @@ no_events!(
     wl_region::WlRegion,
     wl_surface::WlSurface,
     zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
+    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
@@ -1131,5 +1214,106 @@ mod tests {
             ..Wheel::default()
         };
         assert_eq!(w.v120(), (0, i32::MAX));
+    }
+
+    #[test]
+    fn virtual_pointer_coords_maps_edges_clamps_and_rejects_invalid() {
+        let single = OutputGeom {
+            name: "HEADLESS-1".into(),
+            description: String::new(),
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        };
+        assert_eq!(
+            virtual_pointer_coords(&single, (1279.0, 360.0)),
+            Some((2559, 721, 2560, 1440))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&single, (0.0, 180.0)),
+            Some((1, 361, 2560, 1440))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&single, (640.0, 0.0)),
+            Some((1281, 1, 2560, 1440))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&single, (640.0, 719.0)),
+            Some((1281, 1439, 2560, 1440))
+        );
+
+        let offset = OutputGeom {
+            name: "DP-1".into(),
+            description: String::new(),
+            x: 1280,
+            y: 100,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            virtual_pointer_coords(&offset, (3199.0, 640.0)),
+            Some((3839, 1081, 3840, 2160))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&offset, (1280.0, 100.0)),
+            Some((1, 1, 3840, 2160))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&offset, (2240.0, 1179.0)),
+            Some((1921, 2159, 3840, 2160))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&offset, (3199.0, 100.0)),
+            Some((3839, 1, 3840, 2160))
+        );
+
+        // Out-of-bounds layout coordinates clamp inside the output.
+        assert_eq!(
+            virtual_pointer_coords(&offset, (1200.0, 50.0)),
+            Some((1, 1, 3840, 2160))
+        );
+        assert_eq!(
+            virtual_pointer_coords(&offset, (5000.0, 5000.0)),
+            Some((3839, 2159, 3840, 2160))
+        );
+
+        // Non-finite coordinates and non-positive output dimensions return None.
+        assert_eq!(virtual_pointer_coords(&single, (f64::NAN, 360.0)), None);
+        assert_eq!(virtual_pointer_coords(&single, (100.0, f64::INFINITY)), None);
+        assert_eq!(virtual_pointer_coords(&single, (f64::NEG_INFINITY, 100.0)), None);
+        assert_eq!(
+            virtual_pointer_coords(&OutputGeom { w: 0, ..single.clone() }, (100.0, 100.0)),
+            None
+        );
+        assert_eq!(
+            virtual_pointer_coords(&OutputGeom { h: -1, ..single }, (100.0, 100.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn virtual_pointer_layout_coords_spans_multi_monitor_bounding_box() {
+        let a = OutputGeom {
+            name: "DP-1".into(),
+            description: String::new(),
+            x: -1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let b = OutputGeom {
+            name: "DP-2".into(),
+            description: String::new(),
+            x: 0,
+            y: 180,
+            w: 1280,
+            h: 720,
+        };
+        assert_eq!(
+            virtual_pointer_layout_coords(&[a, b], (1279.0, 600.0)),
+            Some((6399, 1201, 6400, 2160))
+        );
+        assert_eq!(virtual_pointer_layout_coords(&[], (0.0, 0.0)), None);
     }
 }

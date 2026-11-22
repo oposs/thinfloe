@@ -868,16 +868,15 @@ impl Daemon {
     }
 
     /// Releases capture and, when returning across an edge (`back_along`),
-    /// hints the compositor's cursor position and updates `hover.at`.
+    /// warps the compositor's cursor position and updates `hover.at`.
     fn release_at(&mut self, reason: &str, back_along: Option<f64>) {
-        let (surface_hint, layout_at) = match (back_along, &self.mode) {
+        let layout_at = match (back_along, &self.mode) {
             (Some(along), Mode::Active(a)) => self
                 .strips
                 .iter()
                 .find(|s| s.spec.id == a.device as u32)
-                .map(|s| edge::reentry_point(s.out, s.side, along))
-                .unzip(),
-            _ => (None, None),
+                .map(|s| edge::reentry_point(s.out, s.side, along)),
+            _ => None,
         };
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Idle => return,
@@ -892,7 +891,7 @@ impl Daemon {
             }
         }
         if let Some(c) = self.capture.as_mut()
-            && c.end_capture(surface_hint)
+            && c.end_capture(layout_at)
         {
             self.own_unlocks += 1;
         }
