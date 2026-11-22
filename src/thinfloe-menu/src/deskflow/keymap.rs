@@ -10,15 +10,23 @@
 //! keysym-to-Unicode conversion decides, which also covers the keysyms
 //! Deskflow's table misses (Unicode keysyms such as `U+0100_0000 + cp`).
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
+use std::sync::Once;
 
 use xkbcommon_dl::{
-    XkbCommon, xkb_context, xkb_context_flags, xkb_keymap, xkb_keymap_compile_flags, xkb_keymap_format, xkb_state,
-    xkb_state_component,
+    XkbCommon, XkbCommonCompose, xkb_compose_compile_flags, xkb_compose_state, xkb_compose_state_flags,
+    xkb_compose_status, xkb_compose_table, xkb_context, xkb_context_flags, xkb_keymap, xkb_keymap_compile_flags,
+    xkb_keymap_format, xkb_state, xkb_state_component,
 };
+
+/// Keysym of the Compose (`Multi_key`) key.
+pub const XK_MULTI_KEY: u32 = 0xff20;
+
+/// Synthetic Deskflow button number used when emitting a composed character.
+pub const COMPOSED_BUTTON: u16 = 1;
 
 /// The largest keymap read from a compositor.
 const KEYMAP_MAX: u32 = 1 << 20;
@@ -171,6 +179,114 @@ impl Mods {
             self.scroll,
         )
     }
+
+    /// Only the lock-key modifier bits (`Caps`, `Num`, `Scroll`).
+    pub fn locks_mask(&self) -> u16 {
+        self.mask() & (MOD_CAPS_LOCK | MOD_NUM_LOCK | MOD_SCROLL_LOCK)
+    }
+}
+
+/// Result of feeding a keysym into the local libxkbcommon Compose state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposeOutcome {
+    /// Not in a compose sequence; forward the key normally.
+    Idle,
+    /// Inside a compose sequence; swallow the key and keep composing.
+    Composing,
+    /// Sequence completed; `Some(key_id)` if representable in Deskflow, `None` otherwise.
+    Composed(Option<u16>),
+    /// Sequence cancelled; state was reset.
+    Cancelled,
+}
+
+/// First usable locale from `LC_ALL`, `LC_CTYPE`, `LANG`, falling back to
+/// `"en_US.UTF-8"` when unset, empty, `"C"`, `"POSIX"`, or `"C.*"`.
+pub(crate) fn compose_locale<'a>(lc_all: Option<&'a str>, lc_ctype: Option<&'a str>, lang: Option<&'a str>) -> &'a str {
+    [lc_all, lc_ctype, lang]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty() && *s != "C" && *s != "POSIX" && !s.starts_with("C."))
+        .unwrap_or("en_US.UTF-8")
+}
+
+/// Single Unicode scalar from a UTF-8 string, or `0` if empty or multi-codepoint.
+fn utf8_to_single_utf32(s: &str) -> u32 {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c as u32,
+        _ => 0,
+    }
+}
+
+fn warn_compose_once(reason: &str) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!("thinfloe-menu --deskflow: compose disabled ({reason})");
+    });
+}
+
+struct Compose {
+    lib: &'static XkbCommonCompose,
+    table: *mut xkb_compose_table,
+    state: *mut xkb_compose_state,
+}
+
+impl Compose {
+    fn new(ctx: *mut xkb_context) -> Option<Self> {
+        let Some(lib) = xkbcommon_dl::xkbcommon_compose_option() else {
+            warn_compose_once("libxkbcommon compose symbols unavailable");
+            return None;
+        };
+        let lc_all = std::env::var("LC_ALL").ok();
+        let lc_ctype = std::env::var("LC_CTYPE").ok();
+        let lang = std::env::var("LANG").ok();
+        let locale = compose_locale(lc_all.as_deref(), lc_ctype.as_deref(), lang.as_deref());
+        let c_locale = CString::new(locale).ok();
+        // SAFETY: ctx is a live xkb_context; locale pointers are NUL-terminated.
+        let table = unsafe {
+            let primary = match c_locale.as_deref() {
+                Some(c) => (lib.xkb_compose_table_new_from_locale)(
+                    ctx,
+                    c.as_ptr(),
+                    xkb_compose_compile_flags::XKB_COMPOSE_COMPILE_NO_FLAGS,
+                ),
+                None => std::ptr::null_mut(),
+            };
+            if primary.is_null() && locale != "en_US.UTF-8" {
+                (lib.xkb_compose_table_new_from_locale)(
+                    ctx,
+                    c"en_US.UTF-8".as_ptr(),
+                    xkb_compose_compile_flags::XKB_COMPOSE_COMPILE_NO_FLAGS,
+                )
+            } else {
+                primary
+            }
+        };
+        if table.is_null() {
+            warn_compose_once("no compose table for locale");
+            return None;
+        }
+        // SAFETY: table is non-null and valid.
+        let state = unsafe { (lib.xkb_compose_state_new)(table, xkb_compose_state_flags::XKB_COMPOSE_STATE_NO_FLAGS) };
+        if state.is_null() {
+            // SAFETY: table was created above and is freed on error.
+            unsafe {
+                (lib.xkb_compose_table_unref)(table);
+            }
+            warn_compose_once("xkb_compose_state_new failed");
+            return None;
+        }
+        Some(Compose { lib, table, state })
+    }
+
+    /// Unrefs `state` and `table`. Must run before `xkb_context_unref(ctx)`.
+    fn unref(self) {
+        // SAFETY: state and table were created in Compose::new and are freed once here.
+        unsafe {
+            (self.lib.xkb_compose_state_unref)(self.state);
+            (self.lib.xkb_compose_table_unref)(self.table);
+        }
+    }
 }
 
 /// The compositor's keymap and the modifier state, through libxkbcommon.
@@ -179,6 +295,7 @@ pub struct Xkb {
     ctx: *mut xkb_context,
     keymap: *mut xkb_keymap,
     state: *mut xkb_state,
+    compose: Option<Compose>,
 }
 
 impl Xkb {
@@ -262,11 +379,13 @@ impl Xkb {
                 (lib.xkb_context_unref)(ctx);
                 return Err("xkb_state_new failed".into());
             }
+            let compose = Compose::new(ctx);
             Ok(Xkb {
                 lib,
                 ctx,
                 keymap,
                 state,
+                compose,
             })
         }
     }
@@ -338,13 +457,92 @@ impl Xkb {
             ) > 0
         }
     }
+
+    /// Whether a compose sequence is currently in progress.
+    pub fn is_composing(&self) -> bool {
+        let Some(compose) = &self.compose else {
+            return false;
+        };
+        // SAFETY: compose.state is valid until Drop.
+        unsafe {
+            (compose.lib.xkb_compose_state_get_status)(compose.state) == xkb_compose_status::XKB_COMPOSE_COMPOSING
+        }
+    }
+
+    /// Resets any in-progress compose sequence.
+    pub fn compose_reset(&mut self) {
+        let Some(compose) = &self.compose else {
+            return;
+        };
+        // SAFETY: compose.state is valid until Drop.
+        unsafe {
+            (compose.lib.xkb_compose_state_reset)(compose.state);
+        }
+    }
+
+    /// Feeds `keysym` into the local compose state and returns the outcome.
+    pub fn compose_feed(&mut self, keysym: u32) -> ComposeOutcome {
+        let Some(compose) = &self.compose else {
+            return ComposeOutcome::Idle;
+        };
+        // SAFETY: compose.state is valid until Drop.
+        unsafe {
+            (compose.lib.xkb_compose_state_feed)(compose.state, keysym);
+            match (compose.lib.xkb_compose_state_get_status)(compose.state) {
+                xkb_compose_status::XKB_COMPOSE_NOTHING => ComposeOutcome::Idle,
+                xkb_compose_status::XKB_COMPOSE_COMPOSING => ComposeOutcome::Composing,
+                xkb_compose_status::XKB_COMPOSE_CANCELLED => {
+                    (compose.lib.xkb_compose_state_reset)(compose.state);
+                    ComposeOutcome::Cancelled
+                }
+                xkb_compose_status::XKB_COMPOSE_COMPOSED => {
+                    let sym = (compose.lib.xkb_compose_state_get_one_sym)(compose.state);
+                    let mut buf = [0u8; 64];
+                    let n = (compose.lib.xkb_compose_state_get_utf8)(
+                        compose.state,
+                        buf.as_mut_ptr().cast::<c_char>(),
+                        buf.len(),
+                    );
+                    (compose.lib.xkb_compose_state_reset)(compose.state);
+                    if n <= 0 {
+                        let utf32 = (self.lib.xkb_keysym_to_utf32)(sym);
+                        return ComposeOutcome::Composed(key_id(sym, utf32));
+                    }
+                    let Ok(n) = usize::try_from(n) else {
+                        return ComposeOutcome::Composed(None);
+                    };
+                    if n >= buf.len() {
+                        return ComposeOutcome::Composed(None);
+                    }
+                    let Ok(s) = std::str::from_utf8(&buf[..n]) else {
+                        return ComposeOutcome::Composed(None);
+                    };
+                    let utf32 = utf8_to_single_utf32(s);
+                    if utf32 == 0 {
+                        return ComposeOutcome::Composed(None);
+                    }
+                    ComposeOutcome::Composed(key_id(sym, utf32))
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn drop_compose_for_test(&mut self) {
+        if let Some(compose) = self.compose.take() {
+            compose.unref();
+        }
+    }
 }
 
 const NO_KEYMAP: &str = "the keymap does not build";
 
 impl Drop for Xkb {
     fn drop(&mut self) {
-        // SAFETY: all three were made in build and are freed only here.
+        if let Some(compose) = self.compose.take() {
+            compose.unref();
+        }
+        // SAFETY: state, keymap and ctx were made in build and are freed only here.
         unsafe {
             (self.lib.xkb_state_unref)(self.state);
             (self.lib.xkb_keymap_unref)(self.keymap);
@@ -498,5 +696,100 @@ mod tests {
     fn a_bad_keymap_is_an_error() {
         let file = File::open("/dev/null").unwrap();
         assert!(Xkb::from_keymap_fd(&OwnedFd::from(file), 0).is_err());
+    }
+
+    #[test]
+    fn locks_mask_keeps_only_lock_modifiers() {
+        let m = Mods {
+            shift: true,
+            ctrl: true,
+            alt: true,
+            logo: true,
+            altgr: true,
+            caps: true,
+            num: true,
+            scroll: false,
+        };
+        assert_eq!(m.locks_mask(), 0x1000 | 0x2000);
+        assert_eq!(Mods::default().locks_mask(), 0);
+    }
+
+    #[test]
+    fn compose_locale_falls_back_to_en_us_utf8() {
+        assert_eq!(compose_locale(None, None, None), "en_US.UTF-8");
+        assert_eq!(compose_locale(Some(""), Some("C"), Some("POSIX")), "en_US.UTF-8");
+        assert_eq!(compose_locale(None, None, Some("C.UTF-8")), "en_US.UTF-8");
+        assert_eq!(
+            compose_locale(None, Some("de_CH.UTF-8"), Some("en_GB.UTF-8")),
+            "de_CH.UTF-8"
+        );
+        assert_eq!(
+            compose_locale(Some("fr_FR.UTF-8"), Some("de_CH.UTF-8"), None),
+            "fr_FR.UTF-8"
+        );
+    }
+
+    #[test]
+    fn utf8_to_single_utf32_rejects_multi_char_and_empty() {
+        assert_eq!(utf8_to_single_utf32(""), 0);
+        assert_eq!(utf8_to_single_utf32("a"), 0x61);
+        assert_eq!(utf8_to_single_utf32("ä"), 0xe4);
+        assert_eq!(utf8_to_single_utf32("ab"), 0);
+        assert_eq!(utf8_to_single_utf32("e\u{0301}"), 0);
+        assert_eq!(utf8_to_single_utf32("\u{1f600}"), 0x1f600);
+        assert_eq!(key_id(0, 0x1f600), None);
+    }
+
+    #[test]
+    fn xkb_compose_resolves_multi_key_sequences_and_resets() {
+        let mut x = Xkb::from_layout("us").expect("libxkbcommon + xkeyboard-config");
+        assert!(!x.is_composing());
+        // Multi_key + " + a => ä (U+00E4)
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert!(x.is_composing());
+        // Modifier mid-sequence is ignored by libxkbcommon and keeps composing.
+        assert_eq!(x.compose_feed(0xffe1), ComposeOutcome::Composing); // Shift_L
+        assert_eq!(x.compose_feed(0x0022), ComposeOutcome::Composing); // quotedbl
+        assert_eq!(x.compose_feed(0x0061), ComposeOutcome::Composed(Some(0x00e4)));
+        assert!(!x.is_composing());
+
+        // Multi_key + = + e => € (U+20AC)
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x003d), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x0065), ComposeOutcome::Composed(Some(0x20ac)));
+
+        // Multi_key + - + - + - => — (U+2014, where keysym 0x0aa9 != utf32)
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x002d), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x002d), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x002d), ComposeOutcome::Composed(Some(0x2014)));
+
+        // Multi_key + . + . => … (U+2026)
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x002e), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x002e), ComposeOutcome::Composed(Some(0x2026)));
+
+        // Invalid sequence cancels and resets cleanly.
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert_eq!(x.compose_feed(0x0078), ComposeOutcome::Composing); // x
+        assert_eq!(x.compose_feed(0x007a), ComposeOutcome::Cancelled); // z
+        assert!(!x.is_composing());
+
+        // Explicit reset clears in-progress compose.
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        x.compose_reset();
+        assert!(!x.is_composing());
+    }
+
+    #[test]
+    fn xkb_without_compose_is_idle_and_noop() {
+        let mut x = Xkb::from_layout("us").expect("libxkbcommon + xkeyboard-config");
+        x.drop_compose_for_test();
+        assert!(!x.is_composing());
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Idle);
+        assert_eq!(x.compose_feed(0x0061), ComposeOutcome::Idle);
+        x.compose_reset();
+        assert!(!x.is_composing());
+        assert_eq!(x.keysym(KEY_A), 0x61);
     }
 }
