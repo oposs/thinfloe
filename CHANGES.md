@@ -4,6 +4,7 @@
 
 ### New
 - Settings → Screen has a switch "Let other computers use this keyboard and mouse (Deskflow)", off by default. Once it is on, computers that run the Deskflow client show up there, and after you compare the fingerprint you attach one beside a monitor. Pushing the pointer past that edge then moves keyboard and mouse to the computer, and Ctrl+Alt+Shift+Escape always brings them back.
+- Text copied on ThinFloe can be pasted on a computer attached with Deskflow, and text copied there can be pasted on ThinFloe; images, files and texts over 1 MiB are not carried. Each attached computer has a "Share the clipboard" switch in Settings → Screen, on by default.
 
 ### Changed
 

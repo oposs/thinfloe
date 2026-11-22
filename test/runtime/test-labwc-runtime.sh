@@ -16,7 +16,9 @@
 # labwc takes the keys, the OSD shows the level, the microphone mark and
 # "not supported" without DDC/CI, and survives an output going away, and
 # that a Deskflow capture strip takes the pointer lock and the keys from a
-# fullscreen X11 window holding a keyboard grab and gives them back.
+# fullscreen X11 window holding a keyboard grab and gives them back, and
+# that the stock Deskflow client pairs, gets the pointer and the keys, and
+# shares the text clipboard with ThinFloe.
 #
 # Not part of 'make test': it needs network (python3-xlib) and runs a
 # compositor. Use 'make test-runtime'.
@@ -2111,6 +2113,114 @@ run_deskflow_forward_case() {
     fw_check $? "sigterm_while_captured: SIGTERM releases the capture, the daemon ends with 0, local keys work and the client disconnects"
 }
 run_deskflow_forward_case
+
+# Deskflow clipboard, against the stock client of the pairing case. The
+# client runs on an Xvfb of its own: on labwc's Xwayland the compositor
+# itself would carry the text between the X and the Wayland clipboard, and
+# the case would pass without Deskflow. The client's clipboard is read and
+# set with xclip on that display. The 1.26 X11 client notices a copy on
+# its side only when it owned the clipboard before (the SelectionClear it
+# gets), so (b) runs after (a) made it the owner; it sends the text on
+# leave. The pointer goes back by moving left past the device's edge
+# ('released (back)').
+# shellcheck disable=SC2016 # expands inside the container
+cb_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
+gen=$TF_CONFIG_DIR/generated/deskflow
+mkdir -p $TF_CONFIG_DIR/generated
+head="[deskflow]\nlisten = true\nport = 24800\nedge_resistance = \"low\"\n"
+printf "$head" >$gen
+upto() { n=$(($1 * 20)); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.05; n=$((n - 1)); done; return 1; }
+st() { cat $TF_DESKFLOW_STATE 2>/dev/null; }
+state() { st | awk -F "\t" -v f="$c1" -v s="$1" "\$1 == \"laptop\" && \$2 == f && \$3 == s" | grep -q .; }
+reload() { python3 -c "import socket, sys; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b\"reload\n\", sys.argv[1])" $TF_DESKFLOW_SOCKET; }
+attach() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint = \"%s\"\noutput = \"HEADLESS-1\"\nside = \"right-of\"\nclipboard = %s\n" "$c1" "$1" >$gen; reload; }
+xc() { DISPLAY=:99 xclip -o -selection clipboard 2>/dev/null; }
+xc_is() { [ "$(xc)" = "$1" ]; }
+wl_is() { [ "$(wl-paste -n </dev/null 2>/dev/null)" = "$1" ]; }
+backs() { grep -c "^thinfloe-deskflow: released (back)$" /tmp/d.err; }
+enter() { wlrctl pointer move -5000 -5000; wlrctl pointer move 1279 360
+    wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+back_after() { [ "$(backs)" -gt "$1" ]; }
+leave() { b=$(backs); wlrctl pointer move -100 0; upto 3 back_after $b && upto 3 state connected; }
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
+upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
+fp=$(st | head -1 | cut -f2)
+mkdir -p /tmp/c1/tls
+printf "[client]\nremoteHost=127.0.0.1\n[core]\nport=24800\ncomputerName=laptop\n[security]\ntlsEnabled=true\n" >/tmp/c1/Deskflow.conf
+openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/c1/key.pem -out /tmp/c1/cert.pem -days 30 -subj /CN=laptop 2>/dev/null
+cat /tmp/c1/cert.pem /tmp/c1/key.pem >/tmp/c1/tls/deskflow.pem
+echo "$fp" >/tmp/c1/tls/trusted-servers
+c1="v2:sha256:$(openssl x509 -in /tmp/c1/cert.pem -outform DER | sha256sum | cut -d" " -f1)"
+attach true
+upto 5 test -e /tmp/.X11-unix/X99
+env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=offscreen DISPLAY=:99 \
+    timeout 90 deskflow-core client --new-instance -s /tmp/c1/Deskflow.conf >/tmp/c1/log 2>&1 &
+upto 15 state connected && echo connected=yes || echo connected=no
+printf "from thinfloe" | wl-copy
+sleep 0.5
+enter && echo a_enter=active || echo a_enter=idle
+upto 5 xc_is "from thinfloe" && echo a_clip=yes || echo a_clip=no
+echo "a_seen=$(xc)"
+printf "from laptop" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
+sleep 0.5
+leave && echo b_leave=yes || echo b_leave=no
+upto 5 wl_is "from laptop" && echo b_paste=yes || echo b_paste=no
+echo "b_seen=$(wl-paste -n </dev/null 2>/dev/null)"
+attach false
+sleep 0.5
+printf "not for the laptop" | wl-copy
+sleep 0.5
+enter && echo c_enter=active || echo c_enter=idle
+sleep 1.5
+echo "c_seen=$(xc)"
+leave && echo c_leave=yes || echo c_leave=no
+st | sed "s/^/state: /"
+sed "s/^/derr: /" /tmp/d.err | head -40
+sed "s/^/c1: /" /tmp/c1/log | tail -20
+sed "s/^/xvfb: /" /tmp/xvfb.log | tail -5
+exit 0'
+run_deskflow_clipboard_case() {
+    local name="thinfloe-runtime-test-cb-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e CB_SCRIPT="$cb_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$CB_SCRIPT" >/tmp/cb.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/cb.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the Deskflow clipboard case)"
+        grep -E '^(state|derr|c1|xvfb): |^[a-z0-9_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^(state|derr|xvfb): |^[a-z0-9_]+=' <<<"$out" | tr '\n' '|') client: $(grep '^c1: ' <<<"$out" | cut -c5- | tail -8 | tr '\n' '|')"
+    cb_ok() { grep -qx "$1" <<<"$out"; }
+    cb_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    cb_ok connected=yes && cb_ok a_enter=active && cb_ok a_clip=yes
+    cb_check $? "clipboard_to_device: a text copied on ThinFloe is on the device's clipboard once the pointer enters it"
+    cb_ok b_leave=yes && cb_ok b_paste=yes
+    cb_check $? "clipboard_from_device: a text copied on the device while the pointer is there is on ThinFloe's clipboard once the pointer comes back"
+    cb_ok c_enter=active && cb_ok 'c_seen=from laptop' && cb_ok c_leave=yes
+    cb_check $? "clipboard_switch_off: with clipboard = false the device's clipboard keeps its own text when the pointer enters it"
+}
+run_deskflow_clipboard_case
 
 # The menu runs the Deskflow daemon (spec, Processes): with '[deskflow]
 # listen = true' in config.toml it starts 'thinfloe-menu --deskflow' in a
