@@ -336,14 +336,24 @@ impl Xkb {
     /// A keymap for the layout name from the system's XKB data (tests).
     #[cfg(test)]
     pub(crate) fn from_layout(layout: &str) -> Result<Xkb, String> {
+        Self::from_layout_options(layout, None)
+    }
+
+    /// A keymap for the layout name and XKB options (tests).
+    #[cfg(test)]
+    pub(crate) fn from_layout_options(layout: &str, options: Option<&str>) -> Result<Xkb, String> {
         let lib = xkbcommon_dl::xkbcommon_option().ok_or("libxkbcommon is not available")?;
         let layout = std::ffi::CString::new(layout).map_err(|e| e.to_string())?;
+        let options = options
+            .map(std::ffi::CString::new)
+            .transpose()
+            .map_err(|e| e.to_string())?;
         let names = xkbcommon_dl::xkb_rule_names {
             rules: std::ptr::null(),
             model: std::ptr::null(),
             layout: layout.as_ptr(),
             variant: std::ptr::null(),
-            options: std::ptr::null(),
+            options: options.as_ref().map_or(std::ptr::null(), |o| o.as_ptr()),
         };
         Xkb::build(lib, |ctx| {
             // SAFETY: ctx is live; names points to NUL-terminated strings.

@@ -50,12 +50,14 @@ pub fn button_id(evdev: u32) -> Option<i8> {
 }
 
 /// What the daemon does with the result of an event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// A message for the captured device.
     Send(Msg),
     /// End the capture ([`release`] first).
     Release(&'static str),
+    /// Pointer crossed back from the device; `along` is 0..1 along the edge.
+    ReleaseBack { along: f64 },
     /// The microphone mute key was released: ThinFloe's microphone.
     LocalMicMute,
 }
@@ -115,6 +117,23 @@ impl Keyboard {
     /// The `KeyModifierMask` of the modifiers down now.
     pub fn mask(&self) -> u16 {
         self.xkb.as_ref().map_or(0, |x| x.mods().mask())
+    }
+
+    /// Only the lock-key modifier bits (`Caps`, `Num`, `Scroll`).
+    fn locks_mask(&self) -> u16 {
+        self.xkb.as_ref().map_or(0, |x| x.mods().locks_mask())
+    }
+
+    /// Whether a local compose sequence is currently in progress.
+    pub fn is_composing(&self) -> bool {
+        self.xkb.as_ref().is_some_and(|x| x.is_composing())
+    }
+
+    /// Resets any in-progress local compose sequence.
+    pub fn reset_compose(&mut self) {
+        if let Some(x) = self.xkb.as_mut() {
+            x.compose_reset();
+        }
     }
 
     /// The key id of a key in the current state; when its keysym has none
@@ -184,11 +203,13 @@ pub struct Active {
     repeat: Option<Repeat>,
     /// The microphone mute key went down during the capture.
     mic_down: bool,
+    /// Whether `Multi_key` compose sequences are handled locally.
+    pub compose: bool,
 }
 
 impl Active {
     /// The pointer entered the device at `at` (the CINN position).
-    pub fn new(device: usize, tracker: Tracker, at: (i16, i16)) -> Active {
+    pub fn new(device: usize, tracker: Tracker, at: (i16, i16), compose: bool) -> Active {
         Active {
             device,
             tracker,
@@ -197,6 +218,7 @@ impl Active {
             pos: at,
             repeat: None,
             mic_down: false,
+            compose,
         }
     }
 
@@ -218,7 +240,7 @@ pub fn on_cap_event(a: &mut Active, ev: &CapEvent, kb: &mut Keyboard, now: Insta
                 return Vec::new();
             }
             match a.tracker.motion(dx, dy) {
-                Track::Back { .. } => vec![Action::Release("back")],
+                Track::Back { along } => vec![Action::ReleaseBack { along }],
                 Track::Move(x, y) if (x, y) != a.pos => {
                     a.pos = (x, y);
                     vec![Action::Send(Msg::MouseMove { x, y })]
@@ -260,13 +282,45 @@ pub fn on_cap_event(a: &mut Active, ev: &CapEvent, kb: &mut Keyboard, now: Insta
     }
 }
 
-fn key_down(a: &mut Active, kb: &Keyboard, code: u32, now: Instant) -> Vec<Action> {
+fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<Action> {
     if kb.escape_chord(code) {
         return vec![Action::Release("escape chord")];
     }
     if kb.mic_mute(code) {
         a.mic_down = true;
         return Vec::new();
+    }
+    if a.compose
+        && let Some(x) = kb.xkb.as_mut()
+    {
+        let sym = x.keysym(code);
+        if x.is_composing() || sym == keymap::XK_MULTI_KEY {
+            a.repeat = None;
+            if sym == 0 {
+                return Vec::new();
+            }
+            return match x.compose_feed(sym) {
+                keymap::ComposeOutcome::Composing
+                | keymap::ComposeOutcome::Cancelled
+                | keymap::ComposeOutcome::Idle
+                | keymap::ComposeOutcome::Composed(None) => Vec::new(),
+                keymap::ComposeOutcome::Composed(Some(id)) => {
+                    let mods = kb.locks_mask();
+                    vec![
+                        Action::Send(Msg::KeyDown {
+                            id,
+                            mods,
+                            button: keymap::COMPOSED_BUTTON,
+                        }),
+                        Action::Send(Msg::KeyUp {
+                            id,
+                            mods,
+                            button: keymap::COMPOSED_BUTTON,
+                        }),
+                    ]
+                }
+            };
+        }
     }
     let button = keymap::button(code);
     let Some(id) = kb.key_id(code) else {
@@ -340,8 +394,9 @@ pub fn tick(a: &mut Active, kb: &Keyboard, now: Instant) -> Vec<Action> {
 
 /// The messages that end a capture on the device: DKUP for every key sent
 /// down, DMUP for every button, then COUT.
-pub fn release(a: &mut Active, kb: &Keyboard) -> Vec<Msg> {
+pub fn release(a: &mut Active, kb: &mut Keyboard) -> Vec<Msg> {
     let mods = kb.mask();
+    kb.reset_compose();
     let mut out: Vec<Msg> = a
         .held
         .drain(..)
@@ -377,8 +432,40 @@ mod tests {
         }
     }
 
+    fn us_compose() -> Keyboard {
+        Keyboard {
+            xkb: Some(
+                Xkb::from_layout_options("us", Some("compose:ralt"))
+                    .expect("libxkbcommon and the xkeyboard-config data are needed for this test"),
+            ),
+            rate: 25,
+            delay: 600,
+            down: Vec::new(),
+        }
+    }
+
+    fn de_compose() -> Keyboard {
+        Keyboard {
+            xkb: Some(
+                Xkb::from_layout("de").expect("libxkbcommon and the xkeyboard-config data are needed for this test"),
+            ),
+            rate: 25,
+            delay: 600,
+            down: Vec::new(),
+        }
+    }
+
     fn active() -> Active {
-        Active::new(7, Tracker::new(Side::RightOf, (0, 540), (1920, 1080)), (0, 540))
+        active_compose(false)
+    }
+
+    fn active_compose(compose: bool) -> Active {
+        Active::new(
+            7,
+            Tracker::new(Side::RightOf, (0, 540), (1920, 1080)),
+            (0, 540),
+            compose,
+        )
     }
 
     fn key(code: u32, pressed: bool) -> CapEvent {
@@ -405,6 +492,10 @@ mod tests {
                     Action::Release(why) => {
                         out.extend(release(a, kb));
                         return (out, Some(why));
+                    }
+                    Action::ReleaseBack { .. } => {
+                        out.extend(release(a, kb));
+                        return (out, Some("back"));
                     }
                     Action::LocalMicMute => {}
                 }
@@ -447,7 +538,7 @@ mod tests {
         let (out, why) = run(&mut a, &mut kb, &[key(KEY_VOLUMEUP, true), key(KEY_VOLUMEUP, false)]);
         assert_eq!(why, None);
         assert_eq!(out, vec![down(0xE0AF, 0, KEY_VOLUMEUP), up(0xE0AF, 0, KEY_VOLUMEUP)]);
-        assert_eq!(release(&mut a, &kb), vec![Msg::Cout]);
+        assert_eq!(release(&mut a, &mut kb), vec![Msg::Cout]);
     }
 
     #[test]
@@ -505,7 +596,7 @@ mod tests {
             &[key(KEY_A, true), key(KEY_A, false), key(KEY_A, false)],
         );
         assert_eq!(out, [down(0x61, 0, KEY_A), up(0x61, 0, KEY_A)]);
-        assert_eq!(release(&mut a, &kb), [Msg::Cout]);
+        assert_eq!(release(&mut a, &mut kb), [Msg::Cout]);
     }
 
     #[test]
@@ -569,7 +660,7 @@ mod tests {
         let (out, _) = run(&mut a, &mut kb, &evs);
         use Msg::{MouseDown as Dn, MouseUp as Up};
         assert_eq!(out, [Dn(1), Up(1), Dn(2), Dn(3), Up(3), Dn(4), Up(4), Dn(5)]);
-        assert_eq!(release(&mut a, &kb), [Up(5), Up(2), Msg::Cout]);
+        assert_eq!(release(&mut a, &mut kb), [Up(5), Up(2), Msg::Cout]);
     }
 
     #[test]
@@ -741,5 +832,161 @@ mod tests {
         let mut kb = Keyboard::default();
         let (out, _) = run(&mut a, &mut kb, &[key(KEY_A, true), mods(SHIFT), key(KEY_A, false)]);
         assert_eq!(out, []);
+    }
+
+    fn mods_locked(depressed: u32, locked: u32) -> CapEvent {
+        CapEvent::Modifiers {
+            depressed,
+            latched: 0,
+            locked,
+            group: 0,
+        }
+    }
+
+    #[test]
+    fn compose_off_forwards_multi_key_raw() {
+        let (mut a, mut kb) = (active_compose(false), us_compose());
+        let (out, why) = run(&mut a, &mut kb, &[key(KEY_RIGHTALT, true), key(KEY_RIGHTALT, false)]);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0xEF20, 0, KEY_RIGHTALT), up(0xEF20, 0, KEY_RIGHTALT)]);
+        assert!(!kb.is_composing());
+    }
+
+    #[test]
+    fn compose_on_resolves_multi_key_with_shift_mid_sequence_and_locks_only() {
+        const KEY_APOSTROPHE: u32 = 40;
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        let evs = [
+            mods_locked(0, 2),
+            key(KEY_RIGHTALT, true),
+            key(KEY_RIGHTALT, false),
+            key(KEY_LEFTSHIFT, true),
+            mods_locked(SHIFT, 2),
+            key(KEY_APOSTROPHE, true),
+            key(KEY_APOSTROPHE, false),
+            key(KEY_LEFTSHIFT, false),
+            mods_locked(0, 2),
+            key(KEY_A, true),
+            key(KEY_A, false),
+        ];
+        let (out, why) = run(&mut a, &mut kb, &evs);
+        assert_eq!(why, None);
+        // Caps Lock (locked = 2) shifts KEY_A to 'A', so Multi_key + " + A composes to Ä (0x00c4)
+        // with only the lock mask (0x1000) and without Shift or Multi_key.
+        assert_eq!(
+            out,
+            [
+                Msg::KeyDown {
+                    id: 0x00c4,
+                    mods: 0x1000,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+                Msg::KeyUp {
+                    id: 0x00c4,
+                    mods: 0x1000,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+            ]
+        );
+        assert!(a.held.is_empty());
+        assert!(!kb.is_composing());
+    }
+
+    #[test]
+    fn modifier_held_before_compose_still_releases_during_compose() {
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        let evs = [
+            key(KEY_LEFTCTRL, true),
+            mods(CONTROL),
+            key(KEY_RIGHTALT, true),
+            key(KEY_RIGHTALT, false),
+            key(KEY_LEFTCTRL, false),
+            mods(0),
+        ];
+        let (out, why) = run(&mut a, &mut kb, &evs);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0xEFE3, 0, KEY_LEFTCTRL), up(0xEFE3, 0x0002, KEY_LEFTCTRL)]);
+        assert!(a.held.is_empty());
+    }
+
+    #[test]
+    fn dead_keys_bypass_local_compose() {
+        const KEY_EQUAL: u32 = 13;
+        let (mut a, mut kb) = (active_compose(true), de_compose());
+        let (out, why) = run(&mut a, &mut kb, &[key(KEY_EQUAL, true), key(KEY_EQUAL, false)]);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0x0301, 0, KEY_EQUAL), up(0x0301, 0, KEY_EQUAL)]);
+        assert!(!kb.is_composing());
+    }
+
+    #[test]
+    fn invalid_compose_cancels_and_next_key_forwards() {
+        const KEY_X: u32 = 45;
+        const KEY_Z: u32 = 44;
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        let evs = [
+            key(KEY_RIGHTALT, true),
+            key(KEY_RIGHTALT, false),
+            key(KEY_X, true),
+            key(KEY_X, false),
+            key(KEY_Z, true),
+            key(KEY_Z, false),
+            key(KEY_A, true),
+            key(KEY_A, false),
+        ];
+        let (out, why) = run(&mut a, &mut kb, &evs);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0x61, 0, KEY_A), up(0x61, 0, KEY_A)]);
+        assert!(!kb.is_composing());
+    }
+
+    #[test]
+    fn escape_chord_and_release_reset_compose_state() {
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        let now = Instant::now();
+        assert_eq!(on_cap_event(&mut a, &key(KEY_RIGHTALT, true), &mut kb, now), []);
+        assert_eq!(on_cap_event(&mut a, &key(KEY_RIGHTALT, false), &mut kb, now), []);
+        assert!(kb.is_composing());
+        let evs = [
+            key(KEY_LEFTCTRL, true),
+            mods(CONTROL),
+            key(KEY_LEFTALT, true),
+            mods(CONTROL | MOD1),
+            key(KEY_LEFTSHIFT, true),
+            mods(CONTROL | MOD1 | SHIFT),
+        ];
+        for ev in &evs {
+            assert_eq!(on_cap_event(&mut a, ev, &mut kb, now), []);
+        }
+        assert_eq!(
+            on_cap_event(&mut a, &key(KEY_ESC, true), &mut kb, now),
+            [Action::Release("escape chord")]
+        );
+        assert_eq!(release(&mut a, &mut kb), [Msg::Cout]);
+        assert!(!kb.is_composing());
+        // Release modifiers in kb before pressing 'a' on a fresh Active.
+        for ev in [
+            key(KEY_LEFTSHIFT, false),
+            key(KEY_LEFTALT, false),
+            key(KEY_LEFTCTRL, false),
+            mods(0),
+        ] {
+            on_cap_event(&mut a, &ev, &mut kb, now);
+        }
+        let mut fresh = active_compose(true);
+        let (out, why) = run(&mut fresh, &mut kb, &[key(KEY_A, true), key(KEY_A, false)]);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0x61, 0, KEY_A), up(0x61, 0, KEY_A)]);
+    }
+
+    #[test]
+    fn motion_crossing_back_carries_along_fraction() {
+        let mut a = Active::new(7, Tracker::new(Side::RightOf, (0, 810), (1920, 1080)), (0, 810), false);
+        let mut kb = us();
+        let acts = on_cap_event(&mut a, &rel(-1.0, 0.0), &mut kb, Instant::now());
+        match acts.as_slice() {
+            [Action::ReleaseBack { along }] => assert!((*along - 0.75).abs() < 1e-9, "along={along}"),
+            other => panic!("expected ReleaseBack, got {other:?}"),
+        }
     }
 }
