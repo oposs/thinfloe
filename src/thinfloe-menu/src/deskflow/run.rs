@@ -736,19 +736,28 @@ impl Daemon {
             return self.release("connection closed");
         };
         let shares = self.shares_clipboard(&self.conns[i]);
+        let compose = self.uses_compose(&self.conns[i]);
         self.conns[i].enter(entry.0, entry.1, mods);
-        self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry, false));
+        self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry, compose));
         let acts = self.sync.on_enter(device, shares);
         self.clip_acts(acts);
     }
 
-    /// The device's Clipboard switch; off for a connection without one.
-    fn shares_clipboard(&self, c: &Conn) -> bool {
+    fn device_cfg(&self, c: &Conn) -> Option<&crate::config::DeviceCfg> {
         self.cfg
             .devices
             .iter()
             .find(|d| c.name() == Some(&d.name) && c.fingerprint() == Some(&d.fingerprint))
-            .is_some_and(|d| d.clipboard)
+    }
+
+    /// The device's Clipboard switch; off for a connection without one.
+    fn shares_clipboard(&self, c: &Conn) -> bool {
+        self.device_cfg(c).is_some_and(|d| d.clipboard)
+    }
+
+    /// The device's Compose switch; off for a connection without one.
+    fn uses_compose(&self, c: &Conn) -> bool {
+        self.device_cfg(c).is_some_and(|d| d.compose)
     }
 
     /// The trusted connections and their Clipboard switch, for ClipSync.
@@ -833,7 +842,7 @@ impl Daemon {
                     }
                 }
                 Action::Release(why) => self.release(why),
-                Action::ReleaseBack { .. } => self.release("back"),
+                Action::ReleaseBack { along } => self.release_at("back", Some(along)),
                 Action::LocalMicMute => self.local_mic_mute(),
             }
         }
@@ -855,6 +864,21 @@ impl Daemon {
     /// a key up for every key and button sent down and COUT, the lock and
     /// the keyboard focus go.
     fn release(&mut self, reason: &str) {
+        self.release_at(reason, None);
+    }
+
+    /// Releases capture and, when returning across an edge (`back_along`),
+    /// hints the compositor's cursor position and updates `hover.at`.
+    fn release_at(&mut self, reason: &str, back_along: Option<f64>) {
+        let (surface_hint, layout_at) = match (back_along, &self.mode) {
+            (Some(along), Mode::Active(a)) => self
+                .strips
+                .iter()
+                .find(|s| s.spec.id == a.device as u32)
+                .map(|s| edge::reentry_point(s.out, s.side, along))
+                .unzip(),
+            _ => (None, None),
+        };
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Idle => return,
             Mode::Locking { .. } => {}
@@ -868,12 +892,15 @@ impl Daemon {
             }
         }
         if let Some(c) = self.capture.as_mut()
-            && c.end_capture()
+            && c.end_capture(surface_hint)
         {
             self.own_unlocks += 1;
         }
         if let Some(h) = self.hover.as_mut() {
             h.push.reset();
+            if let Some(at) = layout_at {
+                h.at = at;
+            }
         }
         eprintln!("thinfloe-deskflow: released ({reason})");
     }
@@ -1109,6 +1136,19 @@ impl Daemon {
             if self.conns[i].trusted() {
                 let shares = self.shares_clipboard(&self.conns[i]);
                 self.conns[i].set_clipboard(shares);
+            }
+        }
+        if let Mode::Active(a) = &self.mode {
+            let compose = self
+                .conns
+                .iter()
+                .find(|c| c.id() == a.device && c.trusted())
+                .is_some_and(|c| self.uses_compose(c));
+            if let Mode::Active(a) = &mut self.mode {
+                a.compose = compose;
+            }
+            if !compose {
+                self.kb.reset_compose();
             }
         }
         Next::Go
@@ -1741,5 +1781,192 @@ mod tests {
         let state = env.state.clone();
         assert_eq!(run(env), Err(format!("port {port} in use")));
         assert_eq!(error_head(&state), format!("port {port} in use"));
+    }
+
+    fn write_cfg_compose(path: &Path, port: u16, output: &str, name: &str, fp: &str, compose: bool) {
+        let t = format!(
+            "[deskflow]\nlisten = true\nport = {port}\n\n[[deskflow.device]]\nname = \"{name}\"\nfingerprint = \"{fp}\"\noutput = \"{output}\"\nside = \"right-of\"\ncompose = {compose}\n"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, t).unwrap();
+    }
+
+    fn direct_daemon(env: RunEnv, output: &str, w: i32, h: i32) -> (Daemon, u16) {
+        let cfg = read_config(&env.generated).unwrap();
+        let id = ident::load_or_create(&env.identity, &env.hostname).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sock = cmd::bind(&env.socket).unwrap();
+        let mut d = Daemon::new(env, cfg, &id, listener, sock, None);
+        d.outputs = vec![OutputGeom {
+            name: output.into(),
+            description: String::new(),
+            x: 0,
+            y: 0,
+            w,
+            h,
+        }];
+        (d, port)
+    }
+
+    fn load_compose_keymap(d: &mut Daemon, dir: &TestDir) {
+        let keymap = "\
+xkb_keymap {
+    xkb_keycodes \"test\" {
+        minimum = 8;
+        maximum = 255;
+        <RALT> = 108;
+        <AD01> = 24;
+    };
+    xkb_types \"test\" {
+        type \"ONE_LEVEL\" {
+            modifiers = none;
+            level_name[Level1] = \"Any\";
+        };
+    };
+    xkb_compatibility \"test\" {};
+    xkb_symbols \"test\" {
+        key <RALT> { [ Multi_key ] };
+        key <AD01> { [ q ] };
+    };
+};
+";
+        let path = dir.join("keymap.xkb");
+        std::fs::write(&path, keymap).unwrap();
+        let size = u32::try_from(keymap.len()).unwrap();
+        let fd = OwnedFd::from(File::open(&path).unwrap());
+        d.on_cap_event(&CapEvent::Keymap { fd, size }, Instant::now());
+    }
+
+    #[test]
+    fn reentry_updates_hover_position_and_resets_resistance() {
+        let (dir, sock) = (TestDir::new("deskflow-run", "reentry"), TestDir::sockets("dfre"));
+        let env = test_env(&dir, &sock);
+        write_cfg(&env.generated, true, 24800, &[]);
+        let (mut d, _) = direct_daemon(env, "HEADLESS-1", 1280, 720);
+        let out = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        };
+        d.strips = vec![Strip {
+            spec: StripSpec {
+                id: 1,
+                output: "HEADLESS-1".into(),
+                rect: edge::strip_rect(out, Side::RightOf),
+            },
+            out,
+            side: Side::RightOf,
+            dev: (1920, 1080),
+        }];
+        let now = Instant::now();
+        let mut push = edge::Resistance::new(40.0);
+        assert!(!push.push(Side::RightOf, 35.0, 0.0, now));
+        d.hover = Some(Hover {
+            strip: 1,
+            at: (1279.0, 100.0),
+            push,
+        });
+        d.mode = Mode::Active(Active::new(
+            1,
+            Tracker::new(Side::RightOf, (0, 150), (1920, 1080)),
+            (0, 150),
+            false,
+        ));
+
+        d.forward(vec![Action::ReleaseBack { along: 0.75 }]);
+
+        assert!(matches!(d.mode, Mode::Idle));
+        assert_eq!(d.hover.as_ref().unwrap().at, (1279.0, 540.0));
+        let t = Instant::now();
+        assert!(!d.hover.as_mut().unwrap().push.push(Side::RightOf, -10.0, 0.0, t));
+        assert!(!d.hover.as_mut().unwrap().push.push(Side::RightOf, 0.0, 50.0, t));
+        d.push_edge(-10.0, 0.0, t);
+        assert!(matches!(d.mode, Mode::Idle));
+        d.push_edge(0.0, 50.0, t);
+        assert!(matches!(d.mode, Mode::Idle));
+        assert!(!d.hover.as_mut().unwrap().push.push(Side::RightOf, 10.0, 0.0, t));
+    }
+
+    #[test]
+    fn compose_flag_flows_on_enter_and_live_reload_resets_compose() {
+        const KEY_RIGHTALT: u32 = 100;
+        let (dir, sock) = (TestDir::new("deskflow-run", "compose"), TestDir::sockets("dfcm"));
+        let env = test_env(&dir, &sock);
+        let gen_path = env.generated.clone();
+        let laptop = cert("laptop");
+        let fp = fp_of(&laptop);
+        write_cfg_compose(&gen_path, 24800, "HEADLESS-1", "laptop", &fp, true);
+        let (mut d, port) = direct_daemon(env, "HEADLESS-1", 1280, 720);
+        let wake = Wake::new().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let client_handle = std::thread::spawn(move || {
+            let mut c = connect(port, &laptop);
+            assert_eq!(hello(&mut c, "laptop"), Msg::Qinf);
+            send(&mut c, &dinf());
+            assert_eq!(
+                [read_msg(&mut c), read_msg(&mut c), read_msg(&mut c)],
+                [
+                    Msg::Ciak,
+                    Msg::Crop,
+                    Msg::Dsop(crate::deskflow::clipdata::options(true))
+                ]
+            );
+            let _ = done_rx.recv();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while d.strips.is_empty() {
+            assert!(Instant::now() < deadline, "timed out waiting for strip");
+            assert!(matches!(d.turn(&wake), Next::Go));
+        }
+
+        load_compose_keymap(&mut d, &dir);
+        let strip_id = d.strips[0].spec.id;
+        d.hover = Some(Hover {
+            strip: strip_id,
+            at: (1279.0, 360.0),
+            push: edge::Resistance::new(40.0),
+        });
+        d.mode = Mode::Locking {
+            strip: strip_id,
+            since: Instant::now(),
+        };
+        d.enter_device();
+        match &d.mode {
+            Mode::Active(a) => assert!(a.compose, "expected Active.compose == true on enter"),
+            _ => panic!("expected Mode::Active after enter_device"),
+        }
+
+        let now = Instant::now();
+        d.on_cap_event(
+            &CapEvent::Key {
+                code: KEY_RIGHTALT,
+                pressed: true,
+            },
+            now,
+        );
+        d.on_cap_event(
+            &CapEvent::Key {
+                code: KEY_RIGHTALT,
+                pressed: false,
+            },
+            now,
+        );
+        assert!(d.kb.is_composing());
+
+        write_cfg_compose(&gen_path, 24800, "HEADLESS-1", "laptop", &fp, false);
+        assert!(matches!(d.reload(), Next::Go));
+        match &d.mode {
+            Mode::Active(a) => assert!(!a.compose, "expected Active.compose == false after reload"),
+            _ => panic!("expected Mode::Active after reload"),
+        }
+        assert!(!d.kb.is_composing());
+
+        drop(done_tx);
+        client_handle.join().unwrap();
     }
 }

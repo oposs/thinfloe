@@ -468,18 +468,26 @@ impl Capture {
 
     /// Give pointer and keyboard back: the lock goes and the strip takes
     /// no keys again. Reports `Unlocked` when a capture was on, and then
-    /// returns true.
-    pub fn end_capture(&mut self) -> bool {
-        self.state.end_capture()
+    /// returns true. When `hint` is given and the lock is active, sets the
+    /// cursor position hint in surface coordinates before destroying the lock.
+    pub fn end_capture(&mut self, hint: Option<(f64, f64)>) -> bool {
+        self.state.end_capture(hint)
     }
 }
 
 impl State {
-    fn end_capture(&mut self) -> bool {
+    fn end_capture(&mut self, hint: Option<(f64, f64)>) -> bool {
         let Some(id) = self.captured.take() else {
             return false;
         };
         if let Some(lock) = self.lock.take() {
+            if let Some((sx, sy)) = hint
+                && self.locked
+                && let Some(st) = self.strips.iter().find(|x| x.spec.id == id)
+            {
+                lock.set_cursor_position_hint(sx, sy);
+                st.surface.commit();
+            }
             lock.destroy();
         }
         if let Some(inhibitor) = self.inhibitor.take() {
@@ -508,7 +516,7 @@ impl State {
 
     fn remove_strip(&mut self, s: Strip) {
         if self.captured == Some(s.spec.id) {
-            self.end_capture();
+            self.end_capture(None);
         }
         if self.hover == Some(s.spec.id) {
             self.hover = None;
@@ -878,7 +886,7 @@ impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for State {
             }
             // A oneshot lock is dead once it is deactivated.
             zwp_locked_pointer_v1::Event::Unlocked => {
-                state.end_capture();
+                state.end_capture(None);
             }
             _ => {}
         }

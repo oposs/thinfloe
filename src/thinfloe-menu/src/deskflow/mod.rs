@@ -223,7 +223,7 @@ fn probe_capture(output: &str, side: &str) -> Result<(), String> {
                     None => code == KEY_ESC,
                 };
                 if escape {
-                    let _ = cap.end_capture();
+                    let _ = cap.end_capture(None);
                 }
             }
         }
