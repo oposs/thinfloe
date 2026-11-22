@@ -5,6 +5,11 @@
 ### New
 
 ### Changed
+
+### Fixed
+
+## 4.8.1 - 2026-11-22
+### Changed
 - A computer whose Deskflow connection fails before it shows in Settings → Screen, for example over its certificate, now leaves a line in the log at the bottom of the menu: `deskflow | a connection from 192.168.1.20 ended before pairing: …` with the reason. The same failure from the same computer is logged once every 5 minutes. All other messages of the Deskflow server appear in that log too, as `deskflow`.
 
 ### Fixed
