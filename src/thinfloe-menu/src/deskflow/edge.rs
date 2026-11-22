@@ -91,11 +91,11 @@ pub fn entry_point(out: Rect, side: Side, at: (f64, f64), dev: (i16, i16)) -> (i
 }
 
 /// Where the pointer re-enters ThinFloe on the capture strip when crossing
-/// back from the device at fraction `along` (`0.0..=1.0`), returning
-/// `((surface_x, surface_y), (layout_x, layout_y))`.
-pub fn reentry_point(out: Rect, side: Side, along: f64) -> ((f64, f64), (f64, f64)) {
+/// back from the device at fraction `along` (`0.0..=1.0`), in layout
+/// coordinates.
+pub fn reentry_point(out: Rect, side: Side, along: f64) -> (f64, f64) {
     if out.w <= 0 || out.h <= 0 {
-        return ((0.0, 0.0), (f64::from(out.x), f64::from(out.y)));
+        return (f64::from(out.x), f64::from(out.y));
     }
     let f = if along.is_finite() { along.clamp(0.0, 1.0) } else { 0.5 };
     let strip = strip_rect(out, side);
@@ -109,7 +109,7 @@ pub fn reentry_point(out: Rect, side: Side, along: f64) -> ((f64, f64), (f64, f6
             0.0,
         ),
     };
-    ((sx, sy), (f64::from(strip.x) + sx, f64::from(strip.y) + sy))
+    (f64::from(strip.x) + sx, f64::from(strip.y) + sy)
 }
 
 /// Result of one motion on the device.
@@ -278,21 +278,16 @@ mod tests {
     #[test]
     fn reentry_maps_proportionally_and_clamps_inside_strip() {
         let o = r(1280, 100, 1920, 1080);
-        assert_eq!(reentry_point(o, Side::RightOf, 0.5), ((0.0, 540.0), (3199.0, 640.0)));
-        assert_eq!(reentry_point(o, Side::LeftOf, 0.25), ((0.0, 270.0), (1280.0, 370.0)));
-        assert_eq!(reentry_point(o, Side::Below, 0.5), ((960.0, 0.0), (2240.0, 1179.0)));
-        assert_eq!(reentry_point(o, Side::Above, 1.0), ((1919.0, 0.0), (3199.0, 100.0)));
+        assert_eq!(reentry_point(o, Side::RightOf, 0.5), (3199.0, 640.0));
+        assert_eq!(reentry_point(o, Side::LeftOf, 0.25), (1280.0, 370.0));
+        assert_eq!(reentry_point(o, Side::Below, 0.5), (2240.0, 1179.0));
+        assert_eq!(reentry_point(o, Side::Above, 1.0), (3199.0, 100.0));
         // Clamping, non-finite and degenerate output never leave strip bounds.
-        assert_eq!(reentry_point(o, Side::RightOf, -0.5), ((0.0, 0.0), (3199.0, 100.0)));
-        assert_eq!(reentry_point(o, Side::RightOf, 1.5), ((0.0, 1079.0), (3199.0, 1179.0)));
-        assert_eq!(
-            reentry_point(o, Side::RightOf, f64::NAN),
-            ((0.0, 540.0), (3199.0, 640.0))
-        );
-        assert_eq!(
-            reentry_point(r(0, 0, 0, 0), Side::RightOf, 0.5),
-            ((0.0, 0.0), (0.0, 0.0))
-        );
+        assert_eq!(reentry_point(o, Side::RightOf, -0.5), (3199.0, 100.0));
+        assert_eq!(reentry_point(o, Side::RightOf, 1.5), (3199.0, 1179.0));
+        assert_eq!(reentry_point(o, Side::RightOf, f64::NAN), (3199.0, 640.0));
+        assert_eq!(reentry_point(r(0, 0, 0, 0), Side::RightOf, 0.5), (0.0, 0.0));
+        assert_eq!(reentry_point(r(10, 20, 0, 5), Side::RightOf, 0.5), (10.0, 20.0));
     }
 
     #[test]
