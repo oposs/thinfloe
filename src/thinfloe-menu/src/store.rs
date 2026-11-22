@@ -245,13 +245,22 @@ impl ConfigStore {
     }
 
     /// Render all files of `table` from `cfg`; one failing render fails
-    /// the lot before anything is written.
+    /// the lot before anything is written. generated/deskflow fails only
+    /// an update of `[deskflow]`: for another table (the volume key switch
+    /// of `[keyboard]` feeds it too) a `[deskflow]` that does not validate
+    /// leaves the file as it is, so it never blocks that table's save.
     fn render_table(&self, table: Table, cfg: &ThinfloeConfig) -> Result<Vec<(&'static str, Option<String>)>, String> {
-        table
-            .files()
-            .iter()
-            .map(|&n| generated::render(cfg, n, &self.inputs).map(|b| (n, b)))
-            .collect()
+        let mut out = Vec::new();
+        for &n in table.files() {
+            match generated::render(cfg, n, &self.inputs) {
+                Ok(b) => out.push((n, b)),
+                Err(e) if n == "deskflow" && table != Table::Deskflow => {
+                    eprintln!("thinfloe-menu: generated/deskflow was not regenerated: {e}");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
     }
 
     /// Apply `f` to a copy, regenerate the files of `table`, then write
@@ -530,6 +539,30 @@ mod tests {
         // Another keyboard change leaves the file alone.
         let changed = o.store.update(Table::Keyboard, |c| c.keyboard.numlock = false).unwrap();
         assert!(!changed.contains(&"deskflow"), "{changed:?}");
+    }
+
+    #[test]
+    fn an_invalid_deskflow_table_does_not_block_a_keyboard_save() {
+        let d = TestDir::new("store", "deskflow-invalid-keyboard");
+        let mut o = open_session(&d);
+        o.store.update(Table::Deskflow, |c| c.deskflow.listen = true).unwrap();
+        let before = gen_text(&d, "deskflow").unwrap();
+        // A hand edit the store keeps: port 0 does not validate.
+        let mut c = o.store.cfg.clone();
+        c.deskflow.port = 0;
+        fs::write(cdir(&d).config_toml(), crate::config::to_text(&c)).unwrap();
+        let mut o = open_session(&d);
+        assert_eq!(o.store.cfg.deskflow.port, 0);
+        let changed = o
+            .store
+            .update(Table::Keyboard, |c| c.keyboard.volume_keys = true)
+            .unwrap();
+        assert!(!changed.contains(&"deskflow"), "{changed:?}");
+        assert!(o.store.cfg.keyboard.volume_keys);
+        assert!(gen_text(&d, "environment").unwrap().contains("THINFLOE_VOLUME_KEYS=on"));
+        assert_eq!(gen_text(&d, "deskflow").unwrap(), before);
+        // The Deskflow table's own update still refuses it.
+        assert!(o.store.update(Table::Deskflow, |_| {}).is_err());
     }
 
     #[test]
