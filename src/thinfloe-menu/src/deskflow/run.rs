@@ -737,7 +737,7 @@ impl Daemon {
         };
         let shares = self.shares_clipboard(&self.conns[i]);
         self.conns[i].enter(entry.0, entry.1, mods);
-        self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry));
+        self.mode = Mode::Active(Active::new(device, Tracker::new(side, entry, dev), entry, false));
         let acts = self.sync.on_enter(device, shares);
         self.clip_acts(acts);
     }
@@ -833,6 +833,7 @@ impl Daemon {
                     }
                 }
                 Action::Release(why) => self.release(why),
+                Action::ReleaseBack { .. } => self.release("back"),
                 Action::LocalMicMute => self.local_mic_mute(),
             }
         }
@@ -858,7 +859,7 @@ impl Daemon {
             Mode::Idle => return,
             Mode::Locking { .. } => {}
             Mode::Active(mut a) => {
-                let msgs = forward::release(&mut a, &self.kb);
+                let msgs = forward::release(&mut a, &mut self.kb);
                 if let Some(c) = self.conns.iter_mut().find(|c| c.id() == a.device) {
                     for m in msgs {
                         c.send(m);
