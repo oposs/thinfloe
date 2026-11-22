@@ -1939,7 +1939,9 @@ run_clip_probe_case
 # line. Without XDG_SESSION_TYPE=wayland the client drives X11, here
 # labwc's Xwayland, whose root window is the 1280x720 output.
 # The case: ThinFloe's fingerprint from the state file goes into the trust
-# file; the client appears as pending; an attach in generated/deskflow and
+# file; a TLS client without a certificate leaves one "ended before
+# pairing" line on the daemon's stderr, the pending clients' retries none;
+# the client appears as pending; an attach in generated/deskflow and
 # 'reload' on the command socket let its next try in (connected, with its
 # screen size); a second 'laptop' with another certificate stays out
 # (fp-changed) while the first stays connected; 'listen = false' and a
@@ -1970,6 +1972,8 @@ dpid=$!
 upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\"" && echo head=yes || echo head=no
 fp=$(st | head -1 | cut -f2)
 echo "fp=$fp"
+timeout 5 openssl s_client -connect 127.0.0.1:24800 </dev/null >/dev/null 2>&1
+upto 5 grep -q "^thinfloe-menu --deskflow: a connection from 127.0.0.1 ended before pairing: TLS: " /tmp/d.err && echo nocert_log=yes || echo nocert_log=no
 client /tmp/c1
 c1=$(cat /tmp/c1/fp)
 upto 15 line laptop "$c1" pending && echo pending=yes || echo pending=no
@@ -1988,6 +1992,7 @@ upto 15 sh -c "! kill -0 $dpid 2>/dev/null"
 wait $dpid
 echo d_rc=$?
 ss -Hltn "sport = :24800" | grep -q . && echo listening=yes || echo listening=no
+echo "before_pairing=$(grep -c "ended before pairing" /tmp/d.err)"
 sed "s/^/c1: /" /tmp/c1/log | tail -60
 sed "s/^/c2: /" /tmp/c2/log | tail -30
 sed "s/^/derr: /" /tmp/d.err | head -40
@@ -2029,6 +2034,8 @@ run_deskflow_pairing_case() {
     df_check $? "the Deskflow daemon writes its fingerprint to the state file"
     df_ok c1_v1=yes && df_ok c2_v1=yes
     df_check $? "the clients' certificates are X.509 v1, as the Deskflow GUI makes them"
+    df_ok nocert_log=yes && df_ok before_pairing=1
+    df_check $? "a TLS client without a certificate is logged once as ended before pairing; the pending clients' retries are not"
     # Deskflow 1.26 logs only its NOTE and IPC lines here, so the refusal
     # shows as a retry without "disconnected from server": a dropped
     # connection logs that line, a refusal (EUNK) does not.

@@ -12,13 +12,22 @@
 //! job or worker thread would end the daemon when that thread ends.
 
 use std::ffi::OsString;
+use std::io::{ErrorKind, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::deskflow::statefile::{self, Head};
 use crate::deskflow::{DESKFLOW_ARG, PARENT_ENV};
+use crate::log::{Feed, Kind, Line, Run, Splitter, local_time};
+
+/// The source the daemon's lines carry in the menu's log.
+pub const LOG_SOURCE: &str = "deskflow";
+/// The prefixes the daemon writes before its lines; the log's source names
+/// it already.
+const DAEMON_PREFIXES: [&str; 2] = ["thinfloe-menu --deskflow: ", "thinfloe-deskflow: "];
 
 /// The first wait before a start again.
 const FIRST_DELAY: Duration = Duration::from_secs(1);
@@ -53,6 +62,8 @@ pub struct Supervisor {
     program: PathBuf,
     state_file: Option<PathBuf>,
     notify: Option<std::sync::Arc<Notify>>,
+    /// Where the daemon's stderr goes; none leaves it on the menu's.
+    log: Option<Arc<Feed>>,
     wanted: bool,
     running: Option<Running>,
     /// When the next start is due, while wanted and not running.
@@ -69,6 +80,7 @@ impl Supervisor {
             program,
             state_file: statefile::path(),
             notify: None,
+            log: None,
             wanted: false,
             running: None,
             start_at: None,
@@ -81,6 +93,13 @@ impl Supervisor {
     /// one `statefile::path` names.
     pub fn with_state_file(mut self, path: Option<PathBuf>) -> Supervisor {
         self.state_file = path;
+        self
+    }
+
+    /// The daemon's stderr goes, line by line, into the menu's log, as
+    /// `LOG_SOURCE`; the log copies each line to the session log.
+    pub fn with_log(mut self, feed: Arc<Feed>) -> Supervisor {
+        self.log = Some(feed);
         self
     }
 
@@ -197,7 +216,11 @@ impl Supervisor {
             .env(PARENT_ENV, OsString::from(std::process::id().to_string()))
             .stdin(Stdio::null())
             .process_group(0);
-        // Output goes where the menu's goes: the session log.
+        // stdout goes where the menu's goes, the session log; stderr to
+        // the menu's log when there is one.
+        if self.log.is_some() {
+            cmd.stderr(Stdio::piped());
+        }
         // SAFETY: only signal and sigprocmask, both async-signal-safe.
         unsafe {
             cmd.pre_exec(|| {
@@ -217,6 +240,10 @@ impl Supervisor {
                 self.program.display()
             )
         })?;
+        let mut child = child;
+        if let (Some(feed), Some(pipe)) = (self.log.clone(), child.stderr.take()) {
+            std::thread::spawn(move || pump(pipe, &feed));
+        }
         if let Some(n) = self.notify.clone() {
             let pid = child.id() as libc::id_t;
             std::thread::spawn(move || {
@@ -302,6 +329,35 @@ impl Supervisor {
 }
 
 /// Signal the daemon's process group (its pid: it leads the group).
+/// Copy the daemon's stderr into the log until it closes, without the
+/// daemon's own prefix.
+fn pump(mut pipe: impl Read, feed: &Feed) {
+    let mut split = Splitter::default();
+    let mut emit = |mut runs: Vec<Run>| {
+        if let Some(first) = runs.first_mut()
+            && let Some(rest) = DAEMON_PREFIXES.iter().find_map(|p| first.text.strip_prefix(p))
+        {
+            first.text = rest.to_string();
+        }
+        feed.push(Line {
+            time: local_time(),
+            source: Some(LOG_SOURCE.to_string()),
+            runs,
+            kind: Kind::Output,
+        });
+    };
+    let mut buf = [0u8; 4096];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => split.feed(&buf[..n], &mut emit),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    split.finish(&mut emit);
+}
+
 fn signal_group(child: &Child, sig: libc::c_int) {
     if let Some(target) = crate::jobs::stop_target(child.id() as i32) {
         // SAFETY: kill has no memory preconditions; ESRCH is ignored.
@@ -626,6 +682,43 @@ mod tests {
         s.tick(at);
         assert!(s.pid().is_some(), "started again when due");
         s.stop(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_daemons_stderr_reaches_the_log_without_its_prefix() {
+        let d = TestDir::new("deskflow-sup", "log");
+        let feed = Arc::new(Feed::default());
+        let mut s = Supervisor::new(program(
+            &d,
+            "echo 'thinfloe-menu --deskflow: a connection ended before pairing: TLS: x' >&2\n\
+             echo 'thinfloe-deskflow: released (escape)' >&2\n\
+             echo 'plain line' >&2",
+        ))
+        .with_state_file(None)
+        .with_log(feed.clone());
+        let now = Instant::now();
+        s.want(true, now);
+        s.tick(now);
+        until_ended(&mut s, now);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut lines = Vec::new();
+        while lines.len() < 3 && Instant::now() < deadline {
+            lines.extend(feed.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let got: Vec<_> = lines.iter().map(|l| (l.source.as_deref(), l.plain(), l.kind)).collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    Some(LOG_SOURCE),
+                    "a connection ended before pairing: TLS: x".to_string(),
+                    Kind::Output
+                ),
+                (Some(LOG_SOURCE), "released (escape)".to_string(), Kind::Output),
+                (Some(LOG_SOURCE), "plain line".to_string(), Kind::Output),
+            ]
+        );
     }
 
     #[test]

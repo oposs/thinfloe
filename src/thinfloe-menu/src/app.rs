@@ -401,9 +401,11 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     let deskflow = {
         let waker = event_loop.create_proxy();
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/thinfloe-menu"));
-        crate::deskflow_sup::Supervisor::new(program).with_notify(move || {
-            let _ = waker.send_event(Wake::Deskflow);
-        })
+        crate::deskflow_sup::Supervisor::new(program)
+            .with_log(feed.clone())
+            .with_notify(move || {
+                let _ = waker.send_event(Wake::Deskflow);
+            })
     };
     let mut app = App {
         deskflow,
