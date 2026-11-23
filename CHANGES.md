@@ -7,8 +7,7 @@
 - Each attached computer has an "On" switch, on by default. With it off, the mouse stops at that edge, the computer stays connected and keeps its place, and no clipboard is shared with it. Its box in the monitor arrangement is dimmed, and switching it off while the pointer is on it brings the pointer back to ThinFloe at once.
 
 ### Changed
-- In Settings → Screen, the Deskflow fingerprint of ThinFloe is now behind "Fingerprint…" and a new computer is attached through "Check and attach…", a dialog with the fingerprint and the free edges. A computer that is not yet attached can also be turned away with "Reject".
-
+- In Settings → Screen, the Deskflow fingerprint of ThinFloe is now behind "Fingerprint…" and a new computer is attached through "Check and attach…", a dialog with the fingerprint and the free edges.
 ### Fixed
 - With "Handle Compose key on ThinFloe" on for a computer, the Compose key did nothing at all when ThinFloe had no Compose table for its language: the key reached neither ThinFloe nor that computer. It now goes to the computer, as with the switch off.
 
