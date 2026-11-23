@@ -1109,8 +1109,8 @@ pub fn screen_dialog_open(mon: &crate::monitors::MonTab, df: &crate::deskflowtab
     mon.dialog_monitor().is_some() || crate::deskflowtab::dialog_open(df)
 }
 
-/// The Screen tab: when the screen turns off, the monitors, then the
-/// graphics, and over them the open monitor dialog.
+/// The Screen tab: when the screen turns off, the monitors, Deskflow, then
+/// the graphics, and over them the open monitor or Deskflow dialog.
 /// Apply follows the bands, as on the Network tab; pinned to the foot of
 /// the panel only when the bands scroll.
 fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {
@@ -1173,9 +1173,10 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
             idle.or(monitors).or(deskflow)
         },
     );
-    // Drawn last, so it is on top.
-    let dialog = crate::monitors_ui::monitor_dialog(ui, &menu.monitors).map(SettingsEvent::Monitors);
-    dialog.or(edit).or(apply.map(SettingsEvent::Monitors))
+    // Drawn last, so it is on top; at most one is open.
+    let monitor = crate::monitors_ui::monitor_dialog(ui, &menu.monitors).map(SettingsEvent::Monitors);
+    let deskflow = crate::deskflow_ui::dialog(ui, &menu.deskflow, &menu.monitors).map(SettingsEvent::Deskflow);
+    monitor.or(deskflow).or(edit).or(apply.map(SettingsEvent::Monitors))
 }
 
 /// When the screen turns off, in one band.
@@ -7355,29 +7356,36 @@ mod tests {
         mon
     }
 
-    /// The On switch in the row of monitor `name`: the smallest shape under
-    /// the "On" heading on the row of the name.
+    /// The On switch in the row of monitor name.
     fn switch_in_row(shapes: &[egui::epaint::ClippedShape], name: &str) -> Rect {
+        switch_in_column(shapes, "On", name)
+    }
+
+    /// The switch in the column under heading on the row of name: the
+    /// smallest shape a little right of the heading's left edge, on the
+    /// row. The heading is the nearest one above the row, so the client
+    /// list's On is not taken for the monitor list's.
+    fn switch_in_column(shapes: &[egui::epaint::ClippedShape], heading: &str, name: &str) -> Rect {
         let rects = text_rects(shapes);
-        let heading = rects
+        let (head, row) = rects
             .iter()
-            .find(|(t, _)| t == "On")
-            .unwrap_or_else(|| panic!("no On heading in {:?}", all_texts(shapes)))
-            .1;
-        let row = rects
-            .iter()
-            .filter(|(t, r)| t == name && r.top() > heading.bottom())
-            .map(|(_, r)| *r)
-            .next()
-            .unwrap_or_else(|| panic!("no row of {name}"));
-        let at = pos2(heading.center().x, row.center().y);
+            .filter(|(t, _)| t == heading)
+            .flat_map(|(_, h)| {
+                rects
+                    .iter()
+                    .filter(move |(t, r)| t == name && r.top() > h.bottom())
+                    .map(move |(_, r)| (*h, *r))
+            })
+            .min_by(|a, b| (a.1.top() - a.0.bottom()).total_cmp(&(b.1.top() - b.0.bottom())))
+            .unwrap_or_else(|| panic!("no row of {name} under {heading} in {:?}", all_texts(shapes)));
+        let at = pos2(head.left() + 4.0, row.center().y);
         shapes
             .iter()
             .filter(|c| !matches!(c.shape, egui::Shape::Text(_)))
             .map(|c| c.shape.visual_bounding_rect())
             .filter(|r| r.contains(at))
             .min_by(|a, b| a.area().total_cmp(&b.area()))
-            .unwrap_or_else(|| panic!("no switch in the row of {name}"))
+            .unwrap_or_else(|| panic!("no switch under {heading} in the row of {name}"))
     }
 
     fn escape_key() -> Vec<egui::Event> {
@@ -7443,6 +7451,381 @@ mod tests {
             let (events, _) = click_labels_at(&menu, &[&idle, &other], MON_WINDOW);
             assert_eq!(events, [None, None]);
         }
+    }
+
+    const DF_FP_MAC: &str = "v2:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DF_FP_PC: &str = "v2:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DF_FP_LNX: &str = "v2:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DF_FP_SELF: &str = "v2:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    fn df_device(name: &str, fp: &str, output: &str, side: crate::kanshi::Side) -> crate::config::DeviceCfg {
+        crate::config::DeviceCfg {
+            name: name.into(),
+            fingerprint: fp.into(),
+            output: output.into(),
+            side,
+            clipboard: true,
+            compose: false,
+            enabled: true,
+        }
+    }
+
+    /// The daemon runs with "mac" right of DP-1 and "pc" left of HDMI-A-1
+    /// attached; no dialog open.
+    fn two_clients() -> crate::deskflowtab::DeskflowTab {
+        use crate::deskflow::statefile::Head;
+        use crate::kanshi::Side;
+        let mut df = crate::deskflowtab::DeskflowTab::default();
+        df.cfg.listen = true;
+        df.cfg.devices = vec![
+            df_device("mac", DF_FP_MAC, "DP-1", Side::RightOf),
+            df_device("pc", DF_FP_PC, "HDMI-A-1", Side::LeftOf),
+        ];
+        df.running = true;
+        df.state.head = Head::SelfInfo {
+            fingerprint: DF_FP_SELF.into(),
+            listen: "0.0.0.0:24800".into(),
+        };
+        df
+    }
+
+    /// The tab of df, and "lnx" wants to attach.
+    fn with_lnx_pending(mut df: crate::deskflowtab::DeskflowTab) -> crate::deskflowtab::DeskflowTab {
+        df.state.devices.push(crate::deskflow::statefile::DevLine {
+            name: "lnx".into(),
+            fingerprint: DF_FP_LNX.into(),
+            state: crate::deskflow::statefile::DevState::Pending,
+            since: 1,
+            width: 0,
+            height: 0,
+            flags: vec![],
+        });
+        df
+    }
+
+    /// The two monitors' Screen tab with the Deskflow band of df.
+    fn deskflow_settings(df: crate::deskflowtab::DeskflowTab) -> Menu {
+        let mut menu = monitor_settings(two_monitors());
+        menu.deskflow = df;
+        menu
+    }
+
+    fn df_ev(e: crate::deskflowtab::DeskflowEvent) -> Option<UiEvent> {
+        Some(UiEvent::Settings(SettingsEvent::Deskflow(e)))
+    }
+
+    /// The Deskflow tests' window: tall enough that the band is in view
+    /// without a scroll.
+    const DF_WINDOW: (f32, f32) = (1920.0, 2000.0);
+
+    fn df_shapes(menu: &Menu) -> Vec<egui::epaint::ClippedShape> {
+        settings_shapes(menu, DF_WINDOW.0, DF_WINDOW.1)
+    }
+
+    fn df_texts(menu: &Menu) -> Vec<String> {
+        all_texts(&df_shapes(menu))
+    }
+
+    fn df_clicks(menu: &Menu, labels: &[&str]) -> Vec<Option<UiEvent>> {
+        let (events, drawn) = click_labels_at(menu, labels, DF_WINDOW);
+        assert!(drawn.iter().all(|d| *d), "{labels:?} drawn: {drawn:?}");
+        events
+    }
+
+    fn df_frame(menu: &Menu, events: Vec<egui::Event>) -> Option<UiEvent> {
+        upgrade_frame(menu, DF_WINDOW.0, DF_WINDOW.1, events).1
+    }
+
+    #[test]
+    fn every_client_shows_on_clipboard_and_compose_without_a_click() {
+        let shapes = df_shapes(&deskflow_settings(two_clients()));
+        let texts = all_texts(&shapes);
+        for want in ["Computer", "On", "Clipboard", "Compose", "mac", "pc"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // Two rows of three switches.
+        let mut switches = vec![];
+        for name in ["mac", "pc"] {
+            for heading in ["On", "Clipboard", "Compose"] {
+                switches.push(switch_in_column(&shapes, heading, name));
+            }
+        }
+        for (i, a) in switches.iter().enumerate() {
+            for b in &switches[i + 1..] {
+                assert!(!a.intersects(*b), "two switches overlap: {a:?} {b:?}");
+            }
+        }
+        // The rest is in the dialog, which is closed.
+        for gone in ["Position", "Forget mac", "Share the clipboard", "Close"] {
+            assert!(!has(&texts, gone), "{gone} in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn a_client_switch_sends_its_event() {
+        use crate::deskflowtab::DeskflowEvent;
+        let menu = deskflow_settings(two_clients());
+        let shapes = df_shapes(&menu);
+        let click = |heading: &str| {
+            let switch = switch_in_column(&shapes, heading, "mac");
+            df_frame(&menu, click_at(switch.center()))
+        };
+        assert_eq!(
+            click("Compose"),
+            df_ev(DeskflowEvent::Compose {
+                name: "mac".into(),
+                on: true
+            })
+        );
+        assert_eq!(
+            click("Clipboard"),
+            df_ev(DeskflowEvent::Clipboard {
+                name: "mac".into(),
+                on: false
+            })
+        );
+        assert_eq!(
+            click("On"),
+            df_ev(DeskflowEvent::Enabled {
+                name: "mac".into(),
+                on: false
+            })
+        );
+        // The gear right of the switches opens the client's dialog.
+        let compose = switch_in_column(&shapes, "Compose", "mac");
+        let gear = shapes
+            .iter()
+            .filter(|c| !matches!(c.shape, egui::Shape::Text(_)))
+            .map(|c| c.shape.visual_bounding_rect())
+            .filter(|r| r.left() > compose.right() && r.y_range().contains(compose.center().y))
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .expect("the gear of mac");
+        assert_eq!(
+            df_frame(&menu, click_at(gear.center())),
+            df_ev(DeskflowEvent::Select("mac".into()))
+        );
+    }
+
+    #[test]
+    fn a_pending_client_attaches_through_its_dialog() {
+        use crate::deskflowtab::{self, DeskflowEvent};
+        use crate::kanshi::Side;
+        let menu = deskflow_settings(with_lnx_pending(two_clients()));
+        assert!(has(&df_texts(&menu), "lnx wants to attach"));
+        assert_eq!(
+            df_clicks(&menu, &["Check and attach…"]),
+            [df_ev(DeskflowEvent::Attach {
+                name: "lnx".into(),
+                fp: DF_FP_LNX.into()
+            })]
+        );
+        let mut df = with_lnx_pending(two_clients());
+        deskflowtab::apply(
+            &mut df,
+            DeskflowEvent::Attach {
+                name: "lnx".into(),
+                fp: DF_FP_LNX.into(),
+            },
+        );
+        let menu = deskflow_settings(df);
+        let texts = df_texts(&menu);
+        for want in [
+            "Check this fingerprint on the other computer before you trust it there.",
+            "Attach",
+            "Cancel",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        // No edge chosen yet: Attach does nothing.
+        assert_eq!(df_clicks(&menu, &["Attach"]), [None]);
+        let events = df_clicks(&menu, &["Choose an edge", "Above DP-1", "Attach"]);
+        assert_eq!(events[..2], [None, None], "choosing an edge only marks it");
+        assert_eq!(
+            events[2],
+            df_ev(DeskflowEvent::Place {
+                name: "lnx".into(),
+                output: "DP-1".into(),
+                side: Side::Above
+            })
+        );
+        assert_eq!(df_clicks(&menu, &["Cancel"]), [df_ev(DeskflowEvent::CancelAttach)]);
+        assert_eq!(df_frame(&menu, escape_key()), df_ev(DeskflowEvent::CancelAttach));
+    }
+
+    /// Whenever a Deskflow dialog counts as open (and the tab under it is
+    /// disabled), one is drawn with a button that closes it, and Escape
+    /// closes it too: also for a client or a fingerprint that is gone.
+    #[test]
+    fn every_open_deskflow_dialog_is_drawn_with_its_close_button() {
+        use crate::deskflowtab::{self, DeskflowEvent};
+        let open = |ev: DeskflowEvent, df: crate::deskflowtab::DeskflowTab| {
+            let mut df = df;
+            deskflowtab::apply(&mut df, ev);
+            assert!(deskflowtab::dialog_open(&df));
+            df
+        };
+        let mut stopped = two_clients();
+        stopped.running = false;
+        let cases = [
+            (
+                open(DeskflowEvent::Select("mac".into()), two_clients()),
+                vec!["mac", "Position", "Share the clipboard", "Forget mac"],
+                "Close",
+                DeskflowEvent::CloseDialog,
+            ),
+            (
+                open(DeskflowEvent::Select("gone".into()), two_clients()),
+                vec!["gone"],
+                "Close",
+                DeskflowEvent::CloseDialog,
+            ),
+            (
+                open(
+                    DeskflowEvent::Attach {
+                        name: "lnx".into(),
+                        fp: DF_FP_LNX.into(),
+                    },
+                    with_lnx_pending(two_clients()),
+                ),
+                vec!["lnx", "Attach"],
+                "Cancel",
+                DeskflowEvent::CancelAttach,
+            ),
+            (
+                open(DeskflowEvent::ShowFingerprint, two_clients()),
+                vec![
+                    "Fingerprint of this computer",
+                    "Check this fingerprint on the other computer before you trust it there.",
+                ],
+                "Close",
+                DeskflowEvent::CloseDialog,
+            ),
+            (
+                open(DeskflowEvent::ShowFingerprint, stopped),
+                vec!["Fingerprint of this computer"],
+                "Close",
+                DeskflowEvent::CloseDialog,
+            ),
+        ];
+        for (df, wants, close, closes) in cases {
+            let menu = deskflow_settings(df);
+            let texts = df_texts(&menu);
+            for want in wants {
+                assert!(has(&texts, want), "{want} not in {texts:?}");
+            }
+            assert_eq!(df_clicks(&menu, &[close]), [df_ev(closes.clone())], "{texts:?}");
+            assert_eq!(df_frame(&menu, escape_key()), df_ev(closes));
+        }
+        // The Fingerprint… button opens this computer's dialog.
+        assert_eq!(
+            df_clicks(&deskflow_settings(two_clients()), &["Fingerprint…"]),
+            [df_ev(DeskflowEvent::ShowFingerprint)]
+        );
+    }
+
+    /// On a 1920x1080 screen, with two monitors, two clients, a pending
+    /// client and a full Graphics band, the page scrolls; scrolled to the
+    /// Deskflow band, all of its rows are in view at once. The page shows
+    /// about 450 points there, which the Monitors band above nearly fills,
+    /// so the rows cannot be in view without a scroll.
+    #[test]
+    fn the_client_rows_are_in_view_on_a_1080_screen() {
+        use crate::graphics::{Codec, Gpu, Info, Vaapi};
+        let codec = |name| Codec {
+            name,
+            decode: true,
+            encode: true,
+        };
+        let mut menu = deskflow_settings(with_lnx_pending(two_clients()));
+        menu.graphics = Some(Info {
+            gpus: vec![Gpu {
+                card: "card1".into(),
+                ids: (0x8086, 0x1616),
+                name: Some("Intel Corporation HD Graphics 5500".into()),
+                driver: Some("i915".into()),
+            }],
+            vaapi: Vaapi::Codecs(vec![codec("H.264"), codec("HEVC"), codec("VP9")]),
+        });
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(1920.0, 1080.0)),
+                events,
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            });
+            o.textures_delta.clear();
+            o.shapes
+        };
+        frame(vec![]);
+        let shapes = frame(vec![]);
+        let title = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "Deskflow" => {
+                        Some((t.galley.rect.translate(t.pos.to_vec2()), c.clip_rect))
+                    }
+                    _ => None,
+                })
+                .expect("the Deskflow title")
+        };
+        let (at, page) = title(&shapes);
+        // Scroll the band's title to the top of the page.
+        let over = page.center();
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, page.top() - at.top()),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+            source: egui::MouseWheelSource::Wheel,
+        };
+        frame(vec![egui::Event::PointerMoved(over), wheel]);
+        // The scroll animates over a few frames.
+        let mut shapes = vec![];
+        for _ in 0..30 {
+            shapes = frame(vec![egui::Event::PointerMoved(over)]);
+        }
+        let (at, _) = title(&shapes);
+        assert!(page.contains_rect(at), "the title {at:?} outside {page:?}");
+        for name in ["mac", "pc"] {
+            let switch = switch_in_column(&shapes, "Compose", name);
+            assert!(
+                page.contains_rect(switch),
+                "{name}'s Compose {switch:?} outside {page:?}"
+            );
+        }
+        let reject = text_rects(&shapes)
+            .into_iter()
+            .find(|(t, _)| t == "Reject")
+            .expect("the pending row's Reject")
+            .1;
+        assert!(page.contains_rect(reject), "Reject {reject:?} outside {page:?}");
+    }
+
+    #[test]
+    fn an_off_client_box_is_dimmed() {
+        let mut df = two_clients();
+        df.cfg.devices[0].enabled = false;
+        let shapes = df_shapes(&deskflow_settings(df));
+        // The first of each name is its box in the arrangement.
+        let colour = |want: &str| {
+            shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == want => Some(t.galley.job.sections[0].format.color),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{want} not drawn"))
+        };
+        let on = colour("pc");
+        assert_eq!(colour("mac"), MUTED);
+        assert_ne!(on, MUTED);
     }
 
     fn monitor_settings(mon: MonTab) -> Menu {
@@ -7741,6 +8124,32 @@ mod tests {
         hand.heads_changed(mon_heads());
         hand.loaded(Ok(None), crate::monitors::MonSource::Kept);
         shot(&monitor_settings(hand), "screen-monitors-hand.ppm", (1920, 1080), 1.0);
+        // The Deskflow band with two clients, one off, and one that wants
+        // to attach; then the dialogs.
+        let mut df = with_lnx_pending(two_clients());
+        df.cfg.devices[1].enabled = false;
+        shot(&deskflow_settings(df.clone()), "screen-deskflow.ppm", (1920, 1400), 1.0);
+        for (ev, name) in [
+            (
+                crate::deskflowtab::DeskflowEvent::Select("mac".into()),
+                "screen-deskflow-client.ppm",
+            ),
+            (
+                crate::deskflowtab::DeskflowEvent::Attach {
+                    name: "lnx".into(),
+                    fp: DF_FP_LNX.into(),
+                },
+                "screen-deskflow-attach.ppm",
+            ),
+            (
+                crate::deskflowtab::DeskflowEvent::ShowFingerprint,
+                "screen-deskflow-self.ppm",
+            ),
+        ] {
+            let mut open = df.clone();
+            crate::deskflowtab::apply(&mut open, ev);
+            shot(&deskflow_settings(open), name, (1920, 1080), 1.0);
+        }
     }
 
     /// The Network and Screen tabs as the web page shows them, at the size

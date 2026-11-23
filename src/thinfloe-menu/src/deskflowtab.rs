@@ -24,7 +24,8 @@ pub const FP_CHANGED: &str = "fp-changed";
 pub struct DeskflowTab {
     pub cfg: DeskflowCfg,
     pub state: StateFile,
-    /// The pending device (name, fingerprint) whose Position control is open.
+    /// The pending device (name, fingerprint) whose *Check and attach…*
+    /// dialog is open.
     pub attaching: Option<(String, String)>,
     /// Why the last write or command failed.
     pub error: Option<String>,
@@ -70,7 +71,7 @@ pub fn no_state() -> StateFile {
 pub enum DeskflowEvent {
     Listen(bool),
     Resistance(Resistance),
-    /// *Attach…* on a pending device: its Position control opens.
+    /// *Check and attach…* on a pending device: its dialog opens.
     Attach {
         name: String,
         fp: String,
