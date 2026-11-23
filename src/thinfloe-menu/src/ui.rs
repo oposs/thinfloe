@@ -7327,6 +7327,8 @@ mod tests {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
         mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
+        // A load opens no dialog; these tests look at the dialog's rows.
+        mon.event(MonEvent::Select("HDMI-A-1".into()), Instant::now());
         mon
     }
 
@@ -7458,7 +7460,7 @@ mod tests {
         let tick = tick_right_of(&mon_shapes(&menu), "On");
         assert_eq!(
             upgrade_frame(&menu, 1920.0, 1080.0, click_at(tick.center())).1,
-            mon_ev(MonEvent::Enabled(false))
+            mon_ev(MonEvent::Enabled("DP-1".into(), false))
         );
     }
 

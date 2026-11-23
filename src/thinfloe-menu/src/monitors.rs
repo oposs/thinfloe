@@ -30,11 +30,15 @@ pub const KEEP_SECS: u64 = 15;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MonEvent {
     Select(String),
-    Enabled(bool),
-    /// An index into the selected monitor's `Head::modes`.
-    Mode(usize),
+    /// Switch the monitor with these criteria on or off.
+    Enabled(String, bool),
+    /// The monitor with these criteria takes the mode at this index of its
+    /// `Head::modes`.
+    Mode(String, usize),
+    /// Close the settings dialog: nothing is selected.
+    CloseDialog,
     Rotation(Rotation),
-    /// Put the selected monitor beside the one with these criteria.
+    /// Put the selected (dialog) monitor beside the one with these criteria.
     Place(Side, String),
     /// *Show the menu here* on the selected monitor.
     MenuHere,
@@ -316,6 +320,10 @@ impl MonTab {
                 }
                 None
             }
+            MonEvent::CloseDialog => {
+                self.selected = None;
+                None
+            }
             MonEvent::Keep => self.answer(Answer::Keep),
             MonEvent::GoBack => self.answer(Answer::GoBack),
             MonEvent::TakeOver => {
@@ -393,7 +401,12 @@ impl MonTab {
     }
 
     fn edit(&mut self, e: MonEvent) {
-        let Some(sel) = self.selected.clone() else { return };
+        // Row events name their monitor; the others act on the dialog's.
+        let target = match &e {
+            MonEvent::Enabled(c, _) | MonEvent::Mode(c, _) => Some(c.clone()),
+            _ => self.selected.clone(),
+        };
+        let Some(sel) = target else { return };
         let head_mode_of = |tab: &MonTab, i: Option<usize>| {
             let h = tab.head_named(&sel)?;
             match i {
@@ -402,13 +415,13 @@ impl MonTab {
             }
         };
         let changed = match e {
-            MonEvent::Enabled(false) => {
-                if !self.off_allowed() {
+            MonEvent::Enabled(_, false) => {
+                if !self.off_allowed_for(&sel) {
                     return;
                 }
                 self.output_mut(&sel).map(|o| o.enabled = false).is_some()
             }
-            MonEvent::Enabled(true) => {
+            MonEvent::Enabled(_, true) => {
                 let fallback = head_mode_of(self, None);
                 self.output_mut(&sel)
                     .map(|o| {
@@ -422,7 +435,7 @@ impl MonTab {
                     })
                     .is_some()
             }
-            MonEvent::Mode(i) => {
+            MonEvent::Mode(_, i) => {
                 let Some(m) = head_mode_of(self, Some(i)) else { return };
                 self.output_mut(&sel).map(|o| o.mode = m).is_some()
             }
@@ -511,7 +524,8 @@ impl MonTab {
     }
 
     /// Show the arrangement saved for the connected monitors, else the one
-    /// on screen, and keep the selection on a monitor that is in it.
+    /// on screen; the selection (the open dialog) stays only on a monitor
+    /// that is in it.
     fn rebuild(&mut self) {
         let draft = match kanshi::profile_for(&self.profiles, &self.heads) {
             Some(i) => self.profiles[i].clone(),
@@ -522,7 +536,7 @@ impl MonTab {
             .as_ref()
             .is_some_and(|s| draft.outputs.iter().any(|o| &o.criteria == s));
         if !keep {
-            self.selected = draft.outputs.first().map(|o| o.criteria.clone());
+            self.selected = None;
         }
         self.base = Some(draft.clone());
         self.draft = Some(draft);
@@ -603,24 +617,27 @@ impl MonTab {
         self.head_named(criteria)
     }
 
-    /// Criteria of the selected monitor.
-    pub fn selected(&self) -> Option<&str> {
+    /// Criteria of the monitor whose settings dialog is open.
+    pub fn dialog_monitor(&self) -> Option<&str> {
         self.selected.as_deref()
     }
 
-    /// The selected monitor's mode, as an index into its `Head::modes`.
-    pub fn selected_mode(&self) -> Option<usize> {
-        let sel = self.selected.as_deref()?;
-        let o = self.output(sel)?;
-        self.head_named(sel)?.modes.iter().position(|m| same_mode(m, &o.mode))
+    /// The mode of the monitor with these criteria, as an index into its
+    /// `Head::modes`.
+    pub fn mode_of(&self, criteria: &str) -> Option<usize> {
+        let o = self.output(criteria)?;
+        self.head_named(criteria)?
+            .modes
+            .iter()
+            .position(|m| same_mode(m, &o.mode))
     }
 
-    /// The selected monitor may be switched off: it is on, it does not
+    /// The monitor with these criteria may be switched off: it is on, it does not
     /// carry the menu, and another one stays on. The menu monitor is the
     /// choice in the tab, else the monitor the menu window is on now.
     /// Without a choice and with that monitor not known, none may go off.
-    pub fn off_allowed(&self) -> bool {
-        let (Some(sel), Some(d)) = (self.selected.as_deref(), self.draft.as_ref()) else {
+    pub fn off_allowed_for(&self, sel: &str) -> bool {
+        let Some(d) = self.draft.as_ref() else {
             return false;
         };
         if !self.editable() {
@@ -777,7 +794,7 @@ mod tests {
     fn first_heads_choose_the_saved_profile_else_the_current_layout() {
         let mut t = tab(two(), Some(file(&[saved_two()])));
         assert_eq!(t.layout(), Some(&saved_two()));
-        assert_eq!(t.selected(), Some("DP-2"));
+        assert_eq!(t.dialog_monitor(), None);
         assert_eq!(t.menu_output(), Some("DP-2"));
         // Later reports ask for nothing more.
         assert_eq!(t.heads_changed(two()), None);
@@ -796,16 +813,56 @@ mod tests {
     }
 
     #[test]
+    fn row_events_act_on_their_monitor_without_a_selection() {
+        let now = Instant::now();
+        let mut t = tab(two(), Some(file(&[saved_two()])));
+        assert_eq!(t.dialog_monitor(), None);
+        ev(&mut t, MonEvent::Mode("DP-2".into(), 0), now);
+        assert_eq!(t.mode_of("DP-2"), Some(0));
+        // The menu's monitor stays on.
+        assert_eq!(ev(&mut t, MonEvent::Enabled("DP-2".into(), false), now), None);
+        assert!(output(&t, "DP-2").enabled);
+        ev(&mut t, MonEvent::Enabled("DP-1".into(), false), now);
+        assert!(!output(&t, "DP-1").enabled);
+        assert_eq!(t.dialog_monitor(), None, "a row event opens no dialog");
+    }
+
+    #[test]
+    fn a_fresh_load_opens_no_dialog() {
+        let t = tab(two(), None);
+        assert_eq!(t.dialog_monitor(), None);
+    }
+
+    #[test]
+    fn close_dialog_clears_the_selection() {
+        let now = Instant::now();
+        let mut t = tab(two(), None);
+        ev(&mut t, MonEvent::Select("DP-1".into()), now);
+        assert_eq!(t.dialog_monitor(), Some("DP-1"));
+        ev(&mut t, MonEvent::CloseDialog, now);
+        assert_eq!(t.dialog_monitor(), None);
+    }
+
+    #[test]
+    fn an_unplugged_monitor_closes_its_dialog() {
+        let now = Instant::now();
+        let mut t = tab(two(), None);
+        ev(&mut t, MonEvent::Select("DP-2".into()), now);
+        t.heads_changed(vec![head("DP-1", 0, 1920, 1080)]);
+        assert_eq!(t.dialog_monitor(), None);
+    }
+
+    #[test]
     fn the_menu_monitor_cannot_be_switched_off() {
         let now = Instant::now();
         let mut t = tab(two(), Some(file(&[saved_two()])));
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
-        assert!(!t.off_allowed());
-        assert_eq!(ev(&mut t, MonEvent::Enabled(false), now), None);
+        assert!(!t.off_allowed_for("DP-2"));
+        assert_eq!(ev(&mut t, MonEvent::Enabled("DP-2".into(), false), now), None);
         assert!(output(&t, "DP-2").enabled);
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
-        assert!(t.off_allowed());
-        ev(&mut t, MonEvent::Enabled(false), now);
+        assert!(t.off_allowed_for("DP-1"));
+        ev(&mut t, MonEvent::Enabled("DP-1".into(), false), now);
         assert!(!output(&t, "DP-1").enabled);
 
         // Without a menu choice, the monitor the menu is on now carries it.
@@ -813,28 +870,28 @@ mod tests {
         assert_eq!(t.menu_choice(), None);
         t.menu_is_on(Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
-        assert!(!t.off_allowed());
-        assert_eq!(ev(&mut t, MonEvent::Enabled(false), now), None);
+        assert!(!t.off_allowed_for("DP-1"));
+        assert_eq!(ev(&mut t, MonEvent::Enabled("DP-1".into(), false), now), None);
         assert!(output(&t, "DP-1").enabled);
         // The last monitor that is on.
         t.menu_is_on(Some("DP-2"));
-        assert!(t.off_allowed());
-        ev(&mut t, MonEvent::Enabled(false), now);
+        assert!(t.off_allowed_for("DP-1"));
+        ev(&mut t, MonEvent::Enabled("DP-1".into(), false), now);
         assert!(!output(&t, "DP-1").enabled);
         t.menu_is_on(Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-2".into()), now);
-        assert!(!t.off_allowed());
-        ev(&mut t, MonEvent::Enabled(false), now);
+        assert!(!t.off_allowed_for("DP-2"));
+        ev(&mut t, MonEvent::Enabled("DP-2".into(), false), now);
         assert!(output(&t, "DP-2").enabled);
         // An off monitor is not "switched off" again.
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
-        assert!(!t.off_allowed());
+        assert!(!t.off_allowed_for("DP-1"));
 
         // A choice wins over the monitor the menu is on now.
         let mut t = tab(two(), Some(file(&[saved_two()])));
         t.menu_is_on(Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
-        assert!(t.off_allowed());
+        assert!(t.off_allowed_for("DP-1"));
     }
 
     #[test]
@@ -843,15 +900,15 @@ mod tests {
         let mut t = tab(two(), None);
         for c in ["DP-1", "DP-2"] {
             ev(&mut t, MonEvent::Select(c.into()), now);
-            assert!(!t.off_allowed(), "{c}");
+            assert!(!t.off_allowed_for(c), "{c}");
         }
         // A connector that is not connected is no better.
         t.menu_is_on(Some("HDMI-A-1"));
-        assert!(!t.off_allowed());
+        assert!(!t.off_allowed_for("DP-2"));
         t.menu_is_on(Some("DP-1"));
-        assert!(t.off_allowed(), "DP-2 is selected");
+        assert!(t.off_allowed_for("DP-2"), "DP-2 is selected");
         t.menu_is_on(None);
-        assert!(!t.off_allowed());
+        assert!(!t.off_allowed_for("DP-2"));
     }
 
     #[test]
@@ -864,17 +921,17 @@ mod tests {
         // A saved monitor that is off may hold no mode.
         assert_eq!((output(&t, "DP-1").mode.w, output(&t, "DP-1").mode.h), (0, 0));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
-        ev(&mut t, MonEvent::Enabled(true), now);
+        ev(&mut t, MonEvent::Enabled("DP-1".into(), true), now);
         let o = output(&t, "DP-1");
         assert!(o.enabled);
         assert_eq!((o.mode.w, o.mode.h), (1920, 1080), "the current mode of the monitor");
-        assert_eq!(t.selected_mode(), Some(1));
-        ev(&mut t, MonEvent::Mode(0), now);
+        assert_eq!(t.mode_of("DP-1"), Some(1));
+        ev(&mut t, MonEvent::Mode("DP-1".into(), 0), now);
         assert_eq!((output(&t, "DP-1").mode.w, output(&t, "DP-1").mode.h), (1280, 720));
-        assert_eq!(t.selected_mode(), Some(0));
+        assert_eq!(t.mode_of("DP-1"), Some(0));
         // A mode the monitor does not offer changes nothing.
-        ev(&mut t, MonEvent::Mode(7), now);
-        assert_eq!(t.selected_mode(), Some(0));
+        ev(&mut t, MonEvent::Mode("DP-1".into(), 7), now);
+        assert_eq!(t.mode_of("DP-1"), Some(0));
     }
 
     #[test]
@@ -1030,14 +1087,14 @@ mod tests {
         applied_tab(&mut t, now);
         // DP-2, the selected one, is unplugged.
         assert_eq!(t.heads_changed(vec![head("DP-1", 0, 1920, 1080)]), None);
-        assert_eq!(t.selected_mode(), None);
-        assert!(!t.off_allowed());
+        assert_eq!(t.mode_of("DP-2"), None);
+        assert!(!t.off_allowed_for("DP-2"));
         assert_eq!(t.menu_output(), None);
         assert_eq!(t.countdown(now + Duration::from_secs(5)), Some(10));
         assert_eq!(t.tick(now + Duration::from_secs(15)), Some(MonRequest::Revert));
         assert_eq!(t.reverted(Ok(())), None);
         assert_eq!(t.layout(), Some(&kanshi::from_heads(&[head("DP-1", 0, 1920, 1080)])));
-        assert_eq!(t.selected(), Some("DP-1"));
+        assert_eq!(t.dialog_monitor(), None, "the unplugged monitor's dialog is closed");
 
         // Go back after a hotplug.
         let mut t = tab(two(), None);
@@ -1053,11 +1110,11 @@ mod tests {
         let alone = vec![head("DP-1", 0, 1920, 1080)];
         assert_eq!(t.heads_changed(alone.clone()), None);
         assert_eq!(t.menu_output(), None);
-        let (layout, selected) = (t.layout().cloned(), t.selected().map(String::from));
+        let (layout, selected) = (t.layout().cloned(), t.dialog_monitor().map(String::from));
         assert_eq!(t.heads_changed(alone), None);
         assert_eq!(t.menu_output(), None);
         assert_eq!(
-            (t.layout().cloned(), t.selected().map(String::from)),
+            (t.layout().cloned(), t.dialog_monitor().map(String::from)),
             (layout, selected)
         );
         // Back at the dock, the choice is there again.
@@ -1081,8 +1138,8 @@ mod tests {
         assert_eq!(before, Some(kanshi::from_heads(&two())), "the monitors still show");
         for e in [
             MonEvent::Select("DP-2".into()),
-            MonEvent::Enabled(false),
-            MonEvent::Mode(0),
+            MonEvent::Enabled("DP-2".into(), false),
+            MonEvent::Mode("DP-2".into(), 0),
             MonEvent::Rotation(Rotation::R90),
             MonEvent::Place(Side::LeftOf, "DP-1".into()),
             MonEvent::MenuHere,
@@ -1093,7 +1150,7 @@ mod tests {
             assert_eq!(ev(&mut t, e.clone(), now), None, "{e:?}");
         }
         assert_eq!(t.layout().cloned(), before);
-        assert_eq!(t.selected(), Some("DP-2"), "selecting is only looking");
+        assert_eq!(t.dialog_monitor(), Some("DP-2"), "selecting is only looking");
         assert_eq!(
             ev(&mut t, MonEvent::TakeOver, now),
             Some(MonRequest::TakeOver { heads: two() })
@@ -1151,7 +1208,7 @@ mod tests {
         ev(&mut t, MonEvent::Place(Side::Below, "HDMI-9".into()), now);
         ev(&mut t, MonEvent::Select("HDMI-9".into()), now);
         assert_eq!(t.layout().cloned(), before);
-        assert_eq!(t.selected(), Some("DP-2"));
+        assert_eq!(t.dialog_monitor(), Some("DP-2"));
     }
 
     #[test]
