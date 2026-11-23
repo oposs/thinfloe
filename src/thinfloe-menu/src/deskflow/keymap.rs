@@ -186,12 +186,11 @@ impl Mods {
     }
 }
 
-/// A modifier or lock keysym: the ones libxkbcommon's Compose leaves out of
-/// a sequence (Shift_L to Hyper_R, ISO_Lock to ISO_Level5_Lock,
-/// Mode_switch, Num_Lock), and Scroll_Lock, which it would take as a key
-/// that cancels the sequence.
-pub fn is_modifier_or_lock(keysym: u32) -> bool {
-    matches!(keysym, 0xffe1..=0xffee | 0xfe01..=0xfe13 | 0xff7e | 0xff7f | 0xff14)
+/// A lock key's keysym: Caps_Lock, Num_Lock, Scroll_Lock. libxkbcommon's
+/// Compose leaves the first two out of a sequence and would take
+/// Scroll_Lock as a key that cancels it.
+pub fn is_lock_key(keysym: u32) -> bool {
+    matches!(keysym, 0xffe5 | 0xff7f | 0xff14)
 }
 
 /// Result of feeding a keysym into the local libxkbcommon Compose state.
