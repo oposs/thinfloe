@@ -1001,6 +1001,7 @@ impl App {
     fn refresh_deskflow_state(&mut self) {
         self.cfg.menu.deskflow.state = crate::deskflow::statefile::path()
             .map_or_else(crate::deskflowtab::no_state, |p| crate::deskflowtab::read_state(&p));
+        crate::deskflowtab::close_stale_dialogs(&mut self.cfg.menu.deskflow);
     }
 
     /// Read the battery file again.
