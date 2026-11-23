@@ -370,6 +370,24 @@ impl Xkb {
         })
     }
 
+    /// A keymap from XKB text (tests).
+    #[cfg(test)]
+    pub(crate) fn from_keymap_text(text: &str) -> Result<Xkb, String> {
+        let lib = xkbcommon_dl::xkbcommon_option().ok_or("libxkbcommon is not available")?;
+        let text = CString::new(text).map_err(|e| e.to_string())?;
+        Xkb::build(lib, |ctx| {
+            // SAFETY: ctx is a live context; text is NUL-terminated.
+            unsafe {
+                (lib.xkb_keymap_new_from_string)(
+                    ctx,
+                    text.as_ptr(),
+                    xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
+                    xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS,
+                )
+            }
+        })
+    }
+
     fn build(lib: &'static XkbCommon, make: impl FnOnce(*mut xkb_context) -> *mut xkb_keymap) -> Result<Xkb, String> {
         // SAFETY: plain libxkbcommon calls on pointers checked for NULL; the
         // three objects are owned by the Xkb and freed in Drop.

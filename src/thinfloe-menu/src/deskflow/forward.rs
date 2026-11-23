@@ -295,8 +295,10 @@ fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<A
     {
         let sym = x.keysym(code);
         if x.is_composing() || sym == keymap::XK_MULTI_KEY {
-            a.repeat = None;
+            // The repeat stops only for a key the sequence takes; a key
+            // that goes on to the client leaves it as with the switch off.
             if sym == 0 {
+                a.repeat = None;
                 return Vec::new();
             }
             match x.compose_feed(sym) {
@@ -305,8 +307,12 @@ fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<A
                 keymap::ComposeOutcome::Idle => {}
                 keymap::ComposeOutcome::Composing
                 | keymap::ComposeOutcome::Cancelled
-                | keymap::ComposeOutcome::Composed(None) => return Vec::new(),
+                | keymap::ComposeOutcome::Composed(None) => {
+                    a.repeat = None;
+                    return Vec::new();
+                }
                 keymap::ComposeOutcome::Composed(Some(id)) => {
+                    a.repeat = None;
                     let mods = kb.locks_mask();
                     return vec![
                         Action::Send(Msg::KeyDown {
@@ -863,6 +869,46 @@ mod tests {
         let (out, why) = run(&mut a, &mut kb, &[key(KEY_RIGHTALT, true), key(KEY_RIGHTALT, false)]);
         assert_eq!(why, None);
         assert_eq!(out, [down(0xEF20, 0, KEY_RIGHTALT), up(0xEF20, 0, KEY_RIGHTALT)]);
+    }
+
+    /// A keymap with a and A, and Multi_key on Right Alt on a key that does
+    /// not repeat (stock XKB options all let the Compose key repeat).
+    const MULTI_NO_REPEAT: &str = "xkb_keymap {
+        xkb_keycodes { minimum = 8; maximum = 255; <AC01> = 38; <RALT> = 108; };
+        xkb_types { include \"complete\" };
+        xkb_compat { include \"complete\" };
+        xkb_symbols {
+            key <AC01> { [ a, A ] };
+            key <RALT> { repeat = False, [ Multi_key ] };
+        };
+    };";
+
+    /// The switch is on but no Compose table loaded: Multi_key leaves the
+    /// repeat of a key held exactly as with the switch off.
+    #[test]
+    fn compose_on_without_a_table_keeps_the_repeat_of_a_held_key() {
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        let deadline = |compose: bool| {
+            let mut x = Xkb::from_keymap_text(MULTI_NO_REPEAT).expect("libxkbcommon and the xkeyboard-config data");
+            x.drop_compose_for_test();
+            assert_eq!(x.keysym(KEY_RIGHTALT), keymap::XK_MULTI_KEY);
+            assert!(!x.repeats(KEY_RIGHTALT));
+            let mut kb = Keyboard {
+                xkb: Some(x),
+                rate: 25,
+                delay: 600,
+                down: Vec::new(),
+            };
+            let mut a = active_compose(compose);
+            on_cap_event(&mut a, &key(KEY_A, true), &mut kb, t);
+            assert_eq!(a.deadline(), Some(t + ms(600)));
+            let out = on_cap_event(&mut a, &key(KEY_RIGHTALT, true), &mut kb, t + ms(100));
+            assert_eq!(out, [Action::Send(down(0xEF20, 0, KEY_RIGHTALT))]);
+            a.deadline()
+        };
+        assert_eq!(deadline(false), Some(t + ms(600)));
+        assert_eq!(deadline(true), Some(t + ms(600)));
     }
 
     #[test]
