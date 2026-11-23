@@ -106,6 +106,44 @@ impl Drop for TestDir {
     }
 }
 
+/// A socket file whose socket is gone: bound by a child process that
+/// has exited. A socket bound and dropped here is not gone for sure:
+/// another test thread's fork() between the bind and the drop leaves a
+/// copy in that child until its exec closes it, and a send in that
+/// window is delivered.
+// main.rs compiles this file again for the bin's tests, which use no socket.
+#[allow(dead_code)]
+pub fn stale_socket(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: an all-zero sockaddr_un is valid.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    assert!(bytes.len() < addr.sun_path.len(), "{path:?} fits sun_path");
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (d, s) in addr.sun_path.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    // SAFETY: the child calls only socket, bind and _exit, which are
+    // async-signal-safe, on memory prepared before the fork.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+    if pid == 0 {
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0);
+            let bound = fd >= 0 && libc::bind(fd, (&raw const addr).cast(), len) == 0;
+            libc::_exit(if bound { 0 } else { 1 });
+        }
+    }
+    let mut status = 0;
+    // SAFETY: waits for the child just made; status is a valid int.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "the child bound {path:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
