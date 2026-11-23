@@ -1004,6 +1004,46 @@ mod tests {
         assert!(!kb.is_composing());
     }
 
+    /// Scroll Lock mid-sequence reaches the client and no longer cancels the
+    /// sequence.
+    #[test]
+    fn scroll_lock_mid_sequence_reaches_the_client_without_cancelling() {
+        const KEY_SCROLLLOCK: u32 = 70;
+        const KEY_APOSTROPHE: u32 = 40;
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        assert_eq!(kb.xkb.as_ref().unwrap().keysym(KEY_SCROLLLOCK), 0xff14);
+        let evs = [
+            key(KEY_RIGHTALT, true),
+            key(KEY_RIGHTALT, false),
+            key(KEY_SCROLLLOCK, true),
+            key(KEY_SCROLLLOCK, false),
+            key(KEY_APOSTROPHE, true),
+            key(KEY_APOSTROPHE, false),
+            key(KEY_A, true),
+            key(KEY_A, false),
+        ];
+        let (out, why) = run(&mut a, &mut kb, &evs);
+        assert_eq!(why, None);
+        assert_eq!(
+            out,
+            [
+                down(0xEF14, 0, KEY_SCROLLLOCK),
+                up(0xEF14, 0, KEY_SCROLLLOCK),
+                Msg::KeyDown {
+                    id: 0x00e1,
+                    mods: 0,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+                Msg::KeyUp {
+                    id: 0x00e1,
+                    mods: 0,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+            ]
+        );
+        assert!(!kb.is_composing());
+    }
+
     /// Shift pressed mid-sequence and released after it never reaches the
     /// client: its release is not sent alone.
     #[test]
