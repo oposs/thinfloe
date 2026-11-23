@@ -11,6 +11,7 @@
 
 ### Fixed
 - With "Handle Compose key on ThinFloe" on for a computer, the Compose key did nothing at all when ThinFloe had no Compose table for its language: the key reached neither ThinFloe nor that computer. It now goes to the computer, as with the switch off.
+- With "Handle Compose key on ThinFloe" on and no Compose table for ThinFloe's language, pressing a Compose key that does not repeat while another key was held stopped that held key repeating on the computer. The held key now keeps repeating, as with the switch off.
 
 ## 4.9.0 - 2026-11-23
 ### New
