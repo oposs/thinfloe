@@ -919,8 +919,10 @@ fn show_settings(
     let width = GROUP_W.min(inner.width());
     let panel = Rect::from_center_size(inner.center(), vec2(width, inner.height()));
     let mut s_ui = ui.new_child(UiBuilder::new().max_rect(panel));
-    // A Network dialog is modal: the screen under it takes no clicks.
-    if menu.settings_tab == SettingsTab::Network && crate::network_ui::dialog_open(&menu.network) {
+    // A Network or Screen dialog is modal: the screen under it takes no clicks.
+    if menu.settings_tab == SettingsTab::Network && crate::network_ui::dialog_open(&menu.network)
+        || menu.settings_tab == SettingsTab::Screen && screen_dialog_open(&menu.monitors, &menu.deskflow)
+    {
         s_ui.disable();
     }
     s_ui.horizontal(|ui| {
@@ -1101,8 +1103,14 @@ fn packages_tab(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], width: f32) ->
     event
 }
 
+/// A dialog of the Screen tab is open: a monitor's, or one of the
+/// Deskflow band. Not *Keep this arrangement?*, which replaces the screen.
+pub fn screen_dialog_open(mon: &crate::monitors::MonTab, df: &crate::deskflowtab::DeskflowTab) -> bool {
+    mon.dialog_monitor().is_some() || crate::deskflowtab::dialog_open(df)
+}
+
 /// The Screen tab: when the screen turns off, the monitors, then the
-/// graphics.
+/// graphics, and over them the open monitor dialog.
 /// Apply follows the bands, as on the Network tab; pinned to the foot of
 /// the panel only when the bands scroll.
 fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<SettingsEvent> {
@@ -1165,7 +1173,9 @@ fn screen_tab(ui: &mut Ui, menu: &Menu, width: f32, now: Instant) -> Option<Sett
             idle.or(monitors).or(deskflow)
         },
     );
-    edit.or(apply.map(SettingsEvent::Monitors))
+    // Drawn last, so it is on top.
+    let dialog = crate::monitors_ui::monitor_dialog(ui, &menu.monitors).map(SettingsEvent::Monitors);
+    dialog.or(edit).or(apply.map(SettingsEvent::Monitors))
 }
 
 /// When the screen turns off, in one band.
@@ -3459,7 +3469,7 @@ mod tests {
                                 "Monitors",
                                 "DP-1",
                                 "Resolution",
-                                "Show the menu here",
+                                "On",
                                 "Apply",
                             ],
                         )
@@ -3468,6 +3478,12 @@ mod tests {
                 (format!("{tab:?}"), menu, size, wants)
             })
             .collect();
+        cases.push((
+            "monitor dialog".into(),
+            monitor_settings(monitor_dialog("DP-1")),
+            (1920.0, 1080.0),
+            &["Position", "Rotation", "Show the menu here", "Close"],
+        ));
         cases.push((
             "keep dialog".into(),
             monitor_settings(asking()),
@@ -4095,11 +4111,12 @@ mod tests {
         menu
     }
 
-    /// On a 1920x1080 screen the monitors' Position row is in view without
+    /// On a 1920x1080 screen the last monitor's row is in view without
     /// a scroll, also with a full Graphics band (a GPU, its driver and
-    /// three codecs). With the band on top it was not (2026-11-20).
+    /// three codecs). With the band on top the Position row of the time
+    /// was not (2026-11-20).
     #[test]
-    fn the_position_row_is_in_view_on_a_1080_screen() {
+    fn the_monitor_rows_are_in_view_on_a_1080_screen() {
         use crate::graphics::{Codec, Gpu, Info, Vaapi};
         let codec = |name| Codec {
             name,
@@ -4120,12 +4137,13 @@ mod tests {
         let side = shapes
             .iter()
             .find_map(|c| match &c.shape {
-                egui::Shape::Text(t) if ["Left of", "Right of", "Above", "Below"].contains(&t.galley.text()) => {
+                // DP-1's Resolution select, in the last row.
+                egui::Shape::Text(t) if t.galley.text() == "2560 × 1440 @ 60 Hz" => {
                     Some((t.galley.rect.translate(t.pos.to_vec2()), c.clip_rect))
                 }
                 _ => None,
             })
-            .expect("the Position row's select");
+            .expect("the last row's Resolution select");
         let (text, clip) = side;
         // The select's box reaches about half a line past its text.
         let select = text.expand2(egui::vec2(0.0, text.height() / 2.0));
@@ -7322,14 +7340,109 @@ mod tests {
     }
 
     /// HDMI-A-1 (1920x1080) with DP-1 (2560x1440) right of it, no file yet;
-    /// HDMI-A-1 is selected.
+    /// no dialog open.
     fn two_monitors() -> MonTab {
         let mut mon = MonTab::default();
         mon.heads_changed(mon_heads());
         mon.loaded(Ok(None), crate::monitors::MonSource::Missing);
-        // A load opens no dialog; these tests look at the dialog's rows.
-        mon.event(MonEvent::Select("HDMI-A-1".into()), Instant::now());
         mon
+    }
+
+    /// `two_monitors` with the dialog of `criteria` open.
+    fn monitor_dialog(criteria: &str) -> MonTab {
+        let mut mon = two_monitors();
+        mon.event(MonEvent::Select(criteria.into()), Instant::now());
+        mon
+    }
+
+    /// The On switch in the row of monitor `name`: the smallest shape under
+    /// the "On" heading on the row of the name.
+    fn switch_in_row(shapes: &[egui::epaint::ClippedShape], name: &str) -> Rect {
+        let rects = text_rects(shapes);
+        let heading = rects
+            .iter()
+            .find(|(t, _)| t == "On")
+            .unwrap_or_else(|| panic!("no On heading in {:?}", all_texts(shapes)))
+            .1;
+        let row = rects
+            .iter()
+            .filter(|(t, r)| t == name && r.top() > heading.bottom())
+            .map(|(_, r)| *r)
+            .next()
+            .unwrap_or_else(|| panic!("no row of {name}"));
+        let at = pos2(heading.center().x, row.center().y);
+        shapes
+            .iter()
+            .filter(|c| !matches!(c.shape, egui::Shape::Text(_)))
+            .map(|c| c.shape.visual_bounding_rect())
+            .filter(|r| r.contains(at))
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("no switch in the row of {name}"))
+    }
+
+    fn escape_key() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    #[test]
+    fn every_monitor_shows_its_resolution_and_on_without_a_click() {
+        let texts = mon_texts(&monitor_settings(two_monitors()));
+        for want in [
+            "Monitor",
+            "Resolution",
+            "On",
+            "HDMI-A-1",
+            "DP-1",
+            "1920 × 1080 @ 60 Hz",
+            "2560 × 1440 @ 60 Hz",
+        ] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        for gone in ["Rotation", "Position", "Show the menu here"] {
+            assert!(!has(&texts, gone), "{gone} in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn a_monitor_box_click_opens_its_dialog_and_escape_closes_it() {
+        let menu = monitor_settings(two_monitors());
+        assert_eq!(mon_clicks(&menu, &["DP-1"]), [mon_ev(MonEvent::Select("DP-1".into()))]);
+        let menu = monitor_settings(monitor_dialog("DP-1"));
+        let texts = mon_texts(&menu);
+        for want in ["Position", "Rotation", "Show the menu here", "Close"] {
+            assert!(has(&texts, want), "{want} not in {texts:?}");
+        }
+        assert_eq!(mon_clicks(&menu, &["Close"]), [mon_ev(MonEvent::CloseDialog)]);
+        assert_eq!(
+            upgrade_frame(&menu, MON_WINDOW.0, MON_WINDOW.1, escape_key()).1,
+            mon_ev(MonEvent::CloseDialog)
+        );
+    }
+
+    #[test]
+    fn the_screen_under_a_screen_dialog_takes_no_click() {
+        // Without a dialog the idle select takes the click.
+        let open = monitor_settings(two_monitors());
+        let idle = crate::screentab::label(open.screen_tab.idle);
+        let other = crate::screentab::options(open.screen_tab.idle)
+            .into_iter()
+            .map(crate::screentab::label)
+            .find(|l| *l != idle)
+            .unwrap();
+        let (events, _) = click_labels_at(&open, &[&idle, &other], MON_WINDOW);
+        assert!(events[1].is_some(), "{events:?}");
+        let mut deskflow = monitor_settings(two_monitors());
+        deskflow.deskflow.selected = Some("macbook".into());
+        for menu in [monitor_settings(monitor_dialog("DP-1")), deskflow] {
+            let (events, _) = click_labels_at(&menu, &[&idle, &other], MON_WINDOW);
+            assert_eq!(events, [None, None]);
+        }
     }
 
     fn monitor_settings(mon: MonTab) -> Menu {
@@ -7377,23 +7490,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The control on the row of `label`, right of it: the leftmost shape
-    /// there that is no wider than a tick box.
-    fn tick_right_of(shapes: &[egui::epaint::ClippedShape], label: &str) -> Rect {
-        let l = text_rects(shapes)
-            .into_iter()
-            .find(|(t, _)| t == label)
-            .unwrap_or_else(|| panic!("{label} not in {:?}", all_texts(shapes)))
-            .1;
-        shapes
-            .iter()
-            .filter(|c| !matches!(c.shape, egui::Shape::Text(_)))
-            .map(|c| c.shape.visual_bounding_rect())
-            .filter(|r| r.left() > l.right() && r.width() < 30.0 && r.top() < l.bottom() && l.top() < r.bottom())
-            .min_by(|a, b| a.left().total_cmp(&b.left()))
-            .unwrap_or_else(|| panic!("no tick box right of {label}"))
-    }
-
     #[test]
     fn monitor_boxes_have_the_monitors_proportions() {
         let shapes = mon_shapes(&monitor_settings(two_monitors()));
@@ -7417,16 +7513,7 @@ mod tests {
             "aligned at the top: {small:?} {big:?}"
         );
         let texts = all_texts(&shapes);
-        for want in [
-            "Monitors",
-            "P2419H",
-            "U2720Q",
-            "On",
-            "Resolution",
-            "Rotation",
-            "Position",
-            "Apply",
-        ] {
+        for want in ["Monitors", "P2419H", "U2720Q", "On", "Resolution", "Apply"] {
             assert!(has(&texts, want), "{want} not in {texts:?}");
         }
         assert!(has(&texts, "1920 × 1080 @ 60 Hz"), "{texts:?}");
@@ -7441,46 +7528,47 @@ mod tests {
     #[test]
     fn the_menu_monitor_cannot_be_switched_off() {
         let now = Instant::now();
-        let mut mon = two_monitors();
+        let mut mon = monitor_dialog("HDMI-A-1");
         mon.event(MonEvent::MenuHere, now);
-        let menu = monitor_settings(mon.clone());
+        mon.event(MonEvent::CloseDialog, now);
+        let menu = monitor_settings(mon);
         let shapes = mon_shapes(&menu);
-        // The box of the menu monitor says so.
+        // The box of the menu monitor says so, and so does its row.
         let menu_word = text_rects(&shapes)
             .into_iter()
             .find(|(t, _)| t == "Menu")
             .expect("the Menu mark")
             .1;
         assert!(box_around(&shapes, "HDMI-A-1").contains(menu_word.center()));
-        let tick = tick_right_of(&shapes, "On");
-        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, click_at(tick.center())).1, None);
-        // The other monitor can go off.
-        mon.event(MonEvent::Select("DP-1".into()), now);
-        let menu = monitor_settings(mon);
-        let tick = tick_right_of(&mon_shapes(&menu), "On");
+        assert!(has(&all_texts(&shapes), "· Menu"));
+        let switch = switch_in_row(&shapes, "HDMI-A-1");
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, click_at(switch.center())).1, None);
+        // The other monitor can go off, from its row.
+        let switch = switch_in_row(&shapes, "DP-1");
         assert_eq!(
-            upgrade_frame(&menu, 1920.0, 1080.0, click_at(tick.center())).1,
+            upgrade_frame(&menu, 1920.0, 1080.0, click_at(switch.center())).1,
             mon_ev(MonEvent::Enabled("DP-1".into(), false))
         );
     }
 
     #[test]
     fn show_the_menu_here_and_apply_report_their_clicks() {
-        let menu = monitor_settings(two_monitors());
+        let menu = monitor_settings(monitor_dialog("HDMI-A-1"));
         assert_eq!(mon_clicks(&menu, &["Show the menu here"]), [mon_ev(MonEvent::MenuHere)]);
-        let mut mon = two_monitors();
+        let mut mon = monitor_dialog("HDMI-A-1");
         mon.event(MonEvent::MenuHere, Instant::now());
+        mon.event(MonEvent::CloseDialog, Instant::now());
         let menu = monitor_settings(mon);
         assert_eq!(mon_clicks(&menu, &["Apply"]), [mon_ev(MonEvent::Apply)]);
     }
 
     #[test]
     fn apply_needs_a_change_and_a_position_change_is_one() {
-        let menu = monitor_settings(two_monitors());
         // Nothing changed yet: Apply is off.
-        assert_eq!(mon_clicks(&menu, &["Apply"]), [None]);
-        // The Position row: the side select shows where the selected
+        assert_eq!(mon_clicks(&monitor_settings(two_monitors()), &["Apply"]), [None]);
+        // The Position row of the dialog: the side select shows where the
         // monitor sits; its list offers the other sides.
+        let menu = monitor_settings(monitor_dialog("HDMI-A-1"));
         let texts = mon_texts(&menu);
         let current = ["Left of", "Right of", "Above", "Below"]
             .into_iter()
@@ -7501,8 +7589,9 @@ mod tests {
                 crate::kanshi::Side::Below
             }
         );
-        let mut mon = two_monitors();
+        let mut mon = monitor_dialog("HDMI-A-1");
         mon.event(MonEvent::Place(side, to), Instant::now());
+        mon.event(MonEvent::CloseDialog, Instant::now());
         let menu = monitor_settings(mon);
         assert_eq!(mon_clicks(&menu, &["Apply"]), [mon_ev(MonEvent::Apply)]);
     }
@@ -7587,11 +7676,16 @@ mod tests {
         let texts = mon_texts(&menu);
         let line = "The monitor arrangement is a kanshi file written by hand, which the menu keeps as it is.";
         assert!(has(&texts, line), "{texts:?}");
-        // The monitors are shown, but nothing is offered to change them.
+        // The monitors and their rows are shown, but nothing is offered
+        // to change them.
         assert!(has(&texts, "DP-1"), "{texts:?}");
-        for gone in ["Apply", "Show the menu here", "Resolution"] {
+        assert!(has(&texts, "Resolution"), "{texts:?}");
+        for gone in ["Apply", "Show the menu here"] {
             assert!(!has(&texts, gone), "{gone} in {texts:?}");
         }
+        let switch = switch_in_row(&mon_shapes(&menu), "DP-1");
+        assert_eq!(upgrade_frame(&menu, 1920.0, 1080.0, click_at(switch.center())).1, None);
+        assert_eq!(mon_clicks(&menu, &["DP-1"]), [None], "a box opens no dialog");
         assert_eq!(
             mon_clicks(&menu, &["Let the menu manage it"]),
             [mon_ev(MonEvent::TakeOver)]
@@ -7629,10 +7723,16 @@ mod tests {
     #[test]
     #[ignore]
     fn shot_screen_monitors() {
-        // DP-1 selected and carrying the menu.
-        let mut two = two_monitors();
-        two.event(MonEvent::Select("DP-1".into()), Instant::now());
+        // DP-1 carrying the menu, then with its dialog open.
+        let mut two = monitor_dialog("DP-1");
         two.event(MonEvent::MenuHere, Instant::now());
+        shot(
+            &monitor_settings(two.clone()),
+            "screen-monitors-dialog.ppm",
+            (1920, 1080),
+            1.0,
+        );
+        two.event(MonEvent::CloseDialog, Instant::now());
         shot(&monitor_settings(two), "screen-monitors-two.ppm", (1920, 1080), 1.0);
         let mut keep = asking();
         keep.set_thinlinc(true);
@@ -7648,9 +7748,9 @@ mod tests {
     #[test]
     #[ignore]
     fn shot_page_pictures() {
-        let mut two = two_monitors();
-        two.event(MonEvent::Select("DP-1".into()), Instant::now());
+        let mut two = monitor_dialog("DP-1");
         two.event(MonEvent::MenuHere, Instant::now());
+        two.event(MonEvent::CloseDialog, Instant::now());
         shot(&monitor_settings(two), "page-screen.ppm", (2880, 1920), 2.0);
         let mut menu = open_settings();
         menu.settings_tab = crate::settings::SettingsTab::Network;
