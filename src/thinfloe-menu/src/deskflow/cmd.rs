@@ -175,7 +175,7 @@ mod tests {
         let d = TestDir::sockets("dn");
         assert!(matches!(send(&d.socket("x"), &Cmd::Reload), Err(SendError::NoServer)));
         let stale = d.socket("st");
-        drop(UnixDatagram::bind(&stale).unwrap());
+        crate::testdir::stale_socket(&stale);
         assert!(matches!(send(&stale, &Cmd::Reload), Err(SendError::NoServer)));
         let server = bind(&stale).unwrap();
         send(&stale, &Cmd::Reload).unwrap();
