@@ -3,8 +3,11 @@
 ## [Unreleased]
 
 ### New
+- Settings → Screen shows the monitors as a list (Monitor, Resolution, On) and the computers attached with Deskflow as a list (name, On, Clipboard, Compose). The switches are always visible; ⚙ or a click on the monitor or computer opens a dialog with the rest, such as Position, Rotation and "Forget".
+- Each attached computer has an "On" switch, on by default. With it off, the mouse stops at that edge, the computer stays connected and keeps its place, and no clipboard is shared with it. Its box in the monitor arrangement is dimmed, and switching it off while the pointer is on it brings the pointer back to ThinFloe at once.
 
 ### Changed
+- In Settings → Screen, the Deskflow fingerprint of ThinFloe is now behind "Fingerprint…" and a new computer is attached through "Check and attach…", a dialog with the fingerprint and the free edges. A computer that is not yet attached can also be turned away with "Reject".
 
 ### Fixed
 - With "Handle Compose key on ThinFloe" on for a computer, the Compose key did nothing at all when ThinFloe had no Compose table for its language: the key reached neither ThinFloe nor that computer. It now goes to the computer, as with the switch off.
