@@ -165,6 +165,10 @@ pub const STATUS_SMALL: StatusSizes = StatusSizes {
 /// (points): "Turn the screen off after" and a gap.
 pub const FORM_LABEL_W: f32 = 240.0;
 
+/// The Resolution column of the Screen tab's list of monitors (points):
+/// "2560 × 1440 @ 59.94 Hz" in its select, and a gap.
+pub const MON_MODE_W: f32 = 240.0;
+
 /// The Settings info panels (`infopanel`), in points: the space between
 /// two rows, before a group's title, a group's indent, between the This
 /// machine tab's columns, and the width from which that tab has two.

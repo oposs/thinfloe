@@ -1,6 +1,6 @@
 //! Drawing the monitor part of the Screen tab: the monitors as boxes in
-//! their real proportions, the settings of the selected one, Apply, and
-//! *Keep this arrangement?* over it all. Everything that decides something
+//! their real proportions, a row per monitor, the dialog of one, Apply,
+//! and *Keep this arrangement?* over it all. Everything that decides something
 //! lives in monitors.rs; this file only paints it and reports clicks.
 
 use crate::brand::{self, role};
@@ -11,10 +11,10 @@ use crate::monitors::{MonEvent, MonSource, MonTab};
 use crate::ui::{self, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT};
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, vec2};
 use shadcn_egui::Theme;
-use shadcn_egui::components::button::{Button, ButtonVariant};
-use shadcn_egui::components::checkbox::Checkbox;
+use shadcn_egui::components::button::{Button, ButtonSize, ButtonVariant};
 use shadcn_egui::components::icon::IconView;
 use shadcn_egui::components::select::Select;
+use shadcn_egui::components::switch::Switch;
 use shadcn_egui::icons::lucide;
 use std::time::Instant;
 
@@ -34,8 +34,12 @@ const BUTTON_GAP: f32 = 8.0;
 /// The radius of a device's status dot, and its gap to the name.
 const DOT_R: f32 = 4.0;
 const DOT_GAP: f32 = 4.0;
-/// Between the On tick box and *Show the menu here* on its row.
-const MENU_BUTTON_GAP: f32 = 24.0;
+/// Above the list of monitors, under the picture.
+const LIST_GAP: f32 = 8.0;
+/// Between two rows of the list of monitors.
+const LIST_ROW_GAP: f32 = 2.0;
+/// The On column of the list of monitors.
+const MON_ON_W: f32 = 64.0;
 
 const ROTATIONS: [Rotation; 4] = [Rotation::Normal, Rotation::R90, Rotation::R180, Rotation::R270];
 const ROTATION_LABELS: [&str; 4] = ["Normal", "90°", "180°", "270°"];
@@ -221,7 +225,8 @@ pub fn arranged(mon: &MonTab, layout: &Profile, devices: &[DevPlace], area: Rect
 }
 
 /// The monitor band of the Screen tab, `width` wide as the panel, under
-/// the screen timeout: the boxes and the selected monitor's settings.
+/// the screen timeout: the boxes and a row per monitor; the dialog of one
+/// is `monitor_dialog`.
 /// Apply follows in `monitors_footer`. `now` keeps the countdown's
 /// wake-up honest.
 ///
@@ -262,6 +267,12 @@ pub fn monitors_band(
             };
             let hand = mon.source() == MonSource::Kept;
             event = arrangement(ui, &t, mon, layout, !hand, devices, device);
+            ui.add_space(LIST_GAP);
+            // A file written by hand shows its monitors, but none changes.
+            let rows = ui.add_enabled_ui(!hand, |ui| monitor_rows(ui, &t, mon, layout)).inner;
+            if let Some(e) = rows {
+                event = Some(BandEvent::Mon(e));
+            }
             if hand {
                 muted(ui, &t, HAND_LINE);
                 if ui
@@ -273,10 +284,6 @@ pub fn monitors_band(
                 {
                     event = Some(BandEvent::Mon(MonEvent::TakeOver));
                 }
-            } else if device.is_none()
-                && let Some(e) = selected_rows(ui, &t, mon, layout)
-            {
-                event = Some(BandEvent::Mon(e));
             }
         });
     event
@@ -334,7 +341,7 @@ fn name_of<'a>(mon: &'a MonTab, criteria: &'a str) -> &'a str {
 }
 
 /// The boxes; returns what a click on one asks for. `pick`: a click on a
-/// monitor selects it, else the monitors only show. A device box always
+/// monitor opens its dialog, else the monitors only show. A device box always
 /// takes a click.
 fn arrangement(
     ui: &mut Ui,
@@ -482,68 +489,115 @@ fn shown_place(layout: &Profile, sel: &str) -> (Option<Side>, Option<String>) {
     }
 }
 
-/// On with *Show the menu here*, Resolution, Rotation and Position of the
-/// selected monitor.
-fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Option<MonEvent> {
+/// The list under the picture: per monitor its name, Resolution, On, and
+/// ⚙, which opens its dialog.
+fn monitor_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Option<MonEvent> {
+    let editable = mon.editable();
+    let p = t.palette();
+    let mut event = None;
+    ui.horizontal(|ui| {
+        let heading = |text: &str| RichText::new(text).size(brand::ROW_STATUS_PT).color(p.muted_foreground);
+        // The Resolution selects line up with the select of the band above.
+        column(ui, brand::FORM_LABEL_W, |ui| ui.label(heading("Monitor")));
+        column(ui, brand::MON_MODE_W, |ui| ui.label(heading("Resolution")));
+        column(ui, MON_ON_W, |ui| ui.label(heading("On")));
+    });
+    for o in &layout.outputs {
+        let c = o.criteria.as_str();
+        let name = name_of(mon, c);
+        ui.add_space(LIST_ROW_GAP);
+        ui.horizontal(|ui| {
+            column(ui, brand::FORM_LABEL_W, |ui| {
+                ui.label(RichText::new(name).color(p.foreground));
+                if mon.menu_choice() == Some(c) {
+                    ui.label(RichText::new("· Menu").color(p.primary));
+                }
+            });
+
+            let modes: Vec<String> = mon
+                .head(c)
+                .map_or(Vec::new(), |h| h.modes.iter().map(mode_label).collect());
+            let mode_refs: Vec<&str> = modes.iter().map(String::as_str).collect();
+            // A mode the monitor does not list (a file from elsewhere) shows as text.
+            let mut mode = mon.mode_of(c).unwrap_or(usize::MAX);
+            let placeholder = if o.mode.w > 0 {
+                mode_label(&o.mode)
+            } else {
+                String::new()
+            };
+            let id = format!("tf-mon-mode-{c}");
+            let changed = column(ui, brand::MON_MODE_W, |ui| {
+                ui.add_enabled(
+                    editable && o.enabled && !modes.is_empty(),
+                    Select::new(&id, &mut mode, &mode_refs).placeholder(placeholder),
+                )
+                .changed()
+            });
+            if changed && mode < modes.len() {
+                event = Some(MonEvent::Mode(c.to_string(), mode));
+            }
+
+            // The menu's monitor, or the last one on, cannot be switched off.
+            let mut on = o.enabled;
+            let can_switch = if o.enabled { mon.off_allowed_for(c) } else { editable };
+            let switched = column(ui, MON_ON_W, |ui| {
+                ui.add_enabled(can_switch, Switch::new(&mut on)).changed()
+            });
+            if switched {
+                event = Some(MonEvent::Enabled(c.to_string(), on));
+            }
+
+            let gear = Button::new(format!("Settings of {name}"))
+                .icon(lucide::SETTINGS)
+                .size(ButtonSize::Icon)
+                .variant(ButtonVariant::Secondary);
+            if ui.add(gear).clicked() {
+                event = Some(MonEvent::Select(c.to_string()));
+            }
+        });
+    }
+    event
+}
+
+/// A column of a row of the list, `width` wide, as `form_row` makes its
+/// label column.
+fn column<R>(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.set_min_width(width);
+        ui.set_max_width(width);
+        ui.horizontal(add).inner
+    })
+    .inner
+}
+
+/// The dialog of the monitor whose ⚙ or box was clicked: Position,
+/// Rotation and *Show the menu here*; Close and Escape close it. Nothing
+/// while no dialog is open.
+pub fn monitor_dialog(ui: &Ui, mon: &MonTab) -> Option<MonEvent> {
     let sel = mon.dialog_monitor()?;
+    let layout = mon.layout()?;
     let o = layout.outputs.iter().find(|o| o.criteria == sel)?;
+    let mut event = None;
+    ui::dialog(ui, name_of(mon, sel), |ui, t| {
+        if let Some(e) = dialog_rows(ui, t, mon, layout, o) {
+            event = Some(e);
+        }
+        ui.add_space(BUTTON_GAP);
+        if ui.add(Button::new("Close")).clicked() {
+            event = Some(MonEvent::CloseDialog);
+        }
+    });
+    event.or_else(|| {
+        ui.input(|i| i.key_pressed(egui::Key::Escape))
+            .then_some(MonEvent::CloseDialog)
+    })
+}
+
+/// Position, Rotation and *Show the menu here* of the dialog's monitor `o`.
+fn dialog_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile, o: &OutputSet) -> Option<MonEvent> {
+    let sel = o.criteria.as_str();
     let editable = mon.editable();
     let mut event = None;
-
-    // The menu's monitor, or the last one on, cannot be switched off; the
-    // menu goes only on a monitor that is on. So both share a row.
-    let mut on = o.enabled;
-    let can_switch = if o.enabled { mon.off_allowed_for(sel) } else { editable };
-    let can_menu = editable && o.enabled && mon.menu_choice() != Some(sel);
-    form_row(ui, t, "On", |ui| {
-        if ui.add_enabled(can_switch, Checkbox::new(&mut on)).changed() {
-            event = Some(MonEvent::Enabled(sel.to_string(), on));
-        }
-        ui.add_space(MENU_BUTTON_GAP);
-        if ui
-            .add_enabled(
-                can_menu,
-                Button::new("Show the menu here").variant(ButtonVariant::Secondary),
-            )
-            .clicked()
-        {
-            event = Some(MonEvent::MenuHere);
-        }
-    });
-
-    let modes: Vec<String> = mon
-        .head(sel)
-        .map_or(Vec::new(), |h| h.modes.iter().map(mode_label).collect());
-    let mode_refs: Vec<&str> = modes.iter().map(String::as_str).collect();
-    // A mode the monitor does not list (a file from elsewhere) shows as text.
-    let mut mode = mon.mode_of(sel).unwrap_or(usize::MAX);
-    let placeholder = if o.mode.w > 0 {
-        mode_label(&o.mode)
-    } else {
-        String::new()
-    };
-    let changed = form_row(ui, t, "Resolution", |ui| {
-        ui.add_enabled(
-            editable && o.enabled && !modes.is_empty(),
-            Select::new("tf-mon-mode", &mut mode, &mode_refs).placeholder(placeholder),
-        )
-        .changed()
-    });
-    if changed && mode < modes.len() {
-        event = Some(MonEvent::Mode(sel.to_string(), mode));
-    }
-
-    let mut rot = ROTATIONS.iter().position(|&r| r == o.rotation).unwrap_or(0);
-    let changed = form_row(ui, t, "Rotation", |ui| {
-        ui.add_enabled(
-            editable && o.enabled,
-            Select::new("tf-mon-rotation", &mut rot, &ROTATION_LABELS),
-        )
-        .changed()
-    });
-    if changed {
-        event = Some(MonEvent::Rotation(ROTATIONS[rot]));
-    }
 
     if layout.outputs.len() > 1 {
         let others: Vec<&OutputSet> = layout
@@ -577,6 +631,32 @@ fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Opti
             }
         }
     }
+
+    let mut rot = ROTATIONS.iter().position(|&r| r == o.rotation).unwrap_or(0);
+    let changed = form_row(ui, t, "Rotation", |ui| {
+        ui.add_enabled(
+            editable && o.enabled,
+            Select::new("tf-mon-rotation", &mut rot, &ROTATION_LABELS),
+        )
+        .changed()
+    });
+    if changed {
+        event = Some(MonEvent::Rotation(ROTATIONS[rot]));
+    }
+
+    // The menu goes only on a monitor that is on.
+    let can_menu = editable && o.enabled && mon.menu_choice() != Some(sel);
+    form_row(ui, t, "Menu", |ui| {
+        if ui
+            .add_enabled(
+                can_menu,
+                Button::new("Show the menu here").variant(ButtonVariant::Secondary),
+            )
+            .clicked()
+        {
+            event = Some(MonEvent::MenuHere);
+        }
+    });
     event
 }
 
