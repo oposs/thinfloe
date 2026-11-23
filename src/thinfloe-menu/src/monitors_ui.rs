@@ -92,6 +92,8 @@ pub struct DevPlace {
     pub state: DevState,
     /// Its edge is not free: it gets no strip.
     pub inactive: bool,
+    /// Its On switch: an off device is drawn dimmed.
+    pub enabled: bool,
 }
 
 /// Where a device's box goes in the drawing.
@@ -449,7 +451,7 @@ fn device_box(ui: &mut Ui, t: &Theme, d: &DevBox, selected: bool) -> Option<Stri
             );
             c.set_clip_rect(text_rect.intersect(ui.clip_rect()));
             c.style_mut().interaction.selectable_labels = false;
-            let colour = if d.place.inactive {
+            let colour = if d.place.inactive || !d.place.enabled {
                 p.muted_foreground
             } else {
                 p.foreground
@@ -561,7 +563,7 @@ fn monitor_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Optio
 
 /// A column of a row of the list, `width` wide, as `form_row` makes its
 /// label column.
-fn column<R>(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn column<R>(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.scope(|ui| {
         ui.set_min_width(width);
         ui.set_max_width(width);
@@ -745,6 +747,7 @@ mod tests {
             size: (960, 540),
             state: DevState::Connected,
             inactive: false,
+            enabled: true,
         };
         let area = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(2880.0, 1080.0));
         let mon = MonTab::default();
