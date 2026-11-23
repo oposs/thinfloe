@@ -525,6 +525,20 @@ impl Capture {
     }
 }
 
+/// The time of an input event we send, in milliseconds of CLOCK_MONOTONIC
+/// (wrapping at 32 bits): the clock wlroots, and so labwc, stamps its own
+/// pointer events with.
+fn input_time_ms() -> u32 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: ts is a valid timespec for clock_gettime to fill.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64)
+        .wrapping_mul(1000)
+        .wrapping_add(ts.tv_nsec as u64 / 1_000_000) as u32
+}
+
 impl State {
     fn end_capture(&mut self, warp: Option<(f64, f64)>, qh: Option<&QueueHandle<State>>) -> bool {
         let Some(id) = self.captured.take() else {
@@ -579,7 +593,7 @@ impl State {
             };
             (mgr.create_virtual_pointer(Some(&self.seat), qh, ()), coords)
         };
-        vp.motion_absolute(0, x, y, x_ext, y_ext);
+        vp.motion_absolute(input_time_ms(), x, y, x_ext, y_ext);
         vp.frame();
         vp.destroy();
     }
@@ -1063,6 +1077,17 @@ no_events!(
 mod tests {
     use super::*;
     use zwlr_layer_surface_v1::Anchor;
+
+    /// The warp's timestamp: milliseconds that advance with time, not 0.
+    #[test]
+    fn input_time_counts_milliseconds() {
+        let a = input_time_ms();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let b = input_time_ms();
+        let d = b.wrapping_sub(a);
+        assert!((30..1000).contains(&d), "{a} -> {b}");
+        assert_ne!(b, 0);
+    }
 
     fn out() -> OutputGeom {
         OutputGeom {
