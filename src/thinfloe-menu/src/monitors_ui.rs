@@ -232,8 +232,8 @@ pub fn arranged(mon: &MonTab, layout: &Profile, devices: &[DevPlace], area: Rect
 /// Apply follows in `monitors_footer`. `now` keeps the countdown's
 /// wake-up honest.
 ///
-/// `devices` are drawn beside their monitors; `device` is the one
-/// selected.
+/// `devices` are drawn beside their monitors; `device` is the one whose
+/// dialog is open.
 pub fn monitors_band(
     ui: &mut Ui,
     mon: &MonTab,
@@ -405,7 +405,7 @@ fn arrangement(
                 );
             }
         }
-        if mon.menu_choice() == Some(b.criteria.as_str()) {
+        if mon.menu_monitor() == Some(b.criteria.as_str()) {
             c.horizontal(|ui| {
                 ui.add(IconView::new(&lucide::MONITOR).color(p.primary));
                 ui.add(egui::Label::new(RichText::new("Menu").color(p.primary)).truncate());
@@ -415,8 +415,8 @@ fn arrangement(
     clicked
 }
 
-/// One device box: outlined, its name and a status dot. Returns its name
-/// when clicked.
+/// One device box: outlined, its name and a status dot; an off client's
+/// name and dot are muted. Returns its name when clicked.
 fn device_box(ui: &mut Ui, t: &Theme, d: &DevBox, selected: bool) -> Option<String> {
     let p = t.palette();
     let name = &d.place.name;
@@ -430,10 +430,11 @@ fn device_box(ui: &mut Ui, t: &Theme, d: &DevBox, selected: bool) -> Option<Stri
         Stroke::new(1.0, p.border)
     };
     ui.painter().rect(drawn, 0.0, fill, stroke, StrokeKind::Inside);
-    let dot = match d.place.state {
-        DevState::Active => p.primary,
-        DevState::Connected => t.role(role::GOOD),
-        _ => p.muted_foreground,
+    // An off client's box is dimmed whole, its dot too.
+    let dot = if d.place.enabled {
+        crate::deskflow_ui::dot_colour(t, d.place.state)
+    } else {
+        p.muted_foreground
     };
     let inside = drawn.shrink(BOX_PAD);
     if inside.width() > 0.0 && inside.height() > 0.0 {
@@ -511,7 +512,7 @@ fn monitor_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Optio
         ui.horizontal(|ui| {
             column(ui, brand::FORM_LABEL_W, |ui| {
                 ui.label(RichText::new(name).color(p.foreground));
-                if mon.menu_choice() == Some(c) {
+                if mon.menu_monitor() == Some(c) {
                     ui.label(RichText::new("· Menu").color(p.primary));
                 }
             });
