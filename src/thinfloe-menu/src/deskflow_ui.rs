@@ -117,7 +117,7 @@ pub fn band(
                     event = Some(e);
                 }
             }
-            for d in deskflowtab::band_devices(tab, mon.layout(), mon.heads()) {
+            for d in &tab.cfg.devices {
                 if let Some(e) = device_rows(ui, t, tab, mon, d) {
                     event = Some(e);
                 }
