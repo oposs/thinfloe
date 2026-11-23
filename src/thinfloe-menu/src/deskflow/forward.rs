@@ -294,10 +294,12 @@ fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<A
         && let Some(x) = kb.xkb.as_mut()
     {
         let sym = x.keysym(code);
-        // Modifier and lock keys always reach the client, mid-sequence
-        // too, so its modifiers and its Caps Lock follow ThinFloe's; the
-        // compose state ignores them.
-        if (x.is_composing() || sym == keymap::XK_MULTI_KEY) && !keymap::is_modifier_or_lock(sym) {
+        // Lock keys always reach the client, mid-sequence too, so its Caps
+        // Lock and Num Lock follow ThinFloe's; the compose state never sees
+        // them. Other modifiers pressed mid-sequence stay held back, press
+        // and release (`key_up` sends only what was sent down), and the
+        // composed key goes with the lock bits alone.
+        if (x.is_composing() || sym == keymap::XK_MULTI_KEY) && !keymap::is_lock_key(sym) {
             // The repeat stops only for a key the sequence takes; a key
             // that goes on to the client leaves it as with the switch off.
             if sym == 0 {
@@ -937,12 +939,9 @@ mod tests {
         assert_eq!(why, None);
         // Caps Lock (locked = 2) shifts KEY_A to 'A', so Multi_key + " + A composes to Ä (0x00c4)
         // with only the lock mask (0x1000) and without Shift or Multi_key.
-        // Shift itself reaches the client as a key of its own.
         assert_eq!(
             out,
             [
-                down(0xEFE1, 0x1000, KEY_LEFTSHIFT),
-                up(0xEFE1, 0x1001, KEY_LEFTSHIFT),
                 Msg::KeyDown {
                     id: 0x00c4,
                     mods: 0x1000,
@@ -960,7 +959,8 @@ mod tests {
     }
 
     /// Caps Lock pressed mid-sequence reaches the client, so its Caps Lock
-    /// follows ThinFloe's, and the sequence still completes.
+    /// follows ThinFloe's; Shift stays held back, press and release, and
+    /// the sequence still completes.
     #[test]
     fn caps_lock_mid_sequence_reaches_the_client_and_the_sequence_completes() {
         const KEY_CAPSLOCK: u32 = 58;
@@ -988,8 +988,6 @@ mod tests {
             [
                 down(0xEFE5, 0, KEY_CAPSLOCK),
                 up(0xEFE5, 0x1000, KEY_CAPSLOCK),
-                down(0xEFE1, 0x1000, KEY_LEFTSHIFT),
-                up(0xEFE1, 0x1001, KEY_LEFTSHIFT),
                 Msg::KeyDown {
                     id: 0x00c4,
                     mods: 0x1000,
@@ -1004,6 +1002,44 @@ mod tests {
         );
         assert!(a.held.is_empty());
         assert!(!kb.is_composing());
+    }
+
+    /// Shift pressed mid-sequence and released after it never reaches the
+    /// client: its release is not sent alone.
+    #[test]
+    fn a_modifier_held_back_mid_sequence_is_not_released_after_it() {
+        const KEY_APOSTROPHE: u32 = 40;
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        let evs = [
+            key(KEY_RIGHTALT, true),
+            key(KEY_RIGHTALT, false),
+            key(KEY_LEFTSHIFT, true),
+            mods(SHIFT),
+            key(KEY_APOSTROPHE, true),
+            key(KEY_APOSTROPHE, false),
+            key(KEY_A, true),
+            key(KEY_A, false),
+            key(KEY_LEFTSHIFT, false),
+            mods(0),
+        ];
+        let (out, why) = run(&mut a, &mut kb, &evs);
+        assert_eq!(why, None);
+        assert_eq!(
+            out,
+            [
+                Msg::KeyDown {
+                    id: 0x00c4,
+                    mods: 0,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+                Msg::KeyUp {
+                    id: 0x00c4,
+                    mods: 0,
+                    button: keymap::COMPOSED_BUTTON,
+                },
+            ]
+        );
+        assert!(a.held.is_empty());
     }
 
     #[test]
@@ -1069,34 +1105,14 @@ mod tests {
             key(KEY_LEFTSHIFT, true),
             mods(CONTROL | MOD1 | SHIFT),
         ];
-        // The modifiers reach the client mid-sequence, so the release
-        // sends their key ups.
-        let sent: Vec<Action> = evs
-            .iter()
-            .flat_map(|ev| on_cap_event(&mut a, ev, &mut kb, now))
-            .collect();
-        assert_eq!(
-            sent,
-            [
-                Action::Send(down(0xEFE3, 0, KEY_LEFTCTRL)),
-                Action::Send(down(0xEFE9, 0x0002, KEY_LEFTALT)),
-                Action::Send(down(0xEFE1, 0x0006, KEY_LEFTSHIFT)),
-            ]
-        );
-        assert!(kb.is_composing());
+        for ev in &evs {
+            assert_eq!(on_cap_event(&mut a, ev, &mut kb, now), []);
+        }
         assert_eq!(
             on_cap_event(&mut a, &key(KEY_ESC, true), &mut kb, now),
             [Action::Release("escape chord")]
         );
-        assert_eq!(
-            release(&mut a, &mut kb),
-            [
-                up(0xEFE1, 0x0007, KEY_LEFTSHIFT),
-                up(0xEFE9, 0x0007, KEY_LEFTALT),
-                up(0xEFE3, 0x0007, KEY_LEFTCTRL),
-                Msg::Cout,
-            ]
-        );
+        assert_eq!(release(&mut a, &mut kb), [Msg::Cout]);
         assert!(!kb.is_composing());
         // Release modifiers in kb before pressing 'a' on a fresh Active.
         for ev in [
