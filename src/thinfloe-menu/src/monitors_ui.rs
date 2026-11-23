@@ -361,7 +361,7 @@ fn arrangement(
             clicked = Some(BandEvent::Mon(MonEvent::Select(b.criteria.clone())));
         }
         let drawn = b.rect.shrink(BOX_GAP / 2.0);
-        let selected = pick && device.is_none() && mon.selected() == Some(b.criteria.as_str());
+        let selected = pick && device.is_none() && mon.dialog_monitor() == Some(b.criteria.as_str());
         let fill = match (b.enabled, pick && resp.hovered()) {
             (true, true) => p.accent,
             (true, false) => p.muted,
@@ -485,7 +485,7 @@ fn shown_place(layout: &Profile, sel: &str) -> (Option<Side>, Option<String>) {
 /// On with *Show the menu here*, Resolution, Rotation and Position of the
 /// selected monitor.
 fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Option<MonEvent> {
-    let sel = mon.selected()?;
+    let sel = mon.dialog_monitor()?;
     let o = layout.outputs.iter().find(|o| o.criteria == sel)?;
     let editable = mon.editable();
     let mut event = None;
@@ -493,11 +493,11 @@ fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Opti
     // The menu's monitor, or the last one on, cannot be switched off; the
     // menu goes only on a monitor that is on. So both share a row.
     let mut on = o.enabled;
-    let can_switch = if o.enabled { mon.off_allowed() } else { editable };
+    let can_switch = if o.enabled { mon.off_allowed_for(sel) } else { editable };
     let can_menu = editable && o.enabled && mon.menu_choice() != Some(sel);
     form_row(ui, t, "On", |ui| {
         if ui.add_enabled(can_switch, Checkbox::new(&mut on)).changed() {
-            event = Some(MonEvent::Enabled(on));
+            event = Some(MonEvent::Enabled(sel.to_string(), on));
         }
         ui.add_space(MENU_BUTTON_GAP);
         if ui
@@ -516,7 +516,7 @@ fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Opti
         .map_or(Vec::new(), |h| h.modes.iter().map(mode_label).collect());
     let mode_refs: Vec<&str> = modes.iter().map(String::as_str).collect();
     // A mode the monitor does not list (a file from elsewhere) shows as text.
-    let mut mode = mon.selected_mode().unwrap_or(usize::MAX);
+    let mut mode = mon.mode_of(sel).unwrap_or(usize::MAX);
     let placeholder = if o.mode.w > 0 {
         mode_label(&o.mode)
     } else {
@@ -530,7 +530,7 @@ fn selected_rows(ui: &mut Ui, t: &Theme, mon: &MonTab, layout: &Profile) -> Opti
         .changed()
     });
     if changed && mode < modes.len() {
-        event = Some(MonEvent::Mode(mode));
+        event = Some(MonEvent::Mode(sel.to_string(), mode));
     }
 
     let mut rot = ROTATIONS.iter().position(|&r| r == o.rotation).unwrap_or(0);
