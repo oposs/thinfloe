@@ -188,7 +188,10 @@ impl Mods {
 
 /// A lock key's keysym: Caps_Lock, Num_Lock, Scroll_Lock. libxkbcommon's
 /// Compose leaves the first two out of a sequence and would take
-/// Scroll_Lock as a key that cancels it.
+/// Scroll_Lock as a key that cancels it. Shift_Lock, ISO_Level3_Lock and
+/// ISO_Level5_Lock are left out on purpose: they lock Shift or AltGr, the
+/// non-lock modifiers a sequence holds back (the composed key carries the
+/// lock bits alone).
 pub fn is_lock_key(keysym: u32) -> bool {
     matches!(keysym, 0xffe5 | 0xff7f | 0xff14)
 }
@@ -844,6 +847,20 @@ mod tests {
         assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
         assert!(x.compose_loaded());
         assert!(x.is_composing());
+    }
+
+    #[test]
+    fn only_caps_num_and_scroll_lock_are_lock_keys() {
+        assert!(is_lock_key(0xffe5)); // Caps_Lock
+        assert!(is_lock_key(0xff7f)); // Num_Lock
+        assert!(is_lock_key(0xff14)); // Scroll_Lock
+        assert!(!is_lock_key(0xffe6)); // Shift_Lock
+        assert!(!is_lock_key(0xfe04)); // ISO_Level3_Lock
+        assert!(!is_lock_key(0xfe13)); // ISO_Level5_Lock
+        assert!(!is_lock_key(0xffe1)); // Shift_L
+        assert!(!is_lock_key(0xfe03)); // ISO_Level3_Shift
+        assert!(!is_lock_key(XK_MULTI_KEY));
+        assert!(!is_lock_key(0x61)); // a
     }
 
     #[test]
