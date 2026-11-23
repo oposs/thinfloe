@@ -169,6 +169,10 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `labwc --reconfigure` and confirms in `thinfloe-menu-output.applied`, and the
   menu then replaces its window to move.
 
+## Screen tab: monitor and computer lists
+
+The monitors are a table (Monitor, Resolution, On, ⚙). ⚙, or a click on a monitor's box in the arrangement, opens that monitor's dialog with Position, Rotation, "Show the menu here" and Close; Escape closes it. The Deskflow computers are a table of the same kind, see [deskflow.md](deskflow.md). One dialog of the tab is open at a time, and the screen under it takes no click. The switches are always visible, because the Compose switch was found only after a click on the computer's box when it lived in the band.
+
 ## Network tab: DNS servers
 
   **DNS** (Settings → Network) is a band of its own below WiFi, with one

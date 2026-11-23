@@ -28,11 +28,14 @@ ThinFloe is a Deskflow server (protocol 1.6 to 1.8). Computers that run the Desk
 
 ## Settings → Screen
 
-- The Deskflow band has the switch "Let other computers use this keyboard and mouse (Deskflow)", ThinFloe's address, port and fingerprint, and the edge resistance select.
-- A pending device lists its name and fingerprint with a Position select and Reject. Picking an edge in the Position select attaches the device and saves it at once; there is no confirm button. Cancel ends an attach. "No monitor edge is free in the current arrangement." shows when no edge is free.
-- An attached device is drawn in the monitor arrangement beside its monitor, scaled from the size it reports, with a status dot. Selecting it shows Position, "Share the clipboard" (default on), "Handle Compose key on ThinFloe" (default off, `compose = true/false`), and Forget. Re-attaching a known device under a new fingerprint keeps both its `clipboard` and `compose` settings.
-- A device whose edge another monitor took (or whose monitor is gone) is not drawn in the arrangement. The band lists it with "This edge is not free in the current arrangement.", Position and Forget.
-- `[deskflow]` in `config.toml`: `listen`, `port`, `edge_resistance` and one `[[deskflow.device]]` per device (`name`, `fingerprint`, `output`, `side`, `clipboard`, `compose`). The position belongs to the monitor and applies in every profile.
+- The Deskflow band has the switch "Let other computers use this keyboard and mouse (Deskflow)". With it on, one line shows the state of this computer, with "Fingerprint…" (a dialog with the random art and the fingerprint in colon-separated hex) and "Edge resistance".
+- Below the line a table lists the computers: state dot, name, On, Clipboard, Compose and ⚙. The three switches are always visible; Clipboard ("Share the clipboard") defaults to on, Compose ("Handle Compose key on ThinFloe", `compose = true/false`) to off.
+- A pending computer shows "Check and attach…" and "Reject". "Check and attach…" opens a dialog with the fingerprint, a Position select of the free edges, Attach and Cancel; there is no attach without it. "No monitor edge is free in the current arrangement." shows when no edge is free.
+- The dialog of an attached computer (⚙, or a click on its box in the arrangement) has Position, the three switches, the fingerprint, "Forget <name>" and Close. Re-attaching a known computer under a new fingerprint keeps its `clipboard`, `compose` and `enabled` settings.
+- On (`enabled` in `[[deskflow.device]]`, default true): off, the pointer stops at that edge, the computer stays connected and keeps its place (the edge stays reserved), and no clipboard is shared with it. Its box in the arrangement is drawn dimmed. Switching it off while the pointer is on it returns the pointer to ThinFloe at once.
+- A computer whose edge another monitor took (or whose monitor is gone) is not drawn in the arrangement. The table lists it with "This edge is not free in the current arrangement.", and its dialog has Position and Forget.
+- Only one dialog of the Screen tab is open at a time (a monitor's, a computer's, the attach check or this computer's fingerprint); opening one closes the others, and the screen under it takes no click. A dialog of a computer that vanished closes.
+- `[deskflow]` in `config.toml`: `listen`, `port`, `edge_resistance` and one `[[deskflow.device]]` per device (`name`, `fingerprint`, `output`, `side`, `enabled`, `clipboard`, `compose`). The position belongs to the monitor and applies in every profile.
 
 ## Capture and the way back
 
