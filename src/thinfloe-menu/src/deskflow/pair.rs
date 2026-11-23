@@ -129,6 +129,7 @@ mod tests {
             side: Side::RightOf,
             clipboard: true,
             compose: false,
+            enabled: true,
         }
     }
 

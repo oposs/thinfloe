@@ -750,9 +750,9 @@ impl Daemon {
             .find(|d| c.name() == Some(&d.name) && c.fingerprint() == Some(&d.fingerprint))
     }
 
-    /// The device's Clipboard switch; off for a connection without one.
+    /// The device's Clipboard switch and On switch; off for a connection without one.
     fn shares_clipboard(&self, c: &Conn) -> bool {
-        self.device_cfg(c).is_some_and(|d| d.clipboard)
+        self.device_cfg(c).is_some_and(|d| d.enabled && d.clipboard)
     }
 
     /// The device's Compose switch; off for a connection without one.
@@ -918,15 +918,16 @@ impl Daemon {
 
     /// The strips the devices need now: one per connected device whose
     /// output exists and whose edge is free. Also the ids of the connected
-    /// devices without an output and of those whose edge is not free.
-    fn wanted_strips(&self) -> (Vec<Strip>, Vec<usize>, Vec<usize>) {
+    /// devices without an output, of those whose edge is not free and of
+    /// those switched off.
+    fn wanted_strips(&self) -> (Vec<Strip>, Vec<usize>, Vec<usize>, Vec<usize>) {
         let rect = |o: &OutputGeom| Rect {
             x: o.x,
             y: o.y,
             w: o.w,
             h: o.h,
         };
-        let (mut strips, mut offline, mut busy) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut strips, mut offline, mut busy, mut off) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for c in self.conns.iter().filter(|c| c.trusted()) {
             let Some((w, h)) = c.screen().filter(|(w, h)| *w > 0 && *h > 0) else {
                 continue;
@@ -939,6 +940,10 @@ impl Daemon {
             else {
                 continue;
             };
+            if !d.enabled {
+                off.push(c.id());
+                continue;
+            }
             let Some(o) = self.outputs.iter().find(|o| o.matches(&d.output)) else {
                 offline.push(c.id());
                 continue;
@@ -959,13 +964,13 @@ impl Daemon {
                 dev: (w, h),
             });
         }
-        (strips, offline, busy)
+        (strips, offline, busy, off)
     }
 
     /// Shows the strips the devices need; a capture whose strip goes or
     /// moves is released first.
     fn update_strips(&mut self) {
-        let (strips, offline, busy) = self.wanted_strips();
+        let (strips, offline, busy, off) = self.wanted_strips();
         let spec = |all: &[Strip], id: u32| all.iter().find(|s| s.spec.id == id).map(|s| s.spec.clone());
         let captured = match &self.mode {
             Mode::Idle => None,
@@ -977,6 +982,7 @@ impl Daemon {
             if now != spec(&self.strips, id) {
                 let why = match now {
                     Some(_) => "the output changed",
+                    None if off.contains(&(id as usize)) => "the device is switched off",
                     None if offline.contains(&(id as usize)) => "output gone",
                     None if busy.contains(&(id as usize)) => "the edge is not free",
                     None => "the device went",
@@ -1790,6 +1796,14 @@ mod tests {
         std::fs::write(path, t).unwrap();
     }
 
+    fn write_cfg_enabled(path: &Path, port: u16, output: &str, name: &str, fp: &str, enabled: bool) {
+        let t = format!(
+            "[deskflow]\nlisten = true\nport = {port}\n\n[[deskflow.device]]\nname = \"{name}\"\nfingerprint = \"{fp}\"\noutput = \"{output}\"\nside = \"right-of\"\nenabled = {enabled}\n"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, t).unwrap();
+    }
+
     fn direct_daemon(env: RunEnv, output: &str, w: i32, h: i32) -> (Daemon, u16) {
         let cfg = read_config(&env.generated).unwrap();
         let id = ident::load_or_create(&env.identity, &env.hostname).unwrap();
@@ -1887,6 +1901,58 @@ xkb_keymap {
         d.push_edge(0.0, 50.0, t);
         assert!(matches!(d.mode, Mode::Idle));
         assert!(!d.hover.as_mut().unwrap().push.push(Side::RightOf, 10.0, 0.0, t));
+    }
+
+    #[test]
+    fn a_switched_off_device_keeps_its_connection_but_loses_strip_and_capture() {
+        let (dir, sock) = (TestDir::new("deskflow-run", "switched-off"), TestDir::sockets("dfof"));
+        let env = test_env(&dir, &sock);
+        let gen_path = env.generated.clone();
+        let laptop = cert("laptop");
+        let fp = fp_of(&laptop);
+        write_cfg_enabled(&gen_path, 24800, "HEADLESS-1", "laptop", &fp, true);
+        let (mut d, port) = direct_daemon(env, "HEADLESS-1", 1280, 720);
+        let wake = Wake::new().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let client_handle = std::thread::spawn(move || {
+            let mut c = connect(port, &laptop);
+            assert_eq!(hello(&mut c, "laptop"), Msg::Qinf);
+            send(&mut c, &dinf());
+            let _ = done_rx.recv();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while d.strips.is_empty() {
+            assert!(Instant::now() < deadline, "timed out waiting for strip");
+            assert!(matches!(d.turn(&wake), Next::Go));
+        }
+        let strip_id = d.strips[0].spec.id;
+        assert!(d.shares_clipboard(&d.conns[0]));
+        d.mode = Mode::Active(Active::new(
+            strip_id as usize,
+            Tracker::new(Side::RightOf, (0, 150), (1920, 1080)),
+            (0, 150),
+            false,
+        ));
+
+        write_cfg_enabled(&gen_path, 24800, "HEADLESS-1", "laptop", &fp, false);
+        assert!(matches!(d.reload(), Next::Go));
+        let (strips, offline, busy, off) = d.wanted_strips();
+        assert!(strips.is_empty() && offline.is_empty() && busy.is_empty());
+        assert_eq!(off, vec![strip_id as usize]);
+        d.update_strips();
+        assert!(
+            matches!(d.mode, Mode::Idle),
+            "capture ends when the device is switched off"
+        );
+        assert!(d.strips.is_empty());
+        assert_eq!(d.conns.len(), 1);
+        assert!(d.conns[0].trusted(), "the connection stays");
+        assert!(!d.shares_clipboard(&d.conns[0]));
+
+        drop(done_tx);
+        client_handle.join().unwrap();
     }
 
     #[test]

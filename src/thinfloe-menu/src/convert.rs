@@ -742,6 +742,7 @@ mod tests {
             side: crate::kanshi::Side::LeftOf,
             clipboard: false,
             compose: false,
+            enabled: true,
         }];
         c
     }

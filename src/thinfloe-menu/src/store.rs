@@ -498,6 +498,7 @@ mod tests {
             side: crate::kanshi::Side::RightOf,
             clipboard: true,
             compose: false,
+            enabled: true,
         }];
         let mut o = open_session(&d);
         o.store
@@ -578,6 +579,7 @@ mod tests {
                 side: crate::kanshi::Side::Above,
                 clipboard: true,
                 compose: false,
+                enabled: true,
             }];
         });
         assert!(r.is_err());
