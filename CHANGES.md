@@ -3,12 +3,17 @@
 ## [Unreleased]
 
 ### New
+
+### Changed
+
+### Fixed
+
+## 4.9.0 - 2026-11-23
+### New
 - Each attached computer in Settings → Screen has a "Handle Compose key on ThinFloe" switch, off by default. With it on, Compose key sequences are combined on ThinFloe and the finished character is sent to that computer, while dead keys still go as keys of their own.
 
 ### Changed
 - Returning the pointer from a computer attached with Deskflow now places ThinFloe's cursor at the matching point along that monitor edge. Before, ThinFloe's cursor stayed where it had crossed onto the computer.
-
-### Fixed
 
 ## 4.8.1 - 2026-11-22
 ### Changed
