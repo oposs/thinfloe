@@ -487,6 +487,10 @@ pub struct DeviceCfg {
     pub clipboard: bool,
     #[serde(default)]
     pub compose: bool,
+    /// The On switch: an off device stays paired and connected, but has no
+    /// edge strip, shares no clipboard and gets no capture.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_true() -> bool {

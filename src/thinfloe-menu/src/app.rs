@@ -2691,6 +2691,7 @@ esac"#;
             side: crate::kanshi::Side::RightOf,
             clipboard: true,
             compose: false,
+            enabled: true,
         });
         let (written, next) = apply_deskflow(cfg.clone(), &store, &mut menu);
         assert!(written);

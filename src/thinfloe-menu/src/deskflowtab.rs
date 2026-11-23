@@ -96,6 +96,11 @@ pub enum DeskflowEvent {
         name: String,
         on: bool,
     },
+    /// The On switch of an attached device.
+    Enabled {
+        name: String,
+        on: bool,
+    },
     CancelAttach,
     /// A device box clicked in the arrangement.
     Select(String),
@@ -146,6 +151,7 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
                 let prev = tab.cfg.devices.iter().find(|d| d.name == name);
                 let clipboard = prev.is_none_or(|d| d.clipboard);
                 let compose = prev.is_some_and(|d| d.compose);
+                let enabled = prev.is_none_or(|d| d.enabled);
                 tab.cfg.devices.retain(|d| d.name != name);
                 tab.cfg.devices.push(DeviceCfg {
                     name,
@@ -154,6 +160,7 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
                     side,
                     clipboard,
                     compose,
+                    enabled,
                 });
                 return save(tab);
             }
@@ -173,6 +180,7 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
         }
         DeskflowEvent::Clipboard { name, on } => set_device_flag(tab, &name, on, |d| &mut d.clipboard),
         DeskflowEvent::Compose { name, on } => set_device_flag(tab, &name, on, |d| &mut d.compose),
+        DeskflowEvent::Enabled { name, on } => set_device_flag(tab, &name, on, |d| &mut d.enabled),
         DeskflowEvent::Forget { name } => {
             let before = tab.cfg.devices.len();
             tab.cfg.devices.retain(|d| d.name != name);
@@ -424,6 +432,7 @@ mod tests {
             side,
             clipboard: true,
             compose: false,
+            enabled: true,
         }
     }
 
@@ -640,6 +649,57 @@ mod tests {
             panic!("no save: {r:?}");
         };
         assert!(cfg.devices.iter().find(|d| d.name == "mac").unwrap().compose);
+    }
+
+    #[test]
+    fn on_switch_writes_device_and_survives_reattach() {
+        let mut tab = DeskflowTab::default();
+        tab.cfg.devices = vec![
+            device("laptop", FP_A, "DP-1", Side::LeftOf),
+            device("mac", FP_B, "DP-2", Side::RightOf),
+        ];
+        let r = apply(
+            &mut tab,
+            DeskflowEvent::Enabled {
+                name: "mac".into(),
+                on: false,
+            },
+        );
+        let Some(DeskflowRequest::Save(cfg)) = r else {
+            panic!("no save: {r:?}");
+        };
+        assert!(cfg.devices[0].enabled);
+        assert!(!cfg.devices[1].enabled);
+        assert_eq!(
+            apply(
+                &mut tab,
+                DeskflowEvent::Enabled {
+                    name: "mac".into(),
+                    on: false,
+                },
+            ),
+            None
+        );
+
+        apply(
+            &mut tab,
+            DeskflowEvent::Attach {
+                name: "mac".into(),
+                fp: FP_A.into(),
+            },
+        );
+        let r = apply(
+            &mut tab,
+            DeskflowEvent::Place {
+                name: "mac".into(),
+                output: "DP-2".into(),
+                side: Side::RightOf,
+            },
+        );
+        let Some(DeskflowRequest::Save(cfg)) = r else {
+            panic!("no save: {r:?}");
+        };
+        assert!(!cfg.devices.iter().find(|d| d.name == "mac").unwrap().enabled);
     }
 
     #[test]

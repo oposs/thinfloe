@@ -134,6 +134,7 @@ mod tests {
             side,
             clipboard: true,
             compose: false,
+            enabled: true,
         }
     }
 
@@ -281,5 +282,21 @@ mod tests {
 
         let g = parse(&render(&c.deskflow, false)).unwrap();
         assert!(g.deskflow.devices[0].compose);
+    }
+
+    #[test]
+    fn enabled_defaults_true_and_roundtrips() {
+        let absent = "[[deskflow.device]]\nname = \"a\"\nfingerprint = \"x\"\noutput = \"o\"\nside = \"above\"\n";
+        let c = crate::config::parse(absent).unwrap();
+        assert!(c.deskflow.devices[0].enabled);
+
+        let off = format!("{absent}enabled = false\n");
+        let c = crate::config::parse(&off).unwrap();
+        assert!(!c.deskflow.devices[0].enabled);
+        let again = crate::config::parse(&crate::config::to_text(&c)).unwrap();
+        assert!(!again.deskflow.devices[0].enabled);
+
+        let g = parse(&render(&c.deskflow, false)).unwrap();
+        assert!(!g.deskflow.devices[0].enabled);
     }
 }
