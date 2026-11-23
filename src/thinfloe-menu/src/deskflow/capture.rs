@@ -593,6 +593,10 @@ impl State {
             };
             (mgr.create_virtual_pointer(Some(&self.seat), qh, ()), coords)
         };
+        // Daemon::release_at also sets `hover.at` to this point itself: the
+        // next capture's entry point (CINN) is taken from `hover.at`, and
+        // the re-entry design (2026-11-22) has it match where the cursor
+        // re-enters rather than where it left for the device.
         vp.motion_absolute(input_time_ms(), x, y, x_ext, y_ext);
         vp.frame();
         vp.destroy();
