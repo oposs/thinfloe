@@ -1212,6 +1212,7 @@ impl Menu {
     /// the home, so a change is saved, as `screen_written` does.
     pub fn deskflow_written(&mut self, stored: crate::config::DeskflowCfg, error: Option<String>) -> Option<Effect> {
         self.deskflow.cfg = stored;
+        crate::deskflowtab::close_stale_dialogs(&mut self.deskflow);
         if let Some(message) = &error {
             self.log.note(Kind::Warn, message.clone());
         }
@@ -4775,6 +4776,11 @@ mod tests {
         assert!(m.deskflow.fingerprint_open);
         m.settings(SettingsEvent::Monitors(MonEvent::Select("DP-2".into())));
         assert!(!m.deskflow.fingerprint_open);
+        m.settings(SettingsEvent::Deskflow(DeskflowEvent::Attach {
+            name: "laptop".into(),
+            fp: "ab".into(),
+        }));
+        assert_eq!(m.monitors.dialog_monitor(), None, "Attach closes the monitor dialog");
     }
 
     #[test]

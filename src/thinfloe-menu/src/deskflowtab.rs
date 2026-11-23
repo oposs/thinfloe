@@ -140,6 +140,7 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
             save(tab)
         }
         DeskflowEvent::Attach { name, fp } => {
+            close_dialogs(tab);
             tab.attaching = Some((name, fp));
             None
         }
@@ -148,17 +149,17 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
             None
         }
         DeskflowEvent::Select(name) => {
+            close_dialogs(tab);
             tab.selected = Some(name);
             None
         }
         DeskflowEvent::ShowFingerprint => {
+            close_dialogs(tab);
             tab.fingerprint_open = true;
             None
         }
         DeskflowEvent::CloseDialog => {
-            tab.selected = None;
-            tab.attaching = None;
-            tab.fingerprint_open = false;
+            close_dialogs(tab);
             None
         }
         DeskflowEvent::Place { name, output, side } => {
@@ -346,6 +347,35 @@ pub fn inactive(profile: &Profile, heads: &[Head], devices: &[DeviceCfg], dev: &
     !free_edges(profile, heads, devices, Some(&dev.name))
         .iter()
         .any(|(c, s)| *c == dev.output && *s == dev.side)
+}
+
+/// Close every dialog; an opening event calls this first, so at most one
+/// is open.
+fn close_dialogs(tab: &mut DeskflowTab) {
+    tab.selected = None;
+    tab.attaching = None;
+    tab.fingerprint_open = false;
+}
+
+/// Close the dialog of a device that is gone: an attached device the
+/// configuration no longer holds, or a pending device the state file no
+/// longer lists. Call after the configuration or the state is replaced.
+pub fn close_stale_dialogs(tab: &mut DeskflowTab) {
+    if tab
+        .selected
+        .as_ref()
+        .is_some_and(|n| !tab.cfg.devices.iter().any(|d| d.name == *n))
+    {
+        tab.selected = None;
+    }
+    if tab.attaching.as_ref().is_some_and(|(n, f)| {
+        !tab.state
+            .devices
+            .iter()
+            .any(|l| l.state == DevState::Pending && l.name == *n && l.fingerprint == *f)
+    }) {
+        tab.attaching = None;
+    }
 }
 
 /// A dialog of the Deskflow band is open: a client's settings, the attach
@@ -754,11 +784,57 @@ mod tests {
     }
 
     #[test]
-    fn close_dialog_closes_every_dialog() {
+    fn close_dialog_closes_the_open_dialog() {
         let mut tab = with_pending();
         tab.cfg.devices = vec![device("mac", FP_B, "DP-1", Side::LeftOf)];
         assert!(!dialog_open(&tab));
+        for open in [
+            DeskflowEvent::Select("mac".into()),
+            DeskflowEvent::Attach {
+                name: "laptop".into(),
+                fp: FP_A.into(),
+            },
+            DeskflowEvent::ShowFingerprint,
+        ] {
+            apply(&mut tab, open);
+            assert!(dialog_open(&tab));
+            assert_eq!(apply(&mut tab, DeskflowEvent::CloseDialog), None);
+            assert!(!dialog_open(&tab));
+        }
+    }
+
+    #[test]
+    fn opening_a_dialog_closes_the_others() {
+        let mut tab = with_pending();
+        tab.cfg.devices = vec![device("mac", FP_B, "DP-1", Side::LeftOf)];
+        let attach = DeskflowEvent::Attach {
+            name: "laptop".into(),
+            fp: FP_A.into(),
+        };
+        let open = |tab: &DeskflowTab| (tab.selected.is_some(), tab.attaching.is_some(), tab.fingerprint_open);
         apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        apply(&mut tab, DeskflowEvent::ShowFingerprint);
+        assert_eq!(open(&tab), (false, false, true));
+        apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        apply(&mut tab, attach.clone());
+        assert_eq!(open(&tab), (false, true, false));
+        apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        assert_eq!(open(&tab), (true, false, false));
+        apply(&mut tab, attach);
+        apply(&mut tab, DeskflowEvent::ShowFingerprint);
+        assert_eq!(open(&tab), (false, false, true));
+    }
+
+    #[test]
+    fn a_removed_device_closes_its_dialog() {
+        let mut tab = with_pending();
+        tab.cfg.devices = vec![device("mac", FP_B, "DP-1", Side::LeftOf)];
+        apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        close_stale_dialogs(&mut tab);
+        assert_eq!(tab.selected.as_deref(), Some("mac"), "still there");
+        tab.cfg.devices.clear();
+        close_stale_dialogs(&mut tab);
+        assert_eq!(tab.selected, None);
         apply(
             &mut tab,
             DeskflowEvent::Attach {
@@ -766,15 +842,11 @@ mod tests {
                 fp: FP_A.into(),
             },
         );
-        apply(&mut tab, DeskflowEvent::ShowFingerprint);
-        assert!(tab.fingerprint_open);
-        assert!(dialog_open(&tab));
-        assert_eq!(apply(&mut tab, DeskflowEvent::CloseDialog), None);
-        assert_eq!(
-            (tab.selected.as_deref(), tab.attaching.as_ref(), tab.fingerprint_open),
-            (None, None, false)
-        );
-        assert!(!dialog_open(&tab));
+        close_stale_dialogs(&mut tab);
+        assert!(tab.attaching.is_some(), "its pending line is still listed");
+        tab.state = no_state();
+        close_stale_dialogs(&mut tab);
+        assert_eq!(tab.attaching, None);
     }
 
     #[test]
