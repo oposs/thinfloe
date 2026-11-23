@@ -1467,7 +1467,9 @@ liveoff)
     echo "reload_from=$from"
     t=$EPOCHREALTIME
     thinfloe-menu --osd-key reload
-    FROM=$from wait_log 1.5 \
+    # Two lists and eight sets, one after the other, each a python3 start
+    # of the fake pactl: on a busy host that alone took 1.09 s.
+    FROM=$from wait_log 5 \
         "set-sink-volume spk_a 100%" "set-sink-mute spk_a 0" "set-sink-volume spk_b 100%" "set-sink-mute spk_b 0" \
         "set-source-volume mic_a 100%" "set-source-mute mic_a 0" "set-source-volume mic_b 100%" "set-source-mute mic_b 0" &&
         echo "liveoff_ms=$(ms_since "$t")" || echo liveoff_ms=none
@@ -1608,8 +1610,12 @@ mk_check $? "the OSD ends with 0 on SIGTERM and leaves no pactl subscribe behind
 
 mk_run liveoff 1 on off
 lo=$(mk_val liveoff_ms)
-[[ "$(mk_val keys)" == yes && "$lo" =~ ^[0-9]+$ && $lo -le 1000 ]]
-mk_check $? "the volume switch turned off during a session puts every speaker and microphone at 100 % and unmuted within 1 s of the reload" \
+# Nothing else in this run resets a device (no key after the reload, the
+# fake's subscribe never ends, no device comes), so any reset is the
+# reload's; 3 s leaves the fake 300 ms a call and still fails a reset that
+# waits for a 3 s pactl timeout or a later event.
+[[ "$(mk_val keys)" == yes && "$lo" =~ ^[0-9]+$ && $lo -le 3000 ]]
+mk_check $? "the volume switch turned off during a session puts every speaker and microphone at 100 % and unmuted within 3 s of the reload" \
     "keys '$(mk_val keys)', after '$lo' ms; $(tail -n +"$(mk_val reload_from)" <(grep '^pactl: ' <<<"$MK_OUT") | grep 'set-' | tr '\n' ' ')"
 [[ "$(mk_val same_sets)" == 0 ]]
 mk_check $? "a reload that leaves the switch as it is sets no device, so a microphone muted elsewhere stays muted" \
