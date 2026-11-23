@@ -861,6 +861,8 @@ mod tests {
         assert_eq!(why, None);
         assert_eq!(out, [down(0xEF20, 0, KEY_RIGHTALT), up(0xEF20, 0, KEY_RIGHTALT)]);
         assert!(!kb.is_composing());
+        // With the switch off nothing reads the Compose table.
+        assert!(!kb.xkb.as_ref().unwrap().compose_loaded());
     }
 
     /// The switch is on but no Compose table loaded: Multi_key reaches the

@@ -303,7 +303,12 @@ pub struct Xkb {
     ctx: *mut xkb_context,
     keymap: *mut xkb_keymap,
     state: *mut xkb_state,
+    /// The Compose table and state, read on the first key fed to it, so a
+    /// keymap event parses no table while no device uses Compose. A new
+    /// keymap is a new `Xkb` and reads the table again when it is needed.
     compose: Option<Compose>,
+    /// The table was tried: a failed load is not retried.
+    compose_tried: bool,
 }
 
 impl Xkb {
@@ -415,13 +420,13 @@ impl Xkb {
                 (lib.xkb_context_unref)(ctx);
                 return Err("xkb_state_new failed".into());
             }
-            let compose = Compose::new(ctx);
             Ok(Xkb {
                 lib,
                 ctx,
                 keymap,
                 state,
-                compose,
+                compose: None,
+                compose_tried: false,
             })
         }
     }
@@ -518,6 +523,10 @@ impl Xkb {
 
     /// Feeds `keysym` into the local compose state and returns the outcome.
     pub fn compose_feed(&mut self, keysym: u32) -> ComposeOutcome {
+        if !self.compose_tried {
+            self.compose_tried = true;
+            self.compose = Compose::new(self.ctx);
+        }
         let Some(compose) = &self.compose else {
             return ComposeOutcome::Idle;
         };
@@ -563,8 +572,15 @@ impl Xkb {
         }
     }
 
+    /// Whether the Compose table is loaded (tests).
+    #[cfg(test)]
+    pub(crate) fn compose_loaded(&self) -> bool {
+        self.compose.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn drop_compose_for_test(&mut self) {
+        self.compose_tried = true;
         if let Some(compose) = self.compose.take() {
             compose.unref();
         }
@@ -815,6 +831,20 @@ mod tests {
         assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
         x.compose_reset();
         assert!(!x.is_composing());
+    }
+
+    /// The Compose table is read on the first key fed to it, not with the
+    /// keymap: a keymap event with no device using Compose parses nothing.
+    #[test]
+    fn the_compose_table_loads_on_first_use_only() {
+        let mut x = Xkb::from_layout("us").expect("libxkbcommon + xkeyboard-config");
+        assert!(!x.compose_loaded());
+        assert!(!x.is_composing());
+        x.compose_reset();
+        assert!(!x.compose_loaded());
+        assert_eq!(x.compose_feed(XK_MULTI_KEY), ComposeOutcome::Composing);
+        assert!(x.compose_loaded());
+        assert!(x.is_composing());
     }
 
     #[test]
