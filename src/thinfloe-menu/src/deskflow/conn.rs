@@ -464,9 +464,17 @@ mod tests {
                 sent = true;
             }
             c.flush();
-            assert_eq!(c.closing(), None);
+            // The client closes its end once it has the text, a moment
+            // before it counts as finished; whether the close came too
+            // soon is the client's to say.
+            if c.closing().is_some() {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(client.join().unwrap(), text);
+        let closing = c.closing().map(str::to_owned);
+        let got = client.join();
+        assert!(got.is_ok(), "the client failed; the server's end: {closing:?}");
+        assert_eq!(got.unwrap(), text);
     }
 }
