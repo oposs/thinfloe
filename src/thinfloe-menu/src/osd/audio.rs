@@ -1459,8 +1459,12 @@ pub(super) mod tests {
         drop(w);
         let t = starts();
         let gaps = [t[1] - t[0], t[2] - t[1]];
+        // A gap is the wait plus the end of one fake and the start of the
+        // next, which a busy host stretches; it is never shorter than the
+        // wait (0.05 s for the clock). Half a second over still tells the
+        // 1 s from the 2 s and the 2 s from the 4 s.
         for (gap, want) in gaps.iter().zip([1.0, 2.0]) {
-            assert!((gap - want).abs() <= 0.2, "gaps {gaps:?}");
+            assert!(*gap >= want - 0.05 && *gap < want + 0.5, "gaps {gaps:?}");
         }
         assert!(seen.lock().unwrap().is_empty(), "no Restarted without a server");
     }
@@ -1468,18 +1472,52 @@ pub(super) mod tests {
     #[test]
     fn a_restart_counts_once_pactl_stays_up() {
         let d = TestDir::new("osd-audio", "stayup");
-        // Two runs without a server, then one that waits for events.
+        // Two runs without a server, then one that waits for events. Each
+        // run notes its start on the wall clock.
         let p = sh_pactl(&format!(
-            "n=$(cat '{0}/n' 2>/dev/null || echo 0); echo $((n + 1)) > '{0}/n'; \
-             [ $n -lt 2 ] && exit 1; exec sleep 30",
+            "date +%s.%N >> '{0}/starts'; [ $(wc -l < '{0}/starts') -le 2 ] && exit 1; exec sleep 30",
             d.display()
         ));
         let t0 = Instant::now();
-        let (w, seen) = watch_seen(&p);
+        let wall = Arc::new(Mutex::new(None));
+        let (w, seen) = {
+            let wall = wall.clone();
+            let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+            let s = seen.clone();
+            let w = watch(&p, move |e| {
+                wall.lock().unwrap().get_or_insert(std::time::SystemTime::now());
+                s.lock().unwrap().push((Instant::now(), e));
+            });
+            (w, seen)
+        };
         wait_for("a restart", || !seen.lock().unwrap().is_empty());
         let at = seen.lock().unwrap()[0].0 - t0;
-        // 1 s + 2 s of back-off, then 0.5 s up.
-        assert!(at.as_millis().abs_diff(3500) <= 300, "Restarted after {at:?}");
+        // 1 s + 2 s of back-off, then 0.5 s up: never sooner. Each of the
+        // three fake starts adds its own time on top, which a busy host
+        // stretches, so the upper bound is taken from the third start.
+        assert!(at >= Duration::from_millis(3500), "Restarted after {at:?}");
+        let third: f64 = std::fs::read_to_string(d.join("starts"))
+            .unwrap()
+            .lines()
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let restarted = wall
+            .lock()
+            .unwrap()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        // 0.5 s up after the spawn, which is before the fake's date; 0.3 s
+        // for a late wake. A longer WATCH_UP fails here, a run counted at
+        // its spawn the bound above.
+        assert!(
+            restarted - third <= 0.8,
+            "Restarted {:.3} s after the third start",
+            restarted - third
+        );
         std::thread::sleep(Duration::from_millis(300));
         drop(w);
         let got: Vec<Watch> = seen.lock().unwrap().iter().map(|(_, e)| *e).collect();
