@@ -29,6 +29,11 @@ Two small improvements to ThinFloe's Deskflow server:
 
 ## Approaches
 
+> **As built (2026-11-23):** pointer re-entry ships Approach 2B
+> (`zwlr_virtual_pointer_v1` absolute motion after the unlock), not 2A:
+> on labwc 0.9.3 the cursor position hint on the 1 px layer strip warps to
+> the wrong x. See `docs/notes/deskflow.md`.
+
 ### 1. Per-device local Compose (`Multi_key` only)
 
 - **1A (chosen): `libxkbcommon` compose state (`xkb_compose_table_new_from_locale` / `xkb_compose_state`) via `xkbcommon-dl`.** Reuses the already-linked `xkbcommon-dl` crate (no new dependency) and matches ThinFloe's own local X11 Compose sequences 1:1. Falls back to `"en_US.UTF-8"` when `LC_ALL`/`LANG` is unset, `C` or `POSIX`. Requires `/usr/share/X11/locale/en_US.UTF-8/Compose` in the ThinFloe rootfs.

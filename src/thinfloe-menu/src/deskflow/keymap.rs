@@ -538,7 +538,7 @@ impl Xkb {
     }
 
     #[cfg(test)]
-    fn drop_compose_for_test(&mut self) {
+    pub(crate) fn drop_compose_for_test(&mut self) {
         if let Some(compose) = self.compose.take() {
             compose.unref();
         }

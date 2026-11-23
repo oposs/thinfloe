@@ -299,14 +299,16 @@ fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<A
             if sym == 0 {
                 return Vec::new();
             }
-            return match x.compose_feed(sym) {
+            match x.compose_feed(sym) {
+                // No table, or Multi_key starts no sequence in it: the key
+                // goes to the client as with the switch off.
+                keymap::ComposeOutcome::Idle => {}
                 keymap::ComposeOutcome::Composing
                 | keymap::ComposeOutcome::Cancelled
-                | keymap::ComposeOutcome::Idle
-                | keymap::ComposeOutcome::Composed(None) => Vec::new(),
+                | keymap::ComposeOutcome::Composed(None) => return Vec::new(),
                 keymap::ComposeOutcome::Composed(Some(id)) => {
                     let mods = kb.locks_mask();
-                    vec![
+                    return vec![
                         Action::Send(Msg::KeyDown {
                             id,
                             mods,
@@ -317,7 +319,7 @@ fn key_down(a: &mut Active, kb: &mut Keyboard, code: u32, now: Instant) -> Vec<A
                             mods,
                             button: keymap::COMPOSED_BUTTON,
                         }),
-                    ]
+                    ];
                 }
             };
         }
@@ -850,6 +852,17 @@ mod tests {
         assert_eq!(why, None);
         assert_eq!(out, [down(0xEF20, 0, KEY_RIGHTALT), up(0xEF20, 0, KEY_RIGHTALT)]);
         assert!(!kb.is_composing());
+    }
+
+    /// The switch is on but no Compose table loaded: Multi_key reaches the
+    /// client as with the switch off, instead of vanishing.
+    #[test]
+    fn compose_on_without_a_table_forwards_multi_key_raw() {
+        let (mut a, mut kb) = (active_compose(true), us_compose());
+        kb.xkb.as_mut().unwrap().drop_compose_for_test();
+        let (out, why) = run(&mut a, &mut kb, &[key(KEY_RIGHTALT, true), key(KEY_RIGHTALT, false)]);
+        assert_eq!(why, None);
+        assert_eq!(out, [down(0xEF20, 0, KEY_RIGHTALT), up(0xEF20, 0, KEY_RIGHTALT)]);
     }
 
     #[test]

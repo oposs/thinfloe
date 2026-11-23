@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- With "Handle Compose key on ThinFloe" on for a computer, the Compose key did nothing at all when ThinFloe had no Compose table for its language: the key reached neither ThinFloe nor that computer. It now goes to the computer, as with the switch off.
 
 ## 4.9.0 - 2026-11-23
 ### New
