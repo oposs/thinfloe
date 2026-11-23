@@ -3141,6 +3141,23 @@ mod tests {
         )
     }
 
+    /// `<d>/started` once it holds `n` whole records of `recording`.
+    /// `kanshi_reload` waits only KANSHI_START_GRACE for a started kanshi
+    /// to end, then leaves it running as it would a real one: on a busy
+    /// host the fake can still be writing when the call returns.
+    fn started(d: &Path, n: usize) -> String {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let log = read(&d.join("started")).unwrap_or_default();
+            let whole = log.ends_with('\n') && log.lines().filter(|l| l.starts_with("config ")).count() >= n;
+            if whole {
+                return log;
+            }
+            assert!(Instant::now() < until, "{n} kanshi starts: {log:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// One monitor, DP-1, turned by `rot`.
     fn layout(rot: crate::heads::Rotation) -> crate::kanshi::Profile {
         crate::kanshi::Profile {
@@ -3342,7 +3359,7 @@ mod tests {
             "args -c {}\nmarker prev\nprev transform normal\nconfig transform 90\n",
             k.config.display()
         );
-        assert_eq!(read(&d.join("started")), Some(want));
+        assert_eq!(started(&d, 1), want);
 
         // No file before: the layout on screen is kept instead, over a
         // stale prev, and the marker still says prev.
@@ -3355,11 +3372,7 @@ mod tests {
         );
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
         assert_eq!(read(&k.prev()), Some(kanshi_text(&[layout(R180)])));
-        assert!(
-            read(&d.join("started"))
-                .unwrap()
-                .contains("marker prev\nprev transform 180\nconfig transform 90\n")
-        );
+        assert!(started(&d, 1).contains("marker prev\nprev transform 180\nconfig transform 90\n"));
 
         // Neither a file nor the layout on screen: nothing is written.
         let d = dir("mon-apply-unknown");
@@ -3519,12 +3532,13 @@ mod tests {
         let (store, k) = mon_home(&d, &recording(&d));
         save_profiles(&store, &[layout(Normal)]);
         mon_apply(&store, &k, &[layout(R90)], None).unwrap();
+        started(&d, 1);
         assert_eq!(mon_revert(&k), Ok(()));
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(Normal)])));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
         // kanshi read the old file again.
-        let log = read(&d.join("started")).unwrap();
+        let log = started(&d, 2);
         assert!(log.ends_with("marker \nprev \nconfig transform normal\n"), "{log}");
 
         // No file before: the layout on screen comes back, and kanshi
@@ -3532,11 +3546,12 @@ mod tests {
         let d = dir("mon-revert-none");
         let (store, k) = mon_home(&d, &recording(&d));
         mon_apply(&store, &k, &[layout(R90)], Some(&onscreen_body(R180))).unwrap();
+        started(&d, 1);
         assert_eq!(mon_revert(&k), Ok(()));
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R180)])));
         assert!(!k.prev().exists());
         assert!(!k.marker.exists());
-        let log = read(&d.join("started")).unwrap();
+        let log = started(&d, 2);
         assert!(log.ends_with("marker \nprev \nconfig transform 180\n"), "{log}");
         assert_eq!(on_disk(&d), crate::config::MonitorsCfg::default());
     }
@@ -3698,14 +3713,14 @@ mod tests {
         let (store, k) = mon_home(&d, &recording(&d));
         save_profiles(&store, &[layout(Normal)]);
         mon_apply(&store, &k, &[layout(R90)], None).unwrap();
-        let started = read(&d.join("started"));
+        let before = Some(started(&d, 1));
         fs::remove_file(k.prev()).unwrap();
         let e = mon_revert(&k).unwrap_err();
         assert!(e.contains("kanshi.prev"), "{e}");
         // Nothing changed: the next session's undo still sees the marker.
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
         assert_eq!(read(&k.marker).as_deref(), Some("prev\n"));
-        assert_eq!(read(&d.join("started")), started, "kanshi was not asked");
+        assert_eq!(read(&d.join("started")), before, "kanshi was not asked");
     }
 
     #[test]
@@ -3735,7 +3750,7 @@ mod tests {
         let (store, k) = mon_home(&d, &recording(&d));
         save_profiles(&store, &[layout(Normal)]);
         mon_apply(&store, &k, &[layout(R90)], None).unwrap();
-        let started = read(&d.join("started"));
+        let before = Some(started(&d, 1));
         let e = mon_apply(&store, &k, &[layout(R180)], None).unwrap_err();
         assert!(e.contains("not confirmed"), "{e}");
         assert_eq!(
@@ -3744,7 +3759,7 @@ mod tests {
             "the real old layout is kept"
         );
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[layout(R90)])));
-        assert_eq!(read(&d.join("started")), started, "kanshi was not asked again");
+        assert_eq!(read(&d.join("started")), before, "kanshi was not asked again");
     }
 
     #[test]
@@ -3896,7 +3911,7 @@ mod tests {
         assert_eq!(generated_kanshi(&k), Some(kanshi_text(&[want])));
 
         // kanshi was told to read the new file, with the settings written.
-        let log = read(&d.join("started")).unwrap();
+        let log = started(&d, 1);
         assert!(
             log.starts_with(&format!("args -c {}\nmarker \n", k.config.display())),
             "{log}"
