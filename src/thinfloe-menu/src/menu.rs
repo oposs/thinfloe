@@ -917,13 +917,20 @@ impl Menu {
                 return self.net_request(r);
             }
             SettingsEvent::Monitors(e) => {
-                // A monitor or a device is selected, never both.
+                // One Screen dialog at a time.
                 if matches!(e, crate::monitors::MonEvent::Select(_)) {
-                    self.deskflow.selected = None;
+                    crate::deskflowtab::apply(&mut self.deskflow, crate::deskflowtab::DeskflowEvent::CloseDialog);
                 }
                 return self.monitors_event(e, Instant::now());
             }
             SettingsEvent::Deskflow(e) => {
+                use crate::deskflowtab::DeskflowEvent;
+                if matches!(
+                    e,
+                    DeskflowEvent::Select(_) | DeskflowEvent::Attach { .. } | DeskflowEvent::ShowFingerprint
+                ) {
+                    self.monitors_event(crate::monitors::MonEvent::CloseDialog, Instant::now());
+                }
                 return crate::deskflowtab::apply(&mut self.deskflow, e).map(Effect::Deskflow);
             }
             SettingsEvent::Status(e) => return self.status_event(e),
@@ -4743,13 +4750,31 @@ mod tests {
         m.settings(SettingsEvent::Monitors(crate::monitors::MonEvent::Select(
             "DP-1".into(),
         )));
-        assert_eq!(
-            m.deskflow.selected, None,
-            "a monitor or a device is selected, never both"
-        );
+        assert_eq!(m.deskflow.selected, None, "one Screen dialog at a time");
         let mut lm = legacy_menu();
         assert_eq!(lm.settings(SettingsEvent::Deskflow(DeskflowEvent::Listen(true))), None);
         assert!(!lm.deskflow.cfg.listen);
+    }
+
+    #[test]
+    fn one_screen_dialog_at_a_time() {
+        use crate::deskflowtab::DeskflowEvent;
+        use crate::monitors::MonEvent;
+        let mut m = mon_menu();
+        m.screen = Screen::Settings;
+        m.settings(SettingsEvent::Monitors(MonEvent::Select("DP-1".into())));
+        assert_eq!(m.monitors.dialog_monitor(), Some("DP-1"));
+        m.settings(SettingsEvent::Deskflow(DeskflowEvent::Select("laptop".into())));
+        assert_eq!(m.monitors.dialog_monitor(), None);
+        assert_eq!(m.deskflow.selected.as_deref(), Some("laptop"));
+        m.settings(SettingsEvent::Monitors(MonEvent::Select("DP-1".into())));
+        assert_eq!(m.deskflow.selected, None);
+        assert_eq!(m.monitors.dialog_monitor(), Some("DP-1"));
+        m.settings(SettingsEvent::Deskflow(DeskflowEvent::ShowFingerprint));
+        assert_eq!(m.monitors.dialog_monitor(), None);
+        assert!(m.deskflow.fingerprint_open);
+        m.settings(SettingsEvent::Monitors(MonEvent::Select("DP-2".into())));
+        assert!(!m.deskflow.fingerprint_open);
     }
 
     #[test]

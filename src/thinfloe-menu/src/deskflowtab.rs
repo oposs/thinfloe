@@ -28,8 +28,10 @@ pub struct DeskflowTab {
     pub attaching: Option<(String, String)>,
     /// Why the last write or command failed.
     pub error: Option<String>,
-    /// The attached device selected in the arrangement, by name.
+    /// The attached device whose dialog is open, by name.
     pub selected: Option<String>,
+    /// The fingerprint dialog of this computer is open.
+    pub fingerprint_open: bool,
     /// The daemon runs; set by the app before each frame.
     pub running: bool,
     /// Why the daemon stopped the last time it failed; set by the app.
@@ -50,6 +52,7 @@ pub fn from_config(cfg: &DeskflowCfg) -> DeskflowTab {
         attaching: None,
         error: None,
         selected: None,
+        fingerprint_open: false,
         running: false,
         stopped: None,
     }
@@ -102,8 +105,12 @@ pub enum DeskflowEvent {
         on: bool,
     },
     CancelAttach,
-    /// A device box clicked in the arrangement.
+    /// A client's ⚙ clicked: its dialog opens.
     Select(String),
+    /// This computer's fingerprint asked for.
+    ShowFingerprint,
+    /// Whatever dialog is open closes.
+    CloseDialog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +149,16 @@ pub fn apply(tab: &mut DeskflowTab, ev: DeskflowEvent) -> Option<DeskflowRequest
         }
         DeskflowEvent::Select(name) => {
             tab.selected = Some(name);
+            None
+        }
+        DeskflowEvent::ShowFingerprint => {
+            tab.fingerprint_open = true;
+            None
+        }
+        DeskflowEvent::CloseDialog => {
+            tab.selected = None;
+            tab.attaching = None;
+            tab.fingerprint_open = false;
             None
         }
         DeskflowEvent::Place { name, output, side } => {
@@ -331,21 +348,10 @@ pub fn inactive(profile: &Profile, heads: &[Head], devices: &[DeviceCfg], dev: &
         .any(|(c, s)| *c == dev.output && *s == dev.side)
 }
 
-/// The attached devices the band lists with their rows: the selected
-/// one, and those the arrangement does not show at their edge (their
-/// monitor off or missing, or the edge not free), so they can be moved
-/// or forgotten.
-pub fn band_devices<'a>(tab: &'a DeskflowTab, profile: Option<&Profile>, heads: &[Head]) -> Vec<&'a DeviceCfg> {
-    let shown = |d: &DeviceCfg| {
-        profile.is_some_and(|p| {
-            p.outputs.iter().any(|o| o.enabled && o.criteria == d.output) && !inactive(p, heads, &tab.cfg.devices, d)
-        })
-    };
-    tab.cfg
-        .devices
-        .iter()
-        .filter(|d| tab.selected.as_deref() == Some(d.name.as_str()) || !shown(d))
-        .collect()
+/// A dialog of the Deskflow band is open: a client's settings, the attach
+/// dialog or the fingerprint.
+pub fn dialog_open(tab: &DeskflowTab) -> bool {
+    tab.selected.is_some() || tab.attaching.is_some() || tab.fingerprint_open
 }
 
 /// "Deskflow stopped: <reason>" while the daemon does not run and its last
@@ -748,30 +754,60 @@ mod tests {
     }
 
     #[test]
-    fn the_band_lists_a_device_whose_edge_another_monitor_took() {
+    fn close_dialog_closes_every_dialog() {
+        let mut tab = with_pending();
+        tab.cfg.devices = vec![device("mac", FP_B, "DP-1", Side::LeftOf)];
+        assert!(!dialog_open(&tab));
+        apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        apply(
+            &mut tab,
+            DeskflowEvent::Attach {
+                name: "laptop".into(),
+                fp: FP_A.into(),
+            },
+        );
+        apply(&mut tab, DeskflowEvent::ShowFingerprint);
+        assert!(tab.fingerprint_open);
+        assert!(dialog_open(&tab));
+        assert_eq!(apply(&mut tab, DeskflowEvent::CloseDialog), None);
+        assert_eq!(
+            (tab.selected.as_deref(), tab.attaching.as_ref(), tab.fingerprint_open),
+            (None, None, false)
+        );
+        assert!(!dialog_open(&tab));
+    }
+
+    #[test]
+    fn forget_closes_its_dialog() {
         let mut tab = DeskflowTab::default();
-        tab.cfg.devices = vec![
-            device("laptop", FP_A, "DP-1", Side::RightOf),
-            device("mac", FP_B, "DP-2", Side::RightOf),
-        ];
-        let names = |tab: &DeskflowTab, p: Option<&Profile>| {
-            band_devices(tab, p, &[])
-                .iter()
-                .map(|d| d.name.clone())
-                .collect::<Vec<_>>()
-        };
-        // DP-2 docked right of DP-1 takes the laptop's edge.
-        assert_eq!(names(&tab, Some(&two())), vec!["laptop".to_string()]);
-        // The selected device is listed too.
-        tab.selected = Some("mac".into());
-        assert_eq!(names(&tab, Some(&two())), vec!["laptop".to_string(), "mac".to_string()]);
-        tab.selected = None;
-        // DP-1 alone: the laptop's edge is free, DP-2 is missing.
-        let mut one = two();
-        one.outputs.truncate(1);
-        assert_eq!(names(&tab, Some(&one)), vec!["mac".to_string()]);
-        // No arrangement: every device is listed.
-        assert_eq!(names(&tab, None).len(), 2);
+        tab.cfg.devices = vec![device("mac", FP_B, "DP-1", Side::LeftOf)];
+        apply(&mut tab, DeskflowEvent::Select("mac".into()));
+        assert!(apply(&mut tab, DeskflowEvent::Forget { name: "mac".into() }).is_some());
+        assert_eq!(tab.selected, None);
+        assert!(tab.cfg.devices.is_empty());
+    }
+
+    #[test]
+    fn a_place_from_the_attach_dialog_closes_it() {
+        let mut tab = with_pending();
+        apply(
+            &mut tab,
+            DeskflowEvent::Attach {
+                name: "laptop".into(),
+                fp: FP_A.into(),
+            },
+        );
+        let r = apply(
+            &mut tab,
+            DeskflowEvent::Place {
+                name: "laptop".into(),
+                output: "DP-1".into(),
+                side: Side::RightOf,
+            },
+        );
+        assert!(r.is_some());
+        assert_eq!(tab.attaching, None);
+        assert_eq!(tab.cfg.devices.len(), 1);
     }
 
     #[test]
