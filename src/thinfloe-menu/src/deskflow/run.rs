@@ -967,28 +967,42 @@ impl Daemon {
         (strips, offline, busy, off)
     }
 
+    /// Why the capture must end with these wanted strips (from
+    /// `wanted_strips`): its strip goes or moves. `None` while it may stay,
+    /// or without a capture.
+    fn strip_release_reason(
+        &self,
+        strips: &[Strip],
+        offline: &[usize],
+        busy: &[usize],
+        off: &[usize],
+    ) -> Option<&'static str> {
+        let spec = |all: &[Strip], id: u32| all.iter().find(|s| s.spec.id == id).map(|s| s.spec.clone());
+        let id = match &self.mode {
+            Mode::Idle => return None,
+            Mode::Locking { strip, .. } => *strip,
+            Mode::Active(a) => a.device as u32,
+        };
+        let now = spec(strips, id);
+        if now == spec(&self.strips, id) {
+            return None;
+        }
+        Some(match now {
+            Some(_) => "the output changed",
+            None if off.contains(&(id as usize)) => "the device is switched off",
+            None if offline.contains(&(id as usize)) => "output gone",
+            None if busy.contains(&(id as usize)) => "the edge is not free",
+            None => "the device went",
+        })
+    }
+
     /// Shows the strips the devices need; a capture whose strip goes or
     /// moves is released first.
     fn update_strips(&mut self) {
         let (strips, offline, busy, off) = self.wanted_strips();
         let spec = |all: &[Strip], id: u32| all.iter().find(|s| s.spec.id == id).map(|s| s.spec.clone());
-        let captured = match &self.mode {
-            Mode::Idle => None,
-            Mode::Locking { strip, .. } => Some(*strip),
-            Mode::Active(a) => Some(a.device as u32),
-        };
-        if let Some(id) = captured {
-            let now = spec(&strips, id);
-            if now != spec(&self.strips, id) {
-                let why = match now {
-                    Some(_) => "the output changed",
-                    None if off.contains(&(id as usize)) => "the device is switched off",
-                    None if offline.contains(&(id as usize)) => "output gone",
-                    None if busy.contains(&(id as usize)) => "the edge is not free",
-                    None => "the device went",
-                };
-                self.release(why);
-            }
+        if let Some(why) = self.strip_release_reason(&strips, &offline, &busy, &off) {
+            self.release(why);
         }
         if let Some(h) = &self.hover
             && (spec(&strips, h.strip).is_none() || spec(&strips, h.strip) != spec(&self.strips, h.strip))
@@ -1941,6 +1955,10 @@ xkb_keymap {
         let (strips, offline, busy, off) = d.wanted_strips();
         assert!(strips.is_empty() && offline.is_empty() && busy.is_empty());
         assert_eq!(off, vec![strip_id as usize]);
+        assert_eq!(
+            d.strip_release_reason(&strips, &offline, &busy, &off),
+            Some("the device is switched off")
+        );
         d.update_strips();
         assert!(
             matches!(d.mode, Mode::Idle),

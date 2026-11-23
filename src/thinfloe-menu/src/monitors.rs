@@ -643,11 +643,7 @@ impl MonTab {
         if !self.editable() {
             return false;
         }
-        let menu = match d.menu_output.as_deref() {
-            Some(c) => Some(c),
-            None => self.menu_now_criteria(),
-        };
-        let Some(menu) = menu else { return false };
+        let Some(menu) = self.menu_monitor() else { return false };
         let on = d.outputs.iter().filter(|o| o.enabled).count();
         self.output(sel).is_some_and(|o| o.enabled) && menu != sel && on > 1
     }
@@ -671,6 +667,12 @@ impl MonTab {
 
     pub fn menu_choice(&self) -> Option<&str> {
         self.draft.as_ref()?.menu_output.as_deref()
+    }
+
+    /// Criteria of the monitor that carries the menu: the choice in the
+    /// tab, else the monitor the menu window is on now.
+    pub fn menu_monitor(&self) -> Option<&str> {
+        self.menu_choice().or_else(|| self.menu_now_criteria())
     }
 
     /// The file is the menu's, or there is none: the arrangement can be
@@ -868,7 +870,9 @@ mod tests {
         // Without a menu choice, the monitor the menu is on now carries it.
         let mut t = tab(two(), None);
         assert_eq!(t.menu_choice(), None);
+        assert_eq!(t.menu_monitor(), None);
         t.menu_is_on(Some("DP-1"));
+        assert_eq!(t.menu_monitor(), Some("DP-1"));
         ev(&mut t, MonEvent::Select("DP-1".into()), now);
         assert!(!t.off_allowed_for("DP-1"));
         assert_eq!(ev(&mut t, MonEvent::Enabled("DP-1".into(), false), now), None);

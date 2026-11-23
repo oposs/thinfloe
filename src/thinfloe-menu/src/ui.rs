@@ -7810,22 +7810,136 @@ mod tests {
 
     #[test]
     fn an_off_client_box_is_dimmed() {
+        use crate::deskflow::statefile::{DevLine, DevState};
         let mut df = two_clients();
         df.cfg.devices[0].enabled = false;
+        // Both connected: only switching mac off dims its dot.
+        for (name, fp) in [("mac", DF_FP_MAC), ("pc", DF_FP_PC)] {
+            df.state.devices.push(DevLine {
+                name: name.into(),
+                fingerprint: fp.into(),
+                state: DevState::Connected,
+                since: 1,
+                width: 1920,
+                height: 1080,
+                flags: vec![],
+            });
+        }
         let shapes = df_shapes(&deskflow_settings(df));
-        // The first of each name is its box in the arrangement.
-        let colour = |want: &str| {
+        // Each name is drawn first in its box, then in its row of the list.
+        let colours = |want: &str| -> Vec<Color32> {
             shapes
                 .iter()
-                .find_map(|c| match &c.shape {
+                .filter_map(|c| match &c.shape {
                     egui::Shape::Text(t) if t.galley.text() == want => Some(t.galley.job.sections[0].format.color),
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("{want} not drawn"))
+                .collect()
         };
-        let on = colour("pc");
-        assert_eq!(colour("mac"), MUTED);
-        assert_ne!(on, MUTED);
+        let (mac, pc) = (colours("mac"), colours("pc"));
+        assert_eq!(mac.len(), 2, "mac in its box and its row");
+        assert_eq!(mac, [MUTED, MUTED], "box and row name of an off client are muted");
+        assert_ne!(pc[0], MUTED);
+        assert_ne!(pc[1], MUTED);
+        // The dot in the box: muted for the off client, as the row's for the on one.
+        let dot_in = |label: &str| {
+            let b = box_around(&shapes, label);
+            shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Circle(d) if b.contains(d.center) => Some(d.fill),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no dot in the box of {label}"))
+        };
+        assert_eq!(dot_in("mac"), MUTED);
+        assert_ne!(dot_in("pc"), MUTED, "a connected client's dot is not muted");
+    }
+
+    /// Without a saved choice the monitor the menu is on now carries the
+    /// Menu marks, in its box and in its row.
+    #[test]
+    fn the_menu_marks_follow_the_menu_without_a_choice() {
+        let mut mon = two_monitors();
+        assert_eq!(mon.menu_choice(), None);
+        let texts = mon_texts(&monitor_settings(mon.clone()));
+        assert!(!has(&texts, "· Menu"), "no mark while the menu's monitor is unknown");
+        mon.menu_is_on(Some("HDMI-A-1"));
+        let shapes = mon_shapes(&monitor_settings(mon));
+        let rects = text_rects(&shapes);
+        let at = |want: &str| {
+            rects
+                .iter()
+                .find(|(t, _)| t == want)
+                .unwrap_or_else(|| panic!("{want} not drawn"))
+                .1
+        };
+        assert!(box_around(&shapes, "HDMI-A-1").contains(at("Menu").center()));
+        // The row mark sits on the row of HDMI-A-1 (its second label).
+        let row = rects
+            .iter()
+            .filter(|(t, _)| t == "HDMI-A-1")
+            .nth(1)
+            .expect("the row of HDMI-A-1")
+            .1;
+        assert!(row.y_range().contains(at("· Menu").center().y));
+    }
+
+    /// The attach dialog closed some other way than Attach, Cancel or
+    /// Escape (here: a frame without it), it opens again with no edge chosen.
+    #[test]
+    fn the_attach_dialog_opens_again_with_no_edge_chosen() {
+        use crate::deskflowtab::{self, DeskflowEvent};
+        let pending = with_lnx_pending(two_clients());
+        let mut attaching = pending.clone();
+        deskflowtab::apply(
+            &mut attaching,
+            DeskflowEvent::Attach {
+                name: "lnx".into(),
+                fp: DF_FP_LNX.into(),
+            },
+        );
+        let (open, closed) = (deskflow_settings(attaching), deskflow_settings(pending));
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let frame = |menu: &Menu, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen(DF_WINDOW.0, DF_WINDOW.1)),
+                events,
+                time: Some(ctx.cumulative_pass_nr() as f64 * 0.1),
+                ..Default::default()
+            };
+            let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, menu, &icons, &Chrome::default(), Instant::now());
+            });
+            out.textures_delta.clear();
+            text_rects(&out.shapes)
+        };
+        let settle = |menu: &Menu| {
+            let mut texts = vec![];
+            for _ in 0..3 {
+                texts = frame(menu, vec![]);
+            }
+            texts
+        };
+        let shown = |texts: &[(String, Rect)], want: &str| texts.iter().any(|(t, _)| t == want);
+        let mut texts = settle(&open);
+        for label in ["Choose an edge", "Above DP-1"] {
+            let at = texts
+                .iter()
+                .find(|(t, _)| t == label)
+                .unwrap_or_else(|| panic!("{label} not drawn"))
+                .1
+                .center();
+            frame(&open, click_at(at));
+            texts = settle(&open);
+        }
+        assert!(shown(&texts, "Above DP-1") && !shown(&texts, "Choose an edge"));
+        settle(&closed);
+        let texts = settle(&open);
+        assert!(shown(&texts, "Choose an edge"), "no edge chosen on reopening");
+        assert!(!shown(&texts, "Above DP-1"));
     }
 
     fn monitor_settings(mon: MonTab) -> Menu {

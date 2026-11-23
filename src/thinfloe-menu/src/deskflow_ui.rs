@@ -273,11 +273,15 @@ fn edge_not_free(tab: &DeskflowTab, mon: &MonTab, d: &DeviceCfg) -> bool {
 /// offline muted.
 fn state_dot(ui: &mut Ui, t: &Theme, state: DevState) {
     let (rect, _) = ui.allocate_exact_size(vec2(DOT_W, DOT_W), Sense::hover());
-    let colour = match state {
+    ui.painter().circle_filled(rect.center(), DOT_R, dot_colour(t, state));
+}
+
+/// The colour of a client's state dot, in its row and in its box.
+pub(crate) fn dot_colour(t: &Theme, state: DevState) -> egui::Color32 {
+    match state {
         DevState::Active | DevState::Connected => t.role(role::GOOD),
         _ => t.palette().muted_foreground,
-    };
-    ui.painter().circle_filled(rect.center(), DOT_R, colour);
+    }
 }
 
 /// A computer that wants to attach: "! <name> wants to attach" (or the
@@ -321,6 +325,10 @@ fn pending_row(ui: &mut Ui, t: &Theme, line: &DevLine) -> Option<DeskflowEvent> 
 /// `deskflowtab::dialog_open` holds draws one, with a button and Escape
 /// that close it. Nothing while none is open.
 pub fn dialog(ui: &Ui, tab: &DeskflowTab, mon: &MonTab) -> Option<DeskflowEvent> {
+    if tab.attaching.is_none() {
+        // However the attach dialog closed, it opens again with no edge chosen.
+        ui.data_mut(|d| d.remove::<AttachEdge>(attach_edge_key()));
+    }
     if let Some(name) = &tab.selected {
         return client_dialog(ui, tab, mon, name);
     }
@@ -382,15 +390,24 @@ fn client_dialog(ui: &Ui, tab: &DeskflowTab, mon: &MonTab, name: &str) -> Option
     event.or_else(|| escaped(ui).then_some(DeskflowEvent::CloseDialog))
 }
 
+/// The edge chosen in the attach dialog: name and fingerprint of the
+/// computer, then the edge. Kept only while that dialog is open.
+type AttachEdge = (String, String, (String, Side));
+
+fn attach_edge_key() -> egui::Id {
+    egui::Id::unique("tf-deskflow-attach-edge")
+}
+
 /// *Check and attach…*: the computer's fingerprint, the check note, and a
 /// Position select of the free edges. The edge chosen stays in the dialog
-/// until Attach places the computer there.
+/// until Attach places the computer there; the dialog closed, it is gone.
 fn attach_dialog(ui: &Ui, tab: &DeskflowTab, mon: &MonTab, name: &str, fp: &str) -> Option<DeskflowEvent> {
     let free = free_edges(tab, mon, name);
-    let key = egui::Id::unique(("tf-deskflow-attach-edge", name, fp));
+    let key = attach_edge_key();
     let mut chosen: Option<(String, Side)> = ui
-        .data(|d| d.get_temp::<(String, Side)>(key))
-        .filter(|e| free.contains(e));
+        .data(|d| d.get_temp::<AttachEdge>(key))
+        .filter(|(n, f, e)| n == name && f == fp && free.contains(e))
+        .map(|(_, _, e)| e);
     let mut event = None;
     ui::dialog_w(ui, name, FP_DIALOG_W, |ui, t| {
         fingerprint(ui, t, fp, |ui| muted(ui, t, CHECK_NOTE));
@@ -410,7 +427,7 @@ fn attach_dialog(ui: &Ui, tab: &DeskflowTab, mon: &MonTab, name: &str, fp: &str)
             });
             if changed && let Some(e) = free.get(idx) {
                 chosen = Some(e.clone());
-                ui.data_mut(|d| d.insert_temp(key, e.clone()));
+                ui.data_mut(|d| d.insert_temp::<AttachEdge>(key, (name.to_string(), fp.to_string(), e.clone())));
             }
         }
         ui.add_space(BUTTON_GAP);
@@ -434,7 +451,7 @@ fn attach_dialog(ui: &Ui, tab: &DeskflowTab, mon: &MonTab, name: &str, fp: &str)
     });
     let event = event.or_else(|| escaped(ui).then_some(DeskflowEvent::CancelAttach));
     if event.is_some() {
-        ui.data_mut(|d| d.remove::<(String, Side)>(key));
+        ui.data_mut(|d| d.remove::<AttachEdge>(key));
     }
     event
 }
