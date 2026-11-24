@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### New
+
+### Changed
+
+### Fixed
+
+## 4.10.0 - 2026-11-24
+### New
 - Settings → Screen shows the monitors as a list (Monitor, Resolution, On) and the computers attached with Deskflow as a list (name, On, Clipboard, Compose). The switches are always visible; ⚙ or a click on the monitor or computer opens a dialog with the rest, such as Position, Rotation and Forget.
 - Each attached computer has an "On" switch, on by default. With it off, the mouse stops at that edge, the computer stays connected and keeps its place, and no clipboard is shared with it. Its box in the monitor arrangement is dimmed, and switching it off while the pointer is on it brings the pointer back to ThinFloe at once.
 
