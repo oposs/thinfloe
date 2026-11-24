@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- While the mouse was on an attached Deskflow computer, ThinFloe's mouse pointer stayed visible at the edge of the screen. It is now hidden until the mouse comes back to ThinFloe.
 
 ## 4.10.0 - 2026-11-24
 ### New
