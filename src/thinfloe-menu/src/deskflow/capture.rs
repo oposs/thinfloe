@@ -34,6 +34,7 @@ use wayland_client::protocol::{
     wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::wp::cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1};
 use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
     zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
 };
@@ -317,8 +318,17 @@ struct State {
     /// compositor's media keys still run while it is on.
     inhibit_mgr: Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
     virtual_pointer_mgr: Option<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1>,
+    /// None on a compositor without it: the cursor then stays visible
+    /// during a capture, since it could not be shown again afterwards.
+    cursor_shape_mgr: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     seat: wl_seat::WlSeat,
     pointer: Option<wl_pointer::WlPointer>,
+    cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    /// The serial of the pointer's last enter on a strip, for set_cursor.
+    enter_serial: u32,
+    /// The cursor is hidden: the lock is active and the pointer is on the
+    /// device.
+    cursor_hidden: bool,
     relative: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// By the output's global name.
@@ -368,8 +378,12 @@ impl Capture {
                 .map_err(err("zwp_relative_pointer_manager_v1"))?,
             inhibit_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             virtual_pointer_mgr: globals.bind(&qh, 1..=2, ()).ok(),
+            cursor_shape_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             seat: globals.bind(&qh, 5..=8, ()).map_err(err("wl_seat v5"))?,
             pointer: None,
+            cursor_shape: None,
+            enter_serial: 0,
+            cursor_hidden: false,
             relative: None,
             keyboard: None,
             outputs: BTreeMap::new(),
@@ -545,6 +559,7 @@ impl State {
             return false;
         };
         let was_locked = self.locked;
+        self.show_cursor();
         if let Some(lock) = self.lock.take() {
             lock.destroy();
         }
@@ -569,6 +584,27 @@ impl State {
         }
         self.events.push(CapEvent::Unlocked);
         true
+    }
+
+    /// Hide the cursor on the strip while the device has the pointer: it
+    /// would otherwise sit at the edge. Only with a cursor shape device,
+    /// which can show it again.
+    fn hide_cursor(&mut self) {
+        if let (Some(p), Some(_)) = (self.pointer.as_ref(), self.cursor_shape.as_ref()) {
+            p.set_cursor(self.enter_serial, None, 0, 0);
+            self.cursor_hidden = true;
+        }
+    }
+
+    /// The default cursor again, after a capture: the pointer re-enters on
+    /// the strip, so no enter on another surface would restore it.
+    fn show_cursor(&mut self) {
+        if !std::mem::take(&mut self.cursor_hidden) {
+            return;
+        }
+        if let Some(d) = self.cursor_shape.as_ref() {
+            d.set_shape(self.enter_serial, wp_cursor_shape_device_v1::Shape::Default);
+        }
     }
 
     fn warp_cursor(&self, output: &str, layout: (f64, f64), qh: &QueueHandle<State>) {
@@ -711,11 +747,16 @@ impl State {
         if has_pointer && self.pointer.is_none() {
             let p = self.seat.get_pointer(qh, ());
             self.relative = Some(self.relative_mgr.get_relative_pointer(&p, qh, ()));
+            self.cursor_shape = self.cursor_shape_mgr.as_ref().map(|m| m.get_pointer(&p, qh, ()));
             self.pointer = Some(p);
         } else if !has_pointer && let Some(p) = self.pointer.take() {
             if let Some(r) = self.relative.take() {
                 r.destroy();
             }
+            if let Some(d) = self.cursor_shape.take() {
+                d.destroy();
+            }
+            self.cursor_hidden = false;
             p.release();
         }
         let has_keyboard = caps.contains(wl_seat::Capability::Keyboard);
@@ -879,13 +920,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         use wl_pointer::{Axis, ButtonState, Event};
         match event {
             Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
-                ..
             } => {
                 if let Some(s) = state.strip_of(&surface) {
                     let (strip, r) = (s.spec.id, s.spec.rect);
+                    state.enter_serial = serial;
                     let (x, y) = (f64::from(r.x) + surface_x, f64::from(r.y) + surface_y);
                     state.hover = Some(strip);
                     state.push(CapEvent::Enter { strip, x, y });
@@ -981,6 +1023,7 @@ impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for State {
         match event {
             zwp_locked_pointer_v1::Event::Locked => {
                 state.locked = true;
+                state.hide_cursor();
                 state.events.push(CapEvent::Locked);
             }
             // A oneshot lock is dead once it is deactivated.
@@ -1074,7 +1117,9 @@ no_events!(
     zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
-    zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1
+    zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1
 );
 
 #[cfg(test)]
