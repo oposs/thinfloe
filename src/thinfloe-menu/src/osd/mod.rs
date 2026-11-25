@@ -15,6 +15,7 @@
 pub mod audio;
 pub mod ddc;
 pub mod draw;
+pub mod notes;
 mod run;
 pub mod socket;
 pub mod state;

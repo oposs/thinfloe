@@ -15,12 +15,14 @@ use std::time::{Duration, Instant};
 use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl, Watch};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
+use super::notes::{self, Notes, Watcher};
 use super::socket::Datagram;
 use super::state::{OsdState, Shown};
 use super::surface::{SurfaceKind, Surfaces, mark_placement};
 use super::sync::{Mode, keys_mode};
 use super::{Action, POLL_MAX_MS, STOP, VOLUME_STEP, socket};
 use crate::raster::Canvas;
+use crate::removable;
 
 /// How long after the outputs change the monitors are detected again:
 /// a monitor that just came answers DDC/CI only after a while.
@@ -170,6 +172,17 @@ pub(super) fn run() -> Result<(), String> {
     drop(notify);
 
     let mut state = OsdState::new();
+    let (contract, event) = (
+        removable_path("TF_REMOVABLE_FILE", removable::FILE),
+        removable_path("TF_REMOVABLE_EVENT", removable::EVENT_FILE),
+    );
+    let mut stick_notes = Notes::new();
+    // The baseline: what is plugged in at start is no news.
+    let (sticks, last) = notes::read_files(&contract, &event);
+    stick_notes.update(&sticks, last.as_ref());
+    let watcher = Watcher::new(&[&contract, &event])
+        .map_err(|why| logged.once(format!("thinfloe-menu --osd: no notes about sticks: {why}")))
+        .ok();
     let mut painter = Painter::new();
     let mut drawn: BTreeMap<String, Drawn> = BTreeMap::new();
     let mut dirty = true;
@@ -186,12 +199,19 @@ pub(super) fn run() -> Result<(), String> {
             .flatten()
             .map(|t| t.saturating_duration_since(now).as_micros().div_ceil(1000))
             .fold(POLL_MAX_MS as u128, u128::min) as libc::c_int;
-        let mut fds = [surfaces.fd().as_raw_fd(), sock.as_raw_fd(), wake_rx.as_raw_fd()].map(|fd| libc::pollfd {
+        let watch_fd = watcher.as_ref().map_or(-1, Watcher::raw_fd);
+        let mut fds = [
+            surfaces.fd().as_raw_fd(),
+            sock.as_raw_fd(),
+            wake_rx.as_raw_fd(),
+            watch_fd,
+        ]
+        .map(|fd| libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         });
-        // SAFETY: three valid pollfds for the duration of the call.
+        // SAFETY: four pollfds (a negative one is ignored) for the duration of the call.
         let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if r < 0 {
             let e = std::io::Error::last_os_error();
@@ -227,6 +247,15 @@ pub(super) fn run() -> Result<(), String> {
             }
             dirty |= on_action(&mut state, a, &audio, &monitors, now);
         }
+        if watcher.as_ref().is_some_and(Watcher::drain) {
+            let (sticks, last) = notes::read_files(&contract, &event);
+            // Only the newest note shows; the others were overtaken.
+            if let Some(n) = stick_notes.update(&sticks, last.as_ref()).last() {
+                let (text, warn) = notes::text(n);
+                state.show(Shown::Note { text, warn }, now);
+                dirty = true;
+            }
+        }
         let mut buf = [0u8; 64];
         while matches!((&wake_rx).read(&mut buf), Ok(n) if n > 0) {}
         let outputs = surfaces.outputs();
@@ -251,6 +280,13 @@ pub(super) fn run() -> Result<(), String> {
         dirty |= state.expire(now);
     }
     Ok(())
+}
+
+/// A file path from the environment (tests), else the default.
+fn removable_path(var: &str, default: &str) -> PathBuf {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from(default), PathBuf::from)
 }
 
 /// What the worker does with a report of `pactl subscribe`.

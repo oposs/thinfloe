@@ -10,6 +10,8 @@
 - A new Eject tile appears while a stick or card is plugged in and tells when it is safe to pull it; with several plugged in, it lists them, each with its own Eject button, and offers Eject all. An ejected USB stick is switched off; a card reader stays on, ready for the next card.
 - Restart and Power off write pending data to the sticks first and show "Writing to …" while they do. A stick that is in use is reported like a failed home save, with the choice to wait or go on.
 
+- A note appears at the bottom of the screen for three seconds when a stick or card is plugged in ("MYSTICK connected"), when it has been ejected and can be pulled ("MYSTICK can be removed"), and when it was pulled without eject ("MYSTICK removed without eject — files may be lost"), the last one in the warning colour.
+
 ### Changed
 - Writing ThinFloe onto a stick that is open under /media/tfuser now closes it first instead of refusing it as mounted. A stick that is in use is refused with "the stick is in use", and a stick that was not written after all is opened again.
 
