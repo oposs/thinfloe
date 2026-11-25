@@ -186,13 +186,88 @@ class TestDriveList(unittest.TestCase):
         self.assertTrue(d["/dev/vda"].is_boot)
 
     def test_fingerprint(self):
-        data = bytes(range(256)) * 80  # 20480 bytes, more than 17408
+        data = bytes(range(256)) * 80  # no GPT: the MBR entries and signature only
         with tempfile.NamedTemporaryFile() as f:
             f.write(data)
             f.flush()
-            want = hashlib.sha256(data[:17408]).hexdigest()[:16]
+            want = hashlib.sha256(data[446:512]).hexdigest()[:16]
             self.assertEqual(ui.ptable_fingerprint(f.name), want)
         self.assertEqual(ui.ptable_fingerprint("/nonexistent/dev"), "-")
+
+    @staticmethod
+    def _fp(data: bytes) -> str:
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(data)
+            f.flush()
+            return ui.ptable_fingerprint(f.name)
+
+    @staticmethod
+    def _superfloppy() -> bytearray:
+        """FAT32 on the whole disk: boot sector, FSInfo, no partition table."""
+        d = bytearray(64 * 1024)
+        d[0:3] = b"\xeb\x58\x90"
+        d[3:11] = b"mkfs.fat"
+        d[0x41] = 0x00                      # BS_Reserved1: the dirty flag
+        d[510:512] = b"\x55\xaa"
+        d[512:516] = b"RRaA"                # FSInfo in sector 1
+        d[512 + 488:512 + 492] = (1000).to_bytes(4, "little")  # free clusters
+        d[1022:1024] = b"\x55\xaa"
+        return d
+
+    def test_fingerprint_ignores_a_mounted_superfloppy(self):
+        # Mounting a whole-disk FAT sets the dirty flag and the umount writes
+        # the free count: the stick is the same stick (it was refused as
+        # "does not match the drive that was chosen" after its release).
+        before = self._superfloppy()
+        after = bytearray(before)
+        after[0x41] = 0x01
+        after[512 + 488:512 + 492] = (990).to_bytes(4, "little")
+        after[2048:2052] = b"data"
+        self.assertEqual(self._fp(bytes(before)), self._fp(bytes(after)))
+
+    def test_fingerprint_changes_with_an_mbr_entry(self):
+        d = self._superfloppy()
+        d[446:462] = bytes([0x80, 0, 0, 0, 0x0C, 0, 0, 0]) + (2048).to_bytes(4, "little") \
+            + (4096).to_bytes(4, "little")
+        e = bytearray(d)
+        e[454:458] = (4096).to_bytes(4, "little")   # the partition moved
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+
+    @staticmethod
+    def _gpt() -> bytearray:
+        d = bytearray(64 * 1024)
+        d[446:462] = bytes([0, 0, 2, 0, 0xEE, 0xFF, 0xFF, 0xFF]) + (1).to_bytes(4, "little") \
+            + (0xFFFFFFFF).to_bytes(4, "little")
+        d[510:512] = b"\x55\xaa"
+        h = 512
+        d[h:h + 8] = b"EFI PART"
+        d[h + 12:h + 16] = (92).to_bytes(4, "little")
+        d[h + 72:h + 80] = (2).to_bytes(8, "little")      # entries at LBA 2
+        d[h + 80:h + 84] = (128).to_bytes(4, "little")
+        d[h + 84:h + 88] = (128).to_bytes(4, "little")
+        d[1024:1040] = b"\x28\x73\x2a\xc1\x1f\xf8\xd2\x11\xba\x4b\x00\xa0\xc9\x3e\xc9\x3b"
+        d[1024 + 32:1024 + 40] = (2048).to_bytes(8, "little")
+        return d
+
+    def test_fingerprint_changes_with_a_gpt_entry(self):
+        d = self._gpt()
+        e = bytearray(d)
+        e[1024 + 32:1024 + 40] = (4096).to_bytes(8, "little")
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+        # The last of the 128 entries counts too.
+        f = bytearray(d)
+        f[1024 + 127 * 128] = 0x01
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(f)))
+
+    def test_fingerprint_of_gpt_ignores_bytes_past_the_entries(self):
+        d = self._gpt()
+        e = bytearray(d)
+        e[1024 + 128 * 128 + 10] = 0x77   # first partition data area
+        self.assertEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+
+    def test_fingerprint_of_a_short_device(self):
+        self.assertEqual(self._fp(b""), ui.ptable_fingerprint_of(lambda off, n: b""))
+        self.assertNotEqual(self._fp(b""), "-")
 
     def test_identity_differs_by_fingerprint(self):
         a, b = self.list()[:2]

@@ -686,17 +686,44 @@ def examine_efi_partition(efi_partition: str,
     return is_thinfloe, has_tl_old, has_tl_new, version
 
 
-PTABLE_BYTES = 17408  # LBA 0 to 33: MBR, GPT header and entries
+GPT_ENTRIES_MAX = 1 << 20  # bytes of GPT entries hashed at most
+
+
+def ptable_fingerprint_of(read: Callable[[int, int], bytes]) -> str:
+    """First 16 hex digits of SHA-256 over the partition table bytes alone.
+
+    read(offset, length) reads the drive. Hashed: the MBR's four entries and
+    its signature (sector 0, bytes 446-511) and, when sector 1 is a GPT
+    header, that header and its entry array. Nothing else: on a stick with a
+    file system on the whole drive (no table) sector 0 is the FAT boot
+    sector, whose dirty flag a mount sets, and the FSInfo sector after it
+    holds the free count an umount writes; hashing them changed the id
+    between `drives` (mounted) and the write (released). 512-byte sectors.
+    """
+    h = hashlib.sha256(read(446, 66))
+    header = read(512, 512)
+    if header[:8] == b"EFI PART" and len(header) >= 92:
+        size = int.from_bytes(header[12:16], "little")
+        h.update(header[:max(92, min(size, 512))])
+        lba = int.from_bytes(header[72:80], "little")
+        count = int.from_bytes(header[80:84], "little")
+        entry = int.from_bytes(header[84:88], "little")
+        length = min(count * entry, GPT_ENTRIES_MAX)
+        if lba > 0 and length > 0:
+            h.update(read(lba * 512, length))
+    return h.hexdigest()[:16]
 
 
 def ptable_fingerprint(device: str) -> str:
-    """First 16 hex digits of SHA-256 over the partition table area."""
+    """ptable_fingerprint_of the drive at device; "-" when it cannot be read."""
     try:
         with open(device, "rb") as f:
-            data = f.read(PTABLE_BYTES)
+            def read(offset: int, length: int) -> bytes:
+                f.seek(offset)
+                return f.read(length)
+            return ptable_fingerprint_of(read)
     except OSError:
         return "-"
-    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def identity_string(serial: str, size_bytes: int, fingerprint: str) -> str:
@@ -2371,7 +2398,7 @@ def fd_identity(fd: int, device: str) -> str:
     # Back to the start: the write goes through this fd from its position.
     os.lseek(fd, 0, os.SEEK_SET)
     try:
-        fingerprint = hashlib.sha256(os.pread(fd, PTABLE_BYTES, 0)).hexdigest()[:16]
+        fingerprint = ptable_fingerprint_of(lambda offset, length: os.pread(fd, length, offset))
     except OSError:
         fingerprint = "-"
     return identity_string(device_serial(device), size, fingerprint)
