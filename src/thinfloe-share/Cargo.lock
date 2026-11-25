@@ -1104,6 +1104,7 @@ dependencies = [
  "owly-airdrop",
  "owlyd",
  "rustls",
+ "serde_json",
  "tokio",
  "zbus",
 ]

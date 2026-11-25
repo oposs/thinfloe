@@ -2,7 +2,13 @@
 
 // Used from the daemon (later tasks); allowed unused until then.
 #[allow(dead_code)]
+mod card;
+#[allow(dead_code)]
+mod config;
+#[allow(dead_code)]
 mod names;
+#[allow(dead_code)]
+mod state;
 
 /// Owly release this build is pinned to; keep in step with Cargo.toml and the Dockerfile.
 const OWLY_VERSION: &str = "0.4.3";

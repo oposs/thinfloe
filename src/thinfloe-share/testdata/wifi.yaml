@@ -1,0 +1,11 @@
+# Written by the ThinFloe menu from config.toml. Edits here are overwritten.
+network:
+  version: 2
+  renderer: networkd
+  wifis:
+    wlp3s0:
+      dhcp4: true
+      optional: true
+      access-points:
+        office:
+          password: secret123
