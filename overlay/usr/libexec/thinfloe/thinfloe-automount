@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""
+thinfloe-automount - mount USB sticks and SD cards under /media/tfuser
+
+Started as root by thinfloe-automount@.service (udev) and, for eject, by
+the menu through sudo. This file holds the decisions that need no mount:
+which devices are mounted, under which name and with which options, and
+the formats of the contract file /run/thinfloe/removable and of a write
+hold. Design: docs/superpowers/specs/2026-11-24-usb-automount-design.md
+
+Every path can be moved with TF_SYSFS, TF_DEV, TF_RUN, TF_MEDIA,
+TF_CMDLINE, TF_ESP_DEVICE_FILE and TF_EFI_MOUNT, so the tests run on fake
+trees.
+
+Contract file line (readers ignore unknown trailing fields):
+
+    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind
+
+kind is stick or card. A write hold is one line, pid<TAB>id, with the id
+that "thinfloe-upgrade drives" reports (sn-<serial> or nosn, then size and
+a partition table fingerprint).
+"""
+
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Set, Union
+
+MAX_NAME_BYTES = 255
+FALLBACK_NAME = "disk"
+TAIL_OPTIONS = "nosuid,nodev"
+OWNER = "uid=1001,gid=1001"
+# Only these filesystems are mounted; anything else is left alone.
+MOUNT_OPTIONS = {
+    "vfat": OWNER + ",shortname=mixed,utf8=1,showexec,flush",
+    "exfat": OWNER + ",iocharset=utf8,errors=remount-ro",
+    "ntfs": OWNER + ",windows_names",
+    "ext2": "", "ext3": "", "ext4": "", "btrfs": "", "xfs": "",
+}
+BOOT_PARTLABEL = "EFI-SYSTEM"
+FLASH_KINDS = ("SD", "MS", "CF", "SM")   # ID_DRIVE_FLASH_<kind>
+LINE_FIELDS = 8
+
+
+class _BootUnknown:
+    """A stick boot whose boot disk could not be found: mount nothing."""
+
+    def __repr__(self):
+        return "BootUnknown"
+
+
+BootUnknown = _BootUnknown()
+
+
+@dataclass
+class Paths:
+    sysfs: str
+    dev: str
+    run: str
+    media: str
+    cmdline: str
+    esp_device_file: str
+    efi_mount: str
+
+
+def paths() -> Paths:
+    env = os.environ.get
+    return Paths(
+        sysfs=env("TF_SYSFS", "/sys"),
+        dev=env("TF_DEV", "/dev"),
+        run=env("TF_RUN", "/run/thinfloe"),
+        media=env("TF_MEDIA", "/media/tfuser"),
+        cmdline=env("TF_CMDLINE", "/proc/cmdline"),
+        esp_device_file=env("TF_ESP_DEVICE_FILE", "/run/thinfloe-esp-device"),
+        efi_mount=env("TF_EFI_MOUNT", "/run/thinfloe/storage/efi"),
+    )
+
+
+@dataclass
+class Dev:
+    kname: str
+    disk: str
+    devnode: str
+    fstype: str
+    label: str
+    uuid: str
+    partlabel: str
+    size_bytes: int
+    model: str
+    id_bus: str
+    removable: bool
+    mmc_type: Optional[str]
+    flash_flags: Set[str]
+    usb_parent: Optional[str]
+    # lsblk's SERIAL, else WWN, as thinfloe-upgrade takes it; matches a hold.
+    serial: str = ""
+
+
+@dataclass
+class Hold:
+    pid: int
+    id: str
+
+
+@dataclass
+class Line:
+    device: str
+    disk: str
+    name: str
+    mountpoint: str
+    fstype: str
+    size_bytes: int
+    model: str
+    kind: str
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def disk_of(kname: str, p: Paths) -> str:
+    """The whole disk of a block device, from sysfs.
+
+    A partition's sysfs directory sits inside its disk's. Without a sysfs
+    entry (the device is already gone) the name is cut the way the kernel
+    names partitions.
+    """
+    real = os.path.realpath(os.path.join(p.sysfs, "class", "block", kname))
+    if os.path.exists(real):
+        if os.path.exists(os.path.join(real, "partition")):
+            return os.path.basename(os.path.dirname(real))
+        return os.path.basename(real)
+    m = re.fullmatch(r"((?:nvme\d+n\d+|mmcblk\d+|loop\d+))p\d+", kname)
+    if m:
+        return m.group(1)
+    return re.sub(r"\d+$", "", kname) or kname
+
+
+def usb_device_of(disk_dir: str) -> Optional[str]:
+    """Name of the USB device directory above a disk (the one with idVendor)."""
+    cur = os.path.dirname(disk_dir)
+    while cur not in ("/", ""):
+        if os.path.exists(os.path.join(cur, "idVendor")):
+            return os.path.basename(cur)
+        cur = os.path.dirname(cur)
+    return None
+
+
+def read_dev(kname: str, props: Dict[str, str], p: Paths) -> Dev:
+    """A Dev from udev properties and sysfs; a missing device reads as empty."""
+    disk = disk_of(kname, p)
+    node = os.path.realpath(os.path.join(p.sysfs, "class", "block", kname))
+    disk_dir = os.path.realpath(os.path.join(p.sysfs, "class", "block", disk))
+    try:
+        sectors = int(read_text(os.path.join(node, "size")) or 0)
+    except ValueError:
+        sectors = 0
+    mmc_type = read_text(os.path.join(disk_dir, "device", "type")) or None
+    return Dev(
+        kname=kname,
+        disk=disk,
+        devnode=os.path.join(p.dev, kname),
+        fstype=props.get("ID_FS_TYPE", ""),
+        label=props.get("ID_FS_LABEL", ""),
+        uuid=props.get("ID_FS_UUID", ""),
+        partlabel=props.get("ID_PART_ENTRY_NAME", ""),
+        size_bytes=sectors * 512,
+        model=props.get("ID_MODEL", ""),
+        id_bus=props.get("ID_BUS", ""),
+        removable=read_text(os.path.join(disk_dir, "removable")) == "1",
+        mmc_type=mmc_type,
+        flash_flags={k for k in FLASH_KINDS if props.get("ID_DRIVE_FLASH_" + k) == "1"},
+        usb_parent=usb_device_of(disk_dir),
+        serial=props.get("ID_SERIAL_SHORT") or props.get("ID_WWN", ""),
+    )
+
+
+def boot_disk(p: Paths, findmnt: Callable[[], Optional[str]]) -> Union[str, None, _BootUnknown]:
+    """The disk the machine booted from.
+
+    Order: the ESP device the initramfs chose, the source mounted at the
+    ESP mount, then netboot (no boot disk: None). A stick boot with neither
+    gives BootUnknown, and nothing is mounted.
+    """
+    device = read_text(p.esp_device_file)
+    if not device:
+        device = findmnt() or ""
+    if device:
+        return disk_of(os.path.basename(device), p)
+    if re.search(r"(?:^|\s)ramroot=https?://", read_text(p.cmdline)):
+        return None
+    return BootUnknown
+
+
+def hold_matches(d: Dev, hold: Hold) -> bool:
+    """The hold's drive is the one now under this kernel name.
+
+    Only the serial part of the id is compared: the size and fingerprint
+    change while the writer repartitions the stick.
+    """
+    want = f"sn-{d.serial}" if d.serial else "nosn"
+    return hold.id.split(":", 1)[0] == want
+
+
+def skip_reason(d: Dev, boot, holds: Dict[str, Hold], mounted: Set[str],
+                alive: Callable[[int], bool]) -> Optional[str]:
+    """Why a device is not mounted, or None when it should be."""
+    if boot is BootUnknown:
+        return "boot disk unknown"
+    if boot is not None and d.disk == boot:
+        return "boot disk"
+    if d.partlabel == BOOT_PARTLABEL:
+        return "ThinFloe stick"
+    hold = holds.get(d.disk)
+    if hold is not None and alive(hold.pid) and hold_matches(d, hold):
+        return "held by a write"
+    if d.kname.startswith("mmcblk") and d.mmc_type != "SD":
+        return "eMMC or unknown card type"
+    if d.size_bytes <= 0:
+        return "no medium"
+    if not d.fstype:
+        return "no filesystem"
+    if d.devnode in mounted:
+        return "already mounted"
+    if mount_options(d.fstype) is None:
+        return f"filesystem {d.fstype} is not mounted"
+    return None
+
+
+def clean_component(text: str) -> str:
+    """One safe path component: no slash, no control character, no leading dot."""
+    out = "".join("_" if (c == "/" or ord(c) < 0x20 or ord(c) == 0x7F) else c
+                  for c in text).strip(" ")
+    if out.startswith("."):
+        out = "_" + out[1:]
+    return out
+
+
+def cut_bytes(text: str, limit: int) -> str:
+    """Cut to limit UTF-8 bytes without splitting a character."""
+    return text.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
+
+
+def choose_name(label: str, uuid: str, taken: Set[str]) -> str:
+    """The mount point name: label, else UUID, else "disk"; suffix on a clash."""
+    base = clean_component(label) or clean_component(uuid) or FALLBACK_NAME
+    base = cut_bytes(base, MAX_NAME_BYTES)
+    if base not in taken:
+        return base
+    n = 1
+    while True:
+        suffix = str(n)
+        name = cut_bytes(base, MAX_NAME_BYTES - len(suffix)) + suffix
+        if name not in taken:
+            return name
+        n += 1
+
+
+def mount_options(fstype: str) -> Optional[str]:
+    """The -o string for a filesystem, or None when it is not mounted."""
+    own = MOUNT_OPTIONS.get(fstype)
+    if own is None:
+        return None
+    return f"{own},{TAIL_OPTIONS}" if own else TAIL_OPTIONS
+
+
+def is_card(d: Dev, luns_on_parent: int) -> bool:
+    """A card reader or built-in SD slot: unmounted on eject, never powered off."""
+    return bool(d.flash_flags) or d.mmc_type == "SD" or luns_on_parent > 1
+
+
+def one_line(text: str) -> str:
+    return re.sub(r"[\t\r\n]", " ", text)
+
+
+def parse_lines(text: str) -> List[Line]:
+    """Contract file lines; short or malformed lines are dropped."""
+    out = []
+    for raw in text.split("\n"):
+        f = raw.split("\t")
+        if len(f) < LINE_FIELDS:
+            continue
+        try:
+            size = int(f[5])
+        except ValueError:
+            continue
+        out.append(Line(f[0], f[1], f[2], f[3], f[4], size, f[6], f[7]))
+    return out
+
+
+def format_lines(lines: List[Line]) -> str:
+    return "".join(
+        "\t".join(one_line(str(v)) for v in (
+            l.device, l.disk, l.name, l.mountpoint, l.fstype, l.size_bytes,
+            l.model, l.kind)) + "\n"
+        for l in lines)
+
+
+def parse_hold(text: str) -> Optional[Hold]:
+    """A hold file: pid<TAB>id."""
+    f = text.strip("\n").split("\t", 1)
+    if len(f) != 2 or not f[1]:
+        return None
+    try:
+        return Hold(int(f[0]), f[1])
+    except ValueError:
+        return None
+
+
+def main(argv: List[str]) -> int:
+    print("usage: thinfloe-automount add|remove|eject|release|remount ...", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
