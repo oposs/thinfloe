@@ -107,7 +107,8 @@ if [[ -f "$X/$TMPF" ]]; then
     for want in \
         'd /media/tfuser 0755 root root' \
         'L /run/media/tfuser - - - - /media/tfuser' \
-        'd /run/thinfloe/automount 0700 root root'; do
+        'd /run/thinfloe/automount 0700 root root' \
+        'd /run/thinfloe/automount/hold 0700 root root'; do
         if grep -qxF "$want" "$X/$TMPF"; then ok "tmpfiles has '$want'"; else bad "tmpfiles lacks '$want'"; fi
     done
 else
