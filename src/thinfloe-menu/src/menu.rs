@@ -201,6 +201,11 @@ pub enum Job {
     MachineFacts,
     /// Put this text on the clipboard with `wl-copy`.
     Copy(String),
+    /// Release a stick or card: `thinfloe-automount eject <target>`, where
+    /// the target is a disk name or `all`.
+    Eject {
+        target: String,
+    },
 }
 
 /// What fills the space above the log.
@@ -264,6 +269,28 @@ pub struct ConfigNotes {
 /// `ConfigNotes::legacy` when the migration failed this boot.
 pub const LEGACY_NOTE: &str = "Your settings could not be moved to ~/.config/thinfloe; they stay as they were until the next start. See the session log.";
 
+/// What the person asked of the Eject panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EjectEvent {
+    /// Eject this disk.
+    One(String),
+    All,
+    Close,
+}
+
+/// The Eject tile's state: the panel over the grid, the eject that runs and
+/// what the last one said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EjectState {
+    pub panel_open: bool,
+    /// The target (a disk or `all`) the helper is working on.
+    pub running: Option<String>,
+    pub message: Option<String>,
+    /// Disk and name of each stick when the eject began: the helper removes
+    /// them from its file before it ends.
+    known: Vec<(String, String)>,
+}
+
 pub struct Menu {
     pub tiles: Vec<Tile>,
     pub banner: Vec<String>,
@@ -289,6 +316,10 @@ pub struct Menu {
     /// When `battery` was set: the status area's battery pages count from
     /// here, so a new reading starts at the first page.
     pub battery_since: Option<Instant>,
+    /// The sticks and cards the automount helper keeps mounted; set by the
+    /// app on every change of its file.
+    pub removable: Vec<crate::removable::Stick>,
+    pub eject: EjectState,
     /// The status area: which elements show, at which size, in which order.
     pub status: crate::status::Area,
     /// The network sampler's last copy, set by the app before each frame.
@@ -392,6 +423,8 @@ impl Menu {
             addon_runs: Vec::new(),
             battery: Vec::new(),
             battery_since: None,
+            removable: Vec::new(),
+            eject: EjectState::default(),
             status: crate::status::Area::default(),
             netstat: None,
             hardware: None,
@@ -1046,6 +1079,7 @@ impl Menu {
         match self.tiles.get(index) {
             Some(t) if t.addon => self.addon_of(index).is_some_and(AddonStatus::present),
             Some(t) if t.action == Action::Upgrade => self.usb_boot,
+            Some(t) if t.action == Action::Eject => !self.removable.is_empty(),
             Some(_) => true,
             None => false,
         }
@@ -1082,7 +1116,7 @@ impl Menu {
 
     /// Whether a dialog is up, so the grid behind it is frozen and dimmed.
     pub fn dialog(&self) -> bool {
-        self.logout.is_some() || self.retry.is_some() || self.monitors.question_up()
+        self.logout.is_some() || self.retry.is_some() || self.monitors.question_up() || self.eject.panel_open
     }
 
     /// Whether input is dropped before egui sees it.
@@ -1120,6 +1154,7 @@ impl Menu {
             Action::Run => tile.multiple || self.running(index) == 0,
             Action::SaveHome => !self.save.running,
             Action::Logout | Action::Reboot | Action::Poweroff | Action::Settings => true,
+            Action::Eject => self.eject.running.is_none(),
             // While a write runs, pressing it shows the progress.
             Action::Upgrade => true,
         }
@@ -1132,6 +1167,7 @@ impl Menu {
         self.running(index) > 0
             || (action == Some(Action::SaveHome) && self.save.running)
             || (action == Some(Action::Upgrade) && self.upgrade.writing())
+            || (action == Some(Action::Eject) && self.eject.running.is_some())
     }
 
     /// Whether an add-on update waits for the next boot, or, for the
@@ -1178,8 +1214,101 @@ impl Menu {
                 let r = self.upgrade.open(now)?;
                 self.upgrade_request(r, now)
             }
+            Action::Eject => match self.removable.as_slice() {
+                [only] => {
+                    let disk = only.disk.clone();
+                    self.start_eject(disk)
+                }
+                [] => None,
+                _ => {
+                    self.eject.panel_open = true;
+                    self.eject.message = None;
+                    None
+                }
+            },
             Action::Logout | Action::Reboot | Action::Poweroff => self.begin_ending(tile.action, now),
         }
+    }
+
+    /// Take the sticks the helper's file lists now. With none left there is
+    /// nothing for the panel to show.
+    pub fn set_removable(&mut self, sticks: Vec<crate::removable::Stick>) {
+        self.removable = sticks;
+        if self.removable.is_empty() {
+            self.eject.panel_open = false;
+        }
+    }
+
+    /// What the person did in the Eject panel.
+    pub fn eject_event(&mut self, event: EjectEvent) -> Option<Effect> {
+        match event {
+            EjectEvent::Close => {
+                self.eject.panel_open = false;
+                self.eject.message = None;
+                None
+            }
+            EjectEvent::One(disk) => self.start_eject(disk),
+            EjectEvent::All => self.start_eject("all".to_string()),
+        }
+    }
+
+    /// Ask the helper to release `target`: a disk the file lists, or `all`.
+    /// One eject runs at a time.
+    fn start_eject(&mut self, target: String) -> Option<Effect> {
+        if self.eject.running.is_some() || self.removable.is_empty() {
+            return None;
+        }
+        if target != "all" && !self.removable.iter().any(|s| s.disk == target) {
+            return None;
+        }
+        self.eject.known = self
+            .removable
+            .iter()
+            .map(|s| (s.disk.clone(), s.label().to_string()))
+            .collect();
+        let what = self.eject_name(&target);
+        self.log.note(Kind::Event, format!("Ejecting {what}."));
+        self.eject.running = Some(target.clone());
+        self.eject.message = None;
+        Some(Effect::Start(Job::Eject { target }))
+    }
+
+    /// How the messages call `target`: the stick's first name, or the sticks.
+    fn eject_name(&self, target: &str) -> String {
+        if target == "all" {
+            return "the sticks".to_string();
+        }
+        self.removable
+            .iter()
+            .find(|s| s.disk == target)
+            .map(|s| s.label().to_string())
+            .or_else(|| {
+                self.eject
+                    .known
+                    .iter()
+                    .find(|(d, _)| d == target)
+                    .map(|(_, n)| n.clone())
+            })
+            .unwrap_or_else(|| target.to_string())
+    }
+
+    /// The helper ended. The message stays in the panel and in the log.
+    pub fn eject_finished(&mut self, target: &str, r: crate::jobs::EjectResult) -> Option<Effect> {
+        use crate::jobs::EjectResult;
+        let what = self.eject_name(target);
+        let all = target == "all";
+        let (kind, message) = match r {
+            EjectResult::Done if all => (Kind::Event, "The sticks can be removed".to_string()),
+            EjectResult::Done => (Kind::Event, format!("{what} can be removed")),
+            EjectResult::Busy if all => (Kind::Warn, "The sticks are in use: close the files on them".to_string()),
+            EjectResult::Busy => (Kind::Warn, format!("{what} is in use: close the files on it")),
+            EjectResult::Failed(e) => (Kind::Warn, format!("Ejecting {what} failed: {e}")),
+        };
+        self.log.note(kind, format!("{message}."));
+        self.eject.message = Some(message);
+        self.eject.running = None;
+        self.eject.known.clear();
+        None
     }
 
     /// Log out, Restart or Power off: ask while programs or root jobs run,
@@ -1541,6 +1670,7 @@ impl Menu {
                 self.machine.facts_done(f, now);
                 None
             }
+            JobResult::Ejected { target, result } => self.eject_finished(&target, result),
             JobResult::Copied(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -4918,5 +5048,142 @@ mod tests {
             ok.settings(SettingsEvent::IdleTimeout(60)),
             Some(Effect::WriteScreen { idle: 60 })
         );
+    }
+}
+
+#[cfg(test)]
+mod eject_tests {
+    use super::*;
+    use crate::jobs::EjectResult;
+    use crate::removable::{Kind as StickKind, Stick};
+    use crate::tiles::{SourceFile, merge};
+
+    fn eject_menu() -> Menu {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-eject.desktop")).unwrap();
+        let tiles = merge(
+            &[SourceFile {
+                name: "70-eject.desktop".into(),
+                entry: crate::desktop::parse(&text),
+            }],
+            &[],
+        );
+        assert_eq!(tiles[0].action, Action::Eject);
+        Menu::new(
+            Grid {
+                tiles,
+                banner: Vec::new(),
+            },
+            false,
+        )
+    }
+
+    fn stick(disk: &str, name: &str) -> Stick {
+        Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            size_bytes: 16_000_000_000,
+            model: "Cruzer".into(),
+            kind: StickKind::Stick,
+        }
+    }
+
+    #[test]
+    fn eject_tile_hidden_without_sticks() {
+        let mut m = eject_menu();
+        assert!(!m.visible(0));
+        assert!(m.visible_tiles().is_empty());
+        assert_eq!(m.activate(0, Instant::now()), None);
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        m.set_removable(Vec::new());
+        assert!(!m.visible(0));
+    }
+
+    #[test]
+    fn eject_tile_shown_with_one() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert!(m.visible(0) && m.can_activate(0));
+    }
+
+    #[test]
+    fn one_stick_tap_ejects_at_once() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert_eq!(
+            m.activate(0, Instant::now()),
+            Some(Effect::Start(Job::Eject { target: "sdb".into() }))
+        );
+        assert!(!m.eject.panel_open);
+        assert_eq!(m.eject.running.as_deref(), Some("sdb"));
+        assert!(m.active(0) && !m.can_activate(0), "one eject at a time");
+    }
+
+    #[test]
+    fn several_sticks_tap_opens_panel() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        assert_eq!(m.activate(0, Instant::now()), None);
+        assert!(m.eject.panel_open && m.dialog());
+        assert_eq!(m.eject.running, None);
+        assert_eq!(
+            m.eject_event(EjectEvent::One("sdc".into())),
+            Some(Effect::Start(Job::Eject { target: "sdc".into() }))
+        );
+        assert_eq!(m.eject_event(EjectEvent::All), None, "one at a time");
+        m.eject_finished("sdc", EjectResult::Busy);
+        assert_eq!(
+            m.eject_event(EjectEvent::One("nope".into())),
+            None,
+            "only a listed disk"
+        );
+        m.eject_event(EjectEvent::Close);
+        assert!(!m.eject.panel_open && m.eject.message.is_none());
+    }
+
+    #[test]
+    fn eject_all_from_panel() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        m.activate(0, Instant::now());
+        assert_eq!(
+            m.eject_event(EjectEvent::All),
+            Some(Effect::Start(Job::Eject { target: "all".into() }))
+        );
+        m.set_removable(Vec::new());
+        assert!(!m.eject.panel_open, "nothing left to show");
+        m.eject_finished("all", EjectResult::Done);
+        assert_eq!(m.eject.message.as_deref(), Some("The sticks can be removed"));
+        assert_eq!(m.eject.running, None);
+    }
+
+    #[test]
+    fn eject_results() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK"), stick("sdc", "OTHER")]);
+        let msg = |m: &Menu| m.eject.message.clone().unwrap();
+        m.eject_finished("sdb", EjectResult::Done);
+        assert_eq!(msg(&m), "MYSTICK can be removed");
+        m.eject_finished("sdb", EjectResult::Busy);
+        assert_eq!(msg(&m), "MYSTICK is in use: close the files on it");
+        m.eject_finished("sdb", EjectResult::Failed("sdb2 is still mounted".into()));
+        assert_eq!(msg(&m), "Ejecting MYSTICK failed: sdb2 is still mounted");
+        m.eject_finished("all", EjectResult::Busy);
+        assert_eq!(msg(&m), "The sticks are in use: close the files on them");
+        // The helper drops the stick from its file before it ends.
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        let Some(Effect::Start(_)) = m.eject_event(EjectEvent::One("sdb".into())) else {
+            panic!("starts")
+        };
+        m.set_removable(Vec::new());
+        m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            Instant::now(),
+        );
+        assert_eq!(msg(&m), "MYSTICK can be removed");
+        assert_eq!(m.eject.running, None);
     }
 }

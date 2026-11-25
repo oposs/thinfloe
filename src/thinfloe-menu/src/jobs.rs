@@ -188,6 +188,11 @@ pub enum JobResult {
     MachineFacts(crate::machine::Facts),
     /// The This machine tab's rows reached the clipboard, or why not.
     Copied(Result<(), String>),
+    /// The eject of `target` (a disk or `all`) ended.
+    Ejected {
+        target: String,
+        result: EjectResult,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +249,9 @@ pub struct Paths {
     pub vainfo_cmd: Vec<String>,
     /// `wl-copy` (`TF_WL_COPY_CMD`), for the This machine tab's Copy.
     pub wl_copy_cmd: Vec<String>,
+    /// The automount helper's eject command and what runs it as root; the
+    /// disk (or `all`) follows.
+    pub eject_cmd: Vec<String>,
     /// Where /sys and /proc are, for the This machine tab's facts.
     pub hardware_roots: crate::hardware::Roots,
     /// The time tool, chronyc and the time files, for the Time band.
@@ -290,6 +298,54 @@ impl LabwcCmds {
             labwc_pid: var("LABWC_PID"),
             osd_socket: crate::osd::socket_path(),
         }
+    }
+}
+
+/// `thinfloe-automount eject <disk|all>`, as root; the target follows.
+pub fn default_eject_cmd() -> Vec<String> {
+    ["sudo", "-n", "/usr/libexec/thinfloe/thinfloe-automount", "eject"]
+        .map(String::from)
+        .to_vec()
+}
+
+/// How an eject ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EjectResult {
+    /// Every partition is unmounted and the stick can be pulled.
+    Done,
+    /// A program holds files on it; nothing changed.
+    Busy,
+    /// Anything else, in a few words.
+    Failed(String),
+}
+
+/// The log source of the eject helper's stderr.
+pub const EJECT_LOG_SOURCE: &str = "eject";
+const EJECT_BYTES: usize = 16 * 1024;
+/// Unmounting syncs the stick: a slow card takes its time.
+const EJECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run `cmd` for `target`, in a process group of its own. Exit 0 is done, 3
+/// busy; anything else fails with the helper's last line on stderr (it names
+/// the partitions left mounted), else the exit code.
+pub fn eject(cmd: &[String], target: &str, feed: &Arc<Feed>) -> EjectResult {
+    let args = [target.to_string()];
+    match capture_as(cmd, &args, EJECT_BYTES, EJECT_TIMEOUT, feed, EJECT_LOG_SOURCE, |_| {}) {
+        Err(e) => EjectResult::Failed(e),
+        Ok((_, Some(0), _)) => EjectResult::Done,
+        Ok((_, Some(3), _)) => EjectResult::Busy,
+        Ok((_, status, stderr)) => EjectResult::Failed(
+            stderr
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| match status {
+                    Some(n) => format!("exit {n}"),
+                    None => "ended by a signal".to_string(),
+                }),
+        ),
     }
 }
 
@@ -1866,6 +1922,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
@@ -1885,6 +1942,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
@@ -1904,6 +1962,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
@@ -2201,6 +2260,7 @@ mod tests {
                 pci_ids: PathBuf::from("/nonexistent/pci.ids"),
                 vainfo_cmd: vec!["/nonexistent/vainfo".into()],
                 wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+                eject_cmd: default_eject_cmd(),
                 hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
                 time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
             };
@@ -2231,6 +2291,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
@@ -2251,6 +2312,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };
@@ -2376,6 +2438,35 @@ mod tests {
         assert!(upgrade_check(&sh("exit 2"), None, &feed).is_err());
         assert!(upgrade_check(&sh("exit 0"), None, &feed).is_err(), "no lines");
         assert_eq!(default_upgrade_cmd(), ["sudo", "-n", "/usr/bin/thinfloe-upgrade"]);
+    }
+
+    #[test]
+    fn eject_maps_exit_codes() {
+        let feed = Arc::new(Feed::default());
+        assert_eq!(eject(&sh("exit 0"), "sdb", &feed), EjectResult::Done);
+        assert_eq!(eject(&sh("exit 3"), "sdb", &feed), EjectResult::Busy);
+        assert_eq!(
+            eject(
+                &sh("echo noise >&2; echo 'sdb2 is still mounted' >&2; exit 1"),
+                "sdb",
+                &feed
+            ),
+            EjectResult::Failed("sdb2 is still mounted".into())
+        );
+        assert_eq!(eject(&sh("exit 2"), "sdb", &feed), EjectResult::Failed("exit 2".into()));
+        assert!(matches!(
+            eject(&["/nonexistent/helper".to_string()], "sdb", &feed),
+            EjectResult::Failed(e) if e.contains("could not be started")
+        ));
+        // The target is the one argument after the command.
+        let echo: Vec<String> = ["/bin/sh", "-c", "test \"$*\" = 'all' || exit 1", "sh"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(eject(&echo, "all", &feed), EjectResult::Done);
+        assert_eq!(
+            default_eject_cmd(),
+            ["sudo", "-n", "/usr/libexec/thinfloe/thinfloe-automount", "eject"]
+        );
     }
 
     #[test]
@@ -2547,6 +2638,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(std::path::Path::new("/nonexistent")),
         };

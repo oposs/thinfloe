@@ -245,6 +245,7 @@ pub enum UiEvent {
     /// The person clicked the chip of a folded window (its toplevel id).
     Unfold(u64),
     Upgrade(UpgradeEvent),
+    Eject(crate::menu::EjectEvent),
 }
 
 /// Where the header, the grid and the log go on a screen.
@@ -681,6 +682,9 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             });
         });
         return chose.map(UiEvent::Retry);
+    }
+    if menu.eject.panel_open {
+        return crate::eject_ui::show(ui, menu).map(UiEvent::Eject);
     }
     show_screen(ui, menu, icons, chrome, now)
 }
@@ -2594,6 +2598,49 @@ mod tests {
         for want in ["ThinLinc could not be installed: HTTP 404", "Retry", "Later"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
+    }
+
+    #[test]
+    fn the_eject_panel_lists_each_stick_with_size_model_and_buttons() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-eject.desktop")).unwrap();
+        let grid = Grid {
+            tiles: crate::tiles::merge(
+                &[crate::tiles::SourceFile {
+                    name: "70-eject.desktop".into(),
+                    entry: crate::desktop::parse(&text),
+                }],
+                &[],
+            ),
+            banner: vec![],
+        };
+        let mut menu = Menu::new(grid, false);
+        let stick = |disk: &str, name: &str, model: &str, bytes: u64| crate::removable::Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            size_bytes: bytes,
+            model: model.into(),
+            kind: crate::removable::Kind::Stick,
+        };
+        menu.set_removable(vec![
+            stick("sdb", "MYSTICK", "Cruzer", 16_000_000_000),
+            stick("sdc", "CARD", "SD Reader", 7_800_000_000),
+        ]);
+        assert_eq!(menu.activate(0, Instant::now()), None);
+        let texts = texts_of(&menu, &[None]);
+        for want in [
+            "MYSTICK",
+            "16 GB",
+            "Cruzer",
+            "CARD",
+            "7.8 GB",
+            "SD Reader",
+            "Eject all",
+            "Close",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+        assert_eq!(texts.iter().filter(|t| *t == "Eject").count(), 2, "{texts:?}");
     }
 
     /// Four add-ons: waiting update, current, failed install, manual.

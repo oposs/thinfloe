@@ -441,6 +441,7 @@ mod tests {
             ("desktop.rs", include_str!("desktop.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("upgrade_ui.rs", include_str!("upgrade_ui.rs")),
+            ("eject_ui.rs", include_str!("eject_ui.rs")),
             ("network_ui.rs", include_str!("network_ui.rs")),
             ("monitors_ui.rs", include_str!("monitors_ui.rs")),
             ("deskflow_ui.rs", include_str!("deskflow_ui.rs")),
