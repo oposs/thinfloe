@@ -9,7 +9,7 @@
 - USB sticks, SD cards and USB disks are opened by themselves and appear under /media/tfuser, where ThinLinc's and OxuLnk's folder sharing can reach them. A card swapped in a card reader appears in place of the old one.
 - A new Eject tile appears while a stick or card is plugged in and tells when it is safe to pull it; with several plugged in, it lists them, each with its own Eject button, and offers Eject all. An ejected USB stick is switched off; a card reader stays on, ready for the next card.
 - Restart and Power off write pending data to the sticks first and show "Writing to …" while they do. A stick that is in use is reported like a failed home save, with the choice to wait or go on. After a minute the menu says "Releasing the sticks takes too long"; a release that still ends after that goes on with the restart or power off.
-- A note appears at the bottom of the screen for three seconds when a stick or card is plugged in ("MYSTICK connected"), when it has been ejected and can be pulled ("MYSTICK can be removed"), and when it was pulled without eject ("MYSTICK removed without eject — files may be lost"), the last one in the warning colour.
+- A note appears at the bottom of the screen for four seconds when a stick or card is plugged in ("MYSTICK connected"), when it has been ejected and can be pulled ("MYSTICK can be removed"), and when it was pulled without eject ("MYSTICK removed without eject — files may be lost"), the last one in the warning colour.
 
 ### Changed
 - Writing ThinFloe onto a stick that is open under /media/tfuser now closes it first instead of refusing it as mounted. A stick that is in use is refused with "the stick is in use", and a stick that was not written after all is opened again, shown as "Mounting the stick again" in Upgrade.
@@ -19,7 +19,6 @@
 - Settings → Sound showed notes about other keyboard settings under its switch, such as "Num Lock follows at the next start." It now shows only a note about turning the volume switch on or off.
 - After the session ended, the file `thinfloe-volume` could stay behind in the user's runtime directory when the volume was being changed at that moment. It is now always removed when the session ends.
 - On Settings → Keyboard and Settings → Sound, an error from a failed change stayed on screen after the setting was switched back to its saved value. It now goes away.
-
 - With only a network change being applied, Log out, Restart and Power off asked with "Add-ons are being changed" and "The add-on work is finished before you restart." They now say "Network settings are being applied" and "The network settings are applied before you restart.", and the waiting dialog names the network settings.
 
 ## 4.11.0 - 2026-11-25
