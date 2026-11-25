@@ -56,6 +56,14 @@ else
     bad "helper missing or not 0755 root: $line"
 fi
 
+for f in "$RULE" "$UNIT"; do
+    if grep -qE "^-rw-r--r-- +root/root .* squashfs-root/${f//./\\.}\$" "$LIST"; then
+        ok "$f is 0644 root"
+    else
+        bad "$f is not 0644 root"
+    fi
+done
+
 # 2. The rule and the unit exist; the unit is started by the rule only.
 [[ -f "$X/$RULE" ]] && ok "udev rule present" || bad "udev rule $RULE missing"
 [[ -f "$X/$UNIT" ]] && ok "unit present" || bad "unit $UNIT missing"
@@ -68,6 +76,17 @@ if [[ -f "$X/$UNIT" ]] && grep -qE '^\s*Before=' "$X/$UNIT"; then
     bad "unit declares Before="
 else
     ok "unit has no Before="
+fi
+
+# 2b. The rule's content: what it starts, and the change lines that make a
+# pulled card stop the unit and the next card start it.
+if [[ -f "$X/$RULE" ]]; then
+    for want in \
+        'ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="thinfloe-automount@%k.service"' \
+        'ACTION=="change", ENV{DEVTYPE}=="disk", ENV{ID_FS_USAGE}!="filesystem", ENV{SYSTEMD_READY}="0", GOTO="thinfloe_automount_end"' \
+        'ACTION=="change", ENV{ID_FS_USAGE}=="filesystem", ENV{SYSTEMD_READY}="1"'; do
+        if grep -qxF "$want" "$X/$RULE"; then ok "rule has: $want"; else bad "rule lacks: $want"; fi
+    done
 fi
 
 # 3. The unit's binding and commands.

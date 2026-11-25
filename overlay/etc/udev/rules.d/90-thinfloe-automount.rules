@@ -31,7 +31,12 @@ ENV{ID_BUS}=="usb", ENV{.TF_AUTOMOUNT}="1"
 KERNEL=="mmcblk*", ATTRS{type}=="SD", ENV{.TF_AUTOMOUNT}="1"
 ENV{.TF_AUTOMOUNT}!="1", GOTO="thinfloe_automount_end"
 
-ACTION=="change", ENV{ID_FS_USAGE}!="filesystem", ENV{SYSTEMD_READY}="0", GOTO="thinfloe_automount_end"
+# Only a whole disk goes not-ready: a pulled partition arrives as a remove event,
+# and a failed probe of a mounted partition must not stop its unit. udev keeps
+# SYSTEMD_READY in its database, so a change with a file system sets it back to
+# 1, or the next card in the reader would never become ready.
+ACTION=="change", ENV{DEVTYPE}=="disk", ENV{ID_FS_USAGE}!="filesystem", ENV{SYSTEMD_READY}="0", GOTO="thinfloe_automount_end"
+ACTION=="change", ENV{ID_FS_USAGE}=="filesystem", ENV{SYSTEMD_READY}="1"
 ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="thinfloe-automount@%k.service"
 
 LABEL="thinfloe_automount_end"
