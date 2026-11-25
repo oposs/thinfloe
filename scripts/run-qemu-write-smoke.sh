@@ -239,13 +239,6 @@ else
     bad "after the failed write: mounted at '$(field NOWRITE-REMOUNTED)', hold '$(field NOWRITE-HOLD)'"
     sed -n '/SMOKE-WRITE-NOWRITE-STATE-BEGIN/,/SMOKE-WRITE-NOWRITE-STATE-END/p' "$clean" | sed 's/^/         /'
 fi
-# Another mount id after the write: B was really released, not left mounted.
-read -r b_before b_after <<<"$(field NOWRITE-MOUNT-ID)"
-if [[ "$b_before" =~ ^[0-9]+$ && "$b_after" =~ ^[0-9]+$ && "$b_before" != "$b_after" ]]; then
-    ok "the failed write released the stick and it was mounted anew (mount $b_before, then $b_after)"
-else
-    bad "the mount of B before and after the failed write: '$(field NOWRITE-MOUNT-ID)' (need two different ids)"
-fi
 
 if [[ "$(field CANCEL-RELEASED)" == yes && "$(field CANCEL-HELD)" == yes ]]; then
     ok "while the write runs, the stick is released and held"

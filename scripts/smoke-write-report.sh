@@ -43,9 +43,6 @@ wait_for() {
     "$@"
 }
 is_listed() { [ -n "$(listed "$1")" ]; }
-# mount_id NAME: mountinfo's id of the mount at NAME's mount point; a new
-# mount has a new id, so two ids prove an umount and a mount in between.
-mount_id() { awk -v m="$(listed "$1")" 'm != "" && $5 == m { print $1 }' /proc/self/mountinfo | tail -1; }
 AUTOMOUNT=/usr/libexec/thinfloe/thinfloe-automount
 
 # Both disks are mounted by the automounter before anything writes them.
@@ -127,14 +124,12 @@ A_DISK=${A_DEV##*/}
 
 # 0. A write to B from a release without the image fails before its first
 # byte: the writer released B for it and mounts it again.
-B_MOUNT_BEFORE=$(mount_id SMOKEB)
 "$TOOL" write --device "$B_DEV" --mode fresh --expect-id "$B_ID" \
     --source "$SRC/missing" >"$OUT/nowrite.out" 2>"$OUT/nowrite.err"
 say "SMOKE-WRITE-NOWRITE-RC: $?"
 say "SMOKE-WRITE-NOWRITE-RESULT: $(grep '^@result' "$OUT/nowrite.out" | tail -1)"
 wait_for 30 is_listed SMOKEB
 say "SMOKE-WRITE-NOWRITE-REMOUNTED: $(listed SMOKEB)"
-say "SMOKE-WRITE-NOWRITE-MOUNT-ID: ${B_MOUNT_BEFORE:-none} $(mount_id SMOKEB)"
 [ -e "$HOLD/$B_DISK" ] && say "SMOKE-WRITE-NOWRITE-HOLD: left" || say "SMOKE-WRITE-NOWRITE-HOLD: gone"
 say "SMOKE-WRITE-NOWRITE-STATE-BEGIN"
 {

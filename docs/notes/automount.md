@@ -180,8 +180,7 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   powers it off; both give a `clean` event.
 - `make qemu-smoke-write`: both target sticks carry vfat and are
   automounted before the writes; a write from a release without the image
-  fails before its first byte and the stick is mounted again, with another
-  mount id (so it was released); while the
+  fails before its first byte and the stick is mounted again; while the
   cancelled write runs the stick is released and held, and the hold is gone
   after it; the ThinFloe stick written is not mounted, and an `add` of it by
   hand after the hold is gone is refused as "ThinFloe stick".
