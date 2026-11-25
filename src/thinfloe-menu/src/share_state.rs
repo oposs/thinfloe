@@ -31,14 +31,14 @@ const MAX_BYTES: u64 = 64 * 1024;
 /// the daemon's start still counts as written by it.
 const MTIME_SLACK: Duration = Duration::from_secs(1);
 
-/// `thinfloe-share` with no arguments. It starts with SIGHUP blocked and
-/// unblocks it once its handler is set. A reload reaches the daemon only:
-/// its radio helper runs in the same group, under sudo, which relays
-/// signals to it.
 /// The menu's pid for the daemon, so a daemon whose menu died before it set
 /// PR_SET_PDEATHSIG exits at once; `thinfloe-share` reads the same name.
 pub const PARENT_ENV: &str = "TF_SHARE_PARENT";
 
+/// `thinfloe-share` with no arguments. It starts with SIGHUP blocked and
+/// unblocks it once its handler is set. A reload reaches the daemon only:
+/// its radio helper runs in the same group, under sudo, which relays
+/// signals to it.
 pub const SHARE: Daemon = Daemon {
     source: LOG_SOURCE,
     label: "FloeDrop",
