@@ -11,7 +11,8 @@ use shadcn_egui::icons::lucide;
 
 use super::surface::{Placement, mark_placement, note_placement, panel_placement};
 use crate::brand::{
-    self, MARK_ICON, OSD_BAR_GAP, OSD_BAR_H, OSD_GAP, OSD_ICON, OSD_PAD_X, OSD_PAD_Y, OSD_TEXT_PT, role,
+    self, MARK_ICON, OSD_BAR_GAP, OSD_BAR_H, OSD_GAP, OSD_ICON, OSD_NOTE_MAX_W, OSD_NOTE_ROWS, OSD_NOTE_SIDE,
+    OSD_PAD_X, OSD_PAD_Y, OSD_TEXT_PT, OSD_W, role,
 };
 use crate::raster::{Canvas, Textures};
 
@@ -32,8 +33,8 @@ pub enum PanelView {
     BrightnessUnsupported,
     /// The brightness key was pressed before detection finished.
     BrightnessUnknown,
-    /// A text from another program: one row, no icon, cut where it does
-    /// not fit.
+    /// A text from another program: up to `OSD_NOTE_ROWS` rows, no icon,
+    /// cut with an ellipsis where it does not fit.
     Note {
         warn: bool,
         text: String,
@@ -51,10 +52,11 @@ impl PanelView {
 }
 
 impl PanelView {
-    /// Where the panel goes and how large it is at `scale`.
-    pub fn placement(&self, scale: f32) -> Placement {
+    /// Where the panel goes at `scale`, for a canvas of `size` from
+    /// `Painter::panel_on` (a note is as large as its text).
+    pub fn placement(&self, scale: f32, size: (u32, u32)) -> Placement {
         match self {
-            PanelView::Note { .. } => note_placement(scale),
+            PanelView::Note { .. } => note_placement(scale, size),
             v => panel_placement(scale, v.has_bar()),
         }
     }
@@ -145,26 +147,51 @@ fn border(ui: &Ui, rect: Rect, color: Color32, scale: f32) {
         .rect_stroke(rect, 0.0, Stroke::new(w, color), StrokeKind::Inside);
 }
 
-/// A note: the frame and one row of text, cut with an ellipsis at the
-/// right padding, amber for a warning.
+/// A note's text wrapped to `max_width` points: at most `OSD_NOTE_ROWS`
+/// rows, broken between words where it can, the rest cut with an ellipsis.
+fn note_job(text: &str, color: Color32, max_width: f32) -> LayoutJob {
+    let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(brand::geo(OSD_TEXT_PT), color));
+    job.wrap.max_width = max_width.max(1.0);
+    job.wrap.max_rows = OSD_NOTE_ROWS;
+    job.wrap.overflow_character = Some('\u{2026}');
+    job
+}
+
+/// How a note's text fits its panel: the canvas size in pixels, the rows
+/// it takes and whether it had to be cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteFit {
+    pub size: (u32, u32),
+    pub rows: usize,
+    pub elided: bool,
+}
+
+/// The widest a note's panel may be at `scale` on an output
+/// `output_width` wide (surface pixels), in pixels.
+fn note_max_width(scale: f32, output_width: Option<u32>) -> f32 {
+    let widest = snap(OSD_NOTE_MAX_W, scale) * scale;
+    match output_width {
+        Some(w) => widest.min(w as f32 - 2.0 * snap(OSD_NOTE_SIDE, scale) * scale).max(1.0),
+        None => widest,
+    }
+}
+
+/// A note: the frame and its text, centred between the paddings, amber
+/// for a warning.
 fn note_ui(ui: &mut Ui, warn: bool, text: &str, scale: f32) {
     let t = Theme::current(ui.ctx());
     let p = t.palette();
     let all = ui.ctx().content_rect();
     let s = |v: f32| snap(v, scale);
-    let (pad_x, pad_y, icon) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_ICON));
+    let pad_x = s(OSD_PAD_X);
     ui.painter().rect_filled(all, 0.0, p.card);
     border(ui, all, p.border, scale);
     let color = if warn { t.role(role::WARN) } else { p.foreground };
-    let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(brand::geo(OSD_TEXT_PT), color));
-    job.wrap.max_width = (all.width() - 2.0 * pad_x).max(1.0);
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some('\u{2026}');
-    let galley = ui.painter().layout_job(job);
-    let mid = pad_y + icon / 2.0;
-    let pos = Pos2::new(pad_x, mid - galley.size().y / 2.0);
-    ui.painter().galley(pos, galley, color);
+    let galley = ui
+        .painter()
+        .layout_job(note_job(text, color, all.width() - 2.0 * pad_x));
+    let top = s((all.height() - galley.size().y) / 2.0);
+    ui.painter().galley(Pos2::new(pad_x, top), galley, color);
 }
 
 fn panel_ui(ui: &mut Ui, v: &PanelView, scale: f32) {
@@ -247,10 +274,45 @@ impl Painter {
         }
     }
 
-    /// The panel for `v` at `scale`, as large as `panel_placement` says.
+    /// The panel for `v` at `scale`, on an output of unknown width.
     pub fn panel(&mut self, v: &PanelView, scale: f32) -> Canvas {
-        let size = v.placement(scale).size;
+        self.panel_on(v, scale, None)
+    }
+
+    /// The panel for `v` at `scale` on an output `output_width` wide: as
+    /// large as `panel_placement` says, a note as large as `note_fit`.
+    pub fn panel_on(&mut self, v: &PanelView, scale: f32, output_width: Option<u32>) -> Canvas {
+        let size = match v {
+            PanelView::Note { text, .. } => self.note_fit(text, scale, output_width).size,
+            v => panel_placement(scale, v.has_bar()).size,
+        };
         self.render(size, scale, |ui| panel_ui(ui, v, scale))
+    }
+
+    /// The size of a note's panel for `text`: as wide as the text and its
+    /// paddings, at least `OSD_W` and at most `note_max_width`; one row
+    /// is as high as a key's panel without a bar, more rows add theirs.
+    pub fn note_fit(&mut self, text: &str, scale: f32, output_width: Option<u32>) -> NoteFit {
+        let s = |v: f32| snap(v, scale);
+        let (pad_x, pad_y, icon) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_ICON));
+        let widest = note_max_width(scale, output_width);
+        let narrowest = (s(OSD_W) * scale).min(widest);
+        let max_text = widest / scale - 2.0 * pad_x;
+        let mut measured = (Vec2::ZERO, 0, false);
+        let size = (widest.ceil() as u32, panel_placement(scale, false).size.1);
+        self.measure(size, scale, |ui| {
+            let g = ui.painter().layout_job(note_job(text, Color32::TRANSPARENT, max_text));
+            measured = (g.size(), g.rows.len(), g.elided);
+        });
+        let (text_size, rows, elided) = measured;
+        let w = ((text_size.x + 2.0 * pad_x) * scale).ceil().clamp(narrowest, widest);
+        let text_h = if rows > 1 { text_size.y.max(icon) } else { icon };
+        let h = ((2.0 * pad_y + text_h) * scale).round();
+        NoteFit {
+            size: (w as u32, h as u32),
+            rows,
+            elided,
+        }
     }
 
     /// The muted-microphone mark at `scale`, as large as `mark_placement`.
@@ -259,8 +321,16 @@ impl Painter {
         self.render(size, scale, |ui| mark_ui(ui, scale))
     }
 
-    fn render(&mut self, size: (u32, u32), scale: f32, mut draw: impl FnMut(&mut Ui)) -> Canvas {
-        let (w, h) = (size.0 as usize, size.1 as usize);
+    /// One pass of `draw` that is not rasterised: for laying out text.
+    fn measure(&mut self, size: (u32, u32), scale: f32, mut draw: impl FnMut(&mut Ui)) {
+        let mut out = self.ctx.run_ui(Self::input(size, scale), |ui| draw(ui));
+        // The font atlas may have grown: keep the textures in step.
+        self.textures.apply_set(&out.textures_delta);
+        self.textures.apply_free(&out.textures_delta);
+        out.textures_delta.clear();
+    }
+
+    fn input(size: (u32, u32), scale: f32) -> egui::RawInput {
         let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -273,7 +343,12 @@ impl Painter {
             .entry(ViewportId::ROOT)
             .or_default()
             .native_pixels_per_point = Some(scale);
-        let mut out = self.ctx.run_ui(input, |ui| draw(ui));
+        input
+    }
+
+    fn render(&mut self, size: (u32, u32), scale: f32, mut draw: impl FnMut(&mut Ui)) -> Canvas {
+        let (w, h) = (size.0 as usize, size.1 as usize);
+        let mut out = self.ctx.run_ui(Self::input(size, scale), |ui| draw(ui));
         let ppp = out.pixels_per_point;
         self.textures.apply_set(&out.textures_delta);
         let prims = self.ctx.tessellate(out.shapes, ppp);
@@ -365,9 +440,16 @@ mod tests {
     }
 
     #[test]
-    fn a_note_panel_is_wide_and_one_row_high() {
-        let c = Painter::new().panel(&note(false, "From Anna: a.pdf"), 1.0);
-        assert_eq!((c.width as u32, c.height as u32), note_placement(1.0).size);
+    fn a_short_note_panel_is_one_row_high() {
+        let mut p = Painter::new();
+        let fit = p.note_fit("From Anna: a.pdf", 1.0, None);
+        assert_eq!(fit.rows, 1);
+        assert!(!fit.elided);
+        // As high as a key's panel without a bar, at least as wide.
+        assert_eq!(fit.size.1, panel_placement(1.0, false).size.1);
+        assert!(fit.size.0 >= panel_placement(1.0, false).size.0);
+        let c = p.panel(&note(false, "From Anna: a.pdf"), 1.0);
+        assert_eq!((c.width as u32, c.height as u32), fit.size);
         assert_eq!(c.height, 46);
         // The text is drawn, in the foreground colour, left of the middle.
         let fg = Theme::current(&Painter::new().ctx).palette().foreground;
@@ -382,8 +464,52 @@ mod tests {
         assert!(!any(&c, (16, 200), (10, 36), WARN));
     }
 
+    /// The longest texts `thinfloe-share` sends, with a long sender name.
+    const LONGEST: [&str; 3] = [
+        "Files from Jane Appleseed's iPhone 16 Pro Max refused: the FloeDrop folder is full",
+        "IMG_20261125_154233_0042.HEIC received from Jane Appleseed's iPhone 16 Pro Max",
+        "Files from Jane Appleseed's iPhone 16 Pro Max could not be received",
+    ];
+
+    #[test]
+    fn the_longest_floedrop_notes_show_whole() {
+        let mut p = Painter::new();
+        for scale in [1.0, 1.5, 2.0] {
+            for text in LONGEST {
+                let fit = p.note_fit(text, scale, Some(1280));
+                assert!(!fit.elided, "{text:?} cut at scale {scale}");
+                assert!(fit.rows <= OSD_NOTE_ROWS);
+            }
+        }
+        // A two-row note is higher than one row and fits its canvas.
+        let two = format!("{} {}", LONGEST[0], LONGEST[1]);
+        let fit = p.note_fit(&two, 1.0, None);
+        assert_eq!(fit.rows, 2);
+        assert!(fit.size.1 > panel_placement(1.0, false).size.1);
+        let c = p.panel(&note(true, &two), 1.0);
+        assert_eq!((c.width as u32, c.height as u32), fit.size);
+        // Both rows are drawn: amber text in the upper and the lower half.
+        let half = c.height / 2;
+        assert!(any(&c, (16, c.width - 16), (4, half), WARN));
+        assert!(any(&c, (16, c.width - 16), (half, c.height - 4), WARN));
+    }
+
+    #[test]
+    fn a_note_panel_stays_inside_a_narrow_output() {
+        let mut p = Painter::new();
+        let fit = p.note_fit(LONGEST[0], 2.0, Some(1024));
+        assert!(fit.size.0 <= 1024 - 2 * 44, "{fit:?}");
+        let two = format!("{} {}", LONGEST[0], LONGEST[1]);
+        let wide = p.note_fit(&two, 1.0, Some(3840));
+        assert_eq!(wide.rows, 2);
+        assert!(wide.size.0 <= 720, "{wide:?}");
+    }
+
     #[test]
     fn a_long_note_is_cut_inside_the_panel() {
+        let fit = Painter::new().note_fit(&"x".repeat(200), 1.0, None);
+        assert!(fit.elided);
+        assert_eq!(fit.rows, OSD_NOTE_ROWS);
         let long = "x".repeat(200);
         let c = Painter::new().panel(&note(false, &long), 1.0);
         let card = TILE;
@@ -439,6 +565,8 @@ mod tests {
                 "note-warn",
                 note(true, "No space left for a-very-long-file-name-that-is-cut.pdf"),
             ),
+            ("note-two-rows", note(true, &format!("{} {}", LONGEST[0], LONGEST[1]))),
+            ("note-cut", note(false, &"IMG_0042.HEIC ".repeat(14))),
         ];
         for s in [1.0, 2.0] {
             for (name, v) in &views {
