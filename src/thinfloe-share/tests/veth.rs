@@ -259,11 +259,13 @@ fn send_to_owly_receiver() {
             folder.is_dir()
         })
         .await;
-        assert!(
-            env.state().contains("\nSam's Mac\tSam's Mac\tidle\t"),
-            "{}",
-            env.state()
-        );
+        // The daemon makes the folder before it writes the state file.
+        until(
+            Duration::from_secs(10),
+            "the device in the state file",
+            || env.state().contains("\nSam's Mac\tSam's Mac\tidle\t"),
+        )
+        .await;
 
         std::fs::write(folder.join("a.txt"), b"one").unwrap();
         std::fs::write(folder.join("b.txt"), b"two").unwrap();
