@@ -9,6 +9,7 @@
 ### Fixed
 - Settings → Sound showed notes about other keyboard settings under its switch, such as "Num Lock follows at the next start." It now shows only a note about turning the volume switch on or off.
 - After the session ended, the file `thinfloe-volume` could stay behind in the user's runtime directory when the volume was being changed at that moment. It is now always removed when the session ends.
+- On Settings → Keyboard and Settings → Sound, an error from a failed change stayed on screen after the setting was switched back to its saved value. It now goes away.
 
 ## 4.11.0 - 2026-11-25
 
