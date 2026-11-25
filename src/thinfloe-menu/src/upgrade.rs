@@ -17,6 +17,47 @@ use crate::upgrade_proto::Msg;
 pub const POLL: Duration = Duration::from_secs(2);
 /// Most steps shown; an unplanned step past this is not added.
 pub const STEPS_MAX: usize = 16;
+/// Most file names kept from the tool's `contents`, and the longest name
+/// (the tool cuts at 80 characters; this is the menu's own bound).
+pub const CONTENTS_MAX: usize = 20;
+const CONTENTS_NAME_MAX: usize = 96;
+
+/// The top-level files on an automounted stick, for the erase confirmation.
+/// Every state leaves the Erase button as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Contents {
+    /// Nothing asked: not an erase, or a stick the automounter has not mounted.
+    #[default]
+    None,
+    Loading,
+    Listed {
+        entries: Vec<String>,
+        more: usize,
+    },
+    Failed,
+}
+
+/// The JSON of `thinfloe-upgrade contents`; untrusted: entries are
+/// counted, cut and only strings are kept.
+pub fn parse_contents(text: &str) -> Contents {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Contents::Failed;
+    };
+    if v.get("error").is_some_and(|e| !e.is_null()) {
+        return Contents::Failed;
+    }
+    let Some(list) = v.get("entries").and_then(|e| e.as_array()) else {
+        return Contents::Failed;
+    };
+    let entries = list
+        .iter()
+        .filter_map(|e| e.as_str())
+        .take(CONTENTS_MAX)
+        .map(|s| s.chars().take(CONTENTS_NAME_MAX).collect())
+        .collect();
+    let more = v.get("more").and_then(|m| m.as_u64()).unwrap_or(0).min(1 << 32) as usize;
+    Contents::Listed { entries, more }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
@@ -93,6 +134,10 @@ pub enum Request {
     },
     Drives {
         all: bool,
+    },
+    /// `contents --device`: the files an erase of this drive removes.
+    Contents {
+        device: String,
     },
     Write {
         args: Vec<String>,
@@ -202,6 +247,11 @@ pub struct Upgrade {
     /// person chooses a drive.
     prefer_boot: bool,
     pub notes: Notes,
+    /// The files on the chosen automounted stick when an erase is open.
+    pub contents: Contents,
+    /// The (device, id) `contents` was asked for: asked once per choice,
+    /// not at every drive refresh.
+    contents_for: Option<(String, String)>,
 }
 
 impl Default for Upgrade {
@@ -243,6 +293,8 @@ impl Upgrade {
             done_version: None,
             prefer_boot: false,
             notes: Notes::Closed,
+            contents: Contents::None,
+            contents_for: None,
         }
     }
 
@@ -282,6 +334,9 @@ impl Upgrade {
     /// A `Drives` request when one is due: only while choosing, and only
     /// when no drives job runs.
     pub fn poll(&mut self, now: Instant) -> Option<Request> {
+        if let Some(r) = self.want_contents() {
+            return Some(r);
+        }
         if self.stage != Stage::Choose || self.listing {
             return None;
         }
@@ -1021,6 +1076,42 @@ impl Upgrade {
         Some(Request::Notes { from, to, only })
     }
 
+    /// A `Contents` request when an erase of an automounted stick has just
+    /// been opened: the choice names a drive in mode Fresh and nothing was
+    /// asked for it yet. Leaving the erase clears the answer.
+    fn want_contents(&mut self) -> Option<Request> {
+        let want = match (self.stage == Stage::Choose, self.mode) {
+            (true, Some(Mode::Fresh)) => self
+                .chosen_drive()
+                .filter(|d| d.automounted)
+                .map(|d| (d.device.clone(), d.id.clone())),
+            _ => None,
+        };
+        if want == self.contents_for {
+            return None;
+        }
+        self.contents_for = want.clone();
+        match want {
+            Some((device, _)) => {
+                self.contents = Contents::Loading;
+                Some(Request::Contents { device })
+            }
+            None => {
+                self.contents = Contents::None;
+                None
+            }
+        }
+    }
+
+    /// The answer to a `Contents` request; dropped unless it answers the
+    /// one asked for last.
+    pub fn on_contents(&mut self, device: &str, c: Contents) {
+        let asked = self.contents_for.as_ref().is_some_and(|(d, _)| d == device);
+        if asked && self.contents == Contents::Loading {
+            self.contents = c;
+        }
+    }
+
     /// The answer to a `Notes` request. Dropped unless it answers the load
     /// that runs now: the dialog was closed or asks for other versions.
     pub fn on_notes(&mut self, from: Option<String>, to: String, only: bool, r: Result<Option<String>, String>) {
@@ -1203,6 +1294,143 @@ mod tests {
             Some(Request::Write { args }) => args,
             other => panic!("not a write: {other:?}"),
         }
+    }
+
+    fn automounted(device: &str, id: &str) -> Drive {
+        Drive {
+            automounted: true,
+            ..stick(device, id)
+        }
+    }
+
+    fn contents_req(device: &str) -> Option<Request> {
+        Some(Request::Contents { device: device.into() })
+    }
+
+    #[test]
+    fn contents_is_asked_once_when_the_erase_opens() {
+        let (mut u, t) = ready(vec![automounted("/dev/sdb", "sn-A:1:1")]);
+        assert_eq!(u.poll(t), None, "nothing chosen yet");
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        assert_eq!(u.mode, Some(Mode::Fresh));
+        assert_eq!(u.poll(t), contents_req("/dev/sdb"));
+        assert_eq!(u.contents, Contents::Loading);
+        // The 2 s refreshes list the same stick: no second request.
+        let t2 = t + POLL;
+        assert_eq!(u.poll(t2), Some(Request::Drives { all: false }));
+        u.drives_listed(false, Ok(vec![automounted("/dev/sdb", "sn-A:1:1")]), t2);
+        assert_eq!(u.poll(t2 + POLL), Some(Request::Drives { all: false }));
+        assert_eq!(u.contents, Contents::Loading);
+    }
+
+    #[test]
+    fn contents_is_not_asked_for_a_stick_without_automount() {
+        let (mut u, t) = ready(vec![stick("/dev/sdb", "sn-A:1:1")]);
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        assert_eq!(u.poll(t + POLL), Some(Request::Drives { all: false }));
+        assert_eq!(u.contents, Contents::None);
+    }
+
+    #[test]
+    fn contents_is_not_asked_for_an_upgrade() {
+        let up = Drive {
+            is_thinfloe: true,
+            version: Some("4.0.0".into()),
+            ..automounted("/dev/sdb", "sn-A:1:1")
+        };
+        let (mut u, t) = ready(vec![up]);
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        assert_eq!(u.mode, Some(Mode::Upgrade));
+        assert!(!matches!(u.poll(t), Some(Request::Contents { .. })));
+        assert_eq!(u.contents, Contents::None);
+    }
+
+    #[test]
+    fn the_answer_is_kept_and_leaving_the_erase_clears_it() {
+        let (mut u, t) = ready(vec![automounted("/dev/sdb", "sn-A:1:1")]);
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        u.poll(t);
+        let listed = Contents::Listed {
+            entries: vec!["a.txt".into()],
+            more: 0,
+        };
+        u.on_contents("/dev/sdc", Contents::Failed);
+        assert_eq!(u.contents, Contents::Loading, "another device's answer is dropped");
+        u.on_contents("/dev/sdb", listed.clone());
+        assert_eq!(u.contents, listed);
+        // A repeated poll does not start it again; a second answer is dropped.
+        assert_ne!(u.poll(t), contents_req("/dev/sdb"));
+        u.on_contents("/dev/sdb", Contents::Failed);
+        assert_eq!(u.contents, listed);
+        u.clear_choice();
+        u.poll(t);
+        assert_eq!(u.contents, Contents::None);
+        // Choosing it again asks again.
+        ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+        assert_eq!(u.poll(t), contents_req("/dev/sdb"));
+    }
+
+    #[test]
+    fn erase_works_in_every_contents_state() {
+        for c in [
+            Contents::None,
+            Contents::Loading,
+            Contents::Failed,
+            Contents::Listed {
+                entries: vec!["x".into()],
+                more: 3,
+            },
+        ] {
+            let (mut u, t) = ready(vec![automounted("/dev/sdb", "sn-A:1:1")]);
+            ev(&mut u, UpgradeEvent::Choose("/dev/sdb".into()), t);
+            u.poll(t);
+            u.contents = c.clone();
+            assert!(u.can_confirm(), "{c:?}");
+            write_of(ev(&mut u, UpgradeEvent::Confirm, t));
+        }
+    }
+
+    #[test]
+    fn parse_contents_reads_the_tool_json() {
+        assert_eq!(
+            parse_contents(r#"{"device":"/dev/sdb","entries":["a","b/"],"more":5,"error":null}"#),
+            Contents::Listed {
+                entries: vec!["a".into(), "b/".into()],
+                more: 5
+            }
+        );
+        assert_eq!(
+            parse_contents(r#"{"device":"/dev/sdb","entries":[],"more":0,"error":null}"#),
+            Contents::Listed {
+                entries: vec![],
+                more: 0
+            }
+        );
+        for bad in [
+            r#"{"entries":[],"more":0,"error":"could not read the stick"}"#,
+            "not json",
+            "",
+            r#"{"more":1}"#,
+        ] {
+            assert_eq!(parse_contents(bad), Contents::Failed, "{bad}");
+        }
+    }
+
+    #[test]
+    fn parse_contents_bounds_what_it_keeps() {
+        let many: Vec<String> = (0..50).map(|i| format!("\"f{i}\"")).collect();
+        let long = "n".repeat(500);
+        let json = format!(r#"{{"entries":[{},"{long}",7],"more":9}}"#, many.join(","));
+        let Contents::Listed { entries, more } = parse_contents(&json) else {
+            panic!()
+        };
+        assert_eq!(entries.len(), CONTENTS_MAX);
+        assert_eq!(more, 9);
+        let json = format!(r#"{{"entries":["{long}"],"more":0}}"#);
+        let Contents::Listed { entries, .. } = parse_contents(&json) else {
+            panic!()
+        };
+        assert_eq!(entries[0].chars().count(), 96);
     }
 
     /// A fresh write of `/dev/sdb` that has started.

@@ -6485,6 +6485,56 @@ mod tests {
         );
     }
 
+    /// The erase of an automounted stick open, with `contents` as the tool answered.
+    fn erase_with_contents(c: crate::upgrade::Contents) -> Menu {
+        let now = Instant::now();
+        let mut drives = three_drives();
+        drives[1].automounted = true;
+        let mut menu = upgrade_open(unknown_release(), drives, false, now);
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
+        menu.tick(now);
+        menu.finished(
+            crate::jobs::JobResult::Contents {
+                device: "/dev/sdb".into(),
+                contents: c,
+            },
+            now,
+        );
+        menu
+    }
+
+    #[test]
+    fn confirmation_lists_files() {
+        use crate::upgrade::Contents;
+        let listed = Contents::Listed {
+            entries: vec!["holiday.jpg".into(), "docs/".into()],
+            more: 5,
+        };
+        let texts = all_texts(&upgrade_shapes(&erase_with_contents(listed), 1280.0, 2000.0));
+        let pos = |s: &str| {
+            texts
+                .iter()
+                .position(|t| t == s)
+                .unwrap_or_else(|| panic!("{s:?} not in {texts:?}"))
+        };
+        assert!(pos("These files will be erased:") < pos("holiday.jpg"));
+        assert!(pos("holiday.jpg") < pos("docs/"));
+        assert!(pos("docs/") < pos("and 5 more"));
+    }
+
+    #[test]
+    fn without_a_list_the_erase_still_works() {
+        use crate::upgrade::Contents;
+        for c in [Contents::Loading, Contents::Failed, Contents::None] {
+            let menu = erase_with_contents(c.clone());
+            let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 2000.0));
+            assert!(!texts.iter().any(|t| t.contains("will be erased")), "{c:?}: {texts:?}");
+            assert!(menu.upgrade.can_confirm(), "{c:?}");
+            assert!(texts.iter().any(|t| t.contains("Erase SanDisk Cruzer")), "{c:?}");
+        }
+    }
+
     #[test]
     fn an_invalid_address_says_so_beside_the_release() {
         let now = Instant::now();

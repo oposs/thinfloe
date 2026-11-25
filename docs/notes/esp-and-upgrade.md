@@ -34,7 +34,15 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   refuses a drive that is not in that list (internal ones need
   `--allow-internal`), whose `id` differs from `--expect-id`, or that is
   mounted (fresh mode: always; upgrade mode: unless it is the boot stick),
-  with exit 2. Progress goes to stdout as `@step <id> <text>`, `@progress
+  with exit 2. `contents --device DEV` (read only, no lock) prints
+  `{"device", "entries", "more", "error"}` for the erase confirmation: the
+  top-level names (directories end in `/`, at most 20 in all, longer names cut
+  at 80 characters) of the automounted partitions of DEV's disk, taken from
+  `/run/thinfloe/removable` and only below `/media/tfuser`. With several
+  partitions each name starts with the partition's name and the first
+  partition may use up the list. The listing runs in a child of its own and is
+  killed after 3 s (`error` is "could not read the stick", exit still 0). The
+  menu asks once when an erase of an automounted stick opens. Progress goes to stdout as `@step <id> <text>`, `@progress
   <done> <total or ->`, `@done <id>`, `@touched` (a fresh write's first byte) and one
   `@result ok|failed <reason>`;
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write

@@ -13,6 +13,7 @@
 
 ### Changed
 - Writing ThinFloe onto a stick that is open under /media/tfuser now closes it first instead of refusing it as mounted. A stick that is in use is refused with "the stick is in use", and a stick that was not written after all is opened again.
+- Before an erase of a stick that is open under /media/tfuser, the confirmation in Upgrade lists the files on it ("These files will be erased:", up to 20 names, then "and N more"). If the stick cannot be read in time, the list is left out and Erase works as before.
 
 ### Fixed
 - Settings → Sound showed notes about other keyboard settings under its switch, such as "Num Lock follows at the next start." It now shows only a note about turning the volume switch on or off.

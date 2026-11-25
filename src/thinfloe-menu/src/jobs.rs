@@ -137,6 +137,11 @@ pub enum JobResult {
         all: bool,
         result: Result<Vec<Drive>, String>,
     },
+    /// The files on an automounted stick, for the erase confirmation.
+    Contents {
+        device: String,
+        contents: crate::upgrade::Contents,
+    },
     /// The release check; `custom` is true when it used an address typed in.
     Release {
         custom: bool,
@@ -828,6 +833,21 @@ pub fn upgrade_drives(cmd: &[String], all: bool, feed: &Arc<Feed>) -> Result<Vec
         });
     }
     drives::parse(&text)
+}
+
+/// Output limit and longest wait of `contents`: the tool answers within its
+/// own 3 s (and cuts every name), a little more covers `sudo`.
+pub const CONTENTS_BYTES: usize = 64 * 1024;
+pub const CONTENTS_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The top-level files of an automounted stick: `contents --device DEV`.
+/// Any problem is `Failed`: the list is a courtesy, never a gate.
+pub fn upgrade_contents(cmd: &[String], device: &str, feed: &Arc<Feed>) -> crate::upgrade::Contents {
+    let args = vec!["contents".to_string(), "--device".to_string(), device.to_string()];
+    match capture(cmd, &args, CONTENTS_BYTES, CONTENTS_TIMEOUT, feed) {
+        Ok((text, Some(0))) => crate::upgrade::parse_contents(&text),
+        _ => crate::upgrade::Contents::Failed,
+    }
 }
 
 /// The latest release: `check [--source URL]`. Exit 0 and 1 both carry the

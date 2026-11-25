@@ -102,6 +102,14 @@ for d in json.load(open(sys.argv[1])):
               "automounted=%s" % str(d.get("automounted")).lower(), end=" ")
 ' "$OUT/drives.json" 2>&1)"
 
+# The erase confirmation lists the files of an automounted stick: B gets one,
+# `contents` must name it (and takes no lock, so it also answers at any time).
+if [ -n "$B_DEV" ]; then
+    echo smoke >"$(listed SMOKEB)/NOTE.TXT" 2>/dev/null
+    sync
+    say "SMOKE-WRITE-CONTENTS-B: $("$TOOL" contents --device "$B_DEV" 2>&1)"
+fi
+
 if [ -z "$A_DEV" ] || [ -z "$B_DEV" ]; then
     say "SMOKE-WRITE-DRIVES-BEGIN"
     cat "$OUT/drives.json" "$OUT/drives.err" >"$CONSOLE" 2>&1

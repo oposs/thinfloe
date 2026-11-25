@@ -3513,5 +3513,153 @@ class TestFreshInstallAutomount(unittest.TestCase):
         self.assertIn("in use", outcome.reason)
 
 
+class TestContents(unittest.TestCase):
+    """`contents --device DEV`: the top-level files of an automounted stick."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.media = os.path.realpath(os.path.join(self.tmp.name, "media"))
+        os.makedirs(self.media)
+        self.removable = os.path.join(self.tmp.name, "removable")
+        env = mock.patch.dict(os.environ, {
+            "TF_REMOVABLE": self.removable, "TF_MEDIA": self.media})
+        env.start()
+        self.addCleanup(env.stop)
+        root = mock.patch.object(ui, "ensure_root")
+        root.start()
+        self.addCleanup(root.stop)
+        # batch_main replaces the global progress reporter.
+        progress = mock.patch.object(ui, "PROGRESS", ui.PROGRESS)
+        progress.start()
+        self.addCleanup(progress.stop)
+
+    def mount(self, name, names=(), disk="sdb", part="sdb1"):
+        """A fake mounted partition; returns its mount point."""
+        mp = os.path.join(self.media, name)
+        os.makedirs(mp, exist_ok=True)
+        for n in names:
+            if n.endswith("/"):
+                os.makedirs(os.path.join(mp, n[:-1]), exist_ok=True)
+            else:
+                Path(os.path.join(mp, n)).write_bytes(b"x")
+        with open(self.removable, "a") as f:
+            f.write(f"/dev/{part}\t{disk}\t{name}\t{mp}\tvfat\t1\tM\tstick\n")
+        return mp
+
+    def contents(self, device="/dev/sdb"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ui.batch_main(["contents", "--device", device])
+        self.assertEqual(rc, 0)
+        return json.loads(out.getvalue())
+
+    def test_contents_lists_top_level(self):
+        self.mount("S", [f"f{i:02}.txt" for i in range(24)] + ["zdir/"])
+        r = self.contents()
+        self.assertEqual(r["device"], "/dev/sdb")
+        self.assertIsNone(r["error"])
+        self.assertEqual(len(r["entries"]), 20)
+        self.assertEqual(r["entries"], sorted(r["entries"]))
+        self.assertEqual(r["more"], 5)
+        self.assertEqual(r["entries"][0], "f00.txt")
+        self.assertNotIn("zdir/", r["entries"])
+
+    def test_directories_get_a_trailing_slash(self):
+        self.mount("S", ["a.txt", "docs/"])
+        self.assertEqual(self.contents()["entries"], ["a.txt", "docs/"])
+
+    def test_contents_non_utf8_names(self):
+        mp = self.mount("S", ["ok"])
+        with open(os.path.join(os.fsencode(mp), b"bad\xff"), "wb") as f:
+            f.write(b"x")
+        Path(os.path.join(mp, "n" * 250)).write_bytes(b"x")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ui.batch_main(["contents", "--device", "/dev/sdb"])
+        r = json.loads(out.getvalue())   # valid UTF-8 JSON
+        self.assertIn("bad\N{REPLACEMENT CHARACTER}", r["entries"])
+        long = [e for e in r["entries"] if e.startswith("nnn")][0]
+        self.assertEqual(long, "n" * 80 + "\N{HORIZONTAL ELLIPSIS}")
+
+    def test_contents_time_limit(self):
+        self.mount("S", ["a"])
+        with mock.patch.object(ui, "CONTENTS_CHILD", "import time; time.sleep(60)"):
+            t0 = time.monotonic()
+            r = self.contents()
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertEqual(r["error"], "could not read the stick")
+        self.assertEqual(r["entries"], [])
+
+    def test_contents_child_runs_in_its_own_session(self):
+        self.mount("S", ["a"])
+        seen = []
+        real = subprocess.Popen
+
+        def spy(*a, **kw):
+            seen.append(kw)
+            return real(*a, **kw)
+        with mock.patch.object(ui.subprocess, "Popen", side_effect=spy):
+            self.contents()
+        self.assertTrue(seen and all(k.get("start_new_session") for k in seen))
+
+    def test_contents_takes_no_lock(self):
+        self.mount("S", ["a"])
+        lock = os.path.join(self.tmp.name, "held.lock")
+        with mock.patch.object(ui, "LOCK_PATH", lock):
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+            self.addCleanup(os.close, fd)
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with mock.patch.object(ui, "_take_lock", side_effect=AssertionError("lock")):
+                r = self.contents()
+        self.assertEqual(r["entries"], ["a"])
+
+    def test_contents_not_automounted(self):
+        r = self.contents()
+        self.assertEqual((r["entries"], r["more"], r["error"]), ([], 0, None))
+
+    def test_other_disks_are_not_listed(self):
+        self.mount("T", ["other"], disk="sdc", part="sdc1")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_several_partitions_are_prefixed_by_name(self):
+        self.mount("ONE", ["a"], part="sdb1")
+        self.mount("TWO", ["b"], part="sdb2")
+        self.assertEqual(self.contents()["entries"], ["ONE: a", "TWO: b"])
+
+    def test_a_mount_point_outside_the_media_directory_is_ignored(self):
+        outside = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(outside)
+        Path(outside, "secret").write_bytes(b"x")
+        with open(self.removable, "w") as f:
+            f.write(f"/dev/sdb1\tsdb\tX\t{outside}\tvfat\t1\tM\tstick\n")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_a_symlink_out_of_the_media_directory_is_ignored(self):
+        outside = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(outside)
+        Path(outside, "secret").write_bytes(b"x")
+        link = os.path.join(self.media, "L")
+        os.symlink(outside, link)
+        with open(self.removable, "w") as f:
+            f.write(f"/dev/sdb1\tsdb\tL\t{link}\tvfat\t1\tM\tstick\n")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_garbage_contract_lines_and_extra_fields(self):
+        mp = self.mount("S", ["a"])
+        with open(self.removable, "a") as f:
+            f.write("garbage\n\n\t\t\n")
+            f.write(f"/dev/sdb2\tsdb\tS\t{mp}\tvfat\t1\tM\tstick\tfuture\n")
+        # The same mount point twice is listed once.
+        self.assertEqual(self.contents()["entries"], ["a"])
+
+    def test_a_bad_device_is_a_usage_error(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = ui.batch_main(["contents", "--device", "sdb; rm"])
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

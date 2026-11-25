@@ -222,6 +222,12 @@ else
     bad "drives flags: '$(field DRIVE-FLAGS)'"
 fi
 
+if [[ "$(field CONTENTS-B)" == *'"entries": ["NOTE.TXT"]'* && "$(field CONTENTS-B)" == *'"error": null'* ]]; then
+    ok "contents lists the file on the automounted stick B"
+else
+    bad "contents of B: '$(field CONTENTS-B)' (need entries [\"NOTE.TXT\"] and no error)"
+fi
+
 if [[ "$(field NOWRITE-RC)" =~ ^[0-9]+$ && "$(field NOWRITE-RC)" != 0 ]]; then
     ok "a write from a release without the image fails (exit $(field NOWRITE-RC), '$(field NOWRITE-RESULT)')"
 else
