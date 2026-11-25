@@ -744,14 +744,13 @@ def cmd_remount(disk: str, p: Paths) -> int:
                        if os.path.exists(os.path.join(base, n, "partition")))
     except OSError:
         parts = []
-    status = EXIT_OK
-    for name in parts or [disk]:
-        rc, _, err = run(["udevadm", "trigger", "--action=change",
-                          os.path.join(p.dev, name)], 10)
-        if rc != 0:
-            log(f"udevadm trigger {name} failed: {err.strip()}")
-            status = EXIT_FAIL
-    return status
+    # add itself, not a udev change event: after release the unit of each
+    # partition is still active (RemainAfterExit=), so systemd would not
+    # start it again and the stick stayed unmounted.
+    codes = [cmd_add(name, p) for name in parts or [disk]]
+    if EXIT_FAIL in codes:
+        return EXIT_FAIL
+    return EXIT_BUSY if EXIT_BUSY in codes else EXIT_OK
 
 
 USAGE = "usage: thinfloe-automount add|remove <kname> | eject <disk>|all | release|remount <disk>"

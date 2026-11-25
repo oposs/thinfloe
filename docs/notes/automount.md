@@ -75,7 +75,10 @@ mounted are printed), 2 usage, 3 busy (nothing changed). The menu calls
 - `eject`: `sync -f` and `umount` of every partition of the disk, the
   lines go, a `clean` event; then a stick is powered off (below).
 - `release`: as eject, without event and power-off; for the writer.
-- `remount`: `udevadm trigger --action=change` on the disk's partitions.
+- `remount`: `add` for each partition of the disk (the disk itself when it
+  has none), with the same locks, hold check and skip rules. Not a udev
+  change event: after `release` the partitions' units are still active, and
+  systemd would not start them again.
 
 ## Write hold
 

@@ -701,11 +701,47 @@ class Eject(Commands):
         self.assertIsNone(self.event())
         self.assertFalse(self.poweroff_file().exists())
 
-    def test_remount_triggers_change(self):
-        self.stick()
+    def test_release_then_remount_mounts_again(self):
+        # The unit of sdb1 stays active after release; remount must not rely
+        # on udev starting it again: it mounts by itself, no udevadm trigger.
+        self.added()
+        self.assertEqual(self.cmd("release", "sdb"), 0)
+        self.assertEqual(self.lines(), [])
         self.assertEqual(self.cmd("remount", "sdb"), 0)
-        self.assertEqual(self.calls("udevadm"), [
-            ["udevadm", "trigger", "--action=change", str(self.tmp / "dev" / "sdb1")]])
+        mp = self.tmp / "media" / "MYSTICK"
+        self.assertEqual([(l.device, l.mountpoint) for l in self.lines()],
+                         [(str(self.tmp / "dev" / "sdb1"), str(mp))])
+        self.assertTrue(mp.is_dir())
+        self.assertEqual(len(self.calls("mount")), 2)
+        self.assertEqual(self.calls("udevadm"), [])
+        self.assertIsNone(self.event())
+
+    def test_remount_twice_mounts_once(self):
+        self.added()
+        self.assertEqual(self.cmd("remount", "sdb"), 0)
+        self.assertEqual(len(self.calls("mount")), 1)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_remount_honours_a_live_hold(self):
+        self.added()
+        self.assertEqual(self.cmd("release", "sdb"), 0)
+        self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-AA:1:2\n")
+        self.assertEqual(self.cmd("remount", "sdb"), 0)
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(len(self.calls("mount")), 1)
+
+    def test_remount_failed_mount_is_a_failure(self):
+        self.added()
+        self.assertEqual(self.cmd("release", "sdb"), 0)
+        os.environ["FAKE_MOUNT_FAIL"] = "1"
+        self.assertEqual(self.cmd("remount", "sdb"), 1)
+        self.assertEqual(self.lines(), [])
+
+    def test_remount_skips_the_boot_disk(self):
+        self.stick("sdc", usb="1-2", label="BOOT", serial="BB")
+        self.write("esp-device", "/dev/sdc1\n")
+        self.assertEqual(self.cmd("remount", "sdc"), 0)
+        self.assertEqual(self.calls("mount"), [])
 
     def test_eject_twice_and_under_hold(self):
         self.added()
