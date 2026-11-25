@@ -3,11 +3,19 @@
 ## [Unreleased]
 
 ### New
-- Settings has a new Sound tab with a volume slider and a mute switch, for keyboards without volume keys. Its switch "Set the volume on this machine" is the same setting as "Volume keys control this machine" on the Keyboard tab; while it is off, the slider and mute are greyed out and the remote session sets the loudness.
 
 ### Changed
 
 ### Fixed
+
+## 4.11.0 - 2026-11-25
+
+### New
+
+- Settings has a new Sound tab with a volume slider and a mute switch, for keyboards without volume keys. Its switch "Set the volume on this machine" is the same setting as "Volume keys control this machine" on the Keyboard tab; while it is off, the slider and mute are greyed out and the remote session sets the loudness.
+
+### Fixed
+
 - With "Volume keys control this machine" on, the speaker volume set with the volume keys could come back at 100 % after a restart. The volume and mute from before the restart now stay.
 - While the mouse was on an attached Deskflow computer, ThinFloe's mouse pointer stayed visible at the edge of the screen. It is now hidden until the mouse comes back to ThinFloe.
 
