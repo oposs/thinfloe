@@ -21,6 +21,9 @@ pub struct Drive {
     pub transport: Option<String>,
     pub removable: bool,
     pub mounted: bool,
+    /// Mounted only by the automounter, which a write releases first;
+    /// `mounted` is then false.
+    pub automounted: bool,
     pub is_boot: bool,
     pub is_thinfloe: bool,
     pub has_tl_old: bool,
@@ -81,6 +84,7 @@ fn row(v: &Value) -> Option<Drive> {
         removable: flag(v, "removable", false),
         // Fail closed: a row the tool did not describe is in use and unexamined.
         mounted: flag(v, "mounted", true),
+        automounted: flag(v, "automounted", false),
         is_boot: flag(v, "is_boot", false),
         is_thinfloe: flag(v, "is_thinfloe", false),
         has_tl_old: flag(v, "has_tl_old", false),
@@ -227,6 +231,7 @@ mod tests {
             transport: Some("usb".into()),
             removable: true,
             mounted: false,
+            automounted: false,
             is_boot: false,
             is_thinfloe: false,
             has_tl_old: false,
@@ -240,6 +245,23 @@ mod tests {
 
     fn row_json(device: &str, id: &str) -> String {
         format!(r#"{{"device":"{device}","id":"{id}","model":"M","size_bytes":1}}"#)
+    }
+
+    #[test]
+    fn parse_accepts_automounted() {
+        let json = r#"[{"device":"/dev/sdb","id":"x","mounted":false,"automounted":true}]"#;
+        let v = parse(json).unwrap();
+        assert!(v[0].automounted && !v[0].mounted);
+    }
+
+    #[test]
+    fn parse_without_automounted_defaults_false() {
+        let v = parse(&row_json_array()).unwrap();
+        assert!(!v[0].automounted);
+    }
+
+    fn row_json_array() -> String {
+        format!("[{}]", row_json("/dev/sdb", "x"))
     }
 
     #[test]

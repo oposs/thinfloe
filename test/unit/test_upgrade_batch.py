@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import hashlib
 import contextlib
+import argparse
 import errno
 import io
 import json
@@ -211,8 +212,8 @@ class TestDriveList(unittest.TestCase):
         self.assertIsNone(json.loads(ui.drives_json(drives, None))[0]["fits"])
         self.assertEqual(set(rows[0]), {
             "device", "model", "size_bytes", "serial", "transport", "removable",
-            "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
-            "efi_partition", "examined", "id", "fits", "version"})
+            "mounted", "automounted", "is_boot", "is_thinfloe", "has_tl_old",
+            "has_tl_new", "efi_partition", "examined", "id", "fits", "version"})
 
 CHANGES = (REPO / "CHANGES.md").read_text()
 
@@ -3240,6 +3241,174 @@ class TestWriteArgsFixture(unittest.TestCase):
             self.assertEqual(args.command, "write", line)
             n += 1
         self.assertGreaterEqual(n, 5)
+
+
+
+class TestAutomountedDrives(unittest.TestCase):
+    """A drive mounted only by thinfloe-automount is released by the write."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.removable = os.path.join(self.tmp.name, "removable")
+        Path(self.removable).write_text(
+            "/dev/sdb1\tsdb\tX\t/media/tfuser/X\tvfat\t1\tM\tstick\n")
+        env = mock.patch.dict(os.environ, {"TF_REMOVABLE": self.removable})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def enum(self, mountpoints):
+        node = {"name": "sdb", "path": "/dev/sdb", "size": 8000000000,
+                "model": None, "serial": None, "wwn": None, "tran": "usb",
+                "rm": True, "type": "disk", "mountpoints": [None],
+                "children": [{"name": "sdb1", "path": "/dev/sdb1", "size": 1,
+                              "type": "part", "mountpoints": mountpoints}]}
+
+        def cmd(c):
+            if c[0] == "lsblk" and "-J" in c:
+                return json.dumps({"blockdevices": [node]})
+            return ""
+        with mock.patch.object(ui, "get_cmd_output", side_effect=cmd), \
+             mock.patch.object(ui, "detect_boot_device", return_value=None), \
+             mock.patch.object(ui, "find_efi_partition", return_value=None), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="ab" * 8):
+            return ui.enumerate_drives()[0]
+
+    def test_drives_json_has_automounted(self):
+        row = json.loads(ui.drives_json([self.enum(["/media/tfuser/X"])], None))[0]
+        self.assertIs(row["automounted"], True)
+        self.assertIs(row["mounted"], False)
+
+    def test_another_mount_point_is_mounted(self):
+        row = json.loads(ui.drives_json(
+            [self.enum(["/media/tfuser/X", "/mnt/other"])], None))[0]
+        self.assertIs(row["automounted"], False)
+        self.assertIs(row["mounted"], True)
+
+    def test_unmounted_is_neither(self):
+        row = json.loads(ui.drives_json([self.enum([None])], None))[0]
+        self.assertIs(row["automounted"], False)
+        self.assertIs(row["mounted"], False)
+
+    def test_write_refusal_allows_automounted(self):
+        d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
+                         False, False, size_bytes=16 * 10**9, serial="S",
+                         mounted=False, automounted=True, fingerprint="ab" * 8)
+        args = argparse.Namespace(device="/dev/sdb", mode="fresh", source="http://x",
+                                  expect_id=ui.drive_identity(d), copy_home=False,
+                                  allow_internal=False)
+        with mock.patch.object(ui, "image_size", return_value=None):
+            self.assertIsNone(ui._write_refusal(args, d))
+
+
+class TestFreshInstallAutomount(unittest.TestCase):
+    """The hold, the release and the remount around a fresh install."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.hold_dir = os.path.join(self.tmp.name, "hold")
+        os.mkdir(self.hold_dir)
+        self.hold = os.path.join(self.hold_dir, "sdb")
+        env = mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": self.hold_dir})
+        env.start()
+        self.addCleanup(env.stop)
+        self.events = []
+        self.release_rc = 0
+        self.drive = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0,
+                                  False, False, False, size_bytes=16 * 10**9,
+                                  serial="S", fingerprint="ab" * 8)
+
+    def run_cmd(self, cmd, **kw):
+        if cmd[0] == ui.AUTOMOUNT:
+            self.events.append((cmd[1], cmd[2], os.path.exists(self.hold)))
+            rc = self.release_rc if cmd[1] == "release" else 0
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def install(self, open_target=None, exclusive=None):
+        def opened(device):
+            self.events.append(("open", device, os.path.exists(self.hold)))
+            return os.open(os.devnull, os.O_RDWR)
+        patches = [mock.patch.object(ui, "run_cmd", side_effect=self.run_cmd),
+                   mock.patch.object(ui, "open_target", side_effect=open_target or opened)]
+        if exclusive is not None:
+            patches.append(mock.patch.object(ui, "_fresh_install_open", side_effect=exclusive))
+        with contextlib.ExitStack() as st, contextlib.redirect_stdout(io.StringIO()):
+            for p in patches:
+                st.enter_context(p)
+            return ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS,
+                                    save=False, stamp_required=False)
+
+    def touched(self, drive, base_url, copy_home, verify, progress, save,
+                stamp_required, held, outcome):
+        outcome.touched = True
+        outcome.written = True
+        outcome.ok = True
+        return outcome
+
+    def untouched(self, *a):
+        return a[-1]
+
+    def test_fresh_install_holds_and_releases(self):
+        self.install(exclusive=self.touched)
+        self.assertEqual(self.events, [("release", "sdb", True), ("open", "/dev/sdb", True)])
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_hold_file_carries_pid_and_id(self):
+        seen = []
+        orig = self.run_cmd
+
+        def peek(cmd, **kw):
+            if cmd[0] == ui.AUTOMOUNT and cmd[1] == "release":
+                seen.append(Path(self.hold).read_text())
+            return orig(cmd, **kw)
+        with mock.patch.object(self, "run_cmd", side_effect=peek):
+            self.install(exclusive=self.touched)
+        self.assertEqual(seen, [f"{os.getpid()}\t{ui.drive_identity(self.drive)}\n"])
+
+    def test_fresh_install_release_busy(self):
+        self.release_rc = 3
+        outcome = self.install(exclusive=self.touched)
+        self.assertTrue(outcome.refused)
+        self.assertEqual(outcome.reason, "the stick is in use")
+        self.assertEqual([e[0] for e in self.events], ["release", "remount"])
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_hold_is_gone_before_the_remount(self):
+        self.install(exclusive=self.untouched)
+        self.assertEqual(self.events[-1], ("remount", "sdb", False))
+
+    def test_fresh_install_unwritten_remounts_ebusy(self):
+        def busy(device):
+            raise OSError(errno.EBUSY, "busy")
+        outcome = self.install(open_target=busy)
+        self.assertTrue(outcome.refused)
+        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+
+    def test_unwritten_remounts_on_cancel(self):
+        def cancel(*a):
+            raise ui.Cancelled()
+        with self.assertRaises(ui.Cancelled):
+            self.install(exclusive=cancel)
+        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_unwritten_checksum_refusal_remounts(self):
+        outcome = self.install(exclusive=self.untouched)
+        self.assertFalse(outcome.ok)
+        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+
+    def test_a_write_that_wrote_bytes_does_not_remount(self):
+        self.install(exclusive=self.touched)
+        self.assertNotIn("remount", [e[0] for e in self.events])
+
+    def test_a_missing_helper_is_no_error(self):
+        with mock.patch.object(ui, "run_cmd", side_effect=FileNotFoundError(2, "none")), \
+             mock.patch.object(ui, "open_target", side_effect=OSError(errno.EBUSY, "b")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            outcome = ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS)
+        self.assertIn("in use", outcome.reason)
 
 
 if __name__ == "__main__":

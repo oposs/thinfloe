@@ -193,6 +193,11 @@ DRIVES_LOCK_WAIT = 2.0
 # process group, and a cp killed in the switch would turn a cancel that
 # came too late into a failed upgrade. The tool decides what stops.
 SPAWN = {"start_new_session": True}
+# The automounter: releases a drive before a write, mounts it again after.
+AUTOMOUNT = "/usr/libexec/thinfloe/thinfloe-automount"
+REMOVABLE_FILE = "/run/thinfloe/removable"   # TF_REMOVABLE moves it in tests
+AUTOMOUNT_HOLD_DIR = "/run/thinfloe/automount/hold"   # TF_AUTOMOUNT_HOLD likewise
+EXIT_BUSY_AUTOMOUNT = 3   # thinfloe-automount: a mount is busy
 
 # ============ Progress ============
 
@@ -347,11 +352,12 @@ class DriveInfo:
     fingerprint: str = "-"   # hash of the partition table, "-" if unreadable
     examined: bool = True    # False: the ESP was not looked at (a write runs)
     version: Optional[str] = None  # the stick's release, None when unknown
+    automounted: bool = False  # mounted only by thinfloe-automount; a write releases it
 
 
 # ============ Global State ============
 
-_cleanup_items: List[Tuple[str, str]] = []  # (type, path) - "mount" or "dir"
+_cleanup_items: List[Tuple[str, str]] = []  # (type, path) - "mount", "dir" or "file"
 
 
 def _register_cleanup(cleanup_type: str, path: str) -> None:
@@ -405,6 +411,12 @@ def _do_cleanup() -> None:
             if cleanup_type == "mount":
                 done = run_cmd(["umount", path], check=False,
                                capture=True).returncode == 0
+            elif cleanup_type == "file":
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                done = True
             elif cleanup_type == "dir":
                 # Entries run in reverse, so a "mount" on this path has had
                 # its umount attempted already. If that failed (busy), the
@@ -713,10 +725,41 @@ def _real_mountpoints(node: dict) -> List[str]:
             if m and not os.path.basename(m).startswith("thinfloe-check-")]
 
 
-def _any_mounted(node: dict) -> bool:
-    if _real_mountpoints(node):
-        return True
-    return any(_any_mounted(c) for c in node.get("children") or [])
+def _all_mountpoints(node: dict) -> List[str]:
+    """Every real mount point of the node and its children."""
+    found = _real_mountpoints(node)
+    for c in node.get("children") or []:
+        found.extend(_all_mountpoints(c))
+    return found
+
+
+def read_removable_mountpoints() -> List[str]:
+    """The mount points thinfloe-automount lists in its contract file.
+
+    Line: device, disk, name, mountpoint, ... separated by tabs. No file
+    (an old image, or nothing mounted) is no mount point.
+    """
+    path = os.environ.get("TF_REMOVABLE", REMOVABLE_FILE)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            rows = [line.rstrip("\n").split("\t") for line in f]
+    except OSError:
+        return []
+    return [r[3] for r in rows if len(r) > 3 and r[3]]
+
+
+def automounted_only(node: dict, lines: List[str]) -> bool:
+    """True if the drive has mount points and every one is the automounter's.
+
+    lines: the mount points read_removable_mountpoints returns.
+    """
+    found = _all_mountpoints(node)
+    return bool(found) and all(m in lines for m in found)
+
+
+def _any_mounted(node: dict, automount: Optional[List[str]] = None) -> bool:
+    """A mount point the automounter did not make (it is released before a write)."""
+    return any(m not in (automount or []) for m in _all_mountpoints(node))
 
 
 def _mountpoint_of(node: dict, path: str) -> Optional[str]:
@@ -781,6 +824,7 @@ def enumerate_drives(include_internal: bool = False,
     """
     drives = []
     boot_dev = detect_boot_device()
+    automount_points = read_removable_mountpoints()
 
     out = get_cmd_output(["lsblk", "-J", "-b", "-o",
                           "NAME,PATH,SIZE,MODEL,SERIAL,WWN,TRAN,RM,TYPE,MOUNTPOINTS"])
@@ -859,7 +903,8 @@ def enumerate_drives(include_internal: bool = False,
             serial=node.get("serial") or node.get("wwn") or "",
             transport=transport,
             removable=removable,
-            mounted=_any_mounted(node),
+            mounted=_any_mounted(node, automount_points),
+            automounted=automounted_only(node, automount_points),
             fingerprint=ptable_fingerprint(device),
             examined=examined,
             version=version,
@@ -880,6 +925,7 @@ def drives_json(drives: List[DriveInfo], image_bytes: Optional[int]) -> str:
             "transport": d.transport,
             "removable": d.removable,
             "mounted": d.mounted,
+            "automounted": d.automounted,
             "is_boot": d.is_boot,
             "is_thinfloe": d.is_thinfloe,
             "has_tl_old": d.has_tl_old,
@@ -2293,6 +2339,7 @@ class FreshOutcome:
     ok: bool
     reason: str = ""
     written: bool = False  # the stick passed write, checksum and verify
+    touched: bool = False  # the first byte went to the stick
     cancelled: bool = False
     refused: bool = False  # nothing was written: the drive is busy or another
     home_copied: Optional[bool] = None  # None: not asked for
@@ -2330,10 +2377,73 @@ def fd_identity(fd: int, device: str) -> str:
     return identity_string(device_serial(device), size, fingerprint)
 
 
+def _hold_drive(drive: DriveInfo) -> Optional[str]:
+    """Tell the automounter to leave this drive alone; the hold file's path.
+
+    One line, pid TAB id, named after the kernel name. Without the hold
+    directory (an old image) there is nothing to tell: None.
+    """
+    folder = os.environ.get("TF_AUTOMOUNT_HOLD", AUTOMOUNT_HOLD_DIR)
+    path = os.path.join(folder, os.path.basename(drive.device))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, f"{os.getpid()}\t{drive_identity(drive)}\n".encode())
+        finally:
+            os.close(fd)
+    except OSError as e:
+        log(f"no automount hold for {drive.device}: {e.strerror or e}")
+        return None
+    _register_cleanup("file", path)
+    return path
+
+
+def _automount(action: str, drive: DriveInfo) -> int:
+    """thinfloe-automount release|remount; 0 when the helper is missing."""
+    try:
+        rc = run_cmd([AUTOMOUNT, action, os.path.basename(drive.device)],
+                     check=False, capture=True).returncode
+    except OSError as e:   # no helper: a test, or an image without it
+        log(f"{action} {drive.device} skipped: {e.strerror or e}")
+        return 0
+    return rc
+
+
 def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
                   verify: bool, progress: Progress, save: bool = True,
                   stamp_required: bool = True,
                   expect_id: Optional[str] = None) -> FreshOutcome:
+    """_fresh_install_exclusive on a drive the automounter has released.
+
+    The hold keeps the automounter off the drive for the whole write. A
+    drive nothing was written to is mounted again (the hold goes first,
+    or the automounter would skip it).
+    """
+    outcome = FreshOutcome(ok=False)
+    hold = _hold_drive(drive)
+    try:
+        if _automount("release", drive) == EXIT_BUSY_AUTOMOUNT:
+            outcome.refused = True
+            outcome.reason = "the stick is in use"
+            return outcome
+        return _fresh_install_exclusive(drive, base_url, copy_home, verify,
+                                        progress, save, stamp_required,
+                                        expect_id, outcome)
+    finally:
+        if hold is not None:
+            _unregister_cleanup("file", hold)
+            try:
+                os.unlink(hold)
+            except OSError:
+                pass
+        if not outcome.touched:
+            _automount("remount", drive)
+
+
+def _fresh_install_exclusive(drive: DriveInfo, base_url: str, copy_home: bool,
+                             verify: bool, progress: Progress, save: bool,
+                             stamp_required: bool, expect_id: Optional[str],
+                             outcome: FreshOutcome) -> FreshOutcome:
     """Write the image to a drive and finish the stick.
 
     Used by both modes. Before the first byte a failure or a cancel leaves
@@ -2351,7 +2461,6 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
     device = drive.device
     image_name = "thinfloe-usb.img.zst"
     image_url = f"{base_url}/{image_name}"
-    outcome = FreshOutcome(ok=False)
     try:
         fd = open_target(device)
     except OSError as e:
@@ -2395,6 +2504,7 @@ def _fresh_install_open(drive, base_url, copy_home, verify, progress, save,
         # wiped a stick the menu called "as it was".
         progress.touched()
         writing[0] = True
+        outcome.touched = True
     try:
         progress.step("write", "Downloading and writing")
         # Before the first byte reaches the stick: a release without its
@@ -2928,7 +3038,7 @@ def _write_refusal(args, drive: Optional[DriveInfo], with_size: bool = True) -> 
     else:
         if not drive.is_thinfloe:
             return f"{args.device} is not a ThinFloe drive and cannot be upgraded"
-        if drive.mounted and not drive.is_boot:
+        if (drive.mounted or drive.automounted) and not drive.is_boot:
             return f"{args.device} is mounted and cannot be upgraded"
     if args.copy_home:
         if args.mode != "fresh":

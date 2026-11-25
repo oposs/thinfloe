@@ -6206,6 +6206,7 @@ mod tests {
             transport: Some("usb".into()),
             removable: true,
             mounted: false,
+            automounted: false,
             is_boot: false,
             is_thinfloe: false,
             has_tl_old: false,
