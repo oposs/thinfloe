@@ -590,4 +590,13 @@ mod tests {
             save(&p.mark(s), &format!("mark-x{s}.png"));
         }
     }
+
+    #[test]
+    fn the_note_font_has_the_em_dash() {
+        // The unclean note reads "... removed without eject \u{2014} files may be lost".
+        let mut p = Painter::new();
+        p.panel(&note(true, "A"), 1.0);
+        let font = brand::geo(OSD_TEXT_PT);
+        assert!(p.ctx.fonts_mut(|f| f.has_glyph(&font, '\u{2014}')));
+    }
 }

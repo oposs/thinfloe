@@ -1343,7 +1343,10 @@ impl Menu {
         self.eject.message = Some(message.clone());
         self.eject.running = None;
         self.eject.known.clear();
-        if matches!(self.logout, Some(Logout::Ejecting { .. })) {
+        // The exit's release ended after EJECT_GRACE had put up "takes too
+        // long": the dialog now says how it ended, and a release that
+        // worked goes on to the exit the person chose.
+        if matches!(self.logout, Some(Logout::Ejecting { .. } | Logout::EjectFailed { .. })) {
             // The eject of one disk ended first: the others still need theirs.
             if done && target != "all" && self.removable.iter().any(|s| s.disk != target) {
                 return self.start_eject("all".to_string());
@@ -1381,9 +1384,13 @@ impl Menu {
     /// The home is saved (or the person goes on anyway): Restart and Power
     /// off first release the sticks, so what is cached reaches them; Log
     /// out leaves the machine running and does not.
+    /// Restart and Power off release the sticks before they exit.
+    fn flushes(&self) -> bool {
+        matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty()
+    }
+
     fn after_save(&mut self, now: Instant) -> Option<Effect> {
-        let flush = matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty();
-        if !flush {
+        if !self.flushes() {
             return self.leave(now);
         }
         self.logout = Some(Logout::Ejecting { since: now });
@@ -1944,7 +1951,7 @@ impl Menu {
             // The failure is in the log already, from when it happened.
             // Sticks are still released first on the way out.
             (Some(Logout::Failed { .. }), Choice::LeaveAnyway) => {
-                if matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty() {
+                if self.flushes() {
                     return self.after_save(now);
                 }
                 self.ending.exit_code().map(Effect::Exit)
@@ -5350,6 +5357,35 @@ mod eject_tests {
         );
         assert!(!m.refuses_input());
         assert_eq!(m.choose(Choice::EjectGoOn, now), Some(Effect::Exit(11)));
+    }
+
+    #[test]
+    fn a_release_that_ends_after_the_grace_replaces_the_too_long_text() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        let late = now + EJECT_GRACE;
+        assert_eq!(m.tick(late), None);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "Releasing the sticks takes too long".into()
+            })
+        );
+        // It ends after all: the power off goes on.
+        assert_eq!(ejected(&mut m, EjectResult::Done, late), None);
+        assert_eq!(m.tick(late + LOGOUT_PAUSE), Some(Effect::Exit(11)));
+        // Or it fails: the dialog names the failure, not the delay.
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        m.tick(late);
+        ejected(&mut m, EjectResult::Busy, late);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "MYSTICK is in use: close the files on it".into()
+            })
+        );
     }
 
     #[test]

@@ -443,18 +443,123 @@ fn ending_words(action: Action) -> (&'static str, &'static str) {
     }
 }
 
-/// What the dialogs wait for: the add-on jobs, the stick write or both.
-fn root_waits(addons: bool, write: bool) -> &'static str {
-    match (addons, write) {
-        (true, true) => "the add-ons and the stick",
-        (false, true) => "the stick",
-        _ => "the add-ons",
+/// The root jobs that run, as the end-of-session dialogs name them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RootWork {
+    addons: bool,
+    write: bool,
+    network: bool,
+    eject: bool,
+}
+
+impl RootWork {
+    fn of(menu: &Menu) -> RootWork {
+        RootWork {
+            addons: !menu.addon_jobs().is_empty(),
+            write: menu.upgrade.writing(),
+            network: menu.network.applying(),
+            eject: menu.eject.running.is_some(),
+        }
+    }
+
+    /// The Confirm dialog's title.
+    fn title(self) -> &'static str {
+        match self {
+            RootWork {
+                addons: true,
+                write: true,
+                ..
+            } => "Add-ons are being changed and a stick is written",
+            RootWork { addons: true, .. } => "Add-ons are being changed",
+            RootWork { write: true, .. } => "A stick is being written",
+            RootWork { network: true, .. } => "Network settings are being applied",
+            RootWork { eject: true, .. } => "A stick is being released",
+            _ => "Work is still running",
+        }
+    }
+
+    /// The Confirm dialog's sentence, before "before you restart.".
+    fn finished(self) -> String {
+        let one = match self {
+            RootWork {
+                addons: true,
+                write: false,
+                network: false,
+                ..
+            } => Some("The add-on work is finished"),
+            RootWork {
+                addons: false,
+                write: true,
+                network: false,
+                ..
+            } => Some("The stick is written"),
+            RootWork {
+                addons: false,
+                write: false,
+                network: true,
+                ..
+            } => Some("The network settings are applied"),
+            RootWork {
+                addons: false,
+                write: false,
+                network: false,
+                eject: true,
+            } => Some("The stick is released"),
+            _ => None,
+        };
+        if let Some(one) = one {
+            return one.to_string();
+        }
+        let parts = self.parts(["the add-on work", "the write", "the network change"]);
+        if parts.is_empty() {
+            return "The work is finished".to_string();
+        }
+        format!("{} are finished", capitalized(&joined(&parts)))
+    }
+
+    /// What the waiting dialog waits for.
+    fn waits(self) -> String {
+        if self
+            == (RootWork {
+                eject: true,
+                ..RootWork::default()
+            })
+        {
+            return "the stick to be released".to_string();
+        }
+        let parts = self.parts(["the add-ons", "the stick", "the network settings"]);
+        if parts.is_empty() {
+            return "the work".to_string();
+        }
+        joined(&parts)
+    }
+
+    /// What the stopping dialog stops.
+    fn stopping(self) -> String {
+        let parts = self.parts(["the add-on work", "the write", "the network change"]);
+        if parts.is_empty() {
+            return "Stopping the work".to_string();
+        }
+        format!("Stopping {}", joined(&parts))
+    }
+
+    /// The words of the add-on work, the write and the network Apply that run.
+    fn parts(self, words: [&'static str; 3]) -> Vec<&'static str> {
+        [self.addons, self.write, self.network]
+            .into_iter()
+            .zip(words)
+            .filter_map(|(on, w)| on.then_some(w))
+            .collect()
     }
 }
 
-/// The root jobs that run: add-on jobs, and the stick write.
-fn root_kinds(menu: &Menu) -> (bool, bool) {
-    (!menu.addon_jobs().is_empty(), menu.upgrade.writing())
+/// "a", "a and b", "a, b and c".
+fn joined(parts: &[&str]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// The first letter in upper case, for a button or a sentence start.
@@ -480,13 +585,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::Confirm) => {
             let mut chose = None;
             let root_jobs = menu.root_jobs();
-            let kinds = root_kinds(menu);
-            let title = match kinds {
-                _ if !menu.jobs.is_empty() => "Programs are still running",
-                (false, false) if menu.eject.running.is_some() => "A stick is being released",
-                (false, true) => "A stick is being written",
-                (true, true) => "Add-ons are being changed and a stick is written",
-                _ => "Add-ons are being changed",
+            let work = RootWork::of(menu);
+            let title = if menu.jobs.is_empty() {
+                work.title()
+            } else {
+                "Programs are still running"
             };
             dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
@@ -502,12 +605,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     );
                 }
                 if !root_jobs.is_empty() {
-                    let what = match kinds {
-                        (false, false) if menu.eject.running.is_some() => "The stick is released",
-                        (false, true) => "The stick is written",
-                        (true, true) => "The add-on work and the write are finished",
-                        _ => "The add-on work is finished",
-                    };
+                    let what = work.finished();
                     ui.label(
                         egui::RichText::new(format!("{what} before you {verb}.")).color(t.palette().muted_foreground),
                     );
@@ -531,12 +629,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::WaitAddons) => {
             let mut chose = None;
-            let (addons, write) = root_kinds(menu);
-            let what = if !addons && !write && menu.eject.running.is_some() {
-                "the stick to be released"
-            } else {
-                root_waits(addons, write)
-            };
+            let what = RootWork::of(menu).waits();
             dialog(ui, &format!("Waiting for {what} before {verbing}"), |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
@@ -576,12 +669,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             return chose.map(UiEvent::Chose);
         }
         Some(Logout::StoppingAddons { go_at }) => {
-            let title = match root_kinds(menu) {
-                (false, true) => "Stopping the write",
-                (true, true) => "Stopping the add-on work and the write",
-                _ => "Stopping the add-on work",
-            };
-            dialog(ui, title, |ui, t| {
+            let title = RootWork::of(menu).stopping();
+            dialog(ui, &title, |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
@@ -7185,9 +7274,65 @@ mod tests {
 
     #[test]
     fn the_waiting_titles_name_what_the_dialog_lists() {
-        assert_eq!(root_waits(false, true), "the stick");
-        assert_eq!(root_waits(true, false), "the add-ons");
-        assert_eq!(root_waits(true, true), "the add-ons and the stick");
+        let w = |addons, write, network, eject| RootWork {
+            addons,
+            write,
+            network,
+            eject,
+        };
+        assert_eq!(w(false, true, false, false).waits(), "the stick");
+        assert_eq!(w(true, false, false, false).waits(), "the add-ons");
+        assert_eq!(w(true, true, false, false).waits(), "the add-ons and the stick");
+        assert_eq!(w(false, false, false, true).waits(), "the stick to be released");
+        assert_eq!(w(false, false, true, false).waits(), "the network settings");
+        assert_eq!(
+            w(true, true, true, false).waits(),
+            "the add-ons, the stick and the network settings"
+        );
+    }
+
+    #[test]
+    fn a_network_apply_is_named_as_such_in_the_ending_dialogs() {
+        // A network Apply alone read "Add-ons are being changed" and "The
+        // add-on work is finished before you restart."
+        let net = RootWork {
+            network: true,
+            ..RootWork::default()
+        };
+        assert_eq!(net.title(), "Network settings are being applied");
+        assert_eq!(net.finished(), "The network settings are applied");
+        assert_eq!(net.stopping(), "Stopping the network change");
+        let both = RootWork {
+            addons: true,
+            network: true,
+            ..RootWork::default()
+        };
+        assert_eq!(both.title(), "Add-ons are being changed");
+        assert_eq!(both.finished(), "The add-on work and the network change are finished");
+        assert_eq!(both.stopping(), "Stopping the add-on work and the network change");
+        // The other cases keep their words.
+        let w = |addons, write, eject| RootWork {
+            addons,
+            write,
+            eject,
+            ..RootWork::default()
+        };
+        assert_eq!(w(false, true, false).title(), "A stick is being written");
+        assert_eq!(w(false, true, false).finished(), "The stick is written");
+        assert_eq!(
+            w(true, true, false).finished(),
+            "The add-on work and the write are finished"
+        );
+        assert_eq!(w(true, false, false).finished(), "The add-on work is finished");
+        assert_eq!(w(false, false, true).title(), "A stick is being released");
+        assert_eq!(w(false, false, true).finished(), "The stick is released");
+        assert_eq!(w(false, true, false).stopping(), "Stopping the write");
+        assert_eq!(
+            w(true, true, false).stopping(),
+            "Stopping the add-on work and the write"
+        );
+        // An eject while a write runs is still "a stick is being written".
+        assert_eq!(w(false, true, true).finished(), "The stick is written");
     }
 
     #[test]

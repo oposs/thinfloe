@@ -348,7 +348,8 @@ pub fn eject(cmd: &[String], target: &str, feed: &Arc<Feed>) -> EjectResult {
                 .rev()
                 .map(str::trim)
                 .find(|l| !l.is_empty())
-                .map(String::from)
+                // Shown in the panel: printable, as every other text from a file.
+                .map(crate::battery::sanitise)
                 .unwrap_or_else(|| match status {
                     Some(n) => format!("exit {n}"),
                     None => "ended by a signal".to_string(),
@@ -2477,6 +2478,18 @@ mod tests {
             EjectResult::Failed("sdb2 is still mounted".into())
         );
         assert_eq!(eject(&sh("exit 2"), "sdb", &feed), EjectResult::Failed("exit 2".into()));
+        // The helper's line is shown in the panel: made printable.
+        match eject(
+            &sh("printf 'bad \\033[31m\\342\\200\\256x\\n' >&2; exit 1"),
+            "sdb",
+            &feed,
+        ) {
+            EjectResult::Failed(e) => {
+                assert!(e.starts_with("bad ") && e.ends_with('x'), "{e:?}");
+                assert!(!e.chars().any(|c| c.is_control() || c == '\u{202e}'), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
             eject(&["/nonexistent/helper".to_string()], "sdb", &feed),
             EjectResult::Failed(e) if e.contains("could not be started")

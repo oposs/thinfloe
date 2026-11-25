@@ -154,7 +154,8 @@ Restart and Power off in the menu run `eject all` after the home save and
 show "Writing to …"; a busy or failed stick is shown like a failed save,
 with the choice to wait or go on; a release that takes longer than 60 s
 (`EJECT_GRACE`) is shown the same way ("Releasing the sticks takes too
-long"). Log out leaves the sticks mounted. The unit's `ExecStop` at
+long"); when that release still ends, a success goes on with the exit and a
+failure replaces the text with its own. Log out leaves the sticks mounted. The unit's `ExecStop` at
 shutdown (`TimeoutStopSec=30`) is only the fallback.
 
 ## Tests
@@ -179,11 +180,15 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   powers it off; both give a `clean` event.
 - `make qemu-smoke-write`: both target sticks carry vfat and are
   automounted before the writes; a write from a release without the image
-  fails before its first byte and the stick is mounted again; while the
+  fails before its first byte and the stick is mounted again, with another
+  mount id (so it was released); while the
   cancelled write runs the stick is released and held, and the hold is gone
-  after it; the ThinFloe stick written is not mounted.
+  after it; the ThinFloe stick written is not mounted, and an `add` of it by
+  hand after the hold is gone is refused as "ThinFloe stick".
 - `make qemu-smoke-two-sticks`: nothing is mounted under `/media/tfuser`
-  with a second ThinFloe stick attached.
+  with a second ThinFloe stick attached; both sticks are virtio, which the
+  udev rule never matches, so an `add` of the other stick's ESP by hand
+  must be refused as "ThinFloe stick".
 
 ## Owner checks on hardware
 

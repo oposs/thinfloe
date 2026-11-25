@@ -1338,8 +1338,11 @@ mod tests {
 
     #[test]
     fn contents_is_not_asked_for_an_upgrade() {
+        // Only the boot stick is upgraded while it is mounted: an automounted
+        // other ThinFloe stick is offered a fresh install alone.
         let up = Drive {
             is_thinfloe: true,
+            is_boot: true,
             version: Some("4.0.0".into()),
             ..automounted("/dev/sdb", "sn-A:1:1")
         };
@@ -1405,6 +1408,21 @@ mod tests {
                 more: 5
             }
         );
+        // The tool decodes names with replacement: U+FFFD reaches the menu
+        // in the JSON, as the character or as its escape.
+        for json in [
+            "{\"device\":\"/dev/sdb\",\"entries\":[\"caf\u{fffd}/\"],\"more\":0,\"error\":null}",
+            "{\"device\":\"/dev/sdb\",\"entries\":[\"caf\\ufffd/\"],\"more\":0,\"error\":null}",
+        ] {
+            assert_eq!(
+                parse_contents(json),
+                Contents::Listed {
+                    entries: vec!["caf\u{fffd}/".into()],
+                    more: 0
+                },
+                "{json}"
+            );
+        }
         assert_eq!(
             parse_contents(r#"{"device":"/dev/sdb","entries":[],"more":0,"error":null}"#),
             Contents::Listed {

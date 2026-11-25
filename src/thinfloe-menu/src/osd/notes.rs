@@ -9,6 +9,7 @@ use std::ffi::{CString, OsStr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::removable::{self, Event, Stick};
 
@@ -174,6 +175,62 @@ impl Watcher {
             at += HEAD + len;
         }
         hit
+    }
+}
+
+/// The watch on the two files, made again every `RETRY` while it cannot
+/// be made (`/run/thinfloe` not there yet when the OSD starts). Without
+/// this a missing directory turned the notes off for the whole session.
+pub struct StickWatch {
+    files: [PathBuf; 2],
+    watcher: Option<Watcher>,
+    retry_at: Instant,
+}
+
+impl StickWatch {
+    pub const RETRY: Duration = Duration::from_secs(5);
+
+    /// The watch, or the reason it is not there yet.
+    pub fn new(contract: &Path, event: &Path, now: Instant) -> (StickWatch, Option<String>) {
+        let mut w = StickWatch {
+            files: [contract.to_path_buf(), event.to_path_buf()],
+            watcher: None,
+            retry_at: now,
+        };
+        let why = w.make(now).err();
+        (w, why)
+    }
+
+    fn make(&mut self, now: Instant) -> Result<(), String> {
+        self.retry_at = now + Self::RETRY;
+        let [a, b] = &self.files;
+        self.watcher = Some(Watcher::new(&[a, b])?);
+        Ok(())
+    }
+
+    pub fn watching(&self) -> bool {
+        self.watcher.is_some()
+    }
+
+    /// The descriptor to poll, -1 (ignored by poll) without a watch.
+    pub fn raw_fd(&self) -> i32 {
+        self.watcher.as_ref().map_or(-1, Watcher::raw_fd)
+    }
+
+    /// When the next try is due; None while watching.
+    pub fn deadline(&self) -> Option<Instant> {
+        (!self.watching()).then_some(self.retry_at)
+    }
+
+    /// Try again when due. True when the watch was made now: the caller
+    /// reads the files once more as its baseline.
+    pub fn retry(&mut self, now: Instant) -> bool {
+        !self.watching() && now >= self.retry_at && self.make(now).is_ok()
+    }
+
+    /// Whether one of the files was touched since the last call.
+    pub fn drain(&self) -> bool {
+        self.watcher.as_ref().is_some_and(Watcher::drain)
     }
 }
 
@@ -353,5 +410,25 @@ mod tests {
                 clean: false
             })
         );
+    }
+
+    #[test]
+    fn a_missing_directory_is_watched_once_it_appears() {
+        let d = crate::testdir::TestDir::new("osd-notes", "late-run");
+        let run = d.join("run");
+        let (contract, event) = (run.join("removable"), run.join("removable.event"));
+        let now = Instant::now();
+        let (mut w, why) = StickWatch::new(&contract, &event, now);
+        assert!(why.is_some() && !w.watching());
+        assert_eq!(w.raw_fd(), -1);
+        assert_eq!(w.deadline(), Some(now + StickWatch::RETRY));
+        assert!(!w.retry(now), "not before the retry is due");
+        std::fs::create_dir(&run).unwrap();
+        assert!(!w.retry(now + StickWatch::RETRY / 2));
+        assert!(w.retry(now + StickWatch::RETRY));
+        assert!(w.watching() && w.raw_fd() >= 0 && w.deadline().is_none());
+        std::fs::write(&event, "1\tA\tclean\n").unwrap();
+        assert!(w.drain());
+        assert!(!w.retry(now + StickWatch::RETRY * 3), "made once");
     }
 }

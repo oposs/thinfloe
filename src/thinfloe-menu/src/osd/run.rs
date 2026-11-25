@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl, Watch};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
-use super::notes::{self, Notes, Watcher};
+use super::notes::{self, Notes, StickWatch};
 use super::socket::Datagram;
 use super::state::{OsdState, Shown};
 use super::surface::{SurfaceKind, Surfaces, mark_placement};
@@ -178,9 +178,10 @@ pub(super) fn run() -> Result<(), String> {
     );
     let mut stick_notes = Notes::new();
     // The watch first: a change between it and the baseline is then not lost.
-    let watcher = Watcher::new(&[&contract, &event])
-        .map_err(|why| logged.once(format!("thinfloe-menu --osd: no notes about sticks: {why}")))
-        .ok();
+    let (mut watch, why) = StickWatch::new(&contract, &event, Instant::now());
+    if let Some(why) = why {
+        logged.once(format!("thinfloe-menu --osd: no notes about sticks yet: {why}"));
+    }
     // The baseline: what is plugged in at start is no news.
     let (sticks, last) = notes::read_files(&contract, &event);
     stick_notes.update(&sticks, last.as_ref());
@@ -195,12 +196,12 @@ pub(super) fn run() -> Result<(), String> {
         surfaces.flush()?;
 
         let now = Instant::now();
-        let timeout = [state.next_deadline(), redetect.deadline()]
+        let timeout = [state.next_deadline(), redetect.deadline(), watch.deadline()]
             .into_iter()
             .flatten()
             .map(|t| t.saturating_duration_since(now).as_micros().div_ceil(1000))
             .fold(POLL_MAX_MS as u128, u128::min) as libc::c_int;
-        let watch_fd = watcher.as_ref().map_or(-1, Watcher::raw_fd);
+        let watch_fd = watch.raw_fd();
         let mut fds = [
             surfaces.fd().as_raw_fd(),
             sock.as_raw_fd(),
@@ -248,7 +249,11 @@ pub(super) fn run() -> Result<(), String> {
             }
             dirty |= on_action(&mut state, a, &audio, &monitors, now);
         }
-        if watcher.as_ref().is_some_and(Watcher::drain) {
+        if watch.retry(now) {
+            // Watched only from now on: what is there now is the baseline.
+            let (sticks, last) = notes::read_files(&contract, &event);
+            stick_notes.update(&sticks, last.as_ref());
+        } else if watch.drain() {
             let (sticks, last) = notes::read_files(&contract, &event);
             // Only the newest note shows; the others were overtaken.
             if let Some(n) = stick_notes.update(&sticks, last.as_ref()).last() {

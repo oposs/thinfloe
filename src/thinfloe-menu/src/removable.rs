@@ -145,13 +145,9 @@ pub fn parse_event(text: &str) -> Option<Event> {
     };
     Some(Event {
         seq: seq.parse().ok()?,
-        name: clean_name(name),
+        name: crate::battery::sanitise(name),
         clean,
     })
-}
-
-fn clean_name(name: &str) -> String {
-    crate::battery::sanitise(name)
 }
 
 #[cfg(test)]
@@ -212,8 +208,20 @@ mod tests {
             .collect();
         let s = parse(&many);
         assert!(s.len() <= MAX_STICKS && !s.is_empty());
+        // Over MAX_BYTES the file is not read at all.
+        assert!(many.len() as u64 > MAX_BYTES);
         std::fs::write(&p, &many).unwrap();
-        assert!(read(&p).len() <= MAX_STICKS);
+        assert!(read(&p).is_empty());
+        // Under MAX_BYTES, with more lines than MAX_LINES: the line and the
+        // stick caps apply through read().
+        let short: String = (0..300)
+            .map(|i| format!("/dev/x{i}\tx{i}\tN\t/m\tvfat\t1\tM\tstick\n"))
+            .collect();
+        assert!((short.len() as u64) < MAX_BYTES && short.lines().count() > MAX_LINES);
+        std::fs::write(&p, &short).unwrap();
+        let s = read(&p);
+        assert_eq!(s.len(), MAX_STICKS);
+        assert_eq!(s.last().map(|s| s.disk.as_str()), Some("x15"));
         // A garbage line between good ones does not hide them.
         let mixed = line("sdb1", "sdb", "A", "stick") + "garbage\n" + &line("sdc1", "sdc", "B", "card");
         assert_eq!(parse(&mixed).len(), 2);
