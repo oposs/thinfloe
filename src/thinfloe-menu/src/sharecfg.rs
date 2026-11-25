@@ -19,6 +19,14 @@ pub fn clean_name(name: &str) -> String {
     out.trim().to_string()
 }
 
+/// The name phones show for an empty one, as `thinfloe-share` makes it:
+/// `FloeDrop <id>`, the host name without its `thinfloe-` prefix, or the
+/// whole host name when it has none.
+pub fn default_name(host: &str) -> String {
+    let id = host.strip_prefix("thinfloe-").filter(|s| !s.is_empty()).unwrap_or(host);
+    format!("FloeDrop {id}")
+}
+
 /// The body of `generated/share`, without the header line.
 pub fn render(cfg: &ShareCfg) -> String {
     format!("enabled={}\nname={}\n", cfg.enabled, clean_name(&cfg.name))
@@ -27,6 +35,13 @@ pub fn render(cfg: &ShareCfg) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_name_is_floedrop_and_the_host_id() {
+        assert_eq!(default_name("thinfloe-56db68"), "FloeDrop 56db68");
+        assert_eq!(default_name("desk-7"), "FloeDrop desk-7");
+        assert_eq!(default_name("thinfloe-"), "FloeDrop thinfloe-");
+    }
 
     #[test]
     fn render_share_file() {

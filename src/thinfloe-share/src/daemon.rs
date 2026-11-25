@@ -166,14 +166,26 @@ pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
     })
 }
 
-/// The name phones show: the configured one, or the host name.
+/// The name phones show: the configured one, or `default_name` of the
+/// host name.
 pub fn share_name(configured: &str, host: &str) -> String {
     let c = configured.trim();
     if c.is_empty() {
-        host.to_string()
+        default_name(host)
     } else {
         c.to_string()
     }
+}
+
+/// `FloeDrop <id>`: the host name without its `thinfloe-` prefix, or the
+/// whole host name when it has none. A space, not a dash: the phone wraps
+/// the name there.
+pub fn default_name(host: &str) -> String {
+    let id = host
+        .strip_prefix("thinfloe-")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(host);
+    format!("FloeDrop {id}")
 }
 
 fn host_name() -> String {
@@ -1188,9 +1200,11 @@ fe800000000000000000000000000002 03 40 20 80     eth0
     }
 
     #[test]
-    fn empty_name_is_the_host_name() {
-        assert_eq!(share_name("", "thinfloe-a1b2c3"), "thinfloe-a1b2c3");
-        assert_eq!(share_name("  ", "thinfloe-a1b2c3"), "thinfloe-a1b2c3");
+    fn empty_name_is_floedrop_and_the_host_id() {
+        assert_eq!(share_name("", "thinfloe-56db68"), "FloeDrop 56db68");
+        assert_eq!(share_name("  ", "thinfloe-a1b2c3"), "FloeDrop a1b2c3");
+        assert_eq!(share_name("", "desk-7"), "FloeDrop desk-7");
+        assert_eq!(share_name("", "thinfloe-"), "FloeDrop thinfloe-");
         assert_eq!(share_name("Front desk", "thinfloe-a1b2c3"), "Front desk");
     }
 }

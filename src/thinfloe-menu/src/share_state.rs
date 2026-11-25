@@ -143,7 +143,8 @@ pub struct ShareBand {
     /// saved.
     cfg: ShareCfg,
     name_text: String,
-    /// The field's placeholder: the name phones get for an empty one.
+    /// The host name; the field's placeholder is the name phones get
+    /// from it for an empty field.
     host: String,
     error: Option<String>,
     /// The state file as last read, and when it was written.
@@ -169,8 +170,9 @@ impl ShareBand {
         self.host = host;
     }
 
-    pub fn host(&self) -> &str {
-        &self.host
+    /// The name field's placeholder: what phones show for an empty one.
+    pub fn placeholder(&self) -> String {
+        sharecfg::default_name(&self.host)
     }
 
     pub fn name_text(&self) -> &str {

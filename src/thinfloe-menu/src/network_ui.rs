@@ -261,7 +261,7 @@ fn share(
         let mut text = shown.to_string();
         let r = ui.add(
             Input::new(&mut text)
-                .hint(band.host().to_string())
+                .hint(band.placeholder())
                 .max_width(brand::NET_FIELD_W)
                 .id_salt("tf-net-share-name"),
         );
