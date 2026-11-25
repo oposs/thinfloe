@@ -449,13 +449,15 @@ impl Worker {
     }
 
     fn on_new(&mut self, kind: Kind, index: u32) -> Result<(), String> {
-        let Some(sync) = &self.sync else {
+        if self.sync.is_none() {
             // A start lines up the new device with all the others.
             return self.start().map(drop);
-        };
+        }
         let devices = self.p.list(kind)?;
+        let sync = self.sync.as_mut().expect("started");
         if let Some(d) = devices.iter().find(|d| d.index == index) {
-            self.apply(&sync.on_new(d));
+            let sets = sync.on_new(d);
+            self.apply(&sets);
         }
         Ok(())
     }
@@ -1621,12 +1623,13 @@ pub(super) mod tests {
         assert_eq!(calls(&d, "get-default-sink").len(), 2, "the start is retried");
         assert_eq!(calls(&d, "set-"), Vec::<String>::new());
         assert_eq!(count(&events, |e| matches!(e, AudioEvent::Sink(_))), 0);
-        // An empty default is "no default": full and unmuted.
+        // An empty default is "no default": the first sink keeps its
+        // volume.
         let d = TestDir::new("osd-audio", "emptydef");
         let p = fake(&d, &json(&[(1, "a", 40, false)]), "[]", "", "", "");
         let (_worker, events) = spawn(p, Mode::Keys);
         wait_for("the start's mark", || !events.lock().unwrap().is_empty());
-        assert_eq!(calls(&d, "set-"), ["set-sink-volume a 100%"]);
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
     }
 
     #[test]

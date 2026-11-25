@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- With "Volume keys control this machine" on, the speaker volume set with the volume keys could come back at 100 % after a restart. The volume and mute from before the restart now stay.
 - While the mouse was on an attached Deskflow computer, ThinFloe's mouse pointer stayed visible at the edge of the screen. It is now hidden until the mouse comes back to ThinFloe.
 
 ## 4.10.0 - 2026-11-24
