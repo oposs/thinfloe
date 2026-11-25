@@ -178,6 +178,9 @@ pub const INFO_INDENT: f32 = 12.0;
 pub const INFO_COL_GAP: f32 = 16.0;
 pub const INFO_TWO_COLUMNS_W: f32 = 720.0;
 
+/// The space above a dialog's row of buttons (points).
+pub const DIALOG_BUTTONS_GAP: f32 = 8.0;
+
 /// The widest an address field on the Network tab gets (points).
 pub const NET_FIELD_W: f32 = 320.0;
 
@@ -400,7 +403,7 @@ mod tests {
         }
         let digit_after = |at: usize| line[at..].starts_with(|c: char| c.is_ascii_digit());
         let call_with_digit = |pat: &str| line.match_indices(pat).any(|(i, _)| digit_after(i + pat.len()));
-        if call_with_digit(".size(") || call_with_digit("geo(") {
+        if call_with_digit(".size(") || call_with_digit("geo(") || call_with_digit("add_space(") {
             return true;
         }
         // FontId::<word>(<digit>
@@ -424,6 +427,7 @@ mod tests {
             ".size(28.0)",
             "brand::geo(34.0)",
             "geo(21.0)",
+            "ui.add_space(8.0);",
         ] {
             assert!(style_literal(bad), "{bad}");
         }
@@ -431,6 +435,7 @@ mod tests {
             "brand::geo(NAME_PT)",
             "FontId::proportional(LOG_PT)",
             ".size(t.metrics.icon)",
+            "ui.add_space(GAP / 2.0);",
         ] {
             assert!(!style_literal(good), "{good}");
         }

@@ -38,7 +38,8 @@ pub enum Contents {
 }
 
 /// The JSON of `thinfloe-upgrade contents`; untrusted: entries are
-/// counted, cut and only strings are kept.
+/// counted, cut, made printable (`battery::printable`, as every name root
+/// writes) and only strings are kept.
 pub fn parse_contents(text: &str) -> Contents {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return Contents::Failed;
@@ -53,7 +54,7 @@ pub fn parse_contents(text: &str) -> Contents {
         .iter()
         .filter_map(|e| e.as_str())
         .take(CONTENTS_MAX)
-        .map(|s| s.chars().take(CONTENTS_NAME_MAX).collect())
+        .map(|s| crate::battery::printable(s).chars().take(CONTENTS_NAME_MAX).collect())
         .collect();
     let more = v.get("more").and_then(|m| m.as_u64()).unwrap_or(0).min(1 << 32) as usize;
     Contents::Listed { entries, more }
@@ -1419,6 +1420,17 @@ mod tests {
         ] {
             assert_eq!(parse_contents(bad), Contents::Failed, "{bad}");
         }
+    }
+
+    #[test]
+    fn parse_contents_makes_names_printable() {
+        // A newline, a bidi override and an escape in a file name must not
+        // reach the erase confirmation as they are.
+        let json = r#"{"entries":["a\nb","evil\u202Etxt.exe","\u001b[31mred"," lead"],"more":0}"#;
+        let Contents::Listed { entries, .. } = parse_contents(json) else {
+            panic!()
+        };
+        assert_eq!(entries, vec!["a?b", "evil?txt.exe", "?[31mred", " lead"]);
     }
 
     #[test]

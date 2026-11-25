@@ -512,7 +512,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         egui::RichText::new(format!("{what} before you {verb}.")).color(t.palette().muted_foreground),
                     );
                 }
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -554,7 +554,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         .color(t.role(role::WARN)),
                     );
                 }
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -661,7 +661,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     egui::RichText::new(format!("If you {verb} now, data not yet written to it can be lost."))
                         .color(t.palette().muted_foreground),
                 );
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::EjectWait);
@@ -691,7 +691,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     egui::RichText::new(format!("If you {verb} now, the changes since the last save are lost."))
                         .color(t.palette().muted_foreground),
                 );
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -723,7 +723,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         dialog(ui, "Add-on not installed", |ui, t| {
             ui.label(egui::RichText::new(text).color(t.role(role::WARN)));
             ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette().muted_foreground));
-            ui.add_space(8.0);
+            ui.add_space(brand::DIALOG_BUTTONS_GAP);
             ui.horizontal(|ui| {
                 if ui.add(Button::new("Retry")).clicked() {
                     chose = Some(true);
@@ -814,6 +814,7 @@ pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Ch
                     }
                 });
             }
+            // token-ok: an empty spacer, no size.
             ui.add_space(0.0);
         });
     // Outside the scroll area: the tiles scroll, the status area stays.

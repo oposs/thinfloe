@@ -2,6 +2,7 @@
 //! the buttons do lives in menu.rs; this file paints the panel and reports
 //! the click.
 
+use crate::brand;
 use crate::drives;
 use crate::menu::{EjectEvent, Menu};
 use crate::ui::dialog;
@@ -37,7 +38,7 @@ pub fn show(ui: &Ui, menu: &Menu) -> Option<EjectEvent> {
         if let Some(m) = &menu.eject.message {
             ui.label(egui::RichText::new(m).color(t.palette().foreground));
         }
-        ui.add_space(8.0);
+        ui.add_space(brand::DIALOG_BUTTONS_GAP);
         if ui.add(Button::new("Close").variant(ButtonVariant::Secondary)).clicked() {
             chose = Some(EjectEvent::Close);
         }
