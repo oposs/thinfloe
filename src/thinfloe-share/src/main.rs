@@ -1,6 +1,10 @@
 //! FloeDrop: AirDrop with iPhones through Owly.
 
 /// Owly release this build is pinned to; keep in step with Cargo.toml and the Dockerfile.
+// Used from the daemon (later tasks); allowed unused until then.
+#[allow(dead_code)]
+mod names;
+
 const OWLY_VERSION: &str = "0.4.3";
 const OWLY_REV: &str = "21171d8";
 
