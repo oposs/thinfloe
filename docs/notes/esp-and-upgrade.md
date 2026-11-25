@@ -34,15 +34,7 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   refuses a drive that is not in that list (internal ones need
   `--allow-internal`), whose `id` differs from `--expect-id`, or that is
   mounted (fresh mode: always; upgrade mode: unless it is the boot stick),
-  with exit 2. `contents --device DEV` (read only, no lock) prints
-  `{"device", "entries", "more", "error"}` for the erase confirmation: the
-  top-level names (directories end in `/`, at most 20 in all, longer names cut
-  at 80 characters) of the automounted partitions of DEV's disk, taken from
-  `/run/thinfloe/removable` and only below `/media/tfuser`. With several
-  partitions each name starts with the partition's name and the first
-  partition may use up the list. The listing runs in a child of its own and is
-  killed after 3 s (`error` is "could not read the stick", exit still 0). The
-  menu asks once when an erase of an automounted stick opens. Progress goes to stdout as `@step <id> <text>`, `@progress
+  with exit 2. Progress goes to stdout as `@step <id> <text>`, `@progress
   <done> <total or ->`, `@done <id>`, `@touched` (a fresh write's first byte) and one
   `@result ok|failed <reason>`;
   exit 0 done, 1 failed, 2 refused, 130 cancelled by SIGTERM. A fresh write
@@ -109,6 +101,18 @@ This note covers `thinfloe-upgrade`: the home copy and size check of a fresh ins
   keeps the previous `image_bytes=` only when `latest=` is the version that
   size was read for; `error=` says what failed.
   `test/unit/upgrade-write-args.tsv` lists the `write` calls the menu may make.
+- `thinfloe-upgrade contents --device DEV` (read only, no lock) prints
+  `{"device", "entries", "more", "error"}` for the erase confirmation. It
+  lists the top-level names (directories end in `/`, at most 20 in all, names
+  over 80 characters cut) of the automounted partitions of DEV's disk, taken
+  from `/run/thinfloe/removable` and only below `/media/tfuser`. With several
+  partitions each name starts with the partition's name, in the order of the
+  contract file, so the first partition may use up the list. A partition that
+  cannot be read is left out; `error` ("could not read the stick", exit still
+  0) is set when none can be read or the listing takes longer than 3 s. The
+  listing runs in a child in a session of its own. The menu asks once when an
+  erase of an automounted stick opens, for the drive's device and `id`, and
+  drops an answer for another `id`.
 - `thinfloe-upgrade-boot-check.timer` runs `thinfloe-upgrade check` 5 min
   after boot without random delay, and `thinfloe-upgrade-check.timer` runs it
   once a day (`OnUnitActiveSec=1d`, `RandomizedDelaySec=1h`), so the Upgrade

@@ -654,8 +654,9 @@ fn panic_result(job: &Job) -> JobResult {
             all: *all,
             result: Err(e),
         },
-        Job::UpgradeContents { device } => JobResult::Contents {
+        Job::UpgradeContents { device, id } => JobResult::Contents {
             device: device.clone(),
+            id: id.clone(),
             contents: crate::upgrade::Contents::Failed,
         },
         Job::UpgradeCheck { source } => JobResult::Release {
@@ -770,7 +771,8 @@ fn job_result(
             all,
             result: jobs::upgrade_drives(&paths.upgrade_cmd, all, feed),
         },
-        Job::UpgradeContents { device } => JobResult::Contents {
+        Job::UpgradeContents { device, id } => JobResult::Contents {
+            id,
             contents: jobs::upgrade_contents(&paths.upgrade_cmd, &device, feed),
             device,
         },

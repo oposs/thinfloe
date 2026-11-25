@@ -6490,6 +6490,7 @@ mod tests {
         let now = Instant::now();
         let mut drives = three_drives();
         drives[1].automounted = true;
+        let id = drives[1].id.clone();
         let mut menu = upgrade_open(unknown_release(), drives, false, now);
         menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
         menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
@@ -6497,6 +6498,7 @@ mod tests {
         menu.finished(
             crate::jobs::JobResult::Contents {
                 device: "/dev/sdb".into(),
+                id,
                 contents: c,
             },
             now,

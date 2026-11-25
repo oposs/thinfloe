@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -3653,6 +3654,19 @@ class TestContents(unittest.TestCase):
             f.write(f"/dev/sdb2\tsdb\tS\t{mp}\tvfat\t1\tM\tstick\tfuture\n")
         # The same mount point twice is listed once.
         self.assertEqual(self.contents()["entries"], ["a"])
+
+    def test_one_unreadable_partition_does_not_hide_the_others(self):
+        self.mount("ONE", ["a"], part="sdb1")
+        two = self.mount("TWO", ["b"], part="sdb2")
+        shutil.rmtree(two)       # a mount point that vanished: scandir fails
+        r = self.contents()
+        self.assertEqual((r["entries"], r["error"]), (["ONE: a"], None))
+
+    def test_all_partitions_unreadable_is_an_error(self):
+        two = self.mount("TWO", ["b"])
+        shutil.rmtree(two)
+        r = self.contents()
+        self.assertEqual((r["entries"], r["error"]), ([], "could not read the stick"))
 
     def test_a_bad_device_is_a_usage_error(self):
         out = io.StringIO()

@@ -208,19 +208,25 @@ CONTENTS_TIMEOUT = 3.0
 CONTENTS_ERROR = "could not read the stick"
 # The listing child: one `os.scandir` per mount point given in argv, names
 # decoded with replacement, directories with a trailing slash, sorted. It
-# prints [{"entries": [...first CONTENTS_MAX...], "total": n}, ...].
+# prints [{"entries": [...first CONTENTS_MAX...], "total": n}, ...]; a mount
+# point it cannot read (stale mount, EIO) gives {"entries": [], "total": 0,
+# "failed": true} and the others are still listed.
 CONTENTS_CHILD = r'''
 import json, os, sys
 MAX, CUT = int(os.environ["TF_CMAX"]), int(os.environ["TF_CCUT"])
 out = []
 for mp in sys.argv[1:]:
     names = []
-    with os.scandir(mp) as it:
-        for e in it:
-            n = os.fsencode(e.name).decode("utf-8", "replace")
-            if len(n) > CUT:
-                n = n[:CUT] + "\N{HORIZONTAL ELLIPSIS}"
-            names.append((n, e.is_dir(follow_symlinks=False)))
+    try:
+        with os.scandir(mp) as it:
+            for e in it:
+                n = os.fsencode(e.name).decode("utf-8", "replace")
+                if len(n) > CUT:
+                    n = n[:CUT] + "\N{HORIZONTAL ELLIPSIS}"
+                names.append((n, e.is_dir(follow_symlinks=False)))
+    except OSError:
+        out.append({"entries": [], "total": 0, "failed": True})
+        continue
     names.sort()
     out.append({"entries": [n + "/" if d else n for n, d in names[:MAX]],
                 "total": len(names)})
@@ -835,7 +841,8 @@ def contents_of(device: str) -> dict:
 
     One partition lists plain names; several list the partition's name
     before each ("NAME: file"), in the order of the contract file, so the
-    first partition may use up the list. Never takes a lock. The listing runs
+    first partition may use up the list. A partition that cannot be read is
+    left out; only when none can be read is `error` set. Never takes a lock. The listing runs
     in a child in a session of its own and is killed after CONTENTS_TIMEOUT;
     any problem is reported in `error`, never as a failed exit.
     """
@@ -858,10 +865,16 @@ def contents_of(device: str) -> dict:
             raise ValueError("unexpected listing")
         entries: List[str] = []
         total = 0
+        readable = 0
         for (name, _), part in zip(mounts, parts):
+            if part.get("failed"):
+                continue
+            readable += 1
             prefix = f"{name}: " if len(mounts) > 1 else ""
             entries.extend(prefix + str(e) for e in part["entries"])
             total += int(part["total"])
+        if not readable:
+            raise OSError("no partition could be read")
         result["entries"] = entries[:CONTENTS_MAX]
         result["more"] = max(0, total - len(result["entries"]))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):

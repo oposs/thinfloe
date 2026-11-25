@@ -140,6 +140,9 @@ pub enum JobResult {
     /// The files on an automounted stick, for the erase confirmation.
     Contents {
         device: String,
+        /// The drive id the request was made for: a stick replaced at the
+        /// same device name must not take the old stick's answer.
+        id: String,
         contents: crate::upgrade::Contents,
     },
     /// The release check; `custom` is true when it used an address typed in.

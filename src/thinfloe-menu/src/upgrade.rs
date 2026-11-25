@@ -138,6 +138,7 @@ pub enum Request {
     /// `contents --device`: the files an erase of this drive removes.
     Contents {
         device: String,
+        id: String,
     },
     Write {
         args: Vec<String>,
@@ -1092,9 +1093,9 @@ impl Upgrade {
         }
         self.contents_for = want.clone();
         match want {
-            Some((device, _)) => {
+            Some((device, id)) => {
                 self.contents = Contents::Loading;
-                Some(Request::Contents { device })
+                Some(Request::Contents { device, id })
             }
             None => {
                 self.contents = Contents::None;
@@ -1105,8 +1106,8 @@ impl Upgrade {
 
     /// The answer to a `Contents` request; dropped unless it answers the
     /// one asked for last.
-    pub fn on_contents(&mut self, device: &str, c: Contents) {
-        let asked = self.contents_for.as_ref().is_some_and(|(d, _)| d == device);
+    pub fn on_contents(&mut self, device: &str, id: &str, c: Contents) {
+        let asked = self.contents_for.as_ref().is_some_and(|(d, i)| d == device && i == id);
         if asked && self.contents == Contents::Loading {
             self.contents = c;
         }
@@ -1304,7 +1305,10 @@ mod tests {
     }
 
     fn contents_req(device: &str) -> Option<Request> {
-        Some(Request::Contents { device: device.into() })
+        Some(Request::Contents {
+            device: device.into(),
+            id: "sn-A:1:1".into(),
+        })
     }
 
     #[test]
@@ -1354,13 +1358,14 @@ mod tests {
             entries: vec!["a.txt".into()],
             more: 0,
         };
-        u.on_contents("/dev/sdc", Contents::Failed);
+        u.on_contents("/dev/sdc", "sn-A:1:1", Contents::Failed);
+        u.on_contents("/dev/sdb", "sn-OTHER:1:1", Contents::Failed);
         assert_eq!(u.contents, Contents::Loading, "another device's answer is dropped");
-        u.on_contents("/dev/sdb", listed.clone());
+        u.on_contents("/dev/sdb", "sn-A:1:1", listed.clone());
         assert_eq!(u.contents, listed);
         // A repeated poll does not start it again; a second answer is dropped.
         assert_ne!(u.poll(t), contents_req("/dev/sdb"));
-        u.on_contents("/dev/sdb", Contents::Failed);
+        u.on_contents("/dev/sdb", "sn-A:1:1", Contents::Failed);
         assert_eq!(u.contents, listed);
         u.clear_choice();
         u.poll(t);

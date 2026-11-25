@@ -159,6 +159,7 @@ pub enum Job {
     /// `thinfloe-upgrade contents --device DEV`.
     UpgradeContents {
         device: String,
+        id: String,
     },
     /// `thinfloe-upgrade check [--source URL]`.
     UpgradeCheck {
@@ -700,7 +701,7 @@ impl Menu {
         match r {
             Request::Check { source } => Some(Effect::Start(Job::UpgradeCheck { source })),
             Request::Drives { all } => Some(Effect::Start(Job::Drives { all })),
-            Request::Contents { device } => Some(Effect::Start(Job::UpgradeContents { device })),
+            Request::Contents { device, id } => Some(Effect::Start(Job::UpgradeContents { device, id })),
             Request::Write { args } => Some(Effect::Start(Job::UpgradeWrite { args })),
             Request::Notes { from, to, only } => Some(Effect::Start(Job::UpgradeNotes { from, to, only })),
             // Not known yet: the signal goes out with UpgradeStarted.
@@ -1616,12 +1617,12 @@ impl Menu {
                 }
                 None
             }
-            JobResult::Contents { device, contents } => {
+            JobResult::Contents { device, id, contents } => {
                 if contents == crate::upgrade::Contents::Failed {
                     self.log
                         .note(Kind::Warn, format!("the files on {device} could not be listed."));
                 }
-                self.upgrade.on_contents(&device, contents);
+                self.upgrade.on_contents(&device, &id, contents);
                 None
             }
             JobResult::Release { custom, result } => {
