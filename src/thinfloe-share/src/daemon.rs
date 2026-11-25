@@ -1,0 +1,1122 @@
+//! \`thinfloe-share\` with no arguments: the FloeDrop daemon, run as tfuser by the menu.
+//!
+//! It starts the root helper (\`sudo -n thinfloe-share --radio\`) with a pipe on its
+//! stdin and reads its one status line. On \`up\` it receives on the lease's
+//! \`awdl0\` (port 8771, files staged in \`.incoming/\` and moved to
+//! \`inbox/<sender>/\`), announces itself over mDNS and, unless the helper says
+//! \`no-ble\`, browses for receivers and sends what lands in \`outbox/<device>/\`.
+//! The state file \`$XDG_RUNTIME_DIR/thinfloe-share.state\` tells the menu how it
+//! goes. Closing the helper's stdin gives the radio back.
+
+use std::collections::HashMap;
+use std::io;
+use std::net::{Ipv6Addr, SocketAddrV6};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc as smpsc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
+use owly_airdrop::driver::mdns::{Mdns, Registration};
+use owly_airdrop::driver::receiver::{Options, Receiver, ReceiverEvent};
+use owly_airdrop::driver::sender::{Payload, Sender};
+use owly_airdrop::driver::tls::Identity;
+use owly_airdrop::proto::mdns::{self, BrowseEvent, RECEIVER_FLAGS, SUPPORTS_DVZIP, Service};
+use owly_airdrop::proto::messages::Offer;
+use owly_airdrop::proto::receiver::Config;
+use owly_airdrop::proto::sender::{Config as SenderConfig, Outcome as OwlyOutcome};
+use owlyd::api::{self, LinkInfo, RadioProxy};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{mpsc, watch};
+
+use crate::outbox::{Outbox, Outcome, SendHandle, Transport};
+use crate::state::{Device, Head};
+use crate::{config, inbox, osd, state};
+
+/// Where we receive (Owly's NET-4 port).
+const RECEIVE_PORT: u16 = 8771;
+/// Apple receivers listen here; an AWDL peer is tried here (DISC-5).
+const AIRDROP_PORT: u16 = 8770;
+const DEFAULT_ROOT: &str = "/media/tfuser/mediashare";
+const DEFAULT_RADIO: &str = "sudo -n /usr/bin/thinfloe-share --radio";
+/// How long the helper gets to give the radio back after its stdin closes.
+const HELPER_GRACE: Duration = Duration::from_secs(5);
+/// A receiver that answered is asked again this often, so it stays in range
+/// (the outbox drops a device not seen for 60 s).
+const REDISCOVER: Duration = Duration::from_secs(20);
+/// A receiver that did not answer yet is tried again this often.
+const RETRY: Duration = Duration::from_secs(2);
+/// The longest one \`/Discover\` may hold up the others.
+const DISCOVER_WAIT: Duration = Duration::from_secs(3);
+/// The outbox thread looks at its folders at least this often.
+const OUTBOX_MAX_SLEEP: Duration = Duration::from_secs(5);
+/// State text when the helper ends without saying why.
+const HELPER_GONE: &str = "The radio helper stopped without a reason.";
+/// State text after SIGTERM: the menu stopped FloeDrop.
+const STOPPED: &str = "FloeDrop is stopped.";
+
+fn log(msg: impl std::fmt::Display) {
+    eprintln!("thinfloe-share: {msg}");
+}
+
+/// A line of the helper's stdout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperLine {
+    Up {
+        iface: String,
+        mode: String,
+        channel: u32,
+        flags: Vec<String>,
+    },
+    Error(String),
+}
+
+/// \`up<TAB>iface<TAB>mode<TAB>channel<TAB>flags\` or \`error<TAB>text\`; anything else is None.
+pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
+    let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+    match f[0] {
+        "up" if f.len() >= 4 && !f[1].is_empty() => Some(HelperLine::Up {
+            iface: f[1].to_string(),
+            mode: f[2].to_string(),
+            channel: f[3].parse().unwrap_or(0),
+            flags: f
+                .get(4)
+                .map(|s| {
+                    s.split(',')
+                        .filter(|x| !x.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        "error" => {
+            let text = f[1..].join(" ");
+            let text = text.trim();
+            Some(HelperLine::Error(if text.is_empty() {
+                HELPER_GONE.to_string()
+            } else {
+                text.to_string()
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Bytes an \`/Ask\` offers; a file without a size counts 0 (the tmpfs still caps it).
+pub fn ask_total(offer: &Offer) -> u64 {
+    match offer {
+        Offer::Files(files) => files
+            .iter()
+            .fold(0u64, |t, f| t.saturating_add(f.size.unwrap_or(0))),
+        Offer::Urls(_) => 0,
+    }
+}
+
+/// The IPv6 link-local address (EUI-64) of a MAC address such as \`aa:bb:cc:dd:ee:ff\`.
+pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
+    let b: Vec<u8> = mac
+        .split(':')
+        .map(|x| u8::from_str_radix(x, 16))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [a, b1, c, d, e, f] = <[u8; 6]>::try_from(b).ok()?;
+    Some(Ipv6Addr::new(
+        0xfe80,
+        0,
+        0,
+        0,
+        u16::from_be_bytes([a ^ 0x02, b1]),
+        u16::from_be_bytes([c, 0xff]),
+        u16::from_be_bytes([0xfe, d]),
+        u16::from_be_bytes([e, f]),
+    ))
+}
+
+/// The link-local address and index of \`iface\` from \`/proc/net/if_inet6\`'s text.
+pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
+    text.lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 6 || f[5] != iface || f[3] != "20" || f[0].len() != 32 {
+            return None;
+        }
+        let n = u128::from_str_radix(f[0], 16).ok()?;
+        let index = u32::from_str_radix(f[1], 16).ok()?;
+        Some((Ipv6Addr::from(n), index))
+    })
+}
+
+/// The name phones show: the configured one, or the host name.
+pub fn share_name(configured: &str, host: &str) -> String {
+    let c = configured.trim();
+    if c.is_empty() {
+        host.to_string()
+    } else {
+        c.to_string()
+    }
+}
+
+fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is valid for buf.len() bytes; gethostname NUL-terminates within it on success.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return "ThinFloe".into();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let h = String::from_utf8_lossy(&buf[..end]).into_owned();
+    if h.is_empty() { "ThinFloe".into() } else { h }
+}
+
+fn config_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("TF_SHARE_CONFIG") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    Path::new(&home).join(".config/thinfloe/generated/share")
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut b = [0u8; N];
+    // SAFETY: getrandom writes at most b.len() bytes into the buffer.
+    let n = unsafe { libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0) };
+    if n != b.len() as isize {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            ^ u128::from(std::process::id());
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = (t >> ((i % 16) * 8)) as u8;
+        }
+    }
+    b
+}
+
+/// The folders the daemon uses.
+#[derive(Debug, Clone)]
+struct Paths {
+    root: PathBuf,
+    inbox: PathBuf,
+    outbox: PathBuf,
+    /// Owly's destination: finished uploads land here before they are placed.
+    incoming: PathBuf,
+    identity: PathBuf,
+}
+
+impl Paths {
+    fn new(runtime_dir: &Path) -> Paths {
+        let root = std::env::var_os("TF_SHARE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT));
+        Paths {
+            inbox: root.join("inbox"),
+            outbox: root.join("outbox"),
+            incoming: root.join(".incoming"),
+            identity: runtime_dir.join("thinfloe-share"),
+            root,
+        }
+    }
+
+    /// \`inbox/\` and an empty \`.incoming/\` (what a killed run left there goes).
+    fn prepare(&self) {
+        if let Err(e) = std::fs::create_dir_all(&self.inbox) {
+            log(format!("{}: {e}", self.inbox.display()));
+        }
+        if let Err(e) = inbox::discard(&self.incoming) {
+            log(format!("{}: {e}", self.incoming.display()));
+        }
+        if let Err(e) = std::fs::create_dir_all(&self.incoming) {
+            log(format!("{}: {e}", self.incoming.display()));
+        }
+    }
+}
+
+struct StateFile {
+    path: PathBuf,
+    head: Head,
+    devices: Vec<Device>,
+}
+
+impl StateFile {
+    fn write(&self) {
+        if let Err(e) = state::write(&self.path, &self.head, &self.devices) {
+            log(format!("{}: {e}", self.path.display()));
+        }
+    }
+}
+
+/// \`thinfloe-share\` with no arguments; the exit code.
+pub fn main() -> i32 {
+    let cfg_path = config_path();
+    let cfg = config::load(&cfg_path);
+    if !cfg.enabled {
+        return 0;
+    }
+    // SAFETY: prctl(PR_SET_PDEATHSIG) takes a signal number and has no memory effects.
+    unsafe {
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGTERM as libc::c_ulong,
+            0,
+            0,
+            0,
+        )
+    };
+    let Some(state_path) = state::path() else {
+        log("XDG_RUNTIME_DIR is not set");
+        return 1;
+    };
+    let runtime_dir = state_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            log(e);
+            return 1;
+        }
+    };
+    rt.block_on(run(cfg_path, cfg.name, state_path, runtime_dir))
+}
+
+enum Exit {
+    Term,
+    Error(String),
+}
+
+fn helper_command() -> Result<tokio::process::Command, String> {
+    let line = std::env::var("TF_SHARE_RADIO").unwrap_or_else(|_| DEFAULT_RADIO.to_string());
+    let mut words = line.split_whitespace();
+    let program = words.next().ok_or("TF_SHARE_RADIO is empty")?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(words)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    Ok(cmd)
+}
+
+async fn run(
+    cfg_path: PathBuf,
+    configured: String,
+    state_path: PathBuf,
+    runtime_dir: PathBuf,
+) -> i32 {
+    let mut st = StateFile {
+        path: state_path,
+        head: Head::Starting,
+        devices: Vec::new(),
+    };
+    st.write();
+    let paths = Paths::new(&runtime_dir);
+    paths.prepare();
+    let mut name = share_name(&configured, &host_name());
+
+    let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::hangup()),
+    ) else {
+        st.head = Head::Error("Cannot install signal handlers.".into());
+        st.write();
+        return 1;
+    };
+
+    let mut child = match helper_command().and_then(|mut c| c.spawn().map_err(|e| e.to_string())) {
+        Ok(c) => c,
+        Err(e) => {
+            log(format!("cannot start the radio helper: {e}"));
+            st.head = Head::Error(format!("Cannot start the radio helper: {e}"));
+            st.write();
+            return 1;
+        }
+    };
+    let mut stdin = child.stdin.take();
+    let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+    let mut airdrop: Option<Airdrop> = None;
+
+    let exit = loop {
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(l)) => match parse_helper_line(&l) {
+                    Some(HelperLine::Up { iface, mode, channel, flags }) if airdrop.is_none() => {
+                        let no_ble = flags.iter().any(|f| f == "no-ble");
+                        match Airdrop::start(&iface, &name, no_ble, &paths).await {
+                            Ok(a) => {
+                                log(format!("ready on {iface} ({mode}, channel {channel}) as {name:?}"));
+                                airdrop = Some(a);
+                                st.head = Head::Ready { iface, mode, channel, flags };
+                                st.write();
+                            }
+                            Err(e) => break Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
+                        }
+                    }
+                    Some(HelperLine::Up { .. }) => log("a second up line from the helper, ignored"),
+                    Some(HelperLine::Error(text)) => break Exit::Error(text),
+                    None => log(format!("the helper said {l:?}, ignored")),
+                },
+                Ok(None) | Err(_) => break Exit::Error(HELPER_GONE.into()),
+            },
+            _ = term.recv() => break Exit::Term,
+            _ = int.recv() => break Exit::Term,
+            _ = hup.recv() => {
+                let cfg = config::load(&cfg_path);
+                if !cfg.enabled {
+                    break Exit::Term;
+                }
+                let new = share_name(&cfg.name, &host_name());
+                if new != name {
+                    log(format!("the name is now {new:?}"));
+                    name = new;
+                    if let Some(a) = airdrop.as_mut()
+                        && let Err(e) = a.rename(&name).await
+                    {
+                        break Exit::Error(format!("FloeDrop cannot take the new name: {e}"));
+                    }
+                }
+            }
+            step = next_step(&mut airdrop) => {
+                if let Some(devices) = step
+                    && devices != st.devices
+                {
+                    st.devices = devices;
+                    st.write();
+                }
+            }
+        }
+    };
+
+    let code = match &exit {
+        Exit::Term => 0,
+        Exit::Error(text) => {
+            log(text);
+            1
+        }
+    };
+    st.head = Head::Error(match exit {
+        Exit::Term => STOPPED.to_string(),
+        Exit::Error(t) => t,
+    });
+    st.devices.clear();
+    st.write();
+    // EOF on its stdin: the helper releases the lease and exits.
+    drop(stdin.take());
+    if let Some(a) = airdrop.take() {
+        a.shutdown().await;
+    }
+    match tokio::time::timeout(HELPER_GRACE, child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            log("the radio helper did not exit; stopping it");
+            let _ = child.start_kill();
+        }
+    }
+    code
+}
+
+async fn next_step(a: &mut Option<Airdrop>) -> Option<Vec<Device>> {
+    match a {
+        Some(a) => a.step().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The link the daemon works on.
+#[derive(Debug, Clone, Copy)]
+struct Iface {
+    index: u32,
+    addr: Ipv6Addr,
+}
+
+/// owlyd's view of the lease, read as tfuser (Radio1 and Properties are open to every user).
+async fn owlyd_link(iface: &str) -> Result<(RadioProxy<'static>, LinkInfo), String> {
+    let conn = api::connect(None)
+        .await
+        .map_err(|e| format!("owlyd cannot be reached ({e})"))?;
+    let radio = api::radio(&conn).await.map_err(|e| e.to_string())?;
+    let link = radio.link().await.map_err(|e| e.to_string())?;
+    let link = LinkInfo::from_dict(&link).ok_or("the radio is not up")?;
+    if link.interface != iface {
+        return Err(format!(
+            "the radio is up on {}, not {iface}",
+            link.interface
+        ));
+    }
+    Ok((radio, link))
+}
+
+/// What the main loop is told by the outbox thread.
+enum FromOutbox {
+    Send {
+        handle: SendHandle,
+        key: String,
+        paths: Vec<PathBuf>,
+    },
+    Devices(Vec<Device>),
+}
+
+/// What the outbox thread is told.
+enum Cmd {
+    Seen { key: String, name: String },
+    Changed(String),
+    Finished(SendHandle, Outcome),
+    Shutdown,
+}
+
+/// A receiver that answered \`/Discover\`: where to send and its TXT flags.
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    addr: SocketAddrV6,
+    flags: u32,
+}
+
+type Targets = Arc<Mutex<HashMap<String, Target>>>;
+type WatchMap = Arc<Mutex<HashMap<WatchDescriptor, String>>>;
+
+struct ChanTransport {
+    next: u64,
+    out: mpsc::UnboundedSender<FromOutbox>,
+}
+
+impl Transport for ChanTransport {
+    fn send(&mut self, service_id: &str, paths: Vec<PathBuf>) -> SendHandle {
+        self.next += 1;
+        let handle = SendHandle(self.next);
+        let _ = self.out.send(FromOutbox::Send {
+            handle,
+            key: service_id.to_string(),
+            paths,
+        });
+        handle
+    }
+}
+
+fn watch_mask() -> WatchMask {
+    WatchMask::CLOSE_WRITE
+        | WatchMask::MOVED_TO
+        | WatchMask::CREATE
+        | WatchMask::ONLYDIR
+        | WatchMask::DONT_FOLLOW
+}
+
+/// The Outbox lives on a thread of its own: its write check scans /proc,
+/// which must not stall the receiver.
+fn outbox_thread(
+    root: PathBuf,
+    cmds: smpsc::Receiver<Cmd>,
+    out: mpsc::UnboundedSender<FromOutbox>,
+    mut watches: Watches,
+    wmap: WatchMap,
+) {
+    let mut ob = Outbox::new(root.clone());
+    let mut tr = ChanTransport {
+        next: 0,
+        out: out.clone(),
+    };
+    let mut last: Option<Vec<Device>> = None;
+    let mut wake = Instant::now() + OUTBOX_MAX_SLEEP;
+    loop {
+        let wait = wake.saturating_duration_since(Instant::now());
+        match cmds.recv_timeout(wait) {
+            Ok(Cmd::Seen { key, name }) => ob.seen(&key, &name, Instant::now()),
+            Ok(Cmd::Changed(folder)) => ob.changed(&folder, Instant::now()),
+            Ok(Cmd::Finished(h, o)) => ob.finished(h, o, Instant::now()),
+            Ok(Cmd::Shutdown) | Err(smpsc::RecvTimeoutError::Disconnected) => {
+                ob.shutdown();
+                return;
+            }
+            Err(smpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let now = Instant::now();
+        let next = ob.tick(now, &mut tr);
+        wake = next.map_or(now + OUTBOX_MAX_SLEEP, |n| n.min(now + OUTBOX_MAX_SLEEP));
+        for folder in ob.take_new_folders() {
+            match watches.add(root.join(&folder), watch_mask()) {
+                Ok(wd) => {
+                    wmap.lock().unwrap().insert(wd, folder);
+                }
+                Err(e) => log(format!("cannot watch outbox/{folder}: {e}")),
+            }
+        }
+        for (tone, text) in ob.take_notes() {
+            osd::note(tone, &text);
+        }
+        let devices = ob.devices();
+        if last.as_ref() != Some(&devices) {
+            let _ = out.send(FromOutbox::Devices(devices.clone()));
+            last = Some(devices);
+        }
+    }
+}
+
+/// Finds receivers: mDNS on the link and \`/Discover\` at the radio's AWDL
+/// peers, again every [\`REDISCOVER\`] for those that answered.
+async fn discovery(
+    iface: Iface,
+    own_id: String,
+    radio: Option<RadioProxy<'static>>,
+    sender: watch::Receiver<Arc<Sender>>,
+    cmds: smpsc::Sender<Cmd>,
+    targets: Targets,
+) {
+    struct Cand {
+        key: String,
+        port: u16,
+        flags: u32,
+        from_peers: bool,
+        next_try: tokio::time::Instant,
+    }
+    let mut browse = match Mdns::new(iface.index).browse().await {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log(format!("not browsing mDNS: {e}"));
+            None
+        }
+    };
+    let mut cands: HashMap<Ipv6Addr, Cand> = HashMap::new();
+    loop {
+        let event = async {
+            match browse.as_mut() {
+                Some(b) => b.events.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            ev = event => match ev {
+                Some(BrowseEvent::Found(f)) if f.instance != own_id => {
+                    let c = cands.entry(f.addr).or_insert(Cand {
+                        key: f.instance.clone(),
+                        port: f.port,
+                        flags: f.flags,
+                        from_peers: false,
+                        next_try: tokio::time::Instant::now(),
+                    });
+                    c.key = f.instance;
+                    c.port = f.port;
+                    c.flags = f.flags;
+                    c.from_peers = false;
+                    c.next_try = tokio::time::Instant::now();
+                }
+                Some(BrowseEvent::Lost(instance)) => cands.retain(|_, c| c.key != instance),
+                Some(_) => {}
+                None => browse = None,
+            },
+            () = tokio::time::sleep(RETRY) => {}
+        }
+        if let Some(radio) = &radio {
+            let peers = radio.peers().await.unwrap_or_default();
+            let addrs: Vec<(String, Ipv6Addr)> = peers
+                .iter()
+                .filter_map(|p| {
+                    let mac = p.get("mac")?.downcast_ref::<String>().ok()?;
+                    Some((mac.clone(), link_local(&mac)?))
+                })
+                .collect();
+            cands.retain(|a, c| !c.from_peers || addrs.iter().any(|(_, x)| x == a));
+            for (mac, addr) in addrs {
+                cands.entry(addr).or_insert(Cand {
+                    key: format!("awdl-{mac}"),
+                    port: AIRDROP_PORT,
+                    // UP-1b: no TXT to say, and Apple receivers take DVZip.
+                    flags: RECEIVER_FLAGS | SUPPORTS_DVZIP,
+                    from_peers: true,
+                    next_try: tokio::time::Instant::now(),
+                });
+            }
+        }
+        let s = sender.borrow().clone();
+        for (addr, c) in cands.iter_mut() {
+            let now = tokio::time::Instant::now();
+            if c.next_try > now {
+                continue;
+            }
+            let sock = SocketAddrV6::new(*addr, c.port, 0, iface.index);
+            match tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await {
+                Ok(Ok(Some(r))) => {
+                    targets.lock().unwrap().insert(
+                        c.key.clone(),
+                        Target {
+                            addr: sock,
+                            flags: c.flags,
+                        },
+                    );
+                    let _ = cmds.send(Cmd::Seen {
+                        key: c.key.clone(),
+                        name: r.computer_name,
+                    });
+                    c.next_try = tokio::time::Instant::now() + REDISCOVER;
+                }
+                _ => c.next_try = tokio::time::Instant::now() + RETRY,
+            }
+        }
+    }
+}
+
+/// The sending half: present unless the helper said \`no-ble\`.
+struct Sending {
+    sender: watch::Sender<Arc<Sender>>,
+    cmds: smpsc::Sender<Cmd>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    from_outbox: mpsc::UnboundedReceiver<FromOutbox>,
+    targets: Targets,
+    events: inotify::EventStream<Vec<u8>>,
+    wmap: WatchMap,
+    discovery: tokio::task::JoinHandle<()>,
+}
+
+/// The AirDrop side once the radio is up.
+struct Airdrop {
+    iface: Iface,
+    identity: Identity,
+    paths: Paths,
+    service_id: String,
+    /// Bumped per receiver bind; request ids are per receiver.
+    generation: u64,
+    receiver: tokio::task::JoinHandle<()>,
+    events_tx: mpsc::Sender<(u64, ReceiverEvent)>,
+    events: mpsc::Receiver<(u64, ReceiverEvent)>,
+    /// Sender names of accepted requests, by (generation, request id).
+    pending: HashMap<(u64, u64), String>,
+    _mdns: Registration,
+    sending: Option<Sending>,
+}
+
+enum Step {
+    Receiver(Option<Box<(u64, ReceiverEvent)>>),
+    Outbox(Option<FromOutbox>),
+    Inotify(Option<io::Result<inotify::Event<std::ffi::OsString>>>),
+}
+
+impl Airdrop {
+    async fn start(
+        iface_name: &str,
+        name: &str,
+        no_ble: bool,
+        paths: &Paths,
+    ) -> Result<Airdrop, String> {
+        let (radio, iface, announce) = match owlyd_link(iface_name).await {
+            Ok((radio, link)) => {
+                let addr: Ipv6Addr = link
+                    .address
+                    .parse()
+                    .map_err(|_| format!("owlyd gave the address {:?}", link.address))?;
+                let announce = link.announce.map(|a| mdns::Burst {
+                    count: a.count,
+                    interval: a.interval,
+                    pause: a.pause,
+                });
+                (
+                    Some(radio),
+                    Iface {
+                        index: link.index,
+                        addr,
+                    },
+                    announce,
+                )
+            }
+            Err(e) => {
+                log(format!(
+                    "not using owlyd's link ({e}); reading {iface_name}'s own address"
+                ));
+                let text = std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default();
+                let (addr, index) = if_inet6_link_local(&text, iface_name)
+                    .ok_or_else(|| format!("{iface_name} has no IPv6 link-local address"))?;
+                (None, Iface { index, addr }, None)
+            }
+        };
+        let identity = Identity::load_or_generate(&paths.identity).map_err(|e| e.to_string())?;
+        let (events_tx, events) = mpsc::channel(64);
+        let receiver = bind(iface, &identity, name, paths, 0, events_tx.clone()).await?;
+        let service_id = mdns::service_id(random_bytes());
+        let service = Service {
+            instance: service_id.clone(),
+            host: format!("floedrop-{service_id}"),
+            port: RECEIVE_PORT,
+            addr: iface.addr,
+            flags: RECEIVER_FLAGS,
+        };
+        if let Some(b) = &announce {
+            log(format!(
+                "announcing {} times {} ms apart, every {} s, as the radio asks",
+                b.count,
+                b.interval.as_millis(),
+                b.pause.as_secs()
+            ));
+        }
+        let mdns = Mdns::new(iface.index)
+            .with_burst(announce)
+            .register(service)
+            .await
+            .map_err(|e| format!("mDNS: {e}"))?;
+        let sending = if no_ble {
+            log("no Bluetooth: receiving only");
+            None
+        } else {
+            Some(Self::start_sending(iface, name, &service_id, radio, paths)?)
+        };
+        Ok(Airdrop {
+            iface,
+            identity,
+            paths: paths.clone(),
+            service_id,
+            generation: 0,
+            receiver,
+            events_tx,
+            events,
+            pending: HashMap::new(),
+            _mdns: mdns,
+            sending,
+        })
+    }
+
+    fn start_sending(
+        iface: Iface,
+        name: &str,
+        service_id: &str,
+        radio: Option<RadioProxy<'static>>,
+        paths: &Paths,
+    ) -> Result<Sending, String> {
+        std::fs::create_dir_all(&paths.outbox)
+            .map_err(|e| format!("{}: {e}", paths.outbox.display()))?;
+        let inotify = Inotify::init().map_err(|e| format!("inotify: {e}"))?;
+        let watches = inotify.watches();
+        let events = inotify
+            .into_event_stream(vec![0u8; 4096])
+            .map_err(|e| format!("inotify: {e}"))?;
+        let sender = Sender::new(SenderConfig::new(name, service_id)).map_err(|e| e.to_string())?;
+        let (sender_tx, sender_rx) = watch::channel(Arc::new(sender));
+        let (cmds, cmds_rx) = smpsc::channel();
+        let (out_tx, from_outbox) = mpsc::unbounded_channel();
+        let wmap: WatchMap = Arc::default();
+        let thread = std::thread::Builder::new()
+            .name("outbox".into())
+            .spawn({
+                let root = paths.outbox.clone();
+                let wmap = wmap.clone();
+                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap)
+            })
+            .map_err(|e| e.to_string())?;
+        let targets: Targets = Arc::default();
+        let discovery = tokio::spawn(discovery(
+            iface,
+            service_id.to_string(),
+            radio,
+            sender_rx,
+            cmds.clone(),
+            targets.clone(),
+        ));
+        Ok(Sending {
+            sender: sender_tx,
+            cmds,
+            thread: Some(thread),
+            from_outbox,
+            targets,
+            events,
+            wmap,
+            discovery,
+        })
+    }
+
+    /// A new name: a new receiver (its \`/Discover\` answer) and sender.
+    async fn rename(&mut self, name: &str) -> Result<(), String> {
+        self.receiver.abort();
+        let _ = (&mut self.receiver).await;
+        self.generation += 1;
+        self.receiver = bind(
+            self.iface,
+            &self.identity,
+            name,
+            &self.paths,
+            self.generation,
+            self.events_tx.clone(),
+        )
+        .await?;
+        if let Some(s) = &self.sending {
+            let sender = Sender::new(SenderConfig::new(name, self.service_id.as_str()))
+                .map_err(|e| e.to_string())?;
+            s.sender.send_replace(Arc::new(sender));
+        }
+        Ok(())
+    }
+
+    /// One event; the receivers in range when they changed.
+    async fn step(&mut self) -> Option<Vec<Device>> {
+        let step = match self.sending.as_mut() {
+            Some(s) => tokio::select! {
+                e = self.events.recv() => Step::Receiver(e.map(Box::new)),
+                m = s.from_outbox.recv() => Step::Outbox(m),
+                i = s.events.next() => Step::Inotify(i),
+            },
+            None => Step::Receiver(self.events.recv().await.map(Box::new)),
+        };
+        match step {
+            Step::Receiver(Some(b)) => {
+                let (generation, ev) = *b;
+                self.on_receiver(generation, ev)
+            }
+            // The sender half of the channel is ours: it never closes.
+            Step::Receiver(None) => std::future::pending().await,
+            Step::Outbox(Some(FromOutbox::Devices(d))) => return Some(d),
+            Step::Outbox(Some(FromOutbox::Send { handle, key, paths })) => {
+                self.send(handle, key, paths)
+            }
+            Step::Outbox(None) | Step::Inotify(None) => {
+                // Only a panic ends them; receiving goes on without sending.
+                log("the outbox stopped; receiving only");
+                if let Some(s) = self.sending.take() {
+                    s.discovery.abort();
+                }
+            }
+            Step::Inotify(Some(Ok(ev))) => self.on_inotify(ev),
+            Step::Inotify(Some(Err(e))) => log(format!("inotify: {e}")),
+        }
+        None
+    }
+
+    fn on_inotify(&mut self, ev: inotify::Event<std::ffi::OsString>) {
+        let Some(s) = &self.sending else { return };
+        let mut map = s.wmap.lock().unwrap();
+        if ev.mask.contains(EventMask::IGNORED) {
+            map.remove(&ev.wd);
+            return;
+        }
+        if let Some(folder) = map.get(&ev.wd) {
+            let _ = s.cmds.send(Cmd::Changed(folder.clone()));
+        }
+    }
+
+    fn send(&mut self, handle: SendHandle, key: String, paths: Vec<PathBuf>) {
+        let Some(s) = &self.sending else { return };
+        let target = s.targets.lock().unwrap().get(&key).copied();
+        let cmds = s.cmds.clone();
+        let Some(target) = target else {
+            let _ = cmds.send(Cmd::Finished(
+                handle,
+                Outcome::Failed("not in range".into()),
+            ));
+            return;
+        };
+        let sender = s.sender.borrow().clone();
+        tokio::spawn(async move {
+            let payload = Payload::Files(paths);
+            let outcome = match sender.send(target.addr, &payload, target.flags, None).await {
+                Ok(OwlyOutcome::Delivered) => Outcome::Delivered,
+                Ok(OwlyOutcome::Declined) => Outcome::Declined,
+                Ok(OwlyOutcome::Failed(why)) => Outcome::Failed(why),
+                Err(e) => Outcome::Failed(e.to_string()),
+            };
+            let _ = cmds.send(Cmd::Finished(handle, outcome));
+        });
+    }
+
+    fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) {
+        match ev {
+            ReceiverEvent::Request(r) => {
+                let sender = r.ask.sender_computer_name.clone();
+                if matches!(r.ask.offer, Offer::Urls(_)) {
+                    log(format!(
+                        "{sender:?} offered links; FloeDrop takes files only"
+                    ));
+                    r.decline();
+                    return;
+                }
+                let total = ask_total(&r.ask.offer);
+                let free = inbox::free_bytes(&self.paths.root).unwrap_or_else(|e| {
+                    log(format!("{}: {e}", self.paths.root.display()));
+                    0
+                });
+                if inbox::decide(total, free) {
+                    self.pending.insert((generation, r.id), sender);
+                    r.accept();
+                } else {
+                    log(format!(
+                        "{sender:?} offered {total} bytes, {free} free: declined"
+                    ));
+                    osd::note(osd::Tone::Warn, &inbox::refused_note(&sender));
+                    r.decline();
+                }
+            }
+            ReceiverEvent::Received { id, paths } => {
+                let sender = self.pending.remove(&(generation, id)).unwrap_or_default();
+                match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
+                    Ok(placed) if placed.is_empty() => {}
+                    Ok(placed) => {
+                        osd::note(osd::Tone::Info, &inbox::received_note(&placed, &sender))
+                    }
+                    Err(e) => {
+                        log(format!("placing files from {sender:?}: {e}"));
+                        for p in &paths {
+                            remove_entry(p);
+                        }
+                    }
+                }
+            }
+            ReceiverEvent::Failed { id, reason } => {
+                // Owly's sandbox for the upload is gone already; nothing was placed.
+                let sender = self.pending.remove(&(generation, id)).unwrap_or_default();
+                log(format!("a transfer from {sender:?} failed: {reason}"));
+            }
+            ReceiverEvent::Withdrawn { id } => {
+                self.pending.remove(&(generation, id));
+            }
+            ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => {}
+        }
+    }
+
+    async fn shutdown(mut self) {
+        self.receiver.abort();
+        if let Some(mut s) = self.sending.take() {
+            s.discovery.abort();
+            let _ = s.cmds.send(Cmd::Shutdown);
+            if let Some(t) = s.thread.take() {
+                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+            }
+        }
+        // The mDNS goodbye goes out when the registration drops.
+        drop(self._mdns);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Removes one leftover staged entry without following a symlink.
+fn remove_entry(p: &Path) {
+    let r = match std::fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(p),
+        Ok(_) => std::fs::remove_file(p),
+        Err(_) => Ok(()),
+    };
+    if let Err(e) = r {
+        log(format!("{}: {e}", p.display()));
+    }
+}
+
+/// Binds a receiver named \`name\` and forwards its events tagged with \`generation\`.
+async fn bind(
+    iface: Iface,
+    identity: &Identity,
+    name: &str,
+    paths: &Paths,
+    generation: u64,
+    out: mpsc::Sender<(u64, ReceiverEvent)>,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    let config = Config::new(name);
+    let addr = SocketAddrV6::new(iface.addr, RECEIVE_PORT, 0, iface.index);
+    let (receiver, mut events) =
+        Receiver::bind(addr, identity, Options::new(config, paths.incoming.clone()))
+            .await
+            .map_err(|e| format!("cannot listen on [{}]:{RECEIVE_PORT}: {e}", iface.addr))?;
+    let run = tokio::spawn(receiver.run());
+    // The forwarder outlives a renamed receiver: its open transfers still report.
+    tokio::spawn(async move {
+        while let Some(ev) = events.recv().await {
+            if out.send((generation, ev)).await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok(run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use owly_airdrop::proto::messages::AskFile;
+
+    #[test]
+    fn helper_lines_parse() {
+        assert_eq!(
+            parse_helper_line("up\tawdl0\texclusive\t44\tno-ble"),
+            Some(HelperLine::Up {
+                iface: "awdl0".into(),
+                mode: "exclusive".into(),
+                channel: 44,
+                flags: vec!["no-ble".into()],
+            })
+        );
+        assert_eq!(
+            parse_helper_line("up\tawdl0\tshared\t6\t\n"),
+            Some(HelperLine::Up {
+                iface: "awdl0".into(),
+                mode: "shared".into(),
+                channel: 6,
+                flags: vec![],
+            })
+        );
+        assert_eq!(
+            parse_helper_line("error\tno card"),
+            Some(HelperLine::Error("no card".into()))
+        );
+        assert_eq!(
+            parse_helper_line("error"),
+            Some(HelperLine::Error(HELPER_GONE.into()))
+        );
+        assert_eq!(parse_helper_line("hello"), None);
+        assert_eq!(parse_helper_line("up\t"), None);
+    }
+
+    fn file(size: Option<u64>) -> AskFile {
+        AskFile {
+            name: "a.jpg".into(),
+            file_type: "public.jpeg".into(),
+            size,
+            bom_path: "./a.jpg".into(),
+            is_directory: false,
+        }
+    }
+
+    #[test]
+    fn ask_total_sums_sizes() {
+        let offer = Offer::Files(vec![file(Some(10)), file(None), file(Some(5))]);
+        assert_eq!(ask_total(&offer), 15);
+        let huge = Offer::Files(vec![file(Some(u64::MAX)), file(Some(1))]);
+        assert_eq!(ask_total(&huge), u64::MAX);
+        assert_eq!(ask_total(&Offer::Urls(vec!["x".into()])), 0);
+    }
+
+    #[test]
+    fn mac_to_link_local() {
+        assert_eq!(
+            link_local("02:00:00:00:00:0a"),
+            Some("fe80::ff:fe00:a".parse().unwrap())
+        );
+        assert_eq!(
+            link_local("aa:bb:cc:dd:ee:01"),
+            Some("fe80::a8bb:ccff:fedd:ee01".parse().unwrap())
+        );
+        assert_eq!(link_local("nonsense"), None);
+        assert_eq!(link_local("aa:bb:cc:dd:ee"), None);
+    }
+
+    #[test]
+    fn if_inet6_finds_the_link_local() {
+        let text = "\
+00000000000000000000000000000001 01 80 10 80       lo
+20010db8000000000000000000000001 07 40 00 00    awdl0
+fe80000000000000a8bbccfffedd ee01 07 40 20 80    awdl0
+fe80000000000000a8bbccfffeddee01 07 40 20 80    awdl0
+fe800000000000000000000000000002 03 40 20 80     eth0
+";
+        assert_eq!(
+            if_inet6_link_local(text, "awdl0"),
+            Some(("fe80::a8bb:ccff:fedd:ee01".parse().unwrap(), 7))
+        );
+        assert_eq!(
+            if_inet6_link_local(text, "eth0"),
+            Some(("fe80::2".parse().unwrap(), 3))
+        );
+        assert_eq!(if_inet6_link_local(text, "lo"), None);
+    }
+
+    #[test]
+    fn empty_name_is_the_host_name() {
+        assert_eq!(share_name("", "thinfloe-a1b2c3"), "thinfloe-a1b2c3");
+        assert_eq!(share_name("  ", "thinfloe-a1b2c3"), "thinfloe-a1b2c3");
+        assert_eq!(share_name("Front desk", "thinfloe-a1b2c3"), "Front desk");
+    }
+}

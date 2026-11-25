@@ -1,22 +1,15 @@
 //! FloeDrop: AirDrop with iPhones through Owly.
 
-// Used from the daemon (later tasks); allowed unused until then.
-#[allow(dead_code)]
 mod bluez;
-#[allow(dead_code)]
 mod card;
-#[allow(dead_code)]
 mod config;
-#[allow(dead_code)]
+mod daemon;
 mod inbox;
-#[allow(dead_code)]
 mod names;
-#[allow(dead_code)]
 mod osd;
-#[allow(dead_code)]
 mod outbox;
-#[allow(dead_code)]
 mod radio;
+// state::parse is the reader's side of the contract; only the tests read here.
 #[allow(dead_code)]
 mod state;
 
@@ -38,8 +31,9 @@ fn main() {
     match arg.as_deref() {
         Some("--version") => println!("{}", version_line()),
         Some("--radio") => std::process::exit(radio::main()),
+        None => std::process::exit(daemon::main()),
         _ => {
-            eprintln!("usage: thinfloe-share --version | --radio");
+            eprintln!("usage: thinfloe-share [--version | --radio]");
             std::process::exit(2);
         }
     }
