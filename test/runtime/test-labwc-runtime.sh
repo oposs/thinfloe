@@ -2359,7 +2359,12 @@ run_deskflow_media_case
 # set with xclip on that display. The 1.26 X11 client notices a copy on
 # its side only when it owned the clipboard before (the SelectionClear it
 # gets), so (b) runs after (a) made it the owner; it sends the text on
-# leave. The pointer goes back by moving left past the device's edge
+# leave. (b) waits until the client's log says it took ThinFloe's text
+# after the enter, and checks that xclip's copy is on the X clipboard. A
+# client that still misses the copy (seen twice in CI: "clipboard was
+# updated", then "leaving screen" and no sign of the copy) gets one more
+# cycle with a fresh text; a ThinFloe that does not carry the text back
+# fails both. The pointer goes back by moving left past the device's edge
 # ('released (back)').
 # shellcheck disable=SC2016 # expands inside the container
 cb_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
@@ -2380,6 +2385,7 @@ enter() { wlrctl pointer move -5000 -5000; wlrctl pointer move 1279 360
     wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
 back_after() { [ "$(backs)" -gt "$1" ]; }
 leave() { b=$(backs); wlrctl pointer move -100 0; upto 3 back_after $b && upto 3 state connected; }
+owns() { awk "/entering screen/ { u = 0 } /clipboard was updated/ { u = 1 } END { exit !u }" /tmp/c1/log; }
 Xvfb :99 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
 thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
 upto 15 sh -c "head -1 $TF_DESKFLOW_STATE 2>/dev/null | grep -q \"^self\""
@@ -2399,11 +2405,28 @@ sleep 0.5
 enter && echo a_enter=active || echo a_enter=idle
 upto 5 xc_is "from thinfloe" && echo a_clip=yes || echo a_clip=no
 echo "a_seen=$(xc)"
+upto 5 owns && echo b_owns=yes || echo b_owns=no
 printf "from laptop" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
+upto 2 xc_is "from laptop" && echo b_xclip=yes || echo b_xclip=no
 sleep 0.5
 leave && echo b_leave=yes || echo b_leave=no
-upto 5 wl_is "from laptop" && echo b_paste=yes || echo b_paste=no
+b_paste=no
+upto 5 wl_is "from laptop" && b_paste=yes
+echo b_paste=$b_paste
 echo "b_seen=$(wl-paste -n </dev/null 2>/dev/null)"
+if [ $b_paste = no ]; then
+    echo b_retry=yes
+    enter && echo r_enter=active || echo r_enter=idle
+    upto 5 owns && echo r_owns=yes || echo r_owns=no
+    printf "from laptop again" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
+    upto 2 xc_is "from laptop again" && echo r_xclip=yes || echo r_xclip=no
+    sleep 0.5
+    leave && echo r_leave=yes || echo r_leave=no
+    upto 5 wl_is "from laptop again" && echo r_paste=yes || echo r_paste=no
+    echo "r_seen=$(wl-paste -n </dev/null 2>/dev/null)"
+else
+    echo b_retry=no
+fi
 attach false
 sleep 0.5
 printf "not for the laptop" | wl-copy
@@ -2452,9 +2475,13 @@ run_deskflow_clipboard_case() {
     }
     cb_ok connected=yes && cb_ok a_enter=active && cb_ok a_clip=yes
     cb_check $? "clipboard_to_device: a text copied on ThinFloe is on the device's clipboard once the pointer enters it"
-    cb_ok b_leave=yes && cb_ok b_paste=yes
+    # The retry's lines (r_*) are in the diagnostics with the rest.
+    { cb_ok b_leave=yes && cb_ok b_paste=yes; } ||
+        { cb_ok b_retry=yes && cb_ok r_leave=yes && cb_ok r_paste=yes; }
     cb_check $? "clipboard_from_device: a text copied on the device while the pointer is there is on ThinFloe's clipboard once the pointer comes back"
-    cb_ok c_enter=active && cb_ok 'c_seen=from laptop' && cb_ok c_leave=yes
+    # After a retry the device's own text is the retry's.
+    cb_ok c_enter=active && cb_ok c_leave=yes &&
+        { cb_ok 'c_seen=from laptop' || { cb_ok b_retry=yes && cb_ok 'c_seen=from laptop again'; }; }
     cb_check $? "clipboard_switch_off: with clipboard = false the device's clipboard keeps its own text when the pointer enters it"
 }
 run_deskflow_clipboard_case
