@@ -177,12 +177,13 @@ pub(super) fn run() -> Result<(), String> {
         removable_path("TF_REMOVABLE_EVENT", removable::EVENT_FILE),
     );
     let mut stick_notes = Notes::new();
-    // The baseline: what is plugged in at start is no news.
-    let (sticks, last) = notes::read_files(&contract, &event);
-    stick_notes.update(&sticks, last.as_ref());
+    // The watch first: a change between it and the baseline is then not lost.
     let watcher = Watcher::new(&[&contract, &event])
         .map_err(|why| logged.once(format!("thinfloe-menu --osd: no notes about sticks: {why}")))
         .ok();
+    // The baseline: what is plugged in at start is no news.
+    let (sticks, last) = notes::read_files(&contract, &event);
+    stick_notes.update(&sticks, last.as_ref());
     let mut painter = Painter::new();
     let mut drawn: BTreeMap<String, Drawn> = BTreeMap::new();
     let mut dirty = true;

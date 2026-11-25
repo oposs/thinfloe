@@ -29,8 +29,8 @@ pub enum Note {
 /// baseline: what is there at start is not news.
 #[derive(Debug, Default)]
 pub struct Notes {
-    /// The disks seen so far in the contract file. A disk that goes is
-    /// forgotten without a note: the event file tells how it went.
+    /// The sticks (disk and names) seen so far in the contract file. One
+    /// that goes is forgotten without a note: the event file tells how it went.
     known: BTreeSet<String>,
     last_seq: Option<u64>,
     primed: bool,
@@ -48,7 +48,7 @@ impl Notes {
         let mut out = Vec::new();
         let fresh = event.filter(|e| self.last_seq != Some(e.seq));
         if self.primed {
-            for s in sticks.iter().filter(|s| !self.known.contains(&s.disk)) {
+            for s in sticks.iter().filter(|s| !self.known.contains(&identity(s))) {
                 out.push(Note::Connected(s.label().to_string()));
             }
             if let Some(e) = fresh {
@@ -59,13 +59,19 @@ impl Notes {
                 });
             }
         }
-        self.known = sticks.iter().map(|s| s.disk.clone()).collect();
+        self.known = sticks.iter().map(identity).collect();
         if let Some(e) = event {
             self.last_seq = Some(e.seq);
         }
         self.primed = true;
         out
     }
+}
+
+/// A stick is the same one while its disk and partition names are: a new
+/// card in the same reader is another stick.
+fn identity(s: &Stick) -> String {
+    format!("{}\t{}", s.disk, s.names.join("\t"))
 }
 
 fn short(name: &str) -> String {
@@ -228,6 +234,22 @@ mod tests {
             [Note::Connected("B".into())]
         );
         assert!(n.update(&[stick("sdb", "A"), stick("sdc", "B")], None).is_empty());
+    }
+
+    #[test]
+    fn the_same_disk_with_another_card_is_new() {
+        let mut n = Notes::new();
+        n.update(&[stick("sdb", "A")], None);
+        assert_eq!(n.update(&[stick("sdb", "B")], None), [Note::Connected("B".into())]);
+    }
+
+    #[test]
+    fn a_replug_with_the_same_name_is_new_but_a_repeat_read_is_not() {
+        let mut n = Notes::new();
+        n.update(&[stick("sdb", "A")], None);
+        assert!(n.update(&[stick("sdb", "A")], None).is_empty());
+        assert!(n.update(&[], None).is_empty());
+        assert_eq!(n.update(&[stick("sdb", "A")], None), [Note::Connected("A".into())]);
     }
 
     #[test]
