@@ -60,10 +60,10 @@ mod tests {
 
     #[test]
     fn note_datagram_format() {
-        // The socket sits under XDG_RUNTIME_DIR: a path below the crate's target
-        // directory is longer than the 108 bytes of sun_path.
-        let base = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is set");
-        let dir = Path::new(&base).join(format!("tfshare-osd-test-{}", std::process::id()));
+        // A relative path: cargo runs the tests in the crate directory, and the absolute
+        // path below target/ can be longer than the 108 bytes of sun_path. No user
+        // session (XDG_RUNTIME_DIR) is needed, so CI runners pass too.
+        let dir = PathBuf::from(format!("target/test-tmp/osd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("osd.sock");
         let server = UnixDatagram::bind(&path).unwrap();
