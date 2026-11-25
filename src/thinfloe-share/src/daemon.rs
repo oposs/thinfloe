@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv6Addr, SocketAddrV6};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as smpsc;
 use std::sync::{Arc, Mutex};
@@ -235,6 +236,19 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
+/// The FloeDrop folder, the tmpfs.
+fn share_root() -> PathBuf {
+    std::env::var_os("TF_SHARE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT))
+}
+
+/// The send spool below `root`: a dot folder, so neither the inbox nor the outbox
+/// (both one level lower) ever lists it.
+fn spool_dir(root: &Path) -> PathBuf {
+    root.join(".spool")
+}
+
 /// The folders the daemon uses.
 #[derive(Debug, Clone)]
 struct Paths {
@@ -243,18 +257,20 @@ struct Paths {
     outbox: PathBuf,
     /// Owly's destination: finished uploads land here before they are placed.
     incoming: PathBuf,
+    /// `TMPDIR` of the daemon: Owly spools the archive of a send here, inside the
+    /// tmpfs and its cap.
+    spool: PathBuf,
     identity: PathBuf,
 }
 
 impl Paths {
     fn new(runtime_dir: &Path) -> Paths {
-        let root = std::env::var_os("TF_SHARE_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT));
+        let root = share_root();
         Paths {
             inbox: root.join("inbox"),
             outbox: root.join("outbox"),
             incoming: root.join(".incoming"),
+            spool: spool_dir(&root),
             identity: runtime_dir.join("thinfloe-share"),
             root,
         }
@@ -270,6 +286,12 @@ impl Paths {
         }
         if let Err(e) = std::fs::create_dir_all(&self.incoming) {
             log(format!("{}: {e}", self.incoming.display()));
+        }
+        if let Err(e) = inbox::discard(&self.spool) {
+            log(format!("{}: {e}", self.spool.display()));
+        }
+        if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&self.spool) {
+            log(format!("{}: {e}", self.spool.display()));
         }
     }
 }
@@ -335,6 +357,11 @@ pub fn main() -> i32 {
         log("XDG_RUNTIME_DIR is not set");
         return 1;
     };
+    // Owly spools a send's archive with tempfile::tempfile(), in TMPDIR: in /tmp that is
+    // RAM outside the FloeDrop cap, a second copy of the batch. In the tmpfs a batch that
+    // does not fit twice fails like any failed send.
+    // SAFETY: no other thread runs yet; the tokio runtime is built below.
+    unsafe { std::env::set_var("TMPDIR", spool_dir(&share_root())) };
     let runtime_dir = state_path
         .parent()
         .map(Path::to_path_buf)

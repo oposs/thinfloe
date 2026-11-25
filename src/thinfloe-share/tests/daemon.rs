@@ -131,6 +131,28 @@ fn a_daemon_whose_menu_is_gone_exits_0_at_once() {
 }
 
 #[test]
+fn sends_spool_in_an_empty_private_folder_inside_the_share() {
+    let env = Env::new("spool");
+    // What a killed run left in the spool goes.
+    std::fs::create_dir_all(env.dir.join("media/.spool")).unwrap();
+    std::fs::write(env.dir.join("media/.spool/left"), b"x").unwrap();
+    env.helper("echo \"$TMPDIR\" >\"$D/tmpdir\"\nprintf 'error\\tno card\\n'\nexit 1");
+    env.config("enabled=true\n");
+    let mut child = env.spawn();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(10)).code(),
+        Some(1)
+    );
+    let spool = env.dir.join("media/.spool");
+    let tmpdir = std::fs::read_to_string(env.dir.join("tmpdir")).unwrap();
+    assert_eq!(tmpdir.trim_end(), spool.to_str().unwrap());
+    let md = std::fs::metadata(&spool).unwrap();
+    assert!(md.is_dir());
+    assert_eq!(md.permissions().mode() & 0o777, 0o700);
+    assert_eq!(std::fs::read_dir(&spool).unwrap().count(), 0);
+}
+
+#[test]
 fn helper_error_line_writes_error_state() {
     let env = Env::new("errline");
     env.helper("printf 'error\\tno card\\n'\nexit 1");
