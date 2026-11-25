@@ -6,8 +6,12 @@
 - FloeDrop: send and receive files with iPhones nearby over AirDrop, through the folder `/media/tfuser/mediashare` (an inbox and one outbox folder per phone). Turn it on in Settings → Network; phones must be set to AirDrop "Everyone for 10 Minutes". The machine needs a Wi-Fi card that it does not use for its own network and that supports AirDrop mode; it was tested with a TP-Link USB stick with the Realtek RTL8812BU chip.
 - Receiving works without Bluetooth; sending to a phone needs Bluetooth on the machine, and Settings → Network says "Sending needs Bluetooth; this machine has none." without it.
 - Files put into a phone's outbox folder are removed from it after each offer, also when the phone declines. Drag with copy in the remote session to keep the original.
+- USB sticks, SD cards and USB disks are opened by themselves and appear under /media/tfuser, where ThinLinc's and OxuLnk's folder sharing can reach them. A card swapped in a card reader appears in place of the old one.
+- A new Eject tile appears while a stick or card is plugged in and tells when it is safe to pull it; with several plugged in, it lists them, each with its own Eject button, and offers Eject all. An ejected USB stick is switched off; a card reader stays on, ready for the next card.
+- Restart and Power off write pending data to the sticks first and show "Writing to …" while they do. A stick that is in use is reported like a failed home save, with the choice to wait or go on.
 
 ### Changed
+- Writing ThinFloe onto a stick that is open under /media/tfuser now closes it first instead of refusing it as mounted. A stick that is in use is refused with "the stick is in use", and a stick that was not written after all is opened again.
 
 ### Fixed
 - Settings → Sound showed notes about other keyboard settings under its switch, such as "Num Lock follows at the next start." It now shows only a note about turning the volume switch on or off.

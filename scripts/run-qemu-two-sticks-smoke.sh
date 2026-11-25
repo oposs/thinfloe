@@ -17,6 +17,8 @@
 #   - each boot passes check-boot-smoke.sh,
 #   - each boot mounted /dev/vdb1, and boots 2 and 3 saw the id boot 1 gave B,
 #     which is not A's,
+#   - no boot automounted anything under /media/tfuser (stick A is a ThinFloe
+#     stick, never automounted),
 #   - afterwards both of B's syslinux.cfg copies carry thinfloe.stick=<that
 #     id>, and A's config/stick-id and syslinux.cfg copies are unchanged.
 #
@@ -126,6 +128,12 @@ for n in 1 2 3; do
         ok "boot $n mounted /dev/vdb1, the stick it booted from (stick id ${id:-none})"
     else
         bad "boot $n mounted '${dev:-nothing}' (stick id ${id:-none}), not /dev/vdb1"
+    fi
+    media=$(tr -d '\r' <"$LOG.$n" | grep -a '^SMOKE-STICK-MEDIA:' | tail -1)
+    if [[ "$media" =~ ^SMOKE-STICK-MEDIA:\ *$ ]]; then
+        ok "boot $n mounted nothing under /media/tfuser, not the other stick either"
+    else
+        bad "boot $n: ${media:-no SMOKE-STICK-MEDIA line}"
     fi
 done
 
