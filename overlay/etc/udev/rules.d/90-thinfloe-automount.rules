@@ -1,0 +1,37 @@
+# Mount a USB stick, SD card or memory card under /media/tfuser when its file
+# system appears, and unmount it when it goes. This only starts and stops the
+# template unit thinfloe-automount@<kernel name>.service; every decision (the
+# boot disk, a stick in use by the writer, the file system type) is the
+# helper's. The unit is not enabled: this rule starts it, at boot too
+# (systemd-udev-trigger replays every device).
+#
+# Candidates are partitions and whole disks without a partition table (a stick
+# formatted as one file system), on a removable disk, on the USB bus, or on an
+# SD card in a built-in slot (mmcblk with card type SD; eMMC is never touched).
+# A whole disk with a partition table is skipped: its partitions are the
+# candidates.
+#
+# A card put into a USB reader gives the reader's disk or partition a change
+# event, not an add event, so the start is tied to change events as well as add
+# events. A card pulled out gives a change event with no file system left:
+# SYSTEMD_READY=0 marks the device not ready, systemd takes its device unit
+# down, the unit's BindsTo= stops the service and the helper unmounts and
+# removes the entry. The next change event with a file system makes the device
+# ready again and starts the unit.
+
+ACTION=="remove", GOTO="thinfloe_automount_end"
+SUBSYSTEM!="block", GOTO="thinfloe_automount_end"
+ENV{DEVTYPE}!="disk|partition", GOTO="thinfloe_automount_end"
+ENV{DEVTYPE}=="disk", ENV{ID_PART_TABLE_TYPE}!="", GOTO="thinfloe_automount_end"
+
+# Internal variable (leading dot): not stored in the udev database.
+ENV{.TF_AUTOMOUNT}="0"
+ATTRS{removable}=="1", ENV{.TF_AUTOMOUNT}="1"
+ENV{ID_BUS}=="usb", ENV{.TF_AUTOMOUNT}="1"
+KERNEL=="mmcblk*", ATTRS{type}=="SD", ENV{.TF_AUTOMOUNT}="1"
+ENV{.TF_AUTOMOUNT}!="1", GOTO="thinfloe_automount_end"
+
+ACTION=="change", ENV{ID_FS_USAGE}!="filesystem", ENV{SYSTEMD_READY}="0", GOTO="thinfloe_automount_end"
+ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="thinfloe-automount@%k.service"
+
+LABEL="thinfloe_automount_end"

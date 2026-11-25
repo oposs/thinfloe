@@ -658,6 +658,7 @@ test-integration: rootfs
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) test/integration/test-firmware.sh
 	@$(TEST_ENV) test/integration/test-wifi-stack.sh
+	@$(TEST_ENV) test/integration/test-automount-image.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@$(TEST_ENV) test/integration/test-squashfs-format.sh
 	@$(TEST_ENV) test/integration/test-image-slim.sh

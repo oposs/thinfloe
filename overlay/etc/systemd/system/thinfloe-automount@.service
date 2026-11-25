@@ -1,0 +1,18 @@
+[Unit]
+Description=Mount removable storage %I
+# Started by the udev rule 90-thinfloe-automount.rules when a file system
+# appears on %I, never enabled. BindsTo= stops it when the device goes away (a
+# pulled stick, or a card taken out of a reader, which the rule turns into a
+# device that is no longer ready); ExecStop= then unmounts it, lazily if
+# something still uses it. No Before= on anything: a unit started after
+# basic.target must never declare Before= on a sysinit.target unit.
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/thinfloe/thinfloe-automount add %i
+ExecStop=/usr/libexec/thinfloe/thinfloe-automount remove %i
+TimeoutStartSec=30
+TimeoutStopSec=30
