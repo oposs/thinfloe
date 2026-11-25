@@ -146,6 +146,8 @@ pub struct Outbox {
     devs: Vec<Dev>,
     probe: Box<dyn Probe>,
     notes: Vec<(Tone, String)>,
+    /// Folders made since the last `take_new_folders`, for the daemon's inotify watches.
+    new_folders: Vec<String>,
 }
 
 fn epoch() -> u64 {
@@ -177,6 +179,21 @@ fn offerable(dir: &Path) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+/// Make the folder of a device in range again when the user deleted it; records it in
+/// `made`. Anything else of that name (a file the user put there) is left alone.
+fn ensure_folder(root: &Path, folder: &str, made: &mut Vec<String>) {
+    let p = root.join(folder);
+    match fs::symlink_metadata(&p) {
+        Ok(_) => return,
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return,
+        Err(_) => {}
+    }
+    match fs::create_dir_all(root).and_then(|()| fs::create_dir(&p)) {
+        Ok(()) => made.push(folder.to_string()),
+        Err(e) => eprintln!("thinfloe-share: outbox folder {folder}: {e}"),
+    }
 }
 
 /// Delete one offered entry without following a symlink; a missing one is fine.
@@ -224,6 +241,7 @@ impl Outbox {
             devs: Vec::new(),
             probe,
             notes: Vec::new(),
+            new_folders: Vec::new(),
         }
     }
 
@@ -236,6 +254,7 @@ impl Outbox {
                 d.present = true;
                 d.pending = Some(now);
             }
+            ensure_folder(&self.root, &d.folder, &mut self.new_folders);
             return;
         }
         let wanted = names::safe(name, DEVICE_FALLBACK);
@@ -250,6 +269,7 @@ impl Outbox {
             d.last_seen = now;
             d.present = true;
             d.pending = Some(now);
+            ensure_folder(&self.root, &d.folder, &mut self.new_folders);
             return;
         }
         if let Err(e) = fs::create_dir_all(&self.root) {
@@ -274,6 +294,7 @@ impl Outbox {
                 eprintln!("thinfloe-share: outbox folder {f}: {e}");
                 return;
             }
+            self.new_folders.push(f.clone());
             f
         };
         self.devs.push(Dev {
@@ -332,6 +353,7 @@ impl Outbox {
                 continue;
             }
             soon(d.last_seen + GONE_AFTER);
+            ensure_folder(&root, &d.folder, &mut self.new_folders);
             if let Some(changed) = d.pending {
                 let due = (changed + BATCH_DELAY).max(d.hold_until.unwrap_or(now));
                 if now < due {
@@ -387,6 +409,12 @@ impl Outbox {
             d.last_seen = d.last_seen.max(now);
         }
         self.notes.push(sent_note(&offered, &d.name, &o));
+    }
+
+    /// Folders made since the last call (new devices and folders made again after the
+    /// user deleted them): the daemon adds an inotify watch for each.
+    pub fn take_new_folders(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.new_folders)
     }
 
     /// The notes since the last call, for the OSD.
@@ -844,6 +872,44 @@ mod tests {
         assert_eq!(t.ob.devices()[0].folder, JANE);
         t.tick(3);
         assert_eq!(t.calls(), vec![("id1".to_string(), vec![a])]);
+    }
+
+    #[test]
+    fn a_deleted_folder_comes_back() {
+        let mut t = T::new("ob-deleted");
+        t.seen("id1", JANE, 0);
+        assert_eq!(t.ob.take_new_folders(), vec![JANE.to_string()]);
+        assert!(t.ob.take_new_folders().is_empty());
+        // Deleted in the remote file manager while the phone stays in range.
+        fs::remove_dir(t.root.join(JANE)).unwrap();
+        t.seen("id1", JANE, 5);
+        assert!(t.root.join(JANE).is_dir());
+        assert_eq!(t.ob.take_new_folders(), vec![JANE.to_string()]);
+        fs::remove_dir(t.root.join(JANE)).unwrap();
+        t.tick(6);
+        assert!(t.root.join(JANE).is_dir(), "tick makes it again too");
+        assert_eq!(t.ob.take_new_folders(), vec![JANE.to_string()]);
+        t.seen("id1", JANE, 7);
+        assert!(t.ob.take_new_folders().is_empty(), "nothing made twice");
+        let a = t.put(JANE, "a.jpg");
+        t.changed(JANE, 7);
+        t.tick(10);
+        assert_eq!(t.calls(), vec![("id1".to_string(), vec![a])]);
+    }
+
+    #[test]
+    fn a_handed_over_folder_is_made_again() {
+        let mut t = T::new("ob-handover");
+        t.seen("id1", JANE, 0);
+        t.tick(3);
+        t.put(JANE, "a.jpg");
+        t.tick(60);
+        // Gone with files; the folder vanishes before the next tick sees it.
+        fs::remove_dir_all(t.root.join(JANE)).unwrap();
+        t.ob.take_new_folders();
+        t.seen("id9", JANE, 61);
+        assert!(t.root.join(JANE).is_dir());
+        assert_eq!(t.ob.take_new_folders(), vec![JANE.to_string()]);
     }
 
     #[test]
