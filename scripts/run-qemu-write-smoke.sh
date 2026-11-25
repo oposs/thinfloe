@@ -6,12 +6,16 @@
 #            PREFIX LOG TIMEOUT GRACE APPEND
 #
 # Run 1: QEMU boots a copy of USB_IMAGE (virtio, kernel and initrd direct)
-# with two blank 4 GiB disks attached as USB mass storage (qemu-xhci +
-# usb-storage, so TRAN=usb), serials SMOKEA and SMOKEB. The guest runs
-# scripts/smoke-write-report.sh as systemd.run=: `drives` lists both, a fresh
-# write to B is cancelled with SIGTERM after its first @progress line (exit
-# 130, the first MiB of B all zero), and a fresh write with --verify to A
-# from the boot server below ends with exit 0 and `@result ok`. The boot
+# with two 4 GiB disks attached as USB mass storage (qemu-xhci +
+# usb-storage, so TRAN=usb), serials SMOKEA and SMOKEB, each with a vfat file
+# system, so thinfloe-automount mounts both at boot. The guest runs
+# scripts/smoke-write-report.sh as systemd.run=: `drives` lists both as
+# automounted, a write to B from a release without the image fails before
+# its first byte and leaves B automounted again, a fresh write to B is
+# cancelled with SIGTERM after its first @progress line (B released and held
+# while it runs; exit 130, the first MiB of B all zero), and a fresh write
+# with --verify to A from the boot server below ends with exit 0 and
+# `@result ok`; the ThinFloe stick it wrote is not automounted. The boot
 # disk's row in `drives` must say is_thinfloe, and `write --mode upgrade` of
 # the boot disk from a stand-in release (three 1 MiB files with checksums)
 # must stage it in tl.new/ and set DEFAULT new in both syslinux.cfg copies.
@@ -136,6 +140,11 @@ DISK_A="$tmp/a.img"
 DISK_B="$tmp/b.img"
 cp --sparse=always "$USB_IMAGE" "$BOOT" || exit 2
 truncate -s 4G "$DISK_A" "$DISK_B" || exit 2
+# Both carry a file system, so the automounter mounts them before the writes:
+# A one vfat partition, B vfat on the whole disk, labelled SMOKEA and SMOKEB.
+echo 'start=2048, type=c' | sfdisk -q --label dos "$DISK_A" || exit 2
+mkfs.vfat -F 32 -n SMOKEA --offset 2048 "$DISK_A" $((4 * 1024 * 1024 - 1024)) >/dev/null || exit 2
+mkfs.vfat -F 32 -n SMOKEB "$DISK_B" >/dev/null || exit 2
 
 esp_of() {
     local start
@@ -201,6 +210,53 @@ else
     sed -n '/SMOKE-WRITE-DRIVES-BEGIN/,/SMOKE-WRITE-DRIVES-END/p' "$clean" | sed 's/^/         /'
 fi
 
+if [[ "$(field AUTOMOUNTED-A)" == /media/tfuser/SMOKEA && "$(field AUTOMOUNTED-B)" == /media/tfuser/SMOKEB ]]; then
+    ok "both USB disks were automounted at boot, before any write"
+else
+    bad "automounted before the writes: A '$(field AUTOMOUNTED-A)', B '$(field AUTOMOUNTED-B)' (need /media/tfuser/SMOKEA and SMOKEB)"
+fi
+if [[ "$(field DRIVE-FLAGS)" == *"SMOKEA mounted=false automounted=true"* \
+      && "$(field DRIVE-FLAGS)" == *"SMOKEB mounted=false automounted=true"* ]]; then
+    ok "drives reports both as automounted, not mounted"
+else
+    bad "drives flags: '$(field DRIVE-FLAGS)'"
+fi
+
+if [[ "$(field CONTENTS-B)" == *'"entries": ["NOTE.TXT"]'* && "$(field CONTENTS-B)" == *'"error": null'* ]]; then
+    ok "contents lists the file on the automounted stick B"
+else
+    bad "contents of B: '$(field CONTENTS-B)' (need entries [\"NOTE.TXT\"] and no error)"
+fi
+
+if [[ "$(field NOWRITE-RC)" =~ ^[0-9]+$ && "$(field NOWRITE-RC)" != 0 ]]; then
+    ok "a write from a release without the image fails (exit $(field NOWRITE-RC), '$(field NOWRITE-RESULT)')"
+else
+    bad "the write from a release without the image: exit '$(field NOWRITE-RC)', result '$(field NOWRITE-RESULT)'"
+fi
+if [[ "$(field NOWRITE-REMOUNTED)" == /media/tfuser/SMOKEB && "$(field NOWRITE-HOLD)" == gone ]]; then
+    ok "the stick nothing was written to is automounted again and not held"
+else
+    bad "after the failed write: mounted at '$(field NOWRITE-REMOUNTED)', hold '$(field NOWRITE-HOLD)'"
+    sed -n '/SMOKE-WRITE-NOWRITE-STATE-BEGIN/,/SMOKE-WRITE-NOWRITE-STATE-END/p' "$clean" | sed 's/^/         /'
+fi
+
+if [[ "$(field NOWRITE-RELEASED)" =~ ^[1-9][0-9]*$ ]]; then
+    ok "the failed write released the stick first (journal: released, $(field NOWRITE-RELEASED) time(s))"
+else
+    bad "no release of B in the journal before the failed write's remount: '$(field NOWRITE-RELEASED)'"
+fi
+
+if [[ "$(field CANCEL-RELEASED)" == yes && "$(field CANCEL-HELD)" == yes ]]; then
+    ok "while the write runs, the stick is released and held"
+else
+    bad "while the write runs: released '$(field CANCEL-RELEASED)', held '$(field CANCEL-HELD)' (need yes, yes)"
+fi
+if [[ "$(field CANCEL-HOLD)" == gone ]]; then
+    ok "the cancelled write removed its hold"
+else
+    bad "the cancelled write left its hold: '$(field CANCEL-HOLD)'"
+fi
+
 if [[ "$(field CANCEL-SAW-PROGRESS)" == yes && "$(field CANCEL-RC)" == 130 ]]; then
     ok "SIGTERM after the first @progress ends the write with exit 130"
 else
@@ -228,6 +284,16 @@ if [[ " $(field WRITE-STEPS) " == *" verify "* ]]; then
     ok "the write ran the verify step"
 else
     bad "no verify step in '$(field WRITE-STEPS)'"
+fi
+if [[ "$(field WRITTEN-AUTOMOUNTED)" == no ]]; then
+    ok "the ThinFloe stick it wrote is not automounted"
+else
+    bad "the written ThinFloe stick is automounted: '$(field WRITTEN-AUTOMOUNTED)'"
+fi
+if [[ "$(field WRITTEN-SKIP)" == *"not mounted: ThinFloe stick" ]]; then
+    ok "with the hold gone, an add of the written stick is refused as a ThinFloe stick"
+else
+    bad "an add of the written stick after the write: '$(field WRITTEN-SKIP)'"
 fi
 
 if [[ "$(field BOOT-THINFLOE)" == true ]]; then

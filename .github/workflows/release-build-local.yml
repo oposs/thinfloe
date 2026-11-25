@@ -1,7 +1,7 @@
 name: Release build (ThinFloe)
 
 # Builds the release image with TF_VERSION set to the release version, runs
-# the nine QEMU smoke tests on exactly the bytes it uploads, and uploads the
+# the ten QEMU smoke tests on exactly the bytes it uploads, and uploads the
 # six release assets, one artifact release-asset-<name> each.
 # scripts/ci-runner-setup.sh prepares the runner (docs/release-ci.md,
 # "Runner setup for the project's workflows").
@@ -70,6 +70,9 @@ jobs:
 
       - name: make qemu-smoke-two-sticks
         run: make qemu-smoke-two-sticks MEMCAP= TF_VERSION="$TF_VERSION"
+
+      - name: make qemu-smoke-automount
+        run: make qemu-smoke-automount MEMCAP= TF_VERSION="$TF_VERSION"
 
       - name: make qemu-smoke-addons
         run: make qemu-smoke-addons MEMCAP= TF_VERSION="$TF_VERSION"

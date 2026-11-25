@@ -49,6 +49,10 @@ pub const NEXT_SESSION: &str = "The new screen timeout applies from the next ses
 /// How long programs get to end after SIGTERM before SIGKILL, at logout.
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// How long Restart and Power off wait for the sticks to be released before
+/// they offer to go on.
+pub const EJECT_GRACE: Duration = Duration::from_secs(60);
+
 /// An add-on job: `sudo -n thinfloe-addon <args>`, in a process group of
 /// its own, because a stop signals the whole group, which would otherwise
 /// be the menu's. sudo receives the SIGTERM and relays it to the tool.
@@ -98,6 +102,11 @@ pub enum Logout {
     WaitSave,
     /// The logout save runs.
     Saving { since: Instant },
+    /// Restart or Power off, saved: the sticks are flushed and released
+    /// before the machine goes down.
+    Ejecting { since: Instant },
+    /// A stick is in use or the release failed: Stay, or go on anyway.
+    EjectFailed { message: String },
     /// The logout save did not happen: Stay, or Log out anyway.
     Failed { message: String },
     /// Saved; the menu exits 0 at `until`.
@@ -107,7 +116,10 @@ pub enum Logout {
 impl Logout {
     /// The steps without buttons drop input before egui sees it.
     fn refuses_input(&self) -> bool {
-        !matches!(self, Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. })
+        !matches!(
+            self,
+            Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. } | Logout::EjectFailed { .. }
+        )
     }
 }
 
@@ -117,6 +129,10 @@ pub enum Choice {
     Stay,
     StopAndLeave,
     LeaveAnyway,
+    /// A stick was not released: stay in the menu.
+    EjectWait,
+    /// A stick was not released: restart or power off anyway.
+    EjectGoOn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +155,11 @@ pub enum Job {
     /// `thinfloe-upgrade drives --no-size [--all]`.
     Drives {
         all: bool,
+    },
+    /// `thinfloe-upgrade contents --device DEV`.
+    UpgradeContents {
+        device: String,
+        id: String,
     },
     /// `thinfloe-upgrade check [--source URL]`.
     UpgradeCheck {
@@ -201,6 +222,11 @@ pub enum Job {
     MachineFacts,
     /// Put this text on the clipboard with `wl-copy`.
     Copy(String),
+    /// Release a stick or card: `thinfloe-automount eject <target>`, where
+    /// the target is a disk name or `all`.
+    Eject {
+        target: String,
+    },
 }
 
 /// What fills the space above the log.
@@ -264,6 +290,28 @@ pub struct ConfigNotes {
 /// `ConfigNotes::legacy` when the migration failed this boot.
 pub const LEGACY_NOTE: &str = "Your settings could not be moved to ~/.config/thinfloe; they stay as they were until the next start. See the session log.";
 
+/// What the person asked of the Eject panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EjectEvent {
+    /// Eject this disk.
+    One(String),
+    All,
+    Close,
+}
+
+/// The Eject tile's state: the panel over the grid, the eject that runs and
+/// what the last one said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EjectState {
+    pub panel_open: bool,
+    /// The target (a disk or `all`) the helper is working on.
+    pub running: Option<String>,
+    pub message: Option<String>,
+    /// Disk and name of each stick when the eject began: the helper removes
+    /// them from its file before it ends.
+    known: Vec<(String, String)>,
+}
+
 pub struct Menu {
     pub tiles: Vec<Tile>,
     pub banner: Vec<String>,
@@ -289,6 +337,10 @@ pub struct Menu {
     /// When `battery` was set: the status area's battery pages count from
     /// here, so a new reading starts at the first page.
     pub battery_since: Option<Instant>,
+    /// The sticks and cards the automount helper keeps mounted; set by the
+    /// app on every change of its file.
+    pub removable: Vec<crate::removable::Stick>,
+    pub eject: EjectState,
     /// The status area: which elements show, at which size, in which order.
     pub status: crate::status::Area,
     /// The network sampler's last copy, set by the app before each frame.
@@ -392,6 +444,8 @@ impl Menu {
             addon_runs: Vec::new(),
             battery: Vec::new(),
             battery_since: None,
+            removable: Vec::new(),
+            eject: EjectState::default(),
             status: crate::status::Area::default(),
             netstat: None,
             hardware: None,
@@ -647,6 +701,7 @@ impl Menu {
         match r {
             Request::Check { source } => Some(Effect::Start(Job::UpgradeCheck { source })),
             Request::Drives { all } => Some(Effect::Start(Job::Drives { all })),
+            Request::Contents { device, id } => Some(Effect::Start(Job::UpgradeContents { device, id })),
             Request::Write { args } => Some(Effect::Start(Job::UpgradeWrite { args })),
             Request::Notes { from, to, only } => Some(Effect::Start(Job::UpgradeNotes { from, to, only })),
             // Not known yet: the signal goes out with UpgradeStarted.
@@ -668,12 +723,19 @@ impl Menu {
         if self.network.applying() {
             v.push(NET_APPLYING.to_string());
         }
+        if let Some(target) = &self.eject.running {
+            v.push(format!("Ejecting {}", self.eject_name(target)));
+        }
         v
     }
 
-    /// No add-on job, no stick write and no network Apply runs.
+    /// No add-on job, no stick write, no network Apply and no eject the
+    /// person started runs.
     fn root_idle(&self) -> bool {
-        self.addon_runs.is_empty() && !self.upgrade.writing() && !self.network.applying()
+        self.addon_runs.is_empty()
+            && !self.upgrade.writing()
+            && !self.network.applying()
+            && self.eject.running.is_none()
     }
 
     /// The known process groups of the root jobs.
@@ -1046,6 +1108,7 @@ impl Menu {
         match self.tiles.get(index) {
             Some(t) if t.addon => self.addon_of(index).is_some_and(AddonStatus::present),
             Some(t) if t.action == Action::Upgrade => self.usb_boot,
+            Some(t) if t.action == Action::Eject => !self.removable.is_empty(),
             Some(_) => true,
             None => false,
         }
@@ -1082,7 +1145,7 @@ impl Menu {
 
     /// Whether a dialog is up, so the grid behind it is frozen and dimmed.
     pub fn dialog(&self) -> bool {
-        self.logout.is_some() || self.retry.is_some() || self.monitors.question_up()
+        self.logout.is_some() || self.retry.is_some() || self.monitors.question_up() || self.eject.panel_open
     }
 
     /// Whether input is dropped before egui sees it.
@@ -1120,6 +1183,7 @@ impl Menu {
             Action::Run => tile.multiple || self.running(index) == 0,
             Action::SaveHome => !self.save.running,
             Action::Logout | Action::Reboot | Action::Poweroff | Action::Settings => true,
+            Action::Eject => self.eject.running.is_none(),
             // While a write runs, pressing it shows the progress.
             Action::Upgrade => true,
         }
@@ -1132,6 +1196,7 @@ impl Menu {
         self.running(index) > 0
             || (action == Some(Action::SaveHome) && self.save.running)
             || (action == Some(Action::Upgrade) && self.upgrade.writing())
+            || (action == Some(Action::Eject) && self.eject.running.is_some())
     }
 
     /// Whether an add-on update waits for the next boot, or, for the
@@ -1178,8 +1243,166 @@ impl Menu {
                 let r = self.upgrade.open(now)?;
                 self.upgrade_request(r, now)
             }
+            Action::Eject => match self.removable.as_slice() {
+                [only] => {
+                    let disk = only.disk.clone();
+                    self.start_eject(disk)
+                }
+                [] => None,
+                _ => {
+                    self.eject.panel_open = true;
+                    self.eject.message = None;
+                    None
+                }
+            },
             Action::Logout | Action::Reboot | Action::Poweroff => self.begin_ending(tile.action, now),
         }
+    }
+
+    /// Take the sticks the helper's file lists now. With none left there is
+    /// nothing for the panel to show.
+    pub fn set_removable(&mut self, sticks: Vec<crate::removable::Stick>) {
+        self.removable = sticks;
+        if self.removable.is_empty() {
+            self.eject.panel_open = false;
+        }
+    }
+
+    /// What the person did in the Eject panel.
+    pub fn eject_event(&mut self, event: EjectEvent) -> Option<Effect> {
+        match event {
+            EjectEvent::Close => {
+                self.eject.panel_open = false;
+                self.eject.message = None;
+                None
+            }
+            EjectEvent::One(disk) => self.start_eject(disk),
+            EjectEvent::All => self.start_eject("all".to_string()),
+        }
+    }
+
+    /// Ask the helper to release `target`: a disk the file lists, or `all`.
+    /// One eject runs at a time.
+    fn start_eject(&mut self, target: String) -> Option<Effect> {
+        if self.eject.running.is_some() || self.removable.is_empty() {
+            return None;
+        }
+        if target != "all" && !self.removable.iter().any(|s| s.disk == target) {
+            return None;
+        }
+        self.eject.known = self
+            .removable
+            .iter()
+            .map(|s| (s.disk.clone(), s.label().to_string()))
+            .collect();
+        let what = self.eject_name(&target);
+        self.log.note(Kind::Event, format!("Ejecting {what}."));
+        self.eject.running = Some(target.clone());
+        self.eject.message = None;
+        Some(Effect::Start(Job::Eject { target }))
+    }
+
+    /// How the messages call `target`: the stick's first name, or the sticks.
+    fn eject_name(&self, target: &str) -> String {
+        if target == "all" {
+            let one = self.eject.known.len() == 1;
+            return if one { "the stick" } else { "the sticks" }.to_string();
+        }
+        self.removable
+            .iter()
+            .find(|s| s.disk == target)
+            .map(|s| s.label().to_string())
+            .or_else(|| {
+                self.eject
+                    .known
+                    .iter()
+                    .find(|(d, _)| d == target)
+                    .map(|(_, n)| n.clone())
+            })
+            .unwrap_or_else(|| target.to_string())
+    }
+
+    /// The helper ended. The message stays in the panel and in the log.
+    pub fn eject_finished(&mut self, target: &str, r: crate::jobs::EjectResult, now: Instant) -> Option<Effect> {
+        use crate::jobs::EjectResult;
+        let done = matches!(r, EjectResult::Done);
+        // One stick is called by its name even when "all" released it.
+        let all = target == "all" && self.eject.known.len() != 1;
+        let what = match self.eject.known.as_slice() {
+            [(_, name)] if target == "all" => name.clone(),
+            _ => self.eject_name(target),
+        };
+        let (kind, message) = match r {
+            EjectResult::Done if all => (Kind::Event, "The sticks can be removed".to_string()),
+            EjectResult::Done => (Kind::Event, format!("{what} can be removed")),
+            EjectResult::Busy if all => (Kind::Warn, "The sticks are in use: close the files on them".to_string()),
+            EjectResult::Busy => (Kind::Warn, format!("{what} is in use: close the files on it")),
+            EjectResult::Failed(e) => (Kind::Warn, format!("Ejecting {what} failed: {e}")),
+        };
+        self.log.note(kind, format!("{message}."));
+        self.eject.message = Some(message.clone());
+        self.eject.running = None;
+        self.eject.known.clear();
+        // The exit's release ended after EJECT_GRACE had put up "takes too
+        // long": the dialog now says how it ended, and a release that
+        // worked goes on to the exit the person chose.
+        if matches!(self.logout, Some(Logout::Ejecting { .. } | Logout::EjectFailed { .. })) {
+            // The eject of one disk ended first: the others still need theirs.
+            if done && target != "all" && self.removable.iter().any(|s| s.disk != target) {
+                return self.start_eject("all".to_string());
+            }
+            self.logout = Some(if done {
+                Logout::Leaving {
+                    until: now + LOGOUT_PAUSE,
+                }
+            } else {
+                Logout::EjectFailed { message }
+            });
+            return None;
+        }
+        self.root_job_ended(now)
+    }
+
+    /// The names of the sticks the exit flushes, for the dialog.
+    fn flushing(&self) -> Vec<&str> {
+        if self.eject.known.is_empty() {
+            self.removable.iter().map(|s| s.label()).collect()
+        } else {
+            self.eject.known.iter().map(|(_, n)| n.as_str()).collect()
+        }
+    }
+
+    pub fn flushing_names(&self) -> String {
+        self.flushing().join(", ")
+    }
+
+    /// More than one stick is flushed.
+    pub fn flushing_many(&self) -> bool {
+        self.flushing().len() > 1
+    }
+
+    /// Restart and Power off release the sticks before they exit.
+    fn flushes(&self) -> bool {
+        matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty()
+    }
+
+    /// The home is saved (or the person goes on anyway): Restart and Power
+    /// off first release the sticks, so what is cached reaches them; Log
+    /// out leaves the machine running and does not.
+    fn after_save(&mut self, now: Instant) -> Option<Effect> {
+        if !self.flushes() {
+            return self.leave(now);
+        }
+        self.logout = Some(Logout::Ejecting { since: now });
+        // A user eject still running ends the step by itself.
+        self.start_eject("all".to_string())
+    }
+
+    fn leave(&mut self, now: Instant) -> Option<Effect> {
+        self.logout = Some(Logout::Leaving {
+            until: now + LOGOUT_PAUSE,
+        });
+        None
     }
 
     /// Log out, Restart or Power off: ask while programs or root jobs run,
@@ -1401,6 +1624,14 @@ impl Menu {
                 }
                 None
             }
+            JobResult::Contents { device, id, contents } => {
+                if contents == crate::upgrade::Contents::Failed {
+                    self.log
+                        .note(Kind::Warn, format!("the files on {device} could not be listed."));
+                }
+                self.upgrade.on_contents(&device, &id, contents);
+                None
+            }
             JobResult::Release { custom, result } => {
                 self.upgrade.released(custom, result);
                 None
@@ -1541,6 +1772,7 @@ impl Menu {
                 self.machine.facts_done(f, now);
                 None
             }
+            JobResult::Ejected { target, result } => self.eject_finished(&target, result, now),
             JobResult::Copied(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1656,14 +1888,11 @@ impl Menu {
                 self.log.note(kind, text);
                 match self.logout {
                     Some(Logout::Saving { .. }) => {
-                        self.logout = Some(if outcome.saved() {
-                            Logout::Leaving {
-                                until: now + LOGOUT_PAUSE,
-                            }
-                        } else {
-                            Logout::Failed {
-                                message: outcome.message(),
-                            }
+                        if outcome.saved() {
+                            return self.after_save(now);
+                        }
+                        self.logout = Some(Logout::Failed {
+                            message: outcome.message(),
                         });
                         None
                     }
@@ -1686,7 +1915,10 @@ impl Menu {
     /// An answer in the logout dialog. Ignored when it does not fit the step.
     pub fn choose(&mut self, choice: Choice, now: Instant) -> Option<Effect> {
         match (&self.logout, choice) {
-            (Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. }), Choice::Stay) => {
+            (
+                Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. } | Logout::EjectFailed { .. }),
+                Choice::Stay | Choice::EjectWait,
+            ) => {
                 self.logout = None;
                 self.offer_retry();
                 if std::mem::take(&mut self.deferred_save) {
@@ -1717,7 +1949,14 @@ impl Menu {
                 Some(Effect::Signal(self.pgids(), Signal::Term))
             }
             // The failure is in the log already, from when it happened.
-            (Some(Logout::Failed { .. }), Choice::LeaveAnyway) => self.ending.exit_code().map(Effect::Exit),
+            // Sticks are still released first on the way out.
+            (Some(Logout::Failed { .. }), Choice::LeaveAnyway) => {
+                if self.flushes() {
+                    return self.after_save(now);
+                }
+                self.ending.exit_code().map(Effect::Exit)
+            }
+            (Some(Logout::EjectFailed { .. }), Choice::EjectGoOn) => self.ending.exit_code().map(Effect::Exit),
             _ => None,
         }
     }
@@ -1765,6 +2004,13 @@ impl Menu {
         }
         match self.logout {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
+            // A release that hangs must not hold the restart for ever.
+            Some(Logout::Ejecting { since }) if now >= since + EJECT_GRACE => {
+                let message = "Releasing the sticks takes too long".to_string();
+                self.log.note(Kind::Warn, format!("{message}."));
+                self.logout = Some(Logout::EjectFailed { message });
+                None
+            }
             // The shutdown ends what is left of the add-on jobs.
             Some(Logout::StoppingAddons { go_at }) if now >= go_at => {
                 let jobs = self.root_jobs();
@@ -4025,6 +4271,7 @@ mod tests {
             transport: Some("usb".into()),
             removable: true,
             mounted: false,
+            automounted: false,
             is_boot: false,
             is_thinfloe: false,
             has_tl_old: false,
@@ -4917,5 +5164,355 @@ mod tests {
             ok.settings(SettingsEvent::IdleTimeout(60)),
             Some(Effect::WriteScreen { idle: 60 })
         );
+    }
+}
+
+#[cfg(test)]
+mod eject_tests {
+    use super::*;
+    use crate::jobs::EjectResult;
+    use crate::removable::{Kind as StickKind, Stick};
+    use crate::tiles::{SourceFile, merge};
+
+    fn eject_menu() -> Menu {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-eject.desktop")).unwrap();
+        let tiles = merge(
+            &[SourceFile {
+                name: "70-eject.desktop".into(),
+                entry: crate::desktop::parse(&text),
+            }],
+            &[],
+        );
+        assert_eq!(tiles[0].action, Action::Eject);
+        Menu::new(
+            Grid {
+                tiles,
+                banner: Vec::new(),
+            },
+            false,
+        )
+    }
+
+    fn stick(disk: &str, name: &str) -> Stick {
+        Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            size_bytes: 16_000_000_000,
+            model: "Cruzer".into(),
+            kind: StickKind::Stick,
+        }
+    }
+
+    #[test]
+    fn eject_tile_hidden_without_sticks() {
+        let mut m = eject_menu();
+        assert!(!m.visible(0));
+        assert!(m.visible_tiles().is_empty());
+        assert_eq!(m.activate(0, Instant::now()), None);
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        m.set_removable(Vec::new());
+        assert!(!m.visible(0));
+    }
+
+    #[test]
+    fn eject_tile_shown_with_one() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert!(m.visible(0) && m.can_activate(0));
+    }
+
+    #[test]
+    fn one_stick_tap_ejects_at_once() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert_eq!(
+            m.activate(0, Instant::now()),
+            Some(Effect::Start(Job::Eject { target: "sdb".into() }))
+        );
+        assert!(!m.eject.panel_open);
+        assert_eq!(m.eject.running.as_deref(), Some("sdb"));
+        assert!(m.active(0) && !m.can_activate(0), "one eject at a time");
+    }
+
+    #[test]
+    fn several_sticks_tap_opens_panel() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        assert_eq!(m.activate(0, Instant::now()), None);
+        assert!(m.eject.panel_open && m.dialog());
+        assert_eq!(m.eject.running, None);
+        assert_eq!(
+            m.eject_event(EjectEvent::One("sdc".into())),
+            Some(Effect::Start(Job::Eject { target: "sdc".into() }))
+        );
+        assert_eq!(m.eject_event(EjectEvent::All), None, "one at a time");
+        m.eject_finished("sdc", EjectResult::Busy, Instant::now());
+        assert_eq!(
+            m.eject_event(EjectEvent::One("nope".into())),
+            None,
+            "only a listed disk"
+        );
+        m.eject_event(EjectEvent::Close);
+        assert!(!m.eject.panel_open && m.eject.message.is_none());
+    }
+
+    #[test]
+    fn eject_all_from_panel() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        m.activate(0, Instant::now());
+        assert_eq!(
+            m.eject_event(EjectEvent::All),
+            Some(Effect::Start(Job::Eject { target: "all".into() }))
+        );
+        m.set_removable(Vec::new());
+        assert!(!m.eject.panel_open, "nothing left to show");
+        m.eject_finished("all", EjectResult::Done, Instant::now());
+        assert_eq!(m.eject.message.as_deref(), Some("The sticks can be removed"));
+        assert_eq!(m.eject.running, None);
+    }
+
+    #[test]
+    fn eject_results() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK"), stick("sdc", "OTHER")]);
+        let msg = |m: &Menu| m.eject.message.clone().unwrap();
+        m.eject_finished("sdb", EjectResult::Done, Instant::now());
+        assert_eq!(msg(&m), "MYSTICK can be removed");
+        m.eject_finished("sdb", EjectResult::Busy, Instant::now());
+        assert_eq!(msg(&m), "MYSTICK is in use: close the files on it");
+        m.eject_finished(
+            "sdb",
+            EjectResult::Failed("sdb2 is still mounted".into()),
+            Instant::now(),
+        );
+        assert_eq!(msg(&m), "Ejecting MYSTICK failed: sdb2 is still mounted");
+        m.eject_finished("all", EjectResult::Busy, Instant::now());
+        assert_eq!(msg(&m), "The sticks are in use: close the files on them");
+        // The helper drops the stick from its file before it ends.
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        let Some(Effect::Start(_)) = m.eject_event(EjectEvent::One("sdb".into())) else {
+            panic!("starts")
+        };
+        m.set_removable(Vec::new());
+        m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            Instant::now(),
+        );
+        assert_eq!(msg(&m), "MYSTICK can be removed");
+        assert_eq!(m.eject.running, None);
+    }
+
+    fn saved(m: &mut Menu, now: Instant) -> Option<Effect> {
+        m.finished(JobResult::Saved(SaveOutcome::Saved), now)
+    }
+
+    fn ending_with_stick(action: Action, now: Instant) -> Menu {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert_eq!(m.begin_ending(action, now), Some(Effect::Start(Job::Save)));
+        m
+    }
+
+    fn ejected(m: &mut Menu, r: EjectResult, now: Instant) -> Option<Effect> {
+        m.finished(
+            JobResult::Ejected {
+                target: "all".into(),
+                result: r,
+            },
+            now,
+        )
+    }
+
+    #[test]
+    fn restart_with_a_stick_saves_then_ejects_then_exits_ten() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        assert_eq!(
+            saved(&mut m, now),
+            Some(Effect::Start(Job::Eject { target: "all".into() }))
+        );
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(m.flushing_names(), "MYSTICK");
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), None, "not before the eject ended");
+        assert_eq!(ejected(&mut m, EjectResult::Done, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn power_off_with_a_busy_stick_asks() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        ejected(&mut m, EjectResult::Busy, now);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "MYSTICK is in use: close the files on it".into()
+            })
+        );
+        assert!(!m.refuses_input());
+        assert_eq!(m.choose(Choice::EjectGoOn, now), Some(Effect::Exit(11)));
+    }
+
+    #[test]
+    fn a_release_that_ends_after_the_grace_replaces_the_too_long_text() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        let late = now + EJECT_GRACE;
+        assert_eq!(m.tick(late), None);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "Releasing the sticks takes too long".into()
+            })
+        );
+        // It ends after all: the power off goes on.
+        assert_eq!(ejected(&mut m, EjectResult::Done, late), None);
+        assert_eq!(m.tick(late + LOGOUT_PAUSE), Some(Effect::Exit(11)));
+        // Or it fails: the dialog names the failure, not the delay.
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        m.tick(late);
+        ejected(&mut m, EjectResult::Busy, late);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "MYSTICK is in use: close the files on it".into()
+            })
+        );
+    }
+
+    #[test]
+    fn waiting_after_a_busy_stick_stays_in_the_menu() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        ejected(&mut m, EjectResult::Failed("sdb2 is still mounted".into()), now);
+        assert!(matches!(m.logout, Some(Logout::EjectFailed { .. })));
+        assert_eq!(m.choose(Choice::EjectWait, now), None);
+        assert_eq!(m.logout, None);
+    }
+
+    #[test]
+    fn restart_without_sticks_does_not_eject() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        assert_eq!(m.begin_ending(Action::Reboot, now), Some(Effect::Start(Job::Save)));
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn logout_never_ejects() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Logout, now);
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(0)));
+    }
+
+    #[test]
+    fn a_failed_save_still_asks_before_eject() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Failed), now), None);
+        assert!(matches!(m.logout, Some(Logout::Failed { .. })));
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Start(Job::Eject { target: "all".into() })),
+            "the sticks are still released"
+        );
+    }
+
+    #[test]
+    fn a_running_user_eject_holds_the_ending_tiles() {
+        let now = Instant::now();
+        for action in [Action::Logout, Action::Reboot, Action::Poweroff] {
+            let mut m = eject_menu();
+            m.set_removable(vec![stick("sdb", "MYSTICK")]);
+            assert!(m.activate(0, now).is_some());
+            assert_eq!(m.root_jobs(), ["Ejecting MYSTICK"]);
+            assert_eq!(m.begin_ending(action, now), None, "asks instead of saving");
+            assert_eq!(m.logout, Some(Logout::Confirm));
+            // The eject ends: the ending goes on by itself.
+            let r = m.finished(
+                JobResult::Ejected {
+                    target: "sdb".into(),
+                    result: EjectResult::Done,
+                },
+                now,
+            );
+            assert_eq!(r, Some(Effect::Start(Job::Save)), "{action:?}");
+            assert_eq!(m.logout, Some(Logout::Saving { since: now }));
+        }
+    }
+
+    #[test]
+    fn the_exit_eject_waits_for_a_running_user_eject() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        // A user eject slipped in while the save ran.
+        m.eject.running = Some("sdb".into());
+        assert_eq!(saved(&mut m, now), None, "no second eject");
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            now,
+        );
+        assert!(matches!(m.logout, Some(Logout::Leaving { .. })));
+    }
+
+    #[test]
+    fn a_user_eject_of_one_disk_does_not_skip_the_other_sticks() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        m.begin_ending(Action::Reboot, now);
+        m.eject.running = Some("sdb".into());
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        m.set_removable(vec![stick("sdc", "TWO")]);
+        let r = m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            now,
+        );
+        assert_eq!(r, Some(Effect::Start(Job::Eject { target: "all".into() })));
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(ejected(&mut m, EjectResult::Done, now), None);
+        assert!(matches!(m.logout, Some(Logout::Leaving { .. })));
+    }
+
+    #[test]
+    fn a_hanging_release_offers_to_go_on() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        assert_eq!(m.tick(now + EJECT_GRACE / 2), None);
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(m.tick(now + EJECT_GRACE), None);
+        assert!(matches!(m.logout, Some(Logout::EjectFailed { .. })));
+        assert_eq!(m.choose(Choice::EjectGoOn, now), Some(Effect::Exit(11)));
+    }
+
+    #[test]
+    fn one_stick_is_called_the_stick() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        m.begin_ending(Action::Reboot, now);
+        saved(&mut m, now);
+        assert!(m.log.lines().any(|l| l.plain() == "Ejecting the stick."));
+        assert!(!m.flushing_many());
     }
 }

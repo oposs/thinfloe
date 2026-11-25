@@ -78,7 +78,8 @@ rm -f "$TREE"/.*-container
 echo x | zstd -q -o "$TREE/artifacts/images/thinfloe-usb.img.zst"
 : >"$TREE/artifacts/images/thinfloe-usb.img.zst.sha256"
 for goal in qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot \
-            qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot; do
+            qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot \
+            qemu-smoke-automount; do
     out=$(dry_rc "$goal" PREBUILT=1)
     if [ "$(tail -n1 <<<"$out")" = "rc=0" ] \
         && ! grep -qE 'podman build|export-rootfs\.sh|make-bootable-image\.sh' <<<"$out"; then

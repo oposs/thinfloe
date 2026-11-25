@@ -21,6 +21,9 @@ pub struct Drive {
     pub transport: Option<String>,
     pub removable: bool,
     pub mounted: bool,
+    /// Mounted only by the automounter, which a write releases first;
+    /// `mounted` is then false.
+    pub automounted: bool,
     pub is_boot: bool,
     pub is_thinfloe: bool,
     pub has_tl_old: bool,
@@ -81,6 +84,7 @@ fn row(v: &Value) -> Option<Drive> {
         removable: flag(v, "removable", false),
         // Fail closed: a row the tool did not describe is in use and unexamined.
         mounted: flag(v, "mounted", true),
+        automounted: flag(v, "automounted", false),
         is_boot: flag(v, "is_boot", false),
         is_thinfloe: flag(v, "is_thinfloe", false),
         has_tl_old: flag(v, "has_tl_old", false),
@@ -183,6 +187,11 @@ fn refusal(d: &Drive, mode: Mode, image_bytes: Option<u64>) -> Result<(), String
     if d.mounted && !d.is_boot {
         return Err("in use: a partition is mounted".to_string());
     }
+    // A fresh install releases an automounted stick first; an upgrade in
+    // place does not, and the tool refuses it.
+    if mode == Mode::Upgrade && d.automounted && !d.is_boot {
+        return Err("in use: a partition is mounted".to_string());
+    }
     if mode == Mode::Fresh {
         let small = d.fits == Some(false) || image_bytes.is_some_and(|b| d.size_bytes < b);
         if small {
@@ -227,6 +236,7 @@ mod tests {
             transport: Some("usb".into()),
             removable: true,
             mounted: false,
+            automounted: false,
             is_boot: false,
             is_thinfloe: false,
             has_tl_old: false,
@@ -240,6 +250,45 @@ mod tests {
 
     fn row_json(device: &str, id: &str) -> String {
         format!(r#"{{"device":"{device}","id":"{id}","model":"M","size_bytes":1}}"#)
+    }
+
+    #[test]
+    fn an_automounted_thinfloe_stick_is_not_offered_an_upgrade_in_place() {
+        // The tool refuses it ("is mounted and cannot be upgraded"); a fresh
+        // install releases the stick first and is offered.
+        let d = Drive {
+            is_thinfloe: true,
+            automounted: true,
+            ..stick()
+        };
+        let m = modes(&d, None);
+        assert_eq!(
+            m,
+            vec![
+                (Mode::Upgrade, Err("in use: a partition is mounted".to_string())),
+                (Mode::Fresh, Ok(()))
+            ]
+        );
+        // The boot stick is never automounted as such; it stays upgradable.
+        let boot = Drive { is_boot: true, ..d };
+        assert_eq!(modes(&boot, None), vec![(Mode::Upgrade, Ok(()))]);
+    }
+
+    #[test]
+    fn parse_accepts_automounted() {
+        let json = r#"[{"device":"/dev/sdb","id":"x","mounted":false,"automounted":true}]"#;
+        let v = parse(json).unwrap();
+        assert!(v[0].automounted && !v[0].mounted);
+    }
+
+    #[test]
+    fn parse_without_automounted_defaults_false() {
+        let v = parse(&row_json_array()).unwrap();
+        assert!(!v[0].automounted);
+    }
+
+    fn row_json_array() -> String {
+        format!("[{}]", row_json("/dev/sdb", "x"))
     }
 
     #[test]

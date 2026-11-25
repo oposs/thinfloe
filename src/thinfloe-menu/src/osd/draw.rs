@@ -377,6 +377,21 @@ mod tests {
     }
 
     #[test]
+    fn the_longest_stick_note_is_not_cut() {
+        use crate::osd::notes::{NAME_MAX, Note, text};
+        let name = "W".repeat(NAME_MAX);
+        for n in [
+            Note::Connected(name.clone()),
+            Note::Removable(name.clone()),
+            Note::Unclean(name),
+        ] {
+            let (t, _) = text(&n);
+            let fit = Painter::new().note_fit(&t, 1.0, None);
+            assert!(!fit.elided, "{t:?} is cut");
+        }
+    }
+
+    #[test]
     fn volume_panel_has_the_size_and_an_ice_bar_to_the_level() {
         let c = Painter::new().panel(&PanelView::Volume { percent: 50 }, 1.0);
         assert_eq!((c.width, c.height), (320, 61));
@@ -574,5 +589,14 @@ mod tests {
             }
             save(&p.mark(s), &format!("mark-x{s}.png"));
         }
+    }
+
+    #[test]
+    fn the_note_font_has_the_em_dash() {
+        // The unclean note reads "... removed without eject \u{2014} files may be lost".
+        let mut p = Painter::new();
+        p.panel(&note(true, "A"), 1.0);
+        let font = brand::geo(OSD_TEXT_PT);
+        assert!(p.ctx.fonts_mut(|f| f.has_glyph(&font, '\u{2014}')));
     }
 }

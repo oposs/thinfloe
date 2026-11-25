@@ -20,7 +20,8 @@ make test-unit           # Python unit tests in test/unit/ and the menu's cargo 
 make test-menu           # fmt, clippy and cargo test of the menu; no image
 make test-runtime        # labwc and the menu headless
 make qemu-smoke          # boot the USB image in QEMU (also: -addons, -write, -upgrade,
-                         #   -netboot, -two-sticks, -grow, -timezone, -timezone-netboot)
+                         #   -netboot, -two-sticks, -grow, -timezone, -timezone-netboot,
+                         #   -automount)
 make qemu-smoke PREBUILT=1  # any smoke target on artifacts/rootfs/{vmlinuz,initrd.img,ramroot.sqsh}
                          #   and artifacts/images/thinfloe-usb.img.zst(.sha256); no container, no export.
                          #   The files are used as they are: no stale or source-key check (on the dev
@@ -35,7 +36,7 @@ Menu crate: `cargo test`, `cargo clippy` and `cargo fmt` in `src/thinfloe-menu`.
 A release starts on GitHub: the **Create release PR** workflow
 (`release-pr.yml`, run by hand with bugfix, feature or major) rolls
 `CHANGES.md`, writes the version to `RELEASE`, builds the image and runs the
-nine smoke tests on it (`release-build-local.yml`), runs `ci.yml`, drafts the
+ten smoke tests on it (`release-build-local.yml`), runs `ci.yml`, drafts the
 release and opens the release pull request; merging it publishes the
 release. Each release carries exactly six assets: `vmlinuz`, `initrd.img`,
 `ramroot.sqsh`, `thinfloe-usb.img.zst`, `version` and `SHA256SUMS`, no
@@ -68,13 +69,14 @@ release.
 - Time zone and NTP: `overlay/usr/bin/thinfloe-time` (live, as root), `install_local_time()` in `thinfloe-lib.sh` (boot), `overlay/usr/libexec/thinfloe/dhcp-timezone` (DHCP zone and NTP servers), the Time band in `timeband.rs`/`network_ui.rs`. Notes: [docs/notes/time-zone.md](docs/notes/time-zone.md).
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
 - Deskflow server: `src/thinfloe-menu/src/deskflow/` (daemon, `thinfloe-menu --deskflow`), `deskflow_sup.rs` (the menu's supervision), `deskflowtab.rs`/`deskflow_ui.rs` (the Deskflow band). Notes: [docs/notes/deskflow.md](docs/notes/deskflow.md).
+- Automount of sticks and cards: `overlay/usr/libexec/thinfloe/thinfloe-automount` (root helper), `overlay/etc/udev/rules.d/90-thinfloe-automount.rules`, `thinfloe-automount@.service`; the Eject tile in `src/thinfloe-menu/src/` (`removable.rs`, `eject_ui.rs`). Notes: [docs/notes/automount.md](docs/notes/automount.md).
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units. Bolt microphone mute key (HID++ divert, F20 through uinput): `overlay/usr/libexec/thinfloe/logitech-keys` and `thinfloe-logitech-keys.service`, started by the same udev rule.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.
 - User defaults: `overlay/home/tfuser/` (`.config/thinfloe/` with `environment`, `sessionrc` and `home-version`; `.thinlinc/tlclient.conf`). Layout of `~/.config/thinfloe/`: [docs/notes/home-persistence.md](docs/notes/home-persistence.md).
 - Keyboard tab: `src/thinfloe-menu/src/` (`kbregistry.rs` layout list, `keyboard.rs` state, `keyboardtab_ui.rs` drawing, `jobs::keyboard_apply` the live apply).
 - OSD: `src/thinfloe-menu/src/osd/` (`thinfloe-menu --osd`, `--osd-key`).
 - Config store and migration: `src/thinfloe-menu/src/` (`config.rs` schema, `store.rs` the only writer, `generated.rs` derived files, `migrate.rs` the 4.x migration).
-- FloeDrop (AirDrop with iPhones): daemon and radio helper `src/thinfloe-share/` (`thinfloe-share`, `thinfloe-share --radio`), the Network tab's band in `share_state.rs`/`sharecfg.rs`, folder mount `overlay/etc/systemd/system/media-tfuser-mediashare.mount`, Owly units under `overlay/usr/lib/systemd/system/owlyd.service`. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
+- FloeDrop (AirDrop with iPhones): daemon and radio helper `src/thinfloe-share/` (`thinfloe-share`, `thinfloe-share --radio`), the Network tab's band in `share_state.rs`/`sharecfg.rs`, folder mount `overlay/etc/systemd/system/media-tfuser-FloeDrop.mount`, Owly units under `overlay/usr/lib/systemd/system/owlyd.service`. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
 - Tests: `test/integration/` (`make test`), `test/unit/` (`make test-unit`), `test/runtime/` (`make test-runtime`).
 
 ## Rules that are easy to break
@@ -138,6 +140,10 @@ Not standing constraints, but each has broken something or is guarded by a test.
 - The Plymouth progress follows elapsed time, never Plymouth's `progress`; the logo is drawn from pre-rendered widths, never `Image.Scale`d; `layout()` runs again on display hotplug; `DeviceScale=1` stays in `plymouthd.conf`. Guard: `test-initramfs-commands.sh`. Notes: [docs/notes/boot-screen.md](docs/notes/boot-screen.md).
 - The Geo font path `/usr/share/fonts/truetype/thinfloe/` is also copied into the initrd; moving it breaks the boot screen.
 
+### Automount
+
+- `/run/thinfloe/removable` (`device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`) and `/run/thinfloe/removable.event` are a contract between `thinfloe-automount`, their only writer, and the menu; readers ignore unknown trailing fields. `/media/tfuser` stays root's (0755) and no stick is named `FloeDrop` in any case (FloeDrop's tmpfs; `RESERVED_NAMES`); the boot disk and a partition labelled `EFI-SYSTEM` are never mounted; a card reader or built-in SD slot is never powered off. Every write of `thinfloe-upgrade` holds the stick and releases it before the first byte. Guards: `test_automount.py`, `test-automount-image.sh`, `make qemu-smoke-automount`. Notes: [docs/notes/automount.md](docs/notes/automount.md).
+
 ### Add-ons
 
 - Lock order: `install.lock` -> `/run/thinfloe/esp.lock` -> `.lock`; never take an earlier one while a later one is held. `thinfloe-save-home` takes only `esp.lock`.
@@ -150,7 +156,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 ### FloeDrop
 
 - The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` (first line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags`, then `name<TAB>folder<TAB>state<TAB>since`) and the OSD note datagram `note<TAB>tone<TAB>text<LF>` are contracts; readers ignore unknown trailing fields. The daemon reads only `generated/share`, never `config.toml`.
-- `media-tfuser-mediashare.mount` is a tmpfs with exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Guard: `test-floedrop-image.sh`.
+- `media-tfuser-FloeDrop.mount` is a tmpfs with exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Guard: `test-floedrop-image.sh`.
 - The radio helper never calls `AcquireDetached` (a crash must give the card back), and a reload SIGHUP goes to the daemon pid only: the process group holds the sudo'd helper. Owly stays pinned to one commit in `Cargo.toml` and the Dockerfile. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
 
 ### Upgrade and netboot
@@ -393,6 +399,7 @@ and hardware results:
 - [esp-and-upgrade.md](docs/notes/esp-and-upgrade.md): `thinfloe-upgrade`: home copy, size check, the batch interface, check timers.
 - [network-boot.md](docs/notes/network-boot.md): netboot networking and its smoke test.
 - [add-ons.md](docs/notes/add-ons.md): add-on sources, storage, locks, boot install, checks, the menu.
+- [automount.md](docs/notes/automount.md): sticks and cards under /media/tfuser, skip rules, the contract and event files, the write hold, locks, power-off, tests and owner checks.
 - [media-keys.md](docs/notes/media-keys.md): the volume and brightness keys, the OSD and the microphone mark, DDC/CI, tests and owner checks.
 - [floedrop.md](docs/notes/floedrop.md): FloeDrop, AirDrop with iPhones: processes, card choice, folders, contracts, hardware results and the owner checklist.
 - [history-of-constraints.md](docs/notes/history-of-constraints.md): the full story behind each standing constraint.

@@ -245,6 +245,7 @@ pub enum UiEvent {
     /// The person clicked the chip of a folded window (its toplevel id).
     Unfold(u64),
     Upgrade(UpgradeEvent),
+    Eject(crate::menu::EjectEvent),
 }
 
 /// Where the header, the grid and the log go on a screen.
@@ -442,18 +443,123 @@ fn ending_words(action: Action) -> (&'static str, &'static str) {
     }
 }
 
-/// What the dialogs wait for: the add-on jobs, the stick write or both.
-fn root_waits(addons: bool, write: bool) -> &'static str {
-    match (addons, write) {
-        (true, true) => "the add-ons and the stick",
-        (false, true) => "the stick",
-        _ => "the add-ons",
+/// The root jobs that run, as the end-of-session dialogs name them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RootWork {
+    addons: bool,
+    write: bool,
+    network: bool,
+    eject: bool,
+}
+
+impl RootWork {
+    fn of(menu: &Menu) -> RootWork {
+        RootWork {
+            addons: !menu.addon_jobs().is_empty(),
+            write: menu.upgrade.writing(),
+            network: menu.network.applying(),
+            eject: menu.eject.running.is_some(),
+        }
+    }
+
+    /// The Confirm dialog's title.
+    fn title(self) -> &'static str {
+        match self {
+            RootWork {
+                addons: true,
+                write: true,
+                ..
+            } => "Add-ons are being changed and a stick is written",
+            RootWork { addons: true, .. } => "Add-ons are being changed",
+            RootWork { write: true, .. } => "A stick is being written",
+            RootWork { network: true, .. } => "Network settings are being applied",
+            RootWork { eject: true, .. } => "A stick is being released",
+            _ => "Work is still running",
+        }
+    }
+
+    /// The Confirm dialog's sentence, before "before you restart.".
+    fn finished(self) -> String {
+        let one = match self {
+            RootWork {
+                addons: true,
+                write: false,
+                network: false,
+                ..
+            } => Some("The add-on work is finished"),
+            RootWork {
+                addons: false,
+                write: true,
+                network: false,
+                ..
+            } => Some("The stick is written"),
+            RootWork {
+                addons: false,
+                write: false,
+                network: true,
+                ..
+            } => Some("The network settings are applied"),
+            RootWork {
+                addons: false,
+                write: false,
+                network: false,
+                eject: true,
+            } => Some("The stick is released"),
+            _ => None,
+        };
+        if let Some(one) = one {
+            return one.to_string();
+        }
+        let parts = self.parts(["the add-on work", "the write", "the network change"]);
+        if parts.is_empty() {
+            return "The work is finished".to_string();
+        }
+        format!("{} are finished", capitalized(&joined(&parts)))
+    }
+
+    /// What the waiting dialog waits for.
+    fn waits(self) -> String {
+        if self
+            == (RootWork {
+                eject: true,
+                ..RootWork::default()
+            })
+        {
+            return "the stick to be released".to_string();
+        }
+        let parts = self.parts(["the add-ons", "the stick", "the network settings"]);
+        if parts.is_empty() {
+            return "the work".to_string();
+        }
+        joined(&parts)
+    }
+
+    /// What the stopping dialog stops.
+    fn stopping(self) -> String {
+        let parts = self.parts(["the add-on work", "the write", "the network change"]);
+        if parts.is_empty() {
+            return "Stopping the work".to_string();
+        }
+        format!("Stopping {}", joined(&parts))
+    }
+
+    /// The words of the add-on work, the write and the network Apply that run.
+    fn parts(self, words: [&'static str; 3]) -> Vec<&'static str> {
+        [self.addons, self.write, self.network]
+            .into_iter()
+            .zip(words)
+            .filter_map(|(on, w)| on.then_some(w))
+            .collect()
     }
 }
 
-/// The root jobs that run: add-on jobs, and the stick write.
-fn root_kinds(menu: &Menu) -> (bool, bool) {
-    (!menu.addon_jobs().is_empty(), menu.upgrade.writing())
+/// "a", "a and b", "a, b and c".
+fn joined(parts: &[&str]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// The first letter in upper case, for a button or a sentence start.
@@ -479,12 +585,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::Confirm) => {
             let mut chose = None;
             let root_jobs = menu.root_jobs();
-            let kinds = root_kinds(menu);
-            let title = match kinds {
-                _ if !menu.jobs.is_empty() => "Programs are still running",
-                (false, true) => "A stick is being written",
-                (true, true) => "Add-ons are being changed and a stick is written",
-                _ => "Add-ons are being changed",
+            let work = RootWork::of(menu);
+            let title = if menu.jobs.is_empty() {
+                work.title()
+            } else {
+                "Programs are still running"
             };
             dialog(ui, title, |ui, t| {
                 for job in &menu.jobs {
@@ -500,16 +605,12 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     );
                 }
                 if !root_jobs.is_empty() {
-                    let what = match kinds {
-                        (false, true) => "The stick is written",
-                        (true, true) => "The add-on work and the write are finished",
-                        _ => "The add-on work is finished",
-                    };
+                    let what = work.finished();
                     ui.label(
                         egui::RichText::new(format!("{what} before you {verb}.")).color(t.palette().muted_foreground),
                     );
                 }
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -528,8 +629,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::WaitAddons) => {
             let mut chose = None;
-            let (addons, write) = root_kinds(menu);
-            let what = root_waits(addons, write);
+            let what = RootWork::of(menu).waits();
             dialog(ui, &format!("Waiting for {what} before {verbing}"), |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
@@ -547,7 +647,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         .color(t.role(role::WARN)),
                     );
                 }
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -569,12 +669,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             return chose.map(UiEvent::Chose);
         }
         Some(Logout::StoppingAddons { go_at }) => {
-            let title = match root_kinds(menu) {
-                (false, true) => "Stopping the write",
-                (true, true) => "Stopping the add-on work and the write",
-                _ => "Stopping the add-on work",
-            };
-            dialog(ui, title, |ui, t| {
+            let title = RootWork::of(menu).stopping();
+            dialog(ui, &title, |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
                 }
@@ -623,6 +719,52 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             ui.ctx().request_repaint_after(Duration::from_secs(1));
             return None;
         }
+        Some(Logout::Ejecting { since }) => {
+            dialog(ui, &format!("Writing to {} …", menu.flushing_names()), |ui, t| {
+                ui.label(
+                    egui::RichText::new(elapsed(now.duration_since(*since)))
+                        .size(brand::TIMER_PT)
+                        .monospace()
+                        .color(t.palette().ring),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} released before {verbing}.",
+                        if menu.flushing_many() {
+                            "The sticks are"
+                        } else {
+                            "The stick is"
+                        }
+                    ))
+                    .color(t.palette().muted_foreground),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            return None;
+        }
+        Some(Logout::EjectFailed { message }) => {
+            let mut chose = None;
+            dialog(ui, "A stick was not released", |ui, t| {
+                ui.label(egui::RichText::new(message).color(t.role(role::WARN)));
+                ui.label(
+                    egui::RichText::new(format!("If you {verb} now, data not yet written to it can be lost."))
+                        .color(t.palette().muted_foreground),
+                );
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
+                ui.horizontal(|ui| {
+                    if ui.add(Button::new("Stay")).clicked() {
+                        chose = Some(Choice::EjectWait);
+                    }
+                    if ui
+                        .add(Button::new(format!("{} anyway", capitalized(verb))).variant(ButtonVariant::Destructive))
+                        .clicked()
+                    {
+                        chose = Some(Choice::EjectGoOn);
+                    }
+                });
+            });
+            return chose.map(UiEvent::Chose);
+        }
         Some(Logout::Leaving { until }) => {
             dialog(ui, "Home directory saved", |ui, t| {
                 ui.label(egui::RichText::new(format!("{}.", capitalized(verbing))).color(t.palette().muted_foreground));
@@ -638,7 +780,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                     egui::RichText::new(format!("If you {verb} now, the changes since the last save are lost."))
                         .color(t.palette().muted_foreground),
                 );
-                ui.add_space(8.0);
+                ui.add_space(brand::DIALOG_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new("Stay")).clicked() {
                         chose = Some(Choice::Stay);
@@ -670,7 +812,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         dialog(ui, "Add-on not installed", |ui, t| {
             ui.label(egui::RichText::new(text).color(t.role(role::WARN)));
             ui.label(egui::RichText::new("Settings shows it as well.").color(t.palette().muted_foreground));
-            ui.add_space(8.0);
+            ui.add_space(brand::DIALOG_BUTTONS_GAP);
             ui.horizontal(|ui| {
                 if ui.add(Button::new("Retry")).clicked() {
                     chose = Some(true);
@@ -681,6 +823,9 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             });
         });
         return chose.map(UiEvent::Retry);
+    }
+    if menu.eject.panel_open {
+        return crate::eject_ui::show(ui, menu).map(UiEvent::Eject);
     }
     show_screen(ui, menu, icons, chrome, now)
 }
@@ -758,6 +903,7 @@ pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Ch
                     }
                 });
             }
+            // token-ok: an empty spacer, no size.
             ui.add_space(0.0);
         });
     // Outside the scroll area: the tiles scroll, the status area stays.
@@ -2594,6 +2740,49 @@ mod tests {
         for want in ["ThinLinc could not be installed: HTTP 404", "Retry", "Later"] {
             assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
         }
+    }
+
+    #[test]
+    fn the_eject_panel_lists_each_stick_with_size_model_and_buttons() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-eject.desktop")).unwrap();
+        let grid = Grid {
+            tiles: crate::tiles::merge(
+                &[crate::tiles::SourceFile {
+                    name: "70-eject.desktop".into(),
+                    entry: crate::desktop::parse(&text),
+                }],
+                &[],
+            ),
+            banner: vec![],
+        };
+        let mut menu = Menu::new(grid, false);
+        let stick = |disk: &str, name: &str, model: &str, bytes: u64| crate::removable::Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            size_bytes: bytes,
+            model: model.into(),
+            kind: crate::removable::Kind::Stick,
+        };
+        menu.set_removable(vec![
+            stick("sdb", "MYSTICK", "Cruzer", 16_000_000_000),
+            stick("sdc", "CARD", "SD Reader", 7_800_000_000),
+        ]);
+        assert_eq!(menu.activate(0, Instant::now()), None);
+        let texts = texts_of(&menu, &[None]);
+        for want in [
+            "MYSTICK",
+            "16 GB",
+            "Cruzer",
+            "CARD",
+            "7.8 GB",
+            "SD Reader",
+            "Eject all",
+            "Close",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} not in {texts:?}");
+        }
+        assert_eq!(texts.iter().filter(|t| *t == "Eject").count(), 2, "{texts:?}");
     }
 
     /// Four add-ons: waiting update, current, failed install, manual.
@@ -5657,7 +5846,7 @@ mod tests {
         assert!(at("DNS") < at("FloeDrop") && at("FloeDrop") < at("Time"), "{texts:?}");
         assert!(has(&texts, crate::share_state::SWITCH_TEXT), "{texts:?}");
         assert!(has(&texts, crate::share_state::NAME_LABEL), "{texts:?}");
-        assert!(!has(&texts, "Folder: /media/tfuser/mediashare"), "off: {texts:?}");
+        assert!(!has(&texts, "Folder: /media/tfuser/FloeDrop"), "off: {texts:?}");
         let mut net = two_networks();
         net.share_mut().set_host("thinfloe-56db68".into());
         let start = std::time::SystemTime::now();
@@ -5679,7 +5868,7 @@ mod tests {
         for t in [
             "Ready on wlx1 (exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
             "Sending needs Bluetooth; this machine has none.",
-            "Folder: /media/tfuser/mediashare",
+            "Folder: /media/tfuser/FloeDrop",
             "FloeDrop 56db68",
         ] {
             assert!(has(&texts, t), "{t}: {texts:?}");
@@ -6206,6 +6395,7 @@ mod tests {
             transport: Some("usb".into()),
             removable: true,
             mounted: false,
+            automounted: false,
             is_boot: false,
             is_thinfloe: false,
             has_tl_old: false,
@@ -6383,6 +6573,58 @@ mod tests {
                 "Check the stick after writing",
             ],
         );
+    }
+
+    /// The erase of an automounted stick open, with `contents` as the tool answered.
+    fn erase_with_contents(c: crate::upgrade::Contents) -> Menu {
+        let now = Instant::now();
+        let mut drives = three_drives();
+        drives[1].automounted = true;
+        let id = drives[1].id.clone();
+        let mut menu = upgrade_open(unknown_release(), drives, false, now);
+        menu.upgrade_event(UpgradeEvent::Choose("/dev/sdb".into()), now);
+        menu.upgrade_event(UpgradeEvent::Mode(crate::drives::Mode::Fresh), now);
+        menu.tick(now);
+        menu.finished(
+            crate::jobs::JobResult::Contents {
+                device: "/dev/sdb".into(),
+                id,
+                contents: c,
+            },
+            now,
+        );
+        menu
+    }
+
+    #[test]
+    fn confirmation_lists_files() {
+        use crate::upgrade::Contents;
+        let listed = Contents::Listed {
+            entries: vec!["holiday.jpg".into(), "docs/".into()],
+            more: 5,
+        };
+        let texts = all_texts(&upgrade_shapes(&erase_with_contents(listed), 1280.0, 2000.0));
+        let pos = |s: &str| {
+            texts
+                .iter()
+                .position(|t| t == s)
+                .unwrap_or_else(|| panic!("{s:?} not in {texts:?}"))
+        };
+        assert!(pos("These files will be erased:") < pos("holiday.jpg"));
+        assert!(pos("holiday.jpg") < pos("docs/"));
+        assert!(pos("docs/") < pos("and 5 more"));
+    }
+
+    #[test]
+    fn without_a_list_the_erase_still_works() {
+        use crate::upgrade::Contents;
+        for c in [Contents::Loading, Contents::Failed, Contents::None] {
+            let menu = erase_with_contents(c.clone());
+            let texts = all_texts(&upgrade_shapes(&menu, 1280.0, 2000.0));
+            assert!(!texts.iter().any(|t| t.contains("will be erased")), "{c:?}: {texts:?}");
+            assert!(menu.upgrade.can_confirm(), "{c:?}");
+            assert!(texts.iter().any(|t| t.contains("Erase SanDisk Cruzer")), "{c:?}");
+        }
     }
 
     #[test]
@@ -7032,9 +7274,65 @@ mod tests {
 
     #[test]
     fn the_waiting_titles_name_what_the_dialog_lists() {
-        assert_eq!(root_waits(false, true), "the stick");
-        assert_eq!(root_waits(true, false), "the add-ons");
-        assert_eq!(root_waits(true, true), "the add-ons and the stick");
+        let w = |addons, write, network, eject| RootWork {
+            addons,
+            write,
+            network,
+            eject,
+        };
+        assert_eq!(w(false, true, false, false).waits(), "the stick");
+        assert_eq!(w(true, false, false, false).waits(), "the add-ons");
+        assert_eq!(w(true, true, false, false).waits(), "the add-ons and the stick");
+        assert_eq!(w(false, false, false, true).waits(), "the stick to be released");
+        assert_eq!(w(false, false, true, false).waits(), "the network settings");
+        assert_eq!(
+            w(true, true, true, false).waits(),
+            "the add-ons, the stick and the network settings"
+        );
+    }
+
+    #[test]
+    fn a_network_apply_is_named_as_such_in_the_ending_dialogs() {
+        // A network Apply alone read "Add-ons are being changed" and "The
+        // add-on work is finished before you restart."
+        let net = RootWork {
+            network: true,
+            ..RootWork::default()
+        };
+        assert_eq!(net.title(), "Network settings are being applied");
+        assert_eq!(net.finished(), "The network settings are applied");
+        assert_eq!(net.stopping(), "Stopping the network change");
+        let both = RootWork {
+            addons: true,
+            network: true,
+            ..RootWork::default()
+        };
+        assert_eq!(both.title(), "Add-ons are being changed");
+        assert_eq!(both.finished(), "The add-on work and the network change are finished");
+        assert_eq!(both.stopping(), "Stopping the add-on work and the network change");
+        // The other cases keep their words.
+        let w = |addons, write, eject| RootWork {
+            addons,
+            write,
+            eject,
+            ..RootWork::default()
+        };
+        assert_eq!(w(false, true, false).title(), "A stick is being written");
+        assert_eq!(w(false, true, false).finished(), "The stick is written");
+        assert_eq!(
+            w(true, true, false).finished(),
+            "The add-on work and the write are finished"
+        );
+        assert_eq!(w(true, false, false).finished(), "The add-on work is finished");
+        assert_eq!(w(false, false, true).title(), "A stick is being released");
+        assert_eq!(w(false, false, true).finished(), "The stick is released");
+        assert_eq!(w(false, true, false).stopping(), "Stopping the write");
+        assert_eq!(
+            w(true, true, false).stopping(),
+            "Stopping the add-on work and the write"
+        );
+        // An eject while a write runs is still "a stick is being written".
+        assert_eq!(w(false, true, true).finished(), "The stick is written");
     }
 
     #[test]

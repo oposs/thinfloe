@@ -5,7 +5,7 @@ name: CI (ThinFloe)
 # `image` builds the rootfs once, runs the integration tests (not the unit
 # tests again), builds the image, uploads the five files the smoke tests
 # read as the artifact `prebuilt` and runs the runtime tests. `smoke` runs
-# the nine QEMU smoke tests in three parallel jobs on those files
+# the ten QEMU smoke tests in three parallel jobs on those files
 # (PREBUILT=1, no rebuild; scripts/ci-check-prebuilt.sh checks that).
 # scripts/ci-runner-setup.sh prepares each runner (docs/release-ci.md,
 # "Runner setup for the project's workflows").
@@ -94,7 +94,7 @@ jobs:
           - group: upgrade
             targets: qemu-smoke-upgrade
           - group: sticks
-            targets: qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow
+            targets: qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow qemu-smoke-automount
           - group: boot
             targets: qemu-smoke qemu-smoke-netboot qemu-smoke-addons qemu-smoke-timezone qemu-smoke-timezone-netboot
     steps:

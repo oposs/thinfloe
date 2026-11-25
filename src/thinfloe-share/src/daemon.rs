@@ -40,7 +40,7 @@ use crate::{config, inbox, osd, state};
 const RECEIVE_PORT: u16 = 8771;
 /// Apple receivers listen here; an AWDL peer is tried here (DISC-5).
 const AIRDROP_PORT: u16 = 8770;
-const DEFAULT_ROOT: &str = "/media/tfuser/mediashare";
+const DEFAULT_ROOT: &str = "/media/tfuser/FloeDrop";
 const DEFAULT_RADIO: &str = "sudo -n /usr/bin/thinfloe-share --radio";
 /// How long the helper gets to give the radio back after its stdin closes.
 const HELPER_GRACE: Duration = Duration::from_secs(5);

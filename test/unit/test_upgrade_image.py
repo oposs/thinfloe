@@ -1330,6 +1330,8 @@ class TestStickId(unittest.TestCase):
         for stamped in (False, True):
             events = []
             with mock.patch.object(ui, "check_drive_fits"), \
+                 mock.patch.object(ui, "_hold_drive", return_value=None), \
+                 mock.patch.object(ui, "_automount", return_value=0), \
                  mock.patch.object(ui, "open_target", side_effect=_open_null), \
                  mock.patch.object(ui, "fd_identity", side_effect=_same_drive), \
                  mock.patch.object(ui, "confirm", side_effect=[True, False]), \

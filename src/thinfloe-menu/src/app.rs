@@ -18,6 +18,7 @@ use crate::netfiles;
 use crate::network;
 use crate::raster::{Background, Canvas, Textures};
 use crate::release;
+use crate::removable;
 use crate::settings::SettingsTab;
 use crate::ui;
 use crate::upgrade::{self, Stage};
@@ -51,6 +52,8 @@ pub enum Wake {
     Addons,
     /// The battery file changed.
     Battery,
+    /// The automount helper's contract file changed.
+    Removable,
     /// The set of folded windows changed.
     Windows,
     /// The release status file of thinfloe-upgrade changed.
@@ -95,6 +98,8 @@ pub struct Config {
     pub addon_last_check: PathBuf,
     /// The file the battery reader writes.
     pub battery_file: PathBuf,
+    /// The file the automount helper keeps (`removable::FILE`).
+    pub removable_file: PathBuf,
     /// `config.toml`, watched for changes to its `[status]` table.
     pub config_toml: PathBuf,
     /// Starting up regenerated `generated/kanshi`: the running kanshi is told
@@ -472,10 +477,13 @@ struct Watch {
     addon_log: PathBuf,
     upgrade_status: PathBuf,
     battery_file: PathBuf,
+    removable_file: PathBuf,
     config_toml: PathBuf,
     addons: addons::Watcher,
     release: release::Watcher,
     battery: battery::Watcher,
+    /// A stamp watcher like the battery file's.
+    removable: battery::Watcher,
     /// A stamp watcher like the battery file's.
     status: battery::Watcher,
     /// The Deskflow daemon's state file, looked at like the battery file.
@@ -493,12 +501,14 @@ impl Watch {
             addon_log: cfg.addon_log.clone(),
             upgrade_status: cfg.upgrade_status.clone(),
             battery_file: cfg.battery_file.clone(),
+            removable_file: cfg.removable_file.clone(),
             config_toml: cfg.config_toml.clone(),
             // The first tick reads the files whatever they hold, so a change
             // between the menu's first read and now is not lost.
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            removable: battery::Watcher::default(),
             status: battery::Watcher::default(),
             deskflow_state: crate::deskflow::statefile::path(),
             deskflow: battery::Watcher::default(),
@@ -518,6 +528,9 @@ impl Watch {
         }
         if self.battery.tick(&self.battery_file) {
             wakes.push(Wake::Battery);
+        }
+        if self.removable.tick(&self.removable_file) {
+            wakes.push(Wake::Removable);
         }
         if self.status.tick(&self.config_toml) {
             wakes.push(Wake::Status);
@@ -641,6 +654,11 @@ fn panic_result(job: &Job) -> JobResult {
             all: *all,
             result: Err(e),
         },
+        Job::UpgradeContents { device, id } => JobResult::Contents {
+            device: device.clone(),
+            id: id.clone(),
+            contents: crate::upgrade::Contents::Failed,
+        },
         Job::UpgradeCheck { source } => JobResult::Release {
             custom: source.is_some(),
             result: Err(e),
@@ -677,6 +695,10 @@ fn panic_result(job: &Job) -> JobResult {
         // The tab shows what the menu knows itself.
         Job::MachineFacts => JobResult::MachineFacts(crate::machine::Facts::default()),
         Job::Copy(_) => JobResult::Copied(Err(e)),
+        Job::Eject { target } => JobResult::Ejected {
+            target: target.clone(),
+            result: jobs::EjectResult::Failed(e),
+        },
     }
 }
 
@@ -749,6 +771,11 @@ fn job_result(
             all,
             result: jobs::upgrade_drives(&paths.upgrade_cmd, all, feed),
         },
+        Job::UpgradeContents { device, id } => JobResult::Contents {
+            id,
+            contents: jobs::upgrade_contents(&paths.upgrade_cmd, &device, feed),
+            device,
+        },
         Job::UpgradeCheck { source } => JobResult::Release {
             custom: source.is_some(),
             result: jobs::upgrade_check(&paths.upgrade_cmd, source.as_deref(), feed),
@@ -818,6 +845,10 @@ fn job_result(
         )),
         Job::MachineFacts => JobResult::MachineFacts(crate::machine::read(&paths.hardware_roots)),
         Job::Copy(text) => JobResult::Copied(jobs::copy_text(&paths.wl_copy_cmd, &text)),
+        Job::Eject { target } => JobResult::Ejected {
+            result: jobs::eject(&paths.eject_cmd, &target, feed),
+            target,
+        },
     }
 }
 
@@ -1093,6 +1124,11 @@ impl App {
             .set_battery(battery::read(&self.cfg.battery_file), Instant::now());
     }
 
+    /// Read the automount helper's file again.
+    fn refresh_removable(&mut self) {
+        self.cfg.menu.set_removable(removable::read(&self.cfg.removable_file));
+    }
+
     /// Read the add-on files again. A program or icon that appeared
     /// (the install runs while the menu does) is picked up here, the icon in
     /// a renderer process like every other.
@@ -1168,6 +1204,7 @@ impl App {
             pci_ids: self.cfg.paths.pci_ids.clone(),
             vainfo_cmd: self.cfg.paths.vainfo_cmd.clone(),
             wl_copy_cmd: self.cfg.paths.wl_copy_cmd.clone(),
+            eject_cmd: self.cfg.paths.eject_cmd.clone(),
             hardware_roots: self.cfg.paths.hardware_roots.clone(),
             time: self.cfg.paths.time.clone(),
         };
@@ -1410,6 +1447,7 @@ impl App {
             Some(ui::UiEvent::Chose(c)) => self.cfg.menu.choose(c, now),
             Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
             Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
+            Some(ui::UiEvent::Eject(e)) => self.cfg.menu.eject_event(e),
             Some(ui::UiEvent::Upgrade(e)) => self.cfg.menu.upgrade_event(e, now),
             Some(ui::UiEvent::Unfold(id)) => {
                 if let Some(Err(e)) = self.windows.as_ref().map(|w| w.restore(id)) {
@@ -1717,6 +1755,7 @@ impl ApplicationHandler<Wake> for App {
             Wake::Addons => self.refresh_addons(),
             Wake::Release => self.refresh_release(),
             Wake::Battery => self.refresh_battery(),
+            Wake::Removable => self.refresh_removable(),
             Wake::Status => self.refresh_status(),
             Wake::Windows => self.windows_changed(),
             Wake::Heads => {
@@ -1929,6 +1968,7 @@ mod tests {
             pci_ids: PathBuf::from("/nonexistent/pci.ids"),
             vainfo_cmd: vec!["/nonexistent/vainfo".into()],
             wl_copy_cmd: vec!["/nonexistent/wl-copy".into()],
+            eject_cmd: jobs::default_eject_cmd(),
             hardware_roots: crate::hardware::Roots::under(Path::new("/nonexistent/hw")),
             time: crate::timetab::TimePaths::under(Path::new("/nonexistent/time")),
         }
@@ -2174,10 +2214,12 @@ esac"#;
             addon_log: d.join("addon-log"),
             upgrade_status: release.clone(),
             battery_file: d.join("battery"),
+            removable_file: d.join("removable"),
             config_toml: d.join("config.toml"),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            removable: battery::Watcher::default(),
             status: battery::Watcher::default(),
             deskflow_state: None,
             deskflow: battery::Watcher::default(),
@@ -2206,10 +2248,12 @@ esac"#;
             addon_log: d.join("addon-log"),
             upgrade_status: d.join("upgrade-status"),
             battery_file: d.join("battery"),
+            removable_file: d.join("removable"),
             config_toml: d.join("config.toml"),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            removable: battery::Watcher::default(),
             status: battery::Watcher::default(),
             deskflow_state: None,
             deskflow: battery::Watcher::default(),
@@ -2452,10 +2496,12 @@ esac"#;
             addon_log: d.join("addon-log"),
             upgrade_status: d.join("upgrade-status"),
             battery_file: d.join("battery"),
+            removable_file: d.join("removable"),
             config_toml: file.clone(),
             addons: addons::Watcher::default(),
             release: release::Watcher::default(),
             battery: battery::Watcher::default(),
+            removable: battery::Watcher::default(),
             status: battery::Watcher::default(),
             deskflow_state: None,
             deskflow: battery::Watcher::default(),

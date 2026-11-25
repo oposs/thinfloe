@@ -2,7 +2,7 @@
 
 Product name: **FloeDrop** (owner, 2026-11-25). It names the feature in
 Settings, the OSD, `CHANGES.md` and the notes; the program stays
-`thinfloe-share` and the folder `mediashare`.
+`thinfloe-share`; the folder is `FloeDrop` (owner, 2026-11-25).
 
 Date: 2026-11-24. Status: design, awaiting owner approval.
 
@@ -11,7 +11,7 @@ Date: 2026-11-24. Status: design, awaiting owner approval.
 The people who use ThinFloe carry iPhones. They want to move a photo or a
 file between the phone and the remote desktop they work in, the way they
 would move it to a Mac: AirDrop. ThinFloe becomes an AirDrop device. A
-folder `/media/tfuser/mediashare/` holds two parts:
+folder `/media/tfuser/FloeDrop/` holds two parts:
 
 - `inbox/<sender>/`: every delivery from a phone lands here, one folder per
   sender. ThinFloe accepts every delivery.
@@ -183,14 +183,13 @@ the stick works.
 
 ### Folders
 
-- Root: `/media/tfuser/mediashare/`, a **tmpfs of its own** (owner,
+- Root: `/media/tfuser/FloeDrop/`, a **tmpfs of its own** (owner,
   2026-11-25), mounted at every boot whatever the switch says, so the path
   exists before a remote session exports it: a mount unit
-  `media-tfuser-mediashare.mount` in `overlay/`, options
+  `media-tfuser-FloeDrop.mount` in `overlay/`, options
   `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. The daemon
   makes `inbox/` and `outbox/` in it at start. Everything vanishes at power
-  off. *My call:* the name `mediashare` is the owner's own word from the
-  first request.
+  off. The folder is named after the feature (owner, 2026-11-25).
 - The tmpfs is the cap: inbox and outbox share 25 % of the RAM, enforced by
   the kernel (a copy into a full outbox fails in the remote file manager
   with "no space"). `noexec` keeps a received file from being run from
@@ -274,7 +273,7 @@ the stick works.
   - "Ready on <card> (<mode>, channel <n>). Phones must be set to AirDrop
     'Everyone for 10 Minutes'."
   - or the error text, in the warning tone.
-  - and the folder path `/media/tfuser/mediashare`.
+  - and the folder path `/media/tfuser/FloeDrop`.
 - "Name shown on phones": a text field, default empty = the machine's host
   name (`thinfloe-xxxxxx`). *My call:* the host name is unique per machine,
   which matters in an office full of thin clients.

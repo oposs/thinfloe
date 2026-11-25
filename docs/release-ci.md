@@ -104,14 +104,15 @@ The split changes as follows (decision 17, revised 2026-11-12 and 2026-11-22):
     that download `prebuilt` and run `make -k PREBUILT=1 MEMCAP=` on those
     files without building the container or exporting the rootfs:
     - `upgrade`: `qemu-smoke-upgrade`.
-    - `sticks`: `qemu-smoke-two-sticks`, `qemu-smoke-write`, `qemu-smoke-grow`.
+    - `sticks`: `qemu-smoke-two-sticks`, `qemu-smoke-write`, `qemu-smoke-grow`,
+      `qemu-smoke-automount`.
     - `boot`: `qemu-smoke`, `qemu-smoke-netboot`, `qemu-smoke-addons`,
       `qemu-smoke-timezone`, `qemu-smoke-timezone-netboot`.
     Each smoke job runs `scripts/ci-check-prebuilt.sh verify` afterwards to
     fail if any downloaded file changed or a `thinfloe-ubuntu` container
     image exists, and uploads `ci-logs-<group>` on failure.
 - `release-build.yml` stays as decision 17 describes it: `make image` with
-  the release version, the nine smoke tests on exactly the bytes it uploads,
+  the release version, the ten smoke tests on exactly the bytes it uploads,
   then the six assets. These are the bytes that ship, so the smoke tests run
   on them again even though the pull request already ran them on a dev
   build.

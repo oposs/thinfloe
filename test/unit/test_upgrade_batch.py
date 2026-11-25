@@ -5,10 +5,12 @@ import importlib.machinery
 import importlib.util
 import hashlib
 import contextlib
+import argparse
 import errno
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -185,13 +187,88 @@ class TestDriveList(unittest.TestCase):
         self.assertTrue(d["/dev/vda"].is_boot)
 
     def test_fingerprint(self):
-        data = bytes(range(256)) * 80  # 20480 bytes, more than 17408
+        data = bytes(range(256)) * 80  # no GPT: the MBR entries and signature only
         with tempfile.NamedTemporaryFile() as f:
             f.write(data)
             f.flush()
-            want = hashlib.sha256(data[:17408]).hexdigest()[:16]
+            want = hashlib.sha256(data[446:512]).hexdigest()[:16]
             self.assertEqual(ui.ptable_fingerprint(f.name), want)
         self.assertEqual(ui.ptable_fingerprint("/nonexistent/dev"), "-")
+
+    @staticmethod
+    def _fp(data: bytes) -> str:
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(data)
+            f.flush()
+            return ui.ptable_fingerprint(f.name)
+
+    @staticmethod
+    def _superfloppy() -> bytearray:
+        """FAT32 on the whole disk: boot sector, FSInfo, no partition table."""
+        d = bytearray(64 * 1024)
+        d[0:3] = b"\xeb\x58\x90"
+        d[3:11] = b"mkfs.fat"
+        d[0x41] = 0x00                      # BS_Reserved1: the dirty flag
+        d[510:512] = b"\x55\xaa"
+        d[512:516] = b"RRaA"                # FSInfo in sector 1
+        d[512 + 488:512 + 492] = (1000).to_bytes(4, "little")  # free clusters
+        d[1022:1024] = b"\x55\xaa"
+        return d
+
+    def test_fingerprint_ignores_a_mounted_superfloppy(self):
+        # Mounting a whole-disk FAT sets the dirty flag and the umount writes
+        # the free count: the stick is the same stick (it was refused as
+        # "does not match the drive that was chosen" after its release).
+        before = self._superfloppy()
+        after = bytearray(before)
+        after[0x41] = 0x01
+        after[512 + 488:512 + 492] = (990).to_bytes(4, "little")
+        after[2048:2052] = b"data"
+        self.assertEqual(self._fp(bytes(before)), self._fp(bytes(after)))
+
+    def test_fingerprint_changes_with_an_mbr_entry(self):
+        d = self._superfloppy()
+        d[446:462] = bytes([0x80, 0, 0, 0, 0x0C, 0, 0, 0]) + (2048).to_bytes(4, "little") \
+            + (4096).to_bytes(4, "little")
+        e = bytearray(d)
+        e[454:458] = (4096).to_bytes(4, "little")   # the partition moved
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+
+    @staticmethod
+    def _gpt() -> bytearray:
+        d = bytearray(64 * 1024)
+        d[446:462] = bytes([0, 0, 2, 0, 0xEE, 0xFF, 0xFF, 0xFF]) + (1).to_bytes(4, "little") \
+            + (0xFFFFFFFF).to_bytes(4, "little")
+        d[510:512] = b"\x55\xaa"
+        h = 512
+        d[h:h + 8] = b"EFI PART"
+        d[h + 12:h + 16] = (92).to_bytes(4, "little")
+        d[h + 72:h + 80] = (2).to_bytes(8, "little")      # entries at LBA 2
+        d[h + 80:h + 84] = (128).to_bytes(4, "little")
+        d[h + 84:h + 88] = (128).to_bytes(4, "little")
+        d[1024:1040] = b"\x28\x73\x2a\xc1\x1f\xf8\xd2\x11\xba\x4b\x00\xa0\xc9\x3e\xc9\x3b"
+        d[1024 + 32:1024 + 40] = (2048).to_bytes(8, "little")
+        return d
+
+    def test_fingerprint_changes_with_a_gpt_entry(self):
+        d = self._gpt()
+        e = bytearray(d)
+        e[1024 + 32:1024 + 40] = (4096).to_bytes(8, "little")
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+        # The last of the 128 entries counts too.
+        f = bytearray(d)
+        f[1024 + 127 * 128] = 0x01
+        self.assertNotEqual(self._fp(bytes(d)), self._fp(bytes(f)))
+
+    def test_fingerprint_of_gpt_ignores_bytes_past_the_entries(self):
+        d = self._gpt()
+        e = bytearray(d)
+        e[1024 + 128 * 128 + 10] = 0x77   # first partition data area
+        self.assertEqual(self._fp(bytes(d)), self._fp(bytes(e)))
+
+    def test_fingerprint_of_a_short_device(self):
+        self.assertEqual(self._fp(b""), ui.ptable_fingerprint_of(lambda off, n: b""))
+        self.assertNotEqual(self._fp(b""), "-")
 
     def test_identity_differs_by_fingerprint(self):
         a, b = self.list()[:2]
@@ -211,8 +288,8 @@ class TestDriveList(unittest.TestCase):
         self.assertIsNone(json.loads(ui.drives_json(drives, None))[0]["fits"])
         self.assertEqual(set(rows[0]), {
             "device", "model", "size_bytes", "serial", "transport", "removable",
-            "mounted", "is_boot", "is_thinfloe", "has_tl_old", "has_tl_new",
-            "efi_partition", "examined", "id", "fits", "version"})
+            "mounted", "automounted", "is_boot", "is_thinfloe", "has_tl_old",
+            "has_tl_new", "efi_partition", "examined", "id", "fits", "version"})
 
 CHANGES = (REPO / "CHANGES.md").read_text()
 
@@ -3240,6 +3317,399 @@ class TestWriteArgsFixture(unittest.TestCase):
             self.assertEqual(args.command, "write", line)
             n += 1
         self.assertGreaterEqual(n, 5)
+
+
+class TestAutomountedDrives(unittest.TestCase):
+    """A drive mounted only by thinfloe-automount is released by the write."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.removable = os.path.join(self.tmp.name, "removable")
+        Path(self.removable).write_text(
+            "/dev/sdb1\tsdb\tX\t/media/tfuser/X\tvfat\t1\tM\tstick\n")
+        env = mock.patch.dict(os.environ, {"TF_REMOVABLE": self.removable})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def enum(self, mountpoints):
+        node = {"name": "sdb", "path": "/dev/sdb", "size": 8000000000,
+                "model": None, "serial": None, "wwn": None, "tran": "usb",
+                "rm": True, "type": "disk", "mountpoints": [None],
+                "children": [{"name": "sdb1", "path": "/dev/sdb1", "size": 1,
+                              "type": "part", "mountpoints": mountpoints}]}
+
+        def cmd(c):
+            if c[0] == "lsblk" and "-J" in c:
+                return json.dumps({"blockdevices": [node]})
+            return ""
+        with mock.patch.object(ui, "get_cmd_output", side_effect=cmd), \
+             mock.patch.object(ui, "detect_boot_device", return_value=None), \
+             mock.patch.object(ui, "find_efi_partition", return_value=None), \
+             mock.patch.object(ui, "ptable_fingerprint", return_value="ab" * 8):
+            return ui.enumerate_drives()[0]
+
+    def test_drives_json_has_automounted(self):
+        row = json.loads(ui.drives_json([self.enum(["/media/tfuser/X"])], None))[0]
+        self.assertIs(row["automounted"], True)
+        self.assertIs(row["mounted"], False)
+
+    def test_another_mount_point_is_mounted(self):
+        row = json.loads(ui.drives_json(
+            [self.enum(["/media/tfuser/X", "/mnt/other"])], None))[0]
+        self.assertIs(row["automounted"], False)
+        self.assertIs(row["mounted"], True)
+
+    def test_unmounted_is_neither(self):
+        row = json.loads(ui.drives_json([self.enum([None])], None))[0]
+        self.assertIs(row["automounted"], False)
+        self.assertIs(row["mounted"], False)
+
+    def test_upgrade_refuses_an_automounted_stick(self):
+        d = ui.DriveInfo("/dev/sdb", "16G", "M", "", True, None, 0, False,
+                         False, False, size_bytes=16 * 10**9, serial="S",
+                         mounted=False, automounted=True, fingerprint="ab" * 8)
+        args = argparse.Namespace(device="/dev/sdb", mode="upgrade", source="http://x",
+                                  expect_id=ui.drive_identity(d), copy_home=False,
+                                  allow_internal=False)
+        self.assertIn("cannot be upgraded", ui._write_refusal(args, d))
+
+    def test_hold_is_written_atomically_and_leaves_no_temp(self):
+        folder = tempfile.mkdtemp(dir=self.tmp.name)
+        with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": folder}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
+                             False, False, serial="S", fingerprint="ab" * 8)
+            path = ui._hold_drive(d)
+        self.assertEqual(os.listdir(folder), ["sdb"])
+        ui._unregister_cleanup("file", path)
+
+    def test_write_refusal_allows_automounted(self):
+        d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
+                         False, False, size_bytes=16 * 10**9, serial="S",
+                         mounted=False, automounted=True, fingerprint="ab" * 8)
+        args = argparse.Namespace(device="/dev/sdb", mode="fresh", source="http://x",
+                                  expect_id=ui.drive_identity(d), copy_home=False,
+                                  allow_internal=False)
+        with mock.patch.object(ui, "image_size", return_value=None):
+            self.assertIsNone(ui._write_refusal(args, d))
+
+
+class TestFreshInstallAutomount(unittest.TestCase):
+    """The hold, the release and the remount around a fresh install."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.hold_dir = os.path.join(self.tmp.name, "hold")
+        os.mkdir(self.hold_dir)
+        self.hold = os.path.join(self.hold_dir, "sdb")
+        env = mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": self.hold_dir})
+        env.start()
+        self.addCleanup(env.stop)
+        self.events = []
+        self.release_rc = 0
+        self.drive = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0,
+                                  False, False, False, size_bytes=16 * 10**9,
+                                  serial="S", fingerprint="ab" * 8)
+
+    def run_cmd(self, cmd, **kw):
+        if cmd[0] == ui.AUTOMOUNT:
+            self.events.append((cmd[1], cmd[2], os.path.exists(self.hold)))
+            rc = self.release_rc if cmd[1] == "release" else 0
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def install(self, open_target=None, exclusive=None):
+        def opened(device):
+            self.events.append(("open", device, os.path.exists(self.hold)))
+            return os.open(os.devnull, os.O_RDWR)
+        patches = [mock.patch.object(ui, "run_cmd", side_effect=self.run_cmd),
+                   mock.patch.object(ui, "open_target", side_effect=open_target or opened)]
+        if exclusive is not None:
+            patches.append(mock.patch.object(ui, "_fresh_install_open", side_effect=exclusive))
+        self.out = io.StringIO()
+        with contextlib.ExitStack() as st, contextlib.redirect_stdout(self.out):
+            for p in patches:
+                st.enter_context(p)
+            return ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS,
+                                    save=False, stamp_required=False)
+
+    def touched(self, drive, base_url, copy_home, verify, progress, save,
+                stamp_required, held, outcome):
+        outcome.touched = True
+        outcome.written = True
+        outcome.ok = True
+        return outcome
+
+    def untouched(self, *a):
+        return a[-1]
+
+    def test_fresh_install_holds_and_releases(self):
+        self.install(exclusive=self.touched)
+        self.assertEqual(self.events, [("release", "sdb", True), ("open", "/dev/sdb", True)])
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_hold_file_carries_pid_and_id(self):
+        seen = []
+        orig = self.run_cmd
+
+        def peek(cmd, **kw):
+            if cmd[0] == ui.AUTOMOUNT and cmd[1] == "release":
+                seen.append(Path(self.hold).read_text())
+            return orig(cmd, **kw)
+        with mock.patch.object(self, "run_cmd", side_effect=peek):
+            self.install(exclusive=self.touched)
+        self.assertEqual(seen, [f"{os.getpid()}\t{ui.drive_identity(self.drive)}\n"])
+
+    def test_fresh_install_release_busy(self):
+        self.release_rc = 3
+        outcome = self.install(exclusive=self.touched)
+        self.assertTrue(outcome.refused)
+        self.assertEqual(outcome.reason, "the stick is in use")
+        self.assertEqual([e[0] for e in self.events], ["release", "remount"])
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_hold_is_gone_before_the_remount(self):
+        self.install(exclusive=self.untouched)
+        self.assertEqual(self.events[-1], ("remount", "sdb", False))
+
+    def test_fresh_install_unwritten_remounts_ebusy(self):
+        def busy(device):
+            raise OSError(errno.EBUSY, "busy")
+        outcome = self.install(open_target=busy)
+        self.assertTrue(outcome.refused)
+        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+
+    def test_unwritten_remounts_on_cancel(self):
+        # The real write path: a cancel while the checksum is fetched comes
+        # before the first byte, so nothing is wiped and the stick comes back.
+        wiped = []
+        with mock.patch.object(ui, "expected_download_sha256", side_effect=ui.Cancelled()), \
+             mock.patch.object(ui, "wipe_partition_tables",
+                               side_effect=lambda *a, **kw: wiped.append(a)):
+            outcome = self.install()
+        self.assertTrue(outcome.cancelled)
+        self.assertFalse(outcome.touched)
+        self.assertEqual([e[0] for e in self.events], ["release", "open", "remount"])
+        self.assertEqual(wiped, [])
+        self.assertFalse(os.path.exists(self.hold))
+
+    def test_unwritten_checksum_refusal_remounts(self):
+        # The real write path: a release without its checksum is refused
+        # before the first byte.
+        with mock.patch.object(ui, "expected_download_sha256", return_value=None), \
+             mock.patch.object(ui, "checksum_required", return_value=True), \
+             mock.patch.object(ui, "stream_image", side_effect=AssertionError("written")):
+            outcome = self.install()
+        self.assertFalse(outcome.ok or outcome.touched)
+        self.assertIn("no checksum", outcome.reason)
+        self.assertEqual([e[0] for e in self.events], ["release", "open", "remount"])
+
+    def test_the_remount_is_announced(self):
+        # The remount can take the helper's whole add budget: the person
+        # sees why the tool still waits.
+        said = []
+        orig = self.run_cmd
+
+        def peek(cmd, **kw):
+            if cmd[0] == ui.AUTOMOUNT and cmd[1] == "remount":
+                said.append(self.out.getvalue())
+            return orig(cmd, **kw)
+        with mock.patch.object(self, "run_cmd", side_effect=peek):
+            self.install(exclusive=self.untouched)
+        self.assertEqual(len(said), 1)
+        self.assertIn("Mounting the stick again", said[0])
+
+    def test_a_write_that_wrote_bytes_does_not_remount(self):
+        self.install(exclusive=self.touched)
+        self.assertNotIn("remount", [e[0] for e in self.events])
+
+    def test_a_failed_release_is_logged_with_its_code(self):
+        self.release_rc = 1
+        out = io.StringIO()
+        with mock.patch.object(ui, "run_cmd", side_effect=self.run_cmd), \
+             mock.patch.object(ui, "open_target", side_effect=OSError(errno.EBUSY, "b")), \
+             contextlib.redirect_stdout(out):
+            ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS)
+        self.assertIn("release sdb exited 1", out.getvalue())
+
+    def test_a_missing_helper_is_no_error(self):
+        with mock.patch.object(ui, "run_cmd", side_effect=FileNotFoundError(2, "none")), \
+             mock.patch.object(ui, "open_target", side_effect=OSError(errno.EBUSY, "b")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            outcome = ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS)
+        self.assertIn("in use", outcome.reason)
+
+
+class TestContents(unittest.TestCase):
+    """`contents --device DEV`: the top-level files of an automounted stick."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.media = os.path.realpath(os.path.join(self.tmp.name, "media"))
+        os.makedirs(self.media)
+        self.removable = os.path.join(self.tmp.name, "removable")
+        env = mock.patch.dict(os.environ, {
+            "TF_REMOVABLE": self.removable, "TF_MEDIA": self.media})
+        env.start()
+        self.addCleanup(env.stop)
+        root = mock.patch.object(ui, "ensure_root")
+        root.start()
+        self.addCleanup(root.stop)
+        # batch_main replaces the global progress reporter.
+        progress = mock.patch.object(ui, "PROGRESS", ui.PROGRESS)
+        progress.start()
+        self.addCleanup(progress.stop)
+
+    def mount(self, name, names=(), disk="sdb", part="sdb1"):
+        """A fake mounted partition; returns its mount point."""
+        mp = os.path.join(self.media, name)
+        os.makedirs(mp, exist_ok=True)
+        for n in names:
+            if n.endswith("/"):
+                os.makedirs(os.path.join(mp, n[:-1]), exist_ok=True)
+            else:
+                Path(os.path.join(mp, n)).write_bytes(b"x")
+        with open(self.removable, "a") as f:
+            f.write(f"/dev/{part}\t{disk}\t{name}\t{mp}\tvfat\t1\tM\tstick\n")
+        return mp
+
+    def contents(self, device="/dev/sdb"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ui.batch_main(["contents", "--device", device])
+        self.assertEqual(rc, 0)
+        return json.loads(out.getvalue())
+
+    def test_contents_lists_top_level(self):
+        self.mount("S", [f"f{i:02}.txt" for i in range(24)] + ["zdir/"])
+        r = self.contents()
+        self.assertEqual(r["device"], "/dev/sdb")
+        self.assertIsNone(r["error"])
+        self.assertEqual(len(r["entries"]), 20)
+        self.assertEqual(r["entries"], sorted(r["entries"]))
+        self.assertEqual(r["more"], 5)
+        self.assertEqual(r["entries"][0], "f00.txt")
+        self.assertNotIn("zdir/", r["entries"])
+
+    def test_directories_get_a_trailing_slash(self):
+        self.mount("S", ["a.txt", "docs/"])
+        self.assertEqual(self.contents()["entries"], ["a.txt", "docs/"])
+
+    def test_contents_non_utf8_names(self):
+        mp = self.mount("S", ["ok"])
+        with open(os.path.join(os.fsencode(mp), b"bad\xff"), "wb") as f:
+            f.write(b"x")
+        Path(os.path.join(mp, "n" * 250)).write_bytes(b"x")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ui.batch_main(["contents", "--device", "/dev/sdb"])
+        r = json.loads(out.getvalue())   # valid UTF-8 JSON
+        self.assertIn("bad\N{REPLACEMENT CHARACTER}", r["entries"])
+        long = [e for e in r["entries"] if e.startswith("nnn")][0]
+        self.assertEqual(long, "n" * 80 + "\N{HORIZONTAL ELLIPSIS}")
+
+    def test_contents_time_limit(self):
+        self.mount("S", ["a"])
+        with mock.patch.object(ui, "CONTENTS_CHILD", "import time; time.sleep(60)"):
+            t0 = time.monotonic()
+            r = self.contents()
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertEqual(r["error"], "could not read the stick")
+        self.assertEqual(r["entries"], [])
+
+    def test_contents_child_runs_in_its_own_session(self):
+        self.mount("S", ["a"])
+        seen = []
+        real = subprocess.Popen
+
+        def spy(*a, **kw):
+            seen.append(kw)
+            return real(*a, **kw)
+        with mock.patch.object(ui.subprocess, "Popen", side_effect=spy):
+            self.contents()
+        self.assertTrue(seen and all(k.get("start_new_session") for k in seen))
+
+    def test_contents_takes_no_lock(self):
+        # The lock is held by another process, as a running write holds it.
+        self.mount("S", ["a"])
+        lock = os.path.join(self.tmp.name, "held.lock")
+        holder = subprocess.Popen(
+            [sys.executable, "-I", "-c",
+             "import fcntl, os, sys, time\n"
+             "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('held', flush=True)\n"
+             "time.sleep(60)\n", lock],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        holder.stdout.close()
+        with mock.patch.object(ui, "LOCK_PATH", lock), \
+             mock.patch.object(ui, "_take_lock", side_effect=AssertionError("lock")):
+            r = self.contents()
+        self.assertEqual(r["entries"], ["a"])
+
+    def test_contents_not_automounted(self):
+        r = self.contents()
+        self.assertEqual((r["entries"], r["more"], r["error"]), ([], 0, None))
+
+    def test_other_disks_are_not_listed(self):
+        self.mount("T", ["other"], disk="sdc", part="sdc1")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_several_partitions_are_prefixed_by_name(self):
+        self.mount("ONE", ["a"], part="sdb1")
+        self.mount("TWO", ["b"], part="sdb2")
+        self.assertEqual(self.contents()["entries"], ["ONE: a", "TWO: b"])
+
+    def test_a_mount_point_outside_the_media_directory_is_ignored(self):
+        outside = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(outside)
+        Path(outside, "secret").write_bytes(b"x")
+        with open(self.removable, "w") as f:
+            f.write(f"/dev/sdb1\tsdb\tX\t{outside}\tvfat\t1\tM\tstick\n")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_a_symlink_out_of_the_media_directory_is_ignored(self):
+        outside = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(outside)
+        Path(outside, "secret").write_bytes(b"x")
+        link = os.path.join(self.media, "L")
+        os.symlink(outside, link)
+        with open(self.removable, "w") as f:
+            f.write(f"/dev/sdb1\tsdb\tL\t{link}\tvfat\t1\tM\tstick\n")
+        self.assertEqual(self.contents()["entries"], [])
+
+    def test_garbage_contract_lines_and_extra_fields(self):
+        mp = self.mount("S", ["a"])
+        with open(self.removable, "a") as f:
+            f.write("garbage\n\n\t\t\n")
+            f.write(f"/dev/sdb2\tsdb\tS\t{mp}\tvfat\t1\tM\tstick\tfuture\n")
+        # The same mount point twice is listed once.
+        self.assertEqual(self.contents()["entries"], ["a"])
+
+    def test_one_unreadable_partition_does_not_hide_the_others(self):
+        self.mount("ONE", ["a"], part="sdb1")
+        two = self.mount("TWO", ["b"], part="sdb2")
+        shutil.rmtree(two)       # a mount point that vanished: scandir fails
+        r = self.contents()
+        self.assertEqual((r["entries"], r["error"]), (["ONE: a"], None))
+
+    def test_all_partitions_unreadable_is_an_error(self):
+        two = self.mount("TWO", ["b"])
+        shutil.rmtree(two)
+        r = self.contents()
+        self.assertEqual((r["entries"], r["error"]), ([], "could not read the stick"))
+
+    def test_a_bad_device_is_a_usage_error(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = ui.batch_main(["contents", "--device", "sdb; rm"])
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

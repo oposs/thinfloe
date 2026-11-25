@@ -13,7 +13,7 @@ CONTAINER_RUNTIME ?= podman
 # PREBUILT=1 (see below) is for the smoke targets only; stop before any
 # other check runs.
 ifeq ($(PREBUILT),1)
-PREBUILT_GOALS := qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot
+PREBUILT_GOALS := qemu-smoke qemu-smoke-addons qemu-smoke-write qemu-smoke-upgrade qemu-smoke-netboot qemu-smoke-two-sticks qemu-smoke-grow qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-automount
 ifneq ($(strip $(MAKECMDGOALS)),)
 ifneq ($(filter-out $(PREBUILT_GOALS),$(MAKECMDGOALS)),)
 $(error PREBUILT=1 is for the smoke targets only: $(PREBUILT_GOALS))
@@ -130,7 +130,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-menu test-share test-integration test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow qemu-smoke-automount release-assets test-unit test-menu test-share test-integration test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -155,6 +155,7 @@ help:
 	@echo "  qemu-smoke-two-sticks - Three headless boots with a second stick attached"
 	@echo "  qemu-smoke-write  - Headless write of a USB stick from a boot server, then boot it"
 	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
+	@echo "  qemu-smoke-automount - Headless boot with a USB stick and a card reader: mount, card swap, eject"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test-menu         - Menu crate: cargo fmt --check, clippy, cargo test (no image)"
 	@echo "  test-share        - FloeDrop crate: cargo fmt --check, clippy, cargo test (no image)"
@@ -612,6 +613,21 @@ qemu-smoke-grow: $(USB_IMAGE)
 		$(QEMU_GROW_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
 		"$(QEMU_SMOKE_APPEND)"
 
+# One headless boot with a USB stick and a two-slot USB card reader attached.
+# Requires the stick and the card to be mounted under /media/tfuser, a card
+# swapped through the QEMU monitor to be followed, and eject to unmount both,
+# powering off the stick but not the reader. See
+# scripts/run-qemu-automount-smoke.sh.
+QEMU_AUTOMOUNT_LOG := $(IMAGE_DIR)/qemu-automount-smoke.log
+
+qemu-smoke-automount: $(USB_IMAGE) $(KERNEL) $(INITRD)
+	@echo "Running headless automount smoke test..."
+	@mkdir -p '$(TEST_TMPDIR)'
+	$(TEST_ENV) BUILD_JOBS=$(BUILD_JOBS) QEMU_MEMORY=$(QEMU_MEMORY) \
+		scripts/run-qemu-automount-smoke.sh $(USB_IMAGE) $(KERNEL) $(INITRD) \
+		$(QEMU_AUTOMOUNT_LOG) $(QEMU_SMOKE_TIMEOUT) $(QEMU_SMOKE_GRACE) \
+		"$(QEMU_SMOKE_APPEND)"
+
 # Host-side tests. No image, no container, no network: the fast feedback
 # loop for the scripts in overlay/usr/bin and for thinfloe-menu's rules.
 # Deliberately not dependent on 'rootfs'.
@@ -658,6 +674,7 @@ test-integration: rootfs
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) test/integration/test-firmware.sh
 	@$(TEST_ENV) test/integration/test-wifi-stack.sh
+	@$(TEST_ENV) test/integration/test-automount-image.sh
 	@$(TEST_ENV) TF_UBUNTU_IMAGE=$(UBUNTU_IMAGE) TF_VERSION='$(TF_VERSION)' test/integration/test-session-packages.sh
 	@$(TEST_ENV) test/integration/test-squashfs-format.sh
 	@$(TEST_ENV) test/integration/test-image-slim.sh

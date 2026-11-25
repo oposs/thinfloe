@@ -37,6 +37,8 @@ pub enum Action {
     Settings,
     /// The Upgrade screen: write or upgrade a stick.
     Upgrade,
+    /// Eject the sticks and cards the automount keeps mounted.
+    Eject,
 }
 
 impl Action {
@@ -49,6 +51,7 @@ impl Action {
             Some("poweroff") => Ok(Action::Poweroff),
             Some("settings") => Ok(Action::Settings),
             Some("upgrade") => Ok(Action::Upgrade),
+            Some("eject") => Ok(Action::Eject),
             Some(other) => Err(format!("unknown action '{other}'")),
         }
     }
@@ -62,7 +65,7 @@ impl Action {
             Action::Logout => Some(0),
             Action::Reboot => Some(10),
             Action::Poweroff => Some(11),
-            Action::Run | Action::SaveHome | Action::Settings | Action::Upgrade => None,
+            Action::Run | Action::SaveHome | Action::Settings | Action::Upgrade | Action::Eject => None,
         }
     }
 }
@@ -760,6 +763,31 @@ mod tests {
         );
         assert_eq!(tiles[0].action, Action::Settings);
         assert_eq!(tiles[0].name, "Einstellungen");
+    }
+
+    #[test]
+    fn eject_tile_parses_and_only_a_shipped_file_may_use_it() {
+        assert_eq!(Action::parse(Some("eject")), Ok(Action::Eject));
+        assert_eq!(Action::Eject.exit_code(), None);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("70-eject.desktop")).unwrap();
+        let t = merge(&[src("70-eject.desktop", &text)], &[]).remove(0);
+        assert_eq!(
+            (t.action, t.name.as_str(), t.icon.as_deref()),
+            (Action::Eject, "Eject", Some("usb"))
+        );
+        assert!(t.usable() && !t.addon && !t.multiple && !t.save_on_exit);
+        let tiles = merge(
+            &[],
+            &[src(
+                "71-mine.desktop",
+                "[Desktop Entry]\nName=Mine\nX-TF-Action=eject\n",
+            )],
+        );
+        assert_eq!(
+            tiles[0].problem.as_deref(),
+            Some("71-mine.desktop: a tile of your own may only use the run action, not 'eject'")
+        );
     }
 
     #[test]

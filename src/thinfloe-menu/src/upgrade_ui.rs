@@ -415,6 +415,7 @@ fn action_blocks(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32, wide: bool, event:
                 "The copy leaves out the SSH host keys and the WireGuard key; the remote-access password travels with the home."
             },
         );
+        contents_list(ui, t, &u.contents);
         if drives::internal(d) {
             let confirm = drives::confirm_text(d);
             warn(ui, t, format!("Type {confirm} to erase this drive."));
@@ -430,6 +431,25 @@ fn action_blocks(ui: &mut Ui, menu: &Menu, t: &Theme, w: f32, wide: bool, event:
             }
         }
     });
+}
+
+/// The files an erase removes, when the tool listed them. Nothing is drawn
+/// while it loads, when it failed or for an empty stick; the Erase button
+/// does not depend on it.
+fn contents_list(ui: &mut Ui, t: &Theme, c: &upgrade::Contents) {
+    let upgrade::Contents::Listed { entries, more } = c else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    warn(ui, t, "These files will be erased:");
+    for name in entries {
+        muted(ui, t, name.as_str());
+    }
+    if *more > 0 {
+        muted(ui, t, format!("and {more} more"));
+    }
 }
 
 /// Two choices: side by side when `wide`, else one under the other.

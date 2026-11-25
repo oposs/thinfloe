@@ -30,6 +30,7 @@ use thinfloe_menu::icons::{self, IconRoots};
 use thinfloe_menu::jobs::{self, Paths};
 use thinfloe_menu::log::Kind;
 use thinfloe_menu::menu::{ConfigNotes, LEGACY_NOTE, Menu};
+use thinfloe_menu::removable;
 use thinfloe_menu::store::{self, OpenMode};
 use thinfloe_menu::{
     bounded, deskflow, keyboard, migrate, osd, release, screentab, settings, status, tiles, ui, windows,
@@ -122,6 +123,10 @@ fn wl_copy_cmd() -> Vec<String> {
 
 fn battery_file() -> PathBuf {
     env_path("TF_BATTERY_FILE", battery::FILE)
+}
+
+fn removable_file() -> PathBuf {
+    env_path("TF_REMOVABLE_FILE", removable::FILE)
 }
 
 fn addon_last_check_path() -> PathBuf {
@@ -269,6 +274,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         pci_ids: PathBuf::from("/usr/share/misc/pci.ids"),
         vainfo_cmd: vainfo_cmd(),
         wl_copy_cmd: wl_copy_cmd(),
+        eject_cmd: jobs::default_eject_cmd(),
         hardware_roots: thinfloe_menu::hardware::Roots::system(),
         time: thinfloe_menu::timetab::TimePaths::system(),
     };
@@ -304,6 +310,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, registry);
     menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());
+    menu.set_removable(removable::read(&removable_file()));
     menu.set_status_layout(status_layout);
     Built {
         menu,
@@ -551,6 +558,7 @@ fn main() -> ExitCode {
         addon_log: env_path("TF_ADDON_LOG", addons::LOG_PATH),
         addon_last_check: addon_last_check_path(),
         battery_file: battery_file(),
+        removable_file: removable_file(),
         config_toml,
         kanshi_changed,
         network_roots: thinfloe_menu::netstat::Roots::system(),

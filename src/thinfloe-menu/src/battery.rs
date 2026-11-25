@@ -88,8 +88,20 @@ impl Device {
 /// Make a device name printable: NUL dropped, control, format and separator
 /// characters shown as `?`, cut to `MAX_NAME` characters.
 pub fn sanitise(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
+    let cleaned = printable(name);
+    let cut: String = cleaned.trim().chars().take(MAX_NAME).collect();
+    if cut.is_empty() {
+        "unknown device".to_string()
+    } else {
+        cut
+    }
+}
+
+/// The character rule of `sanitise` alone, for any string root wrote that
+/// the menu shows (a file name, say): NUL dropped, control, format and
+/// separator characters shown as `?`; not trimmed, not cut.
+pub fn printable(name: &str) -> String {
+    name.chars()
         .filter(|&c| c != '\0')
         .map(|c| {
             let bad = c.is_control()
@@ -108,13 +120,7 @@ pub fn sanitise(name: &str) -> String {
                     | '\u{E0000}'..='\u{E007F}');
             if bad { '?' } else { c }
         })
-        .collect();
-    let cut: String = cleaned.trim().chars().take(MAX_NAME).collect();
-    if cut.is_empty() {
-        "unknown device".to_string()
-    } else {
-        cut
-    }
+        .collect()
 }
 
 fn parse_line(line: &str) -> Option<Device> {
