@@ -98,6 +98,11 @@ pub enum Logout {
     WaitSave,
     /// The logout save runs.
     Saving { since: Instant },
+    /// Restart or Power off, saved: the sticks are flushed and released
+    /// before the machine goes down.
+    Ejecting { since: Instant },
+    /// A stick is in use or the release failed: Stay, or go on anyway.
+    EjectFailed { message: String },
     /// The logout save did not happen: Stay, or Log out anyway.
     Failed { message: String },
     /// Saved; the menu exits 0 at `until`.
@@ -107,7 +112,10 @@ pub enum Logout {
 impl Logout {
     /// The steps without buttons drop input before egui sees it.
     fn refuses_input(&self) -> bool {
-        !matches!(self, Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. })
+        !matches!(
+            self,
+            Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. } | Logout::EjectFailed { .. }
+        )
     }
 }
 
@@ -117,6 +125,10 @@ pub enum Choice {
     Stay,
     StopAndLeave,
     LeaveAnyway,
+    /// A stick was not released: stay in the menu.
+    EjectWait,
+    /// A stick was not released: restart or power off anyway.
+    EjectGoOn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -701,12 +713,19 @@ impl Menu {
         if self.network.applying() {
             v.push(NET_APPLYING.to_string());
         }
+        if let Some(target) = &self.eject.running {
+            v.push(format!("Ejecting {}", self.eject_name(target)));
+        }
         v
     }
 
-    /// No add-on job, no stick write and no network Apply runs.
+    /// No add-on job, no stick write, no network Apply and no eject the
+    /// person started runs.
     fn root_idle(&self) -> bool {
-        self.addon_runs.is_empty() && !self.upgrade.writing() && !self.network.applying()
+        self.addon_runs.is_empty()
+            && !self.upgrade.writing()
+            && !self.network.applying()
+            && self.eject.running.is_none()
     }
 
     /// The known process groups of the root jobs.
@@ -1293,10 +1312,15 @@ impl Menu {
     }
 
     /// The helper ended. The message stays in the panel and in the log.
-    pub fn eject_finished(&mut self, target: &str, r: crate::jobs::EjectResult) -> Option<Effect> {
+    pub fn eject_finished(&mut self, target: &str, r: crate::jobs::EjectResult, now: Instant) -> Option<Effect> {
         use crate::jobs::EjectResult;
-        let what = self.eject_name(target);
-        let all = target == "all";
+        let done = matches!(r, EjectResult::Done);
+        // One stick is called by its name even when "all" released it.
+        let all = target == "all" && self.eject.known.len() != 1;
+        let what = match self.eject.known.as_slice() {
+            [(_, name)] if target == "all" => name.clone(),
+            _ => self.eject_name(target),
+        };
         let (kind, message) = match r {
             EjectResult::Done if all => (Kind::Event, "The sticks can be removed".to_string()),
             EjectResult::Done => (Kind::Event, format!("{what} can be removed")),
@@ -1305,9 +1329,49 @@ impl Menu {
             EjectResult::Failed(e) => (Kind::Warn, format!("Ejecting {what} failed: {e}")),
         };
         self.log.note(kind, format!("{message}."));
-        self.eject.message = Some(message);
+        self.eject.message = Some(message.clone());
         self.eject.running = None;
         self.eject.known.clear();
+        if matches!(self.logout, Some(Logout::Ejecting { .. })) {
+            self.logout = Some(if done {
+                Logout::Leaving {
+                    until: now + LOGOUT_PAUSE,
+                }
+            } else {
+                Logout::EjectFailed { message }
+            });
+            return None;
+        }
+        self.root_job_ended(now)
+    }
+
+    /// The names of the sticks the exit flushes, for the dialog.
+    pub fn flushing_names(&self) -> String {
+        let names: Vec<&str> = if self.eject.known.is_empty() {
+            self.removable.iter().map(|s| s.label()).collect()
+        } else {
+            self.eject.known.iter().map(|(_, n)| n.as_str()).collect()
+        };
+        names.join(", ")
+    }
+
+    /// The home is saved (or the person goes on anyway): Restart and Power
+    /// off first release the sticks, so what is cached reaches them; Log
+    /// out leaves the machine running and does not.
+    fn after_save(&mut self, now: Instant) -> Option<Effect> {
+        let flush = matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty();
+        if !flush {
+            return self.leave(now);
+        }
+        self.logout = Some(Logout::Ejecting { since: now });
+        // A user eject still running ends the step by itself.
+        self.start_eject("all".to_string())
+    }
+
+    fn leave(&mut self, now: Instant) -> Option<Effect> {
+        self.logout = Some(Logout::Leaving {
+            until: now + LOGOUT_PAUSE,
+        });
         None
     }
 
@@ -1670,7 +1734,7 @@ impl Menu {
                 self.machine.facts_done(f, now);
                 None
             }
-            JobResult::Ejected { target, result } => self.eject_finished(&target, result),
+            JobResult::Ejected { target, result } => self.eject_finished(&target, result, now),
             JobResult::Copied(r) => {
                 if let Err(e) = &r {
                     self.log
@@ -1786,14 +1850,11 @@ impl Menu {
                 self.log.note(kind, text);
                 match self.logout {
                     Some(Logout::Saving { .. }) => {
-                        self.logout = Some(if outcome.saved() {
-                            Logout::Leaving {
-                                until: now + LOGOUT_PAUSE,
-                            }
-                        } else {
-                            Logout::Failed {
-                                message: outcome.message(),
-                            }
+                        if outcome.saved() {
+                            return self.after_save(now);
+                        }
+                        self.logout = Some(Logout::Failed {
+                            message: outcome.message(),
                         });
                         None
                     }
@@ -1816,7 +1877,10 @@ impl Menu {
     /// An answer in the logout dialog. Ignored when it does not fit the step.
     pub fn choose(&mut self, choice: Choice, now: Instant) -> Option<Effect> {
         match (&self.logout, choice) {
-            (Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. }), Choice::Stay) => {
+            (
+                Some(Logout::Confirm | Logout::WaitAddons | Logout::Failed { .. } | Logout::EjectFailed { .. }),
+                Choice::Stay | Choice::EjectWait,
+            ) => {
                 self.logout = None;
                 self.offer_retry();
                 if std::mem::take(&mut self.deferred_save) {
@@ -1847,7 +1911,14 @@ impl Menu {
                 Some(Effect::Signal(self.pgids(), Signal::Term))
             }
             // The failure is in the log already, from when it happened.
-            (Some(Logout::Failed { .. }), Choice::LeaveAnyway) => self.ending.exit_code().map(Effect::Exit),
+            // Sticks are still released first on the way out.
+            (Some(Logout::Failed { .. }), Choice::LeaveAnyway) => {
+                if matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty() {
+                    return self.after_save(now);
+                }
+                self.ending.exit_code().map(Effect::Exit)
+            }
+            (Some(Logout::EjectFailed { .. }), Choice::EjectGoOn) => self.ending.exit_code().map(Effect::Exit),
             _ => None,
         }
     }
@@ -5131,7 +5202,7 @@ mod eject_tests {
             Some(Effect::Start(Job::Eject { target: "sdc".into() }))
         );
         assert_eq!(m.eject_event(EjectEvent::All), None, "one at a time");
-        m.eject_finished("sdc", EjectResult::Busy);
+        m.eject_finished("sdc", EjectResult::Busy, Instant::now());
         assert_eq!(
             m.eject_event(EjectEvent::One("nope".into())),
             None,
@@ -5152,7 +5223,7 @@ mod eject_tests {
         );
         m.set_removable(Vec::new());
         assert!(!m.eject.panel_open, "nothing left to show");
-        m.eject_finished("all", EjectResult::Done);
+        m.eject_finished("all", EjectResult::Done, Instant::now());
         assert_eq!(m.eject.message.as_deref(), Some("The sticks can be removed"));
         assert_eq!(m.eject.running, None);
     }
@@ -5162,13 +5233,17 @@ mod eject_tests {
         let mut m = eject_menu();
         m.set_removable(vec![stick("sdb", "MYSTICK"), stick("sdc", "OTHER")]);
         let msg = |m: &Menu| m.eject.message.clone().unwrap();
-        m.eject_finished("sdb", EjectResult::Done);
+        m.eject_finished("sdb", EjectResult::Done, Instant::now());
         assert_eq!(msg(&m), "MYSTICK can be removed");
-        m.eject_finished("sdb", EjectResult::Busy);
+        m.eject_finished("sdb", EjectResult::Busy, Instant::now());
         assert_eq!(msg(&m), "MYSTICK is in use: close the files on it");
-        m.eject_finished("sdb", EjectResult::Failed("sdb2 is still mounted".into()));
+        m.eject_finished(
+            "sdb",
+            EjectResult::Failed("sdb2 is still mounted".into()),
+            Instant::now(),
+        );
         assert_eq!(msg(&m), "Ejecting MYSTICK failed: sdb2 is still mounted");
-        m.eject_finished("all", EjectResult::Busy);
+        m.eject_finished("all", EjectResult::Busy, Instant::now());
         assert_eq!(msg(&m), "The sticks are in use: close the files on them");
         // The helper drops the stick from its file before it ends.
         m.set_removable(vec![stick("sdb", "MYSTICK")]);
@@ -5185,5 +5260,139 @@ mod eject_tests {
         );
         assert_eq!(msg(&m), "MYSTICK can be removed");
         assert_eq!(m.eject.running, None);
+    }
+
+    fn saved(m: &mut Menu, now: Instant) -> Option<Effect> {
+        m.finished(JobResult::Saved(SaveOutcome::Saved), now)
+    }
+
+    fn ending_with_stick(action: Action, now: Instant) -> Menu {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        assert_eq!(m.begin_ending(action, now), Some(Effect::Start(Job::Save)));
+        m
+    }
+
+    fn ejected(m: &mut Menu, r: EjectResult, now: Instant) -> Option<Effect> {
+        m.finished(
+            JobResult::Ejected {
+                target: "all".into(),
+                result: r,
+            },
+            now,
+        )
+    }
+
+    #[test]
+    fn restart_with_a_stick_saves_then_ejects_then_exits_ten() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        assert_eq!(
+            saved(&mut m, now),
+            Some(Effect::Start(Job::Eject { target: "all".into() }))
+        );
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(m.flushing_names(), "MYSTICK");
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), None, "not before the eject ended");
+        assert_eq!(ejected(&mut m, EjectResult::Done, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn power_off_with_a_busy_stick_asks() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        ejected(&mut m, EjectResult::Busy, now);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "MYSTICK is in use: close the files on it".into()
+            })
+        );
+        assert!(!m.refuses_input());
+        assert_eq!(m.choose(Choice::EjectGoOn, now), Some(Effect::Exit(11)));
+    }
+
+    #[test]
+    fn waiting_after_a_busy_stick_stays_in_the_menu() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        ejected(&mut m, EjectResult::Failed("sdb2 is still mounted".into()), now);
+        assert!(matches!(m.logout, Some(Logout::EjectFailed { .. })));
+        assert_eq!(m.choose(Choice::EjectWait, now), None);
+        assert_eq!(m.logout, None);
+    }
+
+    #[test]
+    fn restart_without_sticks_does_not_eject() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        assert_eq!(m.begin_ending(Action::Reboot, now), Some(Effect::Start(Job::Save)));
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(10)));
+    }
+
+    #[test]
+    fn logout_never_ejects() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Logout, now);
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.tick(now + LOGOUT_PAUSE), Some(Effect::Exit(0)));
+    }
+
+    #[test]
+    fn a_failed_save_still_asks_before_eject() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        assert_eq!(m.finished(JobResult::Saved(SaveOutcome::Failed), now), None);
+        assert!(matches!(m.logout, Some(Logout::Failed { .. })));
+        assert_eq!(
+            m.choose(Choice::LeaveAnyway, now),
+            Some(Effect::Start(Job::Eject { target: "all".into() })),
+            "the sticks are still released"
+        );
+    }
+
+    #[test]
+    fn a_running_user_eject_holds_the_ending_tiles() {
+        let now = Instant::now();
+        for action in [Action::Logout, Action::Reboot, Action::Poweroff] {
+            let mut m = eject_menu();
+            m.set_removable(vec![stick("sdb", "MYSTICK")]);
+            assert!(m.activate(0, now).is_some());
+            assert_eq!(m.root_jobs(), ["Ejecting MYSTICK"]);
+            assert_eq!(m.begin_ending(action, now), None, "asks instead of saving");
+            assert_eq!(m.logout, Some(Logout::Confirm));
+            // The eject ends: the ending goes on by itself.
+            let r = m.finished(
+                JobResult::Ejected {
+                    target: "sdb".into(),
+                    result: EjectResult::Done,
+                },
+                now,
+            );
+            assert_eq!(r, Some(Effect::Start(Job::Save)), "{action:?}");
+            assert_eq!(m.logout, Some(Logout::Saving { since: now }));
+        }
+    }
+
+    #[test]
+    fn the_exit_eject_waits_for_a_running_user_eject() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Reboot, now);
+        // A user eject slipped in while the save ran.
+        m.eject.running = Some("sdb".into());
+        assert_eq!(saved(&mut m, now), None, "no second eject");
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            now,
+        );
+        assert!(matches!(m.logout, Some(Logout::Leaving { .. })));
     }
 }

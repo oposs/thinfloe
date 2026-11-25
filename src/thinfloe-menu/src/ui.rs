@@ -483,6 +483,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             let kinds = root_kinds(menu);
             let title = match kinds {
                 _ if !menu.jobs.is_empty() => "Programs are still running",
+                (false, false) if menu.eject.running.is_some() => "A stick is being released",
                 (false, true) => "A stick is being written",
                 (true, true) => "Add-ons are being changed and a stick is written",
                 _ => "Add-ons are being changed",
@@ -502,6 +503,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                 }
                 if !root_jobs.is_empty() {
                     let what = match kinds {
+                        (false, false) => "The stick is released",
                         (false, true) => "The stick is written",
                         (true, true) => "The add-on work and the write are finished",
                         _ => "The add-on work is finished",
@@ -530,7 +532,11 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         Some(Logout::WaitAddons) => {
             let mut chose = None;
             let (addons, write) = root_kinds(menu);
-            let what = root_waits(addons, write);
+            let what = if !addons && !write && menu.eject.running.is_some() {
+                "the stick to be released"
+            } else {
+                root_waits(addons, write)
+            };
             dialog(ui, &format!("Waiting for {what} before {verbing}"), |ui, t| {
                 for job in menu.root_jobs() {
                     ui.label(egui::RichText::new(job).color(t.palette().muted_foreground));
@@ -623,6 +629,45 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             });
             ui.ctx().request_repaint_after(Duration::from_secs(1));
             return None;
+        }
+        Some(Logout::Ejecting { since }) => {
+            dialog(ui, &format!("Writing to {} …", menu.flushing_names()), |ui, t| {
+                ui.label(
+                    egui::RichText::new(elapsed(now.duration_since(*since)))
+                        .size(brand::TIMER_PT)
+                        .monospace()
+                        .color(t.palette().ring),
+                );
+                ui.label(
+                    egui::RichText::new(format!("The sticks are released before {verbing}."))
+                        .color(t.palette().muted_foreground),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            return None;
+        }
+        Some(Logout::EjectFailed { message }) => {
+            let mut chose = None;
+            dialog(ui, "A stick was not released", |ui, t| {
+                ui.label(egui::RichText::new(message).color(t.role(role::WARN)));
+                ui.label(
+                    egui::RichText::new(format!("If you {verb} now, data not yet written to it can be lost."))
+                        .color(t.palette().muted_foreground),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add(Button::new("Stay")).clicked() {
+                        chose = Some(Choice::EjectWait);
+                    }
+                    if ui
+                        .add(Button::new(format!("{} anyway", capitalized(verb))).variant(ButtonVariant::Destructive))
+                        .clicked()
+                    {
+                        chose = Some(Choice::EjectGoOn);
+                    }
+                });
+            });
+            return chose.map(UiEvent::Chose);
         }
         Some(Logout::Leaving { until }) => {
             dialog(ui, "Home directory saved", |ui, t| {
