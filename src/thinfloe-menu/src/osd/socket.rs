@@ -42,10 +42,45 @@ pub fn send(path: &Path, a: Action) -> Result<(), SendError> {
     }
 }
 
-/// The action in one datagram; anything else is `None`.
-pub fn decode(buf: &[u8]) -> Option<Action> {
+/// The longest note text in characters; a longer one is cut.
+pub const NOTE_MAX_CHARS: usize = 200;
+
+/// The largest datagram the OSD reads: a note's header and
+/// `NOTE_MAX_CHARS` characters of four bytes each fit with room to spare.
+pub const DATAGRAM_MAX: usize = 1024;
+
+/// What one datagram asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Datagram {
+    /// A key: `<action>\n`.
+    Key(Action),
+    /// A text note: `note\t<info|warn>\t<text>\n`. Any program may send it.
+    Note { warn: bool, text: String },
+}
+
+/// The datagram in `buf`; anything else is `None`.
+pub fn decode(buf: &[u8]) -> Option<Datagram> {
     let s = std::str::from_utf8(buf).ok()?;
-    Action::parse(s.strip_suffix('\n').unwrap_or(s))
+    let s = s.strip_suffix('\n').unwrap_or(s);
+    if let Some(rest) = s.strip_prefix("note\t") {
+        let (tone, text) = rest.split_once('\t')?;
+        let warn = match tone {
+            "info" => false,
+            "warn" => true,
+            _ => return None,
+        };
+        // Control characters (a name may hold a newline) show as spaces.
+        let text: String = text
+            .chars()
+            .take(NOTE_MAX_CHARS)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        if text.trim().is_empty() {
+            return None;
+        }
+        return Some(Datagram::Note { warn, text });
+    }
+    Action::parse(s).map(Datagram::Key)
 }
 
 #[cfg(test)]
@@ -62,7 +97,7 @@ mod tests {
         let mut buf = [0u8; 64];
         let n = server.recv(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"volume-up\n");
-        assert_eq!(decode(&buf[..n]), Some(Action::VolumeUp));
+        assert_eq!(decode(&buf[..n]), Some(Datagram::Key(Action::VolumeUp)));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -88,7 +123,7 @@ mod tests {
         send(&path, Action::BrightnessDown).unwrap();
         let mut buf = [0u8; 64];
         let n = server.recv(&mut buf).unwrap();
-        assert_eq!(decode(&buf[..n]), Some(Action::BrightnessDown));
+        assert_eq!(decode(&buf[..n]), Some(Datagram::Key(Action::BrightnessDown)));
     }
 
     #[test]
@@ -101,13 +136,69 @@ mod tests {
 
     #[test]
     fn decode_takes_one_action_name() {
-        assert_eq!(decode(b"mic-mute\n"), Some(Action::MicMute));
-        assert_eq!(decode(b"mic-mute"), Some(Action::MicMute));
+        assert_eq!(decode(b"mic-mute\n"), Some(Datagram::Key(Action::MicMute)));
+        assert_eq!(decode(b"mic-mute"), Some(Datagram::Key(Action::MicMute)));
         assert_eq!(decode(b"mic-mute\n\n"), None);
         assert_eq!(decode(b"volume"), None);
         assert_eq!(decode(&[0xff, 0xfe]), None);
         assert_eq!(decode(b"volume-set 35\n"), Some(Action::VolumeSet(35)));
         assert_eq!(decode(b"volume-mute-set 0\n"), Some(Action::VolumeMuteSet(false)));
         assert_eq!(decode(b"volume-set 101\n"), None);
+    }
+
+    fn note(warn: bool, text: &str) -> Option<Datagram> {
+        Some(Datagram::Note {
+            warn,
+            text: text.to_string(),
+        })
+    }
+
+    #[test]
+    fn decode_note_info() {
+        assert_eq!(
+            decode(b"note\tinfo\tFrom Anna: a.pdf\n"),
+            note(false, "From Anna: a.pdf")
+        );
+        assert_eq!(decode(b"note\tinfo\tno newline"), note(false, "no newline"));
+        // A tab or newline inside the text shows as a space.
+        assert_eq!(decode(b"note\tinfo\ta\tb\n"), note(false, "a b"));
+        assert_eq!(decode(b"note\tinfo\ta\nb"), note(false, "a b"));
+    }
+
+    #[test]
+    fn decode_note_warn() {
+        assert_eq!(
+            decode("note\twarn\tNo space left \u{fc}\n".as_bytes()),
+            note(true, "No space left \u{fc}")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_bad_tone() {
+        assert_eq!(decode(b"note\tloud\ttext\n"), None);
+        assert_eq!(decode(b"note\tinfo\n"), None);
+        assert_eq!(decode(b"note\n"), None);
+        assert_eq!(decode(b"note\tinfo\t\n"), None);
+    }
+
+    #[test]
+    fn decode_still_takes_actions() {
+        assert_eq!(decode(b"volume-up\n"), Some(Datagram::Key(Action::VolumeUp)));
+        assert_eq!(decode(b"reload\n"), Some(Datagram::Key(Action::Reload)));
+    }
+
+    #[test]
+    fn decode_caps_a_note_at_200_characters_on_a_char_boundary() {
+        let long = format!("note\twarn\t{}", "\u{e4}".repeat(300));
+        let Some(Datagram::Note { text, .. }) = decode(long.as_bytes()) else {
+            panic!("not a note");
+        };
+        assert_eq!(text.chars().count(), NOTE_MAX_CHARS);
+    }
+
+    #[test]
+    fn a_note_datagram_fits_the_receive_buffer() {
+        let worst = format!("note\twarn\t{}\n", "\u{1f600}".repeat(NOTE_MAX_CHARS));
+        assert!(worst.len() <= DATAGRAM_MAX);
     }
 }

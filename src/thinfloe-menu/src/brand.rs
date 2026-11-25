@@ -214,6 +214,9 @@ pub const OSD_ICON: f32 = 22.0;
 pub const OSD_GAP: f32 = 10.0;
 /// The name, in Geo.
 pub const OSD_TEXT_PT: f32 = 19.0;
+/// The width of a text note's panel (a note is one row, cut with an
+/// ellipsis where it does not fit).
+pub const OSD_NOTE_W: f32 = 480.0;
 /// The level bar's height.
 pub const OSD_BAR_H: f32 = 6.0;
 /// From the icon row to the level bar.

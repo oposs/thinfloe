@@ -101,6 +101,16 @@ of the menu leaves the other running and the session's exit codes unchanged.
   switch change); with the switch off it says `100 0 off`. It
   is removed when the OSD starts (one left by a crashed OSD) and when it
   ends; no file means the volume is not known.
+- Text notes: any program may send one datagram
+  `note<TAB>info|warn<TAB><text>\n` to the same socket (FloeDrop's
+  `thinfloe-share` does). The panel is one row without an icon, 480 logical
+  pixels wide (`OSD_NOTE_W`), at the bottom centre like the volume panel; the
+  text is the foreground colour, amber for `warn`, and is cut with an
+  ellipsis where it does not fit. It shows 4 s (`NOTE_HIDE_AFTER`). A new
+  note replaces the old one, and a key panel replaces a note (and the
+  reverse). The text is cut at 200 characters, control characters show as
+  spaces, an empty text or another tone drops the datagram. The OSD reads
+  datagrams of up to 1024 bytes.
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
   keys itself on every device, starting from the default device's current
   value, and logs `thinfloe-menu --osd-key: no OSD running; <action> done

@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl, Watch};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
+use super::socket::Datagram;
 use super::state::{OsdState, Shown};
-use super::surface::{SurfaceKind, Surfaces, mark_placement, panel_placement};
+use super::surface::{SurfaceKind, Surfaces, mark_placement};
 use super::sync::{Mode, keys_mode};
 use super::{Action, POLL_MAX_MS, STOP, VOLUME_STEP, socket};
 
@@ -210,7 +211,15 @@ pub(super) fn run() -> Result<(), String> {
             dirty = true;
             redetect.outputs_changed(now);
         }
-        for a in drain_socket(&sock) {
+        for d in drain_socket(&sock) {
+            let a = match d {
+                Datagram::Key(a) => a,
+                Datagram::Note { warn, text } => {
+                    state.show(Shown::Note { warn, text }, now);
+                    dirty = true;
+                    continue;
+                }
+            };
             if a == Action::Reload {
                 reload(&audio, &env, &mut mode, &mut logged);
                 continue;
@@ -252,15 +261,15 @@ fn watch_request(w: Watch) -> AudioRequest {
     }
 }
 
-/// The actions waiting on the socket; other datagrams are dropped.
-fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
-    let mut actions = Vec::new();
-    let mut buf = [0u8; 64];
+/// The datagrams waiting on the socket; undecodable ones are dropped.
+fn drain_socket(sock: &UnixDatagram) -> Vec<Datagram> {
+    let mut found = Vec::new();
+    let mut buf = [0u8; socket::DATAGRAM_MAX];
     loop {
         match sock.recv(&mut buf) {
-            Ok(n) => actions.extend(socket::decode(&buf[..n])),
+            Ok(n) => found.extend(socket::decode(&buf[..n])),
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return actions,
+            Err(_) => return found,
         }
     }
 }
@@ -426,7 +435,7 @@ fn redraw(
         if d.panel != want {
             let shown = match &want {
                 Some((v, _)) => {
-                    let place = panel_placement(scale, v.has_bar());
+                    let place = v.placement(scale);
                     let px = match panels.iter().find(|(p, _)| p == v) {
                         Some((_, px)) => px,
                         None => {

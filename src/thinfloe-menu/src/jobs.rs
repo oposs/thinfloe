@@ -1727,7 +1727,7 @@ mod tests {
         );
         let mut buf = [0u8; 64];
         let n = osd.recv(&mut buf).expect("a datagram");
-        assert_eq!(socket::decode(&buf[..n]), Some(Action::Reload));
+        assert_eq!(socket::decode(&buf[..n]), Some(socket::Datagram::Key(Action::Reload)));
         // No OSD listens: nothing to tell, nothing logged, still live.
         p.labwc.osd_socket = Some(d.socket("x"));
         let feed = Arc::new(Feed::default());

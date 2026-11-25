@@ -12,7 +12,9 @@
 //! made again until the outputs change, so a compositor that closes every
 //! new surface cannot drive the OSD into a loop.
 
-use crate::brand::{MARK_RIGHT, MARK_SIDE, MARK_TOP, OSD_BAR_GAP, OSD_BAR_H, OSD_BOTTOM, OSD_ICON, OSD_PAD_Y, OSD_W};
+use crate::brand::{
+    MARK_RIGHT, MARK_SIDE, MARK_TOP, OSD_BAR_GAP, OSD_BAR_H, OSD_BOTTOM, OSD_ICON, OSD_NOTE_W, OSD_PAD_Y, OSD_W,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::File;
@@ -65,6 +67,14 @@ pub fn panel_placement(scale: f32, bar: bool) -> Placement {
         anchor: Anchor::Bottom,
         margin: (0, 0, px(OSD_BOTTOM, scale) as i32, 0),
         size: (px(OSD_W, scale) as u32, h as u32),
+    }
+}
+
+/// A text note's panel: as `panel_placement` without a bar, `OSD_NOTE_W` wide.
+pub fn note_placement(scale: f32) -> Placement {
+    Placement {
+        size: (px(OSD_NOTE_W, scale) as u32, panel_placement(scale, false).size.1),
+        ..panel_placement(scale, false)
     }
 }
 
@@ -542,6 +552,10 @@ mod tests {
         assert_eq!(panel_placement(1.5, true).margin, (0, 0, 33, 0));
         assert_eq!(mark_placement(1.0).margin, (34, 14, 0, 0));
         assert_eq!(mark_placement(2.0).size, (60, 60));
+        assert_eq!(note_placement(1.0).size, (480, 46));
+        assert_eq!(note_placement(2.0).size, (960, 92));
+        assert_eq!(note_placement(1.0).anchor, Anchor::Bottom);
+        assert_eq!(note_placement(1.5).margin, panel_placement(1.5, false).margin);
     }
 
     #[test]

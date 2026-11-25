@@ -3,12 +3,13 @@
 //! of the surface's `Placement`.
 
 use egui::epaint::StrokeKind;
-use egui::{Align2, Color32, Pos2, Rect, Stroke, Ui, Vec2, ViewportId};
+use egui::text::LayoutJob;
+use egui::{Align2, Color32, Pos2, Rect, Stroke, TextFormat, Ui, Vec2, ViewportId};
 use shadcn_egui::Theme;
 use shadcn_egui::components::icon::{Icon, paint_icon};
 use shadcn_egui::icons::lucide;
 
-use super::surface::{mark_placement, panel_placement};
+use super::surface::{Placement, mark_placement, note_placement, panel_placement};
 use crate::brand::{
     self, MARK_ICON, OSD_BAR_GAP, OSD_BAR_H, OSD_GAP, OSD_ICON, OSD_PAD_X, OSD_PAD_Y, OSD_TEXT_PT, role,
 };
@@ -31,6 +32,12 @@ pub enum PanelView {
     BrightnessUnsupported,
     /// The brightness key was pressed before detection finished.
     BrightnessUnknown,
+    /// A text from another program: one row, no icon, cut where it does
+    /// not fit.
+    Note {
+        warn: bool,
+        text: String,
+    },
 }
 
 impl PanelView {
@@ -40,6 +47,16 @@ impl PanelView {
             self,
             PanelView::Volume { .. } | PanelView::Muted { .. } | PanelView::Brightness { .. }
         )
+    }
+}
+
+impl PanelView {
+    /// Where the panel goes and how large it is at `scale`.
+    pub fn placement(&self, scale: f32) -> Placement {
+        match self {
+            PanelView::Note { .. } => note_placement(scale),
+            v => panel_placement(scale, v.has_bar()),
+        }
     }
 }
 
@@ -104,6 +121,7 @@ fn look(v: &PanelView, t: &Theme) -> Look {
             right: Some(("not supported".into(), warn)),
             bar: None,
         },
+        PanelView::Note { .. } => unreachable!("a note has no look; `note_ui` draws it"),
         PanelView::BrightnessUnknown => Look {
             icon: &lucide::SUN,
             icon_color: ice,
@@ -127,7 +145,32 @@ fn border(ui: &Ui, rect: Rect, color: Color32, scale: f32) {
         .rect_stroke(rect, 0.0, Stroke::new(w, color), StrokeKind::Inside);
 }
 
+/// A note: the frame and one row of text, cut with an ellipsis at the
+/// right padding, amber for a warning.
+fn note_ui(ui: &mut Ui, warn: bool, text: &str, scale: f32) {
+    let t = Theme::current(ui.ctx());
+    let p = t.palette();
+    let all = ui.ctx().content_rect();
+    let s = |v: f32| snap(v, scale);
+    let (pad_x, pad_y, icon) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_ICON));
+    ui.painter().rect_filled(all, 0.0, p.card);
+    border(ui, all, p.border, scale);
+    let color = if warn { t.role(role::WARN) } else { p.foreground };
+    let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(brand::geo(OSD_TEXT_PT), color));
+    job.wrap.max_width = (all.width() - 2.0 * pad_x).max(1.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.painter().layout_job(job);
+    let mid = pad_y + icon / 2.0;
+    let pos = Pos2::new(pad_x, mid - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, color);
+}
+
 fn panel_ui(ui: &mut Ui, v: &PanelView, scale: f32) {
+    if let PanelView::Note { warn, text } = v {
+        return note_ui(ui, *warn, text, scale);
+    }
     let t = Theme::current(ui.ctx());
     let p = t.palette();
     let l = look(v, &t);
@@ -206,7 +249,7 @@ impl Painter {
 
     /// The panel for `v` at `scale`, as large as `panel_placement` says.
     pub fn panel(&mut self, v: &PanelView, scale: f32) -> Canvas {
-        let size = panel_placement(scale, v.has_bar()).size;
+        let size = v.placement(scale).size;
         self.render(size, scale, |ui| panel_ui(ui, v, scale))
     }
 
@@ -314,6 +357,53 @@ mod tests {
         assert!(any(&c, (6, 24), (6, 24), WARN));
     }
 
+    fn note(warn: bool, text: &str) -> PanelView {
+        PanelView::Note {
+            warn,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_note_panel_is_wide_and_one_row_high() {
+        let c = Painter::new().panel(&note(false, "From Anna: a.pdf"), 1.0);
+        assert_eq!((c.width as u32, c.height as u32), note_placement(1.0).size);
+        assert_eq!(c.height, 46);
+        // The text is drawn, in the foreground colour, left of the middle.
+        let fg = Theme::current(&Painter::new().ctx).palette().foreground;
+        assert!(any(&c, (16, 200), (10, 36), fg));
+    }
+
+    #[test]
+    fn a_warn_note_is_amber() {
+        let c = Painter::new().panel(&note(true, "No space left"), 1.0);
+        assert!(any(&c, (16, 200), (10, 36), WARN));
+        let c = Painter::new().panel(&note(false, "No space left"), 1.0);
+        assert!(!any(&c, (16, 200), (10, 36), WARN));
+    }
+
+    #[test]
+    fn a_long_note_is_cut_inside_the_panel() {
+        let long = "x".repeat(200);
+        let c = Painter::new().panel(&note(false, &long), 1.0);
+        let card = TILE;
+        // The right padding (and the bottom row below the text) holds no text pixel.
+        let right = (c.width - 16, c.width - 1);
+        for y in 1..c.height - 1 {
+            for x in right.0..right.1 {
+                assert_eq!(px(&c, x, y), card, "text in the padding at {x},{y}");
+            }
+        }
+        // The same at a fractional scale.
+        let c = Painter::new().panel(&note(false, &long), 1.5);
+        for y in 1..c.height - 1 {
+            for x in (c.width - 24)..(c.width - 1) {
+                // The frame's border may be two pixels wide at this scale.
+                assert!([card, LINE].contains(&px(&c, x, y)), "text in the padding at {x},{y}");
+            }
+        }
+    }
+
     #[test]
     fn percent_text_has_a_space_before_the_sign() {
         assert_eq!(percent_text(45), "45 %");
@@ -344,6 +434,11 @@ mod tests {
             ("brightness", PanelView::Brightness { percent: 70 }),
             ("brightness-unsupported", PanelView::BrightnessUnsupported),
             ("brightness-unknown", PanelView::BrightnessUnknown),
+            ("note-info", note(false, "From Anna: holiday-photos.zip")),
+            (
+                "note-warn",
+                note(true, "No space left for a-very-long-file-name-that-is-cut.pdf"),
+            ),
         ];
         for s in [1.0, 2.0] {
             for (name, v) in &views {

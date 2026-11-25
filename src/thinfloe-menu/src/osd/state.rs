@@ -9,13 +9,18 @@ use super::ddc::Bright;
 use super::draw::PanelView;
 
 /// What the last key changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     Sink(Level),
     /// Whether the microphone is now muted.
     Mic(bool),
     /// Each output shows its own monitor's brightness.
     Brightness,
+    /// A text from another program (`socket::Datagram::Note`).
+    Note {
+        warn: bool,
+        text: String,
+    },
 }
 
 #[derive(Default)]
@@ -29,6 +34,15 @@ pub struct OsdState {
 
 impl OsdState {
     pub const HIDE_AFTER: Duration = Duration::from_millis(1500);
+    /// A note stays longer: it is read, not glanced at.
+    pub const NOTE_HIDE_AFTER: Duration = Duration::from_secs(4);
+
+    fn hide_after(s: &Shown) -> Duration {
+        match s {
+            Shown::Note { .. } => Self::NOTE_HIDE_AFTER,
+            _ => Self::HIDE_AFTER,
+        }
+    }
 
     pub fn new() -> OsdState {
         OsdState::default()
@@ -50,11 +64,12 @@ impl OsdState {
 
     /// The panel `output` shows at `now`, if any.
     pub fn panel_for(&self, output: &str, now: Instant) -> Option<PanelView> {
-        let (s, since) = self.panel?;
-        if now >= since + Self::HIDE_AFTER {
+        let (s, since) = self.panel.as_ref()?;
+        if now >= *since + Self::hide_after(s) {
             return None;
         }
-        Some(match s {
+        Some(match s.clone() {
+            Shown::Note { warn, text } => PanelView::Note { warn, text },
             Shown::Sink(l) if l.muted => PanelView::Muted { percent: l.percent },
             Shown::Sink(l) => PanelView::Volume { percent: l.percent },
             Shown::Mic(true) => PanelView::MicOff,
@@ -74,7 +89,7 @@ impl OsdState {
 
     /// When the panel goes away, while one shows.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.panel.map(|(_, since)| since + Self::HIDE_AFTER)
+        self.panel.as_ref().map(|(s, since)| *since + Self::hide_after(s))
     }
 
     /// Drop the panel once its time is up; true when it went away now.
@@ -148,6 +163,60 @@ mod tests {
         assert_eq!(s.panel_for("HDMI-A-1", t0), Some(PanelView::BrightnessUnsupported));
         assert_eq!(s.panel_for("DP-2", t0), Some(PanelView::BrightnessUnknown));
         assert_eq!(s.panel_for("DP-3", t0), Some(PanelView::BrightnessUnknown));
+    }
+
+    fn note(text: &str) -> Shown {
+        Shown::Note {
+            warn: false,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_new_note_replaces_the_old() {
+        let t0 = Instant::now();
+        let mut s = OsdState::new();
+        s.show(note("one"), t0);
+        s.show(
+            Shown::Note {
+                warn: true,
+                text: "two".into(),
+            },
+            t0 + Duration::from_secs(1),
+        );
+        assert_eq!(
+            s.panel_for("DP-1", t0 + Duration::from_secs(1)),
+            Some(PanelView::Note {
+                warn: true,
+                text: "two".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_note_hides_after_4s() {
+        let t0 = Instant::now();
+        let mut s = OsdState::new();
+        s.show(note("hi"), t0);
+        assert!(s.panel_for("DP-1", t0 + Duration::from_millis(3999)).is_some());
+        assert_eq!(s.panel_for("DP-1", t0 + Duration::from_secs(4)), None);
+        assert_eq!(s.next_deadline(), Some(t0 + OsdState::NOTE_HIDE_AFTER));
+        assert!(!s.expire(t0 + Duration::from_millis(3999)));
+        assert!(s.expire(t0 + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn a_key_panel_during_a_note_replaces_it() {
+        let t0 = Instant::now();
+        let mut s = OsdState::new();
+        s.show(note("hi"), t0);
+        s.show(Shown::Mic(true), t0 + Duration::from_secs(1));
+        assert_eq!(
+            s.panel_for("DP-1", t0 + Duration::from_secs(1)),
+            Some(PanelView::MicOff)
+        );
+        // The key panel's own, shorter time applies.
+        assert_eq!(s.panel_for("DP-1", t0 + Duration::from_millis(2500)), None);
     }
 
     #[test]
