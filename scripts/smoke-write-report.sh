@@ -130,6 +130,8 @@ say "SMOKE-WRITE-NOWRITE-RC: $?"
 say "SMOKE-WRITE-NOWRITE-RESULT: $(grep '^@result' "$OUT/nowrite.out" | tail -1)"
 wait_for 30 is_listed SMOKEB
 say "SMOKE-WRITE-NOWRITE-REMOUNTED: $(listed SMOKEB)"
+# The helper's release writes "released <disk>: <names>" to the journal.
+say "SMOKE-WRITE-NOWRITE-RELEASED: $(journalctl -b -o cat -t thinfloe-automount --no-pager | grep -c "^released $B_DISK: ")"
 [ -e "$HOLD/$B_DISK" ] && say "SMOKE-WRITE-NOWRITE-HOLD: left" || say "SMOKE-WRITE-NOWRITE-HOLD: gone"
 say "SMOKE-WRITE-NOWRITE-STATE-BEGIN"
 {

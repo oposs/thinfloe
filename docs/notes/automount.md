@@ -97,7 +97,9 @@ no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
   lines go, a `clean` event; then a stick is powered off (below).
 - `release`: as eject, without event and power-off; for the writer. Before
   the first umount it records the partitions it takes off in
-  `/run/thinfloe/automount/released/<disk>`.
+  `/run/thinfloe/automount/released/<disk>`, and logs `released <disk>:
+  <names>` to the journal (`thinfloe-automount`), as the writer captures
+  its stderr.
 - `remount`: `add` for each partition that record names, and nothing else,
   with the same locks, hold check and skip rules; the record goes. A release
   killed half-way is covered: its record is written, and the stale lines are
@@ -112,8 +114,10 @@ no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
 "the stick is in use". `add` skips the disk while the pid lives and the
 serial part of the id matches (the write repartitions the stick, so the size
 and partition fingerprint of the id would never match); a stale hold is
-removed, but only the file that was read (same inode): a hold the writer
-renamed into place meanwhile stays. The hold goes when the write ends; a write that never wrote a byte
+removed, but only the file that was read: it is renamed aside, and if the
+file taken aside is not that inode it is linked back (or a newer hold is
+there already), so a hold the writer renamed into place meanwhile always
+stays. The hold goes when the write ends; a write that never wrote a byte
 runs `remount`, so the stick comes back (step `remount`, "Mounting the
 stick again": it can take up to the helper's 80 s add budget). `drives` reports such a stick as
 `automounted`, not `mounted`; an automounted stick that is not the boot
@@ -180,7 +184,8 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   powers it off; both give a `clean` event.
 - `make qemu-smoke-write`: both target sticks carry vfat and are
   automounted before the writes; a write from a release without the image
-  fails before its first byte and the stick is mounted again; while the
+  fails before its first byte, the journal shows its release, and the stick
+  is mounted again; while the
   cancelled write runs the stick is released and held, and the hold is gone
   after it; the ThinFloe stick written is not mounted, and an `add` of it by
   hand after the hold is gone is refused as "ThinFloe stick".

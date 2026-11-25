@@ -17,9 +17,11 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -877,6 +879,70 @@ class FollowUps(Commands):
         mod.pid_alive = lambda pid: False
         self.assertFalse(mod.live_hold(self.p, d))
         self.assertFalse(hold.exists(), "a stale hold is still removed")
+
+    def test_a_hold_written_between_the_check_and_the_delete_is_kept(self):
+        # The writer renames its new hold into place right after the stale
+        # one was taken aside, before it is checked and deleted.
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
+        fresh = f"{os.getpid()}\tsn-AA:2:2\n"
+        real_rename = os.rename
+
+        def rename_then_writer(src, dst):
+            real_rename(src, dst)
+            if str(src) == str(hold):
+                tmp = hold.with_name(".new")
+                tmp.write_text(fresh)
+                os.replace(tmp, hold)
+        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
+        with unittest.mock.patch.object(mod.os, "rename", side_effect=rename_then_writer):
+            self.assertFalse(mod.live_hold(self.p, d))
+        self.assertEqual(hold.read_text(), fresh)
+        self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"], "nothing left aside")
+
+    def test_a_hold_written_before_it_is_taken_aside_is_put_back(self):
+        # The stale hold was read; the writer's hold replaces it before the
+        # rename takes it aside: it is linked back into place.
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
+        fresh = f"{os.getpid()}\tsn-AA:2:2\n"
+        real_rename = os.rename
+
+        def writer_then_rename(src, dst):
+            if str(src) == str(hold):
+                tmp = hold.with_name(".new")
+                tmp.write_text(fresh)
+                os.replace(tmp, hold)
+            real_rename(src, dst)
+        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
+        with unittest.mock.patch.object(mod.os, "rename", side_effect=writer_then_rename):
+            self.assertFalse(mod.live_hold(self.p, d))
+        self.assertEqual(hold.read_text(), fresh)
+        self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"])
+
+    def test_release_is_logged_for_the_journal(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        said = []
+        mod.log = said.append
+        sent = []
+        fake = type(sys)("syslog")
+        fake.LOG_INFO = 6
+        fake.openlog = lambda ident: sent.append(("ident", ident))
+        fake.syslog = lambda prio, msg: sent.append((prio, msg))
+        del os.environ["TF_RUN"]   # the tests' guard; paths are already read
+        with unittest.mock.patch.dict(sys.modules, {"syslog": fake}):
+            self.assertEqual(mod.cmd_unmount("sdb", self.p, False), 0)
+        self.assertIn("released sdb: MYSTICK", said)
+        self.assertEqual(sent, [("ident", "thinfloe-automount"), (6, "released sdb: MYSTICK")])
+        # An eject is not a release: no such line.
+        os.environ["TF_RUN"] = str(self.p.run)
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        said.clear()
+        self.assertEqual(mod.cmd_unmount("sdb", self.p, True), 0)
+        self.assertFalse([s for s in said if s.startswith("released")])
 
     def test_card_swapped_for_one_without_a_filesystem_is_unclean(self):
         # A whole-disk card in a reader: the node and a size stay, udev's

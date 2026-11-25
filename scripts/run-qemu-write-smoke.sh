@@ -240,6 +240,12 @@ else
     sed -n '/SMOKE-WRITE-NOWRITE-STATE-BEGIN/,/SMOKE-WRITE-NOWRITE-STATE-END/p' "$clean" | sed 's/^/         /'
 fi
 
+if [[ "$(field NOWRITE-RELEASED)" =~ ^[1-9][0-9]*$ ]]; then
+    ok "the failed write released the stick first (journal: released, $(field NOWRITE-RELEASED) time(s))"
+else
+    bad "no release of B in the journal before the failed write's remount: '$(field NOWRITE-RELEASED)'"
+fi
+
 if [[ "$(field CANCEL-RELEASED)" == yes && "$(field CANCEL-HELD)" == yes ]]; then
     ok "while the write runs, the stick is released and held"
 else

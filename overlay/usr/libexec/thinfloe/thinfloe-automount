@@ -422,6 +422,20 @@ def log(msg: str) -> None:
     print("thinfloe-automount: " + msg, file=sys.stderr, flush=True)
 
 
+def journal(msg: str) -> None:
+    """log, and the same line to the journal: release runs under the
+    writer, which captures stderr. Not under the tests (TF_RUN set)."""
+    log(msg)
+    if os.environ.get("TF_RUN"):
+        return
+    try:
+        import syslog
+        syslog.openlog("thinfloe-automount")
+        syslog.syslog(syslog.LOG_INFO, msg)
+    except Exception:   # no journal is no reason to fail a release
+        pass
+
+
 def run(argv: List[str], timeout: float):
     """Run a command found on PATH: (returncode, stdout, stderr).
 
@@ -585,14 +599,36 @@ def live_hold(p: Paths, d: Dev) -> bool:
         return False
     if pid_alive(hold.pid) and hold_matches(d, hold):
         return True
-    # The writer puts a hold in place by rename, so a new hold is a new
-    # inode: only the file that was read is deleted, never one written since.
+    drop_stale_hold(path, ino)
+    return False
+
+
+def drop_stale_hold(path: str, ino: int) -> None:
+    """Delete the hold file at path if it is still the one read (inode ino).
+
+    The writer puts a hold in place by rename, so a hold written since is
+    another inode. The file is first renamed aside, which takes exactly one
+    file away from path; if that is not the stale one, it is linked back
+    (link fails when a newer hold is at path already, and that one stays).
+    No moment remains in which a fresh hold can be deleted.
+    """
+    aside = os.path.join(os.path.dirname(path), f".stale-{os.getpid()}")
     try:
-        if os.stat(path).st_ino == ino:
-            os.unlink(path)
+        os.rename(path, aside)
+    except OSError:
+        return   # gone already
+    try:
+        if os.stat(aside).st_ino != ino:
+            try:
+                os.link(aside, path)
+            except FileExistsError:
+                pass   # a newer hold is in place
     except OSError:
         pass
-    return False
+    try:
+        os.unlink(aside)
+    except OSError:
+        pass
 
 
 def mountinfo_unescape(text: str) -> str:
@@ -972,6 +1008,8 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
         log(f"{disk}: partly unmounted, still mounted: {left}")
     for ln in done:
         remove_dir(ln.mountpoint)
+    if not event and done:
+        journal(f"released {disk}: {', '.join(ln.name for ln in done)}")
     ejected = event and status == EXIT_OK
     commit(p, drop={ln.device for ln in done},
            event=(", ".join(ln.name for ln in lines), "clean") if ejected else None)
