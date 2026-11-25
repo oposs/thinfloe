@@ -99,8 +99,11 @@ of the menu leaves the other running and the session's exit codes unchanged.
   writes it atomically (a file beside it and a rename) whenever the shared
   speaker state or the switch is set or changes (start, keys, slider,
   switch change); with the switch off it says `100 0 off`. It
-  is removed when the OSD starts (one left by a crashed OSD) and when it
-  ends; no file means the volume is not known.
+  is removed when the OSD starts (one left by a killed OSD) and when it
+  ends; no file means the volume is not known. The audio worker writes it
+  only under its queue's lock while the queue is open, and the worker's
+  drop closes the queue and removes the file under that lock, so a `pactl`
+  call still running at the exit cannot write it again.
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
   keys itself on every device, starting from the default device's current
   value, and logs `thinfloe-menu --osd-key: no OSD running; <action> done

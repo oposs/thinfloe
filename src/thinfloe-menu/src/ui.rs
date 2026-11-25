@@ -969,7 +969,7 @@ fn show_settings(
             &mut s_ui,
             &menu.sound,
             menu.keyboard.shown.volume_keys,
-            menu.keyboard.note.as_deref(),
+            menu.keyboard.volume_note.as_deref(),
             width,
             now,
         ),
@@ -4399,7 +4399,14 @@ mod tests {
         menu.sound.set_file(Some(off), Instant::now());
         let texts = settings_texts(&menu);
         assert!(texts.iter().any(|t| t == crate::soundtab::TURNING_ON_NOTE), "{texts:?}");
-        menu.keyboard.note = Some("The apply failed for a test.".into());
+        // A note of another keyboard setting stays on the Keyboard tab.
+        menu.keyboard.note = Some(crate::keyboard::NUMLOCK_NEXT_START.into());
+        let texts = settings_texts(&menu);
+        assert!(
+            !texts.iter().any(|t| t == crate::keyboard::NUMLOCK_NEXT_START),
+            "{texts:?}"
+        );
+        menu.keyboard.volume_note = Some("The apply failed for a test.".into());
         let texts = settings_texts(&menu);
         assert!(texts.iter().any(|t| t == "The apply failed for a test."), "{texts:?}");
         menu.sound

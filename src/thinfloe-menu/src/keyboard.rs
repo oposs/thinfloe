@@ -51,6 +51,10 @@ pub struct KeyboardTab {
     /// The newest choice made while an apply ran.
     pending: Option<Keyboard>,
     pub note: Option<String>,
+    /// The note of the last apply that changed the volume keys switch, for
+    /// the Sound tab, which shares that switch; `note` also holds notes
+    /// of the other settings (Num Lock, the layout list).
+    pub volume_note: Option<String>,
     pub try_text: String,
     /// Num Lock as the session started: labwc read it then and applies no
     /// later change before the next start (or a keyboard plugged in).
@@ -179,6 +183,7 @@ impl KeyboardTab {
             applying: false,
             pending: None,
             note,
+            volume_note: None,
             try_text: String::new(),
         }
     }
@@ -231,18 +236,39 @@ impl KeyboardTab {
     /// The apply of `kb` ended. `Some` is the next one to start.
     pub fn done(&mut self, kb: &Keyboard, r: Result<KbOutcome, String>) -> Option<Keyboard> {
         self.applying = false;
+        let volume_changed = kb.volume_keys != self.applied.volume_keys;
         match r {
             Ok(outcome) => {
+                let outcome_live = matches!(outcome, KbOutcome::Live);
                 // Saved, live or not: the disk holds `kb` now.
                 self.applied = kb.clone();
-                self.note = match outcome {
-                    KbOutcome::Live if kb.numlock != self.session_numlock => Some(NUMLOCK_NEXT_START.into()),
-                    KbOutcome::Live => None,
-                    KbOutcome::NextStart => Some("Takes effect at the next start.".into()),
-                    KbOutcome::Saved(why) => Some(format!("{why} {SAVED_NOT_LIVE}")),
+                let (note, volume_note) = match outcome {
+                    KbOutcome::Live if kb.numlock != self.session_numlock => (Some(NUMLOCK_NEXT_START.into()), None),
+                    KbOutcome::Live => (None, None),
+                    KbOutcome::NextStart => {
+                        let n = Some("Takes effect at the next start.".to_string());
+                        (n.clone(), n)
+                    }
+                    KbOutcome::Saved(why) => {
+                        let n = Some(format!("{why} {SAVED_NOT_LIVE}"));
+                        (n.clone(), n)
+                    }
                 };
+                self.note = note;
+                if outcome_live {
+                    // A live apply hands the whole keyboard config over and
+                    // tells the OSD: the switch is live, whatever changed.
+                    self.volume_note = None;
+                } else if volume_changed {
+                    self.volume_note = volume_note;
+                }
             }
-            Err(e) => self.note = Some(e),
+            Err(e) => {
+                if volume_changed {
+                    self.volume_note = Some(e.clone());
+                }
+                self.note = Some(e);
+            }
         }
         let next = self.pending.take().filter(|p| *p != self.applied)?;
         self.applying = true;
@@ -418,6 +444,55 @@ mod tests {
         let mut t = tab("us", "");
         assert_eq!(t.event(KbEvent::CapsAsCtrl(true)), None);
         assert!(!t.applying);
+    }
+
+    #[test]
+    fn only_an_apply_that_changed_the_volume_switch_sets_the_volume_note() {
+        // A Num Lock change: a note for the Keyboard tab only.
+        let mut t = tab("us", "");
+        let next = t.event(KbEvent::NumLock(!t.shown.numlock)).unwrap();
+        t.done(&next, Ok(KbOutcome::Live));
+        assert_eq!(t.note.as_deref(), Some(NUMLOCK_NEXT_START));
+        assert_eq!(t.volume_note, None);
+        // The volume switch, failed: both tabs say why.
+        let next = t.event(KbEvent::VolumeKeys(true)).unwrap();
+        t.done(&next, Err("disk full".into()));
+        assert_eq!(t.volume_note.as_deref(), Some("disk full"));
+        // Another failed change leaves the volume note as it was.
+        let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
+        assert!(next.volume_keys, "the volume change is still to apply");
+        t.done(&next, Err("still full".into()));
+        assert_eq!(t.note.as_deref(), Some("still full"));
+        assert_eq!(
+            t.volume_note.as_deref(),
+            Some("still full"),
+            "it carried the volume change"
+        );
+        // Applied live at last: no volume note.
+        let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
+        t.done(&next, Ok(KbOutcome::Live));
+        assert_eq!(t.volume_note, None);
+        // A later layout-only failure does not reach the Sound tab.
+        let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
+        t.done(&next, Err("other".into()));
+        assert_eq!(t.volume_note, None);
+    }
+
+    #[test]
+    fn any_live_apply_clears_the_volume_note() {
+        let mut t = tab("us", "");
+        let next = t.event(KbEvent::VolumeKeys(true)).unwrap();
+        t.done(&next, Ok(KbOutcome::Saved("the composer failed".into())));
+        assert!(
+            t.volume_note
+                .as_deref()
+                .is_some_and(|n| n.contains("the composer failed"))
+        );
+        // A Caps-as-Ctrl apply that goes live hands the switch over too.
+        let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
+        assert_eq!(next.volume_keys, t.applied.volume_keys, "the switch did not change");
+        t.done(&next, Ok(KbOutcome::Live));
+        assert_eq!(t.volume_note, None);
     }
 
     #[test]
