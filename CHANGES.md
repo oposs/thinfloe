@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- Settings → Sound showed notes about other keyboard settings under its switch, such as "Num Lock follows at the next start." It now shows only a note about turning the volume switch on or off.
 
 ## 4.11.0 - 2026-11-25
 

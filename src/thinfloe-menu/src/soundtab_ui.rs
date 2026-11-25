@@ -16,7 +16,7 @@ use shadcn_egui::components::switch::Switch;
 const CARD_PAD: i8 = 12;
 
 /// The tab's body; `switch_on` is the volume keys switch as the Keyboard
-/// tab shows it, `kb_note` why its last apply failed, if it did.
+/// tab shows it, `kb_note` the note of the last apply that changed it.
 pub fn sound_tab(
     ui: &mut Ui,
     tab: &SoundTab,
