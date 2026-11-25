@@ -45,11 +45,12 @@ STUB
 chmod +x "$RUNTIME"
 
 TREE="$WORK/tree"
-mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/src/thinfloe-menu/src" \
+mkdir -p "$TREE/containers/ubuntu/patches" "$TREE/containers/ubuntu/slim" "$TREE/src/thinfloe-menu/src" "$TREE/src/thinfloe-share/src" \
     "$TREE/overlay/etc/x.d" "$TREE/brand" "$TREE/artifacts/rootfs" "$TREE/scripts/lib"
 cp "$REPO/Makefile" "$TREE/Makefile"
 tf_guard_tree "$TREE" "$WORK"
 inputs=(RELEASE containers/ubuntu/Dockerfile src/thinfloe-menu/src/main.rs
+        src/thinfloe-share/src/main.rs
         containers/ubuntu/slim/slim-rootfs.sh containers/ubuntu/slim/gone.sh
         scripts/export-rootfs.sh scripts/lib/common.sh
         overlay/etc/keep overlay/etc/x.d/gone.conf brand/keep.svg brand/gone.svg)
@@ -94,6 +95,22 @@ if [[ $(state) == up-to-date ]]; then
     ok "a stamp newer than all its inputs is not built again"
 else
     bad "the stamp is rebuilt although no input changed"
+fi
+
+reset
+touch "$TREE/src/thinfloe-share/src/main.rs"
+if [[ $(state) == rebuild ]]; then
+    ok "a changed thinfloe-share source rebuilds the container"
+else
+    bad "a changed thinfloe-share source left the container standing"
+fi
+
+reset
+rm "$TREE/src/thinfloe-share/src/main.rs"
+if [[ $(state) == rebuild ]]; then
+    ok "a deleted thinfloe-share source rebuilds the container"
+else
+    bad "a deleted thinfloe-share source left the container standing"
 fi
 
 reset

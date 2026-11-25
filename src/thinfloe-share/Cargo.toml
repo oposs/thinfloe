@@ -1,0 +1,23 @@
+[package]
+name = "thinfloe-share"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+owly-airdrop = { git = "https://github.com/t4t5/owly", rev = "21171d8f9a08bfa2c625a1fa338e877a67913e54", features = ["mdns"] }
+owlyd = { git = "https://github.com/t4t5/owly", rev = "21171d8f9a08bfa2c625a1fa338e877a67913e54" }
+tokio = { version = "1", features = ["rt", "macros", "net", "fs", "time", "signal", "process", "io-util", "sync"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+inotify = { version = "0.11", features = ["stream"] }
+libc = "0.2"
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.release]
+lto = "thin"
+strip = true

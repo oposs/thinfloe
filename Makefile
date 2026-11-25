@@ -130,7 +130,7 @@ QEMU_EXTRA_ARGS ?=
 QEMU_XRES ?= 1920
 QEMU_YRES ?= 1080
 
-.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-menu test-integration test test-runtime help
+.PHONY: all clean rootfs image ipxe qemu-test qemu-smoke qemu-smoke-netboot qemu-smoke-timezone qemu-smoke-timezone-netboot qemu-smoke-upgrade qemu-smoke-addons qemu-smoke-two-sticks qemu-smoke-write qemu-smoke-grow release-assets test-unit test-menu test-share test-integration test test-runtime help
 
 all: image
 	@echo "✓ Build complete!"
@@ -157,6 +157,7 @@ help:
 	@echo "  qemu-smoke-grow   - Two headless boots of an 8 GB stick: the ESP grows once"
 	@echo "  test-unit         - Run offline unit tests (no rootfs needed)"
 	@echo "  test-menu         - Menu crate: cargo fmt --check, clippy, cargo test (no image)"
+	@echo "  test-share        - FloeDrop crate: cargo fmt --check, clippy, cargo test (no image)"
 	@echo "  test-integration  - Run integration guard tests against rootfs"
 	@echo "  test              - test-unit, then test-integration"
 	@echo "  test-runtime      - Run runtime session tests (needs network, compositor)"
@@ -210,6 +211,9 @@ PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 # prerequisite's mtime.
 MENU_FILES := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
 MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type d -print 2>/dev/null)
+# thinfloe-share (FloeDrop) is built in the same stage, so it is an input too.
+SHARE_FILES := $(shell find src/thinfloe-share -path src/thinfloe-share/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
+SHARE_DIRS := $(shell find src/thinfloe-share -path src/thinfloe-share/target -prune -o -type d -print 2>/dev/null)
 
 # The slim step is copied into the ubuntu container and run as its last RUN.
 # Like PATCH_FILES, its files and their directory are prerequisites of
@@ -245,7 +249,7 @@ drop_stale_stamp = $(shell id=$$($(call image_id,$(1)) 2>/dev/null); [ -n "$$id"
 # left out; the raw image comes from the .zst, and a missing file is a
 # "No rule to make target" error.
 ifneq ($(PREBUILT),1)
-UBUNTU_INPUTS := $(sort containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES))
+UBUNTU_INPUTS := $(sort containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES) $(SHARE_FILES))
 UBUNTU_INPUTS_HASH := $(shell { stat -c '%a %n' $(UBUNTU_INPUTS); sha256sum $(UBUNTU_INPUTS); } 2>&1 | sha256sum | cut -d' ' -f1)
 $(shell [ "$$(sed -n 2p .ubuntu-container 2>/dev/null)" = "$(UBUNTU_INPUTS_HASH)" ] || rm -f .ubuntu-container)
 $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
@@ -253,7 +257,7 @@ $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 endif
 
-.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(SLIM_FILES) containers/ubuntu/slim $(MENU_FILES) $(MENU_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(SLIM_FILES) containers/ubuntu/slim $(MENU_FILES) $(MENU_DIRS) $(SHARE_FILES) $(SHARE_DIRS) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
@@ -616,6 +620,7 @@ qemu-smoke-grow: $(USB_IMAGE)
 # deliberately oversized input, and a broken bound must fail the test rather
 # than take the machine's memory. Set MEMCAP= where systemd-run is missing.
 MENU_DIR := src/thinfloe-menu
+SHARE_DIR := src/thinfloe-share
 MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
 
 # The tests' work dirs (mktemp -d, Python's tempfile, Rust's temp_dir) go
@@ -625,11 +630,13 @@ MEMCAP ?= systemd-run --user --scope -q -p MemoryMax=2G --
 TEST_TMPDIR := $(or $(TMPDIR),$(CURDIR)/.tmp)
 TEST_ENV := TMPDIR='$(TEST_TMPDIR)'
 MENU_CARGO_TEST = cd $(MENU_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
+SHARE_CARGO_TEST = cd $(SHARE_DIR) && $(TEST_ENV) CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo test --locked -j $(BUILD_JOBS) -- --test-threads=$(TEST_THREADS)
 
 test-unit:
 	@mkdir -p '$(TEST_TMPDIR)'
 	@$(TEST_ENV) python3 scripts/run-unit-tests.py -j $(TEST_THREADS) test/unit
 	$(MENU_CARGO_TEST)
+	$(SHARE_CARGO_TEST)
 
 # The menu crate alone: format, lints, tests. No image, no Python.
 test-menu:
@@ -637,6 +644,13 @@ test-menu:
 	cd $(MENU_DIR) && cargo fmt --check
 	cd $(MENU_DIR) && CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo clippy --locked --all-targets -j $(BUILD_JOBS) -- -D warnings
 	$(MENU_CARGO_TEST)
+
+# The FloeDrop crate alone: format, lints, tests. No image, no Python.
+test-share:
+	@mkdir -p '$(TEST_TMPDIR)'
+	cd $(SHARE_DIR) && cargo fmt --check
+	cd $(SHARE_DIR) && CARGO_BUILD_JOBS=$(BUILD_JOBS) $(MEMCAP) cargo clippy --locked --all-targets -j $(BUILD_JOBS) -- -D warnings
+	$(SHARE_CARGO_TEST)
 
 test: test-unit test-integration
 
