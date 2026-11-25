@@ -67,8 +67,7 @@ impl Logged {
 }
 
 /// The socket file goes with the OSD, however it ends, so `--osd-key`
-/// knows there is none; the volume file too, so the menu knows the
-/// volume is not known.
+/// knows there is none. (The volume file goes with the audio worker.)
 struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {
@@ -154,13 +153,13 @@ pub(super) fn run() -> Result<(), String> {
     let mut logged = Logged::default();
     let mut mode = start_mode(&env, &mut logged);
     // The speaker state for the menu's Sound tab: one left by an OSD that
-    // did not end cleanly is not this one's, and the file goes with the
-    // OSD (dropped after the worker, which is declared after it).
+    // did not end cleanly (SIGKILL) is not this one's. The worker's drop
+    // removes the file at the end, so that no write of a `pactl` call
+    // still running can put it back.
     let volume_file = super::volume_file_path();
     if let Some(p) = &volume_file {
         let _ = crate::atomic::remove(p);
     }
-    let _volume_file = volume_file.clone().map(RemoveOnDrop);
     let n = notify.clone();
     let audio = AudioWorker::spawn_with_file(Pactl::from_env(), mode, volume_file, move |e| n.send(Msg::Audio(e)));
     let n = notify.clone();

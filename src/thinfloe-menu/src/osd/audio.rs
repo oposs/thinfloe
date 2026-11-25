@@ -284,6 +284,8 @@ fn refreshes_mark(e: &PaEvent) -> bool {
 /// value. Dropping the worker ends the thread after its current call.
 pub struct AudioWorker {
     shared: Arc<(Mutex<Queue>, Condvar)>,
+    /// The volume file, removed by the drop under the queue's lock.
+    volume_file: Option<PathBuf>,
 }
 
 impl AudioWorker {
@@ -303,13 +305,15 @@ impl AudioWorker {
     ) -> AudioWorker {
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let s = shared.clone();
+        let file = volume_file.clone();
         std::thread::spawn(move || {
             let mut w = Worker {
                 p,
                 mode,
                 sync: None,
-                volume_file,
+                volume_file: file,
                 written: None,
+                queue: s.clone(),
             };
             match w.start() {
                 Ok(muted) => on_event(AudioEvent::Mark(muted)),
@@ -345,7 +349,7 @@ impl AudioWorker {
                 }
             }
         });
-        AudioWorker { shared }
+        AudioWorker { shared, volume_file }
     }
 
     /// Queue `r` for the worker. Never blocks on `pactl`.
@@ -373,7 +377,15 @@ impl AudioWorker {
 impl Drop for AudioWorker {
     fn drop(&mut self) {
         let (m, cv) = &*self.shared;
-        m.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        let mut q = m.lock().unwrap_or_else(|e| e.into_inner());
+        q.closed = true;
+        // The worker writes the file only under this lock and only while
+        // the queue is open: no write can follow this removal, even from
+        // a `pactl` call still running.
+        if let Some(p) = &self.volume_file {
+            let _ = crate::atomic::remove(p);
+        }
+        drop(q);
         cv.notify_one();
     }
 }
@@ -388,6 +400,9 @@ struct Worker {
     volume_file: Option<PathBuf>,
     /// What the file holds now, so an unchanged state is not written again.
     written: Option<(Level, Mode)>,
+    /// The queue, whose lock and `closed` flag order a write against the
+    /// drop's removal of the file.
+    queue: Arc<(Mutex<Queue>, Condvar)>,
 }
 
 impl Worker {
@@ -435,7 +450,13 @@ impl Worker {
         if self.written == Some(state) {
             return;
         }
-        match write_volume_file(path, level, state.1) {
+        let q = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+        if q.closed {
+            return;
+        }
+        let written = write_volume_file(path, level, state.1);
+        drop(q);
+        match written {
             Ok(()) => self.written = Some(state),
             Err(e) => eprintln!("thinfloe-menu --osd: {}: {e}", path.display()),
         }
@@ -1449,9 +1470,34 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn no_write_follows_the_drop_that_removes_the_volume_file() {
+        let d = TestDir::new("osd-audio", "drop-file");
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 50, false)]),
+            "[]",
+            "a",
+            "",
+            "[ \"$1\" = set-sink-volume ] && sleep 0.5",
+        );
+        let file = d.join("volume");
+        let worker = AudioWorker::spawn_with_file(p, Mode::Keys, Some(file.clone()), |_| {});
+        wait_for("the start's file", || std::fs::read_to_string(&file).is_ok());
+        worker.request(AudioRequest::SetLevel(20));
+        // The set runs (the fake logs before it sleeps): the worker will
+        // want to write 20 % once it returns.
+        wait_for("the set to start", || !calls(&d, "set-sink-volume").is_empty());
+        drop(worker);
+        assert!(!file.exists(), "the drop removes the file");
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(!file.exists(), "nothing wrote it again after the drop");
+    }
+
+    #[test]
     fn the_queue_keeps_one_set_level_at_the_back() {
         let worker = AudioWorker {
             shared: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            volume_file: None,
         };
         worker.request(AudioRequest::SetLevel(10));
         worker.request(AudioRequest::Step(5));
