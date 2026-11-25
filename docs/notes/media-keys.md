@@ -145,7 +145,13 @@ never set.
 
 - Start with the volume switch on: `L` and `M` from the default sink, `Q`
   from the default source, then every sink gets `L`/`M` and every source
-  `Q`.
+  `Q`. A default that is not listed counts as none (so does `auto_null`,
+  pipewire-pulse's stand-in while it has no device); the first device listed
+  is taken then. When no device of a kind is listed yet (the session started
+  before PipeWire had probed the cards), the first one that appears gives the
+  state and is not set: it carries the volume WirePlumber restored from
+  `~/.local/state/wireplumber/`. Before that fix the state was 100 % and the
+  first device was set to it, so a saved volume was lost at every boot.
 - Start with the switch off, or the switch turned off: every speaker and
   microphone at 100 % and unmuted.
 - Volume up or down: `L` ± 5, between 0 and 100, on every sink. A volume key
