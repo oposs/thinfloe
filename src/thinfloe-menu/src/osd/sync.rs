@@ -231,6 +231,10 @@ impl Shared {
         self.mic_muted
     }
 
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
     /// The speaker state for the volume file: `None` while no sink gave
     /// it yet; with the switch off always 100 % and unmuted.
     pub fn known_level(&self) -> Option<Level> {

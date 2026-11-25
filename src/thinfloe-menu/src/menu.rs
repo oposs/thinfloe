@@ -3354,10 +3354,14 @@ mod tests {
         m.settings(SettingsEvent::Tab(SettingsTab::Sound));
         // Not known: nothing is sent.
         assert_eq!(m.settings(SettingsEvent::Sound(SoundEvent::Mute(true))), None);
-        m.sound.set_file(Some(Volume {
-            percent: 40,
-            muted: false,
-        }));
+        m.sound.set_file(
+            Some(Volume {
+                percent: 40,
+                muted: false,
+                on: true,
+            }),
+            Instant::now(),
+        );
         assert_eq!(
             m.settings(SettingsEvent::Sound(SoundEvent::Mute(true))),
             Some(Effect::Osd(crate::osd::Action::VolumeMuteSet(true)))

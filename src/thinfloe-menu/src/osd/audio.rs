@@ -387,7 +387,7 @@ struct Worker {
     /// Where the speaker state is kept for the menu; `None` keeps none.
     volume_file: Option<PathBuf>,
     /// What the file holds now, so an unchanged state is not written again.
-    written: Option<Level>,
+    written: Option<(Level, Mode)>,
 }
 
 impl Worker {
@@ -427,14 +427,16 @@ impl Worker {
     /// tried again after the next request.
     fn keep_volume_file(&mut self) {
         let Some(path) = &self.volume_file else { return };
-        let Some(level) = self.sync.as_ref().and_then(Shared::known_level) else {
+        let Some(sync) = &self.sync else { return };
+        let Some(level) = sync.known_level() else {
             return;
         };
-        if self.written == Some(level) {
+        let state = (level, sync.mode());
+        if self.written == Some(state) {
             return;
         }
-        match write_volume_file(path, level) {
-            Ok(()) => self.written = Some(level),
+        match write_volume_file(path, level, state.1) {
+            Ok(()) => self.written = Some(state),
             Err(e) => eprintln!("thinfloe-menu --osd: {}: {e}", path.display()),
         }
     }
@@ -892,15 +894,21 @@ fn for_each_line<R: Read + AsRawFd>(
     }
 }
 
-/// The volume file's text: `<percent> <muted>\n`, muted `0` or `1`.
-pub fn volume_line(l: Level) -> String {
-    format!("{} {}\n", l.percent, u8::from(l.muted))
+/// The volume file's text: `<percent> <muted> <on|off>\n`, muted `0` or
+/// `1`, then the volume switch as the OSD acts on it: the menu's Sound tab
+/// takes input only once the OSD says `on`.
+pub fn volume_line(l: Level, mode: Mode) -> String {
+    let m = match mode {
+        Mode::Keys => "on",
+        Mode::Off => "off",
+    };
+    format!("{} {} {m}\n", l.percent, u8::from(l.muted))
 }
 
 /// Write `l` to `path` atomically (a file beside it and a rename), so
 /// the menu never reads half a line.
-pub fn write_volume_file(path: &Path, l: Level) -> std::io::Result<()> {
-    crate::atomic::write(path, volume_line(l).as_bytes(), 0o600)
+pub fn write_volume_file(path: &Path, l: Level, mode: Mode) -> std::io::Result<()> {
+    crate::atomic::write(path, volume_line(l, mode).as_bytes(), 0o600)
 }
 
 /// The next request, waiting for one; `None` once the worker is dropped.
@@ -1424,13 +1432,13 @@ pub(super) mod tests {
         let worker =
             AudioWorker::spawn_with_file(p, Mode::Keys, Some(file.clone()), move |ev| e.lock().unwrap().push(ev));
         wait_for("the start's file", || std::fs::read_to_string(&file).is_ok());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "50 0\n");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "50 0 on\n");
         for n in [10, 20, 30, 40, 50, 60] {
             worker.request(AudioRequest::SetLevel(n));
         }
         worker.request(AudioRequest::SetMute(true));
         wait_for("the file says 60 % and muted", || {
-            std::fs::read_to_string(&file).is_ok_and(|t| t == "60 1\n")
+            std::fs::read_to_string(&file).is_ok_and(|t| t == "60 1 on\n")
         });
         let sets = calls(&d, "set-sink-volume");
         assert!(sets.len() <= 2, "{sets:?}");
@@ -1475,7 +1483,12 @@ pub(super) mod tests {
         wait_for("the step's list", || calls(&d, "-f json list sinks").len() >= 4);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(calls(&d, "set-"), Vec::<String>::new());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "100 0\n");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "100 0 off\n");
+        // The switch turned on: the file says so, with the state unchanged.
+        worker.request(AudioRequest::Mode(Mode::Keys));
+        wait_for("the file says on", || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t == "100 0 on\n")
+        });
     }
 
     #[test]
@@ -1492,18 +1505,22 @@ pub(super) mod tests {
                 percent: 35,
                 muted: true,
             },
+            Mode::Keys,
         )
         .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "35 1\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "35 1 on\n");
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep\n");
         assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
         assert!(!d.join("thinfloe-volume.tmp").exists());
         assert_eq!(
-            volume_line(Level {
-                percent: 100,
-                muted: false
-            }),
-            "100 0\n"
+            volume_line(
+                Level {
+                    percent: 100,
+                    muted: false
+                },
+                Mode::Off
+            ),
+            "100 0 off\n"
         );
     }
 

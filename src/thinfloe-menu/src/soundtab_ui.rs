@@ -16,8 +16,15 @@ use shadcn_egui::components::switch::Switch;
 const CARD_PAD: i8 = 12;
 
 /// The tab's body; `switch_on` is the volume keys switch as the Keyboard
-/// tab shows it.
-pub fn sound_tab(ui: &mut Ui, tab: &SoundTab, switch_on: bool, width: f32, now: Instant) -> Option<SettingsEvent> {
+/// tab shows it, `kb_note` why its last apply failed, if it did.
+pub fn sound_tab(
+    ui: &mut Ui,
+    tab: &SoundTab,
+    switch_on: bool,
+    kb_note: Option<&str>,
+    width: f32,
+    now: Instant,
+) -> Option<SettingsEvent> {
     let t = Theme::current(ui.ctx());
     let mut event = None;
     let shown = tab.shown(now);
@@ -44,9 +51,15 @@ pub fn sound_tab(ui: &mut Ui, tab: &SoundTab, switch_on: bool, width: f32, now: 
                         }
                     });
                     control_note(ui, &t, soundtab::SWITCH_NOTE);
+                    // The switch goes through the keyboard apply: its
+                    // failure shows here too.
+                    if let Some(note) = kb_note {
+                        control_note(ui, &t, note);
+                    }
                     let v = shown.unwrap_or(soundtab::Volume {
                         percent: 0,
                         muted: false,
+                        on: false,
                     });
                     ui.add_enabled_ui(enabled, |ui| {
                         let mut level = f32::from(v.percent);

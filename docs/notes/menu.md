@@ -443,8 +443,11 @@ card: the switch "Set the volume on this machine" (the Keyboard tab's
 `volume_keys`; both send `KbEvent::VolumeKeys` through the keyboard
 apply), its note, "Volume" (shadcn-egui `Slider`, 0 to 100 in steps of 1,
 the value as "NN %" beside it) and "Mute" (a switch). Slider and Mute are
-greyed while the switch is off ("The remote session sets the loudness.") or
-while there is no volume file ("The volume is not known yet."). The values
+greyed while the switch is off ("The remote session sets the loudness."),
+while there is no volume file ("The volume is not known yet.") and while
+the switch is on but the OSD does not act on it yet ("Turning on…"). A
+failed keyboard apply shows its note under the switch, as on the Keyboard
+tab. The values
 come from the OSD's volume file and go to the OSD's socket; see
 [media-keys.md](media-keys.md) (The Sound tab). After a failed move of the
 settings the tab is read-only like Keyboard.

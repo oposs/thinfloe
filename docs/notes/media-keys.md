@@ -93,10 +93,12 @@ of the menu leaves the other running and the session's exit codes unchanged.
   and `volume-mute-set 0|1`; `--osd-key` refuses those two like an
   unknown action (exit 2).
 - Volume file: `$XDG_RUNTIME_DIR/thinfloe-volume` (`TF_VOLUME_FILE`
-  overrides), one line `<percent> <muted>\n`, muted `0` or `1`; readers
-  ignore trailing fields. The OSD writes it atomically (a file beside it and
-  a rename) whenever the shared speaker state is set or changes (start,
-  keys, slider, switch change); with the switch off it says `100 0`. It
+  overrides), one line `<percent> <muted> <on|off>\n`, muted `0` or `1`,
+  then whether the OSD acts on the volume switch; readers ignore further
+  fields, and a line without the third field counts as not on. The OSD
+  writes it atomically (a file beside it and a rename) whenever the shared
+  speaker state or the switch is set or changes (start, keys, slider,
+  switch change); with the switch off it says `100 0 off`. It
   is removed when the OSD starts (one left by a crashed OSD) and when it
   ends; no file means the volume is not known.
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
@@ -213,7 +215,13 @@ Several `volume-set` waiting in the worker's queue collapse into the last
 one, so a drag does not queue a round of `pactl` per step. The menu sends
 at most one `volume-set` per 50 ms while the person drags, plus the final
 value on release, and reads the volume file when the tab opens and then once
-a second; it shows its own value until 1 s after the last send. Without an
+a second; it shows its own value until 1 s after the last send and a read
+after that (each send pulls the next read in to the end of that second, so
+the slider does not jump back to a value read before the OSD wrote). The
+slider and mute take input only when the switch is on and the file says
+`on`: just after the switch is turned on, until the keyboard apply has sent
+`reload`, the tab says "Turning on…", and it keeps saying so when that
+apply failed (its note shows under the switch). Without an
 OSD the send fails, the menu logs it once and the tab says "The volume is not
 known yet." See [menu.md](menu.md) (Sound tab).
 

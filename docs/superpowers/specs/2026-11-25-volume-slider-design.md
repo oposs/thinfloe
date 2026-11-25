@@ -23,7 +23,11 @@ be a volume slider in the settings screen?"
    - Slider and Mute are disabled (greyed, not hidden) while the switch is
      off, and while the volume is not known (no state file, see 3); then one
      muted line says why: "The remote session sets the loudness." (switch
-     off) or "The volume is not known yet." (no state file).
+     off) or "The volume is not known yet." (no state file). While the
+     switch is shown on but the file does not say `on` (the keyboard apply
+     still runs, or failed), they stay disabled with "Turning on…". A
+     failed keyboard apply's note shows under the switch, as on the
+     Keyboard tab.
    Why a tab of its own: a person without volume keys does not look on the
    Keyboard tab. Why the same switch: the switch already means "this machine
    sets the volume" (with it off the OSD holds every speaker at 100 %), so a
@@ -49,14 +53,18 @@ be a volume slider in the settings screen?"
 
 3. **Readback: a state file** `$XDG_RUNTIME_DIR/thinfloe-volume`, written by
    the OSD atomically (temp file + rename, like the scale file), one line
-   `<percent> <muted>\n` with muted `0` or `1`; readers ignore trailing
-   fields. Written whenever the shared sink state is set or changes (start,
-   keys, slider, mode change) — in `Mode::Off` too (it then says `100 0`).
+   `<percent> <muted> <on|off>\n` with muted `0` or `1` and the mode the
+   OSD acts on (`on` is `Mode::Keys`); readers ignore further fields, and
+   a 2-field file counts as mode unknown, i.e. not yet on. Written whenever
+   the shared sink state or the mode is set or changes (start, keys,
+   slider, mode change) — in `Mode::Off` too (it then says `100 0 off`).
    Removed by the OSD on a clean exit (SIGTERM). The menu reads it
    (`bounded` reader, not a sysfs read) when the Sound tab is shown and
    then about once a second; while the person drags, the menu shows its own
    value and sends at most one `volume-set` per 50 ms plus the final value
-   on release, and takes the file's value again 1 s after the last send.
+   on release, and takes the file's value again 1 s after the last send,
+   from a read made after that second (each send pulls the next read in to
+   the end of its hold), never from a read made during it.
 
 4. Saving needs nothing new: WirePlumber stores the volume in
    `~/.local/state/wireplumber/`, which travels with the home archive (and
