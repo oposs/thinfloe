@@ -2409,15 +2409,21 @@ upto 5 owns && echo b_owns=yes || echo b_owns=no
 printf "from laptop" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
 upto 2 xc_is "from laptop" && echo b_xclip=yes || echo b_xclip=no
 sleep 0.5
-leave && echo b_leave=yes || echo b_leave=no
+b_left=no
+leave && b_left=yes
+echo b_leave=$b_left
 b_paste=no
 upto 5 wl_is "from laptop" && b_paste=yes
 echo b_paste=$b_paste
 echo "b_seen=$(wl-paste -n </dev/null 2>/dev/null)"
-if [ $b_paste = no ]; then
+# A retry only for a missed copy: a way back that failed is a ThinFloe
+# failure. No wait for ownership here: ThinFloe does not send the client
+# its clipboard again on this enter (the device already holds that text),
+# so the client logs no new "clipboard was updated"; it owns the clipboard
+# since (a).
+if [ $b_paste = no ] && [ $b_left = yes ]; then
     echo b_retry=yes
     enter && echo r_enter=active || echo r_enter=idle
-    upto 5 owns && echo r_owns=yes || echo r_owns=no
     printf "from laptop again" | DISPLAY=:99 xclip -i -selection clipboard >/dev/null 2>&1
     upto 2 xc_is "from laptop again" && echo r_xclip=yes || echo r_xclip=no
     sleep 0.5
@@ -2476,12 +2482,12 @@ run_deskflow_clipboard_case() {
     cb_ok connected=yes && cb_ok a_enter=active && cb_ok a_clip=yes
     cb_check $? "clipboard_to_device: a text copied on ThinFloe is on the device's clipboard once the pointer enters it"
     # The retry's lines (r_*) are in the diagnostics with the rest.
-    { cb_ok b_leave=yes && cb_ok b_paste=yes; } ||
-        { cb_ok b_retry=yes && cb_ok r_leave=yes && cb_ok r_paste=yes; }
+    cb_ok b_leave=yes &&
+        { cb_ok b_paste=yes || { cb_ok b_retry=yes && cb_ok r_leave=yes && cb_ok r_paste=yes; }; }
     cb_check $? "clipboard_from_device: a text copied on the device while the pointer is there is on ThinFloe's clipboard once the pointer comes back"
     # After a retry the device's own text is the retry's.
     cb_ok c_enter=active && cb_ok c_leave=yes &&
-        { cb_ok 'c_seen=from laptop' || { cb_ok b_retry=yes && cb_ok 'c_seen=from laptop again'; }; }
+        if cb_ok b_retry=yes; then cb_ok 'c_seen=from laptop again'; else cb_ok 'c_seen=from laptop'; fi
     cb_check $? "clipboard_switch_off: with clipboard = false the device's clipboard keeps its own text when the pointer enters it"
 }
 run_deskflow_clipboard_case

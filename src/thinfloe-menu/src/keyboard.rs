@@ -239,6 +239,7 @@ impl KeyboardTab {
         let volume_changed = kb.volume_keys != self.applied.volume_keys;
         match r {
             Ok(outcome) => {
+                let outcome_live = matches!(outcome, KbOutcome::Live);
                 // Saved, live or not: the disk holds `kb` now.
                 self.applied = kb.clone();
                 let (note, volume_note) = match outcome {
@@ -254,7 +255,11 @@ impl KeyboardTab {
                     }
                 };
                 self.note = note;
-                if volume_changed {
+                if outcome_live {
+                    // A live apply hands the whole keyboard config over and
+                    // tells the OSD: the switch is live, whatever changed.
+                    self.volume_note = None;
+                } else if volume_changed {
                     self.volume_note = volume_note;
                 }
             }
@@ -470,6 +475,23 @@ mod tests {
         // A later layout-only failure does not reach the Sound tab.
         let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
         t.done(&next, Err("other".into()));
+        assert_eq!(t.volume_note, None);
+    }
+
+    #[test]
+    fn any_live_apply_clears_the_volume_note() {
+        let mut t = tab("us", "");
+        let next = t.event(KbEvent::VolumeKeys(true)).unwrap();
+        t.done(&next, Ok(KbOutcome::Saved("the composer failed".into())));
+        assert!(
+            t.volume_note
+                .as_deref()
+                .is_some_and(|n| n.contains("the composer failed"))
+        );
+        // A Caps-as-Ctrl apply that goes live hands the switch over too.
+        let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
+        assert_eq!(next.volume_keys, t.applied.volume_keys, "the switch did not change");
+        t.done(&next, Ok(KbOutcome::Live));
         assert_eq!(t.volume_note, None);
     }
 
