@@ -12,6 +12,8 @@ mod names;
 #[allow(dead_code)]
 mod osd;
 #[allow(dead_code)]
+mod outbox;
+#[allow(dead_code)]
 mod state;
 
 /// Owly release this build is pinned to; keep in step with Cargo.toml and the Dockerfile.
