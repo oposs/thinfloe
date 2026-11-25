@@ -67,7 +67,12 @@ mount point. Every command first drops the lines whose mount is gone, with
 their empty directories: a helper killed between a umount and the update of
 the file (a cancelled write during `release`) would otherwise leave a line
 that makes `add` skip the next stick under the same kernel name and
-`remove` report it pulled without eject.
+`remove` report it pulled without eject. An empty mountinfo read (the
+file always lists `/`) drops nothing. The same step removes the empty
+directories under `/media/tfuser` that no line names and that are not
+mounted (a helper killed between its `mkdir` and its mount): only empty
+directories, never through a link, and never the one a running `add` has
+reserved (`/run/thinfloe/automount/reserved/<name>`, its pid).
 
 `/run/thinfloe/removable.event` holds the last removal, one line
 `seq<TAB>name<TAB>clean|unclean`: `clean` after an eject, `unclean` for a
@@ -85,7 +90,9 @@ no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
 
 - `remove`: medium gone, `umount -l` and an `unclean` event; medium still
   there (the unit stopped at shutdown), `sync -f` and a plain `umount`, no
-  event.
+  event. Gone means no device node, size 0, or a udev record without a file
+  system (a whole-disk card swapped in a reader keeps its node and a size);
+  a udev record that cannot be read counts as there.
 - `eject`: `sync -f` and `umount` of every partition of the disk, the
   lines go, a `clean` event; then a stick is powered off (below).
 - `release`: as eject, without event and power-off; for the writer. Before
@@ -105,7 +112,8 @@ no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
 "the stick is in use". `add` skips the disk while the pid lives and the
 serial part of the id matches (the write repartitions the stick, so the size
 and partition fingerprint of the id would never match); a stale hold is
-removed. The hold goes when the write ends; a write that never wrote a byte
+removed, but only the file that was read (same inode): a hold the writer
+renamed into place meanwhile stays. The hold goes when the write ends; a write that never wrote a byte
 runs `remount`, so the stick comes back. `drives` reports such a stick as
 `automounted`, not `mounted`; an automounted stick that is not the boot
 stick is not upgraded in place.
@@ -118,9 +126,11 @@ of a mount name; one lock per disk covers that disk's mount, umount and
 power-off. Flushing is `sync -f` per mount, never a global `sync`.
 
 Timeouts: one mount, umount or sync gets at most 30 s and is then killed
-(and not waited for: a mount stuck in the kernel cannot die). The helper
-keeps within budgets below the unit's timeouts, so systemd never kills it
-between a mount and its line:
+(and waited for 1 s at most: a mount stuck in the kernel cannot die). The
+helper keeps within budgets below the unit's timeouts, so systemd never
+kills it between a mount and its line. Each command's timeout counts that
+1 s and keeps time for the steps after it; a step with no time left is not
+started:
 
 - `add` ends within 80 s (`TimeoutStartSec=90`). udev starts the units of
   all partitions of a stick at once; the second waits for the disk lock
@@ -128,7 +138,8 @@ between a mount and its line:
   are mounted. `remount` shares one such budget for all its partitions.
 - `remove` ends within 25 s (`TimeoutStopSec=30`): it waits for the disk
   lock up to 15 s (an `add` of a stick pulled while it was mounted), then
-  `sync -f`, `umount` and `umount -l` share what is left.
+  the udev query, `sync -f`, `umount` and `umount -l` share what is left,
+  each keeping 2 s for every step after it.
 - `eject` and `release` wait 5 s for a disk lock and then answer busy.
 
 ## Power off, restart

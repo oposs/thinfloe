@@ -9,6 +9,7 @@ fake trees under a temporary directory, named by the TF_* variables.
 
 import importlib.machinery
 import importlib.util
+import fcntl
 import io
 import os
 import re
@@ -140,19 +141,22 @@ class SkipRules(Base):
         return mod.skip_reason(d, boot, holds or {}, set(mounted), alive)
 
     def test_skip_rules(self):
-        self.assertIn("boot disk", self.reason(make_dev(), boot="sdb"))
-        self.assertIn("ThinFloe stick", self.reason(make_dev(partlabel="EFI-SYSTEM")))
+        self.assertEqual(self.reason(make_dev(), boot="sdb"), "boot disk")
+        self.assertEqual(self.reason(make_dev(partlabel="EFI-SYSTEM")), "ThinFloe stick")
         hold = {"sdb": mod.Hold(1234, "sn-AA:16:3f")}
-        self.assertIn("held", self.reason(make_dev(), holds=hold))
+        self.assertEqual(self.reason(make_dev(), holds=hold), "held by a write")
         self.assertIsNone(self.reason(make_dev(), holds=hold, alive=lambda pid: False))
         other = {"sdb": mod.Hold(1234, "sn-BB:16:3f")}
         self.assertIsNone(self.reason(make_dev(), holds=other))
-        self.assertIn("eMMC", self.reason(make_dev(kname="mmcblk0p1", disk="mmcblk0", mmc_type="MMC")))
+        self.assertEqual(self.reason(make_dev(kname="mmcblk0p1", disk="mmcblk0", mmc_type="MMC")),
+                         "eMMC or unknown card type")
         self.assertIsNone(self.reason(make_dev(mmc_type="SD")))
-        self.assertIn("no filesystem", self.reason(make_dev(fstype="")))
-        self.assertIn("no medium", self.reason(make_dev(size_bytes=0)))
-        self.assertIn("mounted", self.reason(make_dev(), mounted={"/dev/sdb1"}))
-        self.assertIn("filesystem", self.reason(make_dev(fstype="iso9660")))
+        # Exact reasons: "no filesystem" and "filesystem iso9660 is not
+        # mounted" share words with "already mounted".
+        self.assertEqual(self.reason(make_dev(fstype="")), "no filesystem")
+        self.assertEqual(self.reason(make_dev(size_bytes=0)), "no medium")
+        self.assertEqual(self.reason(make_dev(), mounted={"/dev/sdb1"}), "already mounted")
+        self.assertEqual(self.reason(make_dev(fstype="iso9660")), "filesystem iso9660 is not mounted")
         self.assertIsNone(self.reason(make_dev()))
 
     def test_internal_disks_are_skipped(self):
@@ -314,7 +318,9 @@ class Lines(Base):
 
 
 # mount and umount keep $TF_MOUNTINFO as the kernel keeps mountinfo: a line
-# per mount, the mount point with a blank written as \040.
+# per mount, the mount point with a blank written as \040. "/" is always
+# there, as in the kernel's file: an empty mountinfo is a failed read.
+ROOT_MOUNT = "1 0 0:1 / / rw - ext4 /dev/root rw\n"
 FAKES = {
     "mount": '''#!/bin/sh
 printf 'mount\t%s\n' "$*" | tr ' ' '\t' >> "$FAKE_STATE/calls.log"
@@ -368,6 +374,7 @@ class Commands(Base):
         os.environ["FAKE_STATE"] = str(self.tmp)
         os.environ["TF_OWNER_UID"] = str(os.getuid())
         os.environ["TF_MOUNTINFO"] = str(self.tmp / "mountinfo")
+        (self.tmp / "mountinfo").write_text(ROOT_MOUNT)
         for k in ("FAKE_MOUNT_HANG", "FAKE_MOUNT_SLOW", "FAKE_MOUNT_FAIL", "FAKE_UMOUNT_BUSY",
                   "FAKE_UMOUNT_KILL"):
             os.environ.pop(k, None)
@@ -620,7 +627,7 @@ class Guards(Commands):
         # its commit): the next stick under the same name is mounted.
         self.stick()
         self.assertEqual(self.cmd("add", "sdb1"), 0)
-        (self.tmp / "mountinfo").write_text("")
+        (self.tmp / "mountinfo").write_text(ROOT_MOUNT)
         self.unplug("sdb")
         self.stick(label="NEXT", serial="BB", usb="1-2")
         self.assertEqual(self.cmd("add", "sdb1"), 0)
@@ -631,7 +638,7 @@ class Guards(Commands):
     def test_ghost_line_is_no_unclean_removal(self):
         self.stick()
         self.assertEqual(self.cmd("add", "sdb1"), 0)
-        (self.tmp / "mountinfo").write_text("")
+        (self.tmp / "mountinfo").write_text(ROOT_MOUNT)
         self.unplug("sdb")
         self.assertEqual(self.cmd("remove", "sdb1"), 0)
         self.assertEqual(self.lines(), [])
@@ -641,7 +648,7 @@ class Guards(Commands):
     def test_eject_drops_a_ghost_line(self):
         self.stick()
         self.assertEqual(self.cmd("add", "sdb1"), 0)
-        (self.tmp / "mountinfo").write_text("")
+        (self.tmp / "mountinfo").write_text(ROOT_MOUNT)
         self.assertEqual(self.cmd("eject", "sdb"), 0)
         self.assertIn("nothing to eject", self.out)
         self.assertEqual(self.lines(), [])
@@ -705,12 +712,189 @@ class Guards(Commands):
         self.assertLessEqual(mod.Deadline(2.0).step(), 2.0)
         self.assertEqual(mod.Deadline(1000).step(), mod.MOUNT_TIMEOUT)
         self.assertEqual(mod.Deadline(0).lock_wait(), 0.0)
+        self.assertEqual(mod.Deadline(0).step(), 0.0)
+
+    def test_no_time_left_starts_nothing(self):
+        self.assertEqual(mod.run(["mount", "/dev/sdb1", "/x"], 0)[0], 124)
+        self.assertEqual(self.calls("mount"), [])
 
     def test_hung_command_is_given_up(self):
         start = time.monotonic()
         rc, _, _ = mod.run(["sh", "-c", "sleep 30 & wait"], 0.5)
         self.assertEqual(rc, 124)
         self.assertLess(time.monotonic() - start, 3)
+
+
+class FakeClock:
+    """time for the helper: sleep moves the clock; at release_at the held
+    disk lock is let go, as an add that ends just in time."""
+
+    def __init__(self, release_at, held_fd):
+        self.now = 0.0
+        self.release_at = release_at
+        self.held_fd = held_fd
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+        if self.held_fd is not None and self.now >= self.release_at:
+            os.close(self.held_fd)
+            self.held_fd = None
+
+
+class FollowUps(Commands):
+    """The follow-up list: budgets, mountinfo, leftover directories, holds."""
+
+    def worst_case(self, disk, release_at):
+        """Hold the disk's lock until release_at; every command then runs
+        into its timeout. Returns the clock and the commands run."""
+        lock_dir = self.tmp / "run" / "automount" / "lock"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_dir / disk, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        clock = FakeClock(release_at, fd)
+        ran = []
+
+        def run(argv, timeout):
+            if timeout <= 0:
+                return 124, "", "no time left"
+            ran.append((argv[0], argv[1:2], timeout))
+            clock.now += timeout + mod.KILL_WAIT
+            return 124, "", "timed out"
+        for name, value in (("time", clock), ("run", run)):
+            self.addCleanup(setattr, mod, name, getattr(mod, name))
+            setattr(mod, name, value)
+        return clock, ran
+
+    def test_remove_ends_within_its_budget(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        del os.environ["TF_UDEV_PROPS_sdb1"]   # udevadm runs, and hangs
+        clock, ran = self.worst_case("sdb", mod.REMOVE_BUDGET - mod.STEP_RESERVE - 0.05)
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertLessEqual(clock.now, mod.REMOVE_BUDGET + 0.01)
+        # Every step had its turn, the umount -l last.
+        self.assertEqual([r[0] for r in ran], ["udevadm", "sync", "umount", "umount"])
+        self.assertEqual(ran[-1][1], ["-l"])
+        self.assertEqual(self.lines(), [])
+
+    def test_add_ends_within_its_budget(self):
+        self.stick()
+        clock, ran = self.worst_case("sdb", mod.ADD_BUDGET - mod.STEP_RESERVE - 0.05)
+        self.assertEqual(self.cmd("add", "sdb1"), 1)
+        self.assertLessEqual(clock.now, mod.ADD_BUDGET + 0.01)
+        self.assertEqual([r[0] for r in ran], ["mount", "umount"])
+        self.assertEqual(ran[-1][1], ["-l"])
+
+    def test_empty_mountinfo_drops_no_line(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        mp = self.tmp / "media" / "MYSTICK"
+        for text in ("", None):
+            if text is None:
+                (self.tmp / "mountinfo").unlink()
+            else:
+                (self.tmp / "mountinfo").write_text(text)
+            mod.prune(self.p)
+            self.assertEqual([ln.mountpoint for ln in self.lines()], [str(mp)])
+            self.assertTrue(mp.is_dir())
+
+    def test_leftover_empty_directories_are_removed(self):
+        media = self.tmp / "media"
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        for name in ("LEFT", "FULL", "BUSY", "DEAD"):
+            (media / name).mkdir()
+        (media / "FULL" / "file").write_text("x")
+        (media / "LINK").symlink_to(outside)
+        (media / "PLAIN").write_text("")
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        self.write("run/automount/reserved/BUSY", f"{os.getpid()}\n")
+        self.write("run/automount/reserved/DEAD", f"{dead.pid}\n")
+        self.assertEqual(self.cmd("remove", "sdz1"), 0)
+        self.assertEqual(sorted(os.listdir(media)), ["BUSY", "FULL", "LINK", "PLAIN"])
+        self.assertTrue(outside.is_dir())
+        self.assertFalse((self.tmp / "run" / "automount" / "reserved" / "DEAD").exists())
+
+    def test_killed_add_leaves_no_directory_behind(self):
+        self.stick()
+        env = dict(os.environ, FAKE_MOUNT_HANG="sdb1")
+        proc = subprocess.Popen(["python3", str(SCRIPT), "add", "sdb1"], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        hang = self.tmp / "hang.pid"
+        for _ in range(500):
+            if hang.exists() and hang.read_text().strip():
+                break
+            time.sleep(0.02)
+        proc.kill()
+        proc.wait()
+        os.kill(int(hang.read_text()), 9)
+        mp = self.tmp / "media" / "MYSTICK"
+        self.assertTrue(mp.is_dir(), "killed between its mkdir and its mount")
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertFalse(mp.exists())
+
+    def test_a_live_add_keeps_its_directory(self):
+        # Another stick's command runs while this add mounts: the reserved
+        # directory stays.
+        self.stick()
+        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
+        name, mp = mod.reserve_mountpoint(d, self.p)
+        mod.prune(self.p)
+        self.assertTrue(os.path.isdir(mp))
+        mod.unreserve(self.p, name)
+        mod.prune(self.p)
+        self.assertFalse(os.path.exists(mp))
+
+    def test_a_directory_not_ours_leaks_nothing(self):
+        self.stick()
+        os.environ["TF_OWNER_UID"] = str(os.getuid() + 1)
+        self.assertEqual(self.cmd("add", "sdb1"), 1)
+        self.assertEqual(os.listdir(self.tmp / "media"), [])
+        self.assertEqual(self.calls("mount"), [])
+
+    def test_a_hold_written_while_a_stale_one_is_read_is_kept(self):
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
+        fresh = f"{os.getpid()}\tsn-AA:2:2\n"
+        real = mod.pid_alive
+
+        def writer_comes(pid):
+            # The writer puts its new hold in place by rename.
+            tmp = hold.with_name(".new")
+            tmp.write_text(fresh)
+            os.replace(tmp, hold)
+            return False
+        self.addCleanup(setattr, mod, "pid_alive", real)
+        mod.pid_alive = writer_comes
+        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertEqual(hold.read_text(), fresh)
+        mod.pid_alive = lambda pid: False
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertFalse(hold.exists(), "a stale hold is still removed")
+
+    def test_card_swapped_for_one_without_a_filesystem_is_unclean(self):
+        # A whole-disk card in a reader: the node and a size stay, udev's
+        # record has no file system any more.
+        self.stick(kind_card=True)
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        os.environ["TF_UDEV_PROPS_sdb1"] = "ID_BUS=usb\nID_DRIVE_FLASH_SD=1\n"
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual(self.event(), ["1", "MYSTICK", "unclean"])
+        self.assertIn(["umount", "-l", str(self.tmp / "media" / "MYSTICK")], self.calls("umount"))
+
+    def test_unreadable_udev_record_is_no_pull(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        del os.environ["TF_UDEV_PROPS_sdb1"]   # the fake udevadm prints nothing
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertIsNone(self.event())
+        self.assertEqual(self.calls("umount")[0], ["umount", str(self.tmp / "media" / "MYSTICK")])
 
 
 class Remove(Commands):
