@@ -19,7 +19,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 
 ## Card choice and country
 
-- The helper takes a Wi-Fi card only when the machine does not use it: no IP address on it (link-local addresses do not count as "in use"), no default route through it, and not named in the netplan Wi-Fi file (matched by name or MAC). Without such a card the band shows "AirDrop needs a Wi-Fi card this machine does not use for its network."
+- The helper takes a Wi-Fi card only when the machine does not use it: no IP address on it (an IPv6 link-local address does not count as "in use"; an IPv4 link-local address, 169.254/16, still does), no default route through it, and not named in the netplan Wi-Fi file (matched by name or MAC). Without such a card the band shows "AirDrop needs a Wi-Fi card this machine does not use for its network."
 - If the network state cannot be read (for example `ip -j` output does not parse), no card is taken.
 - The country comes from the time zone (`zone1970.tab`). It must be set: with country CH the radio ran on channel 44 (5 GHz).
 - Owly's own probe decides whether a card can run AWDL (`allow_untested` stays at its default, off). See the hardware results below.
@@ -67,7 +67,7 @@ Stock `owly` 0.4.3 command line, not yet the FloeDrop image.
 2. Receive a photo, a video and a folder from an iPhone.
 3. Send one file and three files to the iPhone; the phone shows one prompt per batch.
 4. Decline on the phone: the files leave the outbox and a warning note appears.
-5. Turn Bluetooth off on the thin client: receive still works, sending shows the receive-only text.
+5. Without Bluetooth: receive still works. With no adapter the band shows "Sending needs Bluetooth; this machine has none." and the daemon log has "no Bluetooth: receiving only". With Bluetooth switched off and not turnable on, the helper error is "Bluetooth is off and couldn't be turned on".
 6. Pull the stick with the radio up: the band shows an error line and no card stays in AWDL mode (`iw dev`).
 7. Log out with the radio up and check `iw dev`.
 

@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### New
-- FloeDrop: send and receive files with iPhones nearby over AirDrop, through the folder `/media/tfuser/mediashare` (an inbox and one outbox folder per phone). Turn it on in Settings → Network; phones must be set to AirDrop "Everyone for 10 Minutes". The machine needs a USB Wi-Fi stick with the Realtek RTL8812BU chip, for example the TP-Link Archer T3U Plus, that it does not use for its own network.
+- FloeDrop: send and receive files with iPhones nearby over AirDrop, through the folder `/media/tfuser/mediashare` (an inbox and one outbox folder per phone). Turn it on in Settings → Network; phones must be set to AirDrop "Everyone for 10 Minutes". The machine needs a Wi-Fi card that it does not use for its own network and that supports AirDrop mode; it was tested with a TP-Link USB stick with the Realtek RTL8812BU chip.
+- Receiving works without Bluetooth; sending to a phone needs Bluetooth on the machine, and Settings → Network says "Sending needs Bluetooth; this machine has none." without it.
 - Files put into a phone's outbox folder are removed from it after each offer, also when the phone declines. Drag with copy in the remote session to keep the original.
 
 ### Changed
