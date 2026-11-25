@@ -17,6 +17,7 @@ Thumbs.db
 
 # thinfloe-menu build output, when CARGO_TARGET_DIR is not set
 /src/thinfloe-menu/target/
+/src/thinfloe-share/target/
 
 # Brainstorming mockups (superpowers visual companion)
 .superpowers/

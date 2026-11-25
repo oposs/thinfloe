@@ -62,6 +62,8 @@ pub enum NetEvent {
     PublicIp(bool),
     /// The Time band; saved at once.
     Time(crate::timeband::TimeEvent),
+    /// The FloeDrop band; saved at once.
+    Share(crate::share_state::ShareEvent),
     /// The lookup address field as typed. `commit`: it lost focus or took
     /// Enter, and the address is saved unless it is refused. The text
     /// rides along so a change and a commit of the same frame are one
@@ -86,6 +88,8 @@ pub enum NetRequest {
     SavePublicIp(PublicIpPrefs),
     /// Write `[time]` and install it.
     SaveTime(crate::config::TimeCfg),
+    /// Write `[share]`; the FloeDrop daemon follows it.
+    SaveShare(crate::config::ShareCfg),
 }
 
 /// The wired part as the form shows it: the select and the two texts.
@@ -215,6 +219,8 @@ pub struct NetTab {
     public_ip_error: Option<String>,
     /// The Time band.
     time: crate::timeband::TimeBand,
+    /// The FloeDrop band.
+    share: crate::share_state::ShareBand,
 }
 
 impl NetTab {
@@ -247,7 +253,16 @@ impl NetTab {
             public_ip_url_text: String::new(),
             public_ip_error: None,
             time: crate::timeband::TimeBand::default(),
+            share: crate::share_state::ShareBand::default(),
         }
+    }
+
+    pub fn share(&self) -> &crate::share_state::ShareBand {
+        &self.share
+    }
+
+    pub fn share_mut(&mut self) -> &mut crate::share_state::ShareBand {
+        &mut self.share
     }
 
     pub fn time(&self) -> &crate::timeband::TimeBand {
@@ -374,6 +389,10 @@ impl NetTab {
         // The Time band, like the public IP band, needs no network file.
         if let NetEvent::Time(t) = e {
             return self.time.event(t).map(NetRequest::SaveTime);
+        }
+        // So is the FloeDrop band.
+        if let NetEvent::Share(s) = e {
+            return self.share.event(s).map(NetRequest::SaveShare);
         }
         if self.applying || self.taking_over.is_some() || self.wifi.is_none() || self.wired.is_none() {
             return None;
@@ -522,9 +541,11 @@ impl NetTab {
                 self.error = None;
                 Some(NetRequest::TakeOver(which))
             }
-            NetEvent::PublicIp(_) | NetEvent::PublicIpUrl { .. } | NetEvent::PublicIpUrlCancel | NetEvent::Time(_) => {
-                None
-            }
+            NetEvent::PublicIp(_)
+            | NetEvent::PublicIpUrl { .. }
+            | NetEvent::PublicIpUrlCancel
+            | NetEvent::Time(_)
+            | NetEvent::Share(_) => None,
         }
     }
 

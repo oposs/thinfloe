@@ -57,16 +57,41 @@ RUN set -eu; \
 FROM ubuntu:26.04 AS menu-build
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
-    apt-get install -yq --no-install-recommends rustup ca-certificates gcc libc6-dev
+    apt-get install -yq --no-install-recommends rustup ca-certificates gcc libc6-dev git
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+# FloeDrop: the Owly radio service owlyd from Owly v0.4.3, stripped. It sits
+# before the COPY of the menu and share sources so a change there does not
+# rebuild it. The commit is pinned here and in src/thinfloe-share/Cargo.toml;
+# keep the two in step. OWLY_TOOLCHAIN is the toolchain of the two crates.
+ARG OWLY_REV=21171d8f9a08bfa2c625a1fa338e877a67913e54
+ARG OWLY_TOOLCHAIN=1.96.0
+RUN set -eu; \
+    rustup toolchain install "$OWLY_TOOLCHAIN" --profile minimal; \
+    mkdir /build-owly; cd /build-owly; \
+    git init -q; \
+    git fetch -q --depth 1 https://github.com/t4t5/owly "$OWLY_REV"; \
+    git checkout -q FETCH_HEAD; \
+    test "$(git rev-parse HEAD)" = "$OWLY_REV"; \
+    CARGO_PROFILE_RELEASE_STRIP=true CARGO_BUILD_JOBS=4 rustup run "$OWLY_TOOLCHAIN" cargo build --release --locked -j 4 -p owlyd; \
+    install -D -m 0755 target/release/owlyd /out/usr/lib/owly/owlyd; \
+    cmp target/release/owlyd /out/usr/lib/owly/owlyd
 # The tree mirrors the repository: migrate.rs embeds the home templates from
 # overlay/home/tfuser/.config/thinfloe by a path relative to its own file.
 COPY src/thinfloe-menu/ /build/src/thinfloe-menu/
+COPY src/thinfloe-share/ /build/src/thinfloe-share/
 COPY overlay/home/tfuser/.config/thinfloe/ /build/overlay/home/tfuser/.config/thinfloe/
-WORKDIR /build/src/thinfloe-menu
+# FloeDrop: thinfloe-share, built from the crate copied above. Its Owly
+# dependency is pinned in Cargo.toml to the same commit as OWLY_REV above.
+WORKDIR /build/src/thinfloe-share
 RUN set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     rustup toolchain install "$toolchain" --profile minimal; \
+    CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
+    install -D -m 0755 target/release/thinfloe-share /out/usr/bin/thinfloe-share; \
+    cmp target/release/thinfloe-share /out/usr/bin/thinfloe-share
+WORKDIR /build/src/thinfloe-menu
+RUN set -eu; \
+    toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     # A zero-filled copy was once seen on /scratch; compare, do not trust.
@@ -471,7 +496,9 @@ RUN rm -f /etc/ssh/ssh_host_*_key* && \
 # built the early microcode archive, each with its own guards. This RUN comes
 # before dracut: no apt-get or dpkg may run after the initrd is built, since a
 # dpkg trigger would rebuild it (test-slim-last-run.sh).
-RUN rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
+# Owly's licence in /usr/share/doc/owly stays (find prunes only the others).
+RUN rm -rf /var/lib/apt/lists/* /usr/share/man/* && \
+    find /usr/share/doc -mindepth 1 -maxdepth 1 ! -name owly -exec rm -rf {} + && \
     apt-get -qqy clean && apt-get -qqy autoremove
 
 # Build initramfs with dracut

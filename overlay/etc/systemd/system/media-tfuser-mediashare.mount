@@ -1,0 +1,12 @@
+[Unit]
+Description=FloeDrop folder for files shared with phones
+Documentation=file:///usr/bin/thinfloe-share
+
+[Mount]
+What=tmpfs
+Where=/media/tfuser/mediashare
+Type=tmpfs
+Options=size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec
+
+[Install]
+WantedBy=local-fs.target

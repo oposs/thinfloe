@@ -21,7 +21,8 @@ pub fn read_header(version_file: &Path) -> Header {
     }
 }
 
-fn host_name() -> String {
+/// The kernel's host name; empty when it cannot be read.
+pub fn host_name() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: gethostname writes at most buf.len() bytes into buf.
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };

@@ -104,6 +104,20 @@ of the menu leaves the other running and the session's exit codes unchanged.
   only under its queue's lock while the queue is open, and the worker's
   drop closes the queue and removes the file under that lock, so a `pactl`
   call still running at the exit cannot write it again.
+- Text notes: any program may send one datagram
+  `note<TAB>info|warn<TAB><text>\n` to the same socket (FloeDrop's
+  `thinfloe-share` does). The panel has no icon and sits at the bottom
+  centre like the volume panel. It is as wide as its text, at least the volume
+  panel's width and at most 720 logical pixels (`OSD_NOTE_MAX_W`); on a
+  narrower output it keeps 22 pixels (`OSD_NOTE_SIDE`) to each edge (the
+  output's current mode, transform and scale give its width). The text wraps
+  between words to two rows (`OSD_NOTE_ROWS`), and the panel grows by the
+  second row; only a longer text is cut with an ellipsis. The text is the
+  foreground colour, amber for `warn`. It shows 4 s (`NOTE_HIDE_AFTER`). A new
+  note replaces the old one, and a key panel replaces a note (and the
+  reverse). The text is cut at 200 characters, control characters show as
+  spaces, format characters (bidi overrides, zero-width spaces) are dropped, an empty text or another tone drops the datagram. The OSD reads
+  datagrams of up to 1024 bytes.
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
   keys itself on every device, starting from the default device's current
   value, and logs `thinfloe-menu --osd-key: no OSD running; <action> done

@@ -15,10 +15,12 @@ use std::time::{Duration, Instant};
 use super::audio::{AudioEvent, AudioRequest, AudioWorker, Pactl, Watch};
 use super::ddc::{Bright, DdcEvent, Ddcutil, Monitors};
 use super::draw::{Painter, PanelView};
+use super::socket::Datagram;
 use super::state::{OsdState, Shown};
-use super::surface::{SurfaceKind, Surfaces, mark_placement, panel_placement};
+use super::surface::{SurfaceKind, Surfaces, mark_placement};
 use super::sync::{Mode, keys_mode};
 use super::{Action, POLL_MAX_MS, STOP, VOLUME_STEP, socket};
+use crate::raster::Canvas;
 
 /// How long after the outputs change the monitors are detected again:
 /// a monitor that just came answers DDC/CI only after a while.
@@ -123,7 +125,8 @@ impl Redetect {
 /// What each output shows now, to draw only what changed.
 #[derive(Default)]
 struct Drawn {
-    panel: Option<(PanelView, f32)>,
+    /// The view, the scale and the output's width it was drawn for.
+    panel: Option<(PanelView, f32, Option<u32>)>,
     mark: Option<f32>,
 }
 
@@ -209,7 +212,15 @@ pub(super) fn run() -> Result<(), String> {
             dirty = true;
             redetect.outputs_changed(now);
         }
-        for a in drain_socket(&sock) {
+        for d in drain_socket(&sock) {
+            let a = match d {
+                Datagram::Key(a) => a,
+                Datagram::Note { warn, text } => {
+                    state.show(Shown::Note { warn, text }, now);
+                    dirty = true;
+                    continue;
+                }
+            };
             if a == Action::Reload {
                 reload(&audio, &env, &mut mode, &mut logged);
                 continue;
@@ -251,15 +262,15 @@ fn watch_request(w: Watch) -> AudioRequest {
     }
 }
 
-/// The actions waiting on the socket; other datagrams are dropped.
-fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
-    let mut actions = Vec::new();
-    let mut buf = [0u8; 64];
+/// The datagrams waiting on the socket; undecodable ones are dropped.
+fn drain_socket(sock: &UnixDatagram) -> Vec<Datagram> {
+    let mut found = Vec::new();
+    let mut buf = [0u8; socket::DATAGRAM_MAX];
     loop {
         match sock.recv(&mut buf) {
-            Ok(n) => actions.extend(socket::decode(&buf[..n])),
+            Ok(n) => found.extend(socket::decode(&buf[..n])),
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return actions,
+            Err(_) => return found,
         }
     }
 }
@@ -417,23 +428,24 @@ fn redraw(
     let now = Instant::now();
     let outputs = surfaces.outputs();
     drawn.retain(|name, _| outputs.contains(name));
-    let mut panels: Vec<(PanelView, Vec<u32>)> = Vec::new();
+    let mut panels: Vec<(PanelView, Option<u32>, Canvas)> = Vec::new();
     let mut mark_px: Option<Vec<u32>> = None;
     for out in outputs {
         let d = drawn.entry(out.clone()).or_default();
-        let want = state.panel_for(&out, now).map(|v| (v, scale));
+        let width = surfaces.output_width(&out);
+        let want = state.panel_for(&out, now).map(|v| (v, scale, width));
         if d.panel != want {
             let shown = match &want {
-                Some((v, _)) => {
-                    let place = panel_placement(scale, v.has_bar());
-                    let px = match panels.iter().find(|(p, _)| p == v) {
-                        Some((_, px)) => px,
+                Some((v, _, _)) => {
+                    let c = match panels.iter().find(|(p, w, _)| p == v && *w == width) {
+                        Some((_, _, c)) => c,
                         None => {
-                            panels.push((v.clone(), painter.panel(v, scale).pixels));
-                            &panels.last().expect("just pushed").1
+                            panels.push((v.clone(), width, painter.panel_on(v, scale, width)));
+                            &panels.last().expect("just pushed").2
                         }
                     };
-                    surfaces.show(&out, SurfaceKind::Panel, &place, place.size.0, px)
+                    let place = v.placement(scale, (c.width as u32, c.height as u32));
+                    surfaces.show(&out, SurfaceKind::Panel, &place, place.size.0, &c.pixels)
                 }
                 None => {
                     surfaces.hide(&out, SurfaceKind::Panel);

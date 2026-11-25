@@ -214,6 +214,14 @@ pub const OSD_ICON: f32 = 22.0;
 pub const OSD_GAP: f32 = 10.0;
 /// The name, in Geo.
 pub const OSD_TEXT_PT: f32 = 19.0;
+/// The widest a text note's panel gets; a shorter note is as wide as its
+/// text, at least `OSD_W`. On a narrower output the panel keeps
+/// `OSD_NOTE_SIDE` to each edge.
+pub const OSD_NOTE_MAX_W: f32 = 720.0;
+/// From a note's panel to the left and right edges of a narrow output.
+pub const OSD_NOTE_SIDE: f32 = 22.0;
+/// The rows a note wraps to; a longer note is cut with an ellipsis.
+pub const OSD_NOTE_ROWS: usize = 2;
 /// The level bar's height.
 pub const OSD_BAR_H: f32 = 6.0;
 /// From the icon row to the level bar.

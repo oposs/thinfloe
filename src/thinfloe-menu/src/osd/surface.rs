@@ -68,6 +68,15 @@ pub fn panel_placement(scale: f32, bar: bool) -> Placement {
     }
 }
 
+/// A text note's panel: where `panel_placement` puts the panel, `size`
+/// as the drawing measured it for its text.
+pub fn note_placement(scale: f32, size: (u32, u32)) -> Placement {
+    Placement {
+        size,
+        ..panel_placement(scale, false)
+    }
+}
+
 /// The muted-microphone mark in the top right corner.
 pub fn mark_placement(scale: f32) -> Placement {
     let side = px(MARK_SIDE, scale) as u32;
@@ -99,6 +108,12 @@ impl Layer {
 struct Output {
     wl: wl_output::WlOutput,
     name: Option<String>,
+    /// The current mode's size in pixels, as the output sends it.
+    mode: Option<(i32, i32)>,
+    /// A transform by 90 or 270 degrees swaps width and height.
+    rotated: bool,
+    /// The output's integer scale.
+    scale: i32,
     panel: Option<Layer>,
     mark: Option<Layer>,
 }
@@ -208,6 +223,13 @@ impl Surfaces {
         Ok(OutputsChanged(std::mem::take(&mut self.state.changed)))
     }
 
+    /// The width of the output `name` in surface coordinates, once it has
+    /// sent its mode.
+    pub fn output_width(&self, name: &str) -> Option<u32> {
+        let o = self.state.outputs.values().find(|o| o.name.as_deref() == Some(name))?;
+        logical_width(o.mode?, o.rotated, o.scale)
+    }
+
     /// The names of the outputs that have one, e.g. "HEADLESS-1".
     pub fn outputs(&self) -> Vec<String> {
         self.state.outputs.values().filter_map(|o| o.name.clone()).collect()
@@ -315,6 +337,13 @@ fn apply_placement(layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, place: &Pl
     layer.set_margin(top, right, bottom, left);
 }
 
+/// An output's width in surface coordinates: its current mode, turned by
+/// its transform, divided by its scale.
+fn logical_width((w, h): (i32, i32), rotated: bool, scale: i32) -> Option<u32> {
+    let w = if rotated { h } else { w };
+    u32::try_from(w / scale.max(1)).ok().filter(|&w| w > 0)
+}
+
 /// Whether a configure of `(width, height)` lets a frame of `size` show.
 /// A configure of an earlier placement may still arrive after `show`
 /// changed the size; the frame of the new size waits for one that
@@ -367,6 +396,9 @@ impl State {
                 name: None,
                 panel: None,
                 mark: None,
+                mode: None,
+                rotated: false,
+                scale: 1,
             },
         );
         self.outputs_changed();
@@ -440,11 +472,28 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event
-            && let Some(out) = state.outputs.get_mut(id)
-        {
-            out.name = Some(name);
-            state.outputs_changed();
+        let Some(out) = state.outputs.get_mut(id) else {
+            return;
+        };
+        match event {
+            wl_output::Event::Name { name } => {
+                out.name = Some(name);
+                state.outputs_changed();
+            }
+            wl_output::Event::Mode {
+                flags, width, height, ..
+            } if flags.into_result().is_ok_and(|f| f.contains(wl_output::Mode::Current)) => {
+                out.mode = Some((width, height));
+            }
+            wl_output::Event::Geometry { transform, .. } => {
+                use wl_output::Transform as T;
+                out.rotated = matches!(
+                    transform.into_result(),
+                    Ok(T::_90 | T::_270 | T::Flipped90 | T::Flipped270)
+                );
+            }
+            wl_output::Event::Scale { factor } => out.scale = factor.max(1),
+            _ => {}
         }
     }
 }
@@ -542,6 +591,17 @@ mod tests {
         assert_eq!(panel_placement(1.5, true).margin, (0, 0, 33, 0));
         assert_eq!(mark_placement(1.0).margin, (34, 14, 0, 0));
         assert_eq!(mark_placement(2.0).size, (60, 60));
+        assert_eq!(note_placement(1.0, (600, 71)).size, (600, 71));
+        assert_eq!(note_placement(1.0, (600, 71)).anchor, Anchor::Bottom);
+        assert_eq!(note_placement(1.5, (1, 1)).margin, panel_placement(1.5, false).margin);
+    }
+
+    #[test]
+    fn the_output_width_follows_transform_and_scale() {
+        assert_eq!(logical_width((1920, 1080), false, 1), Some(1920));
+        assert_eq!(logical_width((1920, 1080), true, 1), Some(1080));
+        assert_eq!(logical_width((3840, 2160), false, 2), Some(1920));
+        assert_eq!(logical_width((0, 0), false, 1), None);
     }
 
     #[test]

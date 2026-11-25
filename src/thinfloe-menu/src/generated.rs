@@ -1,6 +1,7 @@
 //! The files derived from config.toml for readers that cannot parse TOML:
 //! the session (environment, screen), kanshi, netplan and the root side of
-//! the time setting (time).
+//! the time setting (time), the Deskflow daemon (deskflow) and the
+//! FloeDrop daemon (share).
 
 use std::fs;
 use std::io;
@@ -35,6 +36,8 @@ pub enum Table {
     /// `[deskflow]`: the listener switch, the port and the paired devices.
     /// Its file also follows the volume key switch of `[keyboard]`.
     Deskflow,
+    /// `[share]`: the FloeDrop switch and the name phones show.
+    Share,
     Notice,
 }
 
@@ -50,6 +53,7 @@ impl Table {
             Table::Network => &["wifi.yaml", "ethernet.yaml"],
             Table::Time => &["time"],
             Table::Deskflow => &["deskflow"],
+            Table::Share => &["share"],
         }
     }
 }
@@ -161,6 +165,14 @@ pub fn render(cfg: &ThinfloeConfig, name: &str, inp: &Inputs) -> Result<Option<S
                 &cfg.deskflow,
                 cfg.keyboard.volume_keys,
             ))))
+        }
+        "share" => {
+            // Off and unnamed: no file; the daemon reads an absent file
+            // as off.
+            if cfg.share == crate::config::ShareCfg::default() {
+                return Ok(None);
+            }
+            Ok(Some(with_header(&crate::sharecfg::render(&cfg.share))))
         }
         other => Err(format!("No generated file named {other}")),
     }
@@ -486,6 +498,21 @@ mod tests {
         assert_eq!(Table::Time.files(), ["time"]);
         cfg.time.ntp = vec!["a;b".into()];
         assert!(render(&cfg, "time", &inp()).unwrap_err().starts_with("Time: "));
+    }
+
+    #[test]
+    fn table_share_files() {
+        assert_eq!(Table::Share.files(), ["share"]);
+        let mut cfg = ThinfloeConfig::default();
+        // Off and unnamed: no file; the daemon reads an absent file as off.
+        assert_eq!(render(&cfg, "share", &inp()).unwrap(), None);
+        cfg.share.enabled = true;
+        cfg.share.name = "Front desk".into();
+        assert_eq!(
+            render(&cfg, "share", &inp()).unwrap().unwrap(),
+            format!("{HEADER}\nenabled=true\nname=Front desk\n")
+        );
+        assert_eq!(mode_of("share"), 0o644);
     }
 
     /// A zone the image does not list does not block the servers: it is

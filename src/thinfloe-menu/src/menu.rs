@@ -242,6 +242,8 @@ pub enum Effect {
     Deskflow(crate::deskflowtab::DeskflowRequest),
     /// Send the OSD this action (the Sound tab's slider or mute switch).
     Osd(crate::osd::Action),
+    /// Keep the `[share]` table, then report with `share_written`.
+    Share(crate::config::ShareCfg),
 }
 
 /// What the Settings screen tells about the config directory, in the order
@@ -434,9 +436,11 @@ impl Menu {
         self.usb_boot = usb;
         let public_ip = self.network.public_ip().clone();
         let time = std::mem::take(self.network.time_mut());
+        let share = std::mem::take(self.network.share_mut());
         self.network = NetTab::new(!usb);
         self.network.set_public_ip(public_ip);
         *self.network.time_mut() = time;
+        *self.network.share_mut() = share;
     }
 
     /// Show `tab` of the Settings screen. Leaving the Network tab is leaving
@@ -454,16 +458,17 @@ impl Menu {
             commit: true,
         };
         // Only the field that had the focus can hold uncommitted text.
-        let r = match self.network.event(commit, false) {
-            Some(r) => r,
-            None => {
-                let ntp = NetEvent::Time(crate::timeband::TimeEvent::NtpText {
-                    text: self.network.time().ntp_text().to_string(),
-                    commit: true,
-                });
-                self.network.event(ntp, false)?
-            }
-        };
+        let ntp = NetEvent::Time(crate::timeband::TimeEvent::NtpText {
+            text: self.network.time().ntp_text().to_string(),
+            commit: true,
+        });
+        let name = NetEvent::Share(crate::share_state::ShareEvent::NameText {
+            text: self.network.share().name_text().to_string(),
+            commit: true,
+        });
+        let r = [commit, ntp, name]
+            .into_iter()
+            .find_map(|e| self.network.event(e, false))?;
         self.net_request(r)
     }
 
@@ -500,6 +505,7 @@ impl Menu {
             NetRequest::TakeOver(which) => Job::NetTakeOver { which },
             NetRequest::SavePublicIp(prefs) => return self.write_public_ip(prefs),
             NetRequest::SaveTime(cfg) => return self.write_time(cfg),
+            NetRequest::SaveShare(cfg) => return Some(Effect::Share(cfg)),
         };
         Some(Effect::Start(job))
     }
@@ -1225,6 +1231,16 @@ impl Menu {
         }
         let ok = error.is_none();
         self.deskflow.error = error;
+        if ok { self.save_after_change() } else { None }
+    }
+
+    /// The `[share]` write ended, as `deskflow_written` for `[deskflow]`.
+    pub fn share_written(&mut self, stored: crate::config::ShareCfg, error: Option<String>) -> Option<Effect> {
+        if let Some(message) = &error {
+            self.log.note(Kind::Warn, message.clone());
+        }
+        let ok = error.is_none();
+        self.network.share_mut().written(stored, error);
         if ok { self.save_after_change() } else { None }
     }
 

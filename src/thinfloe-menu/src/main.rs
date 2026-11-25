@@ -244,6 +244,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
         .collect();
     let keyboard_cfg = opened.store.cfg.keyboard.clone();
     let time_cfg = opened.store.cfg.time.clone();
+    let share_cfg = opened.store.cfg.share.clone();
     let public_ip = thinfloe_menu::publicip::PublicIpPrefs {
         on: opened.store.cfg.network.public_ip,
         url: opened.store.cfg.network.public_ip_url.clone(),
@@ -298,6 +299,8 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     menu.network.set_public_ip(public_ip);
     menu.network.time_mut().set_zones(thinfloe_menu::timecfg::read_zones());
     menu.network.time_mut().set_cfg(time_cfg);
+    menu.network.share_mut().set_cfg(share_cfg);
+    menu.network.share_mut().set_host(thinfloe_menu::header::host_name());
     menu.keyboard = keyboard::KeyboardTab::new(keyboard_cfg, registry);
     menu.config_notes = config_notes;
     menu.set_battery(battery::read(&battery_file()), std::time::Instant::now());

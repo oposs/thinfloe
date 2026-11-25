@@ -53,6 +53,8 @@ pub mod raster;
 pub mod release;
 pub mod screentab;
 pub mod settings;
+pub mod share_state;
+pub mod sharecfg;
 pub mod soundtab;
 pub mod soundtab_ui;
 pub mod speed;

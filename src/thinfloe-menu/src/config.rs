@@ -108,6 +108,7 @@ pub struct ThinfloeConfig {
     pub network: NetworkCfg,
     pub time: TimeCfg,
     pub deskflow: DeskflowCfg,
+    pub share: ShareCfg,
     pub notice: NoticeCfg,
 }
 
@@ -122,6 +123,7 @@ impl Default for ThinfloeConfig {
             network: NetworkCfg::default(),
             time: TimeCfg::default(),
             deskflow: DeskflowCfg::default(),
+            share: ShareCfg::default(),
             notice: NoticeCfg::default(),
         }
     }
@@ -472,6 +474,18 @@ impl Default for DeskflowCfg {
             devices: Vec::new(),
         }
     }
+}
+
+// ---- share ----
+
+/// FloeDrop, files to and from iPhones nearby; see `sharecfg`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct ShareCfg {
+    /// The switch.
+    pub enabled: bool,
+    /// The name phones show; empty is the host name.
+    pub name: String,
 }
 
 /// A paired computer and the edge of a monitor it sits at.
@@ -1134,5 +1148,35 @@ mod tests {
             Path::new("/h/.config/thinfloe/generated/kanshi")
         );
         assert_eq!(d.wg0(), Path::new("/h/.config/thinfloe/wg0.conf"));
+    }
+
+    #[test]
+    fn share_defaults_off() {
+        assert_eq!(
+            ThinfloeConfig::default().share,
+            ShareCfg {
+                enabled: false,
+                name: String::new()
+            }
+        );
+        let c = parse("[keyboard]\nlayout = \"de\"\n").unwrap();
+        assert_eq!(c.share, ShareCfg::default());
+    }
+
+    #[test]
+    fn share_round_trips_through_config_toml() {
+        let c = ThinfloeConfig {
+            share: ShareCfg {
+                enabled: true,
+                name: "Front desk".into(),
+            },
+            ..ThinfloeConfig::default()
+        };
+        let text = toml::to_string(&c).unwrap();
+        assert!(
+            text.contains("[share]\nenabled = true\nname = \"Front desk\"\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap(), c);
     }
 }
