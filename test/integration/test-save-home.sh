@@ -385,14 +385,16 @@ fi
 # --------------------------------------------------------------- test 17
 # It must write to the ESP the initramfs already mounted, never mount
 # by-partlabel again: every ThinFloe stick carries that label, so with two sticks
-# plugged in the home can land on the wrong one.
+# plugged in the home can land on the wrong one. The check matches the command
+# word of each sudo line, not the bare word: paths in the arguments (a
+# checkout called thinfloe-usb-automount) may contain "mount".
 setup
 echo "ro ramroot=tl/ramroot.sqsh quiet" >"$WORK/cmdline"
 mkdir -p "$WORK/esp" && : >"$WORK/esp/.test-mounted"
 rc=$(TF_EFI_MOUNT_OVERRIDE="$WORK/esp" \
      run_save_home "$WORK/root" "$WORK/home/tfuser")
 if [[ "$rc" == "0" ]] && [[ -f "$WORK/esp/home.tar.gz" ]] &&
-   ! grep -q 'mount' "$WORK/sudo.log" 2>/dev/null; then
+   ! grep -qE '^sudo (/[^ ]*/)?u?mount( |$)' "$WORK/sudo.log" 2>/dev/null; then
     ok "writes to the existing ESP mount without mounting anything"
 else
     bad "did not use the existing mount (exit $rc, sudo log: $(cat "$WORK/sudo.log" 2>/dev/null))"
