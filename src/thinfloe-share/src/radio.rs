@@ -276,11 +276,22 @@ impl RadioApi for Owlyd {
                         return a.reason;
                     }
                 }
-                // owlyd stopped or restarted: its leases are gone with it.
-                _ = owner.next() => return "owlyd stopped".into(),
+                change = owner.next() => {
+                    if owner_lost(change) {
+                        return "owlyd stopped".into();
+                    }
+                }
             }
         }
     }
+}
+
+/// Whether an item of owlyd's name-owner stream means owlyd is gone (and
+/// its leases with it): the name lost its owner, or the stream ended. A new
+/// owner is not a loss: D-Bus activation by the helper's own first call
+/// gives one, and a restart shows the name gone first.
+fn owner_lost<T>(change: Option<Option<T>>) -> bool {
+    !matches!(change, Some(Some(_)))
 }
 
 /// Wi-Fi interfaces: those with a `wireless` directory in sysfs.
@@ -536,6 +547,14 @@ mod tests {
         let mut out = Vec::new();
         let code = hold(fake, card, Some("CH"), toml, no_ble(), stop, &mut out).await;
         (code, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn only_a_lost_owner_ends_the_wait() {
+        // Activation: "" -> ":1.42" is not a loss.
+        assert!(!owner_lost(Some(Some(":1.42"))));
+        assert!(owner_lost(Some(None::<&str>)));
+        assert!(owner_lost(None::<Option<&str>>));
     }
 
     #[test]
