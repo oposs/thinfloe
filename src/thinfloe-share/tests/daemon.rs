@@ -115,6 +115,22 @@ fn disabled_config_exits_0() {
 }
 
 #[test]
+fn a_daemon_whose_menu_is_gone_exits_0_at_once() {
+    let env = Env::new("orphan");
+    env.helper("touch \"$D/ran\"\nsleep 30");
+    env.config("enabled=true\n");
+    // A menu pid that is not the parent: the menu died before the daemon set
+    // PR_SET_PDEATHSIG and the daemon was re-parented.
+    let mut child = env.command().env("TF_SHARE_PARENT", "1").spawn().unwrap();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).code(),
+        Some(0)
+    );
+    assert!(!env.exists("ran"), "the helper must not start");
+    assert_eq!(env.state(), None);
+}
+
+#[test]
 fn helper_error_line_writes_error_state() {
     let env = Env::new("errline");
     env.helper("printf 'error\\tno card\\n'\nexit 1");

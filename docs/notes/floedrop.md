@@ -42,7 +42,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 - File names from phones are made safe (`names.rs`): no path parts, no leading dot, length limit, unique in the inbox.
 - Reload: SIGHUP goes to the daemon pid only, never to the process group, because the group holds the root helper through `sudo` and SIGHUP would end it. The daemon starts with SIGHUP blocked and unblocks it after the handler is set, so an early reload from the menu does not kill it. `--radio` ignores SIGHUP.
 - The radio helper uses a plain `Acquire(0)`, never `AcquireDetached`: the lease ends when the helper leaves the bus, so a crash gives the card back. At start the helper releases a lease an earlier crash left detached.
-- The daemon runs only while the menu lives (`PR_SET_PDEATHSIG`, which fires when the parent thread exits: the menu spawns it from a long-lived thread).
+- The daemon runs only while the menu lives (`PR_SET_PDEATHSIG`, which fires when the parent thread exits: the menu spawns it from a long-lived thread). A menu that dies before the daemon sets it sends nothing, so the daemon then compares its parent with the menu pid in `TF_SHARE_PARENT` and exits 0 when they differ.
 
 ## Tests
 

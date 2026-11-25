@@ -288,14 +288,36 @@ impl StateFile {
     }
 }
 
-/// \`thinfloe-share\` with no arguments; the exit code.
+/// The menu's pid, set by the menu when it starts the daemon.
+pub const PARENT_ENV: &str = "TF_SHARE_PARENT";
+
+/// The pid the daemon's parent must have: the menu's from `PARENT_ENV`, else the
+/// parent at start.
+fn expected_parent(env: Option<&str>, at_start: libc::pid_t) -> libc::pid_t {
+    env.and_then(|p| p.trim().parse::<libc::pid_t>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(at_start)
+}
+
+/// True when the daemon has lost its parent: re-parented to init (or a subreaper),
+/// or never the child of the menu that named itself.
+fn parent_gone(expected: libc::pid_t, now: libc::pid_t) -> bool {
+    now == 1 || now != expected
+}
+
+/// `thinfloe-share` with no arguments; the exit code.
 pub fn main() -> i32 {
     let cfg_path = config_path();
     let cfg = config::load(&cfg_path);
     if !cfg.enabled {
         return 0;
     }
-    // SAFETY: prctl(PR_SET_PDEATHSIG) takes a signal number and has no memory effects.
+    // The menu starts the daemon; it must not outlive it. A parent that died before
+    // the prctl sends nothing, so the parent is checked after it: the menu's pid from
+    // PARENT_ENV, else the parent at start.
+    // SAFETY: getppid and prctl take no pointers and have no memory effects.
+    let at_start = unsafe { libc::getppid() };
+    let parent = expected_parent(std::env::var(PARENT_ENV).ok().as_deref(), at_start);
     unsafe {
         libc::prctl(
             libc::PR_SET_PDEATHSIG,
@@ -305,6 +327,10 @@ pub fn main() -> i32 {
             0,
         )
     };
+    if parent_gone(parent, unsafe { libc::getppid() }) {
+        log("the menu that started it is gone");
+        return 0;
+    }
     let Some(state_path) = state::path() else {
         log("XDG_RUNTIME_DIR is not set");
         return 1;
@@ -1102,6 +1128,27 @@ async fn bind(
         }
     });
     Ok(run)
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_pid_from_the_environment_wins() {
+        assert_eq!(expected_parent(Some("4242"), 17), 4242);
+        assert_eq!(expected_parent(None, 17), 17);
+        assert_eq!(expected_parent(Some("x"), 17), 17);
+        assert_eq!(expected_parent(Some("0"), 17), 17);
+    }
+
+    #[test]
+    fn a_new_parent_or_init_means_the_menu_is_gone() {
+        assert!(!parent_gone(4242, 4242));
+        assert!(parent_gone(4242, 1));
+        assert!(parent_gone(4242, 900));
+        assert!(parent_gone(1, 1));
+    }
 }
 
 #[cfg(test)]

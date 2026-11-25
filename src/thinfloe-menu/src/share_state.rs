@@ -35,11 +35,15 @@ const MTIME_SLACK: Duration = Duration::from_secs(1);
 /// unblocks it once its handler is set. A reload reaches the daemon only:
 /// its radio helper runs in the same group, under sudo, which relays
 /// signals to it.
+/// The menu's pid for the daemon, so a daemon whose menu died before it set
+/// PR_SET_PDEATHSIG exits at once; `thinfloe-share` reads the same name.
+pub const PARENT_ENV: &str = "TF_SHARE_PARENT";
+
 pub const SHARE: Daemon = Daemon {
     source: LOG_SOURCE,
     label: "FloeDrop",
     prefixes: &["thinfloe-share: "],
-    parent_env: None,
+    parent_env: Some(PARENT_ENV),
     block_hup: true,
     reload_group: false,
     error_head,
@@ -417,6 +421,37 @@ mod tests {
         let blk = std::fs::read_to_string(&out).unwrap();
         let mask = u64::from_str_radix(blk.split_whitespace().nth(1).unwrap(), 16).unwrap();
         assert_ne!(mask & (1 << (libc::SIGHUP - 1)), 0, "{blk}");
+        s.stop(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_daemon_is_told_the_menu_pid() {
+        use crate::deskflow_sup::Supervisor;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+        let d = crate::testdir::TestDir::new("share-state", "parent");
+        let out = d.join("out");
+        let prog = d.join("daemon");
+        std::fs::write(
+            &prog,
+            format!(
+                "#!/bin/sh\necho \"$TF_SHARE_PARENT\" >{0}.tmp\nmv {0}.tmp {0}\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = Supervisor::new(prog).with_daemon(SHARE).with_state_file(None);
+        let now = Instant::now();
+        s.want(true, now);
+        s.tick(now);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the stand-in did not run");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.trim(), std::process::id().to_string());
         s.stop(Duration::from_secs(1));
     }
 
