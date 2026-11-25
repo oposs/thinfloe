@@ -291,6 +291,7 @@ fn build_menu(marker: settings::RetryMarker, mode: OpenMode) -> Built {
     // The Upgrade tile is drawn on a USB boot only; a netbooted machine has
     // no stick of its own to upgrade.
     menu.set_usb_boot(usb_boot(&env_path("TF_ESP_DIR", "/run/thinfloe/storage/efi")));
+    menu.sound.set_path(thinfloe_menu::osd::volume_file_path());
     menu.upgrade.release_file(release::read_status(&upgrade_status_path()));
     menu.screen_tab = screen_tab;
     menu.deskflow = deskflow_tab;

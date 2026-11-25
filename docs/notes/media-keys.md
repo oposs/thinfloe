@@ -89,7 +89,18 @@ of the menu leaves the other running and the session's exit codes unchanged.
   a datagram socket, mode 0600, removed when the OSD ends. A key runs
   `thinfloe-menu --osd-key <action>`, which sends one datagram `<action>\n`
   and never waits. The OSD also takes `reload`, which the composer does not
-  bind.
+  bind, and from the menu's Sound tab `volume-set <n>` (n from 0 to 100)
+  and `volume-mute-set 0|1`; `--osd-key` refuses those two like an
+  unknown action (exit 2).
+- Volume file: `$XDG_RUNTIME_DIR/thinfloe-volume` (`TF_VOLUME_FILE`
+  overrides), one line `<percent> <muted> <on|off>\n`, muted `0` or `1`,
+  then whether the OSD acts on the volume switch; readers ignore further
+  fields, and a line without the third field counts as not on. The OSD
+  writes it atomically (a file beside it and a rename) whenever the shared
+  speaker state or the switch is set or changes (start, keys, slider,
+  switch change); with the switch off it says `100 0 off`. It
+  is removed when the OSD starts (one left by a crashed OSD) and when it
+  ends; no file means the volume is not known.
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
   keys itself on every device, starting from the default device's current
   value, and logs `thinfloe-menu --osd-key: no OSD running; <action> done
@@ -190,6 +201,29 @@ never set.
   `~/.local/state/wireplumber/`; they travel with the home and win over the
   1.0 default of `50-thinfloe-volume.conf` at the next start (see
   [session.md](session.md), Audio volume).
+
+## The Sound tab
+
+Settings -> Sound is for machines without volume keys. Its switch "Set the
+volume on this machine" is `volume_keys` of `[keyboard]`, the same setting
+as "Volume keys control this machine" on the Keyboard tab: a slider without
+it would be undone at the next start, where the OSD puts every speaker at
+100 %. The slider sends `volume-set <n>`, the mute switch
+`volume-mute-set 0|1`; the OSD sets `L` or `M` on every sink and shows no
+panel (the slider is the feedback). With the switch off both do nothing.
+Several `volume-set` waiting in the worker's queue collapse into the last
+one, so a drag does not queue a round of `pactl` per step. The menu sends
+at most one `volume-set` per 50 ms while the person drags, plus the final
+value on release, and reads the volume file when the tab opens and then once
+a second; it shows its own value until 1 s after the last send and a read
+after that (each send pulls the next read in to the end of that second, so
+the slider does not jump back to a value read before the OSD wrote). The
+slider and mute take input only when the switch is on and the file says
+`on`: just after the switch is turned on, until the keyboard apply has sent
+`reload`, the tab says "Turning on…", and it keeps saying so when that
+apply failed (its note shows under the switch). Without an
+OSD the send fails, the menu logs it once and the tab says "The volume is not
+known yet." See [menu.md](menu.md) (Sound tab).
 
 ## Brightness
 

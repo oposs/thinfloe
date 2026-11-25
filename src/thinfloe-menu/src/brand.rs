@@ -438,6 +438,7 @@ mod tests {
             ("deskflow_ui.rs", include_str!("deskflow_ui.rs")),
             ("deskflowtab.rs", include_str!("deskflowtab.rs")),
             ("keyboardtab_ui.rs", include_str!("keyboardtab_ui.rs")),
+            ("soundtab_ui.rs", include_str!("soundtab_ui.rs")),
             ("machine.rs", include_str!("machine.rs")),
             ("machine_ui.rs", include_str!("machine_ui.rs")),
             ("infopanel.rs", include_str!("infopanel.rs")),

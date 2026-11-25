@@ -1,5 +1,6 @@
-//! The key client's way to the OSD process: one Unix datagram per key,
-//! `<action>\n`. Neither side ever blocks on the other: a full queue or a
+//! The key client's and the menu's way to the OSD process: one Unix
+//! datagram per action, `<action>\n` (`volume-set <n>\n` and
+//! `volume-mute-set 0|1\n` from the Sound tab). Neither side ever blocks on the other: a full queue or a
 //! missing OSD is an error the client reports at once.
 
 use std::io::ErrorKind;
@@ -33,7 +34,7 @@ pub fn bind(path: &Path) -> std::io::Result<UnixDatagram> {
 pub fn send(path: &Path, a: Action) -> Result<(), SendError> {
     let sock = UnixDatagram::unbound().map_err(SendError::Io)?;
     sock.set_nonblocking(true).map_err(SendError::Io)?;
-    let msg = format!("{}\n", a.as_str());
+    let msg = format!("{}\n", a.encode());
     match sock.send_to(msg.as_bytes(), path) {
         Ok(_) => Ok(()),
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => Err(SendError::NoServer),
@@ -105,5 +106,8 @@ mod tests {
         assert_eq!(decode(b"mic-mute\n\n"), None);
         assert_eq!(decode(b"volume"), None);
         assert_eq!(decode(&[0xff, 0xfe]), None);
+        assert_eq!(decode(b"volume-set 35\n"), Some(Action::VolumeSet(35)));
+        assert_eq!(decode(b"volume-mute-set 0\n"), Some(Action::VolumeMuteSet(false)));
+        assert_eq!(decode(b"volume-set 101\n"), None);
     }
 }

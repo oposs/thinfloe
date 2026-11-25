@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -233,6 +234,11 @@ pub enum AudioRequest {
     Step(i32),
     ToggleMute,
     ToggleMic,
+    /// The Sound tab's slider: every speaker to this percent. Shows no
+    /// panel.
+    SetLevel(u8),
+    /// The Sound tab's mute switch. Shows no panel.
+    SetMute(bool),
     /// A `pactl subscribe` line.
     Device(PaEvent),
     /// The volume keys switch changed.
@@ -273,8 +279,9 @@ fn refreshes_mark(e: &PaEvent) -> bool {
 /// the shared state. A `Step` that arrives while the previous `Step`
 /// still waits is added to it, so a held key runs one round of sets per
 /// call, not one per press; change events merge into one mark refresh;
-/// toggles are kept one by one. Dropping the worker ends the thread after
-/// its current call.
+/// toggles are kept one by one. A `SetLevel` replaces one still waiting,
+/// so a drag of the slider runs one round of sets per call, at the last
+/// value. Dropping the worker ends the thread after its current call.
 pub struct AudioWorker {
     shared: Arc<(Mutex<Queue>, Condvar)>,
 }
@@ -283,10 +290,27 @@ impl AudioWorker {
     /// At start the worker brings every device in line (`Shared::start`) and
     /// sends one `Mark`.
     pub fn spawn(p: Pactl, mode: Mode, on_event: impl Fn(AudioEvent) + Send + 'static) -> AudioWorker {
+        AudioWorker::spawn_with_file(p, mode, None, on_event)
+    }
+
+    /// `spawn`, keeping the speaker state in `volume_file` (see
+    /// `write_volume_file`) whenever it is set or changes.
+    pub fn spawn_with_file(
+        p: Pactl,
+        mode: Mode,
+        volume_file: Option<PathBuf>,
+        on_event: impl Fn(AudioEvent) + Send + 'static,
+    ) -> AudioWorker {
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let s = shared.clone();
         std::thread::spawn(move || {
-            let mut w = Worker { p, mode, sync: None };
+            let mut w = Worker {
+                p,
+                mode,
+                sync: None,
+                volume_file,
+                written: None,
+            };
             match w.start() {
                 Ok(muted) => on_event(AudioEvent::Mark(muted)),
                 Err(e) => {
@@ -294,6 +318,7 @@ impl AudioWorker {
                     on_event(AudioEvent::Mark(false));
                 }
             }
+            w.keep_volume_file();
             while let Some(r) = next(&s) {
                 // What may change a source's mute sends a fresh mark once
                 // its sets are done, read from the default source: the
@@ -314,6 +339,7 @@ impl AudioWorker {
                     on_event(ev);
                 }
                 w.apply(&sets);
+                w.keep_volume_file();
                 if remark && !failed {
                     on_event(w.mark());
                 }
@@ -333,6 +359,11 @@ impl AudioWorker {
         match (q.pending.back_mut(), r) {
             (Some(AudioRequest::Step(a)), AudioRequest::Step(b)) => *a = a.saturating_add(b),
             (Some(AudioRequest::Device(a)), AudioRequest::Device(b)) if refreshes_mark(a) && refreshes_mark(&b) => {}
+            (_, AudioRequest::SetLevel(n)) => {
+                // The last value of a drag is the one that counts.
+                q.pending.retain(|p| !matches!(p, AudioRequest::SetLevel(_)));
+                q.pending.push_back(AudioRequest::SetLevel(n));
+            }
             (_, r) => q.pending.push_back(r),
         }
         cv.notify_one();
@@ -353,6 +384,10 @@ struct Worker {
     p: Pactl,
     mode: Mode,
     sync: Option<Shared>,
+    /// Where the speaker state is kept for the menu; `None` keeps none.
+    volume_file: Option<PathBuf>,
+    /// What the file holds now, so an unchanged state is not written again.
+    written: Option<(Level, Mode)>,
 }
 
 impl Worker {
@@ -387,6 +422,25 @@ impl Worker {
         }
     }
 
+    /// Write the speaker state to the volume file when it is known and
+    /// differs from what the file holds. A failed write is logged and
+    /// tried again after the next request.
+    fn keep_volume_file(&mut self) {
+        let Some(path) = &self.volume_file else { return };
+        let Some(sync) = &self.sync else { return };
+        let Some(level) = sync.known_level() else {
+            return;
+        };
+        let state = (level, sync.mode());
+        if self.written == Some(state) {
+            return;
+        }
+        match write_volume_file(path, level, state.1) {
+            Ok(()) => self.written = Some(state),
+            Err(e) => eprintln!("thinfloe-menu --osd: {}: {e}", path.display()),
+        }
+    }
+
     fn mark(&self) -> AudioEvent {
         self.p.source_muted().map_or_else(AudioEvent::Failed, AudioEvent::Mark)
     }
@@ -404,6 +458,19 @@ impl Worker {
             AudioRequest::ToggleMic => self
                 .with(Kind::Source, Shared::toggle_mic)
                 .map(|(s, sets)| (AudioEvent::Mic(s.mic_muted()), sets)),
+            // The slider is its own feedback: no panel.
+            AudioRequest::SetLevel(n) => {
+                return match self.with(Kind::Sink, |s, sinks| s.set_level(n, sinks)) {
+                    Ok((_, sets)) => (None, sets),
+                    Err(e) => (Some(AudioEvent::Failed(e)), Vec::new()),
+                };
+            }
+            AudioRequest::SetMute(m) => {
+                return match self.with(Kind::Sink, |s, sinks| s.set_mute(m, sinks)) {
+                    Ok((_, sets)) => (None, sets),
+                    Err(e) => (Some(AudioEvent::Failed(e)), Vec::new()),
+                };
+            }
             AudioRequest::Device(PaEvent::New(kind, index)) => {
                 return (self.on_new(kind, index).err().map(AudioEvent::Failed), Vec::new());
             }
@@ -825,6 +892,23 @@ fn for_each_line<R: Read + AsRawFd>(
             }
         }
     }
+}
+
+/// The volume file's text: `<percent> <muted> <on|off>\n`, muted `0` or
+/// `1`, then the volume switch as the OSD acts on it: the menu's Sound tab
+/// takes input only once the OSD says `on`.
+pub fn volume_line(l: Level, mode: Mode) -> String {
+    let m = match mode {
+        Mode::Keys => "on",
+        Mode::Off => "off",
+    };
+    format!("{} {} {m}\n", l.percent, u8::from(l.muted))
+}
+
+/// Write `l` to `path` atomically (a file beside it and a rename), so
+/// the menu never reads half a line.
+pub fn write_volume_file(path: &Path, l: Level, mode: Mode) -> std::io::Result<()> {
+    crate::atomic::write(path, volume_line(l, mode).as_bytes(), 0o600)
 }
 
 /// The next request, waiting for one; `None` once the worker is dropped.
@@ -1328,6 +1412,115 @@ pub(super) mod tests {
             count(&events, |e| matches!(e, AudioEvent::Sink(_))),
             sets.len(),
             "an event per run"
+        );
+    }
+
+    #[test]
+    fn waiting_set_levels_collapse_to_the_last() {
+        let d = TestDir::new("osd-audio", "set-level");
+        let p = fake(
+            &d,
+            &json(&[(1, "a", 50, false)]),
+            "[]",
+            "a",
+            "",
+            "[ \"$1\" = set-sink-volume ] && sleep 0.3",
+        );
+        let file = d.join("volume");
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let e = events.clone();
+        let worker =
+            AudioWorker::spawn_with_file(p, Mode::Keys, Some(file.clone()), move |ev| e.lock().unwrap().push(ev));
+        wait_for("the start's file", || std::fs::read_to_string(&file).is_ok());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "50 0 on\n");
+        for n in [10, 20, 30, 40, 50, 60] {
+            worker.request(AudioRequest::SetLevel(n));
+        }
+        worker.request(AudioRequest::SetMute(true));
+        wait_for("the file says 60 % and muted", || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t == "60 1 on\n")
+        });
+        let sets = calls(&d, "set-sink-volume");
+        assert!(sets.len() <= 2, "{sets:?}");
+        assert_eq!(sets.last().map(String::as_str), Some("set-sink-volume a 60%"));
+        assert_eq!(calls(&d, "set-sink-mute"), ["set-sink-mute a 1"]);
+        // The slider shows no panel.
+        assert_eq!(count(&events, |e| matches!(e, AudioEvent::Sink(_))), 0);
+    }
+
+    #[test]
+    fn the_queue_keeps_one_set_level_at_the_back() {
+        let worker = AudioWorker {
+            shared: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+        };
+        worker.request(AudioRequest::SetLevel(10));
+        worker.request(AudioRequest::Step(5));
+        worker.request(AudioRequest::SetLevel(20));
+        worker.request(AudioRequest::SetMute(true));
+        worker.request(AudioRequest::SetLevel(30));
+        let q = worker.shared.0.lock().unwrap();
+        assert_eq!(
+            q.pending.iter().collect::<Vec<_>>(),
+            [
+                &AudioRequest::Step(5),
+                &AudioRequest::SetMute(true),
+                &AudioRequest::SetLevel(30)
+            ]
+        );
+    }
+
+    #[test]
+    fn with_the_switch_off_the_file_says_full_and_the_slider_sets_nothing() {
+        let d = TestDir::new("osd-audio", "set-off");
+        let p = fake(&d, &json(&[(1, "a", 100, false)]), "[]", "a", "", "");
+        let file = d.join("volume");
+        let worker = AudioWorker::spawn_with_file(p, Mode::Off, Some(file.clone()), |_| {});
+        wait_for("the start's file", || std::fs::read_to_string(&file).is_ok());
+        worker.request(AudioRequest::SetLevel(20));
+        worker.request(AudioRequest::SetMute(true));
+        // A step after them marks the point where their sets would have run.
+        worker.request(AudioRequest::Step(0));
+        wait_for("the step's list", || calls(&d, "-f json list sinks").len() >= 4);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls(&d, "set-"), Vec::<String>::new());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "100 0 off\n");
+        // The switch turned on: the file says so, with the state unchanged.
+        worker.request(AudioRequest::Mode(Mode::Keys));
+        wait_for("the file says on", || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t == "100 0 on\n")
+        });
+    }
+
+    #[test]
+    fn the_volume_file_is_one_line_written_atomically() {
+        let d = TestDir::new("osd-audio", "file");
+        let path = d.join("thinfloe-volume");
+        // A link where the file goes is replaced, not followed.
+        let outside = d.join("outside");
+        std::fs::write(&outside, "keep\n").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        write_volume_file(
+            &path,
+            Level {
+                percent: 35,
+                muted: true,
+            },
+            Mode::Keys,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "35 1 on\n");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert!(!d.join("thinfloe-volume.tmp").exists());
+        assert_eq!(
+            volume_line(
+                Level {
+                    percent: 100,
+                    muted: false
+                },
+                Mode::Off
+            ),
+            "100 0 off\n"
         );
     }
 

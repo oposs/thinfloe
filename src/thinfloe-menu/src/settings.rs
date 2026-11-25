@@ -41,8 +41,11 @@ pub enum SettingsEvent {
     Status(crate::statustab::StatusEvent),
     /// *Dismiss* on the migration report.
     DismissReport,
-    /// Something on the Keyboard tab.
+    /// Something on the Keyboard tab, or the volume switch on the Sound
+    /// tab (the same setting).
     Keyboard(crate::keyboard::KbEvent),
+    /// The slider or the mute switch on the Sound tab.
+    Sound(crate::soundtab::SoundEvent),
     /// *Copy* on the This machine tab.
     MachineCopy,
 }
@@ -54,16 +57,18 @@ pub enum SettingsTab {
     Network,
     Screen,
     Keyboard,
+    Sound,
     Status,
     Machine,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Packages,
         SettingsTab::Network,
         SettingsTab::Screen,
         SettingsTab::Keyboard,
+        SettingsTab::Sound,
         SettingsTab::Status,
         SettingsTab::Machine,
     ];
@@ -74,6 +79,7 @@ impl SettingsTab {
             SettingsTab::Network => "Network",
             SettingsTab::Screen => "Screen",
             SettingsTab::Keyboard => "Keyboard",
+            SettingsTab::Sound => "Sound",
             SettingsTab::Status => "Status",
             SettingsTab::Machine => "This machine",
         }

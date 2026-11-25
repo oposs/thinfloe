@@ -534,6 +534,30 @@ fn network_wake(screen: Screen, tab: SettingsTab, shown: bool) -> Option<Duratio
     (screen == Screen::Settings && tab == SettingsTab::Network && shown).then_some(network::POLL)
 }
 
+/// When the loop must wake for the Sound tab: its file read while the tab
+/// is open and the window is on screen, and a slider value the throttle
+/// holds back, open or not.
+fn sound_wake(menu: &Menu, now: Instant, shown: bool) -> Option<Duration> {
+    let open = menu.screen == Screen::Settings && menu.settings_tab == SettingsTab::Sound && shown;
+    menu.sound.next_wake(now, open)
+}
+
+/// Hand the Sound tab's action to the OSD. Without an OSD nothing changes
+/// (the tab shows the volume as not known, since there is no volume file);
+/// each kind of failure is logged once.
+fn send_osd(a: crate::osd::Action, tab: &mut crate::soundtab::SoundTab) {
+    use crate::osd::socket::{self, SendError};
+    let sent = match crate::osd::socket_path() {
+        Some(p) => socket::send(&p, a),
+        None => Err(SendError::NoServer),
+    };
+    match sent {
+        Ok(()) => {}
+        Err(SendError::NoServer) => tab.log_once("no OSD running; the Sound tab's volume is not set".into()),
+        Err(SendError::Io(e)) => tab.log_once(format!("the Sound tab's {} could not reach the OSD: {e}", a.as_str())),
+    }
+}
+
 /// When the loop must wake for the This machine tab's uptime row: at its
 /// next minute, while the tab is open and the window is on screen. Asked of
 /// the screen here, not of the tab: the tab hears it closed only at the next
@@ -1126,6 +1150,7 @@ impl App {
                 let error = send_deskflow(&cmd).err();
                 self.cfg.menu.deskflow_sent(error);
             }
+            Some(Effect::Osd(a)) => send_osd(a, &mut self.cfg.menu.sound),
             None => {}
         }
     }
@@ -1298,6 +1323,7 @@ impl App {
                     .into_iter()
                     .chain(network_wake(menu.screen, menu.settings_tab, shown))
                     .chain(machine_wake(menu, now, shown))
+                    .chain(sound_wake(menu, now, shown))
                     .chain(menu.monitors.next_wake(now))
                     .min();
                 let at = Instant::now();

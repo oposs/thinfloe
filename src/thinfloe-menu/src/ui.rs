@@ -965,6 +965,14 @@ fn show_settings(
         SettingsTab::Keyboard => {
             crate::keyboardtab_ui::keyboard_tab(&mut s_ui, &menu.keyboard, width).map(SettingsEvent::Keyboard)
         }
+        SettingsTab::Sound => crate::soundtab_ui::sound_tab(
+            &mut s_ui,
+            &menu.sound,
+            menu.keyboard.shown.volume_keys,
+            menu.keyboard.note.as_deref(),
+            width,
+            now,
+        ),
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
@@ -3446,6 +3454,24 @@ mod tests {
                             ],
                         )
                     }
+                    crate::settings::SettingsTab::Sound => {
+                        menu.keyboard = keyboard_menu().keyboard;
+                        let mut kb = menu.keyboard.shown.clone();
+                        kb.volume_keys = true;
+                        menu.keyboard = crate::keyboard::KeyboardTab::new(kb, Err("no list".into()));
+                        menu.sound.set_file(
+                            Some(crate::soundtab::Volume {
+                                percent: 40,
+                                muted: false,
+                                on: true,
+                            }),
+                            Instant::now(),
+                        );
+                        (
+                            (1280.0, 720.0),
+                            &["Set the volume on this machine", "Volume", "40 %", "Mute"],
+                        )
+                    }
                     crate::settings::SettingsTab::Status => {
                         menu.set_status_layout(crate::status::Area::shipped().layout);
                         (
@@ -4356,6 +4382,33 @@ mod tests {
         assert!(at(&got, "GPU") < at(&got, "none found"), "{got:?}");
         // The cause is for the log, not the band.
         assert!(!got.iter().any(|t| t.contains("status 1")), "{got:?}");
+    }
+
+    #[test]
+    fn the_sound_tab_says_turning_on_and_shows_a_failed_apply() {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Sound;
+        let mut kb = menu.keyboard.shown.clone();
+        kb.volume_keys = true;
+        menu.keyboard = crate::keyboard::KeyboardTab::new(kb, Err("no list".into()));
+        let off = crate::soundtab::Volume {
+            percent: 100,
+            muted: false,
+            on: false,
+        };
+        menu.sound.set_file(Some(off), Instant::now());
+        let texts = settings_texts(&menu);
+        assert!(texts.iter().any(|t| t == crate::soundtab::TURNING_ON_NOTE), "{texts:?}");
+        menu.keyboard.note = Some("The apply failed for a test.".into());
+        let texts = settings_texts(&menu);
+        assert!(texts.iter().any(|t| t == "The apply failed for a test."), "{texts:?}");
+        menu.sound
+            .set_file(Some(crate::soundtab::Volume { on: true, ..off }), Instant::now());
+        let texts = settings_texts(&menu);
+        assert!(
+            !texts.iter().any(|t| t == crate::soundtab::TURNING_ON_NOTE),
+            "{texts:?}"
+        );
     }
 
     #[test]

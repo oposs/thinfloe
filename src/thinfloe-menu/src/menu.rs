@@ -240,6 +240,8 @@ pub enum Effect {
     /// Keep the `[deskflow]` table or send the daemon a command, then
     /// report with `deskflow_written` or `deskflow_sent`.
     Deskflow(crate::deskflowtab::DeskflowRequest),
+    /// Send the OSD this action (the Sound tab's slider or mute switch).
+    Osd(crate::osd::Action),
 }
 
 /// What the Settings screen tells about the config directory, in the order
@@ -342,6 +344,8 @@ pub struct Menu {
     pub monitors: MonTab,
     /// The Keyboard tab, and the apply it runs.
     pub keyboard: KeyboardTab,
+    /// The Sound tab's slider and mute switch.
+    pub sound: crate::soundtab::SoundTab,
     /// The Screen tab's graphics band; `None` until the job answers.
     pub graphics: Option<crate::graphics::Info>,
     /// The This machine tab.
@@ -417,6 +421,7 @@ impl Menu {
                 crate::config::Keyboard::default(),
                 Err("The keyboard layout list is not loaded.".into()),
             ),
+            sound: crate::soundtab::SoundTab::default(),
             graphics: None,
             machine: MachineTab::default(),
             header: Header::default(),
@@ -887,6 +892,7 @@ impl Menu {
                     | SettingsEvent::Deskflow(_)
                     | SettingsEvent::Status(_)
                     | SettingsEvent::Keyboard(_)
+                    | SettingsEvent::Sound(_)
                     | SettingsEvent::DismissReport
             )
         {
@@ -938,6 +944,7 @@ impl Menu {
                 let kb = self.keyboard.event(e)?;
                 return Some(Effect::Start(Job::KeyboardApply(kb)));
             }
+            SettingsEvent::Sound(e) => return self.sound.event(e, Instant::now()).map(Effect::Osd),
             SettingsEvent::MachineCopy => {
                 // Nothing to copy before the machine's facts are read.
                 if self.machine.facts().is_none() || !self.machine.start_copy() {
@@ -1707,13 +1714,17 @@ impl Menu {
             return Some(Menu::mon_request(r));
         }
         let on_tab = |tab| self.logout.is_none() && self.screen == Screen::Settings && self.settings_tab == tab;
-        let (net_open, machine_open, screen_open) = (
+        let (net_open, machine_open, screen_open, sound_open) = (
             on_tab(SettingsTab::Network),
             on_tab(SettingsTab::Machine),
             on_tab(SettingsTab::Screen),
+            on_tab(SettingsTab::Sound),
         );
         if let Some(job) = self.machine.poll(machine_open) {
             return Some(Effect::Start(job));
+        }
+        if let Some(a) = self.sound.poll(now, sound_open) {
+            return Some(Effect::Osd(a));
         }
         // Asked here rather than at the tab click: leaving the Network tab
         // may already answer that click with the public IP write. The This
@@ -3326,12 +3337,49 @@ mod tests {
                 SettingsTab::Network,
                 SettingsTab::Screen,
                 SettingsTab::Keyboard,
+                SettingsTab::Sound,
                 SettingsTab::Status,
                 SettingsTab::Machine
             ]
         );
+        assert_eq!(SettingsTab::Sound.label(), "Sound");
         assert_eq!(SettingsTab::Network.label(), "Network");
         assert_eq!(SettingsTab::Keyboard.label(), "Keyboard");
+    }
+
+    #[test]
+    fn the_sound_tab_sends_its_actions_to_the_osd() {
+        use crate::soundtab::{SoundEvent, Volume};
+        let mut m = kb_menu();
+        m.settings(SettingsEvent::Tab(SettingsTab::Sound));
+        // Not known: nothing is sent.
+        assert_eq!(m.settings(SettingsEvent::Sound(SoundEvent::Mute(true))), None);
+        m.sound.set_file(
+            Some(Volume {
+                percent: 40,
+                muted: false,
+                on: true,
+            }),
+            Instant::now(),
+        );
+        assert_eq!(
+            m.settings(SettingsEvent::Sound(SoundEvent::Mute(true))),
+            Some(Effect::Osd(crate::osd::Action::VolumeMuteSet(true)))
+        );
+        assert_eq!(
+            m.settings(SettingsEvent::Sound(SoundEvent::Level {
+                percent: 55,
+                done: true
+            })),
+            Some(Effect::Osd(crate::osd::Action::VolumeSet(55)))
+        );
+        // A value the throttle held back goes out from the tick.
+        m.settings(SettingsEvent::Sound(SoundEvent::Level {
+            percent: 60,
+            done: false,
+        }));
+        let later = Instant::now() + crate::soundtab::SEND_EVERY;
+        assert_eq!(m.tick(later), Some(Effect::Osd(crate::osd::Action::VolumeSet(60))));
     }
 
     fn kb_menu() -> Menu {
