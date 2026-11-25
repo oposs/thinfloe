@@ -19,17 +19,13 @@ impl Tone {
     }
 }
 
-/// The datagram for a note: tabs and newlines in the text become spaces.
+/// The datagram for a note: control characters (tabs, newlines) in the text become
+/// spaces, format characters (bidi overrides, zero-width spaces) are dropped.
 pub fn datagram(tone: Tone, text: &str) -> String {
     let clean: String = text
         .chars()
-        .map(|c| {
-            if c == '\t' || c == '\n' || c == '\r' {
-                ' '
-            } else {
-                c
-            }
-        })
+        .filter(|&c| !crate::names::is_format(c))
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     format!("note\t{}\t{}\n", tone.word(), clean)
 }
@@ -77,6 +73,15 @@ mod tests {
         let n = server.recv(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"note\twarn\tx y\n");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn format_characters_never_reach_the_note() {
+        let d = datagram(
+            Tone::Info,
+            "invoice\u{202E}fdp.exe from Jane\u{200B}'s iPhone\u{7f}",
+        );
+        assert_eq!(d, "note\tinfo\tinvoicefdp.exe from Jane's iPhone \n");
     }
 
     #[test]

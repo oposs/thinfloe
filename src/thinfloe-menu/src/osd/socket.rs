@@ -58,6 +58,33 @@ pub enum Datagram {
     Note { warn: bool, text: String },
 }
 
+/// Unicode general category Cf (format characters), as `thinfloe-share`'s
+/// `names::is_format`: std has no category table (Unicode 16).
+fn is_format(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xAD | 0x600..=0x605
+            | 0x61C
+            | 0x6DD
+            | 0x70F
+            | 0x890..=0x891
+            | 0x8E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
 /// The datagram in `buf`; anything else is `None`.
 pub fn decode(buf: &[u8]) -> Option<Datagram> {
     let s = std::str::from_utf8(buf).ok()?;
@@ -69,9 +96,12 @@ pub fn decode(buf: &[u8]) -> Option<Datagram> {
             "warn" => true,
             _ => return None,
         };
-        // Control characters (a name may hold a newline) show as spaces.
+        // Control characters (a name may hold a newline) show as spaces;
+        // format characters (bidi overrides, zero-width spaces) are dropped,
+        // so a file name cannot show a false extension.
         let text: String = text
             .chars()
+            .filter(|&c| !is_format(c))
             .take(NOTE_MAX_CHARS)
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
@@ -163,6 +193,15 @@ mod tests {
         // A tab or newline inside the text shows as a space.
         assert_eq!(decode(b"note\tinfo\ta\tb\n"), note(false, "a b"));
         assert_eq!(decode(b"note\tinfo\ta\nb"), note(false, "a b"));
+    }
+
+    #[test]
+    fn decode_drops_format_characters_from_a_note() {
+        assert_eq!(
+            decode("note\tinfo\tinvoice\u{202E}fdp.exe from Jane\u{200B}\n".as_bytes()),
+            note(false, "invoicefdp.exe from Jane")
+        );
+        assert_eq!(decode("note\tinfo\t\u{200B}\u{FEFF}\n".as_bytes()), None);
     }
 
     #[test]
