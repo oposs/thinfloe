@@ -238,7 +238,8 @@ mod tests {
 
     #[test]
     fn round_trip_and_atomic_write() {
-        let dir = std::env::temp_dir().join(format!("tfshare-state-{}", std::process::id()));
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+            .join(format!("state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("thinfloe-share.state");
         let h = Head::Error("x".into());

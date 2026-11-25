@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 
+pub const NO_STATE: &str = "Cannot read the network state.";
 pub const NO_CARD: &str = "AirDrop needs a Wi-Fi card this machine does not use for its network.";
 
 /// What the choice looks at; the helper fills it from `ip -j addr`, `ip -j route`, the
@@ -63,18 +64,30 @@ fn configured(yaml: &str, iface: &str, mac: Option<&str>) -> bool {
     })
 }
 
-/// The first Wi-Fi interface (sorted) with no address, no route and no network configured.
+/// The first Wi-Fi interface (sorted) with no address other than IPv6 link-local, no route
+/// other than IPv6 link-local and multicast, and no network configured. Unreadable input is an
+/// error: the card is not taken on a guess.
 pub fn choose_station(i: &CardInputs) -> Result<String, &'static str> {
-    let addrs: Vec<Value> = serde_json::from_str(&i.ip_addr_json).unwrap_or_default();
-    let routes: Vec<Value> = serde_json::from_str(&i.ip_route_json).unwrap_or_default();
+    let (Ok(addrs), Ok(routes)) = (
+        serde_json::from_str::<Vec<Value>>(&i.ip_addr_json),
+        serde_json::from_str::<Vec<Value>>(&i.ip_route_json),
+    ) else {
+        return Err(NO_STATE);
+    };
     let mut ifaces = i.wifi_ifaces.clone();
     ifaces.sort();
     for iface in ifaces {
         let entry = addrs.iter().find(|a| a["ifname"] == iface.as_str());
         let has_addr = entry
             .and_then(|a| a["addr_info"].as_array())
-            .is_some_and(|l| !l.is_empty());
-        let has_route = routes.iter().any(|r| r["dev"] == iface.as_str());
+            .is_some_and(|l| {
+                l.iter()
+                    .any(|a| !(a["family"] == "inet6" && a["scope"] == "link"))
+            });
+        let has_route = routes.iter().any(|r| {
+            r["dev"] == iface.as_str()
+                && !matches!(r["dst"].as_str(), Some("fe80::/64" | "ff00::/8"))
+        });
         let mac = entry.and_then(|a| a["address"].as_str());
         let named = i
             .wifi_yaml
@@ -154,6 +167,29 @@ mod tests {
             choose_station(&inputs(&["wlp3s0"], Some(by_name))),
             Err(NO_CARD)
         );
+    }
+
+    #[test]
+    fn own_up_card_with_only_link_local_is_taken() {
+        let i = inputs(&["wlx00e04c654321"], None);
+        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c654321");
+        // An IPv4 link-local address still counts.
+        let mut j = inputs(&["wlx00e04c654321"], None);
+        j.ip_addr_json = j.ip_addr_json.replace(
+            "\"family\":\"inet6\",\"local\":\"fe80::2e0:4cff:fe65:4321\",\"prefixlen\":64",
+            "\"family\":\"inet\",\"local\":\"169.254.3.4\",\"prefixlen\":16",
+        );
+        assert_eq!(choose_station(&j), Err(NO_CARD));
+    }
+
+    #[test]
+    fn unreadable_state_is_an_error_not_a_free_card() {
+        let mut i = inputs(&["wlx00e04c123456"], None);
+        i.ip_addr_json = "not json".into();
+        assert_eq!(choose_station(&i), Err(NO_STATE));
+        let mut i = inputs(&["wlx00e04c123456"], None);
+        i.ip_route_json = String::new();
+        assert_eq!(choose_station(&i), Err(NO_STATE));
     }
 
     #[test]
