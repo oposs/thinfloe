@@ -171,8 +171,11 @@ mod tests {
         assert_eq!(decode(b"mic-mute\n\n"), None);
         assert_eq!(decode(b"volume"), None);
         assert_eq!(decode(&[0xff, 0xfe]), None);
-        assert_eq!(decode(b"volume-set 35\n"), Some(Action::VolumeSet(35)));
-        assert_eq!(decode(b"volume-mute-set 0\n"), Some(Action::VolumeMuteSet(false)));
+        assert_eq!(decode(b"volume-set 35\n"), Some(Datagram::Key(Action::VolumeSet(35))));
+        assert_eq!(
+            decode(b"volume-mute-set 0\n"),
+            Some(Datagram::Key(Action::VolumeMuteSet(false)))
+        );
         assert_eq!(decode(b"volume-set 101\n"), None);
     }
 
