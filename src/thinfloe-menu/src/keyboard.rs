@@ -55,6 +55,9 @@ pub struct KeyboardTab {
     /// the Sound tab, which shares that switch; `note` also holds notes
     /// of the other settings (Num Lock, the layout list).
     pub volume_note: Option<String>,
+    /// The notes say why the last apply failed: the disk still holds
+    /// `applied`, so a choice back to it makes them stale.
+    failed: bool,
     pub try_text: String,
     /// Num Lock as the session started: labwc read it then and applies no
     /// later change before the next start (or a keyboard plugged in).
@@ -184,6 +187,7 @@ impl KeyboardTab {
             pending: None,
             note,
             volume_note: None,
+            failed: false,
             try_text: String::new(),
         }
     }
@@ -227,6 +231,11 @@ impl KeyboardTab {
             return None;
         }
         if self.shown == self.applied {
+            if std::mem::take(&mut self.failed) {
+                // Back to what the disk holds: the failure is moot.
+                self.note = None;
+                self.volume_note = None;
+            }
             return None;
         }
         self.applying = true;
@@ -239,6 +248,7 @@ impl KeyboardTab {
         let volume_changed = kb.volume_keys != self.applied.volume_keys;
         match r {
             Ok(outcome) => {
+                self.failed = false;
                 let outcome_live = matches!(outcome, KbOutcome::Live);
                 // Saved, live or not: the disk holds `kb` now.
                 self.applied = kb.clone();
@@ -264,6 +274,7 @@ impl KeyboardTab {
                 }
             }
             Err(e) => {
+                self.failed = true;
                 if volume_changed {
                     self.volume_note = Some(e.clone());
                 }
@@ -476,6 +487,25 @@ mod tests {
         let next = t.event(KbEvent::CapsAsCtrl(!t.shown.caps_as_ctrl)).unwrap();
         t.done(&next, Err("other".into()));
         assert_eq!(t.volume_note, None);
+    }
+
+    #[test]
+    fn switching_back_after_a_failed_apply_clears_its_notes() {
+        let mut t = tab("us", "");
+        let before = t.shown.volume_keys;
+        let next = t.event(KbEvent::VolumeKeys(!before)).unwrap();
+        t.done(&next, Err("disk full".into()));
+        assert_eq!(t.volume_note.as_deref(), Some("disk full"));
+        assert_eq!(t.note.as_deref(), Some("disk full"));
+        // Back to the value on disk: nothing to apply, no stale error.
+        assert_eq!(t.event(KbEvent::VolumeKeys(before)), None);
+        assert_eq!(t.note, None);
+        assert_eq!(t.volume_note, None);
+        // A note of a successful apply stays when nothing is to apply.
+        let next = t.event(KbEvent::VolumeKeys(!before)).unwrap();
+        t.done(&next, Ok(KbOutcome::NextStart));
+        assert_eq!(t.event(KbEvent::VolumeKeys(!before)), None);
+        assert!(t.volume_note.is_some());
     }
 
     #[test]
