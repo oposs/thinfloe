@@ -70,10 +70,14 @@ pub enum Wake {
     Deskflow,
     /// The Deskflow daemon's state file changed.
     DeskflowState,
+    /// The FloeDrop daemon ended.
+    Share,
+    /// The FloeDrop daemon's state file changed.
+    ShareState,
 }
 
-/// Before the menu exits, how long the Deskflow daemon has after SIGTERM
-/// (spec, Processes); SIGKILL follows.
+/// Before the menu exits, how long the Deskflow daemon and the FloeDrop
+/// daemon have after SIGTERM (spec, Processes); SIGKILL follows.
 const DESKFLOW_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How often the add-on files are looked at, while the window is visible.
@@ -187,6 +191,8 @@ pub struct App {
     height: f32,
     /// The Deskflow daemon, run while `[deskflow] listen` is on.
     deskflow: crate::deskflow_sup::Supervisor,
+    /// The FloeDrop daemon, run while `[share] enabled` is on.
+    share: crate::deskflow_sup::Supervisor,
 }
 
 /// Starts a sampler thread with its `on` flag and returns its shared copy.
@@ -402,13 +408,29 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         let waker = event_loop.create_proxy();
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/thinfloe-menu"));
         crate::deskflow_sup::Supervisor::new(program)
+            .with_args(vec![crate::deskflow::DESKFLOW_ARG.into()])
             .with_log(feed.clone())
             .with_notify(move || {
                 let _ = waker.send_event(Wake::Deskflow);
             })
     };
+    // From this thread too, for the same reason.
+    let share = {
+        let waker = event_loop.create_proxy();
+        let program = std::env::var_os("TF_SHARE")
+            .filter(|p| !p.is_empty())
+            .map_or_else(|| PathBuf::from(crate::share_state::PROGRAM), PathBuf::from);
+        crate::deskflow_sup::Supervisor::new(program)
+            .with_daemon(crate::share_state::SHARE)
+            .with_state_file(crate::share_state::path())
+            .with_log(feed.clone())
+            .with_notify(move || {
+                let _ = waker.send_event(Wake::Share);
+            })
+    };
     let mut app = App {
         deskflow,
+        share,
         samplers,
         covered: false,
         height: ui::SHORT_SCREEN_H,
@@ -432,10 +454,13 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     // by the time the area shows. The first frame corrects the height.
     app.sync_samplers();
     app.deskflow_changed();
+    app.share_changed();
     let ran = event_loop.run_app(&mut app).map_err(|e| e.to_string());
     // Every way out, also an exit 0, 10 or 11 after its save: the daemon
-    // must not hold port 24800 into the next session.
+    // must not hold port 24800 into the next session, nor FloeDrop the
+    // WiFi card.
     app.deskflow.stop(DESKFLOW_STOP_WAIT);
+    app.share.stop(DESKFLOW_STOP_WAIT);
     ran?;
     app.exit
         .ok_or_else(|| "the event loop ended without an exit request".to_string())
@@ -456,6 +481,9 @@ struct Watch {
     /// The Deskflow daemon's state file, looked at like the battery file.
     deskflow_state: Option<PathBuf>,
     deskflow: battery::Watcher,
+    /// The FloeDrop daemon's state file, likewise.
+    share_state: Option<PathBuf>,
+    share: battery::Watcher,
 }
 
 impl Watch {
@@ -474,6 +502,8 @@ impl Watch {
             status: battery::Watcher::default(),
             deskflow_state: crate::deskflow::statefile::path(),
             deskflow: battery::Watcher::default(),
+            share_state: crate::share_state::path(),
+            share: battery::Watcher::default(),
         }
     }
 
@@ -496,6 +526,11 @@ impl Watch {
             && self.deskflow.tick(p)
         {
             wakes.push(Wake::DeskflowState);
+        }
+        if let Some(p) = self.share_state.as_ref()
+            && self.share.tick(p)
+        {
+            wakes.push(Wake::ShareState);
         }
         wakes
     }
@@ -1010,6 +1045,29 @@ impl App {
         self.deskflow.want(listen, Instant::now());
     }
 
+    /// `[share]` was written (or the menu starts), as `deskflow_changed`:
+    /// a running daemon rereads `generated/share` on SIGHUP, the switch
+    /// starts or stops it.
+    fn share_changed(&mut self) {
+        let enabled = self
+            .cfg
+            .paths
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cfg
+            .share
+            .enabled;
+        self.share.reload();
+        self.share.want(enabled, Instant::now());
+    }
+
+    /// Read the FloeDrop daemon's state file again.
+    fn refresh_share_state(&mut self) {
+        let file = crate::share_state::path().and_then(|p| crate::share_state::read(&p));
+        self.cfg.menu.network.share_mut().set_file(file);
+    }
+
     /// Read the status layout file again: the person or the menu changed it.
     fn refresh_status(&mut self) {
         reload_status(
@@ -1146,6 +1204,15 @@ impl App {
                 }
                 self.apply(next, event_loop);
             }
+            Some(Effect::Share(cfg)) => {
+                // The store writes generated/share before config.toml, so
+                // the daemon reads the new table once it is signalled.
+                let (written, next) = apply_share(cfg, &self.cfg.paths.config, &mut self.cfg.menu);
+                if written {
+                    self.share_changed();
+                }
+                self.apply(next, event_loop);
+            }
             Some(Effect::Deskflow(DeskflowRequest::Send(cmd))) => {
                 let error = send_deskflow(&cmd).err();
                 self.cfg.menu.deskflow_sent(error);
@@ -1186,6 +1253,12 @@ impl App {
         // The Deskflow band says whether the daemon runs and why it stopped.
         self.cfg.menu.deskflow.running = self.deskflow.pid().is_some();
         self.cfg.menu.deskflow.stopped = self.deskflow.last_failure();
+        // The FloeDrop band, likewise.
+        self.cfg
+            .menu
+            .network
+            .share_mut()
+            .set_daemon(self.share.started(), self.share.last_failure());
         // The sampler's latest copy, taken under its lock for as long as a
         // copy of 600 numbers takes.
         let (network, hardware) = self.samplers.copies();
@@ -1596,6 +1669,9 @@ impl ApplicationHandler<Wake> for App {
         if let Some(at) = self.deskflow.tick(now) {
             wake_by(event_loop, at);
         }
+        if let Some(at) = self.share.tick(now) {
+            wake_by(event_loop, at);
+        }
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
@@ -1652,6 +1728,8 @@ impl ApplicationHandler<Wake> for App {
             // about_to_wait reaps it and starts it again.
             Wake::Deskflow => {}
             Wake::DeskflowState => self.refresh_deskflow_state(),
+            Wake::Share => {}
+            Wake::ShareState => self.refresh_share_state(),
             Wake::Output | Wake::Network | Wake::Hardware | Wake::PublicIp => {}
         }
         if let Some(live) = self.live.as_ref() {
@@ -1761,6 +1839,17 @@ fn apply_deskflow(
     };
     let written = result.is_ok();
     (written, menu.deskflow_written(stored, result.err()))
+}
+
+/// Carry out `Effect::Share`, as `apply_deskflow` for `[deskflow]`.
+fn apply_share(cfg: crate::config::ShareCfg, store: &crate::store::Shared, menu: &mut Menu) -> (bool, Option<Effect>) {
+    let (result, stored) = {
+        let mut store = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = store.update(crate::generated::Table::Share, |c| c.share = cfg);
+        (result, store.cfg.share.clone())
+    };
+    let written = result.is_ok();
+    (written, menu.share_written(stored, result.err()))
 }
 
 /// Send `cmd` to the Deskflow daemon's socket.
@@ -2092,6 +2181,8 @@ esac"#;
             status: battery::Watcher::default(),
             deskflow_state: None,
             deskflow: battery::Watcher::default(),
+            share_state: None,
+            share: battery::Watcher::default(),
         };
         let is_release = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Release)).count();
         // The first look reads both, whatever the files hold.
@@ -2104,6 +2195,33 @@ esac"#;
         assert_eq!(is_release(&next), 1, "{next:?}");
         assert!(!next.iter().any(|w| matches!(w, Wake::Addons)), "{next:?}");
         assert!(w.tick().is_empty());
+    }
+
+    #[test]
+    fn a_floedrop_state_change_wakes_the_loop() {
+        let d = TestDir::new("app", "share-wake");
+        let state = d.join("thinfloe-share.state");
+        let mut w = Watch {
+            addon_status: d.join("addon-status"),
+            addon_log: d.join("addon-log"),
+            upgrade_status: d.join("upgrade-status"),
+            battery_file: d.join("battery"),
+            config_toml: d.join("config.toml"),
+            addons: addons::Watcher::default(),
+            release: release::Watcher::default(),
+            battery: battery::Watcher::default(),
+            status: battery::Watcher::default(),
+            deskflow_state: None,
+            deskflow: battery::Watcher::default(),
+            share_state: Some(state.clone()),
+            share: battery::Watcher::default(),
+        };
+        let is_share = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::ShareState)).count();
+        assert_eq!(is_share(&w.tick()), 1, "the first look reads it");
+        assert_eq!(is_share(&w.tick()), 0);
+        std::fs::write(&state, "starting\n").unwrap();
+        assert_eq!(is_share(&w.tick()), 1);
+        assert_eq!(is_share(&w.tick()), 0);
     }
 
     #[test]
@@ -2341,6 +2459,8 @@ esac"#;
             status: battery::Watcher::default(),
             deskflow_state: None,
             deskflow: battery::Watcher::default(),
+            share_state: None,
+            share: battery::Watcher::default(),
         };
         let is_status = |v: &[Wake]| v.iter().filter(|w| matches!(w, Wake::Status)).count();
         // The first look reads it, also when there is none.

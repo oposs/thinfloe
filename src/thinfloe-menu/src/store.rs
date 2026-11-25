@@ -19,7 +19,7 @@ const CONFIG_MODE: u32 = 0o600;
 pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Every generated file, in the order they are regenerated.
-const ALL_FILES: [&str; 7] = [
+const ALL_FILES: [&str; 8] = [
     "environment",
     "screen",
     "kanshi",
@@ -27,6 +27,7 @@ const ALL_FILES: [&str; 7] = [
     "ethernet.yaml",
     "time",
     "deskflow",
+    "share",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

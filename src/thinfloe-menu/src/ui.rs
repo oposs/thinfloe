@@ -5635,6 +5635,48 @@ mod tests {
         }
     }
 
+    /// The FloeDrop band sits between DNS and Time; its status and folder
+    /// show only while the switch is on.
+    #[test]
+    fn the_floedrop_band_follows_dns() {
+        use crate::share_state::Head;
+        let texts = net_texts(&network_settings(two_networks()));
+        let at = |name: &str| {
+            texts
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("{name} not in {texts:?}"))
+        };
+        assert!(at("DNS") < at("FloeDrop") && at("FloeDrop") < at("Time"), "{texts:?}");
+        assert!(has(&texts, crate::share_state::SWITCH_TEXT), "{texts:?}");
+        assert!(has(&texts, crate::share_state::NAME_LABEL), "{texts:?}");
+        assert!(!has(&texts, "Folder: /media/tfuser/mediashare"), "off: {texts:?}");
+        let mut net = two_networks();
+        let start = std::time::SystemTime::now();
+        net.share_mut().set_cfg(crate::config::ShareCfg {
+            enabled: true,
+            name: String::new(),
+        });
+        net.share_mut().set_daemon(Some(start), None);
+        net.share_mut().set_file(Some((
+            Head::Ready {
+                iface: "wlx1".into(),
+                mode: "exclusive".into(),
+                channel: 6,
+                flags: vec!["no-ble".into()],
+            },
+            start,
+        )));
+        let texts = net_texts(&network_settings(net));
+        for t in [
+            "Ready on wlx1 (exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
+            "Sending needs Bluetooth; this machine has none.",
+            "Folder: /media/tfuser/mediashare",
+        ] {
+            assert!(has(&texts, t), "{t}: {texts:?}");
+        }
+    }
+
     /// A saved zone the image does not list is named in the band.
     #[test]
     fn the_time_band_names_an_unknown_zone() {

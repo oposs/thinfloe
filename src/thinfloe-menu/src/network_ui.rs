@@ -1,5 +1,6 @@
 //! Drawing the Settings screen's Network tab: the connections now, the
-//! wired address, the saved WiFi networks and Apply, the Time band, and
+//! wired address, the saved WiFi networks and Apply, the FloeDrop band,
+//! the Time band, and
 //! the two dialogs
 //! over it (add a network, confirm an Apply during a remote session).
 //! Everything that decides something lives in network.rs; this file only
@@ -11,6 +12,7 @@ use crate::netfiles::FileState;
 use crate::nettab;
 use crate::network::{AddView, NetEvent, NetTab};
 use crate::publicip;
+use crate::share_state::{self, ShareEvent};
 use crate::timeband::TimeEvent;
 use crate::timetab;
 use crate::ui::{self, GAP, ROW_LEFT, ROW_MARGIN_X, ROW_RIGHT, TILE_GAP};
@@ -79,9 +81,12 @@ pub fn network_tab(ui: &mut Ui, net: &NetTab, width: f32) -> Option<NetEvent> {
                     band(ui, &t, inner, between, "DNS", |ui| dns(ui, &t, net, &mut event));
                 });
             }
-            // The Time band and the public IP band are saved at once and
+            // The FloeDrop, Time and public IP bands are saved at once and
             // unrelated to the network files: they take clicks before the
             // files are read and while an Apply runs.
+            band(ui, &t, inner, between, "FloeDrop", |ui| {
+                share(ui, &t, net, pending.as_ref(), &mut event, &mut url)
+            });
             band(ui, &t, inner, between, "Time", |ui| {
                 time(ui, &t, net, pending.as_ref(), &mut event, &mut url)
             });
@@ -165,6 +170,14 @@ fn merge_url(kept: Option<NetEvent>, now: Option<NetEvent>) -> Option<NetEvent> 
         (kept, None) => kept,
         (Some(NetEvent::PublicIpUrlCancel), _) => Some(NetEvent::PublicIpUrlCancel),
         (Some(NetEvent::Time(TimeEvent::NtpCancel)), _) => Some(NetEvent::Time(TimeEvent::NtpCancel)),
+        (Some(NetEvent::Share(ShareEvent::NameCancel)), _) => Some(NetEvent::Share(ShareEvent::NameCancel)),
+        (
+            Some(NetEvent::Share(ShareEvent::NameText { commit: was, .. })),
+            Some(NetEvent::Share(ShareEvent::NameText { text, commit })),
+        ) => Some(NetEvent::Share(ShareEvent::NameText {
+            text,
+            commit: was || commit,
+        })),
         (
             Some(NetEvent::Time(TimeEvent::NtpText { commit: was, .. })),
             Some(NetEvent::Time(TimeEvent::NtpText { text, commit })),
@@ -204,6 +217,62 @@ fn ntp_field_event(changed: Option<String>, lost_focus: bool, escape: bool, show
         _ => TimeEvent::NtpCancel,
     };
     Some(NetEvent::Time(e))
+}
+
+/// `url_field_event` for the FloeDrop name field.
+fn name_field_event(changed: Option<String>, lost_focus: bool, escape: bool, shown: &str) -> Option<NetEvent> {
+    let e = match url_field_event(changed, lost_focus, escape, shown)? {
+        NetEvent::PublicIpUrl { text, commit } => ShareEvent::NameText { text, commit },
+        _ => ShareEvent::NameCancel,
+    };
+    Some(NetEvent::Share(e))
+}
+
+/// The FloeDrop band: the switch, while it is on what the daemon says and
+/// the folder, and the name phones show. Saved at once; the name field's
+/// event goes to `field`, as the NTP servers field's does.
+fn share(
+    ui: &mut Ui,
+    t: &Theme,
+    net: &NetTab,
+    pending: Option<&NetEvent>,
+    event: &mut Option<NetEvent>,
+    field: &mut Option<NetEvent>,
+) {
+    let band = net.share();
+    let mut on = band.cfg().enabled;
+    ui.horizontal(|ui| {
+        if ui.add(Switch::new(&mut on)).changed() {
+            *event = Some(NetEvent::Share(ShareEvent::Enable(on)));
+        }
+        ui.label(RichText::new(share_state::SWITCH_TEXT).color(t.palette().foreground));
+    });
+    if let Some(head) = band.head() {
+        for (text, tone) in share_state::status_lines(&head) {
+            ui.label(RichText::new(text).color(crate::upgrade_ui::tone_color(t, tone)));
+        }
+        muted(ui, t, format!("Folder: {}", share_state::FOLDER));
+    }
+    let shown = match pending {
+        Some(NetEvent::Share(ShareEvent::NameText { text, .. })) => text.as_str(),
+        _ => band.name_text(),
+    };
+    form_row(ui, t, share_state::NAME_LABEL, |ui| {
+        let mut text = shown.to_string();
+        let r = ui.add(
+            Input::new(&mut text)
+                .hint(band.host().to_string())
+                .max_width(brand::NET_FIELD_W)
+                .id_salt("tf-net-share-name"),
+        );
+        let changed = r.changed().then_some(text);
+        if let Some(e) = name_field_event(changed, r.lost_focus(), escape(ui), shown) {
+            *field = Some(e);
+        }
+    });
+    if let Some(e) = band.error() {
+        warn(ui, t, e);
+    }
 }
 
 /// The Time band: the zone selects, the NTP servers field and the clock's

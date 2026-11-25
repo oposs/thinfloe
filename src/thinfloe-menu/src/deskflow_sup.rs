@@ -1,8 +1,9 @@
-//! The menu's side of the Deskflow daemon (spec, Processes): it runs
-//! `thinfloe-menu --deskflow` while `[deskflow] listen` is on, starts it
-//! again after it ended (1 s, 2 s, 4 s … 60 s apart), tells it to read its
-//! file again after a write, and stops it when the switch goes off or the
-//! menu exits.
+//! The menu's side of its daemons (spec, Processes): it runs
+//! `thinfloe-menu --deskflow` while `[deskflow] listen` is on, and
+//! `thinfloe-share` while `[share] enabled` is on; starts one again after
+//! it ended (1 s, 2 s, 4 s … 60 s apart), tells it to read its file again
+//! after a write, and stops it when the switch goes off or the menu exits.
+//! `Daemon` holds what differs between the two.
 //!
 //! The daemon runs in a process group of its own and is signalled through
 //! the group. It sets `PR_SET_PDEATHSIG` itself, so a menu that dies
@@ -19,15 +20,48 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::deskflow::PARENT_ENV;
 use crate::deskflow::statefile::{self, Head};
-use crate::deskflow::{DESKFLOW_ARG, PARENT_ENV};
 use crate::log::{Feed, Kind, Line, Run, Splitter, local_time};
 
-/// The source the daemon's lines carry in the menu's log.
+/// The source the Deskflow daemon's lines carry in the menu's log.
 pub const LOG_SOURCE: &str = "deskflow";
-/// The prefixes the daemon writes before its lines; the log's source names
-/// it already.
-const DAEMON_PREFIXES: [&str; 2] = ["thinfloe-menu --deskflow: ", "thinfloe-deskflow: "];
+
+/// What differs between the daemons the menu supervises.
+#[derive(Clone, Copy)]
+pub struct Daemon {
+    /// The source its lines carry in the menu's log.
+    pub source: &'static str,
+    /// Its name in the menu's messages.
+    pub label: &'static str,
+    /// The prefixes it writes before its lines; the log's source names it
+    /// already.
+    pub prefixes: &'static [&'static str],
+    /// The variable that carries the menu's pid to it, if it reads one.
+    pub parent_env: Option<&'static str>,
+    /// It starts with SIGHUP blocked and unblocks it once its handler is
+    /// set. A daemon that does not unblock it would never see a reload.
+    pub block_hup: bool,
+    /// The error line of its state file, if the text has one.
+    pub error_head: fn(&str) -> Option<String>,
+}
+
+/// `thinfloe-menu --deskflow`.
+pub const DESKFLOW: Daemon = Daemon {
+    source: LOG_SOURCE,
+    label: "Deskflow",
+    prefixes: &["thinfloe-menu --deskflow: ", "thinfloe-deskflow: "],
+    parent_env: Some(PARENT_ENV),
+    block_hup: true,
+    error_head: deskflow_error_head,
+};
+
+fn deskflow_error_head(text: &str) -> Option<String> {
+    match statefile::parse(text).head {
+        Head::Error(why) => Some(why),
+        _ => None,
+    }
+}
 
 /// The first wait before a start again.
 const FIRST_DELAY: Duration = Duration::from_secs(1);
@@ -60,6 +94,8 @@ struct Running {
 
 pub struct Supervisor {
     program: PathBuf,
+    args: Vec<OsString>,
+    daemon: Daemon,
     state_file: Option<PathBuf>,
     notify: Option<std::sync::Arc<Notify>>,
     /// Where the daemon's stderr goes; none leaves it on the menu's.
@@ -74,10 +110,13 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// `program` is run with `--deskflow`: the menu's own binary.
+    /// `program` is run without arguments (see `with_args`), as the
+    /// Deskflow daemon (see `with_daemon`).
     pub fn new(program: PathBuf) -> Supervisor {
         Supervisor {
             program,
+            args: Vec::new(),
+            daemon: DESKFLOW,
             state_file: statefile::path(),
             notify: None,
             log: None,
@@ -89,6 +128,19 @@ impl Supervisor {
         }
     }
 
+    /// The arguments `program` gets: `[DESKFLOW_ARG]` for the menu's own
+    /// binary.
+    pub fn with_args(mut self, args: Vec<OsString>) -> Supervisor {
+        self.args = args;
+        self
+    }
+
+    /// Which daemon this is; `DESKFLOW` by default.
+    pub fn with_daemon(mut self, daemon: Daemon) -> Supervisor {
+        self.daemon = daemon;
+        self
+    }
+
     /// The state file the daemon writes its error head to; by default the
     /// one `statefile::path` names.
     pub fn with_state_file(mut self, path: Option<PathBuf>) -> Supervisor {
@@ -96,8 +148,8 @@ impl Supervisor {
         self
     }
 
-    /// The daemon's stderr goes, line by line, into the menu's log, as
-    /// `LOG_SOURCE`; the log copies each line to the session log.
+    /// The daemon's stderr goes, line by line, into the menu's log, as its
+    /// `Daemon::source`; the log copies each line to the session log.
     pub fn with_log(mut self, feed: Arc<Feed>) -> Supervisor {
         self.log = Some(feed);
         self
@@ -205,6 +257,12 @@ impl Supervisor {
         self.failure.clone()
     }
 
+    /// When the running daemon started, by the wall clock; for the age
+    /// of its state file.
+    pub fn started(&self) -> Option<SystemTime> {
+        self.running.as_ref().map(|r| r.started_wall)
+    }
+
     /// The daemon's pid while it runs.
     pub fn pid(&self) -> Option<u32> {
         self.running.as_ref().map(|r| r.child.id())
@@ -212,10 +270,11 @@ impl Supervisor {
 
     fn spawn(&mut self, now: Instant) -> Result<(), String> {
         let mut cmd = Command::new(&self.program);
-        cmd.arg(DESKFLOW_ARG)
-            .env(PARENT_ENV, OsString::from(std::process::id().to_string()))
-            .stdin(Stdio::null())
-            .process_group(0);
+        cmd.args(&self.args).stdin(Stdio::null()).process_group(0);
+        if let Some(var) = self.daemon.parent_env {
+            cmd.env(var, OsString::from(std::process::id().to_string()));
+        }
+        let block_hup = self.daemon.block_hup;
         // stdout goes where the menu's goes, the session log; stderr to
         // the menu's log when there is one.
         if self.log.is_some() {
@@ -223,26 +282,30 @@ impl Supervisor {
         }
         // SAFETY: only signal and sigprocmask, both async-signal-safe.
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 crate::jobs::reset_signals();
                 // A SIGHUP before the daemon's handler is set would end it;
                 // blocked, it waits for the daemon to unblock it.
-                let mut set: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut set);
-                libc::sigaddset(&mut set, libc::SIGHUP);
-                libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                if block_hup {
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, libc::SIGHUP);
+                    libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                }
                 Ok(())
             });
         }
+        let label = self.daemon.label;
         let child = cmd.spawn().map_err(|e| {
             format!(
-                "the Deskflow daemon could not be started: {} {e}",
+                "the {label} daemon could not be started: {} {e}",
                 self.program.display()
             )
         })?;
         let mut child = child;
         if let (Some(feed), Some(pipe)) = (self.log.clone(), child.stderr.take()) {
-            std::thread::spawn(move || pump(pipe, &feed));
+            let daemon = self.daemon;
+            std::thread::spawn(move || pump(pipe, &feed, daemon.source, daemon.prefixes));
         }
         if let Some(n) = self.notify.clone() {
             let pid = child.id() as libc::id_t;
@@ -276,7 +339,7 @@ impl Supervisor {
         }
         if !status.success() {
             let why = self.reason(status, r.started_wall);
-            eprintln!("thinfloe-menu: the Deskflow daemon stopped: {why}");
+            eprintln!("thinfloe-menu: the {} daemon stopped: {why}", self.daemon.label);
             self.failure = Some(why);
         }
         if self.wanted {
@@ -289,7 +352,7 @@ impl Supervisor {
     /// never signalled again; a start again follows as after a failure.
     fn lost(&mut self, e: std::io::Error, now: Instant) {
         let Some(r) = self.running.take() else { return };
-        let why = format!("the Deskflow daemon cannot be waited for: {e}");
+        let why = format!("the {} daemon cannot be waited for: {e}", self.daemon.label);
         eprintln!("thinfloe-menu: {why}");
         if r.kill_at.is_none() {
             self.failure = Some(why);
@@ -316,7 +379,7 @@ impl Supervisor {
             && let Ok(meta) = std::fs::metadata(path)
             && meta.modified().is_ok_and(|m| m + MTIME_SLACK >= started)
             && let Ok(text) = std::fs::read_to_string(path)
-            && let Head::Error(why) = statefile::parse(&text).head
+            && let Some(why) = (self.daemon.error_head)(&text)
         {
             return why;
         }
@@ -331,17 +394,17 @@ impl Supervisor {
 /// Signal the daemon's process group (its pid: it leads the group).
 /// Copy the daemon's stderr into the log until it closes, without the
 /// daemon's own prefix.
-fn pump(mut pipe: impl Read, feed: &Feed) {
+fn pump(mut pipe: impl Read, feed: &Feed, source: &str, prefixes: &[&str]) {
     let mut split = Splitter::default();
     let mut emit = |mut runs: Vec<Run>| {
         if let Some(first) = runs.first_mut()
-            && let Some(rest) = DAEMON_PREFIXES.iter().find_map(|p| first.text.strip_prefix(p))
+            && let Some(rest) = prefixes.iter().find_map(|p| first.text.strip_prefix(p))
         {
             first.text = rest.to_string();
         }
         feed.push(Line {
             time: local_time(),
-            source: Some(LOG_SOURCE.to_string()),
+            source: Some(source.to_string()),
             runs,
             kind: Kind::Output,
         });
@@ -380,6 +443,7 @@ fn wait_ended(pid: libc::id_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deskflow::DESKFLOW_ARG;
     use crate::testdir::TestDir;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -397,7 +461,9 @@ mod tests {
     }
 
     fn sup(d: &Path, body: &str) -> Supervisor {
-        Supervisor::new(program(d, body)).with_state_file(Some(d.join("state")))
+        Supervisor::new(program(d, body))
+            .with_args(vec![DESKFLOW_ARG.into()])
+            .with_state_file(Some(d.join("state")))
     }
 
     /// Tick at `now` until the running daemon has ended and been
@@ -719,6 +785,30 @@ mod tests {
                 (Some(LOG_SOURCE), "plain line".to_string(), Kind::Output),
             ]
         );
+    }
+
+    #[test]
+    fn supervisor_passes_its_args() {
+        let d = TestDir::new("deskflow-sup", "args");
+        let out = d.join("out");
+        let record = format!("printf '%s|' \"$@\" >{0}.tmp\nmv {0}.tmp {0}", out.display());
+        for (args, want) in [
+            (vec![], ""),
+            (vec![OsString::from("--a"), OsString::from("b c")], "--a|b c|"),
+        ] {
+            let _ = std::fs::remove_file(&out);
+            let mut s = Supervisor::new(program(&d, &record))
+                .with_state_file(None)
+                .with_args(args);
+            let now = Instant::now();
+            s.want(true, now);
+            s.tick(now);
+            until_ended(&mut s, now);
+            let got = std::fs::read_to_string(&out).unwrap();
+            // printf with no arguments still prints its format once.
+            let want = if want.is_empty() { "|" } else { want };
+            assert_eq!(got, want);
+        }
     }
 
     #[test]
