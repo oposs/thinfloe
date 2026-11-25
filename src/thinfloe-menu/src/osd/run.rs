@@ -65,7 +65,8 @@ impl Logged {
 }
 
 /// The socket file goes with the OSD, however it ends, so `--osd-key`
-/// knows there is none.
+/// knows there is none; the volume file too, so the menu knows the
+/// volume is not known.
 struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {
@@ -149,8 +150,16 @@ pub(super) fn run() -> Result<(), String> {
     let env = env_file();
     let mut logged = Logged::default();
     let mut mode = start_mode(&env, &mut logged);
+    // The speaker state for the menu's Sound tab: one left by an OSD that
+    // did not end cleanly is not this one's, and the file goes with the
+    // OSD (dropped after the worker, which is declared after it).
+    let volume_file = super::volume_file_path();
+    if let Some(p) = &volume_file {
+        let _ = crate::atomic::remove(p);
+    }
+    let _volume_file = volume_file.clone().map(RemoveOnDrop);
     let n = notify.clone();
-    let audio = AudioWorker::spawn(Pactl::from_env(), mode, move |e| n.send(Msg::Audio(e)));
+    let audio = AudioWorker::spawn_with_file(Pactl::from_env(), mode, volume_file, move |e| n.send(Msg::Audio(e)));
     let n = notify.clone();
     let monitors = Monitors::spawn(Ddcutil::from_env(), move |e| n.send(Msg::Ddc(e)));
     let mut redetect = Redetect::default();
@@ -257,7 +266,8 @@ fn drain_socket(sock: &UnixDatagram) -> Vec<Action> {
 }
 
 /// Start what `a` asks for; the brightness panel shows at once, the
-/// volume and microphone panels when `pactl` has answered. True when
+/// volume and microphone panels when `pactl` has answered, and the Sound
+/// tab's sets show none. True when
 /// something to draw changed. `Reload` is the loop's (`reload`).
 fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Monitors, now: Instant) -> bool {
     match a {
@@ -266,6 +276,9 @@ fn on_action(state: &mut OsdState, a: Action, audio: &AudioWorker, monitors: &Mo
         Action::VolumeDown => audio.request(AudioRequest::Step(-VOLUME_STEP)),
         Action::VolumeMute => audio.request(AudioRequest::ToggleMute),
         Action::MicMute => audio.request(AudioRequest::ToggleMic),
+        // The Sound tab: the slider is the feedback, no panel.
+        Action::VolumeSet(n) => audio.request(AudioRequest::SetLevel(n)),
+        Action::VolumeMuteSet(m) => audio.request(AudioRequest::SetMute(m)),
         Action::BrightnessUp | Action::BrightnessDown => {
             monitors.step(a == Action::BrightnessUp);
             state.show(Shown::Brightness, now);

@@ -435,6 +435,20 @@ value already on disk when the list changes is caught by the composer, see
 [session.md](session.md). Guards: the `keyboard`, `generated`, `store` and
 `migrate` tests, `test-labwc-config-merge.sh`, `test-labwc-runtime.sh`.
 
+## Sound tab
+
+Settings -> Sound (`soundtab.rs` state and throttle, `soundtab_ui.rs`
+drawing), between Keyboard and Status, for people without volume keys. One
+card: the switch "Set the volume on this machine" (the Keyboard tab's
+`volume_keys`; both send `KbEvent::VolumeKeys` through the keyboard
+apply), its note, "Volume" (shadcn-egui `Slider`, 0 to 100 in steps of 1,
+the value as "NN %" beside it) and "Mute" (a switch). Slider and Mute are
+greyed while the switch is off ("The remote session sets the loudness.") or
+while there is no volume file ("The volume is not known yet."). The values
+come from the OSD's volume file and go to the OSD's socket; see
+[media-keys.md](media-keys.md) (The Sound tab). After a failed move of the
+settings the tab is read-only like Keyboard.
+
 ## Switches
 
 Every switch in the menu (Keyboard tab, the public IP switch, Advanced on

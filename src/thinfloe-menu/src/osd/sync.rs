@@ -131,6 +131,29 @@ impl Shared {
         sinks.iter().flat_map(|d| mute(d, self.sink_muted)).collect()
     }
 
+    /// The Sound tab's slider: `L` becomes `percent` (at most 100) and
+    /// every sink gets it; the mute stays as it is. With the switch off it
+    /// does nothing: every sink stays at 100 %.
+    pub fn set_level(&mut self, percent: u8, sinks: &[Device]) -> Vec<Set> {
+        if self.mode == Mode::Off {
+            return Vec::new();
+        }
+        self.sink_known = true;
+        self.level = percent.min(FULL);
+        sinks.iter().flat_map(|d| volume(d, self.level)).collect()
+    }
+
+    /// The Sound tab's mute switch: `M` becomes `muted` and every sink
+    /// gets it. With the switch off it does nothing.
+    pub fn set_mute(&mut self, muted: bool, sinks: &[Device]) -> Vec<Set> {
+        if self.mode == Mode::Off {
+            return Vec::new();
+        }
+        self.sink_known = true;
+        self.sink_muted = muted;
+        sinks.iter().flat_map(|d| mute(d, self.sink_muted)).collect()
+    }
+
     /// The mic mute key: `Q` flips and every source gets it.
     pub fn toggle_mic(&mut self, sources: &[Device]) -> Vec<Set> {
         self.source_known = true;
@@ -206,6 +229,18 @@ impl Shared {
 
     pub fn mic_muted(&self) -> bool {
         self.mic_muted
+    }
+
+    /// The speaker state for the volume file: `None` while no sink gave
+    /// it yet; with the switch off always 100 % and unmuted.
+    pub fn known_level(&self) -> Option<Level> {
+        match self.mode {
+            Mode::Off => Some(Level {
+                percent: FULL,
+                muted: false,
+            }),
+            Mode::Keys => self.sink_known.then(|| self.level()),
+        }
     }
 }
 
@@ -407,6 +442,75 @@ mod tests {
             "the second press unmutes"
         );
         assert!(!s.level().muted);
+    }
+
+    #[test]
+    fn set_level_and_set_mute_set_every_sink() {
+        let sinks = [sink(1, "a", 40, false), sink(2, "b", 70, true)];
+        let (mut s, _) = Shared::start(Mode::Keys, &[sinks[0].clone()], &[], Some("a"), None);
+        assert_eq!(
+            s.set_level(25, &sinks),
+            [vol(Kind::Sink, "a", 25), vol(Kind::Sink, "b", 25)]
+        );
+        assert_eq!(s.level().percent, 25);
+        // Above 100 is 100; the mute is left alone.
+        assert_eq!(
+            s.set_level(180, &sinks),
+            [vol(Kind::Sink, "a", 100), vol(Kind::Sink, "b", 100)]
+        );
+        assert!(!s.level().muted);
+        assert_eq!(s.set_mute(true, &sinks), [mute(Kind::Sink, "a", true)]);
+        assert!(s.level().muted);
+        assert_eq!(
+            s.set_mute(true, &sinks),
+            [mute(Kind::Sink, "a", true)],
+            "a set, not a toggle"
+        );
+        assert_eq!(
+            s.known_level(),
+            Some(Level {
+                percent: 100,
+                muted: true
+            })
+        );
+
+        // Before any sink: the slider decides the state.
+        let (mut s, _) = Shared::start(Mode::Keys, &[], &[], None, None);
+        assert_eq!(s.known_level(), None);
+        assert_eq!(s.set_level(30, &[]), []);
+        assert_eq!(
+            s.known_level(),
+            Some(Level {
+                percent: 30,
+                muted: false
+            })
+        );
+        assert_eq!(
+            s.on_new(&sink(1, "speakers", 80, false)),
+            [vol(Kind::Sink, "speakers", 30)]
+        );
+    }
+
+    #[test]
+    fn set_level_and_set_mute_do_nothing_with_the_switch_off() {
+        let sinks = [sink(1, "a", 100, false)];
+        let (mut s, _) = Shared::start(Mode::Off, &sinks, &[], Some("a"), None);
+        assert_eq!(s.set_level(20, &sinks), []);
+        assert_eq!(s.set_mute(true, &sinks), []);
+        assert_eq!(
+            s.level(),
+            Level {
+                percent: 100,
+                muted: false
+            }
+        );
+        assert_eq!(
+            s.known_level(),
+            Some(Level {
+                percent: 100,
+                muted: false
+            })
+        );
     }
 
     #[test]

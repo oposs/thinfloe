@@ -54,9 +54,16 @@ pub enum Action {
     /// Read the volume keys switch again (the menu sends it after a
     /// keyboard apply). No key is bound to it.
     Reload,
+    /// The Sound tab's slider: every speaker to this percent, 0 to 100.
+    /// No key is bound to it, and `--osd-key` refuses it.
+    VolumeSet(u8),
+    /// The Sound tab's mute switch: every speaker muted or not. No key is
+    /// bound to it, and `--osd-key` refuses it.
+    VolumeMuteSet(bool),
 }
 
 impl Action {
+    /// The actions without an argument.
     pub const ALL: [Action; 7] = [
         Action::VolumeUp,
         Action::VolumeDown,
@@ -67,10 +74,44 @@ impl Action {
         Action::Reload,
     ];
 
+    /// An action as `encode` writes it: a name, or `volume-set <n>`
+    /// with n from 0 to 100, or `volume-mute-set 0|1`. Anything else,
+    /// extra blanks included, is `None`.
     pub fn parse(s: &str) -> Option<Action> {
-        Action::ALL.into_iter().find(|a| a.as_str() == s)
+        if let Some(a) = Action::ALL.into_iter().find(|a| a.as_str() == s) {
+            return Some(a);
+        }
+        let (verb, arg) = s.split_once(' ')?;
+        match verb {
+            "volume-set" => {
+                let digits = (1..=3).contains(&arg.len()) && arg.bytes().all(|b| b.is_ascii_digit());
+                let n: u8 = arg.parse().ok().filter(|_| digits)?;
+                (n <= 100).then_some(Action::VolumeSet(n))
+            }
+            "volume-mute-set" => match arg {
+                "0" => Some(Action::VolumeMuteSet(false)),
+                "1" => Some(Action::VolumeMuteSet(true)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
+    /// The action as one datagram's text, without the newline.
+    pub fn encode(self) -> String {
+        match self {
+            Action::VolumeSet(n) => format!("{} {n}", self.as_str()),
+            Action::VolumeMuteSet(m) => format!("{} {}", self.as_str(), u8::from(m)),
+            _ => self.as_str().to_string(),
+        }
+    }
+
+    /// Only the menu sends it: labwc never binds it to a key.
+    pub fn menu_only(self) -> bool {
+        matches!(self, Action::VolumeSet(_) | Action::VolumeMuteSet(_))
+    }
+
+    /// The action's name, without its argument.
     pub fn as_str(self) -> &'static str {
         match self {
             Action::VolumeUp => "volume-up",
@@ -80,8 +121,25 @@ impl Action {
             Action::BrightnessUp => "brightness-up",
             Action::BrightnessDown => "brightness-down",
             Action::Reload => "reload",
+            Action::VolumeSet(_) => "volume-set",
+            Action::VolumeMuteSet(_) => "volume-mute-set",
         }
     }
+}
+
+/// The file the OSD keeps the speaker state in for the menu's Sound tab:
+/// `TF_VOLUME_FILE`, else `$XDG_RUNTIME_DIR/thinfloe-volume`; an empty
+/// variable is unset. One line `<percent> <muted>\n`, muted `0` or `1`.
+pub fn volume_file_path() -> Option<PathBuf> {
+    volume_file_from(std::env::var_os("TF_VOLUME_FILE"), std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+fn volume_file_from(file: Option<OsString>, runtime_dir: Option<OsString>) -> Option<PathBuf> {
+    if let Some(p) = file.filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let dir = runtime_dir.filter(|d| !d.is_empty())?;
+    Some(PathBuf::from(dir).join("thinfloe-volume"))
 }
 
 /// Where the OSD listens: `TF_OSD_SOCKET`, else
@@ -103,7 +161,7 @@ fn socket_path_from(sock: Option<OsString>, runtime_dir: Option<OsString>) -> Op
 /// action is exit 0.
 pub fn osd_key_main(args: &[OsString]) -> ExitCode {
     let name = args.first().map(|a| a.as_os_str()).unwrap_or(OsStr::new(""));
-    let Some(action) = name.to_str().and_then(Action::parse) else {
+    let Some(action) = name.to_str().and_then(Action::parse).filter(|a| !a.menu_only()) else {
         eprintln!("thinfloe-menu --osd-key: unknown action '{}'", name.to_string_lossy());
         return ExitCode::from(2);
     };
@@ -126,7 +184,8 @@ pub fn osd_key_main(args: &[OsString]) -> ExitCode {
 /// switch when it starts.
 fn act_without_osd(a: Action) {
     let kind = match a {
-        Action::Reload => return,
+        // The menu sends these, never `--osd-key`.
+        Action::Reload | Action::VolumeSet(_) | Action::VolumeMuteSet(_) => return,
         Action::VolumeUp | Action::VolumeDown | Action::VolumeMute => audio::Kind::Sink,
         Action::MicMute => audio::Kind::Source,
         Action::BrightnessUp | Action::BrightnessDown => {
@@ -285,9 +344,65 @@ mod tests {
     fn actions_round_trip() {
         for a in Action::ALL {
             assert_eq!(Action::parse(a.as_str()), Some(a));
+            assert_eq!(Action::parse(&a.encode()), Some(a));
+            assert!(!a.menu_only(), "{a:?}");
         }
         assert_eq!(Action::parse("volume"), None);
         assert_eq!(Action::parse("reload"), Some(Action::Reload));
+        for a in [
+            Action::VolumeSet(0),
+            Action::VolumeSet(7),
+            Action::VolumeSet(100),
+            Action::VolumeMuteSet(false),
+            Action::VolumeMuteSet(true),
+        ] {
+            assert_eq!(Action::parse(&a.encode()), Some(a));
+            assert!(a.menu_only(), "{a:?}");
+        }
+        assert_eq!(Action::VolumeSet(42).encode(), "volume-set 42");
+        assert_eq!(Action::VolumeMuteSet(true).encode(), "volume-mute-set 1");
+    }
+
+    #[test]
+    fn set_actions_reject_bad_arguments() {
+        for bad in [
+            "volume-set 101",
+            "volume-set x",
+            "volume-set",
+            "volume-set ",
+            "volume-set -1",
+            "volume-set +5",
+            "volume-set 1000",
+            "volume-set  5",
+            "volume-set 5 ",
+            "volume-set 2.5",
+            "volume-mute-set 2",
+            "volume-mute-set on",
+            "volume-mute-set",
+            "volume-up 5",
+        ] {
+            assert_eq!(Action::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(Action::parse("volume-set 007"), Some(Action::VolumeSet(7)));
+    }
+
+    #[test]
+    fn osd_key_refuses_the_menus_actions() {
+        for a in ["volume-set 50", "volume-mute-set 1", "nonsense"] {
+            let code = osd_key_main(&[OsString::from(a)]);
+            assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(2)), "{a}");
+        }
+    }
+
+    #[test]
+    fn the_volume_file_is_in_the_runtime_dir_unless_named() {
+        let o = |s: &str| Some(OsString::from(s));
+        assert_eq!(volume_file_from(o("/a/v"), o("/run")), Some(PathBuf::from("/a/v")));
+        assert_eq!(
+            volume_file_from(o(""), o("/run/user/1001")),
+            Some(PathBuf::from("/run/user/1001/thinfloe-volume"))
+        );
+        assert_eq!(volume_file_from(None, None), None);
     }
 
     #[test]

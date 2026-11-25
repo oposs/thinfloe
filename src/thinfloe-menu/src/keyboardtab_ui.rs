@@ -60,7 +60,7 @@ pub fn keyboard_tab(ui: &mut Ui, tab: &KeyboardTab, width: f32) -> Option<KbEven
 }
 
 /// A row: the label in its column, then what `add` draws.
-fn row(ui: &mut Ui, t: &Theme, label: &str, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn row(ui: &mut Ui, t: &Theme, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.scope(|ui| {
             ui.set_min_width(brand::FORM_LABEL_W);
@@ -73,9 +73,14 @@ fn row(ui: &mut Ui, t: &Theme, label: &str, add: impl FnOnce(&mut Ui)) {
 
 /// The explanation under a media key switch, in the control column.
 fn media_keys_note(ui: &mut Ui, t: &Theme) {
+    control_note(ui, t, MEDIA_KEYS_NOTE);
+}
+
+/// Muted text in the control column, under the row it explains.
+pub(crate) fn control_note(ui: &mut Ui, t: &Theme, text: &str) {
     ui.horizontal(|ui| {
         ui.add_space(brand::FORM_LABEL_W);
-        ui.add(egui::Label::new(RichText::new(MEDIA_KEYS_NOTE).color(t.palette().muted_foreground)).wrap());
+        ui.add(egui::Label::new(RichText::new(text).color(t.palette().muted_foreground)).wrap());
     });
 }
 

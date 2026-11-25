@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### New
+- Settings has a new Sound tab with a volume slider and a mute switch, for keyboards without volume keys. Its switch "Set the volume on this machine" is the same setting as "Volume keys control this machine" on the Keyboard tab; while it is off, the slider and mute are greyed out and the remote session sets the loudness.
 
 ### Changed
 

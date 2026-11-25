@@ -965,6 +965,9 @@ fn show_settings(
         SettingsTab::Keyboard => {
             crate::keyboardtab_ui::keyboard_tab(&mut s_ui, &menu.keyboard, width).map(SettingsEvent::Keyboard)
         }
+        SettingsTab::Sound => {
+            crate::soundtab_ui::sound_tab(&mut s_ui, &menu.sound, menu.keyboard.shown.volume_keys, width, now)
+        }
         SettingsTab::Status => {
             crate::statustab_ui::status_tab(&mut s_ui, menu, preview, now).map(SettingsEvent::Status)
         }
@@ -3444,6 +3447,20 @@ mod tests {
                                 "Num Lock on at start",
                                 "Compose key",
                             ],
+                        )
+                    }
+                    crate::settings::SettingsTab::Sound => {
+                        menu.keyboard = keyboard_menu().keyboard;
+                        let mut kb = menu.keyboard.shown.clone();
+                        kb.volume_keys = true;
+                        menu.keyboard = crate::keyboard::KeyboardTab::new(kb, Err("no list".into()));
+                        menu.sound.set_file(Some(crate::soundtab::Volume {
+                            percent: 40,
+                            muted: false,
+                        }));
+                        (
+                            (1280.0, 720.0),
+                            &["Set the volume on this machine", "Volume", "40 %", "Mute"],
                         )
                     }
                     crate::settings::SettingsTab::Status => {
