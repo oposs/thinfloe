@@ -503,7 +503,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                 }
                 if !root_jobs.is_empty() {
                     let what = match kinds {
-                        (false, false) => "The stick is released",
+                        (false, false) if menu.eject.running.is_some() => "The stick is released",
                         (false, true) => "The stick is written",
                         (true, true) => "The add-on work and the write are finished",
                         _ => "The add-on work is finished",
@@ -639,8 +639,15 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         .color(t.palette().ring),
                 );
                 ui.label(
-                    egui::RichText::new(format!("The sticks are released before {verbing}."))
-                        .color(t.palette().muted_foreground),
+                    egui::RichText::new(format!(
+                        "{} released before {verbing}.",
+                        if menu.flushing_many() {
+                            "The sticks are"
+                        } else {
+                            "The stick is"
+                        }
+                    ))
+                    .color(t.palette().muted_foreground),
                 );
             });
             ui.ctx().request_repaint_after(Duration::from_secs(1));

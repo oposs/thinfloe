@@ -49,6 +49,10 @@ pub const NEXT_SESSION: &str = "The new screen timeout applies from the next ses
 /// How long programs get to end after SIGTERM before SIGKILL, at logout.
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// How long Restart and Power off wait for the sticks to be released before
+/// they offer to go on.
+pub const EJECT_GRACE: Duration = Duration::from_secs(60);
+
 /// An add-on job: `sudo -n thinfloe-addon <args>`, in a process group of
 /// its own, because a stop signals the whole group, which would otherwise
 /// be the menu's. sudo receives the SIGTERM and relays it to the tool.
@@ -1295,7 +1299,8 @@ impl Menu {
     /// How the messages call `target`: the stick's first name, or the sticks.
     fn eject_name(&self, target: &str) -> String {
         if target == "all" {
-            return "the sticks".to_string();
+            let one = self.eject.known.len() == 1;
+            return if one { "the stick" } else { "the sticks" }.to_string();
         }
         self.removable
             .iter()
@@ -1333,6 +1338,10 @@ impl Menu {
         self.eject.running = None;
         self.eject.known.clear();
         if matches!(self.logout, Some(Logout::Ejecting { .. })) {
+            // The eject of one disk ended first: the others still need theirs.
+            if done && target != "all" && self.removable.iter().any(|s| s.disk != target) {
+                return self.start_eject("all".to_string());
+            }
             self.logout = Some(if done {
                 Logout::Leaving {
                     until: now + LOGOUT_PAUSE,
@@ -1346,13 +1355,21 @@ impl Menu {
     }
 
     /// The names of the sticks the exit flushes, for the dialog.
-    pub fn flushing_names(&self) -> String {
-        let names: Vec<&str> = if self.eject.known.is_empty() {
+    fn flushing(&self) -> Vec<&str> {
+        if self.eject.known.is_empty() {
             self.removable.iter().map(|s| s.label()).collect()
         } else {
             self.eject.known.iter().map(|(_, n)| n.as_str()).collect()
-        };
-        names.join(", ")
+        }
+    }
+
+    pub fn flushing_names(&self) -> String {
+        self.flushing().join(", ")
+    }
+
+    /// More than one stick is flushed.
+    pub fn flushing_many(&self) -> bool {
+        self.flushing().len() > 1
     }
 
     /// The home is saved (or the person goes on anyway): Restart and Power
@@ -1966,6 +1983,13 @@ impl Menu {
         }
         match self.logout {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
+            // A release that hangs must not hold the restart for ever.
+            Some(Logout::Ejecting { since }) if now >= since + EJECT_GRACE => {
+                let message = "Releasing the sticks takes too long".to_string();
+                self.log.note(Kind::Warn, format!("{message}."));
+                self.logout = Some(Logout::EjectFailed { message });
+                None
+            }
             // The shutdown ends what is left of the add-on jobs.
             Some(Logout::StoppingAddons { go_at }) if now >= go_at => {
                 let jobs = self.root_jobs();
@@ -5394,5 +5418,51 @@ mod eject_tests {
             now,
         );
         assert!(matches!(m.logout, Some(Logout::Leaving { .. })));
+    }
+
+    #[test]
+    fn a_user_eject_of_one_disk_does_not_skip_the_other_sticks() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), stick("sdc", "TWO")]);
+        m.begin_ending(Action::Reboot, now);
+        m.eject.running = Some("sdb".into());
+        assert_eq!(saved(&mut m, now), None);
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        m.set_removable(vec![stick("sdc", "TWO")]);
+        let r = m.finished(
+            JobResult::Ejected {
+                target: "sdb".into(),
+                result: EjectResult::Done,
+            },
+            now,
+        );
+        assert_eq!(r, Some(Effect::Start(Job::Eject { target: "all".into() })));
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(ejected(&mut m, EjectResult::Done, now), None);
+        assert!(matches!(m.logout, Some(Logout::Leaving { .. })));
+    }
+
+    #[test]
+    fn a_hanging_release_offers_to_go_on() {
+        let now = Instant::now();
+        let mut m = ending_with_stick(Action::Poweroff, now);
+        saved(&mut m, now);
+        assert_eq!(m.tick(now + EJECT_GRACE / 2), None);
+        assert_eq!(m.logout, Some(Logout::Ejecting { since: now }));
+        assert_eq!(m.tick(now + EJECT_GRACE), None);
+        assert!(matches!(m.logout, Some(Logout::EjectFailed { .. })));
+        assert_eq!(m.choose(Choice::EjectGoOn, now), Some(Effect::Exit(11)));
+    }
+
+    #[test]
+    fn one_stick_is_called_the_stick() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "MYSTICK")]);
+        m.begin_ending(Action::Reboot, now);
+        saved(&mut m, now);
+        assert!(m.log.lines().any(|l| l.plain() == "Ejecting the stick."));
+        assert!(!m.flushing_many());
     }
 }
