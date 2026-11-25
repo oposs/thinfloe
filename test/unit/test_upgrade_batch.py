@@ -3428,7 +3428,8 @@ class TestFreshInstallAutomount(unittest.TestCase):
                    mock.patch.object(ui, "open_target", side_effect=open_target or opened)]
         if exclusive is not None:
             patches.append(mock.patch.object(ui, "_fresh_install_open", side_effect=exclusive))
-        with contextlib.ExitStack() as st, contextlib.redirect_stdout(io.StringIO()):
+        self.out = io.StringIO()
+        with contextlib.ExitStack() as st, contextlib.redirect_stdout(self.out):
             for p in patches:
                 st.enter_context(p)
             return ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS,
@@ -3481,17 +3482,44 @@ class TestFreshInstallAutomount(unittest.TestCase):
         self.assertEqual([e[0] for e in self.events].count("remount"), 1)
 
     def test_unwritten_remounts_on_cancel(self):
-        def cancel(*a):
-            raise ui.Cancelled()
-        with self.assertRaises(ui.Cancelled):
-            self.install(exclusive=cancel)
-        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+        # The real write path: a cancel while the checksum is fetched comes
+        # before the first byte, so nothing is wiped and the stick comes back.
+        wiped = []
+        with mock.patch.object(ui, "expected_download_sha256", side_effect=ui.Cancelled()), \
+             mock.patch.object(ui, "wipe_partition_tables",
+                               side_effect=lambda *a, **kw: wiped.append(a)):
+            outcome = self.install()
+        self.assertTrue(outcome.cancelled)
+        self.assertFalse(outcome.touched)
+        self.assertEqual([e[0] for e in self.events], ["release", "open", "remount"])
+        self.assertEqual(wiped, [])
         self.assertFalse(os.path.exists(self.hold))
 
     def test_unwritten_checksum_refusal_remounts(self):
-        outcome = self.install(exclusive=self.untouched)
-        self.assertFalse(outcome.ok)
-        self.assertEqual([e[0] for e in self.events].count("remount"), 1)
+        # The real write path: a release without its checksum is refused
+        # before the first byte.
+        with mock.patch.object(ui, "expected_download_sha256", return_value=None), \
+             mock.patch.object(ui, "checksum_required", return_value=True), \
+             mock.patch.object(ui, "stream_image", side_effect=AssertionError("written")):
+            outcome = self.install()
+        self.assertFalse(outcome.ok or outcome.touched)
+        self.assertIn("no checksum", outcome.reason)
+        self.assertEqual([e[0] for e in self.events], ["release", "open", "remount"])
+
+    def test_the_remount_is_announced(self):
+        # The remount can take the helper's whole add budget: the person
+        # sees why the tool still waits.
+        said = []
+        orig = self.run_cmd
+
+        def peek(cmd, **kw):
+            if cmd[0] == ui.AUTOMOUNT and cmd[1] == "remount":
+                said.append(self.out.getvalue())
+            return orig(cmd, **kw)
+        with mock.patch.object(self, "run_cmd", side_effect=peek):
+            self.install(exclusive=self.untouched)
+        self.assertEqual(len(said), 1)
+        self.assertIn("Mounting the stick again", said[0])
 
     def test_a_write_that_wrote_bytes_does_not_remount(self):
         self.install(exclusive=self.touched)
@@ -3605,15 +3633,24 @@ class TestContents(unittest.TestCase):
         self.assertTrue(seen and all(k.get("start_new_session") for k in seen))
 
     def test_contents_takes_no_lock(self):
+        # The lock is held by another process, as a running write holds it.
         self.mount("S", ["a"])
         lock = os.path.join(self.tmp.name, "held.lock")
-        with mock.patch.object(ui, "LOCK_PATH", lock):
-            fd = os.open(lock, os.O_RDWR | os.O_CREAT)
-            self.addCleanup(os.close, fd)
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            with mock.patch.object(ui, "_take_lock", side_effect=AssertionError("lock")):
-                r = self.contents()
+        holder = subprocess.Popen(
+            [sys.executable, "-I", "-c",
+             "import fcntl, os, sys, time\n"
+             "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('held', flush=True)\n"
+             "time.sleep(60)\n", lock],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        holder.stdout.close()
+        with mock.patch.object(ui, "LOCK_PATH", lock), \
+             mock.patch.object(ui, "_take_lock", side_effect=AssertionError("lock")):
+            r = self.contents()
         self.assertEqual(r["entries"], ["a"])
 
     def test_contents_not_automounted(self):

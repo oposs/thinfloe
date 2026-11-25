@@ -114,7 +114,8 @@ serial part of the id matches (the write repartitions the stick, so the size
 and partition fingerprint of the id would never match); a stale hold is
 removed, but only the file that was read (same inode): a hold the writer
 renamed into place meanwhile stays. The hold goes when the write ends; a write that never wrote a byte
-runs `remount`, so the stick comes back. `drives` reports such a stick as
+runs `remount`, so the stick comes back (step `remount`, "Mounting the
+stick again": it can take up to the helper's 80 s add budget). `drives` reports such a stick as
 `automounted`, not `mounted`; an automounted stick that is not the boot
 stick is not upgraded in place.
 

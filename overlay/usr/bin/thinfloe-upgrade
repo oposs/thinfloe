@@ -210,26 +210,34 @@ CONTENTS_ERROR = "could not read the stick"
 # decoded with replacement, directories with a trailing slash, sorted. It
 # prints [{"entries": [...first CONTENTS_MAX...], "total": n}, ...]; a mount
 # point it cannot read (stale mount, EIO) gives {"entries": [], "total": 0,
-# "failed": true} and the others are still listed.
+# "failed": true} and the others are still listed. Only the first MAX names
+# are kept while it reads (heapq.nsmallest), so a directory with millions of
+# entries costs time, bounded by the kill, not memory.
 CONTENTS_CHILD = r'''
-import json, os, sys
+import heapq, json, os, sys
 MAX, CUT = int(os.environ["TF_CMAX"]), int(os.environ["TF_CCUT"])
 out = []
+
+
+def names(it, count):
+    for e in it:
+        count[0] += 1
+        n = os.fsencode(e.name).decode("utf-8", "replace")
+        if len(n) > CUT:
+            n = n[:CUT] + "\N{HORIZONTAL ELLIPSIS}"
+        yield (n, e.is_dir(follow_symlinks=False))
+
+
 for mp in sys.argv[1:]:
-    names = []
+    count = [0]
     try:
         with os.scandir(mp) as it:
-            for e in it:
-                n = os.fsencode(e.name).decode("utf-8", "replace")
-                if len(n) > CUT:
-                    n = n[:CUT] + "\N{HORIZONTAL ELLIPSIS}"
-                names.append((n, e.is_dir(follow_symlinks=False)))
+            first = heapq.nsmallest(MAX, names(it, count))
     except OSError:
         out.append({"entries": [], "total": 0, "failed": True})
         continue
-    names.sort()
-    out.append({"entries": [n + "/" if d else n for n, d in names[:MAX]],
-                "total": len(names)})
+    out.append({"entries": [n + "/" if d else n for n, d in first],
+                "total": count[0]})
 print(json.dumps(out))
 '''
 EXIT_BUSY_AUTOMOUNT = 3   # thinfloe-automount: a mount is busy
@@ -734,6 +742,10 @@ def ptable_fingerprint_of(read: Callable[[int, int], bytes]) -> str:
     sector, whose dirty flag a mount sets, and the FSInfo sector after it
     holds the free count an umount writes; hashing them changed the id
     between `drives` (mounted) and the write (released). 512-byte sectors.
+
+    So two sticks without a table, of the same serial and size (whole-drive
+    FAT from the same mkfs), get the same fingerprint: the swap check after
+    the open tells them apart by serial and size alone.
     """
     h = hashlib.sha256(read(446, 66))
     header = read(512, 512)
@@ -842,9 +854,10 @@ def contents_of(device: str) -> dict:
     One partition lists plain names; several list the partition's name
     before each ("NAME: file"), in the order of the contract file, so the
     first partition may use up the list. A partition that cannot be read is
-    left out; only when none can be read is `error` set. Never takes a lock. The listing runs
-    in a child in a session of its own and is killed after CONTENTS_TIMEOUT;
-    any problem is reported in `error`, never as a failed exit.
+    left out; only when none can be read is `error` set. Never takes a
+    lock. The listing runs in a child in a session of its own and is killed
+    after CONTENTS_TIMEOUT; any problem is reported in `error`, never as a
+    failed exit.
     """
     result = {"device": device, "entries": [], "more": 0, "error": None}
     mounts = _contents_mounts(device)
@@ -2587,7 +2600,10 @@ def fresh_install(drive: DriveInfo, base_url: str, copy_home: bool,
             except OSError:
                 pass
         if not outcome.touched:
+            # Up to the helper's add budget (80 s) for a slow stick: say so.
+            progress.step("remount", "Mounting the stick again")
             _automount("remount", drive)
+            progress.done("remount")
 
 
 def _fresh_install_exclusive(drive: DriveInfo, base_url: str, copy_home: bool,
