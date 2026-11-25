@@ -37,6 +37,11 @@ from typing import Callable, Dict, List, Optional, Set, Union
 
 MAX_NAME_BYTES = 255
 FALLBACK_NAME = "disk"
+# Names under the mount root that belong to others, compared in any case:
+# FloeDrop's tmpfs (media-tfuser-mediashare.mount) is mounted at
+# /media/tfuser/mediashare, also after a stick has been mounted. A stick is
+# never given one of these names, and sweep_dirs never removes them.
+RESERVED_NAMES = frozenset({"mediashare"})
 TAIL_OPTIONS = "nosuid,nodev"
 OWNER = "uid=1001,gid=1001"
 # Only these filesystems are mounted; anything else is left alone.
@@ -302,11 +307,16 @@ def cut_bytes(text: str, limit: int) -> str:
     return text.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
 
 
+def is_reserved_name(name: str) -> bool:
+    return name.casefold() in RESERVED_NAMES
+
+
 def choose_name(label: str, uuid: str, taken: Set[str]) -> str:
-    """The mount point name: label, else UUID, else "disk"; suffix on a clash."""
+    """The mount point name: label, else UUID, else "disk"; suffix on a
+    clash or on a reserved name (RESERVED_NAMES)."""
     base = clean_component(label) or clean_component(uuid) or FALLBACK_NAME
     base = cut_bytes(base, MAX_NAME_BYTES)
-    if base not in taken:
+    if base not in taken and not is_reserved_name(base):
         return base
     n = 1
     while True:
@@ -729,8 +739,9 @@ def sweep_dirs(p: Paths, lines: List[Line], mounts: List[tuple]) -> None:
     """Remove the empty directories under the mount root that nothing uses.
 
     Runs under the files lock. Kept: a line's mount point, any mount point,
-    a live add's reservation, and everything that is not a directory (a
-    link is never followed). rmdir removes only an empty directory.
+    a live add's reservation, a reserved name (FloeDrop's folder, mounted
+    or not), and everything that is not a directory (a link is never
+    followed). rmdir removes only an empty directory.
     """
     named = {ln.mountpoint for ln in lines} | {mp for _, mp, _ in mounts}
     try:
@@ -739,7 +750,7 @@ def sweep_dirs(p: Paths, lines: List[Line], mounts: List[tuple]) -> None:
         return
     for name in names:
         path = os.path.join(p.media, name)
-        if path in named or reserved(p, name):
+        if path in named or is_reserved_name(name) or reserved(p, name):
             continue
         try:
             if not stat.S_ISDIR(os.lstat(path).st_mode):

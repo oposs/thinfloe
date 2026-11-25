@@ -10,7 +10,9 @@
 #   - a 64 MiB usb-storage stick, serial SMOKEU, with one vfat partition
 #     labelled SMOKEU that holds hello.txt;
 #   - a usb-bot card reader with two removable LUNs: slot 0 holds CARD1 (vfat
-#     on the whole medium, one.txt), slot 1 a medium without a file system.
+#     on the whole medium, one.txt), slot 1 a medium without a file system;
+#   - a 32 MiB usb-storage stick, serial SMOKES, vfat on the whole medium
+#     labelled MEDIASHARE: it must not land on FloeDrop's folder.
 # The guest runs scripts/smoke-automount-report.sh as systemd.run= and prints
 # ok/FAIL lines. When it prints SMOKE-AUTOMOUNT-SWAP-OUT this script takes
 # the card out of slot 0 through the QEMU monitor (QMP eject), and when it
@@ -69,6 +71,7 @@ STICK="$tmp/stick.img"
 CARD1="$tmp/card1.img"
 CARD2="$tmp/card2.img"
 EMPTY="$tmp/empty.img"
+SHARE="$tmp/share.img"
 cp --sparse=always "$USB_IMAGE" "$BOOT" || exit 2
 truncate -s 64M "$STICK" || exit 2
 echo 'start=2048, type=c' | sfdisk -q --label dos "$STICK" || exit 2
@@ -78,6 +81,7 @@ mcopy -i "$STICK@@1M" "$tmp/hello.txt" ::hello.txt || exit 2
 vfat_image "$CARD1" 32M CARD1 one.txt "card one" || exit 2
 vfat_image "$CARD2" 32M CARD2 two.txt "card two" || exit 2
 truncate -s 16M "$EMPTY" || exit 2
+vfat_image "$SHARE" 32M MEDIASHARE share.txt "not the folder" || exit 2
 
 ESP=$(esp_of "$BOOT") || exit 2
 mcopy -o -i "$ESP" "$DIR/smoke-automount-report.sh" ::smoke-automount-report.sh || exit 2
@@ -161,6 +165,8 @@ SMOKE_WAIT_FOR='^SMOKE-AUTOMOUNT-DONE' "$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT
     -device scsi-hd,bus=reader.0,scsi-id=0,lun=0,drive=card0,removable=on,id=slot0 \
     -drive "if=none,id=card1,file=$EMPTY,format=raw,cache=unsafe" \
     -device scsi-hd,bus=reader.0,scsi-id=0,lun=1,drive=card1,removable=on,id=slot1 \
+    -drive "if=none,id=ushare,file=$SHARE,format=raw,cache=unsafe" \
+    -device usb-storage,bus=xhci.0,drive=ushare,serial=SMOKES \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
     -append "ramroot=tl/ramroot.sqsh $APPEND $REPORT" || exit 2

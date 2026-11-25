@@ -10,7 +10,8 @@
 # one.txt), slot 1 a card without a file system. The host swaps the card in
 # slot 0 through the QEMU monitor: it takes the card out after
 # SMOKE-AUTOMOUNT-SWAP-OUT and puts CARD2 (two.txt) in after
-# SMOKE-AUTOMOUNT-SWAP-IN.
+# SMOKE-AUTOMOUNT-SWAP-IN. A second stick (serial SMOKES, vfat labelled
+# MEDIASHARE) must not land on FloeDrop's tmpfs at $MEDIA/mediashare.
 
 CONSOLE=/dev/console
 HELPER=/usr/libexec/thinfloe/thinfloe-automount
@@ -87,7 +88,23 @@ check "the card in the reader is listed as CARD1, kind card ($(field "$C" 1))" \
 check "$MEDIA/CARD1/one.txt is readable" \
     '[ "$(cat "$MEDIA/CARD1/one.txt" 2>/dev/null)" = "card one" ]'
 check "the reader's slot without a file system is not listed" \
-    '[ "$(wc -l <"$LIST")" -eq 2 ]'
+    '[ -z "$(cut -f 3 "$LIST" | grep -vxE "SMOKEU|CARD1|MEDIASHARE1")" ]'
+
+# --- FloeDrop's folder ------------------------------------------------------
+SHARE=$MEDIA/mediashare
+if ! wait_for 30 has_line MEDIASHARE1; then
+    bad "the stick labelled MEDIASHARE was automounted as MEDIASHARE1 within 30 s"
+    show_state
+fi
+check "$SHARE is a tmpfs owned by tfuser" \
+    '[ "$(findmnt -rn -o FSTYPE "$SHARE")" = tmpfs ] && [ "$(stat -c %U "$SHARE" 2>/dev/null)" = tfuser ]'
+check "$SHARE is not in $LIST" \
+    '! cut -f 4 "$LIST" | grep -qxF "$SHARE"'
+S=$(line MEDIASHARE1)
+check "the stick labelled MEDIASHARE is at $MEDIA/MEDIASHARE1, kind stick" \
+    '[ "$(field "$S" 4)" = "$MEDIA/MEDIASHARE1" ] && [ "$(field "$S" 8)" = stick ] && [ "$(cat "$MEDIA/MEDIASHARE1/share.txt" 2>/dev/null)" = "not the folder" ]'
+check "only the tmpfs is mounted at $SHARE" \
+    '[ "$(findmnt -rn -o SOURCE "$SHARE" | wc -l)" -eq 1 ] && [ ! -e "$SHARE/share.txt" ]'
 
 say "SMOKE-AUTOMOUNT-SWAP-OUT"
 check "the card taken out of the reader loses its line" 'wait_for 60 no_line CARD1'
@@ -128,6 +145,12 @@ check "the ejected stick's mount is gone" \
 check "the event file says SMOKEU went clean" 'event_is SMOKEU clean'
 check "the stick is powered off ($U_DISK gone)" \
     '[ -n "$U_DISK" ] && wait_for 10 [ ! -e "/sys/class/block/$U_DISK" ]'
+
+"$HELPER" eject all
+rc=$?
+check "eject all exits 0 and leaves no line (exit $rc)" '[ "$rc" -eq 0 ] && [ ! -s "$LIST" ]'
+check "eject all leaves FloeDrop's tmpfs mounted at $SHARE" \
+    '[ "$(findmnt -rn -o FSTYPE "$SHARE")" = tmpfs ]'
 
 show_state
 say "SMOKE-AUTOMOUNT-DONE"

@@ -142,7 +142,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 
 ### Automount
 
-- `/run/thinfloe/removable` (`device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`) and `/run/thinfloe/removable.event` are a contract between `thinfloe-automount`, their only writer, and the menu; readers ignore unknown trailing fields. `/media/tfuser` stays root's (0755); the boot disk and a partition labelled `EFI-SYSTEM` are never mounted; a card reader or built-in SD slot is never powered off. Every write of `thinfloe-upgrade` holds the stick and releases it before the first byte. Guards: `test_automount.py`, `test-automount-image.sh`, `make qemu-smoke-automount`. Notes: [docs/notes/automount.md](docs/notes/automount.md).
+- `/run/thinfloe/removable` (`device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`) and `/run/thinfloe/removable.event` are a contract between `thinfloe-automount`, their only writer, and the menu; readers ignore unknown trailing fields. `/media/tfuser` stays root's (0755) and no stick is named `mediashare` in any case (FloeDrop's tmpfs; `RESERVED_NAMES`); the boot disk and a partition labelled `EFI-SYSTEM` are never mounted; a card reader or built-in SD slot is never powered off. Every write of `thinfloe-upgrade` holds the stick and releases it before the first byte. Guards: `test_automount.py`, `test-automount-image.sh`, `make qemu-smoke-automount`. Notes: [docs/notes/automount.md](docs/notes/automount.md).
 
 ### Add-ons
 

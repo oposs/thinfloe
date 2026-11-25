@@ -23,7 +23,15 @@ makes it ready again and starts the unit.
 
 Name: the file system label, else its UUID, else `disk`; `/`, control
 characters (C1 too) and leading dots replaced, cut to 255 bytes, a name in
-use gets a number (`MYSTICK1`), as udisks2 does. The label is udev's
+use gets a number (`MYSTICK1`), as udisks2 does. `mediashare`, in any
+case, is reserved (`RESERVED_NAMES`): FloeDrop mounts its tmpfs
+(`media-tfuser-mediashare.mount`, tfuser's, 0755) at
+`/media/tfuser/mediashare`, so a stick labelled `MEDIASHARE` is mounted at
+`MEDIASHARE1`, also before the tmpfs is there. The tmpfs is no stick: it
+has no contract line, no Eject tile and no note, `eject all` and
+`thinfloe-upgrade contents` never reach it, and the sweep below never
+removes the folder, mounted or not. systemd makes the folder (root, 0755)
+under a `/media/tfuser` that is root's 0755 as in `tmpfiles.d`. The label is udev's
 `ID_FS_LABEL_ENC` with its `\xNN` escapes decoded, as udisks2 reads it:
 `ID_FS_LABEL` has `_` for every blank, so "My Passport" would become
 `My_Passport`; it is mounted at `/media/tfuser/My Passport`. Options: vfat
@@ -72,7 +80,8 @@ file always lists `/`) drops nothing. The same step removes the empty
 directories under `/media/tfuser` that no line names and that are not
 mounted (a helper killed between its `mkdir` and its mount): only empty
 directories, never through a link, and never the one a running `add` has
-reserved (`/run/thinfloe/automount/reserved/<name>`, its pid).
+reserved (`/run/thinfloe/automount/reserved/<name>`, its pid), and never
+a reserved name.
 
 `/run/thinfloe/removable.event` holds the last removal, one line
 `seq<TAB>name<TAB>clean|unclean`: `clean` after an eject, `unclean` for a
@@ -181,7 +190,10 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   `eject`): its line goes and the event says `unclean`; it puts another
   card in (`blockdev-change-medium`): the new card is mounted on the same
   disk. Eject of the card leaves the reader powered, eject of the stick
-  powers it off; both give a `clean` event.
+  powers it off; both give a `clean` event. A second stick, vfat labelled
+  `MEDIASHARE`, is mounted at `/media/tfuser/MEDIASHARE1`; FloeDrop's
+  `/media/tfuser/mediashare` is a tmpfs owned by tfuser, not in the
+  contract file, and still mounted after `eject all`.
 - `make qemu-smoke-write`: both target sticks carry vfat and are
   automounted before the writes; a write from a release without the image
   fails before its first byte, the journal shows its release, and the stick
@@ -189,8 +201,8 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   cancelled write runs the stick is released and held, and the hold is gone
   after it; the ThinFloe stick written is not mounted, and an `add` of it by
   hand after the hold is gone is refused as "ThinFloe stick".
-- `make qemu-smoke-two-sticks`: nothing is mounted under `/media/tfuser`
-  with a second ThinFloe stick attached; both sticks are virtio, which the
+- `make qemu-smoke-two-sticks`: nothing but FloeDrop's tmpfs is mounted
+  under `/media/tfuser` with a second ThinFloe stick attached; both sticks are virtio, which the
   udev rule never matches, so an `add` of the other stick's ESP by hand
   must be refused as "ThinFloe stick".
 

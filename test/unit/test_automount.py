@@ -1224,6 +1224,81 @@ class Eject(Commands):
         self.assertEqual([l.name for l in self.lines()], ["OK"])
 
 
+class FloeDropFolder(Commands):
+    """FloeDrop's tmpfs at /media/tfuser/mediashare is not a stick."""
+
+    def share(self, mounted=True):
+        folder = self.tmp / "media" / "mediashare"
+        folder.mkdir()
+        if mounted:
+            with open(self.tmp / "mountinfo", "a") as fh:
+                fh.write(f"40 25 0:40 / {folder} rw,nosuid,nodev,noexec - tmpfs tmpfs rw,uid=1001\n")
+        return folder
+
+    def test_mediashare_is_a_reserved_name_in_any_case(self):
+        for label, want in (("mediashare", "mediashare1"), ("MEDIASHARE", "MEDIASHARE1"),
+                            ("MediaShare", "MediaShare1"), (" mediashare ", "mediashare1")):
+            self.assertEqual(mod.choose_name(label, "", set()), want, label)
+        self.assertEqual(mod.choose_name("", "mediashare", set()), "mediashare1")
+        self.assertEqual(mod.choose_name("mediashare", "", {"mediashare1"}), "mediashare2")
+        self.assertEqual(mod.choose_name("mediashare1", "", set()), "mediashare1")
+        self.assertEqual(mod.choose_name("mediashares", "", set()), "mediashares")
+
+    def test_a_mediashare_stick_is_not_mounted_on_the_folder_before_it_exists(self):
+        self.stick(label="mediashare")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([l.name for l in self.lines()], ["mediashare1"])
+        self.assertEqual(self.calls("mount")[0][-1], str(self.tmp / "media" / "mediashare1"))
+        self.assertFalse((self.tmp / "media" / "mediashare").exists())
+
+    def test_a_mediashare_stick_is_not_mounted_over_the_tmpfs(self):
+        folder = self.share()
+        self.stick(label="MEDIASHARE")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([(l.name, l.mountpoint) for l in self.lines()],
+                         [("MEDIASHARE1", str(self.tmp / "media" / "MEDIASHARE1"))])
+        self.assertTrue(folder.is_dir())
+
+    def test_the_folder_is_never_swept(self):
+        for mounted in (False, True):
+            with self.subTest(mounted=mounted):
+                (self.tmp / "mountinfo").write_text(ROOT_MOUNT)
+                folder = self.share(mounted)
+                (self.tmp / "media" / "leftover").mkdir()
+                mod.prune(self.p)
+                self.assertTrue(folder.is_dir())
+                self.assertFalse((self.tmp / "media" / "leftover").exists())
+                folder.rmdir()
+
+    def test_the_tmpfs_is_no_stick(self):
+        folder = self.share()
+        mod.prune(self.p)
+        self.assertEqual(self.lines(), [])
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([l.name for l in self.lines()], ["MYSTICK"])
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertEqual([c[-1] for c in self.calls("umount")], [str(self.tmp / "media" / "MYSTICK")])
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.event()[1:], ["MYSTICK", "clean"])
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertIn("nothing to eject", self.out)
+        self.assertTrue(folder.is_dir())
+        self.assertIn(str(folder), (self.tmp / "mountinfo").read_text())
+
+    def test_the_mount_unit_and_tmpfiles_agree_with_the_helper(self):
+        unit = (REPO / "overlay/etc/systemd/system/media-tfuser-mediashare.mount").read_text()
+        where = re.search(r"^Where=(.*)$", unit, re.M).group(1)
+        self.assertEqual(os.path.dirname(where), "/media/tfuser")
+        self.assertIn(os.path.basename(where), mod.RESERVED_NAMES)
+        # The tmpfs belongs to tfuser; the mount root stays root's 0755, the
+        # mode and owner systemd gives a parent it creates for the mount.
+        self.assertRegex(unit, r"(?m)^Options=.*\buid=1001\b.*\bmode=0755\b")
+        tmpfiles = (REPO / "overlay/usr/lib/tmpfiles.d/thinfloe-automount.conf").read_text()
+        self.assertIn("d /media/tfuser 0755 root root\n", tmpfiles)
+        self.assertNotRegex(tmpfiles, r"(?m)^\S+\s+/media/tfuser/")
+
+
 class Usage(Commands):
     def test_usage(self):
         for argv in ([], ["add"], ["bogus", "sdb"], ["add", "sdb", "x"], ["eject", ""]):
