@@ -7,8 +7,9 @@ publish = false
 
 [dependencies]
 owly-airdrop = { git = "https://github.com/t4t5/owly", rev = "21171d8f9a08bfa2c625a1fa338e877a67913e54", features = ["mdns"] }
+futures-util = { version = "0.3", default-features = false }
 owlyd = { git = "https://github.com/t4t5/owly", rev = "21171d8f9a08bfa2c625a1fa338e877a67913e54" }
-tokio = { version = "1", features = ["rt", "macros", "net", "fs", "time", "signal", "process", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "fs", "time", "signal", "process", "io-util", "io-std", "sync"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 inotify = { version = "0.11", features = ["stream"] }

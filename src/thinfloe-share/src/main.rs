@@ -2,6 +2,8 @@
 
 // Used from the daemon (later tasks); allowed unused until then.
 #[allow(dead_code)]
+mod bluez;
+#[allow(dead_code)]
 mod card;
 #[allow(dead_code)]
 mod config;
@@ -13,6 +15,8 @@ mod names;
 mod osd;
 #[allow(dead_code)]
 mod outbox;
+#[allow(dead_code)]
+mod radio;
 #[allow(dead_code)]
 mod state;
 
@@ -33,8 +37,9 @@ fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("--version") => println!("{}", version_line()),
+        Some("--radio") => std::process::exit(radio::main()),
         _ => {
-            eprintln!("usage: thinfloe-share --version");
+            eprintln!("usage: thinfloe-share --version | --radio");
             std::process::exit(2);
         }
     }
