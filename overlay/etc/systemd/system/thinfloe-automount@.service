@@ -14,5 +14,8 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/thinfloe/thinfloe-automount add %i
 ExecStop=/usr/libexec/thinfloe/thinfloe-automount remove %i
-TimeoutStartSec=30
+# The helper ends add within 80 s (most of it waiting for the disk lock while
+# another partition of the stick mounts) and remove within 25 s, so systemd
+# never kills it between a mount and its line in /run/thinfloe/removable.
+TimeoutStartSec=90
 TimeoutStopSec=30

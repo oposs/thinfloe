@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -154,6 +155,17 @@ class SkipRules(Base):
         self.assertIn("filesystem", self.reason(make_dev(fstype="iso9660")))
         self.assertIsNone(self.reason(make_dev()))
 
+    def test_internal_disks_are_skipped(self):
+        # The udev rule's candidate test, done again by the helper.
+        for d in (make_dev(removable=False, id_bus="ata"),
+                  make_dev(kname="nvme0n1p1", disk="nvme0n1", removable=False, id_bus=""),
+                  make_dev(kname="sdb1", removable=False, id_bus="scsi", mmc_type="SD")):
+            self.assertIn("not removable", self.reason(d), d.kname)
+        self.assertIsNone(self.reason(make_dev(removable=True, id_bus="ata")))
+        self.assertIsNone(self.reason(make_dev(removable=False, id_bus="usb")))
+        self.assertIsNone(self.reason(make_dev(kname="mmcblk0p1", disk="mmcblk0",
+                                               removable=False, id_bus="", mmc_type="SD")))
+
     def test_hold_with_colon_in_serial(self):
         hold = {"sdb": mod.Hold(1, "sn-AA:BB:16:3f")}
         self.assertIn("held", self.reason(make_dev(serial="AA:BB"), holds=hold))
@@ -218,6 +230,20 @@ class Naming(Base):
             self.assertNotIn(name, ("", ".", ".."))
         name = mod.choose_name("\xe4" * 200, "", set())
         self.assertEqual(len(name.encode()), 254)
+
+    def test_label_from_label_enc(self):
+        # udev's ID_FS_LABEL has "_" for every blank; ID_FS_LABEL_ENC keeps it.
+        props = {"ID_FS_LABEL": "My_Passport", "ID_FS_LABEL_ENC": "My\\x20Passport"}
+        self.assertEqual(mod.fs_label(props), "My Passport")
+        self.assertEqual(mod.choose_name(mod.fs_label(props), "", set()), "My Passport")
+        self.assertEqual(mod.fs_label({"ID_FS_LABEL": "OLD"}), "OLD")
+        for enc, name in (("\\x2e\\x2e", "_."), ("a\\x2fb", "a_b"), ("x\\x0ay", "x_y"),
+                          ("\\x20\\x20", "disk"), ("\xdcber", "\xdcber"),
+                          ("\\xc3\\xbcber", "\xfcber"), ("a\\xc2\\x85b", "a_b"),
+                          ("back\\x5cslash", "back\\slash")):
+            self.assertEqual(mod.choose_name(mod.fs_label({"ID_FS_LABEL_ENC": enc}), "", set()),
+                             name, enc)
+        self.assertEqual(mod.choose_name("a\x9bb", "", set()), "a_b")
 
     def test_name_suffix_stays_within_limit(self):
         taken = {"a" * 255}
@@ -287,17 +313,30 @@ class Lines(Base):
             self.assertIsNone(mod.parse_hold(bad), bad)
 
 
+# mount and umount keep $TF_MOUNTINFO as the kernel keeps mountinfo: a line
+# per mount, the mount point with a blank written as \040.
 FAKES = {
     "mount": '''#!/bin/sh
 printf 'mount\t%s\n' "$*" | tr ' ' '\t' >> "$FAKE_STATE/calls.log"
 case "$*" in *"$FAKE_MOUNT_HANG"*) if [ -n "$FAKE_MOUNT_HANG" ]; then echo $$ > "$FAKE_STATE/hang.pid"; exec sleep 30; fi;; esac
+case "$*" in *"$FAKE_MOUNT_SLOW"*) [ -n "$FAKE_MOUNT_SLOW" ] && sleep 1.5;; esac
 [ -n "$FAKE_MOUNT_FAIL" ] && { echo "wrong fs type" >&2; exit 32; }
+prev=; dev=; for a; do dev=$prev; prev=$a; done
+esc=$(printf '%s' "$prev" | sed 's/ /\\\\040/g')
+printf '99 25 0:99 / %s rw - vfat %s rw\n' "$esc" "$dev" >> "$TF_MOUNTINFO"
 exit 0
 ''',
     "umount": '''#!/bin/sh
 printf 'umount\t%s\n' "$*" | tr ' ' '\t' >> "$FAKE_STATE/calls.log"
-case " $* " in *" -l "*) exit 0;; esac
-[ -n "$FAKE_UMOUNT_BUSY" ] && case "$*" in *"$FAKE_UMOUNT_BUSY"*) echo "umount: target is busy" >&2; exit 32;; esac
+for a; do mp=$a; done
+case " $* " in *" -l "*) ;; *)
+  [ -n "$FAKE_UMOUNT_BUSY" ] && case "$*" in *"$FAKE_UMOUNT_BUSY"*) echo "umount: target is busy" >&2; exit 32;; esac;;
+esac
+esc=$(printf '%s' "$mp" | sed 's/ /\\\\040/g')
+if [ -f "$TF_MOUNTINFO" ]; then
+  MP="$esc" awk '$5 != ENVIRON["MP"]' "$TF_MOUNTINFO" > "$TF_MOUNTINFO.new" && mv "$TF_MOUNTINFO.new" "$TF_MOUNTINFO"
+fi
+[ -n "$FAKE_UMOUNT_KILL" ] && kill -9 $PPID
 exit 0
 ''',
     "sync": '''#!/bin/sh
@@ -329,7 +368,8 @@ class Commands(Base):
         os.environ["FAKE_STATE"] = str(self.tmp)
         os.environ["TF_OWNER_UID"] = str(os.getuid())
         os.environ["TF_MOUNTINFO"] = str(self.tmp / "mountinfo")
-        for k in ("FAKE_MOUNT_HANG", "FAKE_MOUNT_FAIL", "FAKE_UMOUNT_BUSY"):
+        for k in ("FAKE_MOUNT_HANG", "FAKE_MOUNT_SLOW", "FAKE_MOUNT_FAIL", "FAKE_UMOUNT_BUSY",
+                  "FAKE_UMOUNT_KILL"):
             os.environ.pop(k, None)
         self.write("esp-device", "/dev/sda1\n")
         self.addCleanup(setattr, mod, "log", mod.log)
@@ -528,6 +568,149 @@ class Add(Commands):
         self.assertEqual(self.cmd("add", "sdb1"), 0)
         self.assertEqual(self.calls("mount"), [])
         self.assertEqual(self.lines(), [])
+
+
+class Guards(Commands):
+    """The final review's findings: candidacy, arguments, ghost lines, locks."""
+
+    def internal_disk(self):
+        base = self.add_disk("sda", parts=["sda2"], bus="pci/ata1", removable="0")
+        (base / "sda2" / "dev").write_text("8:2\n")
+        (self.tmp / "dev" / "sda2").write_text("")
+        os.environ["TF_UDEV_PROPS_sda2"] = "ID_FS_TYPE=ntfs\nID_FS_LABEL=Windows\nID_BUS=ata\n"
+        self.write("esp-device", "/dev/sdz1\n")
+
+    def test_remount_of_an_internal_disk_mounts_nothing(self):
+        self.internal_disk()
+        self.assertEqual(self.cmd("remount", "sda"), 0)
+        self.write("run/automount/released/sda", "sda2\n")
+        self.assertEqual(self.cmd("remount", "sda"), 0)
+        self.assertEqual(self.cmd("add", "sda2"), 0)
+        self.assertEqual(self.calls("mount"), [])
+        self.assertEqual(self.lines(), [])
+
+    def test_commands_take_only_kernel_names(self):
+        self.stick()
+        for cmd in ("add", "remove", "eject", "release", "remount"):
+            for bad in (".", "..", "/dev/sdb1", "sdb/1", "../sdb1", "-x", "a" * 40, "sd b", "*"):
+                self.assertEqual(self.cmd(cmd, bad), 2, (cmd, bad))
+        self.assertEqual(self.calls("mount"), [])
+
+    def second_partition(self, label, fstype="vfat"):
+        base = self.tmp / "sys" / "devices" / "usb" / "1-1" / "sdb"
+        (base / "sdb2").mkdir()
+        (base / "sdb2" / "partition").write_text("2\n")
+        (base / "sdb2" / "size").write_text("2048\n")
+        (self.tmp / "sys" / "class" / "block" / "sdb2").symlink_to(base / "sdb2")
+        (self.tmp / "dev" / "sdb2").write_text("")
+        os.environ["TF_UDEV_PROPS_sdb2"] = f"ID_FS_TYPE={fstype}\nID_FS_LABEL={label}\nID_BUS=usb\n"
+
+    def test_remount_mounts_only_what_release_took(self):
+        self.stick()
+        self.second_partition("OTHER")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)   # sdb2 is not mounted (ejected, say)
+        self.assertEqual(self.cmd("release", "sdb"), 0)
+        self.assertEqual(self.cmd("remount", "sdb"), 0)
+        self.assertEqual([l.name for l in self.lines()], ["MYSTICK"])
+        self.assertEqual(len(self.calls("mount")), 2)
+        self.assertFalse((self.tmp / "run" / "automount" / "released" / "sdb").exists())
+
+    def test_ghost_line_does_not_block_the_next_stick(self):
+        # A line whose mount is gone (a helper killed between umount and
+        # its commit): the next stick under the same name is mounted.
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        (self.tmp / "mountinfo").write_text("")
+        self.unplug("sdb")
+        self.stick(label="NEXT", serial="BB", usb="1-2")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([l.name for l in self.lines()], ["NEXT"])
+        self.assertEqual(len(self.calls("mount")), 2)
+        self.assertFalse((self.tmp / "media" / "MYSTICK").exists())
+
+    def test_ghost_line_is_no_unclean_removal(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        (self.tmp / "mountinfo").write_text("")
+        self.unplug("sdb")
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual(self.lines(), [])
+        self.assertIsNone(self.event())
+        self.assertEqual(self.calls("umount"), [])
+
+    def test_eject_drops_a_ghost_line(self):
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        (self.tmp / "mountinfo").write_text("")
+        self.assertEqual(self.cmd("eject", "sdb"), 0)
+        self.assertIn("nothing to eject", self.out)
+        self.assertEqual(self.lines(), [])
+
+    def test_killed_release_is_mounted_again(self):
+        # The writer's cancel kills release after its umount, before the
+        # line is dropped; the remount in the writer's finally mounts it.
+        self.stick()
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        env = dict(os.environ, FAKE_UMOUNT_KILL="1")
+        r = subprocess.run(["python3", str(SCRIPT), "release", "sdb"], env=env,
+                           capture_output=True, timeout=60)
+        self.assertEqual(r.returncode, -9)
+        self.assertEqual(len(self.lines()), 1, "the killed release left its line")
+        self.assertEqual(self.cmd("remount", "sdb"), 0)
+        self.assertEqual(len(self.calls("mount")), 2)
+        mp = str(self.tmp / "media" / "MYSTICK")
+        self.assertEqual([l.mountpoint for l in self.lines()], [mp])
+        self.assertIn(mp, (self.tmp / "mountinfo").read_text())
+
+    def test_second_partition_waits_for_a_slow_first(self):
+        mod.LOCK_WAIT = 0.3
+        self.stick()
+        self.second_partition("DATA", "exfat")
+        os.environ["FAKE_MOUNT_SLOW"] = "sdb1"
+        result = []
+        t = threading.Thread(target=lambda: result.append(self.cmd("add", "sdb1")))
+        t.start()
+        for _ in range(100):
+            if self.calls("mount"):
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.cmd("add", "sdb2"), 0)
+        t.join(10)
+        self.assertEqual(result, [0])
+        self.assertEqual(sorted(l.name for l in self.lines()), ["DATA", "MYSTICK"])
+
+    def test_label_with_blank_is_kept(self):
+        self.stick(label="My_Passport")
+        os.environ["TF_UDEV_PROPS_sdb1"] += "ID_FS_LABEL_ENC=My\\x20Passport\n"
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        mp = self.tmp / "media" / "My Passport"
+        self.assertTrue(mp.is_dir())
+        self.assertEqual([l.mountpoint for l in self.lines()], [str(mp)])
+        self.assertIn("My\\040Passport", (self.tmp / "mountinfo").read_text())
+        # mountinfo's escaped blank is read back: the line is still trusted.
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(len(self.calls("mount")), 1)
+        self.assertEqual(self.cmd("eject", "sdb"), 0)
+        self.assertEqual(self.lines(), [])
+        self.assertFalse(mp.exists())
+
+    def test_budgets_fit_the_unit(self):
+        unit = (REPO / "overlay" / "etc" / "systemd" / "system"
+                / "thinfloe-automount@.service").read_text()
+        start = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
+        stop = int(re.search(r"^TimeoutStopSec=(\d+)$", unit, re.M).group(1))
+        self.assertLess(mod.ADD_BUDGET + 5, start)
+        self.assertLess(mod.REMOVE_BUDGET + 3, stop)
+        self.assertLessEqual(mod.MOUNT_TIMEOUT, mod.ADD_BUDGET - mod.STEP_RESERVE)
+        self.assertLessEqual(mod.Deadline(2.0).step(), 2.0)
+        self.assertEqual(mod.Deadline(1000).step(), mod.MOUNT_TIMEOUT)
+        self.assertEqual(mod.Deadline(0).lock_wait(), 0.0)
+
+    def test_hung_command_is_given_up(self):
+        start = time.monotonic()
+        rc, _, _ = mod.run(["sh", "-c", "sleep 30 & wait"], 0.5)
+        self.assertEqual(rc, 124)
+        self.assertLess(time.monotonic() - start, 3)
 
 
 class Remove(Commands):
@@ -740,6 +923,8 @@ class Eject(Commands):
     def test_remount_skips_the_boot_disk(self):
         self.stick("sdc", usb="1-2", label="BOOT", serial="BB")
         self.write("esp-device", "/dev/sdc1\n")
+        # As if a release had taken sdc1 off: the skip rules still hold.
+        self.write("run/automount/released/sdc", "sdc1\n")
         self.assertEqual(self.cmd("remount", "sdc"), 0)
         self.assertEqual(self.calls("mount"), [])
 

@@ -16,9 +16,12 @@ Contract file line (readers ignore unknown trailing fields):
 
     device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind
 
-kind is stick or card. A write hold is one line, pid<TAB>id, with the id
-that "thinfloe-upgrade drives" reports (sn-<serial> or nosn, then size and
-a partition table fingerprint).
+kind is stick or card. A line counts only while mountinfo shows its device
+at its mount point; every command drops the others first. A write hold is
+one line, pid<TAB>id, with the id that "thinfloe-upgrade drives" reports
+(sn-<serial> or nosn, then size and a partition table fingerprint). release
+records the kernel names it unmounts, one per line, in
+automount/released/<disk>; remount mounts those and nothing else.
 """
 
 import fcntl
@@ -46,6 +49,8 @@ MOUNT_OPTIONS = {
 BOOT_PARTLABEL = "EFI-SYSTEM"
 FLASH_KINDS = ("SD", "MS", "CF", "SM")   # ID_DRIVE_FLASH_<kind>
 LINE_FIELDS = 8
+# A kernel name as the commands take it: sdb1, mmcblk0p1, nvme0n1p2, dm-0.
+KNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 
 
 class _BootUnknown:
@@ -171,6 +176,24 @@ def drive_serial(props: Dict[str, str]) -> str:
     return ""
 
 
+def udev_decode(text: str) -> str:
+    """A udev *_ENC value with its \\xNN escapes turned back into bytes.
+
+    udev's ID_FS_LABEL replaces every blank with "_"; ID_FS_LABEL_ENC keeps
+    the label and escapes unsafe bytes (a blank is \\x20). udisks2 names
+    the mount point from the decoded value, so "My Passport" stays as it is.
+    """
+    raw = re.sub(rb"\\x([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]),
+                 text.encode("utf-8", "surrogateescape"))
+    return raw.decode("utf-8", "replace")
+
+
+def fs_label(props: Dict[str, str]) -> str:
+    """The file system label: ID_FS_LABEL_ENC decoded, else ID_FS_LABEL."""
+    enc = props.get("ID_FS_LABEL_ENC", "")
+    return udev_decode(enc) if enc else props.get("ID_FS_LABEL", "")
+
+
 def read_dev(kname: str, props: Dict[str, str], p: Paths) -> Dev:
     """A Dev from udev properties and sysfs; a missing device reads as empty."""
     disk = disk_of(kname, p)
@@ -186,7 +209,7 @@ def read_dev(kname: str, props: Dict[str, str], p: Paths) -> Dev:
         disk=disk,
         devnode=os.path.join(p.dev, kname),
         fstype=props.get("ID_FS_TYPE", ""),
-        label=props.get("ID_FS_LABEL", ""),
+        label=fs_label(props),
         uuid=props.get("ID_FS_UUID", ""),
         partlabel=props.get("ID_PART_ENTRY_NAME", ""),
         size_bytes=sectors * 512,
@@ -228,9 +251,19 @@ def hold_matches(d: Dev, hold: Hold) -> bool:
     return hold.id.startswith(want + ":")
 
 
+def eligible(d: Dev) -> bool:
+    """The udev rule's candidate test, repeated: a removable disk, the USB
+    bus, or an SD card in a built-in slot. Every command that mounts goes
+    through skip_reason, so remount cannot mount an internal disk."""
+    return d.removable or d.id_bus == "usb" or (
+        d.kname.startswith("mmcblk") and d.mmc_type == "SD")
+
+
 def skip_reason(d: Dev, boot, holds: Dict[str, Hold], mounted: Set[str],
                 alive: Callable[[int], bool]) -> Optional[str]:
     """Why a device is not mounted, or None when it should be."""
+    if not KNAME_RE.fullmatch(d.kname):
+        return "not a kernel device name"
     if boot is BootUnknown:
         return "boot disk unknown"
     if boot is not None and d.disk == boot:
@@ -242,6 +275,8 @@ def skip_reason(d: Dev, boot, holds: Dict[str, Hold], mounted: Set[str],
         return "held by a write"
     if d.kname.startswith("mmcblk") and d.mmc_type != "SD":
         return "eMMC or unknown card type"
+    if not eligible(d):
+        return "not removable, not USB and not an SD card"
     if d.size_bytes <= 0:
         return "no medium"
     if not d.fstype:
@@ -255,7 +290,7 @@ def skip_reason(d: Dev, boot, holds: Dict[str, Hold], mounted: Set[str],
 
 def clean_component(text: str) -> str:
     """One safe path component: no slash, no control character, no leading dot."""
-    out = "".join("_" if (c == "/" or ord(c) < 0x20 or ord(c) == 0x7F) else c
+    out = "".join("_" if (c == "/" or ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F) else c
                   for c in text).strip(" ")
     if out.startswith("."):
         out = "_" + out[1:]
@@ -344,8 +379,33 @@ def parse_hold(text: str) -> Optional[Hold]:
 # ---------------------------------------------------------------------------
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_BUSY = 0, 1, 2, 3
-LOCK_WAIT = 5.0        # seconds to wait for a disk's lock, then busy
-MOUNT_TIMEOUT = 60     # seconds for mount, umount and sync of one device
+# The budget is kept below the unit's timeouts, so systemd never kills the
+# helper between a mount and its contract line: add (and remount) ends within
+# ADD_BUDGET, under TimeoutStartSec=90; remove within REMOVE_BUDGET, under
+# TimeoutStopSec=30. Each mount, umount or sync gets at most MOUNT_TIMEOUT
+# and never more than is left.
+LOCK_WAIT = 5.0        # eject and release: seconds to wait for a disk's lock, then busy
+MOUNT_TIMEOUT = 30     # seconds for one mount, umount or sync
+ADD_BUDGET = 80.0      # seconds for a whole add; most of it may go to waiting for the disk lock
+REMOVE_BUDGET = 25.0   # seconds for a whole remove
+STEP_RESERVE = 10.0    # an add or remove stops waiting for the lock this long before its end
+
+
+class Deadline:
+    """The end of a command's budget."""
+
+    def __init__(self, seconds: float):
+        self.end = time.monotonic() + seconds
+
+    def left(self) -> float:
+        return max(0.0, self.end - time.monotonic())
+
+    def step(self) -> float:
+        """The timeout for the next mount, umount or sync."""
+        return max(1.0, min(float(MOUNT_TIMEOUT), self.left()))
+
+    def lock_wait(self) -> float:
+        return max(0.0, self.left() - STEP_RESERVE)
 
 
 class Busy(Exception):
@@ -360,16 +420,29 @@ def run(argv: List[str], timeout: float):
     """Run a command found on PATH: (returncode, stdout, stderr).
 
     A command that is missing gives 127, one that outlives timeout is
-    killed and gives 124.
+    killed and gives 124. The command runs in a session of its own and is
+    not waited for after the kill: a mount stuck in the kernel (D state)
+    cannot die, and waiting for it would hold the helper past its budget.
     """
     try:
-        r = subprocess.run(argv, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return 124, "", "timed out"
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, errors="replace",
+                                start_new_session=True)
     except OSError as e:
         return 127, "", str(e)
-    return r.returncode, r.stdout, r.stderr
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        return 124, "", "timed out"
+    return proc.returncode, out, err
 
 
 def owner_uid() -> int:
@@ -419,8 +492,9 @@ def files_lock(p: Paths) -> FileLock:
     return FileLock(p, "files")
 
 
-def disk_lock(p: Paths, disk: str) -> FileLock:
-    return FileLock(p, disk, LOCK_WAIT)
+def disk_lock(p: Paths, disk: str, wait: Optional[float] = None) -> FileLock:
+    """A disk's lock, waited for LOCK_WAIT seconds unless wait is given."""
+    return FileLock(p, disk, LOCK_WAIT if wait is None else wait)
 
 
 def atomic_write(path: str, text: str) -> None:
@@ -502,19 +576,63 @@ def live_hold(p: Paths, d: Dev) -> bool:
     return False
 
 
-def mountinfo_mounted(d: Dev, p: Paths) -> bool:
-    """The device is mounted somewhere, by anyone (major:minor or source)."""
-    majmin = read_text(os.path.join(p.sysfs, "class", "block", d.kname, "dev"))
+def mountinfo_unescape(text: str) -> str:
+    """The kernel writes a blank, tab, newline and backslash as \\ooo."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), text)
+
+
+def read_mountinfo() -> List[tuple]:
+    """(major:minor, mount point, source) of every mount, from mountinfo."""
     text = read_text(os.environ.get("TF_MOUNTINFO", "/proc/self/mountinfo"))
+    out = []
     for row in text.split("\n"):
         left, sep, right = row.partition(" - ")
         fields = left.split()
-        if not sep or len(fields) < 3:
+        if not sep or len(fields) < 5:
             continue
         source = right.split()[1:2]
-        if (majmin and fields[2] == majmin) or source == [d.devnode]:
-            return True
-    return False
+        out.append((fields[2], mountinfo_unescape(fields[4]),
+                    mountinfo_unescape(source[0]) if source else ""))
+    return out
+
+
+def majmin_of(kname: str, p: Paths) -> str:
+    return read_text(os.path.join(p.sysfs, "class", "block", kname, "dev"))
+
+
+def mountinfo_mounted(d: Dev, p: Paths) -> bool:
+    """The device is mounted somewhere, by anyone (major:minor or source)."""
+    majmin = majmin_of(d.kname, p)
+    return any((majmin and m == majmin) or source == d.devnode
+               for m, _, source in read_mountinfo())
+
+
+def line_mounted(line: Line, mounts: List[tuple], p: Paths) -> bool:
+    """mountinfo shows the line's device at the line's mount point."""
+    majmin = majmin_of(os.path.basename(line.device), p)
+    return any(mp == line.mountpoint and (source == line.device or (majmin and m == majmin))
+               for m, mp, source in mounts)
+
+
+def prune(p: Paths) -> None:
+    """Drop the contract lines whose mount is gone.
+
+    A line is written after its mount and dropped after its umount; a helper
+    killed in between (a cancelled write, a stop timeout) leaves a line that
+    nothing is mounted at. Such a line would make add skip the next stick
+    under the same kernel name and remove report it pulled without eject.
+    Only mountinfo counts. The empty mount point goes with the line (rmdir).
+    """
+    with files_lock(p):
+        lines = read_lines(p)
+        mounts = read_mountinfo()
+        stale = [l for l in lines if not line_mounted(l, mounts, p)]
+        if not stale:
+            return
+        for l in stale:
+            log(f"{l.device} is no longer mounted at {l.mountpoint}: line dropped")
+            remove_dir(l.mountpoint)
+        atomic_write(contract_path(p), format_lines([l for l in lines if l not in stale]))
 
 
 def udev_props(kname: str, p: Paths) -> Dict[str, str]:
@@ -581,7 +699,9 @@ def remove_dir(path: str) -> None:
         pass
 
 
-def add_locked(d: Dev, p: Paths) -> int:
+def add_locked(d: Dev, p: Paths, deadline: Optional[Deadline] = None) -> int:
+    deadline = deadline or Deadline(ADD_BUDGET)
+    prune(p)
     if any(l.device == d.devnode for l in read_lines(p)) or mountinfo_mounted(d, p):
         return EXIT_OK
     if live_hold(p, d):
@@ -589,9 +709,12 @@ def add_locked(d: Dev, p: Paths) -> int:
         return EXIT_OK
     name, mp = reserve_mountpoint(d, p)
     rc, out, err = run(["mount", "--no-canonicalize", "-t", fs_driver(d.fstype),
-                        "-o", mount_options(d.fstype), d.devnode, mp], MOUNT_TIMEOUT)
+                        "-o", mount_options(d.fstype), d.devnode, mp], deadline.step())
     if rc != 0:
         log(f"mount of {d.devnode} failed ({rc}): {(err or out).strip()}")
+        if rc == 124:
+            # A mount that was killed may still finish in the kernel.
+            run(["umount", "-l", mp], 5)
         remove_dir(mp)
         return EXIT_FAIL
     kind = "card" if is_card(d, luns_on_parent(d, p)) else "stick"
@@ -601,8 +724,10 @@ def add_locked(d: Dev, p: Paths) -> int:
     return EXIT_OK
 
 
-def cmd_add(kname: str, p: Paths) -> int:
+def cmd_add(kname: str, p: Paths, deadline: Optional[Deadline] = None) -> int:
+    deadline = deadline or Deadline(ADD_BUDGET)
     d = read_dev(kname, udev_props(kname, p), p)
+    prune(p)
     mounted = {l.device for l in read_lines(p)}
     if mountinfo_mounted(d, p):
         mounted.add(d.devnode)
@@ -613,8 +738,10 @@ def cmd_add(kname: str, p: Paths) -> int:
         log(f"{kname} not mounted: {reason}")
         return EXIT_OK
     try:
-        with disk_lock(p, d.disk):
-            return add_locked(d, p)
+        # udev starts the units of all partitions of a stick at once: the
+        # second waits here while the first mounts, for most of the budget.
+        with disk_lock(p, d.disk, deadline.lock_wait()):
+            return add_locked(d, p, deadline)
     except Busy:
         log(f"{d.disk} is busy")
         return EXIT_BUSY
@@ -628,27 +755,34 @@ def medium_present(kname: str, p: Paths) -> bool:
 
 
 def cmd_remove(kname: str, p: Paths) -> int:
+    deadline = Deadline(REMOVE_BUDGET)
     dev = os.path.join(p.dev, kname)
+    prune(p)
     line = next((l for l in read_lines(p) if l.device == dev), None)
     if line is None:
         return EXIT_OK
     try:
-        with disk_lock(p, line.disk):
+        # As long as an add of the same disk can hold the lock, so a stick
+        # pulled while it was being mounted still loses its line.
+        with disk_lock(p, line.disk, deadline.lock_wait()):
+            prune(p)
+            if not any(l.device == dev for l in read_lines(p)):
+                return EXIT_OK
             event = (line.name, "unclean")
             lazy = True
             if medium_present(kname, p):
                 # The stick is still there (shutdown, or a udev remove with
                 # the medium in place): unmount it properly, no event.
                 event = None
-                run(["sync", "-f", line.mountpoint], MOUNT_TIMEOUT)
-                lazy = run(["umount", line.mountpoint], MOUNT_TIMEOUT)[0] != 0
+                run(["sync", "-f", line.mountpoint], deadline.step())
+                lazy = run(["umount", line.mountpoint], deadline.step())[0] != 0
             else:
-                _, state, _ = run(["systemctl", "is-system-running"], 10)
+                _, state, _ = run(["systemctl", "is-system-running"], min(10.0, deadline.step()))
                 if state.strip() == "stopping":
                     event = None
             if lazy:
                 # Pulled, or busy: whatever is open stays open until closed.
-                rc, out, err = run(["umount", "-l", line.mountpoint], MOUNT_TIMEOUT)
+                rc, out, err = run(["umount", "-l", line.mountpoint], deadline.step())
                 if rc != 0:
                     log(f"umount -l {line.mountpoint} failed: {(err or out).strip()}")
             remove_dir(line.mountpoint)
@@ -671,14 +805,32 @@ def power_off(disk: str, p: Paths) -> None:
         log(f"power off of {disk} failed: {e}")
 
 
+def released_path(p: Paths, disk: str) -> str:
+    return os.path.join(state_dir(p), "released", disk)
+
+
 def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     """Unmount every partition of a disk; None when none was mounted.
 
-    Runs under the disk's lock. A busy mount leaves its line and gives 3;
-    partitions unmounted before it stay unmounted and lose their line.
-    event: this is an eject (clean event, power off a stick).
+    Runs under the disk's lock. A busy first mount leaves every line and
+    gives 3 (nothing changed); when a later one is busy, the partitions
+    unmounted before it stay unmounted and lose their line, the ones still
+    mounted are printed and the answer is 1.
+    event: this is an eject (clean event, power off a stick). Without it
+    (release), the partitions are recorded first, so remount mounts exactly
+    these again, even when the release is killed half-way.
     """
+    prune(p)
     lines = [l for l in read_lines(p) if l.disk == disk]
+    if not event:
+        record = "".join(os.path.basename(l.device) + "\n" for l in lines)
+        if record:
+            atomic_write(released_path(p, disk), record)
+        else:
+            try:
+                os.unlink(released_path(p, disk))
+            except OSError:
+                pass
     if not lines:
         return None
     if event:
@@ -719,7 +871,7 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
     if arg == "all" and event:
         disks = sorted({l.disk for l in read_lines(p)})
     else:
-        disks = [os.path.basename(arg)]
+        disks = [arg]
     results = []
     for disk in disks:
         try:
@@ -737,17 +889,19 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
 
 
 def cmd_remount(disk: str, p: Paths) -> int:
-    disk = os.path.basename(disk)
-    base = os.path.realpath(os.path.join(p.sysfs, "class", "block", disk))
+    """Mount again what release took off this disk, and nothing else."""
+    path = released_path(p, disk)
+    parts = [n for n in read_text(path).split("\n")
+             if KNAME_RE.fullmatch(n) and disk_of(n, p) == disk]
     try:
-        parts = sorted(n for n in os.listdir(base)
-                       if os.path.exists(os.path.join(base, n, "partition")))
+        os.unlink(path)
     except OSError:
-        parts = []
+        pass
     # add itself, not a udev change event: after release the unit of each
     # partition is still active (RemainAfterExit=), so systemd would not
     # start it again and the stick stayed unmounted.
-    codes = [cmd_add(name, p) for name in parts or [disk]]
+    deadline = Deadline(ADD_BUDGET)
+    codes = [cmd_add(name, p, deadline) for name in parts]
     if EXIT_FAIL in codes:
         return EXIT_FAIL
     return EXIT_BUSY if EXIT_BUSY in codes else EXIT_OK
@@ -761,12 +915,16 @@ def main(argv: List[str]) -> int:
         print(USAGE, file=sys.stderr)
         return EXIT_USAGE
     cmd, arg = argv
+    if not KNAME_RE.fullmatch(arg):
+        # Only a kernel name (or all): no path, no ".", nothing for a glob.
+        print(USAGE, file=sys.stderr)
+        return EXIT_USAGE
     p = paths()
     try:
         if cmd == "add":
-            return cmd_add(os.path.basename(arg), p)
+            return cmd_add(arg, p)
         if cmd == "remove":
-            return cmd_remove(os.path.basename(arg), p)
+            return cmd_remove(arg, p)
         if cmd == "eject":
             return cmd_unmount(arg, p, True)
         if cmd == "release":

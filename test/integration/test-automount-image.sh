@@ -94,7 +94,7 @@ if [[ -f "$X/$UNIT" ]]; then
     for want in \
         'BindsTo=dev-%i.device' \
         'After=dev-%i.device' \
-        'TimeoutStartSec=30' \
+        'TimeoutStartSec=90' \
         'TimeoutStopSec=30' \
         'ExecStart=/usr/libexec/thinfloe/thinfloe-automount add %i' \
         'ExecStop=/usr/libexec/thinfloe/thinfloe-automount remove %i'; do

@@ -22,8 +22,11 @@ ready (`SYSTEMD_READY=0`, the unit stops and unmounts), a change with one
 makes it ready again and starts the unit.
 
 Name: the file system label, else its UUID, else `disk`; `/`, control
-characters and leading dots replaced, cut to 255 bytes, a name in use gets a
-number (`MYSTICK1`), as udisks2 does. Options: vfat
+characters (C1 too) and leading dots replaced, cut to 255 bytes, a name in
+use gets a number (`MYSTICK1`), as udisks2 does. The label is udev's
+`ID_FS_LABEL_ENC` with its `\xNN` escapes decoded, as udisks2 reads it:
+`ID_FS_LABEL` has `_` for every blank, so "My Passport" would become
+`My_Passport`; it is mounted at `/media/tfuser/My Passport`. Options: vfat
 `uid=1001,gid=1001,shortname=mixed,utf8=1,showexec,flush`, exfat
 `uid=1001,gid=1001,iocharset=utf8,errors=remount-ro`, ntfs (kernel
 `ntfs3`) `uid=1001,gid=1001,windows_names`; ext2/3/4, btrfs and xfs as
@@ -41,6 +44,9 @@ mounted.
   ThinFloe stick and a stick the writer has just written stay unmounted,
 - a disk with a live write hold (below),
 - an `mmcblk` device whose card type is not `SD`,
+- a device that is not on a removable disk, not on USB and not an SD card
+  in a built-in slot: the udev rule's test, done again, so `remount` or an
+  `add` by hand never mounts an internal disk,
 - no medium, no file system, a file system not in the list, or a device
   mounted already.
 
@@ -56,6 +62,13 @@ per mounted partition:
 the same USB device, or a built-in SD slot). Readers ignore unknown trailing
 fields. The menu's Eject tile and panel read it (`removable.rs`).
 
+A line counts only while `/proc/self/mountinfo` shows its device at its
+mount point. Every command first drops the lines whose mount is gone, with
+their empty directories: a helper killed between a umount and the update of
+the file (a cancelled write during `release`) would otherwise leave a line
+that makes `add` skip the next stick under the same kernel name and
+`remove` report it pulled without eject.
+
 `/run/thinfloe/removable.event` holds the last removal, one line
 `seq<TAB>name<TAB>clean|unclean`: `clean` after an eject, `unclean` for a
 stick pulled or a card taken out while mounted. A shutdown records nothing.
@@ -65,7 +78,8 @@ stick pulled or a card taken out while mounted. A shutdown records nothing.
 
 `thinfloe-automount add|remove <kname> | eject <disk>|all | release|remount <disk>`;
 exit 0 done, 1 failure (a partly unmounted disk too: the partitions still
-mounted are printed), 2 usage, 3 busy (nothing changed). The menu calls
+mounted are printed), 2 usage (also an argument that is not a kernel name:
+no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
 `sudo -n /usr/libexec/thinfloe/thinfloe-automount eject …`; tfuser's
 `NOPASSWD` covers it.
 
@@ -74,11 +88,14 @@ mounted are printed), 2 usage, 3 busy (nothing changed). The menu calls
   event.
 - `eject`: `sync -f` and `umount` of every partition of the disk, the
   lines go, a `clean` event; then a stick is powered off (below).
-- `release`: as eject, without event and power-off; for the writer.
-- `remount`: `add` for each partition of the disk (the disk itself when it
-  has none), with the same locks, hold check and skip rules. Not a udev
-  change event: after `release` the partitions' units are still active, and
-  systemd would not start them again.
+- `release`: as eject, without event and power-off; for the writer. Before
+  the first umount it records the partitions it takes off in
+  `/run/thinfloe/automount/released/<disk>`.
+- `remount`: `add` for each partition that record names, and nothing else,
+  with the same locks, hold check and skip rules; the record goes. A release
+  killed half-way is covered: its record is written, and the stale lines are
+  dropped. Not a udev change event: after `release` the partitions' units
+  are still active, and systemd would not start them again.
 
 ## Write hold
 
@@ -98,9 +115,21 @@ stick is not upgraded in place.
 No lock is held across a mount, umount or sync of another disk. One short
 lock (`/run/thinfloe/automount/`) covers the contract file and the choice
 of a mount name; one lock per disk covers that disk's mount, umount and
-power-off. `eject` and `release` wait 5 s for a disk lock and then answer
-busy; mount, umount and sync each give up after 60 s. Flushing is `sync -f`
-per mount, never a global `sync`.
+power-off. Flushing is `sync -f` per mount, never a global `sync`.
+
+Timeouts: one mount, umount or sync gets at most 30 s and is then killed
+(and not waited for: a mount stuck in the kernel cannot die). The helper
+keeps within budgets below the unit's timeouts, so systemd never kills it
+between a mount and its line:
+
+- `add` ends within 80 s (`TimeoutStartSec=90`). udev starts the units of
+  all partitions of a stick at once; the second waits for the disk lock
+  while the first mounts, up to 10 s before the end of its budget, so both
+  are mounted. `remount` shares one such budget for all its partitions.
+- `remove` ends within 25 s (`TimeoutStopSec=30`): it waits for the disk
+  lock up to 15 s (an `add` of a stick pulled while it was mounted), then
+  `sync -f`, `umount` and `umount -l` share what is left.
+- `eject` and `release` wait 5 s for a disk lock and then answer busy.
 
 ## Power off, restart
 

@@ -131,9 +131,11 @@ after it in the plan, in that order. All three are in this round.
   unit as well; the builder verifies this on QEMU and with a real reader.
 - `overlay/etc/systemd/system/thinfloe-automount@.service`: `Type=oneshot`,
   `RemainAfterExit=yes`, `ExecStart=/usr/libexec/thinfloe/thinfloe-automount
-  add %i`, `ExecStop=… remove %i`, `TimeoutStartSec=30` so a hung mount gives
+  add %i`, `ExecStop=… remove %i`, `TimeoutStartSec=90` so a hung mount gives
   up, and an explicit `TimeoutStopSec` (about 30 s; the real flush happens in
-  the menu before restart and power off, see below). Not enabled; started
+  the menu before restart and power off, see below). The helper keeps its own
+  budget below both (final review: add 80 s, of which most may go to waiting
+  for the disk lock of a second partition; remove 25 s). Not enabled; started
   only by udev, at boot too (udev trigger replays devices plugged in before
   boot).
 - `overlay/usr/libexec/thinfloe/thinfloe-automount` (root; language the
