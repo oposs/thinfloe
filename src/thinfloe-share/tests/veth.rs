@@ -297,3 +297,82 @@ fn send_to_owly_receiver() {
         assert!(!folder.exists(), "an empty device folder goes at the stop");
     });
 }
+
+/// Owly's receiver "Sam's Mac" on `a`, announced over mDNS; files go to `got`.
+async fn sams_mac(
+    a: End,
+    got: &Path,
+) -> (
+    tokio::sync::mpsc::Receiver<ReceiverEvent>,
+    owly_airdrop::driver::mdns::Registration,
+) {
+    let identity = Identity::generate().unwrap();
+    let addr = SocketAddrV6::new(a.addr, 8771, 0, a.index);
+    let (receiver, events) = Receiver::bind(
+        addr,
+        &identity,
+        Options::new(Config::new("Sam's Mac"), got.to_path_buf()),
+    )
+    .await
+    .unwrap();
+    tokio::spawn(receiver.run());
+    let reg = Mdns::new(a.index)
+        .register(Service {
+            instance: "a1a2a3a4a5a6".into(),
+            host: "sams-mac".into(),
+            port: 8771,
+            addr: a.addr,
+            flags: RECEIVER_FLAGS,
+        })
+        .await
+        .unwrap();
+    (events, reg)
+}
+
+/// The names of the next accepted offer's files.
+async fn next_offer(events: &mut tokio::sync::mpsc::Receiver<ReceiverEvent>) -> Vec<String> {
+    let paths = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await.expect("receiver events") {
+                ReceiverEvent::Request(r) => r.accept(),
+                ReceiverEvent::Received { paths, .. } => return paths,
+                ReceiverEvent::Failed { reason, .. } => panic!("upload failed: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("an offer within 30 s");
+    let mut names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_leftover_outbox_folder_is_watched() {
+    let Some((a, _b)) = enter("a_leftover_outbox_folder_is_watched") else {
+        return;
+    };
+    runtime().block_on(async {
+        let env = Env::new("leftover");
+        // An earlier run stopped with a file waiting for Sam's Mac.
+        let folder = env.media("outbox/Sam's Mac");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("left.txt"), b"old").unwrap();
+        let got = env.dir.join("got");
+        let (mut events, _reg) = sams_mac(a, &got).await;
+        let child = env.spawn("");
+        assert_eq!(next_offer(&mut events).await, ["left.txt"]);
+        until(Duration::from_secs(10), "left.txt deleted", || {
+            !folder.join("left.txt").exists()
+        })
+        .await;
+        // A file dropped in later goes too: the folder is watched in this run.
+        std::fs::write(folder.join("new.txt"), b"new").unwrap();
+        assert_eq!(next_offer(&mut events).await, ["new.txt"]);
+        stop(child);
+    });
+}

@@ -37,15 +37,18 @@ impl Env {
     }
 
     fn spawn(&self) -> Child {
-        Command::new(BIN)
-            .env("XDG_RUNTIME_DIR", self.dir.join("run"))
+        self.command().spawn().unwrap()
+    }
+
+    fn command(&self) -> Command {
+        let mut c = Command::new(BIN);
+        c.env("XDG_RUNTIME_DIR", self.dir.join("run"))
             .env("HOME", self.dir.join("home"))
             .env("TF_SHARE_CONFIG", self.dir.join("share"))
             .env("TF_SHARE_RADIO", self.dir.join("helper.sh"))
             .env("TF_SHARE_ROOT", self.dir.join("media"))
-            .env_remove("TF_OSD_SOCKET")
-            .spawn()
-            .unwrap()
+            .env_remove("TF_OSD_SOCKET");
+        c
     }
 
     fn state(&self) -> Option<String> {
@@ -141,6 +144,44 @@ fn helper_dies_writes_error_state() {
         first.len() > "error\t".len(),
         "the error has a text: {state:?}"
     );
+}
+
+#[test]
+fn sigterm_while_the_radio_starts() {
+    let env = Env::new("hang");
+    // A system bus that takes the connection and never answers: the owlyd
+    // lookup after the up line hangs.
+    use std::os::linux::net::SocketAddrExt;
+    let bus_name = format!("floedrop-test-bus-{}", std::process::id());
+    let bus_addr = std::os::unix::net::SocketAddr::from_abstract_name(&bus_name).unwrap();
+    let bus = std::os::unix::net::UnixListener::bind_addr(&bus_addr).unwrap();
+    env.helper("printf 'up\\tawdl0\\texclusive\\t6\\t\\n'\ntouch \"$D/started\"\ncat >/dev/null\ntouch \"$D/eof\"");
+    env.config("enabled=true\n");
+    let mut child = env
+        .command()
+        .env(
+            "DBUS_SYSTEM_BUS_ADDRESS",
+            format!("unix:abstract={bus_name}"),
+        )
+        .spawn()
+        .unwrap();
+    assert!(wait_for(Duration::from_secs(10), || env.exists("started")));
+    let (_conn, _) = bus.accept().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(env.state().as_deref(), Some("starting\n"));
+    let t0 = Instant::now();
+    // SAFETY: kill with a valid pid and signal number.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(3)).code(),
+        Some(0)
+    );
+    assert!(t0.elapsed() < Duration::from_secs(3));
+    assert!(
+        wait_for(Duration::from_secs(2), || env.exists("eof")),
+        "the helper saw no EOF"
+    );
+    assert!(env.state().unwrap().starts_with("error\t"));
 }
 
 #[test]

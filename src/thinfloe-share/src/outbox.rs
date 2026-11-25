@@ -279,6 +279,8 @@ impl Outbox {
         let owned: HashSet<&str> = self.devs.iter().map(|d| d.folder.as_str()).collect();
         // A folder of that name nobody owns (left from an earlier run) is taken over.
         let folder = if !owned.contains(wanted.as_str()) && is_real_dir(&self.root.join(&wanted)) {
+            // A new run has a new inotify instance: the daemon watches it again.
+            self.new_folders.push(wanted.clone());
             wanted
         } else {
             let mut taken: Vec<String> = fs::read_dir(&self.root)
@@ -872,6 +874,16 @@ mod tests {
         assert_eq!(t.ob.devices()[0].folder, JANE);
         t.tick(3);
         assert_eq!(t.calls(), vec![("id1".to_string(), vec![a])]);
+    }
+
+    #[test]
+    fn a_taken_over_folder_is_listed_for_watching() {
+        // A new run (new inotify instance) must watch a folder an earlier run left.
+        let mut t = T::new("ob-left-watch");
+        fs::create_dir_all(t.root.join(JANE)).unwrap();
+        t.put(JANE, "a.jpg");
+        t.seen("id1", JANE, 0);
+        assert_eq!(t.ob.take_new_folders(), vec![JANE.to_string()]);
     }
 
     #[test]

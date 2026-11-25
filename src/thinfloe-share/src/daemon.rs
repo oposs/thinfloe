@@ -50,6 +50,8 @@ const REDISCOVER: Duration = Duration::from_secs(20);
 const RETRY: Duration = Duration::from_secs(2);
 /// The longest one \`/Discover\` may hold up the others.
 const DISCOVER_WAIT: Duration = Duration::from_secs(3);
+/// The longest the owlyd lookup at radio start may take (zbus waits 25 s).
+const OWLYD_WAIT: Duration = Duration::from_secs(5);
 /// The outbox thread looks at its folders at least this often.
 const OUTBOX_MAX_SLEEP: Duration = Duration::from_secs(5);
 /// State text when the helper ends without saying why.
@@ -111,6 +113,23 @@ pub fn ask_total(offer: &Offer) -> u64 {
             .iter()
             .fold(0u64, |t, f| t.saturating_add(f.size.unwrap_or(0))),
         Offer::Urls(_) => 0,
+    }
+}
+
+/// What to say to an `/Ask`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Accept,
+    /// Declined, with the note to show, if any.
+    Decline(Option<(osd::Tone, String)>),
+}
+
+/// Files are taken iff they fit in `free` bytes; links are never taken.
+pub fn answer(offer: &Offer, free: u64, sender: &str) -> Answer {
+    match offer {
+        Offer::Urls(_) => Answer::Decline(None),
+        Offer::Files(_) if inbox::decide(ask_total(offer), free) => Answer::Accept,
+        Offer::Files(_) => Answer::Decline(Some((osd::Tone::Warn, inbox::refused_note(sender)))),
     }
 }
 
@@ -341,20 +360,39 @@ async fn run(
     let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
     let mut airdrop: Option<Airdrop> = None;
 
-    let exit = loop {
+    let exit = 'main: loop {
         tokio::select! {
             line = lines.next_line() => match line {
                 Ok(Some(l)) => match parse_helper_line(&l) {
                     Some(HelperLine::Up { iface, mode, channel, flags }) if airdrop.is_none() => {
                         let no_ble = flags.iter().any(|f| f == "no-ble");
-                        match Airdrop::start(&iface, &name, no_ble, &paths).await {
+                        // Signals and the helper's lines still count while the radio starts.
+                        let started = {
+                            let start = Airdrop::start(&iface, &name, no_ble, &paths);
+                            tokio::pin!(start);
+                            loop {
+                                tokio::select! {
+                                    r = &mut start => break r,
+                                    _ = term.recv() => break 'main Exit::Term,
+                                    _ = int.recv() => break 'main Exit::Term,
+                                    line = lines.next_line() => match line {
+                                        Ok(Some(l)) => match parse_helper_line(&l) {
+                                            Some(HelperLine::Error(text)) => break 'main Exit::Error(text),
+                                            _ => log(format!("the helper said {l:?}, ignored")),
+                                        },
+                                        Ok(None) | Err(_) => break 'main Exit::Error(HELPER_GONE.into()),
+                                    },
+                                }
+                            }
+                        };
+                        match started {
                             Ok(a) => {
                                 log(format!("ready on {iface} ({mode}, channel {channel}) as {name:?}"));
                                 airdrop = Some(a);
                                 st.head = Head::Ready { iface, mode, channel, flags };
                                 st.write();
                             }
-                            Err(e) => break Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
+                            Err(e) => break 'main Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
                         }
                     }
                     Some(HelperLine::Up { .. }) => log("a second up line from the helper, ignored"),
@@ -700,7 +738,15 @@ impl Airdrop {
         no_ble: bool,
         paths: &Paths,
     ) -> Result<Airdrop, String> {
-        let (radio, iface, announce) = match owlyd_link(iface_name).await {
+        let link = tokio::time::timeout(OWLYD_WAIT, owlyd_link(iface_name))
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "owlyd did not answer within {} s",
+                    OWLYD_WAIT.as_secs()
+                ))
+            });
+        let (radio, iface, announce) = match link {
             Ok((radio, link)) => {
                 let addr: Ipv6Addr = link
                     .address
@@ -915,35 +961,42 @@ impl Airdrop {
         });
     }
 
+    /// The sender of an accepted request, forgotten here; "iPhone" when unknown.
+    fn sender_of(&mut self, generation: u64, id: u64) -> String {
+        self.pending
+            .remove(&(generation, id))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "iPhone".into())
+    }
+
     fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) {
         match ev {
             ReceiverEvent::Request(r) => {
                 let sender = r.ask.sender_computer_name.clone();
-                if matches!(r.ask.offer, Offer::Urls(_)) {
-                    log(format!(
-                        "{sender:?} offered links; FloeDrop takes files only"
-                    ));
-                    r.decline();
-                    return;
-                }
-                let total = ask_total(&r.ask.offer);
                 let free = inbox::free_bytes(&self.paths.root).unwrap_or_else(|e| {
                     log(format!("{}: {e}", self.paths.root.display()));
                     0
                 });
-                if inbox::decide(total, free) {
-                    self.pending.insert((generation, r.id), sender);
-                    r.accept();
-                } else {
-                    log(format!(
-                        "{sender:?} offered {total} bytes, {free} free: declined"
-                    ));
-                    osd::note(osd::Tone::Warn, &inbox::refused_note(&sender));
-                    r.decline();
+                match answer(&r.ask.offer, free, &sender) {
+                    Answer::Accept => {
+                        self.pending.insert((generation, r.id), sender);
+                        r.accept();
+                    }
+                    Answer::Decline(note) => {
+                        log(format!(
+                            "declined an offer from {sender:?} ({} bytes, {free} free, links: {})",
+                            ask_total(&r.ask.offer),
+                            matches!(r.ask.offer, Offer::Urls(_))
+                        ));
+                        if let Some((tone, text)) = note {
+                            osd::note(tone, &text);
+                        }
+                        r.decline();
+                    }
                 }
             }
             ReceiverEvent::Received { id, paths } => {
-                let sender = self.pending.remove(&(generation, id)).unwrap_or_default();
+                let sender = self.sender_of(generation, id);
                 match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
                     Ok(placed) if placed.is_empty() => {}
                     Ok(placed) => {
@@ -954,13 +1007,15 @@ impl Airdrop {
                         for p in &paths {
                             remove_entry(p);
                         }
+                        osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
                     }
                 }
             }
             ReceiverEvent::Failed { id, reason } => {
                 // Owly's sandbox for the upload is gone already; nothing was placed.
-                let sender = self.pending.remove(&(generation, id)).unwrap_or_default();
+                let sender = self.sender_of(generation, id);
                 log(format!("a transfer from {sender:?} failed: {reason}"));
+                osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
             }
             ReceiverEvent::Withdrawn { id } => {
                 self.pending.remove(&(generation, id));
@@ -1111,6 +1166,25 @@ fe800000000000000000000000000002 03 40 20 80     eth0
             Some(("fe80::2".parse().unwrap(), 3))
         );
         assert_eq!(if_inet6_link_local(text, "lo"), None);
+    }
+
+    #[test]
+    fn an_offer_that_does_not_fit_is_declined_with_a_note() {
+        let offer = Offer::Files(vec![file(Some(10)), file(Some(5))]);
+        assert_eq!(answer(&offer, 15, "Jane's iPhone"), Answer::Accept);
+        assert_eq!(
+            answer(&offer, 14, "Jane's iPhone"),
+            Answer::Decline(Some((
+                osd::Tone::Warn,
+                "Files from Jane's iPhone refused: the FloeDrop folder is full".into()
+            )))
+        );
+        // Links are not taken, and that is no reason for a note.
+        let links = Offer::Urls(vec!["https://example.org".into()]);
+        assert_eq!(
+            answer(&links, 1 << 30, "Jane's iPhone"),
+            Answer::Decline(None)
+        );
     }
 
     #[test]

@@ -142,6 +142,11 @@ pub fn refused_note(sender: &str) -> String {
     format!("Files from {sender} refused: the FloeDrop folder is full")
 }
 
+/// OSD text when an accepted transfer fails.
+pub fn failed_note(sender: &str) -> String {
+    format!("Files from {sender} could not be received")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +305,14 @@ mod tests {
         assert_eq!(
             refused_note("Jane's iPhone"),
             "Files from Jane's iPhone refused: the FloeDrop folder is full"
+        );
+    }
+
+    #[test]
+    fn failed_note_text() {
+        assert_eq!(
+            failed_note("Jane's iPhone"),
+            "Files from Jane's iPhone could not be received"
         );
     }
 }
