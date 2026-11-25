@@ -1,0 +1,63 @@
+# owlyd, Owly's radio service: it owns the Wi-Fi radio and leases it out
+# over the system D-Bus API (io.github.t4t5.Owly.Radio1). D-Bus starts it
+# on the first call (io.github.t4t5.Owly.service), so it needn't be enabled.
+#
+# It runs as root's user, for the files root owns that a session changes
+# (mt76's debugfs, /proc/sys/net), but with CAP_NET_ADMIN and CAP_NET_RAW
+# only: the capabilities AWDL and hostapd need, which hostapd inherits. It parses
+# nothing above AWDL; AirDrop itself runs as the user it receives for.
+
+[Unit]
+Description=Owly radio service
+Documentation=https://github.com/t4t5/owly
+After=dbus.service NetworkManager.service
+# mt76's power management is in debugfs, which owlyd can't mount without
+# CAP_SYS_ADMIN: have systemd mount it first, where it doesn't at boot.
+Wants=sys-kernel-debug.mount
+After=sys-kernel-debug.mount
+
+[Service]
+Type=dbus
+BusName=io.github.t4t5.Owly
+ExecStart=/usr/lib/owly/owlyd
+Restart=on-failure
+
+# /run/owly holds the recovery journal, which has to outlive a crash of
+# owlyd so the next start can give Wi-Fi back.
+RuntimeDirectory=owly
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Netlink for nl80211 and rtnetlink, packet sockets for AWDL's capture and
+# injection, Unix sockets for D-Bus and hostapd, IP sockets for interface
+# ioctls.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET AF_INET AF_INET6
+# awdl0 is a TAP device.
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+# Not ProtectKernelTunables: a session sets net sysctls (accept_dad,
+# disable_ipv6) and mt76's power management in debugfs.
+
+[Install]
+WantedBy=multi-user.target

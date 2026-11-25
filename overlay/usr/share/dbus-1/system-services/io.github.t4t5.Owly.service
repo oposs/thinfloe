@@ -1,0 +1,6 @@
+# D-Bus starts owlyd through systemd on the first call to it.
+[D-BUS Service]
+Name=io.github.t4t5.Owly
+Exec=/bin/false
+User=root
+SystemdService=owlyd.service

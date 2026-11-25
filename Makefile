@@ -664,6 +664,7 @@ test-integration: rootfs
 	@$(TEST_ENV) test/integration/test-slim-last-run.sh
 	@$(TEST_ENV) test/integration/test-initramfs-drivers.sh
 	@$(TEST_ENV) test/integration/test-image-size.sh
+	@$(TEST_ENV) test/integration/test-floedrop-image.sh
 	@$(TEST_ENV) test/integration/test-labwc-config-merge.sh
 	@$(TEST_ENV) test/integration/test-labwc-scale.sh
 	@$(TEST_ENV) test/integration/test-initramfs-home.sh
