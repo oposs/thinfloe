@@ -151,6 +151,18 @@ def usb_device_of(disk_dir: str) -> Optional[str]:
     return None
 
 
+def drive_serial(props: Dict[str, str]) -> str:
+    """The serial thinfloe-upgrade uses: lsblk SERIAL, else WWN.
+
+    lsblk takes SERIAL from udev ID_SCSI_SERIAL, then ID_SERIAL_SHORT, and
+    WWN from ID_WWN_WITH_EXTENSION, then ID_WWN.
+    """
+    for key in ("ID_SCSI_SERIAL", "ID_SERIAL_SHORT", "ID_WWN_WITH_EXTENSION", "ID_WWN"):
+        if props.get(key):
+            return props[key]
+    return ""
+
+
 def read_dev(kname: str, props: Dict[str, str], p: Paths) -> Dev:
     """A Dev from udev properties and sysfs; a missing device reads as empty."""
     disk = disk_of(kname, p)
@@ -176,7 +188,7 @@ def read_dev(kname: str, props: Dict[str, str], p: Paths) -> Dev:
         mmc_type=mmc_type,
         flash_flags={k for k in FLASH_KINDS if props.get("ID_DRIVE_FLASH_" + k) == "1"},
         usb_parent=usb_device_of(disk_dir),
-        serial=props.get("ID_SERIAL_SHORT") or props.get("ID_WWN", ""),
+        serial=drive_serial(props),
     )
 
 
@@ -201,10 +213,11 @@ def hold_matches(d: Dev, hold: Hold) -> bool:
     """The hold's drive is the one now under this kernel name.
 
     Only the serial part of the id is compared: the size and fingerprint
-    change while the writer repartitions the stick.
+    change while the writer repartitions the stick. A serial may itself
+    contain ":", so the prefix is compared, not the first field.
     """
     want = f"sn-{d.serial}" if d.serial else "nosn"
-    return hold.id.split(":", 1)[0] == want
+    return hold.id.startswith(want + ":")
 
 
 def skip_reason(d: Dev, boot, holds: Dict[str, Hold], mounted: Set[str],
@@ -267,6 +280,11 @@ def mount_options(fstype: str) -> Optional[str]:
     if own is None:
         return None
     return f"{own},{TAIL_OPTIONS}" if own else TAIL_OPTIONS
+
+
+def fs_driver(fstype: str) -> str:
+    """The -t value for mount: blkid says ntfs, the kernel driver is ntfs3."""
+    return "ntfs3" if fstype == "ntfs" else fstype
 
 
 def is_card(d: Dev, luns_on_parent: int) -> bool:

@@ -141,6 +141,12 @@ class SkipRules(Base):
         self.assertIn("filesystem", self.reason(make_dev(fstype="iso9660")))
         self.assertIsNone(self.reason(make_dev()))
 
+    def test_hold_with_colon_in_serial(self):
+        hold = {"sdb": mod.Hold(1, "sn-AA:BB:16:3f")}
+        self.assertIn("held", self.reason(make_dev(serial="AA:BB"), holds=hold))
+        # A different serial is not held.
+        self.assertIsNone(self.reason(make_dev(serial="CC"), holds=hold))
+
     def test_hold_without_serial_matches_nosn(self):
         hold = {"sdb": mod.Hold(1, "nosn:16:3f")}
         self.assertIn("held", self.reason(make_dev(serial=""), holds=hold))
@@ -161,6 +167,14 @@ class ReadDev(Base):
         self.assertEqual((d.model, d.id_bus, d.serial, d.removable), ("Flash", "usb", "AA", True))
         self.assertEqual(d.flash_flags, {"SD"})
         self.assertIsNone(d.mmc_type)
+
+    def test_serial_order_follows_lsblk(self):
+        order = ["ID_SCSI_SERIAL", "ID_SERIAL_SHORT", "ID_WWN_WITH_EXTENSION", "ID_WWN"]
+        for i, key in enumerate(order):
+            props = {k: k + "-v" for k in order[i:]}
+            self.assertEqual(mod.drive_serial(props), key + "-v")
+        self.assertEqual(mod.drive_serial({}), "")
+        self.assertEqual(mod.read_dev("sdz1", {"ID_SCSI_SERIAL": "S", "ID_SERIAL_SHORT": "T"}, self.p).serial, "S")
 
     def test_read_dev_mmc_type_and_missing_sysfs(self):
         self.add_disk("mmcblk0", parts=["mmcblk0p1"], bus="mmc", removable="0", mmc_type="SD")
@@ -211,6 +225,12 @@ class Options(Base):
             self.assertEqual(mod.mount_options(fs), "nosuid,nodev", fs)
         self.assertIsNone(mod.mount_options("iso9660"))
         self.assertIsNone(mod.mount_options(""))
+
+    def test_fs_driver(self):
+        self.assertEqual(mod.fs_driver("ntfs"), "ntfs3")
+        for fs in ("vfat", "exfat", "ext4", "btrfs", "xfs"):
+            self.assertEqual(mod.fs_driver(fs), fs)
+        self.assertIn("windows_names", mod.mount_options("ntfs"))
 
     def test_is_card(self):
         self.assertTrue(mod.is_card(make_dev(flash_flags={"SD"}), 1))
