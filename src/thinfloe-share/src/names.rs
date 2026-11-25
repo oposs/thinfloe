@@ -24,6 +24,17 @@ pub fn safe(name: &str, fallback: &str) -> String {
     s
 }
 
+/// Like `unique` for a folder name: a dot is part of the name, so " (N)" is always appended.
+pub fn unique_dir(dir_entries: &[String], wanted: &str) -> String {
+    if !dir_entries.iter().any(|e| e == wanted) {
+        return wanted.to_string();
+    }
+    (2u32..)
+        .map(|n| format!("{wanted} ({n})"))
+        .find(|c| !dir_entries.iter().any(|e| e == c))
+        .expect("an unused suffix exists")
+}
+
 /// `wanted`, or `wanted` with " (N)" before the last extension, so it is not in `dir_entries`.
 pub fn unique(dir_entries: &[String], wanted: &str) -> String {
     if !dir_entries.iter().any(|e| e == wanted) {
@@ -82,5 +93,20 @@ mod tests {
             unique(&["IMG_0042.HEIC".into()], "IMG_0042.HEIC"),
             "IMG_0042 (2).HEIC"
         );
+    }
+    #[test]
+    fn folder_suffix_ignores_dots() {
+        assert_eq!(
+            unique_dir(&["Tobias Q. iPhone".into()], "Tobias Q. iPhone"),
+            "Tobias Q. iPhone (2)"
+        );
+        assert_eq!(
+            unique_dir(
+                &["iPhone 15.5".into(), "iPhone 15.5 (2)".into()],
+                "iPhone 15.5"
+            ),
+            "iPhone 15.5 (3)"
+        );
+        assert_eq!(unique_dir(&[], "iPhone 15.5"), "iPhone 15.5");
     }
 }
