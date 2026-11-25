@@ -598,6 +598,17 @@ struct Target {
 }
 
 type Targets = Arc<Mutex<HashMap<String, Target>>>;
+
+/// Forgets the targets of service IDs the outbox no longer knows.
+fn forget_targets(targets: &Targets, dropped: &[String]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let mut map = targets.lock().unwrap();
+    for id in dropped {
+        map.remove(id);
+    }
+}
 type WatchMap = Arc<Mutex<HashMap<WatchDescriptor, String>>>;
 
 struct ChanTransport {
@@ -634,6 +645,7 @@ fn outbox_thread(
     out: mpsc::UnboundedSender<FromOutbox>,
     mut watches: Watches,
     wmap: WatchMap,
+    targets: Targets,
 ) {
     let mut ob = Outbox::new(root.clone());
     let mut tr = ChanTransport {
@@ -665,6 +677,7 @@ fn outbox_thread(
                 Err(e) => log(format!("cannot watch outbox/{folder}: {e}")),
             }
         }
+        forget_targets(&targets, &ob.take_dropped());
         for (tone, text) in ob.take_notes() {
             osd::note(tone, &text);
         }
@@ -924,15 +937,16 @@ impl Airdrop {
         let (cmds, cmds_rx) = smpsc::channel();
         let (out_tx, from_outbox) = mpsc::unbounded_channel();
         let wmap: WatchMap = Arc::default();
+        let targets: Targets = Arc::default();
         let thread = std::thread::Builder::new()
             .name("outbox".into())
             .spawn({
                 let root = paths.outbox.clone();
                 let wmap = wmap.clone();
-                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap)
+                let targets = targets.clone();
+                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap, targets)
             })
             .map_err(|e| e.to_string())?;
-        let targets: Targets = Arc::default();
         let discovery = tokio::spawn(discovery(
             iface,
             service_id.to_string(),
@@ -1187,6 +1201,22 @@ mod parent_tests {
 mod tests {
     use super::*;
     use owly_airdrop::proto::messages::AskFile;
+
+    #[test]
+    fn dropped_service_ids_lose_their_targets() {
+        let t = Target {
+            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0),
+            flags: 0,
+        };
+        let targets: Targets = Arc::default();
+        for k in ["awdl-aa", "mdns-1", "other"] {
+            targets.lock().unwrap().insert(k.to_string(), t);
+        }
+        forget_targets(&targets, &["awdl-aa".to_string(), "mdns-1".to_string()]);
+        let mut left: Vec<String> = targets.lock().unwrap().keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["other"]);
+    }
 
     #[test]
     fn helper_lines_parse() {

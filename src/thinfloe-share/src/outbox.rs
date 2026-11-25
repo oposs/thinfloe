@@ -151,6 +151,9 @@ pub struct Outbox {
     notes: Vec<(Tone, String)>,
     /// Folders made since the last `take_new_folders`, for the daemon's inotify watches.
     new_folders: Vec<String>,
+    /// Service IDs no device answers to any more (re-keyed, gone or replaced), for the
+    /// daemon to forget their send targets.
+    dropped: Vec<String>,
 }
 
 fn epoch() -> u64 {
@@ -245,6 +248,7 @@ impl Outbox {
             probe,
             notes: Vec::new(),
             new_folders: Vec::new(),
+            dropped: Vec::new(),
         }
     }
 
@@ -259,7 +263,10 @@ impl Outbox {
             .position(|d| d.service_id == service_id)
             .or_else(|| self.devs.iter().position(|d| d.addr == addr));
         if let Some(d) = known.map(|i| &mut self.devs[i]) {
-            d.service_id = service_id.to_string();
+            if d.service_id != service_id {
+                self.dropped
+                    .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
+            }
             d.addr = addr.to_string();
             d.name = name.to_string();
             d.last_seen = now;
@@ -277,7 +284,8 @@ impl Outbox {
             .iter_mut()
             .find(|d| !d.present && d.in_flight.is_none() && d.folder == wanted)
         {
-            d.service_id = service_id.to_string();
+            self.dropped
+                .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
             d.addr = addr.to_string();
             d.name = name.to_string();
             d.last_seen = now;
@@ -352,16 +360,20 @@ impl Outbox {
             }
             if d.present && now.duration_since(d.last_seen) >= GONE_AFTER {
                 d.present = false;
+                self.dropped.push(d.service_id.clone());
             }
             if !d.present {
+                let id = d.service_id.clone();
                 // Only an empty folder goes; one with files waits for its device.
                 match fs::remove_dir(root.join(&d.folder)) {
                     Ok(()) => {
                         self.devs.remove(i);
+                        self.dropped.push(id);
                         continue;
                     }
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
                         self.devs.remove(i);
+                        self.dropped.push(id);
                         continue;
                     }
                     Err(_) => {}
@@ -432,6 +444,11 @@ impl Outbox {
     /// user deleted them): the daemon adds an inotify watch for each.
     pub fn take_new_folders(&mut self) -> Vec<String> {
         std::mem::take(&mut self.new_folders)
+    }
+
+    /// The service IDs that stopped naming a receiver since the last call.
+    pub fn take_dropped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dropped)
     }
 
     /// The notes since the last call, for the OSD.
@@ -876,6 +893,25 @@ mod tests {
         t.tick(90);
         assert!(!t.root.join(JANE).exists());
         assert!(t.ob.devices().is_empty());
+    }
+
+    #[test]
+    fn a_rekey_drops_the_old_service_id() {
+        let mut t = T::new("ob-drop-rekey");
+        t.seen_at("awdl-02:11:22:33:44:55", "fe80::1", JANE, 0);
+        assert!(t.ob.take_dropped().is_empty());
+        t.seen_at("Jane-mdns-instance", "fe80::1", JANE, 1);
+        assert_eq!(t.ob.take_dropped(), vec!["awdl-02:11:22:33:44:55"]);
+    }
+
+    #[test]
+    fn a_gone_device_drops_its_service_id() {
+        let mut t = T::new("ob-drop-gone");
+        t.seen("id1", JANE, 0);
+        t.tick(59);
+        assert!(t.ob.take_dropped().is_empty());
+        t.tick(60);
+        assert_eq!(t.ob.take_dropped(), vec!["id1", "id1"]);
     }
 
     #[test]
