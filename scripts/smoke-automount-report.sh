@@ -11,7 +11,7 @@
 # slot 0 through the QEMU monitor: it takes the card out after
 # SMOKE-AUTOMOUNT-SWAP-OUT and puts CARD2 (two.txt) in after
 # SMOKE-AUTOMOUNT-SWAP-IN. A second stick (serial SMOKES, vfat labelled
-# MEDIASHARE) must not land on FloeDrop's tmpfs at $MEDIA/mediashare.
+# FLOEDROP) must not land on FloeDrop's tmpfs at $MEDIA/FloeDrop.
 
 CONSOLE=/dev/console
 HELPER=/usr/libexec/thinfloe/thinfloe-automount
@@ -88,21 +88,21 @@ check "the card in the reader is listed as CARD1, kind card ($(field "$C" 1))" \
 check "$MEDIA/CARD1/one.txt is readable" \
     '[ "$(cat "$MEDIA/CARD1/one.txt" 2>/dev/null)" = "card one" ]'
 check "the reader's slot without a file system is not listed" \
-    '[ -z "$(cut -f 3 "$LIST" | grep -vxE "SMOKEU|CARD1|MEDIASHARE1")" ]'
+    '[ -z "$(cut -f 3 "$LIST" | grep -vxE "SMOKEU|CARD1|FLOEDROP1")" ]'
 
 # --- FloeDrop's folder ------------------------------------------------------
-SHARE=$MEDIA/mediashare
-if ! wait_for 30 has_line MEDIASHARE1; then
-    bad "the stick labelled MEDIASHARE was automounted as MEDIASHARE1 within 30 s"
+SHARE=$MEDIA/FloeDrop
+if ! wait_for 30 has_line FLOEDROP1; then
+    bad "the stick labelled FLOEDROP was automounted as FLOEDROP1 within 30 s"
     show_state
 fi
 check "$SHARE is a tmpfs owned by tfuser" \
     '[ "$(findmnt -rn -o FSTYPE "$SHARE")" = tmpfs ] && [ "$(stat -c %U "$SHARE" 2>/dev/null)" = tfuser ]'
 check "$SHARE is not in $LIST" \
     '! cut -f 4 "$LIST" | grep -qxF "$SHARE"'
-S=$(line MEDIASHARE1)
-check "the stick labelled MEDIASHARE is at $MEDIA/MEDIASHARE1, kind stick" \
-    '[ "$(field "$S" 4)" = "$MEDIA/MEDIASHARE1" ] && [ "$(field "$S" 8)" = stick ] && [ "$(cat "$MEDIA/MEDIASHARE1/share.txt" 2>/dev/null)" = "not the folder" ]'
+S=$(line FLOEDROP1)
+check "the stick labelled FLOEDROP is at $MEDIA/FLOEDROP1, kind stick" \
+    '[ "$(field "$S" 4)" = "$MEDIA/FLOEDROP1" ] && [ "$(field "$S" 8)" = stick ] && [ "$(cat "$MEDIA/FLOEDROP1/share.txt" 2>/dev/null)" = "not the folder" ]'
 check "only the tmpfs is mounted at $SHARE" \
     '[ "$(findmnt -rn -o SOURCE "$SHARE" | wc -l)" -eq 1 ] && [ ! -e "$SHARE/share.txt" ]'
 

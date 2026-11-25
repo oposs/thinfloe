@@ -38,10 +38,10 @@ from typing import Callable, Dict, List, Optional, Set, Union
 MAX_NAME_BYTES = 255
 FALLBACK_NAME = "disk"
 # Names under the mount root that belong to others, compared in any case:
-# FloeDrop's tmpfs (media-tfuser-mediashare.mount) is mounted at
-# /media/tfuser/mediashare, also after a stick has been mounted. A stick is
+# FloeDrop's tmpfs (media-tfuser-FloeDrop.mount) is mounted at
+# /media/tfuser/FloeDrop, also after a stick has been mounted. A stick is
 # never given one of these names, and sweep_dirs never removes them.
-RESERVED_NAMES = frozenset({"mediashare"})
+RESERVED_NAMES = frozenset({"floedrop"})
 TAIL_OPTIONS = "nosuid,nodev"
 OWNER = "uid=1001,gid=1001"
 # Only these filesystems are mounted; anything else is left alone.

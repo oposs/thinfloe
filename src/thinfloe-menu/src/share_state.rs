@@ -20,7 +20,7 @@ pub const PROGRAM: &str = "/usr/bin/thinfloe-share";
 /// The source the daemon's lines carry in the menu's log.
 pub const LOG_SOURCE: &str = "share";
 /// Where received files go and files to send are put.
-pub const FOLDER: &str = "/media/tfuser/mediashare";
+pub const FOLDER: &str = "/media/tfuser/FloeDrop";
 /// The switch's text.
 pub const SWITCH_TEXT: &str = "FloeDrop: receive and send files with iPhones nearby (AirDrop)";
 /// The name field's label.

@@ -1225,38 +1225,39 @@ class Eject(Commands):
 
 
 class FloeDropFolder(Commands):
-    """FloeDrop's tmpfs at /media/tfuser/mediashare is not a stick."""
+    """FloeDrop's tmpfs at /media/tfuser/FloeDrop is not a stick."""
 
     def share(self, mounted=True):
-        folder = self.tmp / "media" / "mediashare"
+        folder = self.tmp / "media" / "FloeDrop"
         folder.mkdir()
         if mounted:
             with open(self.tmp / "mountinfo", "a") as fh:
                 fh.write(f"40 25 0:40 / {folder} rw,nosuid,nodev,noexec - tmpfs tmpfs rw,uid=1001\n")
         return folder
 
-    def test_mediashare_is_a_reserved_name_in_any_case(self):
-        for label, want in (("mediashare", "mediashare1"), ("MEDIASHARE", "MEDIASHARE1"),
-                            ("MediaShare", "MediaShare1"), (" mediashare ", "mediashare1")):
+    def test_floedrop_is_a_reserved_name_in_any_case(self):
+        for label, want in (("FloeDrop", "FloeDrop1"), ("floedrop", "floedrop1"),
+                            ("FLOEDROP", "FLOEDROP1"), ("fLoEdRoP", "fLoEdRoP1"),
+                            (" FloeDrop ", "FloeDrop1")):
             self.assertEqual(mod.choose_name(label, "", set()), want, label)
-        self.assertEqual(mod.choose_name("", "mediashare", set()), "mediashare1")
-        self.assertEqual(mod.choose_name("mediashare", "", {"mediashare1"}), "mediashare2")
-        self.assertEqual(mod.choose_name("mediashare1", "", set()), "mediashare1")
-        self.assertEqual(mod.choose_name("mediashares", "", set()), "mediashares")
+        self.assertEqual(mod.choose_name("", "floedrop", set()), "floedrop1")
+        self.assertEqual(mod.choose_name("FloeDrop", "", {"FloeDrop1"}), "FloeDrop2")
+        self.assertEqual(mod.choose_name("FloeDrop1", "", set()), "FloeDrop1")
+        self.assertEqual(mod.choose_name("FloeDrops", "", set()), "FloeDrops")
 
-    def test_a_mediashare_stick_is_not_mounted_on_the_folder_before_it_exists(self):
-        self.stick(label="mediashare")
+    def test_a_floedrop_stick_is_not_mounted_on_the_folder_before_it_exists(self):
+        self.stick(label="FloeDrop")
         self.assertEqual(self.cmd("add", "sdb1"), 0)
-        self.assertEqual([l.name for l in self.lines()], ["mediashare1"])
-        self.assertEqual(self.calls("mount")[0][-1], str(self.tmp / "media" / "mediashare1"))
-        self.assertFalse((self.tmp / "media" / "mediashare").exists())
+        self.assertEqual([l.name for l in self.lines()], ["FloeDrop1"])
+        self.assertEqual(self.calls("mount")[0][-1], str(self.tmp / "media" / "FloeDrop1"))
+        self.assertFalse((self.tmp / "media" / "FloeDrop").exists())
 
-    def test_a_mediashare_stick_is_not_mounted_over_the_tmpfs(self):
+    def test_a_floedrop_stick_is_not_mounted_over_the_tmpfs(self):
         folder = self.share()
-        self.stick(label="MEDIASHARE")
+        self.stick(label="FLOEDROP")
         self.assertEqual(self.cmd("add", "sdb1"), 0)
         self.assertEqual([(l.name, l.mountpoint) for l in self.lines()],
-                         [("MEDIASHARE1", str(self.tmp / "media" / "MEDIASHARE1"))])
+                         [("FLOEDROP1", str(self.tmp / "media" / "FLOEDROP1"))])
         self.assertTrue(folder.is_dir())
 
     def test_the_folder_is_never_swept(self):
@@ -1287,10 +1288,10 @@ class FloeDropFolder(Commands):
         self.assertIn(str(folder), (self.tmp / "mountinfo").read_text())
 
     def test_the_mount_unit_and_tmpfiles_agree_with_the_helper(self):
-        unit = (REPO / "overlay/etc/systemd/system/media-tfuser-mediashare.mount").read_text()
+        unit = (REPO / "overlay/etc/systemd/system/media-tfuser-FloeDrop.mount").read_text()
         where = re.search(r"^Where=(.*)$", unit, re.M).group(1)
         self.assertEqual(os.path.dirname(where), "/media/tfuser")
-        self.assertIn(os.path.basename(where), mod.RESERVED_NAMES)
+        self.assertIn(os.path.basename(where).casefold(), mod.RESERVED_NAMES)
         # The tmpfs belongs to tfuser; the mount root stays root's 0755, the
         # mode and owner systemd gives a parent it creates for the mount.
         self.assertRegex(unit, r"(?m)^Options=.*\buid=1001\b.*\bmode=0755\b")

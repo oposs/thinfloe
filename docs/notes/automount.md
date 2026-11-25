@@ -23,11 +23,11 @@ makes it ready again and starts the unit.
 
 Name: the file system label, else its UUID, else `disk`; `/`, control
 characters (C1 too) and leading dots replaced, cut to 255 bytes, a name in
-use gets a number (`MYSTICK1`), as udisks2 does. `mediashare`, in any
+use gets a number (`MYSTICK1`), as udisks2 does. `FloeDrop`, in any
 case, is reserved (`RESERVED_NAMES`): FloeDrop mounts its tmpfs
-(`media-tfuser-mediashare.mount`, tfuser's, 0755) at
-`/media/tfuser/mediashare`, so a stick labelled `MEDIASHARE` is mounted at
-`MEDIASHARE1`, also before the tmpfs is there. The tmpfs is no stick: it
+(`media-tfuser-FloeDrop.mount`, tfuser's, 0755) at
+`/media/tfuser/FloeDrop`, so a stick labelled `FLOEDROP` is mounted at
+`FLOEDROP1`, also before the tmpfs is there. The tmpfs is no stick: it
 has no contract line, no Eject tile and no note, `eject all` and
 `thinfloe-upgrade contents` never reach it, and the sweep below never
 removes the folder, mounted or not. systemd makes the folder (root, 0755)
@@ -191,8 +191,8 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
   card in (`blockdev-change-medium`): the new card is mounted on the same
   disk. Eject of the card leaves the reader powered, eject of the stick
   powers it off; both give a `clean` event. A second stick, vfat labelled
-  `MEDIASHARE`, is mounted at `/media/tfuser/MEDIASHARE1`; FloeDrop's
-  `/media/tfuser/mediashare` is a tmpfs owned by tfuser, not in the
+  `FLOEDROP`, is mounted at `/media/tfuser/FLOEDROP1`; FloeDrop's
+  `/media/tfuser/FloeDrop` is a tmpfs owned by tfuser, not in the
   contract file, and still mounted after `eject all`.
 - `make qemu-smoke-write`: both target sticks carry vfat and are
   automounted before the writes; a write from a release without the image

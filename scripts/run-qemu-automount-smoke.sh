@@ -12,7 +12,7 @@
 #   - a usb-bot card reader with two removable LUNs: slot 0 holds CARD1 (vfat
 #     on the whole medium, one.txt), slot 1 a medium without a file system;
 #   - a 32 MiB usb-storage stick, serial SMOKES, vfat on the whole medium
-#     labelled MEDIASHARE: it must not land on FloeDrop's folder.
+#     labelled FLOEDROP: it must not land on FloeDrop's folder.
 # The guest runs scripts/smoke-automount-report.sh as systemd.run= and prints
 # ok/FAIL lines. When it prints SMOKE-AUTOMOUNT-SWAP-OUT this script takes
 # the card out of slot 0 through the QEMU monitor (QMP eject), and when it
@@ -81,7 +81,7 @@ mcopy -i "$STICK@@1M" "$tmp/hello.txt" ::hello.txt || exit 2
 vfat_image "$CARD1" 32M CARD1 one.txt "card one" || exit 2
 vfat_image "$CARD2" 32M CARD2 two.txt "card two" || exit 2
 truncate -s 16M "$EMPTY" || exit 2
-vfat_image "$SHARE" 32M MEDIASHARE share.txt "not the folder" || exit 2
+vfat_image "$SHARE" 32M FLOEDROP share.txt "not the folder" || exit 2
 
 ESP=$(esp_of "$BOOT") || exit 2
 mcopy -o -i "$ESP" "$DIR/smoke-automount-report.sh" ::smoke-automount-report.sh || exit 2

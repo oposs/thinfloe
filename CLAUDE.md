@@ -76,7 +76,7 @@ release.
 - Keyboard tab: `src/thinfloe-menu/src/` (`kbregistry.rs` layout list, `keyboard.rs` state, `keyboardtab_ui.rs` drawing, `jobs::keyboard_apply` the live apply).
 - OSD: `src/thinfloe-menu/src/osd/` (`thinfloe-menu --osd`, `--osd-key`).
 - Config store and migration: `src/thinfloe-menu/src/` (`config.rs` schema, `store.rs` the only writer, `generated.rs` derived files, `migrate.rs` the 4.x migration).
-- FloeDrop (AirDrop with iPhones): daemon and radio helper `src/thinfloe-share/` (`thinfloe-share`, `thinfloe-share --radio`), the Network tab's band in `share_state.rs`/`sharecfg.rs`, folder mount `overlay/etc/systemd/system/media-tfuser-mediashare.mount`, Owly units under `overlay/usr/lib/systemd/system/owlyd.service`. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
+- FloeDrop (AirDrop with iPhones): daemon and radio helper `src/thinfloe-share/` (`thinfloe-share`, `thinfloe-share --radio`), the Network tab's band in `share_state.rs`/`sharecfg.rs`, folder mount `overlay/etc/systemd/system/media-tfuser-FloeDrop.mount`, Owly units under `overlay/usr/lib/systemd/system/owlyd.service`. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
 - Tests: `test/integration/` (`make test`), `test/unit/` (`make test-unit`), `test/runtime/` (`make test-runtime`).
 
 ## Rules that are easy to break
@@ -142,7 +142,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 
 ### Automount
 
-- `/run/thinfloe/removable` (`device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`) and `/run/thinfloe/removable.event` are a contract between `thinfloe-automount`, their only writer, and the menu; readers ignore unknown trailing fields. `/media/tfuser` stays root's (0755) and no stick is named `mediashare` in any case (FloeDrop's tmpfs; `RESERVED_NAMES`); the boot disk and a partition labelled `EFI-SYSTEM` are never mounted; a card reader or built-in SD slot is never powered off. Every write of `thinfloe-upgrade` holds the stick and releases it before the first byte. Guards: `test_automount.py`, `test-automount-image.sh`, `make qemu-smoke-automount`. Notes: [docs/notes/automount.md](docs/notes/automount.md).
+- `/run/thinfloe/removable` (`device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`) and `/run/thinfloe/removable.event` are a contract between `thinfloe-automount`, their only writer, and the menu; readers ignore unknown trailing fields. `/media/tfuser` stays root's (0755) and no stick is named `FloeDrop` in any case (FloeDrop's tmpfs; `RESERVED_NAMES`); the boot disk and a partition labelled `EFI-SYSTEM` are never mounted; a card reader or built-in SD slot is never powered off. Every write of `thinfloe-upgrade` holds the stick and releases it before the first byte. Guards: `test_automount.py`, `test-automount-image.sh`, `make qemu-smoke-automount`. Notes: [docs/notes/automount.md](docs/notes/automount.md).
 
 ### Add-ons
 
@@ -156,7 +156,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 ### FloeDrop
 
 - The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` (first line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags`, then `name<TAB>folder<TAB>state<TAB>since`) and the OSD note datagram `note<TAB>tone<TAB>text<LF>` are contracts; readers ignore unknown trailing fields. The daemon reads only `generated/share`, never `config.toml`.
-- `media-tfuser-mediashare.mount` is a tmpfs with exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Guard: `test-floedrop-image.sh`.
+- `media-tfuser-FloeDrop.mount` is a tmpfs with exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Guard: `test-floedrop-image.sh`.
 - The radio helper never calls `AcquireDetached` (a crash must give the card back), and a reload SIGHUP goes to the daemon pid only: the process group holds the sudo'd helper. Owly stays pinned to one commit in `Cargo.toml` and the Dockerfile. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
 
 ### Upgrade and netboot

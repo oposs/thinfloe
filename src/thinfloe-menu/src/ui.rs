@@ -5846,7 +5846,7 @@ mod tests {
         assert!(at("DNS") < at("FloeDrop") && at("FloeDrop") < at("Time"), "{texts:?}");
         assert!(has(&texts, crate::share_state::SWITCH_TEXT), "{texts:?}");
         assert!(has(&texts, crate::share_state::NAME_LABEL), "{texts:?}");
-        assert!(!has(&texts, "Folder: /media/tfuser/mediashare"), "off: {texts:?}");
+        assert!(!has(&texts, "Folder: /media/tfuser/FloeDrop"), "off: {texts:?}");
         let mut net = two_networks();
         net.share_mut().set_host("thinfloe-56db68".into());
         let start = std::time::SystemTime::now();
@@ -5868,7 +5868,7 @@ mod tests {
         for t in [
             "Ready on wlx1 (exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
             "Sending needs Bluetooth; this machine has none.",
-            "Folder: /media/tfuser/mediashare",
+            "Folder: /media/tfuser/FloeDrop",
             "FloeDrop 56db68",
         ] {
             assert!(has(&texts, t), "{t}: {texts:?}");

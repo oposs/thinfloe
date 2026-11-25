@@ -1,12 +1,12 @@
 # FloeDrop
 
-FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone sees the thin client as a receiver named `FloeDrop <id>`; the thin client sees each phone as a folder. Files travel through the folder `/media/tfuser/mediashare`. Design: `docs/superpowers/specs/2026-11-24-airdrop-share-design.md`.
+FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone sees the thin client as a receiver named `FloeDrop <id>`; the thin client sees each phone as a folder. Files travel through the folder `/media/tfuser/FloeDrop`. Design: `docs/superpowers/specs/2026-11-24-airdrop-share-design.md`.
 
 ## Use
 
 - The switch is in Settings → Network (band FloeDrop), off by default. The name phones show is `FloeDrop <host suffix>`, for example `FloeDrop 56db68`; the name can be changed in the band.
 - Phones must have AirDrop set to "Everyone for 10 Minutes".
-- `/media/tfuser/mediashare` holds the inbox (what phones send) and one outbox folder per phone in range. Files put into a phone's folder are offered to that phone.
+- `/media/tfuser/FloeDrop` holds the inbox (what phones send) and one outbox folder per phone in range. Files put into a phone's folder are offered to that phone.
 - Received files are placed in the inbox; an OSD note says how many.
 - The outbox is a move, not a copy: after each offer the folder's offered entries are deleted, whatever the outcome (accepted, declined, failed). A drag in the remote session must be a copy to keep the original.
 
@@ -28,7 +28,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 
 - State file `$XDG_RUNTIME_DIR/thinfloe-share.state`, atomic, tab separated. First line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags`; then one line per receiver in range: `name<TAB>folder<TAB>state<TAB>since_epoch` with state `idle`, `sending`, `declined` or `failed`. Readers ignore unknown trailing fields. The menu parses it on its own.
 - OSD note: one datagram to the OSD socket, `note<TAB>tone<TAB>text<LF>`, tone `info` or `warn`, shown 4 s. Tabs and newlines inside the text become spaces. Sending never blocks; without an OSD the note is lost.
-- Mount: `media-tfuser-mediashare.mount` is a tmpfs, options exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Files in it live in RAM. Guard: `test/integration/test-floedrop-image.sh`.
+- Mount: `media-tfuser-FloeDrop.mount` is a tmpfs, options exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Files in it live in RAM. Guard: `test/integration/test-floedrop-image.sh`.
 - `generated/share` is `key=value` lines; the daemon never reads `config.toml`.
 
 ## Behaviour rulings
@@ -37,7 +37,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 - Outbox folders left over from an earlier run are watched too, and a deleted folder of a device still in range is made again. The folder of a device that is gone is removed after 60 s when empty.
 - One folder per sender: an existing folder is reused; a new name is made unique only when something that is not a folder holds the name.
 - An outbox folder is named by the computer name the phone gives in its `/Discover` answer, never by its key. A phone found first in the radio's AWDL peer list (key `awdl-<mac>`) and later by mDNS (its instance name) is one device: the outbox matches it by the address it answered at and keeps the one folder and the files in it. A phone whose mDNS address differs from the link-local address of its AWDL MAC would still get a second folder `<name> (2)`; check on hardware.
-- Sending spools the batch's archive in `/media/tfuser/mediashare/.spool` (the daemon's `TMPDIR`, mode 0700, emptied at start), inside the tmpfs: a send briefly needs the batch's space twice, and a batch that does not fit twice fails like any failed send (entries deleted, warning note). In `/tmp` the archive would be RAM outside the 25 % cap. Uploads from phones are staged in `.incoming/` next to it.
+- Sending spools the batch's archive in `/media/tfuser/FloeDrop/.spool` (the daemon's `TMPDIR`, mode 0700, emptied at start), inside the tmpfs: a send briefly needs the batch's space twice, and a batch that does not fit twice fails like any failed send (entries deleted, warning note). In `/tmp` the archive would be RAM outside the 25 % cap. Uploads from phones are staged in `.incoming/` next to it.
 - Declined and failed offers delete the offered entries (owner decision 2026-11-25); the device line shows the state and an OSD warning note appears.
 - A failed receive shows a warning note. A receive that placed no file makes no note.
 - File names from phones are made safe (`names.rs`): no path parts, no control or format characters (a bidi override such as U+202E would show `invoice<U+202E>fdp.exe` as `invoiceexe.pdf` on the remote desktop), no leading dot, length limit, unique in the inbox. OSD notes drop format characters too, in the daemon and in the OSD.

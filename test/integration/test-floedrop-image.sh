@@ -1,6 +1,6 @@
 #!/bin/bash
 # FloeDrop image guards: thinfloe-share and owlyd are installed, Owly's system
-# files are the pinned commit's unchanged copies, the mediashare tmpfs unit has
+# files are the pinned commit's unchanged copies, the FloeDrop tmpfs unit has
 # its fixed options, the RTL8822BU driver and firmware are present, and
 # neither polkit nor NetworkManager is in the image.
 #
@@ -44,8 +44,8 @@ FILES=(
     usr/share/dbus-1/system.d/io.github.t4t5.Owly.conf
     usr/lib/systemd/network/10-owly-awdl0.link
     usr/share/doc/owly/LICENSE
-    etc/systemd/system/media-tfuser-mediashare.mount
-    etc/systemd/system/local-fs.target.wants/media-tfuser-mediashare.mount
+    etc/systemd/system/media-tfuser-FloeDrop.mount
+    etc/systemd/system/local-fs.target.wants/media-tfuser-FloeDrop.mount
     var/lib/dpkg/status
 )
 unsquashfs -d "$ROOT" -f "$SQSH" "${FILES[@]}" >/dev/null 2>&1
@@ -69,17 +69,17 @@ done
 grep -qx 'ExecStart=/usr/lib/owly/owlyd' "$ROOT/usr/lib/systemd/system/owlyd.service" \
     || fail "owlyd.service does not start /usr/lib/owly/owlyd"
 
-# The mediashare tmpfs.
-M="$ROOT/etc/systemd/system/media-tfuser-mediashare.mount"
+# The FloeDrop tmpfs.
+M="$ROOT/etc/systemd/system/media-tfuser-FloeDrop.mount"
 grep -qx 'What=tmpfs' "$M" || fail "mount unit: What=tmpfs missing"
-grep -qx 'Where=/media/tfuser/mediashare' "$M" || fail "mount unit: Where= wrong"
+grep -qx 'Where=/media/tfuser/FloeDrop' "$M" || fail "mount unit: Where= wrong"
 grep -qx 'Type=tmpfs' "$M" || fail "mount unit: Type=tmpfs missing"
 grep -qx 'Options=size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec' "$M" \
     || fail "mount unit: Options= is not the fixed set"
 grep -qx 'WantedBy=local-fs.target' "$M" || fail "mount unit: WantedBy=local-fs.target missing"
-W="$ROOT/etc/systemd/system/local-fs.target.wants/media-tfuser-mediashare.mount"
+W="$ROOT/etc/systemd/system/local-fs.target.wants/media-tfuser-FloeDrop.mount"
 [[ -L "$W" ]] || fail "local-fs.target.wants link is not a symlink"
-[[ "$(readlink "$W")" == ../media-tfuser-mediashare.mount ]] \
+[[ "$(readlink "$W")" == ../media-tfuser-FloeDrop.mount ]] \
     || fail "local-fs.target.wants link target is $(readlink "$W")"
 
 # RTL8822BU (the usual iPhone-AWDL-capable USB adapter) driver and firmware.
@@ -96,4 +96,4 @@ done
 if [[ $FAILED -ne 0 ]]; then
     exit 1
 fi
-echo "PASS: FloeDrop image files, mediashare tmpfs, rtw88 and package guards"
+echo "PASS: FloeDrop image files, FloeDrop tmpfs, rtw88 and package guards"
