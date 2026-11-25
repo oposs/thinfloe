@@ -93,7 +93,9 @@ fn check_ignores_the_old_status_file() {
     let cfg = dir.0.join("cfg");
     fs::create_dir_all(&cfg).unwrap();
     fs::write(cfg.join("status"), "ups 2x1\n").unwrap();
-    let out = check(&dir, &cfg);
+    // The temporary directory's own path may contain "ups" (a checkout
+    // named …-followups): only the rest of the output counts.
+    let out = check(&dir, &cfg).replace(&dir.0.display().to_string(), "<dir>");
     assert!(!out.contains("ups"), "{out}");
     assert_eq!(fs::read_to_string(cfg.join("status")).unwrap(), "ups 2x1\n");
 }
