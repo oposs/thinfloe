@@ -13,6 +13,7 @@ import io
 import os
 import shutil
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -296,7 +297,7 @@ exit 0
     "umount": '''#!/bin/sh
 printf 'umount\t%s\n' "$*" | tr ' ' '\t' >> "$FAKE_STATE/calls.log"
 case " $* " in *" -l "*) exit 0;; esac
-[ -n "$FAKE_UMOUNT_BUSY" ] && { echo "umount: target is busy" >&2; exit 32; }
+[ -n "$FAKE_UMOUNT_BUSY" ] && case "$*" in *"$FAKE_UMOUNT_BUSY"*) echo "umount: target is busy" >&2; exit 32;; esac
 exit 0
 ''',
     "sync": '''#!/bin/sh
@@ -327,6 +328,7 @@ class Commands(Base):
         os.environ["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         os.environ["FAKE_STATE"] = str(self.tmp)
         os.environ["TF_OWNER_UID"] = str(os.getuid())
+        os.environ["TF_MOUNTINFO"] = str(self.tmp / "mountinfo")
         for k in ("FAKE_MOUNT_HANG", "FAKE_MOUNT_FAIL", "FAKE_UMOUNT_BUSY"):
             os.environ.pop(k, None)
         self.write("esp-device", "/dev/sda1\n")
@@ -349,6 +351,7 @@ class Commands(Base):
         base = self.add_disk(disk, parts=[disk + "1"], bus=bus)
         for node in (base / "size", base / (disk + "1") / "size"):
             node.write_text(f"{sectors}\n")
+        (base / (disk + "1") / "dev").write_text("8:17\n")
         (self.tmp / "dev" / disk).write_text("")
         (self.tmp / "dev" / (disk + "1")).write_text("")
         (self.tmp / "sys" / "bus" / "usb" / "devices" / usb).mkdir(parents=True, exist_ok=True)
@@ -471,6 +474,54 @@ class Add(Commands):
         self.assertEqual(self.cmd("add", "sdb1"), 0)
         self.assertEqual(len(self.calls("mount")), 1)
 
+    def dead_pid(self):
+        child = subprocess.Popen(["true"])
+        child.wait()
+        return child.pid
+
+    def test_add_skips_device_mounted_elsewhere(self):
+        self.stick()
+        self.write("mountinfo", "36 25 8:17 / /mnt rw - vfat /dev/other rw\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(self.calls("mount"), [])
+        self.write("mountinfo", f"36 25 0:99 / /mnt rw - vfat {self.tmp}/dev/sdb1 rw\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(self.calls("mount"), [])
+        self.write("mountinfo", "36 25 8:18 / /mnt rw - vfat /dev/other rw\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(len(self.calls("mount")), 1)
+
+    def test_add_locked_rechecks_the_hold(self):
+        self.stick()
+        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
+        self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-AA:1:2\n")
+        self.assertEqual(mod.add_locked(d, self.p), 0)
+        self.assertEqual(self.calls("mount"), [])
+        self.assertEqual(self.lines(), [])
+
+    def test_stale_hold_is_removed_by_add(self):
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", f"{self.dead_pid()}\tsn-AA:1:2\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(len(self.calls("mount")), 1)
+        self.assertFalse(hold.exists())
+
+    def test_hold_of_another_drive_is_removed_by_add(self):
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-BB:1:2\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(len(self.calls("mount")), 1)
+        self.assertFalse(hold.exists())
+
+    def test_live_hold_file_is_kept(self):
+        self.stick()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-AA:1:2\n")
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertTrue(hold.exists())
+
     def test_add_under_hold_skips(self):
         self.stick()
         self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-AA:2048:ff\n")
@@ -523,9 +574,26 @@ class Remove(Commands):
         self.assertEqual(self.cmd("remove", "sdb1"), 0)
         self.assertEqual(self.event(), ["1", "MYSTICK", "clean"])
 
+    def test_remove_present_medium_is_clean_whatever_the_state(self):
+        self.added()
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual([c[0] for c in self.calls() if c[0] != "mount"], ["sync", "umount"])
+        self.assertNotIn("-l", self.calls("umount")[0])
+        self.assertEqual(self.lines(), [])
+        self.assertIsNone(self.event())
+
+    def test_remove_busy_while_stopping_records_nothing(self):
+        self.added()
+        self.write("systemd-state", "stopping\n")
+        os.environ["FAKE_UMOUNT_BUSY"] = "media"
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual(self.calls("umount")[-1][1], "-l")
+        self.assertEqual(self.lines(), [])
+        self.assertIsNone(self.event())
+
     def test_pull_with_busy_mount(self):
         self.added(label="X")
-        os.environ["FAKE_UMOUNT_BUSY"] = "1"   # only a plain umount is busy
+        os.environ["FAKE_UMOUNT_BUSY"] = "media"   # only a plain umount is busy
         self.unplug("sdb")
         self.assertEqual(self.cmd("remove", "sdb1"), 0)
         self.assertEqual(self.lines(), [])
@@ -542,7 +610,7 @@ class Eject(Commands):
 
     def test_eject_busy(self):
         self.added()
-        os.environ["FAKE_UMOUNT_BUSY"] = "1"
+        os.environ["FAKE_UMOUNT_BUSY"] = "media"
         self.assertEqual(self.cmd("eject", "sdb"), 3)
         self.assertEqual(len(self.lines()), 1)
         self.assertFalse(self.poweroff_file().exists())
@@ -575,6 +643,56 @@ class Eject(Commands):
         self.assertEqual(self.lines(), [])
         self.assertEqual(self.event()[0], "2")
         self.assertEqual(self.event()[2], "clean")
+
+    def two_partitions(self):
+        self.added()
+        base = self.tmp / "sys" / "devices" / "usb" / "1-1" / "sdb"
+        pd = base / "sdb2"
+        pd.mkdir()
+        (pd / "partition").write_text("2\n")
+        (pd / "size").write_text("2048\n")
+        (self.tmp / "sys" / "class" / "block" / "sdb2").symlink_to(pd)
+        (self.tmp / "dev" / "sdb2").write_text("")
+        os.environ["TF_UDEV_PROPS_sdb2"] = "ID_FS_TYPE=vfat\nID_FS_LABEL=SECOND\nID_SERIAL_SHORT=AA\n"
+        self.assertEqual(self.cmd("add", "sdb2"), 0)
+        self.assertEqual([l.name for l in self.lines()], ["MYSTICK", "SECOND"])
+
+    def test_eject_first_partition_busy_changes_nothing(self):
+        self.two_partitions()
+        os.environ["FAKE_UMOUNT_BUSY"] = "MYSTICK"
+        self.assertEqual(self.cmd("eject", "sdb"), 3)
+        self.assertEqual([l.name for l in self.lines()], ["MYSTICK", "SECOND"])
+        self.assertEqual(len(self.calls("umount")), 1)
+        self.assertFalse(self.poweroff_file().exists())
+        self.assertIsNone(self.event())
+
+    def test_eject_later_partition_busy_reports_what_stays(self):
+        self.two_partitions()
+        os.environ["FAKE_UMOUNT_BUSY"] = "SECOND"
+        self.assertEqual(self.cmd("eject", "sdb"), 1)
+        self.assertEqual([l.name for l in self.lines()], ["SECOND"])
+        self.assertIn("SECOND", self.out)
+        self.assertNotIn("MYSTICK", self.out)
+        self.assertFalse(self.poweroff_file().exists())
+        self.assertIsNone(self.event())
+        self.assertFalse((self.tmp / "media" / "MYSTICK").exists())
+
+    def test_release_under_hold_unmounts(self):
+        self.added()
+        self.write("run/automount/hold/sdb", f"{os.getpid()}\tsn-AA:1:2\n")
+        self.assertEqual(self.cmd("release", "sdb"), 0)
+        self.assertEqual(self.lines(), [])
+        self.assertIsNone(self.event())
+
+    def test_eject_removes_a_stale_hold(self):
+        self.added()
+        child = subprocess.Popen(["true"])
+        child.wait()
+        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
+        self.write("run/automount/hold/sdb", f"{child.pid}\tsn-AA:1:2\n")
+        self.assertEqual(self.cmd("eject", "sdb"), 0)
+        self.assertEqual(self.lines(), [])
+        self.assertFalse(hold.exists())
 
     def test_release_records_no_event(self):
         self.added()

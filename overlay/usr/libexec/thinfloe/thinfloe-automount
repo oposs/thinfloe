@@ -484,9 +484,37 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def live_hold(p: Paths, disk: str) -> bool:
-    hold = read_holds(p).get(disk)
-    return hold is not None and pid_alive(hold.pid)
+def live_hold(p: Paths, d: Dev) -> bool:
+    """A live write holds this drive; a stale hold file is deleted.
+
+    Stale: its pid is gone, or its id names another drive than the one
+    now under the disk name. Same rule as skip_reason.
+    """
+    hold = read_holds(p).get(d.disk)
+    if hold is None:
+        return False
+    if pid_alive(hold.pid) and hold_matches(d, hold):
+        return True
+    try:
+        os.unlink(os.path.join(state_dir(p), "hold", d.disk))
+    except OSError:
+        pass
+    return False
+
+
+def mountinfo_mounted(d: Dev, p: Paths) -> bool:
+    """The device is mounted somewhere, by anyone (major:minor or source)."""
+    majmin = read_text(os.path.join(p.sysfs, "class", "block", d.kname, "dev"))
+    text = read_text(os.environ.get("TF_MOUNTINFO", "/proc/self/mountinfo"))
+    for row in text.split("\n"):
+        left, sep, right = row.partition(" - ")
+        fields = left.split()
+        if not sep or len(fields) < 3:
+            continue
+        source = right.split()[1:2]
+        if (majmin and fields[2] == majmin) or source == [d.devnode]:
+            return True
+    return False
 
 
 def udev_props(kname: str, p: Paths) -> Dict[str, str]:
@@ -554,7 +582,10 @@ def remove_dir(path: str) -> None:
 
 
 def add_locked(d: Dev, p: Paths) -> int:
-    if any(l.device == d.devnode for l in read_lines(p)):
+    if any(l.device == d.devnode for l in read_lines(p)) or mountinfo_mounted(d, p):
+        return EXIT_OK
+    if live_hold(p, d):
+        log(f"{d.kname} not mounted: held by a write")
         return EXIT_OK
     name, mp = reserve_mountpoint(d, p)
     rc, out, err = run(["mount", "--no-canonicalize", "-t", fs_driver(d.fstype),
@@ -573,6 +604,9 @@ def add_locked(d: Dev, p: Paths) -> int:
 def cmd_add(kname: str, p: Paths) -> int:
     d = read_dev(kname, udev_props(kname, p), p)
     mounted = {l.device for l in read_lines(p)}
+    if mountinfo_mounted(d, p):
+        mounted.add(d.devnode)
+    live_hold(p, d)   # deletes a stale hold file before skip_reason reads them
     reason = skip_reason(d, boot_disk(p, lambda: findmnt_source(p)),
                          read_holds(p), mounted, pid_alive)
     if reason:
@@ -601,15 +635,19 @@ def cmd_remove(kname: str, p: Paths) -> int:
     try:
         with disk_lock(p, line.disk):
             event = (line.name, "unclean")
+            lazy = True
             if medium_present(kname, p):
+                # The stick is still there (shutdown, or a udev remove with
+                # the medium in place): unmount it properly, no event.
+                event = None
+                run(["sync", "-f", line.mountpoint], MOUNT_TIMEOUT)
+                lazy = run(["umount", line.mountpoint], MOUNT_TIMEOUT)[0] != 0
+            else:
                 _, state, _ = run(["systemctl", "is-system-running"], 10)
                 if state.strip() == "stopping":
-                    # Shutdown: the stick is still there, so leave it clean.
-                    run(["sync", "-f", line.mountpoint], MOUNT_TIMEOUT)
-                    if run(["umount", line.mountpoint], MOUNT_TIMEOUT)[0] == 0:
-                        event = None
-            if event is not None:
-                # Pulled: whatever is open stays open until closed.
+                    event = None
+            if lazy:
+                # Pulled, or busy: whatever is open stays open until closed.
                 rc, out, err = run(["umount", "-l", line.mountpoint], MOUNT_TIMEOUT)
                 if rc != 0:
                     log(f"umount -l {line.mountpoint} failed: {(err or out).strip()}")
@@ -643,9 +681,11 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     lines = [l for l in read_lines(p) if l.disk == disk]
     if not lines:
         return None
-    if live_hold(p, disk):
-        log(f"{disk} is held by a write")
-        return EXIT_BUSY
+    if event:
+        first = os.path.basename(lines[0].device)
+        if live_hold(p, read_dev(first, udev_props(first, p), p)):
+            log(f"{disk} is held by a write")
+            return EXIT_BUSY
     status, done = EXIT_OK, []
     for l in lines:
         run(["sync", "-f", l.mountpoint], MOUNT_TIMEOUT)
@@ -656,8 +696,15 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
         log(f"umount {l.mountpoint} failed ({rc}): {(err or out).strip()}")
         if "busy" in (err + out).lower():
             status = EXIT_BUSY
-        elif status != EXIT_BUSY:
+        else:
             status = EXIT_FAIL
+        break
+    if status != EXIT_OK and done:
+        # Some partitions are gone already: the caller must not think nothing changed.
+        status = EXIT_FAIL
+        left = ", ".join(l.name for l in lines if l not in done)
+        print(f"still mounted: {left}")
+        log(f"{disk}: partly unmounted, still mounted: {left}")
     for l in done:
         remove_dir(l.mountpoint)
     ejected = event and status == EXIT_OK
