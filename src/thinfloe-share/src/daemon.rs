@@ -166,6 +166,17 @@ pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
     })
 }
 
+/// Unblock SIGHUP on this thread, where the runtime polls its handler.
+fn unblock_hangup() {
+    // SAFETY: a zeroed sigset_t that sigemptyset initialises; no other memory.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
+}
+
 /// The name phones show: the configured one, or `default_name` of the
 /// host name.
 pub fn share_name(configured: &str, host: &str) -> String {
@@ -358,6 +369,9 @@ async fn run(
         st.write();
         return 1;
     };
+    // The menu starts the daemon with SIGHUP blocked, so a reload before the
+    // handler above was set waits instead of ending it; it arrives now.
+    unblock_hangup();
 
     let mut child = match helper_command().and_then(|mut c| c.spawn().map_err(|e| e.to_string())) {
         Ok(c) => c,
@@ -1197,6 +1211,23 @@ fe800000000000000000000000000002 03 40 20 80     eth0
             answer(&links, 1 << 30, "Jane's iPhone"),
             Answer::Decline(None)
         );
+    }
+
+    #[test]
+    fn unblock_hangup_clears_sighup_from_the_threads_mask() {
+        // On a thread of its own, so the test binary's mask stays as it is.
+        std::thread::spawn(|| unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGHUP);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            unblock_hangup();
+            let mut now: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now);
+            assert_eq!(libc::sigismember(&now, libc::SIGHUP), 0);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

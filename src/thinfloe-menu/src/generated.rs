@@ -496,6 +496,8 @@ mod tests {
         );
         assert_eq!(mode_of("time"), 0o644);
         assert_eq!(Table::Time.files(), ["time"]);
+        cfg.time.ntp = vec!["a;b".into()];
+        assert!(render(&cfg, "time", &inp()).unwrap_err().starts_with("Time: "));
     }
 
     #[test]
@@ -511,8 +513,6 @@ mod tests {
             format!("{HEADER}\nenabled=true\nname=Front desk\n")
         );
         assert_eq!(mode_of("share"), 0o644);
-        cfg.time.ntp = vec!["a;b".into()];
-        assert!(render(&cfg, "time", &inp()).unwrap_err().starts_with("Time: "));
     }
 
     /// A zone the image does not list does not block the servers: it is

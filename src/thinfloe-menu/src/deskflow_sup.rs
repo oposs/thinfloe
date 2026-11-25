@@ -42,6 +42,11 @@ pub struct Daemon {
     /// It starts with SIGHUP blocked and unblocks it once its handler is
     /// set. A daemon that does not unblock it would never see a reload.
     pub block_hup: bool,
+    /// A reload's SIGHUP goes to its whole process group, else to its pid
+    /// only: a child of the daemon in that group (FloeDrop's radio helper
+    /// under sudo, which relays it) would end on it. SIGTERM and SIGKILL
+    /// always go to the group.
+    pub reload_group: bool,
     /// The error line of its state file, if the text has one.
     pub error_head: fn(&str) -> Option<String>,
 }
@@ -53,6 +58,7 @@ pub const DESKFLOW: Daemon = Daemon {
     prefixes: &["thinfloe-menu --deskflow: ", "thinfloe-deskflow: "],
     parent_env: Some(PARENT_ENV),
     block_hup: true,
+    reload_group: true,
     error_head: deskflow_error_head,
 };
 
@@ -227,7 +233,13 @@ impl Supervisor {
         if let Some(r) = self.running.as_ref()
             && r.kill_at.is_none()
         {
-            signal_group(&r.child, libc::SIGHUP);
+            if self.daemon.reload_group {
+                signal_group(&r.child, libc::SIGHUP);
+            } else {
+                // SAFETY: kill has no memory preconditions. The child is
+                // not reaped yet, so its pid is still its own.
+                unsafe { libc::kill(r.child.id() as libc::pid_t, libc::SIGHUP) };
+            }
         }
     }
 

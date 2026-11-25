@@ -419,8 +419,16 @@ async fn stop() {
     }
 }
 
+/// A SIGHUP ends nothing here: sudo relays the signals its group gets, and
+/// a reload of the daemon must not end the helper.
+fn ignore_hangup() {
+    // SAFETY: setting a signal to SIG_IGN has no memory effects.
+    unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+}
+
 /// `thinfloe-share --radio`; the exit code.
 pub fn main() -> i32 {
+    ignore_hangup();
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("thinfloe-share: --radio must run as root");
@@ -470,6 +478,28 @@ pub fn main() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_helper_lives_through_a_sighup() {
+        // In a child of its own, so the test binary keeps its handlers. The
+        // child calls only async-signal-safe functions.
+        // SAFETY: fork; the child uses signal, raise and _exit only.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+                super::ignore_hangup();
+                libc::raise(libc::SIGHUP);
+                libc::_exit(7);
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waitpid on our own child with a valid status pointer.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "ended by a signal: {status:#x}");
+        assert_eq!(libc::WEXITSTATUS(status), 7);
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::path::PathBuf;

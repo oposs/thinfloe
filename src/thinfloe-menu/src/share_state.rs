@@ -31,14 +31,17 @@ const MAX_BYTES: u64 = 64 * 1024;
 /// the daemon's start still counts as written by it.
 const MTIME_SLACK: Duration = Duration::from_secs(1);
 
-/// `thinfloe-share` with no arguments. It handles SIGHUP from the start of
-/// its run loop but never unblocks it, so the menu must not block it.
+/// `thinfloe-share` with no arguments. It starts with SIGHUP blocked and
+/// unblocks it once its handler is set. A reload reaches the daemon only:
+/// its radio helper runs in the same group, under sudo, which relays
+/// signals to it.
 pub const SHARE: Daemon = Daemon {
     source: LOG_SOURCE,
     label: "FloeDrop",
     prefixes: &["thinfloe-share: "],
     parent_env: None,
-    block_hup: false,
+    block_hup: true,
+    reload_group: false,
     error_head,
 };
 
@@ -386,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn the_share_daemon_starts_with_sighup_unblocked() {
+    fn the_share_daemon_starts_with_sighup_blocked() {
         use crate::deskflow_sup::Supervisor;
         use std::os::unix::fs::PermissionsExt;
         use std::time::Instant;
@@ -413,7 +416,64 @@ mod tests {
         }
         let blk = std::fs::read_to_string(&out).unwrap();
         let mask = u64::from_str_radix(blk.split_whitespace().nth(1).unwrap(), 16).unwrap();
-        assert_eq!(mask & (1 << (libc::SIGHUP - 1)), 0, "{blk}");
+        assert_ne!(mask & (1 << (libc::SIGHUP - 1)), 0, "{blk}");
         s.stop(Duration::from_secs(1));
+    }
+
+    /// Whether a reload of a stand-in daemon reaches the daemon and a
+    /// child of it in its group: (daemon, child).
+    fn reload_reaches(daemon: Daemon, tag: &str) -> (bool, bool) {
+        use crate::deskflow_sup::Supervisor;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+        let d = crate::testdir::TestDir::new("share-state", tag);
+        let (parent, kid, ready) = (d.join("parent"), d.join("kid"), d.join("ready"));
+        let prog = d.join("daemon");
+        std::fs::write(
+            &prog,
+            format!(
+                "#!/bin/sh\ntrap 'echo hup >>{p}' HUP\nsh -c 'trap \"echo hup >>{k}\" HUP; : >{r}; while :; do sleep 0.05; done' &\nwhile :; do sleep 0.05; done\n",
+                p = parent.display(),
+                k = kid.display(),
+                r = ready.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = Supervisor::new(prog).with_daemon(daemon).with_state_file(None);
+        let now = Instant::now();
+        s.want(true, now);
+        s.tick(now);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "the stand-in did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        s.reload();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !parent.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Time for the child's trap too, had it got the signal.
+        std::thread::sleep(Duration::from_millis(400));
+        let got = (parent.exists(), kid.exists());
+        s.stop(Duration::from_secs(1));
+        got
+    }
+
+    #[test]
+    fn a_floedrop_reload_reaches_the_daemon_and_not_its_helper() {
+        // Unblocked, as the real daemon is once its handler is set.
+        let share = Daemon {
+            block_hup: false,
+            ..SHARE
+        };
+        assert_eq!(reload_reaches(share, "reload-pid"), (true, false));
+        // Control: sent to the group, the child gets it too.
+        let group = Daemon {
+            reload_group: true,
+            ..share
+        };
+        assert_eq!(reload_reaches(group, "reload-group"), (true, true));
     }
 }
