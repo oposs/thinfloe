@@ -553,7 +553,11 @@ enum FromOutbox {
 
 /// What the outbox thread is told.
 enum Cmd {
-    Seen { key: String, name: String },
+    Seen {
+        key: String,
+        addr: String,
+        name: String,
+    },
     Changed(String),
     Finished(SendHandle, Outcome),
     Shutdown,
@@ -614,7 +618,7 @@ fn outbox_thread(
     loop {
         let wait = wake.saturating_duration_since(Instant::now());
         match cmds.recv_timeout(wait) {
-            Ok(Cmd::Seen { key, name }) => ob.seen(&key, &name, Instant::now()),
+            Ok(Cmd::Seen { key, addr, name }) => ob.seen(&key, &addr, &name, Instant::now()),
             Ok(Cmd::Changed(folder)) => ob.changed(&folder, Instant::now()),
             Ok(Cmd::Finished(h, o)) => ob.finished(h, o, Instant::now()),
             Ok(Cmd::Shutdown) | Err(smpsc::RecvTimeoutError::Disconnected) => {
@@ -738,6 +742,7 @@ async fn discovery(
                     );
                     let _ = cmds.send(Cmd::Seen {
                         key: c.key.clone(),
+                        addr: addr.to_string(),
                         name: r.computer_name,
                     });
                     c.next_try = tokio::time::Instant::now() + REDISCOVER;

@@ -128,6 +128,9 @@ pub fn open_for_writing(proc: &Path) -> HashSet<PathBuf> {
 
 struct Dev {
     service_id: String,
+    /// Where the receiver answered; one phone found twice (an AWDL peer, then its mDNS
+    /// instance) has two service IDs but one address.
+    addr: String,
     name: String,
     folder: String,
     last_seen: Instant,
@@ -245,9 +248,19 @@ impl Outbox {
         }
     }
 
-    /// A receiver answered: give it a folder, or the folder it or its name had.
-    pub fn seen(&mut self, service_id: &str, name: &str, now: Instant) {
-        if let Some(d) = self.devs.iter_mut().find(|d| d.service_id == service_id) {
+    /// A receiver answered `/Discover` at `addr` with the computer name `name`: give it
+    /// a folder, or the folder it, its address or its name had.
+    pub fn seen(&mut self, service_id: &str, addr: &str, name: &str, now: Instant) {
+        // The same service ID, or the same phone under a new one (found by the radio's
+        // peer list first, by mDNS later): one device, one folder.
+        let known = self
+            .devs
+            .iter()
+            .position(|d| d.service_id == service_id)
+            .or_else(|| self.devs.iter().position(|d| d.addr == addr));
+        if let Some(d) = known.map(|i| &mut self.devs[i]) {
+            d.service_id = service_id.to_string();
+            d.addr = addr.to_string();
             d.name = name.to_string();
             d.last_seen = now;
             if !d.present {
@@ -265,6 +278,7 @@ impl Outbox {
             .find(|d| !d.present && d.in_flight.is_none() && d.folder == wanted)
         {
             d.service_id = service_id.to_string();
+            d.addr = addr.to_string();
             d.name = name.to_string();
             d.last_seen = now;
             d.present = true;
@@ -301,6 +315,7 @@ impl Outbox {
         };
         self.devs.push(Dev {
             service_id: service_id.to_string(),
+            addr: addr.to_string(),
             name: name.to_string(),
             folder,
             last_seen: now,
@@ -516,9 +531,13 @@ mod tests {
         fn at(&self, s: u64) -> Instant {
             self.t0 + Duration::from_secs(s)
         }
+        /// Seen at an address of its own, derived from `id`.
         fn seen(&mut self, id: &str, name: &str, s: u64) {
+            self.seen_at(id, &format!("addr-{id}"), name, s);
+        }
+        fn seen_at(&mut self, id: &str, addr: &str, name: &str, s: u64) {
             let now = self.at(s);
-            self.ob.seen(id, name, now);
+            self.ob.seen(id, addr, name, now);
         }
         fn changed(&mut self, folder: &str, s: u64) {
             let now = self.at(s);
@@ -551,6 +570,33 @@ mod tests {
     }
 
     const JANE: &str = "Jane's iPhone";
+
+    #[test]
+    fn an_awdl_peer_and_its_mdns_instance_share_one_folder() {
+        let mut t = T::new("ob-rekey");
+        // The radio's peer list first, then mDNS finds the same phone.
+        t.seen_at("awdl-02:11:22:33:44:55", "fe80::11:22ff:fe33:4455", JANE, 0);
+        t.tick(0);
+        let early = t.put(JANE, "early.jpg");
+        t.seen_at("Jane-mdns-instance", "fe80::11:22ff:fe33:4455", JANE, 1);
+        let late = t.put(JANE, "late.jpg");
+        t.changed(JANE, 1);
+        t.tick(1);
+        let mut dirs: Vec<String> = fs::read_dir(&t.root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        dirs.sort();
+        assert_eq!(dirs, vec![JANE.to_string()], "one folder, never \"(2)\"");
+        assert_eq!(t.entries(JANE), vec!["early.jpg", "late.jpg"]);
+        assert_eq!(t.ob.devices().len(), 1);
+        // The batch goes to the mDNS instance, files from before the re-key too.
+        t.tick(4);
+        assert_eq!(
+            t.calls(),
+            vec![("Jane-mdns-instance".to_string(), vec![early, late])]
+        );
+    }
 
     /// Jane is seen at 0 and her three files are offered at 3 (handle 1).
     fn jane_sends_three(name: &str) -> (T, Vec<PathBuf>) {
