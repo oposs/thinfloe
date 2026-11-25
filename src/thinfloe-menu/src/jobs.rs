@@ -348,8 +348,9 @@ pub fn eject(cmd: &[String], target: &str, feed: &Arc<Feed>) -> EjectResult {
                 .rev()
                 .map(str::trim)
                 .find(|l| !l.is_empty())
-                // Shown in the panel: printable, as every other text from a file.
-                .map(crate::battery::sanitise)
+                // Shown in the panel: printable, as every other text from a
+                // file, and whole (sanitise would cut it at a battery name's length).
+                .map(crate::battery::printable)
                 .unwrap_or_else(|| match status {
                     Some(n) => format!("exit {n}"),
                     None => "ended by a signal".to_string(),
@@ -2490,6 +2491,11 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        let long = format!("sdb2 is still mounted: {}", "word ".repeat(40).trim_end());
+        assert_eq!(
+            eject(&sh(&format!("echo '{long}' >&2; exit 1")), "sdb", &feed),
+            EjectResult::Failed(long.clone())
+        );
         assert!(matches!(
             eject(&["/nonexistent/helper".to_string()], "sdb", &feed),
             EjectResult::Failed(e) if e.contains("could not be started")

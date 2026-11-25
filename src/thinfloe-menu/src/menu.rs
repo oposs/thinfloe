@@ -1381,14 +1381,14 @@ impl Menu {
         self.flushing().len() > 1
     }
 
-    /// The home is saved (or the person goes on anyway): Restart and Power
-    /// off first release the sticks, so what is cached reaches them; Log
-    /// out leaves the machine running and does not.
     /// Restart and Power off release the sticks before they exit.
     fn flushes(&self) -> bool {
         matches!(self.ending, Action::Reboot | Action::Poweroff) && !self.removable.is_empty()
     }
 
+    /// The home is saved (or the person goes on anyway): Restart and Power
+    /// off first release the sticks, so what is cached reaches them; Log
+    /// out leaves the machine running and does not.
     fn after_save(&mut self, now: Instant) -> Option<Effect> {
         if !self.flushes() {
             return self.leave(now);
