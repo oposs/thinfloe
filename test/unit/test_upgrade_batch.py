@@ -3243,7 +3243,6 @@ class TestWriteArgsFixture(unittest.TestCase):
         self.assertGreaterEqual(n, 5)
 
 
-
 class TestAutomountedDrives(unittest.TestCase):
     """A drive mounted only by thinfloe-automount is released by the write."""
 
@@ -3289,6 +3288,25 @@ class TestAutomountedDrives(unittest.TestCase):
         row = json.loads(ui.drives_json([self.enum([None])], None))[0]
         self.assertIs(row["automounted"], False)
         self.assertIs(row["mounted"], False)
+
+    def test_upgrade_refuses_an_automounted_stick(self):
+        d = ui.DriveInfo("/dev/sdb", "16G", "M", "", True, None, 0, False,
+                         False, False, size_bytes=16 * 10**9, serial="S",
+                         mounted=False, automounted=True, fingerprint="ab" * 8)
+        args = argparse.Namespace(device="/dev/sdb", mode="upgrade", source="http://x",
+                                  expect_id=ui.drive_identity(d), copy_home=False,
+                                  allow_internal=False)
+        self.assertIn("cannot be upgraded", ui._write_refusal(args, d))
+
+    def test_hold_is_written_atomically_and_leaves_no_temp(self):
+        folder = tempfile.mkdtemp(dir=self.tmp.name)
+        with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": folder}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
+                             False, False, serial="S", fingerprint="ab" * 8)
+            path = ui._hold_drive(d)
+        self.assertEqual(os.listdir(folder), ["sdb"])
+        ui._unregister_cleanup("file", path)
 
     def test_write_refusal_allows_automounted(self):
         d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
@@ -3402,6 +3420,15 @@ class TestFreshInstallAutomount(unittest.TestCase):
     def test_a_write_that_wrote_bytes_does_not_remount(self):
         self.install(exclusive=self.touched)
         self.assertNotIn("remount", [e[0] for e in self.events])
+
+    def test_a_failed_release_is_logged_with_its_code(self):
+        self.release_rc = 1
+        out = io.StringIO()
+        with mock.patch.object(ui, "run_cmd", side_effect=self.run_cmd), \
+             mock.patch.object(ui, "open_target", side_effect=OSError(errno.EBUSY, "b")), \
+             contextlib.redirect_stdout(out):
+            ui.fresh_install(self.drive, "http://x", False, False, ui.PROGRESS)
+        self.assertIn("release sdb exited 1", out.getvalue())
 
     def test_a_missing_helper_is_no_error(self):
         with mock.patch.object(ui, "run_cmd", side_effect=FileNotFoundError(2, "none")), \
