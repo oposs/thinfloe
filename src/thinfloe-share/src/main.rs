@@ -6,7 +6,11 @@ mod card;
 #[allow(dead_code)]
 mod config;
 #[allow(dead_code)]
+mod inbox;
+#[allow(dead_code)]
 mod names;
+#[allow(dead_code)]
+mod osd;
 #[allow(dead_code)]
 mod state;
 
