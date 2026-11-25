@@ -21,9 +21,14 @@ that "thinfloe-upgrade drives" reports (sn-<serial> or nosn, then size and
 a partition table fingerprint).
 """
 
+import fcntl
 import os
 import re
+import stat
+import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Union
 
@@ -135,10 +140,13 @@ def disk_of(kname: str, p: Paths) -> str:
         if os.path.exists(os.path.join(real, "partition")):
             return os.path.basename(os.path.dirname(real))
         return os.path.basename(real)
-    m = re.fullmatch(r"((?:nvme\d+n\d+|mmcblk\d+|loop\d+))p\d+", kname)
+    m = re.fullmatch(r"(nvme\d+n\d+|mmcblk\d+|loop\d+)p\d+", kname)
     if m:
         return m.group(1)
-    return re.sub(r"\d+$", "", kname) or kname
+    m = re.fullmatch(r"((?:sd|vd|xvd|hd)[a-z]+)\d+", kname)
+    if m:
+        return m.group(1)
+    return kname
 
 
 def usb_device_of(disk_dir: str) -> Optional[str]:
@@ -325,14 +333,405 @@ def parse_hold(text: str) -> Optional[Hold]:
     if len(f) != 2 or not f[1]:
         return None
     try:
-        return Hold(int(f[0]), f[1])
+        pid = int(f[0])
     except ValueError:
         return None
+    return Hold(pid, f[1]) if pid > 0 else None
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_BUSY = 0, 1, 2, 3
+LOCK_WAIT = 5.0        # seconds to wait for a disk's lock, then busy
+MOUNT_TIMEOUT = 60     # seconds for mount, umount and sync of one device
+
+
+class Busy(Exception):
+    """A disk's lock could not be had in time."""
+
+
+def log(msg: str) -> None:
+    print("thinfloe-automount: " + msg, file=sys.stderr, flush=True)
+
+
+def run(argv: List[str], timeout: float):
+    """Run a command found on PATH: (returncode, stdout, stderr).
+
+    A command that is missing gives 127, one that outlives timeout is
+    killed and gives 124.
+    """
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out"
+    except OSError as e:
+        return 127, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def owner_uid() -> int:
+    return int(os.environ.get("TF_OWNER_UID", "0"))
+
+
+def state_dir(p: Paths) -> str:
+    return os.path.join(p.run, "automount")
+
+
+def contract_path(p: Paths) -> str:
+    return os.path.join(p.run, "removable")
+
+
+def event_path(p: Paths) -> str:
+    return os.path.join(p.run, "removable.event")
+
+
+class FileLock:
+    """flock on a file under the state directory; timeout None waits."""
+
+    def __init__(self, p: Paths, name: str, timeout: Optional[float] = None):
+        self.dir = os.path.join(state_dir(p), "lock")
+        self.name = os.path.basename(name)
+        self.timeout = timeout
+        self.fd = -1
+
+    def __enter__(self):
+        os.makedirs(self.dir, mode=0o700, exist_ok=True)
+        self.fd = os.open(os.path.join(self.dir, self.name), os.O_RDWR | os.O_CREAT, 0o600)
+        deadline = None if self.timeout is None else time.monotonic() + self.timeout
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | (0 if deadline is None else fcntl.LOCK_NB))
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(self.fd)
+                    raise Busy(self.name)
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        os.close(self.fd)   # closing drops the flock
+
+
+def files_lock(p: Paths) -> FileLock:
+    return FileLock(p, "files")
+
+
+def disk_lock(p: Paths, disk: str) -> FileLock:
+    return FileLock(p, disk, LOCK_WAIT)
+
+
+def atomic_write(path: str, text: str) -> None:
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_lines(p: Paths) -> List[Line]:
+    return parse_lines(read_text(contract_path(p)))
+
+
+def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
+           event: Optional[tuple] = None) -> None:
+    """One locked update of the contract file and, when given, the event file."""
+    with files_lock(p):
+        lines = [l for l in read_lines(p) if l.device not in drop]
+        if add is not None:
+            lines = [l for l in lines if l.device != add.device] + [add]
+        atomic_write(contract_path(p), format_lines(lines))
+        if event is not None:
+            first = read_text(event_path(p)).split("\t", 1)[0]
+            seq = (int(first) if first.isdigit() else 0) + 1
+            atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}\n")
+
+
+def read_holds(p: Paths) -> Dict[str, Hold]:
+    folder = os.path.join(state_dir(p), "hold")
+    holds = {}
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return holds
+    for name in names:
+        hold = parse_hold(read_text(os.path.join(folder, name)))
+        if hold is not None:
+            holds[name] = hold
+    return holds
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def live_hold(p: Paths, disk: str) -> bool:
+    hold = read_holds(p).get(disk)
+    return hold is not None and pid_alive(hold.pid)
+
+
+def udev_props(kname: str, p: Paths) -> Dict[str, str]:
+    env = os.environ.get("TF_UDEV_PROPS_" + kname)
+    if env is None:
+        rc, out, _ = run(["udevadm", "info", "--query=property",
+                          "--name", os.path.join(p.dev, kname)], 10)
+        env = out if rc == 0 else ""
+    props = {}
+    for row in env.split("\n"):
+        key, eq, value = row.partition("=")
+        if eq:
+            props[key] = value
+    return props
+
+
+def findmnt_source(p: Paths) -> Optional[str]:
+    rc, out, _ = run(["findmnt", "-n", "-o", "SOURCE", p.efi_mount], 10)
+    return out.strip() or None if rc == 0 else None
+
+
+def luns_on_parent(d: Dev, p: Paths) -> int:
+    """Disks below the same USB device; more than one means a card reader."""
+    if not d.usb_parent:
+        return 1
+    mark = "/" + d.usb_parent + "/"
+    count = 0
+    try:
+        names = os.listdir(os.path.join(p.sysfs, "class", "block"))
+    except OSError:
+        return 1
+    for name in names:
+        real = os.path.realpath(os.path.join(p.sysfs, "class", "block", name))
+        if mark in real + "/" and not os.path.exists(os.path.join(real, "partition")):
+            count += 1
+    return max(count, 1)
+
+
+def reserve_mountpoint(d: Dev, p: Paths):
+    """Make a fresh directory for the stick under the mount root: (name, path)."""
+    with files_lock(p):
+        os.makedirs(p.media, mode=0o755, exist_ok=True)
+        taken = {l.name for l in read_lines(p)} | set(os.listdir(p.media))
+        while True:
+            name = choose_name(d.label, d.uuid, taken)
+            path = os.path.join(p.media, name)
+            try:
+                os.mkdir(path, 0o755)   # never exist_ok: an existing entry is not ours
+            except FileExistsError:
+                taken.add(name)
+                continue
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner_uid():
+                log(f"{path} is not a directory of ours, trying another name")
+                taken.add(name)
+                continue
+            return name, path
+
+
+def remove_dir(path: str) -> None:
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+
+
+def add_locked(d: Dev, p: Paths) -> int:
+    if any(l.device == d.devnode for l in read_lines(p)):
+        return EXIT_OK
+    name, mp = reserve_mountpoint(d, p)
+    rc, out, err = run(["mount", "--no-canonicalize", "-t", fs_driver(d.fstype),
+                        "-o", mount_options(d.fstype), d.devnode, mp], MOUNT_TIMEOUT)
+    if rc != 0:
+        log(f"mount of {d.devnode} failed ({rc}): {(err or out).strip()}")
+        remove_dir(mp)
+        return EXIT_FAIL
+    kind = "card" if is_card(d, luns_on_parent(d, p)) else "stick"
+    commit(p, add=Line(d.devnode, d.disk, name, mp, d.fstype, d.size_bytes,
+                       d.model, kind))
+    log(f"mounted {d.devnode} at {mp}")
+    return EXIT_OK
+
+
+def cmd_add(kname: str, p: Paths) -> int:
+    d = read_dev(kname, udev_props(kname, p), p)
+    mounted = {l.device for l in read_lines(p)}
+    reason = skip_reason(d, boot_disk(p, lambda: findmnt_source(p)),
+                         read_holds(p), mounted, pid_alive)
+    if reason:
+        log(f"{kname} not mounted: {reason}")
+        return EXIT_OK
+    try:
+        with disk_lock(p, d.disk):
+            return add_locked(d, p)
+    except Busy:
+        log(f"{d.disk} is busy")
+        return EXIT_BUSY
+
+
+def medium_present(kname: str, p: Paths) -> bool:
+    if not os.path.exists(os.path.join(p.dev, kname)):
+        return False
+    size = read_text(os.path.join(p.sysfs, "class", "block", kname, "size"))
+    return size.isdigit() and int(size) > 0
+
+
+def cmd_remove(kname: str, p: Paths) -> int:
+    dev = os.path.join(p.dev, kname)
+    line = next((l for l in read_lines(p) if l.device == dev), None)
+    if line is None:
+        return EXIT_OK
+    try:
+        with disk_lock(p, line.disk):
+            event = (line.name, "unclean")
+            if medium_present(kname, p):
+                _, state, _ = run(["systemctl", "is-system-running"], 10)
+                if state.strip() == "stopping":
+                    # Shutdown: the stick is still there, so leave it clean.
+                    run(["sync", "-f", line.mountpoint], MOUNT_TIMEOUT)
+                    if run(["umount", line.mountpoint], MOUNT_TIMEOUT)[0] == 0:
+                        event = None
+            if event is not None:
+                # Pulled: whatever is open stays open until closed.
+                rc, out, err = run(["umount", "-l", line.mountpoint], MOUNT_TIMEOUT)
+                if rc != 0:
+                    log(f"umount -l {line.mountpoint} failed: {(err or out).strip()}")
+            remove_dir(line.mountpoint)
+            commit(p, drop={dev}, event=event)
+    except Busy:
+        log(f"{line.disk} is busy")
+        return EXIT_BUSY
+    return EXIT_OK
+
+
+def power_off(disk: str, p: Paths) -> None:
+    """Remove the USB device, as udisks2 does, so the stick can be unplugged."""
+    usb = usb_device_of(os.path.realpath(os.path.join(p.sysfs, "class", "block", disk)))
+    if not usb:
+        return
+    try:
+        with open(os.path.join(p.sysfs, "bus", "usb", "devices", usb, "remove"), "w") as fh:
+            fh.write("1")
+    except OSError as e:
+        log(f"power off of {disk} failed: {e}")
+
+
+def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
+    """Unmount every partition of a disk; None when none was mounted.
+
+    Runs under the disk's lock. A busy mount leaves its line and gives 3;
+    partitions unmounted before it stay unmounted and lose their line.
+    event: this is an eject (clean event, power off a stick).
+    """
+    lines = [l for l in read_lines(p) if l.disk == disk]
+    if not lines:
+        return None
+    if live_hold(p, disk):
+        log(f"{disk} is held by a write")
+        return EXIT_BUSY
+    status, done = EXIT_OK, []
+    for l in lines:
+        run(["sync", "-f", l.mountpoint], MOUNT_TIMEOUT)
+        rc, out, err = run(["umount", l.mountpoint], MOUNT_TIMEOUT)
+        if rc == 0:
+            done.append(l)
+            continue
+        log(f"umount {l.mountpoint} failed ({rc}): {(err or out).strip()}")
+        if "busy" in (err + out).lower():
+            status = EXIT_BUSY
+        elif status != EXIT_BUSY:
+            status = EXIT_FAIL
+    for l in done:
+        remove_dir(l.mountpoint)
+    ejected = event and status == EXIT_OK
+    commit(p, drop={l.device for l in done},
+           event=(", ".join(l.name for l in lines), "clean") if ejected else None)
+    if ejected and any(l.kind == "stick" for l in lines):
+        power_off(disk, p)
+    return status
+
+
+def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
+    if arg == "all" and event:
+        disks = sorted({l.disk for l in read_lines(p)})
+    else:
+        disks = [os.path.basename(arg)]
+    results = []
+    for disk in disks:
+        try:
+            with disk_lock(p, disk):
+                results.append(unmount_disk(disk, p, event))
+        except Busy:
+            log(f"{disk} is busy")
+            results.append(EXIT_BUSY)
+    if event and all(r is None for r in results):
+        print("nothing to eject")
+    codes = [r for r in results if r is not None]
+    if EXIT_FAIL in codes:
+        return EXIT_FAIL
+    return EXIT_BUSY if EXIT_BUSY in codes else EXIT_OK
+
+
+def cmd_remount(disk: str, p: Paths) -> int:
+    disk = os.path.basename(disk)
+    base = os.path.realpath(os.path.join(p.sysfs, "class", "block", disk))
+    try:
+        parts = sorted(n for n in os.listdir(base)
+                       if os.path.exists(os.path.join(base, n, "partition")))
+    except OSError:
+        parts = []
+    status = EXIT_OK
+    for name in parts or [disk]:
+        rc, _, err = run(["udevadm", "trigger", "--action=change",
+                          os.path.join(p.dev, name)], 10)
+        if rc != 0:
+            log(f"udevadm trigger {name} failed: {err.strip()}")
+            status = EXIT_FAIL
+    return status
+
+
+USAGE = "usage: thinfloe-automount add|remove <kname> | eject <disk>|all | release|remount <disk>"
 
 
 def main(argv: List[str]) -> int:
-    print("usage: thinfloe-automount add|remove|eject|release|remount ...", file=sys.stderr)
-    return 2
+    if len(argv) != 2 or not argv[1]:
+        print(USAGE, file=sys.stderr)
+        return EXIT_USAGE
+    cmd, arg = argv
+    p = paths()
+    try:
+        if cmd == "add":
+            return cmd_add(os.path.basename(arg), p)
+        if cmd == "remove":
+            return cmd_remove(os.path.basename(arg), p)
+        if cmd == "eject":
+            return cmd_unmount(arg, p, True)
+        if cmd == "release":
+            return cmd_unmount(arg, p, False)
+        if cmd == "remount":
+            return cmd_remount(arg, p)
+    except Exception as e:   # never a traceback to the caller
+        log(f"{cmd} {arg} failed: {type(e).__name__}: {e}")
+        return EXIT_FAIL
+    print(USAGE, file=sys.stderr)
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":
