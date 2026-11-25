@@ -17,8 +17,11 @@
 #   - each boot passes check-boot-smoke.sh,
 #   - each boot mounted /dev/vdb1, and boots 2 and 3 saw the id boot 1 gave B,
 #     which is not A's,
-#   - no boot automounted anything under /media/tfuser (stick A is a ThinFloe
-#     stick, never automounted),
+#   - no boot automounted anything under /media/tfuser (both sticks are
+#     virtio, which the udev rule never matches, so this alone cannot show
+#     the ThinFloe-stick rule),
+#   - an add of A's ESP by hand is refused as "ThinFloe stick" (the rule
+#     the helper applies before any other test of a non-boot disk),
 #   - afterwards both of B's syslinux.cfg copies carry thinfloe.stick=<that
 #     id>, and A's config/stick-id and syslinux.cfg copies are unchanged.
 #
@@ -128,6 +131,12 @@ for n in 1 2 3; do
         ok "boot $n mounted /dev/vdb1, the stick it booted from (stick id ${id:-none})"
     else
         bad "boot $n mounted '${dev:-nothing}' (stick id ${id:-none}), not /dev/vdb1"
+    fi
+    skip=$(tr -d '\r' <"$LOG.$n" | grep -a '^SMOKE-STICK-SKIP:' | tail -1)
+    if [[ "$skip" == *"not mounted: ThinFloe stick" ]]; then
+        ok "boot $n: an add of the other stick's ESP is refused as a ThinFloe stick"
+    else
+        bad "boot $n: ${skip:-no SMOKE-STICK-SKIP line}"
     fi
     media=$(tr -d '\r' <"$LOG.$n" | grep -a '^SMOKE-STICK-MEDIA:' | tail -1)
     if [[ "$media" =~ ^SMOKE-STICK-MEDIA:\ *$ ]]; then

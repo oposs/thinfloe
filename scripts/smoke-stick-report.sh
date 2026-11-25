@@ -13,5 +13,11 @@ udevadm settle --timeout=30 >/dev/null 2>&1
 {
     echo "SMOKE-STICK: $(findmnt -n -o SOURCE "$ESP") $(cat "$ESP/config/stick-id" 2>/dev/null || echo none)"
     echo "SMOKE-STICK-MEDIA: $(findmnt -rn -o SOURCE,TARGET | awk 'index($2, "/media/tfuser/") == 1' | tr '\n' ' ')$(cut -f 1 /run/thinfloe/removable 2>/dev/null | tr '\n' ' ')"
+    # The other ThinFloe stick's ESP, added by hand: the udev rule never
+    # starts a unit for a virtio disk, so only this shows the helper's
+    # ThinFloe-stick rule.
+    boot=$(findmnt -n -o SOURCE "$ESP")
+    other=$(lsblk -rno NAME,PARTLABEL | awk -v boot="$boot" '$2 == "EFI-SYSTEM" && "/dev/" $1 != boot { print $1; exit }')
+    echo "SMOKE-STICK-SKIP: ${other:-none} $([ -n "$other" ] && /usr/libexec/thinfloe/thinfloe-automount add "$other" 2>&1 | tail -1)"
     echo "SMOKE-STICK-DONE"
 } >/dev/console 2>&1

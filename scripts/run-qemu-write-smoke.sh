@@ -239,6 +239,13 @@ else
     bad "after the failed write: mounted at '$(field NOWRITE-REMOUNTED)', hold '$(field NOWRITE-HOLD)'"
     sed -n '/SMOKE-WRITE-NOWRITE-STATE-BEGIN/,/SMOKE-WRITE-NOWRITE-STATE-END/p' "$clean" | sed 's/^/         /'
 fi
+# Another mount id after the write: B was really released, not left mounted.
+read -r b_before b_after <<<"$(field NOWRITE-MOUNT-ID)"
+if [[ "$b_before" =~ ^[0-9]+$ && "$b_after" =~ ^[0-9]+$ && "$b_before" != "$b_after" ]]; then
+    ok "the failed write released the stick and it was mounted anew (mount $b_before, then $b_after)"
+else
+    bad "the mount of B before and after the failed write: '$(field NOWRITE-MOUNT-ID)' (need two different ids)"
+fi
 
 if [[ "$(field CANCEL-RELEASED)" == yes && "$(field CANCEL-HELD)" == yes ]]; then
     ok "while the write runs, the stick is released and held"
@@ -283,6 +290,11 @@ if [[ "$(field WRITTEN-AUTOMOUNTED)" == no ]]; then
     ok "the ThinFloe stick it wrote is not automounted"
 else
     bad "the written ThinFloe stick is automounted: '$(field WRITTEN-AUTOMOUNTED)'"
+fi
+if [[ "$(field WRITTEN-SKIP)" == *"not mounted: ThinFloe stick" ]]; then
+    ok "with the hold gone, an add of the written stick is refused as a ThinFloe stick"
+else
+    bad "an add of the written stick after the write: '$(field WRITTEN-SKIP)'"
 fi
 
 if [[ "$(field BOOT-THINFLOE)" == true ]]; then
