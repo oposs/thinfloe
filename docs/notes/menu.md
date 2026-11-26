@@ -495,6 +495,16 @@ animation in the menu does (`animation_time` 0, see `app.rs`). Guards:
 `the_switch_knob_moves_and_reads_on_the_page`,
 `a_switch_click_damages_the_old_and_new_knob` in `brand.rs`.
 
+## Events of a discarded pass
+
+egui reruns a pass that asks for a discard (`ui.rs` does when a page or its
+footer changes height) and gives the second pass no input, so a click is
+seen in the first pass only. The frame loop keeps the event of every pass
+(`app::run_passes`) and handles them in order; before, it kept the last
+pass's answer and such a click did nothing. Guards:
+`an_event_of_a_discarded_pass_is_kept` in `app.rs`,
+`a_tile_click_in_a_discarded_pass_starts_one_tile` in `ui.rs`.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are

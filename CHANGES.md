@@ -20,6 +20,7 @@ the entries into this file.
 - A USB Wi-Fi stick that Owly cannot drive kept FloeDrop from using a working internal card; FloeDrop now tries the next card.
 - FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
 - "FloeDrop cannot start on …" now names the Wi-Fi card and driver instead of awdl0.
+- Now and then a click in the menu did nothing and had to be repeated; it happened when the page changed its layout at the same moment. Every click now counts.
 
 ## 4.13.0 - 2026-11-26
 
