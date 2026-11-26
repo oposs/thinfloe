@@ -110,11 +110,18 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   release, comment or note) ends `MARK_GAP` before the leftmost mark
   area, the update mark's click target or the "user" mark; `tile_columns`
   in `ui.rs` gives the drawing and the tests the same columns. A greyed
-  tile fades its fill, the mark's highlight and both focus rings, not its
-  reason or the word "update". The pointer is a hand over every enabled
-  widget that takes a click and no drag (`pointing_hand` at the start of
-  `ui::show`); widgets that set their own cursor later in the pass win.
-  winit draws it from whiteglass's `pointer` cursor.
+  tile fades its fill and the mark's hover highlight, not its reason, the
+  word "update" or the mark's focus ring: the mark is the one control of
+  a greyed tile that still works, and a faded ring was too faint for a
+  focus indicator. The pointer is a hand over every enabled widget that
+  takes a click and no drag (`pointing_hand` at the start of
+  `ui::show`), but not over an Area's own move widget: a fixed Area, as
+  every dialog is, senses a click over all of itself to come to the
+  front, and the hand showed on the dialog's padding. The folded-window
+  chips sense drag for the strip's scroll area and set the hand
+  themselves. Widgets that set their own cursor later in the pass win (a
+  text field's I-beam). winit draws the hand from whiteglass's `pointer`
+  cursor.
 
 ## Menu density
 

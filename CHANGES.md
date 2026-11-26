@@ -8,7 +8,7 @@ the entries into this file.
 - After Eject all with several sticks plugged in, the note at the bottom of the screen named only one of them. It now says how many can be removed, for example "2 sticks can be removed".
 - A card swapped in a card reader for another card with the same name gave no "… connected" note. It now does.
 - A long description on an app tile no longer runs under the small "update" or "user" mark; it now ends with "…" before the marks.
-- On a greyed-out tile, the highlight and the focus frame of the "update" mark are now greyed out like the rest of the tile.
+- On a greyed-out tile, the highlight of the "update" mark under the mouse is now greyed out like the rest of the tile; its keyboard focus frame stays at full strength, so it can still be seen.
 
 ## 4.13.0 - 2026-11-26
 
