@@ -57,7 +57,7 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
           <picture>
             <source srcset="img/menu.webp" type="image/webp">
             <img src="img/menu.png" width="2880" height="1920"
-                 alt="The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Restart and Power off, the status area and the log.">
+                 alt="The ThinFloe menu: tiles for ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Eject, Restart and Power off, the status area and the log.">
           </picture>
           <video id="boot" autoplay muted loop playsinline preload="auto" poster="img/boot-poster.webp" width="1440" height="960"
                  aria-label="ThinFloe boots: the logo above a bar that fills while the steps of the boot are named, then the menu.">
@@ -82,11 +82,11 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
     <p class="lede">One menu. Tiles start the remote desktop, a terminal or a home backup; below them the machine reports on itself, and the log says what the system did.</p>
     <figure class="shot">
       <img src="img/menu.webp" width="2880" height="1920" loading="lazy"
-           alt="The ThinFloe menu on a 3:2 screen. Eight tiles: ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Restart, Power off. Below them the status area: batteries of keyboard and mouse, a network traffic graph, network details, CPU load, memory, uptime and model, time and date. At the bottom the log, with lines of the add-on checks.">
+           alt="The ThinFloe menu on a 3:2 screen. Nine tiles: ThinLinc, OxuLnk, Terminal, Back up home, Upgrade, Settings, Eject (a USB stick is plugged in), Restart, Power off. Below them the status area: batteries of keyboard and mouse, time, date and time zone, a network traffic graph, the connection with address, gateway, DNS, traffic and uptime, CPU load and memory. At the bottom the log, with lines of the add-on installs and checks.">
     </figure>
     <dl class="parts">
-      <div><dt>Tiles</dt><dd>ThinLinc, OxuLnk, a terminal, a home backup, upgrades, settings. Add your own with one small file.</dd></div>
-      <div><dt>Status area</dt><dd>The machine reports on itself: batteries of keyboard and mouse, network traffic, addresses, load, memory.</dd></div>
+      <div><dt>Tiles</dt><dd>ThinLinc, OxuLnk, a terminal, a home backup, upgrades, settings, and Eject while a stick or card is plugged in. Add your own with one small file.</dd></div>
+      <div><dt>Status area</dt><dd>The machine reports on itself: batteries of keyboard and mouse, network traffic, the connection, load, memory, the time.</dd></div>
       <div><dt>Log</dt><dd>What the system did and when, such as the daily look for new add-on versions.</dd></div>
     </dl>
   </div>
@@ -95,19 +95,21 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
 <section class="band" id="settings">
   <div class="wrap">
     <h2>Settings on the screen</h2>
-    <p class="lede">WiFi and wired network, monitors, keyboard and the status area are set in the menu. A change applies at once and travels with the home.</p>
+    <p class="lede">WiFi and wired network, monitors, keyboard, sound and the status area are set in the menu. A change applies at once and travels with the home.</p>
 
     <div class="tabs">
       <input type="radio" name="st" id="st-packages" checked>
       <input type="radio" name="st" id="st-network">
       <input type="radio" name="st" id="st-screen">
       <input type="radio" name="st" id="st-keyboard">
+      <input type="radio" name="st" id="st-sound">
       <input type="radio" name="st" id="st-status">
       <div class="tabbar">
         <label for="st-packages">Packages</label>
         <label for="st-network">Network</label>
         <label for="st-screen">Screen</label>
         <label for="st-keyboard">Keyboard</label>
+        <label for="st-sound">Sound</label>
         <label for="st-status">Status</label>
       </div>
       <figure class="panel p-packages">
@@ -118,17 +120,22 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
       <figure class="panel p-network">
         <img src="img/settings-network.webp" width="1872" height="858" loading="lazy"
              alt="The Network tab: the wired connection with a fixed address and gateway, and two saved WiFi networks, one of them hidden.">
-        <figcaption><b>Network</b>Wired with DHCP or a fixed address, the WiFi networks this machine knows, and the DNS servers.</figcaption>
+        <figcaption><b>Network</b>Wired with DHCP or a fixed address, the WiFi networks this machine knows, the DNS servers, the time zone and FloeDrop.</figcaption>
       </figure>
       <figure class="panel p-screen">
         <img src="img/settings-screen.webp" width="1872" height="858" loading="lazy"
-             alt="The Screen tab: two monitors side by side, the right one selected and showing the menu, with its resolution and rotation.">
-        <figcaption><b>Screen</b>Place the monitors, set resolution and rotation, choose which one shows the menu and when the screen turns off.</figcaption>
+             alt="The Screen tab: the monitors HDMI-A-1 and DP-1 side by side, DP-1 showing the menu, with the computers pc on the left and mac on the right, attached with Deskflow. Below them the list of monitors with resolution and an On switch each.">
+        <figcaption><b>Screen</b>Place the monitors, set resolution and rotation, choose which one shows the menu and when the screen turns off. Computers attached with Deskflow sit beside the monitors.</figcaption>
       </figure>
       <figure class="panel p-keyboard">
         <img src="img/settings-keyboard.webp" width="1872" height="858" loading="lazy"
-             alt="The Keyboard tab with the list of layouts open: Dari, Dhivehi, Dutch, Dzongkha and several English layouts. Below it Variant, CapsLock acts as Ctrl, Compose key and a field to try the keys.">
-        <figcaption><b>Keyboard</b>New in 4.4.0. Layout and variant, CapsLock as Ctrl, the Compose key, and a field to try them in.</figcaption>
+             alt="The Keyboard tab: Layout English (US) and Variant Default; CapsLock acts as Ctrl, Num Lock on at start and Volume keys control this machine switched on, Brightness keys control the monitors off; Compose key Right Alt.">
+        <figcaption><b>Keyboard</b>Layout and variant, CapsLock as Ctrl, Num Lock at start, the Compose key, and a field to try them in. Two switches give the volume and brightness keys to this machine.</figcaption>
+      </figure>
+      <figure class="panel p-sound">
+        <img src="img/settings-sound.webp" width="1872" height="858" loading="lazy"
+             alt="The Sound tab: Set the volume on this machine switched on, the volume slider at 64 %, Mute off.">
+        <figcaption><b>Sound</b>A volume slider and a mute switch, for keyboards without volume keys. With the switch off, the remote session sets the loudness.</figcaption>
       </figure>
       <figure class="panel p-status">
         <img src="img/settings-status.webp" width="1872" height="858" loading="lazy"
@@ -168,12 +175,32 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
       <li>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
         <h3>Settings on the screen</h3>
-        <p>WiFi and wired network, keyboard layout, monitors and the status area are set in the menu. A change applies at once and travels with the home.</p>
+        <p>WiFi and wired network, keyboard layout, monitors, sound and the status area are set in the menu. A change applies at once and travels with the home.</p>
       </li>
       <li>
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/></svg>
         <h3>Add-ons you tick</h3>
         <p>ThinLinc and OxuLnk are not in the image. Tick one and ThinFloe fetches it from its source, keeps it on the stick and looks for a new version every day.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></svg>
+        <h3>Sticks and cards open by themselves</h3>
+        <p>A USB stick or SD card appears under /media/tfuser, where the folder sharing of ThinLinc and OxuLnk reaches it. An Eject tile says when it is safe to pull it.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="7" height="12" x="2" y="6" rx="1"/><path d="M13 8.32a7.43 7.43 0 0 1 0 7.36"/><path d="M16.46 6.21a11.76 11.76 0 0 1 0 11.58"/><path d="M19.91 4.1a15.91 15.91 0 0 1 .01 15.8"/></svg>
+        <h3>FloeDrop: files with iPhones</h3>
+        <p>Send files to iPhones nearby over AirDrop and receive them, through one folder. It needs a spare WiFi card that supports AirDrop; sending also needs Bluetooth.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"/></svg>
+        <h3>One keyboard for more computers</h3>
+        <p>ThinFloe's keyboard and mouse drive the computers beside it that run Deskflow. Push the pointer past the edge of the screen; copied text goes along.</p>
+      </li>
+      <li>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg>
+        <h3>Volume and brightness keys</h3>
+        <p>Switched on in Settings, the volume keys set the speakers and the brightness keys the monitors, with a note on the screen. The Sound tab has a slider for keyboards without them.</p>
       </li>
       <li>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
@@ -188,7 +215,7 @@ if (/[?&]still\b/.test(location.search)) document.documentElement.classList.add(
     </ul>
 
     <dl class="status">
-      <div><dt>Download</dt><dd>493 MB</dd></div>
+      <div><dt>Download</dt><dd>491 MB</dd></div>
       <div><dt>RAM in use</dt><dd>0.7 to 1.3 GiB</dd></div>
       <div><dt>Boot</dt><dd>UEFI and BIOS</dd></div>
       <div><dt>Licence</dt><dd>MIT</dd></div>
