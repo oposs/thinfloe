@@ -45,6 +45,12 @@ has_line() { [ -n "$(line "$1")" ]; }
 no_line() { [ -z "$(line "$1")" ]; }
 # event_is NAME STATE: the last event names NAME and STATE
 event_is() { [ "$(cut -f 2- "$EVENT" 2>/dev/null)" = "$(printf '%s\t%s' "$1" "$2")" ]; }
+# event_is_batch NAMES1 NAMES2 STATE COUNT: the last event is a batch line
+# naming NAMES1 or NAMES2 (the order of the disks), STATE and COUNT
+event_is_batch() {
+    got=$(cut -f 2- "$EVENT" 2>/dev/null)
+    [ "$got" = "$(printf '%s\t%s\t%s' "$1" "$3" "$4")" ] || [ "$got" = "$(printf '%s\t%s\t%s' "$2" "$3" "$4")" ]
+}
 show_state() {
     say "SMOKE-AUTOMOUNT-STATE-BEGIN"
     cat "$LIST" "$EVENT" >"$CONSOLE" 2>&1
@@ -136,19 +142,18 @@ sleep 3
 check "the card reader stays powered ($C_DISK still there)" \
     '[ -n "$C_DISK" ] && [ -e "/sys/class/block/$C_DISK" ]'
 
-"$HELPER" eject "$U_DISK"
-rc=$?
-check "eject of the stick exits 0 (exit $rc)" '[ "$rc" -eq 0 ]'
-check "the ejected stick loses its line" 'no_line SMOKEU'
-check "the ejected stick's mount is gone" \
-    '! findmnt -rn "$MEDIA/SMOKEU" >/dev/null && [ ! -e "$MEDIA/SMOKEU" ]'
-check "the event file says SMOKEU went clean" 'event_is SMOKEU clean'
-check "the stick is powered off ($U_DISK gone)" \
-    '[ -n "$U_DISK" ] && wait_for 10 [ ! -e "/sys/class/block/$U_DISK" ]'
-
+# eject all with two sticks mounted (SMOKEU and FLOEDROP1): one event for
+# the batch, both names and the count, in the order of their disks.
+check "two sticks are mounted before eject all" 'has_line SMOKEU && has_line FLOEDROP1'
 "$HELPER" eject all
 rc=$?
 check "eject all exits 0 and leaves no line (exit $rc)" '[ "$rc" -eq 0 ] && [ ! -s "$LIST" ]'
+check "the ejected stick's mount is gone" \
+    '! findmnt -rn "$MEDIA/SMOKEU" >/dev/null && [ ! -e "$MEDIA/SMOKEU" ]'
+check "the event file says both sticks went clean, count 2 ($(cut -f 2- "$EVENT" 2>/dev/null | tr '\t' ' '))" \
+    'event_is_batch "SMOKEU, FLOEDROP1" "FLOEDROP1, SMOKEU" clean 2'
+check "the stick is powered off ($U_DISK gone)" \
+    '[ -n "$U_DISK" ] && wait_for 10 [ ! -e "/sys/class/block/$U_DISK" ]'
 check "eject all leaves FloeDrop's tmpfs mounted at $SHARE" \
     '[ "$(findmnt -rn -o FSTYPE "$SHARE")" = tmpfs ]'
 
