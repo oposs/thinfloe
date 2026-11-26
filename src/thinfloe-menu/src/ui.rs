@@ -573,11 +573,17 @@ fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Draw one frame.
 /// Whether the pointer over `w` is a hand: it is enabled and takes a
 /// click and no drag (scroll bars, sliders and text fields keep theirs).
+/// An Area's own move widget is no click target: a fixed Area (every
+/// dialog) senses a click over all of itself only to come to the front.
 fn wants_pointing_hand(w: &egui::WidgetRect) -> bool {
-    w.enabled && w.sense.senses_click() && !w.sense.senses_drag()
+    w.enabled && w.sense.senses_click() && !w.sense.senses_drag() && w.id != area_move_id(w.layer_id)
+}
+
+/// The id egui 0.37 gives an Area's move widget (`Area::show`).
+fn area_move_id(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("move")
 }
 
 /// The pointing hand over the widget egui would give a click to, when
@@ -590,6 +596,7 @@ fn pointing_hand(ctx: &egui::Context) {
     }
 }
 
+/// Draw one frame.
 pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
     pointing_hand(ui.ctx());
     // The clock changes on the minute and at no other time.
@@ -1017,6 +1024,10 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                     // scroll area, so it hands the movement back.
                     if resp.dragged() {
                         ui.scroll_with_delta(vec2(resp.drag_delta().x, 0.0));
+                    } else if resp.hovered() {
+                        // It senses drag for the scroll area, so
+                        // pointing_hand() leaves it out; a click unfolds.
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     let p = ui.painter();
                     let fill = if resp.hovered() {
@@ -1758,8 +1769,8 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     let p = ui.painter();
     let usable = tile.usable();
     // A tile that cannot be used fades, its focus ring and the update
-    // mark's highlight and ring too; its reason and the word "update" stay
-    // at full strength.
+    // mark's highlight too; its reason, the word "update" and the mark's
+    // focus ring stay at full strength.
     let fade = |c: Color32| faded(c, usable);
     let fill = if state.hovered {
         t.palette().accent
@@ -1892,13 +1903,10 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
         if m.hovered {
             p.rect_filled(target, 0.0, fade(t.palette().accent));
         }
+        // Full strength: the mark is the one control of a greyed tile that
+        // still works, and its focus must stay visible.
         if m.focused {
-            p.rect_stroke(
-                target,
-                0.0,
-                Stroke::new(2.0, fade(t.palette().ring)),
-                StrokeKind::Inside,
-            );
+            p.rect_stroke(target, 0.0, Stroke::new(2.0, t.palette().ring), StrokeKind::Inside);
         }
         mark(UPDATE_MARK, t.palette().primary);
     }
@@ -3466,8 +3474,18 @@ mod tests {
 
     /// One pass of `show` for `menu` on 1280 x 720 with `events`.
     fn grid_pass(ctx: &egui::Context, menu: &Menu, events: Vec<egui::Event>) -> (egui::FullOutput, Option<UiEvent>) {
+        pass_on(ctx, menu, vec2(1280.0, 720.0), events)
+    }
+
+    /// One pass of `show` for `menu` on a screen of `size` with `events`.
+    fn pass_on(
+        ctx: &egui::Context,
+        menu: &Menu,
+        size: Vec2,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<UiEvent>) {
         let input = egui::RawInput {
-            screen_rect: Some(screen(1280.0, 720.0)),
+            screen_rect: Some(screen(size.x, size.y)),
             events,
             ..Default::default()
         };
@@ -3493,8 +3511,13 @@ mod tests {
     /// The cursor `show` asks for with the pointer at `p`: one layout
     /// pass, then one with the pointer moved there.
     fn cursor_at(ctx: &egui::Context, menu: &Menu, p: egui::Pos2) -> egui::CursorIcon {
-        grid_pass(ctx, menu, vec![]);
-        grid_pass(ctx, menu, vec![egui::Event::PointerMoved(p)])
+        cursor_on(ctx, menu, vec2(1280.0, 720.0), p)
+    }
+
+    /// `cursor_at` on a screen of `size`.
+    fn cursor_on(ctx: &egui::Context, menu: &Menu, size: Vec2, p: egui::Pos2) -> egui::CursorIcon {
+        pass_on(ctx, menu, size, vec![]);
+        pass_on(ctx, menu, size, vec![egui::Event::PointerMoved(p)])
             .0
             .platform_output
             .cursor_icon
@@ -3630,10 +3653,11 @@ mod tests {
         assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
     }
 
-    // A greyed tile drew the update mark's highlight and the focus rings at
-    // full strength on its faded fill (PR #62 follow-up, 2026-11-26).
+    // A greyed tile drew the update mark's highlight at full strength on
+    // its faded fill (PR #62 follow-up, 2026-11-26). The mark's focus ring
+    // stays at full strength: it is the tile's one working control.
     #[test]
-    fn a_greyed_tile_fades_the_mark_highlight_and_rings() {
+    fn a_greyed_tile_fades_the_mark_highlight_not_its_focus_ring() {
         let mut t0 = plain_tile("T0");
         t0.addon = true;
         t0.problem = Some("W".repeat(80));
@@ -3670,7 +3694,7 @@ mod tests {
         };
         assert_eq!(fills(faded(TILE_HOVER, false)), 1, "the faded highlight");
         assert_eq!(fills(TILE_HOVER), 0, "no full-strength highlight");
-        // Focus: Tab until a ring appears; it is faded too.
+        // Focus: Tab until a ring appears; it is at full strength.
         let ring = Theme::current(&ctx).palette().ring;
         let strokes = |shapes: &[egui::epaint::ClippedShape], c: Color32| {
             shapes
@@ -3690,7 +3714,8 @@ mod tests {
             grid_frame(&ctx, &menu, vec![tab.clone()]);
             let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
             if strokes(&shapes, faded(ring, false)) > 0 || strokes(&shapes, ring) > 0 {
-                assert_eq!(strokes(&shapes, ring), 0, "no full-strength ring");
+                assert_eq!(strokes(&shapes, faded(ring, false)), 0, "no faded ring");
+                assert_eq!(strokes(&shapes, ring), 1, "the mark's ring");
                 found = true;
                 break;
             }
@@ -3715,6 +3740,13 @@ mod tests {
         assert!(!wants_pointing_hand(&w(Sense::hover(), true)));
         assert!(!wants_pointing_hand(&w(Sense::click_and_drag(), true)));
         assert!(!wants_pointing_hand(&w(Sense::drag(), true)));
+        let area = egui::LayerId::new(egui::Order::Middle, egui::Id::NULL.with("dialog"));
+        let mover = egui::WidgetRect {
+            id: area_move_id(area),
+            layer_id: area,
+            ..w(Sense::click(), true)
+        };
+        assert!(!wants_pointing_hand(&mover), "an Area's move widget");
     }
 
     // The pointer stayed an arrow over everything (2026-11-26).
@@ -3755,6 +3787,102 @@ mod tests {
         );
         let log = layout(screen(1280.0, 720.0), 2, 0, 0, 0).log.center();
         assert_eq!(cursor_at(&ctx, &menu, log), Arrow, "the log");
+    }
+
+    /// Where `what` is drawn on `menu`'s screen of `size`.
+    fn drawn_at(ctx: &egui::Context, menu: &Menu, size: Vec2, what: &str) -> Rect {
+        pass_on(ctx, menu, size, vec![]);
+        let shapes = pass_on(ctx, menu, size, vec![]).0.shapes;
+        text_rects(&shapes)
+            .into_iter()
+            .find(|(t, _)| t == what)
+            .unwrap_or_else(|| panic!("{what} not drawn in {:?}", all_texts(&shapes)))
+            .1
+    }
+
+    // A fixed Area senses a click over all of itself to come to the front:
+    // the pointer was a hand on every dialog's padding (review, 2026-11-26).
+    #[test]
+    fn the_pointer_is_an_arrow_on_a_dialog_and_a_hand_over_its_buttons() {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.logout = Some(Logout::Confirm);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let (shapes, _) = {
+            grid_frame(&ctx, &menu, vec![]);
+            grid_frame(&ctx, &menu, vec![])
+        };
+        let texts = all_texts(&shapes);
+        let title = texts.first().cloned().expect("a dialog");
+        let small = vec2(1280.0, 720.0);
+        let title = drawn_at(&ctx, &menu, small, &title);
+        let stay = drawn_at(&ctx, &menu, small, "Stay");
+        use egui::CursorIcon::{Default as Arrow, PointingHand};
+        assert_eq!(
+            cursor_at(&ctx, &menu, title.left_top() + vec2(0.0, -12.0)),
+            Arrow,
+            "the padding"
+        );
+        assert_eq!(cursor_at(&ctx, &menu, stay.center()), PointingHand, "a button");
+    }
+
+    // A chip senses drag for the strip's scroll area; a click on it unfolds
+    // the window, so it shows the hand too (review, 2026-11-26).
+    #[test]
+    fn the_pointer_is_a_hand_over_a_folded_window_chip() {
+        let menu = folded_menu(1);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let chip = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if (r.rect.height() - CHIP_H).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .expect("a chip");
+        assert_eq!(cursor_at(&ctx, &menu, chip.center()), egui::CursorIcon::PointingHand);
+    }
+
+    // Settings: a shadcn button takes the hand, a text field keeps its
+    // I-beam, which it sets after pointing_hand() (review, 2026-11-26).
+    #[test]
+    fn the_pointer_in_settings_is_a_hand_over_a_tab_and_a_beam_over_a_field() {
+        let menu = keyboard_menu();
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let big = vec2(1920.0, 1080.0);
+        let tab = drawn_at(&ctx, &menu, big, "Network");
+        assert_eq!(
+            cursor_on(&ctx, &menu, big, tab.center()),
+            egui::CursorIcon::PointingHand,
+            "a tab"
+        );
+        let label = drawn_at(&ctx, &menu, big, "Try it here");
+        // The field: the widget that senses click and drag in the label's row.
+        let field = ctx.viewport(|v| {
+            v.prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, ws)| ws.iter())
+                .filter(|w| w.sense.senses_drag() && w.sense.senses_click())
+                .filter(|w| w.rect.left() > label.right() && w.rect.y_range().contains(label.center().y))
+                .map(|w| w.rect)
+                .next()
+        });
+        let field = field.expect("the Try it here field");
+        assert_eq!(
+            cursor_on(&ctx, &menu, big, field.center()),
+            egui::CursorIcon::Text,
+            "a text field"
+        );
     }
 
     #[test]
