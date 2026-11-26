@@ -414,7 +414,8 @@ mod tests {
         let client = std::thread::spawn(move || {
             let cert = rcgen::generate_simple_self_signed(vec!["big".to_string()]).unwrap();
             let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            // 30 s: only reached when the test fails.
+            tcp.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             let conn = rustls::ClientConnection::new(testclient::config(&cert), testclient::server_name()).unwrap();
             let mut c = rustls::StreamOwned::new(conn, tcp);
             let mut len = [0u8; 4];
@@ -448,12 +449,18 @@ mod tests {
             "test",
         )
         .unwrap();
-        let mut c = Conn::new(1, stream, tls::server_config(&id), Instant::now()).unwrap();
+        // The connection runs on a frozen clock: its handshake and hello
+        // deadlines (10 s each) measure test load, not the code, when a
+        // debug rcgen key and identity are made next to dozens of other
+        // tests in make test-unit. Only the loop's own end is wall time.
+        let t0 = Instant::now();
+        let mut c = Conn::new(1, stream, tls::server_config(&id), t0).unwrap();
         let text = vec![b'x'; 900 * 1024];
         let mut sent = false;
-        let end = Instant::now() + Duration::from_secs(10);
+        // 60 s: only reached when the test fails.
+        let end = Instant::now() + Duration::from_secs(60);
         while !client.is_finished() && Instant::now() < end {
-            let now = Instant::now();
+            let now = t0;
             for ev in c.on_readable(now) {
                 if let Event::Named(_) = ev {
                     c.set_verdict(Verdict::Trusted(0), now);
