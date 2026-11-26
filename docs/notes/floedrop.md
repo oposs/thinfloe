@@ -22,7 +22,8 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 - The helper takes a Wi-Fi card only when the machine does not use it: no IP address on it (an IPv6 link-local address does not count as "in use"; an IPv4 link-local address, 169.254/16, still does), no default route through it, and not named in the netplan Wi-Fi file (matched by name or MAC). Without such a card the band shows "AirDrop needs a Wi-Fi card this machine does not use for its network."
 - If the network state cannot be read (for example `ip -j` output does not parse), no card is taken.
 - The country comes from the time zone (`zone1970.tab`). It must be set: with country CH the radio ran on channel 44 (5 GHz).
-- Owly's own probe decides whether a card can run AWDL (`allow_untested` stays at its default, off). See the hardware results below.
+- Whether a card can run AWDL is decided by Owly's own probe (`allow_untested` stays at its default, off) and by ThinFloe's skip list `AWDL_BROKEN` in `card.rs`: cards the probe accepts but that fail in AWDL mode, by PCI vendor and device from `/sys/class/net/<if>/device/{vendor,device}`. It holds the Intel Wireless 3160 (8086:08b3, 8086:08b4). When the only unused card is on the list, the band shows "The Wi-Fi card wlp2s0 (Intel Wireless 3160) cannot run AirDrop; plug in a USB Wi-Fi stick that can." Other Intel cards stay usable. See the hardware results below.
+- Among the usable cards a USB card comes first (`device/subsystem` is `usb`), then the sorted interface name.
 
 ## Contracts
 
@@ -61,6 +62,12 @@ Stock `owly` 0.4.3 command line, not yet the FloeDrop image.
 - Thin client to iPhone: a text file arrived after the phone accepted; the Bluetooth wake-up came from the Intel card's `hci0`.
 - The kernel logged once `rtw88_8822bu ...: failed to get tx report from firmware`; harmless. The stick once failed at plug-in (error -71) and reconnected by itself.
 - The Intel AC 3160 crashes in AWDL mode: not usable.
+
+## Hardware results (2026-11-26, thinfloe-56db68, ThinFloe 4.12.0)
+
+- Cards: internal Intel Wireless 3160 [8086:08b3] (`wlp2s0`, `iwlwifi`) and the TP-Link stick 2357:012e (`wlxc03a55f0d060`, `rtw88_8822bu`). The 4.12.0 helper took `wlp2s0`, the first name in sorted order. Owly's probe accepted it ("exclusive mode up"); then the firmware crashed about every 11 s ("Microcode SW error detected", 40 times in one boot) and the iPhone never showed the receiver.
+- With the 3160 unbound from its driver, the helper took the stick and the iPhone showed "FloeDrop Tobi" at once. This led to the skip list and the preference for USB cards.
+- The owner reports that newer Intel cards (model not recorded) worked with FloeDrop.
 
 ## Owner checklist (hardware, FloeDrop image)
 
