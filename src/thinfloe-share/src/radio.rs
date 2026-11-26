@@ -27,7 +27,9 @@ use crate::health::{self, Health};
 /// The file owlyd reads each time the radio comes up (no restart needed).
 pub const RADIO_TOML: &str = "/etc/owly/radio.toml";
 const ZONEINFO: &str = "/usr/share/zoneinfo/";
-/// How long the up line waits for BlueZ before it reports `no-ble`.
+/// The error when another program holds owlyd's radio.
+pub const BUSY: &str = "The Wi-Fi radio is in use by another program.";
+/// How long each BlueZ call of the advert may take before the up line reports `no-ble`.
 const BLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// What the helper needs from owlyd; the zbus implementation is [`Owlyd`].
@@ -42,6 +44,9 @@ pub trait RadioApi {
     /// A lease held while this helper starts: one a crashed run left
     /// detached. Releasing a lease of a live owner fails, harmlessly.
     async fn stale_detached(&self) -> Option<u64>;
+    /// Whether a lease is held now (after the stale one was released): another program
+    /// has the radio.
+    async fn held(&self) -> bool;
     /// Completes once the card under the link has stopped sending (see [`health`]); pending
     /// for ever when that cannot be watched.
     async fn wait_wedged(&self, station: &str);
@@ -194,7 +199,13 @@ pub async fn hold<R: RadioApi, G>(
     if let Some(stale) = api.stale_detached().await {
         api.release(stale).await;
     }
+    // A live owner's lease: radio.toml is left as that owner has it.
+    if api.held().await {
+        say(out, &Err(BUSY.into()));
+        return 1;
+    }
     let mut first_refusal: Option<String> = None;
+    let mut last_error: Option<String> = None;
     let mut chosen = None;
     for station in stations {
         if let Err(e) = write_atomic(radio_toml_path, &radio_toml(&station, country)) {
@@ -204,11 +215,13 @@ pub async fn hold<R: RadioApi, G>(
             );
             return 1;
         }
+        // A probe that fails on one card may work on the next: tried like a refusal.
         let probe = match api.probe().await {
             Ok(p) => p,
             Err(e) => {
-                say(out, &Err(e));
-                return 1;
+                eprintln!("thinfloe-share: probe of {station}: {e}");
+                last_error = Some(e);
+                continue;
             }
         };
         match probe.refusal {
@@ -223,7 +236,12 @@ pub async fn hold<R: RadioApi, G>(
         }
     }
     let Some((station, Probe { mode, .. })) = chosen else {
-        say(out, &Err(first_refusal.unwrap_or_else(|| NO_CARD.into())));
+        say(
+            out,
+            &Err(first_refusal
+                .or(last_error)
+                .unwrap_or_else(|| NO_CARD.into())),
+        );
         return 1;
     };
     let bus = card.cards.get(&station).map(|c| c.bus).unwrap_or_default();
@@ -396,6 +414,11 @@ impl RadioApi for Owlyd {
         }
     }
 
+    async fn held(&self) -> bool {
+        // An unreadable property is not a holder: Acquire then says what is wrong.
+        matches!(self.radio.lease().await, Ok(l) if l != 0)
+    }
+
     async fn wait_lost(&self, lease: u64) -> String {
         let mut states = self.states.lock().await;
         // Ended before the wait began: the signal went by in the stream, or
@@ -560,12 +583,21 @@ fn wifi_yaml() -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
+/// The zone a link to zoneinfo names: the part after `zoneinfo/`, without a leading
+/// `posix/` or `right/` (the same zones with other leap second rules).
+pub fn zone_of(link_target: &str) -> Option<String> {
+    let (_, z) = link_target.split_once("zoneinfo/")?;
+    let z = z
+        .strip_prefix("posix/")
+        .or_else(|| z.strip_prefix("right/"))
+        .unwrap_or(z);
+    (!z.is_empty()).then(|| z.to_string())
+}
+
 /// The zone /etc/localtime points to, as timedatectl sets it.
 fn zone() -> Option<String> {
     let target = std::fs::read_link("/etc/localtime").ok()?;
-    let t = target.to_str()?;
-    let (_, z) = t.split_once(ZONEINFO.trim_start_matches('/'))?;
-    Some(z.to_string())
+    zone_of(target.to_str()?)
 }
 
 /// The value of the last `XKB_DEFAULT_LAYOUT=` line of an environment file; None when empty.
@@ -627,19 +659,12 @@ fn random_tag() -> [u8; 3] {
 
 async fn ble() -> (Option<crate::bluez::Registration>, Vec<String>) {
     use owly_airdrop::proto::ble::Advert;
-    let started = tokio::time::timeout(
-        BLE_TIMEOUT,
-        crate::bluez::advertise(Advert::anonymous(random_tag())),
-    )
-    .await;
-    match started {
-        Ok(Ok(Some(r))) => (Some(r), Vec::new()),
-        Ok(Ok(None)) => (None, vec!["no-ble".into()]),
-        Err(_) => {
-            eprintln!("thinfloe-share: no BLE advert: BlueZ did not answer");
-            (None, vec!["no-ble".into()])
-        }
-        Ok(Err(e)) => {
+    // Each BlueZ call is bounded inside: a timeout after the adapter was turned on turns it
+    // off again, which an outer timeout dropping the future could not.
+    match crate::bluez::advertise(Advert::anonymous(random_tag()), BLE_TIMEOUT).await {
+        Ok(Some(r)) => (Some(r), Vec::new()),
+        Ok(None) => (None, vec!["no-ble".into()]),
+        Err(e) => {
             eprintln!("thinfloe-share: no BLE advert: {e}");
             (None, vec!["no-ble".into()])
         }
@@ -662,18 +687,26 @@ pub async fn stop_on(stdin: impl AsyncRead + Unpin, signal: impl Future<Output =
     let _ = tokio::time::timeout(TERM_WAIT, closed).await;
 }
 
-async fn stop() {
+/// The SIGTERM and SIGINT handlers, installed before anything else, so a signal during the
+/// start no longer ends the helper with Bluetooth on: it waits for [`stop`].
+struct Stop {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+fn install_stop() -> Result<Stop, String> {
     use tokio::signal::unix::{SignalKind, signal};
-    let (Ok(mut term), Ok(mut int)) = (
-        signal(SignalKind::terminate()),
-        signal(SignalKind::interrupt()),
-    ) else {
-        return;
-    };
+    let term = signal(SignalKind::terminate()).map_err(|e| format!("SIGTERM: {e}"))?;
+    let int = signal(SignalKind::interrupt()).map_err(|e| format!("SIGINT: {e}"))?;
+    Ok(Stop { term, int })
+}
+
+/// Completes on stdin's EOF, or after SIGTERM or SIGINT (see [`stop_on`]).
+async fn stop(mut s: Stop) {
     let signalled = async {
         tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv() => {}
+            _ = s.term.recv() => {}
+            _ = s.int.recv() => {}
         }
     };
     stop_on(tokio::io::stdin(), signalled).await;
@@ -706,7 +739,22 @@ pub fn main() -> i32 {
     };
     rt.block_on(async {
         let mut out = std::io::stdout();
+        let signals = match install_stop() {
+            Ok(s) => s,
+            Err(e) => {
+                say(
+                    &mut out,
+                    &Err(format!("Cannot install signal handlers: {e}")),
+                );
+                return 1;
+            }
+        };
         let (card, country) = gather();
+        // No free card is said before owlyd is asked, whose error would hide it.
+        if let Err(e) = candidates(&card) {
+            say(&mut out, &Err(e.to_string()));
+            return 1;
+        }
         let owlyd = match Owlyd::connect().await {
             Ok(o) => o,
             Err(e) => {
@@ -725,7 +773,7 @@ pub fn main() -> i32 {
                 reg = r;
                 (None::<()>, flags)
             },
-            stop(),
+            stop(signals),
             &mut out,
         )
         .await;
@@ -791,6 +839,10 @@ mod tests {
         wedged: bool,
         /// `acquire` fails with this text.
         acquire_error: Option<String>,
+        /// Another program holds the radio.
+        held: bool,
+        /// Stations whose probe call fails, with the error.
+        probe_error: Vec<(String, String)>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -809,6 +861,9 @@ mod tests {
         async fn probe(&self) -> Result<Probe, String> {
             let station = self.station();
             self.calls.borrow_mut().push(format!("probe {station}"));
+            if let Some((_, e)) = self.probe_error.iter().find(|(s, _)| *s == station) {
+                return Err(e.clone());
+            }
             let refusal = self
                 .refuse
                 .iter()
@@ -836,6 +891,9 @@ mod tests {
         async fn stale_detached(&self) -> Option<u64> {
             self.stale
         }
+        async fn held(&self) -> bool {
+            self.held
+        }
         async fn wait_wedged(&self, _station: &str) {
             if !self.wedged {
                 std::future::pending::<()>().await;
@@ -859,12 +917,133 @@ mod tests {
         }
     }
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+    /// A test's own directory below target/, removed when the guard drops.
+    struct Tmp {
+        dir: PathBuf,
+        toml: PathBuf,
+    }
+
+    impl Tmp {
+        /// The radio.toml path inside it (not written).
+        fn toml(&self) -> PathBuf {
+            self.toml.clone()
+        }
+    }
+
+    impl AsRef<Path> for Tmp {
+        fn as_ref(&self) -> &Path {
+            &self.toml
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The guard derefs to its radio.toml path, so a test passes `&tmp(..)` as the path.
+    impl std::ops::Deref for Tmp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.toml
+        }
+    }
+
+    fn tmp(name: &str) -> Tmp {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
             .join(format!("radio-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.join("owly").join("radio.toml")
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("owly").join("radio.toml");
+        Tmp { dir, toml }
+    }
+
+    #[test]
+    fn a_tmp_dir_goes_with_its_guard() {
+        let t = tmp("guard");
+        let dir = t.dir.clone();
+        std::fs::create_dir_all(t.toml().parent().unwrap()).unwrap();
+        std::fs::write(t.toml(), "x").unwrap();
+        assert!(dir.is_dir());
+        drop(t);
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn a_held_radio_writes_nothing() {
+        let fake = Fake {
+            held: true,
+            channel: Some(44),
+            ..Default::default()
+        };
+        let toml = tmp("held");
+        let (code, out) = run(&fake, &free_card(), &toml, async {}).await;
+        assert_eq!(code, 1);
+        assert_eq!(out, format!("error\t{BUSY}\n"));
+        assert!(!toml.exists(), "radio.toml is not written");
+        assert!(!fake.calls.borrow().iter().any(|c| c == "acquire"));
+    }
+
+    #[tokio::test]
+    async fn a_probe_error_tries_the_next_card() {
+        let fake = Fake {
+            probe_error: vec![("wlx00e04c123456".into(), "owlyd's probe: broken".into())],
+            channel: Some(44),
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &stick_and_internal(), &tmp("probe-err"), async {}).await;
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with("up\tawdl0\texclusive\t44\tno-ble\twlp3s0\t"),
+            "{out}"
+        );
+        // Every probe fails: the last error is the line.
+        let fake = Fake {
+            probe_error: vec![
+                ("wlx00e04c123456".into(), "owlyd's probe: first".into()),
+                ("wlp3s0".into(), "owlyd's probe: last".into()),
+            ],
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &stick_and_internal(), &tmp("probe-err2"), async {}).await;
+        assert_eq!(code, 1);
+        assert_eq!(out, "error\towlyd's probe: last\n");
+        assert!(!fake.calls.borrow().iter().any(|c| c == "acquire"));
+        // A refusal beside a failed probe: the refusal is the line.
+        let fake = Fake {
+            refuse: vec![("wlx00e04c123456".into(), "untested".into())],
+            probe_error: vec![("wlp3s0".into(), "owlyd's probe: last".into())],
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &stick_and_internal(), &tmp("probe-err3"), async {}).await;
+        assert_eq!(code, 1);
+        assert_eq!(out, "error\tuntested\n");
+    }
+
+    #[test]
+    fn posix_and_right_zones_have_a_country() {
+        for t in [
+            "../usr/share/zoneinfo/posix/Europe/Zurich",
+            "/usr/share/zoneinfo/right/Europe/Zurich",
+            "/usr/share/zoneinfo/Europe/Zurich",
+        ] {
+            assert_eq!(zone_of(t).as_deref(), Some("Europe/Zurich"), "{t}");
+        }
+        assert_eq!(zone_of("/usr/share/zoneinfo/UTC").as_deref(), Some("UTC"));
+        assert_eq!(zone_of("/etc/foo"), None);
+        assert_eq!(zone_of("/usr/share/zoneinfo/"), None);
+    }
+
+    #[test]
+    fn no_free_card_is_said_before_owlyd() {
+        // main() calls candidates() before Owlyd::connect(); the function is pure.
+        let mut card = free_card();
+        card.wifi_ifaces = vec!["wlp2s0".into()];
+        assert_eq!(
+            candidates(&card).map_err(|e| e.to_string()),
+            Err(NO_CARD.to_string())
+        );
     }
 
     async fn no_ble() -> (Option<()>, Vec<String>) {
@@ -1159,7 +1338,7 @@ phy#0
             ..Default::default()
         };
         let toml = tmp("nocountry");
-        *fake.toml.borrow_mut() = toml.clone();
+        *fake.toml.borrow_mut() = toml.toml();
         let mut out = Vec::new();
         hold(
             &fake,
@@ -1332,7 +1511,8 @@ phy#0
     #[test]
     fn card_facts_come_from_sysfs() {
         use std::os::unix::fs::symlink;
-        let root = tmp("sysfs").parent().unwrap().parent().unwrap().join("sys");
+        let t = tmp("sysfs");
+        let root = t.dir.join("sys");
         let usb = root.join("devices/usb1/1-1/1-1:1.0");
         let pci = root.join("devices/pci0000:00/0000:02:00.0");
         for d in [&usb, &pci] {

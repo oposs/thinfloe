@@ -49,10 +49,27 @@ pub struct BluezAdvertiser {
     adapter: OwnedObjectPath,
 }
 
+/// `f` within `wait`; a timeout is an `io::ErrorKind::TimedOut` error naming `what`.
+async fn bounded<T>(
+    wait: std::time::Duration,
+    what: &str,
+    f: impl std::future::Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    tokio::time::timeout(wait, f).await.unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("BlueZ did not answer ({what})"),
+        ))
+    })
+}
+
 impl BluezAdvertiser {
-    pub async fn new() -> io::Result<Self> {
-        let conn = zbus::Connection::system().await.map_err(io::Error::other)?;
-        let adapter = find_adapter(&conn).await?;
+    pub async fn new(wait: std::time::Duration) -> io::Result<Self> {
+        let conn = bounded(wait, "connect", async {
+            zbus::Connection::system().await.map_err(io::Error::other)
+        })
+        .await?;
+        let adapter = bounded(wait, "adapters", find_adapter(&conn)).await?;
         Ok(BluezAdvertiser { conn, adapter })
     }
 }
@@ -134,8 +151,14 @@ impl Advertisement {
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 impl BluezAdvertiser {
-    /// Transmits `advert` until the registration is dropped.
-    pub async fn advertise(&self, advert: Advert) -> io::Result<Registration> {
+    /// Transmits `advert` until the registration is dropped. Each BlueZ call takes at most
+    /// `wait`; after a failure or timeout the advert is unregistered and an adapter this
+    /// turned on is turned off again (those calls bounded by `wait` too).
+    pub async fn advertise(
+        &self,
+        advert: Advert,
+        wait: std::time::Duration,
+    ) -> io::Result<Registration> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = ObjectPath::try_from(format!(
             "/ch/oetiker/ThinFloe/Share/advert{}_{n}",
@@ -146,23 +169,30 @@ impl BluezAdvertiser {
         let advertisement = Advertisement {
             data: advert.manufacturer_data(),
         };
-        self.conn
-            .object_server()
-            .at(&path, advertisement)
-            .await
-            .map_err(io::Error::other)?;
+        bounded(wait, "object", async {
+            self.conn
+                .object_server()
+                .at(&path, advertisement)
+                .await
+                .map_err(io::Error::other)
+        })
+        .await?;
         let mut link = Link {
             conn: self.conn.clone(),
             adapter: self.adapter.clone(),
             path,
             powered_on: false,
         };
-        if let Err(e) = link.power_on().await {
-            link.unregister().await;
+        if let Err(e) = bounded(wait, "power", link.power_on()).await {
+            // A timeout may come after BlueZ turned the adapter on: off again.
+            if e.kind() == io::ErrorKind::TimedOut {
+                link.powered_on = true;
+            }
+            let _ = tokio::time::timeout(wait, link.unregister()).await;
             return Err(e);
         }
-        if let Err(e) = link.register().await {
-            link.unregister().await;
+        if let Err(e) = bounded(wait, "register", link.register()).await {
+            let _ = tokio::time::timeout(wait, link.unregister()).await;
             return Err(e);
         }
         Ok(Registration(Some(link)))
@@ -268,13 +298,16 @@ impl Registration {
 
 /// Transmits `advert` through the first adapter with LE advertising until
 /// the registration is stopped or dropped; `Ok(None)` when BlueZ has none.
-pub async fn advertise(advert: Advert) -> io::Result<Option<Registration>> {
-    let advertiser = match BluezAdvertiser::new().await {
+pub async fn advertise(
+    advert: Advert,
+    wait: std::time::Duration,
+) -> io::Result<Option<Registration>> {
+    let advertiser = match BluezAdvertiser::new(wait).await {
         Ok(a) => a,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    advertiser.advertise(advert).await.map(Some)
+    advertiser.advertise(advert, wait).await.map(Some)
 }
 
 impl Drop for Registration {
