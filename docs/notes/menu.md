@@ -102,6 +102,19 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `data:` of any size. Limits and guards are in
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
+  The update mark (an add-on update waits for the next boot) is a click
+  target of its own: a click on it opens Settings → Packages, elsewhere on
+  the tile it starts the program. It is also a focus stop of its own, right
+  after its tile, so Tab reaches Packages without a mouse; the extra stop
+  is kept on purpose (round 2026-11-26b, C4). A tile's second line (reason,
+  release, comment or note) ends `MARK_GAP` before the leftmost mark
+  area, the update mark's click target or the "user" mark; `tile_columns`
+  in `ui.rs` gives the drawing and the tests the same columns. A greyed
+  tile fades its fill, the mark's highlight and both focus rings, not its
+  reason or the word "update". The pointer is a hand over every enabled
+  widget that takes a click and no drag (`pointing_hand` at the start of
+  `ui::show`); widgets that set their own cursor later in the pass win.
+  winit draws it from whiteglass's `pointer` cursor.
 
 ## Menu density
 
@@ -513,6 +526,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
   its host-name line), the title bars, the strip and chip clicks with a real
   mouse, the DHCP time zone from a real DHCP server (on netboot as well; only
   QEMU with dnsmasq has run it).
+- Not verified on hardware (hand cursor): the unit tests prove egui asks
+  for the pointing hand, and the image test that whiteglass's `pointer`
+  file ships; that labwc shows it under a real mouse is an owner check.
 - Not verified on hardware (menu density): the scale chosen from real EDIDs
   (including monitors that report no or a wrong size), and the scaled title
   bars after labwc's reload.
