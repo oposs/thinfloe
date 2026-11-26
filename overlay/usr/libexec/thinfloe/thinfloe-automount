@@ -19,7 +19,8 @@ Contract file line (readers ignore unknown trailing fields):
 kind is stick or card. A line counts only while mountinfo shows its device
 at its mount point; every command drops the others first. A write hold is
 one line, pid<TAB>id, with the id that "thinfloe-upgrade drives" reports
-(sn-<serial> or nosn, then size and a partition table fingerprint). release
+(sn-<serial> or nosn, then size and a partition table fingerprint); it is
+put in place and deleted only under an flock of the hold directory. release
 records the kernel names it unmounts, one per line, in
 automount/released/<disk>; remount mounts those and nothing else.
 """
@@ -400,6 +401,7 @@ ADD_BUDGET = 80.0      # seconds for a whole add; most of it may go to waiting f
 REMOVE_BUDGET = 25.0   # seconds for a whole remove
 STEP_RESERVE = 10.0    # an add or remove stops waiting for the lock this long before its end
 KILL_WAIT = 1.0        # run() waits this long for a command it has killed
+HOLD_LOCK_WAIT = 5.0   # seconds to wait for the hold directory's flock, then keep a stale hold
 
 
 class Deadline:
@@ -522,6 +524,36 @@ class FileLock:
         os.close(self.fd)   # closing drops the flock
 
 
+class DirLock:
+    """flock on a directory, waited for timeout seconds, then Busy.
+
+    The hold directory's lock: thinfloe-upgrade takes it around the rename
+    of its hold, this helper around the delete of a stale one. A leaf lock:
+    nothing else is taken while it is held.
+    """
+
+    def __init__(self, path: str, timeout: float):
+        self.path = path
+        self.timeout = timeout
+        self.fd = -1
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(self.fd)
+                    raise Busy(self.path)
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        os.close(self.fd)   # closing drops the flock
+
+
 def files_lock(p: Paths) -> FileLock:
     return FileLock(p, "files")
 
@@ -616,29 +648,23 @@ def live_hold(p: Paths, d: Dev) -> bool:
 def drop_stale_hold(path: str, ino: int) -> None:
     """Delete the hold file at path if it is still the one read (inode ino).
 
-    The writer puts a hold in place by rename, so a hold written since is
-    another inode. The file is first renamed aside, which takes exactly one
-    file away from path; if that is not the stale one, it is linked back
-    (link fails when a newer hold is at path already, and that one stays).
-    No moment remains in which a fresh hold can be deleted.
+    The writer renames its hold into place under an flock of the hold
+    directory, and the inode is compared and the file unlinked under the
+    same lock, so the file removed is the one compared. Nothing is renamed
+    aside: a fresh hold is never missing. When the lock stays taken, the
+    stale hold is kept (the stick stays unmounted until the next add).
     """
-    aside = os.path.join(os.path.dirname(path), f".stale-{os.getpid()}")
     try:
-        os.rename(path, aside)
-    except OSError:
-        return   # gone already
-    try:
-        if os.stat(aside).st_ino != ino:
+        with DirLock(os.path.dirname(path), HOLD_LOCK_WAIT):
             try:
-                os.link(aside, path)
-            except FileExistsError:
-                pass   # a newer hold is in place
+                if os.stat(path).st_ino == ino:
+                    os.unlink(path)
+            except FileNotFoundError:
+                pass   # gone already
+    except Busy:
+        log(f"stale hold {path} kept: its directory is locked")
     except OSError:
-        pass
-    try:
-        os.unlink(aside)
-    except OSError:
-        pass
+        pass   # no hold directory any more
 
 
 def mountinfo_unescape(text: str) -> str:

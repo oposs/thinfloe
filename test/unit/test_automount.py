@@ -880,47 +880,71 @@ class FollowUps(Commands):
         self.assertFalse(mod.live_hold(self.p, d))
         self.assertFalse(hold.exists(), "a stale hold is still removed")
 
-    def test_a_hold_written_between_the_check_and_the_delete_is_kept(self):
-        # The writer renames its new hold into place right after the stale
-        # one was taken aside, before it is checked and deleted.
+    def stale_hold(self):
+        """A stale hold of sdb; the hold path and the device."""
         self.stick()
         hold = self.tmp / "run" / "automount" / "hold" / "sdb"
         self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
-        fresh = f"{os.getpid()}\tsn-AA:2:2\n"
-        real_rename = os.rename
-
-        def rename_then_writer(src, dst):
-            real_rename(src, dst)
-            if str(src) == str(hold):
-                tmp = hold.with_name(".new")
-                tmp.write_text(fresh)
-                os.replace(tmp, hold)
         d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
-        with unittest.mock.patch.object(mod.os, "rename", side_effect=rename_then_writer):
+        return hold, d
+
+    def test_a_stale_hold_is_deleted_in_place(self):
+        # Never renamed: a fresh hold is never missing, nothing is left aside.
+        hold, d = self.stale_hold()
+        with unittest.mock.patch.object(mod.os, "rename", side_effect=os.rename) as ren:
             self.assertFalse(mod.live_hold(self.p, d))
-        self.assertEqual(hold.read_text(), fresh)
-        self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"], "nothing left aside")
+        self.assertFalse(hold.exists())
+        self.assertEqual([c for c in ren.call_args_list if str(c.args[0]) == str(hold)], [])
+        self.assertEqual(os.listdir(hold.parent), [])
 
-    def test_a_hold_written_before_it_is_taken_aside_is_put_back(self):
+    def test_the_delete_waits_for_the_writers_lock(self):
+        hold, d = self.stale_hold()
+        fd = os.open(hold.parent, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(fd, fcntl.LOCK_EX)               # the writer, mid-rename
+        self.addCleanup(setattr, mod, "HOLD_LOCK_WAIT", mod.HOLD_LOCK_WAIT)
+        mod.HOLD_LOCK_WAIT = 0.2
+        said = []
+        self.addCleanup(setattr, mod, "log", mod.log)
+        mod.log = said.append
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertTrue(hold.exists(), "kept while the writer holds the lock")
+        self.assertTrue(any("its directory is locked" in s for s in said), said)
+        os.close(fd)
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertFalse(hold.exists())
+
+    def test_a_hold_replaced_before_the_lock_is_kept(self):
         # The stale hold was read; the writer's hold replaces it before the
-        # rename takes it aside: it is linked back into place.
-        self.stick()
-        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
-        self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
+        # helper has the lock: the inode differs and the fresh hold stays.
+        hold, d = self.stale_hold()
         fresh = f"{os.getpid()}\tsn-AA:2:2\n"
-        real_rename = os.rename
+        real_enter = mod.DirLock.__enter__
 
-        def writer_then_rename(src, dst):
-            if str(src) == str(hold):
-                tmp = hold.with_name(".new")
-                tmp.write_text(fresh)
-                os.replace(tmp, hold)
-            real_rename(src, dst)
-        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
-        with unittest.mock.patch.object(mod.os, "rename", side_effect=writer_then_rename):
+        def writer_then_lock(lock):
+            tmp = hold.with_name(".new")
+            tmp.write_text(fresh)
+            os.replace(tmp, hold)
+            return real_enter(lock)
+        with unittest.mock.patch.object(mod.DirLock, "__enter__", writer_then_lock):
             self.assertFalse(mod.live_hold(self.p, d))
         self.assertEqual(hold.read_text(), fresh)
         self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"])
+
+    def test_a_hold_lock_left_by_a_dead_writer_is_free(self):
+        hold, d = self.stale_hold()
+        code = ("import fcntl, os, sys, time\n"
+                "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "time.sleep(60)\n")
+        child = subprocess.Popen([sys.executable, "-c", code, str(hold.parent)],
+                                 stdout=subprocess.PIPE, text=True)
+        self.assertEqual(child.stdout.readline().strip(), "locked")
+        child.kill()
+        child.wait()
+        child.stdout.close()
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertFalse(hold.exists())
 
     def test_release_is_logged_for_the_journal(self):
         self.stick()

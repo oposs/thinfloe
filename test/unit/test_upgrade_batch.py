@@ -7,6 +7,7 @@ import hashlib
 import contextlib
 import argparse
 import errno
+import fcntl
 import io
 import json
 import os
@@ -3383,6 +3384,51 @@ class TestAutomountedDrives(unittest.TestCase):
             path = ui._hold_drive(d)
         self.assertEqual(os.listdir(folder), ["sdb"])
         ui._unregister_cleanup("file", path)
+
+    def hold_drive(self):
+        return ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
+                            False, False, serial="S", fingerprint="ab" * 8)
+
+    def test_hold_is_renamed_in_under_the_directory_lock(self):
+        folder = tempfile.mkdtemp(dir=self.tmp.name)
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(fd, fcntl.LOCK_EX)               # the helper, mid-delete
+        got = []
+        with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": folder}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            t = threading.Thread(target=lambda: got.append(ui._hold_drive(self.hold_drive())))
+            t.start()
+            time.sleep(0.3)
+            self.assertNotIn("sdb", os.listdir(folder), "waits for the helper's lock")
+            os.close(fd)
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertIn("sdb", os.listdir(folder))
+        ui._unregister_cleanup("file", got[0])
+
+    def test_a_lock_that_stays_taken_delays_the_hold_by_the_wait_only(self):
+        folder = tempfile.mkdtemp(dir=self.tmp.name)
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": folder}), \
+             mock.patch.object(ui, "HOLD_LOCK_WAIT", 0.2), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            start = time.monotonic()
+            path = ui._hold_drive(self.hold_drive())
+            took = time.monotonic() - start
+        self.assertEqual(os.listdir(folder), ["sdb"])   # written unlocked, logged
+        self.assertLess(took, 3.0)
+        ui._unregister_cleanup("file", path)
+
+    def test_no_hold_directory_is_no_hold(self):
+        missing = os.path.join(self.tmp.name, "no-such-dir")
+        with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": missing}), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(ui._hold_drive(self.hold_drive()))
+        self.assertFalse(os.path.exists(missing))
 
     def test_write_refusal_allows_automounted(self):
         d = ui.DriveInfo("/dev/sdb", "16G", "M", "", False, None, 0, False,
