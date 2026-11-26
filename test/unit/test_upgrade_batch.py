@@ -3411,14 +3411,15 @@ class TestAutomountedDrives(unittest.TestCase):
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        err = io.StringIO()
+        out = io.StringIO()
         with mock.patch.dict(os.environ, {"TF_AUTOMOUNT_HOLD": folder}), \
              mock.patch.object(ui, "HOLD_LOCK_WAIT", 0.2), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             start = time.monotonic()
             path = ui._hold_drive(self.hold_drive())
             took = time.monotonic() - start
         self.assertEqual(os.listdir(folder), ["sdb"])   # written unlocked, logged
+        self.assertIn("hold written unlocked", out.getvalue())   # log() prints to stdout
         self.assertLess(took, 3.0)
         ui._unregister_cleanup("file", path)
 
