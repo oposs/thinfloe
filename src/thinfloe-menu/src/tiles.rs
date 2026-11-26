@@ -774,8 +774,10 @@ mod tests {
         let t = merge(&[src("70-eject.desktop", &text)], &[]).remove(0);
         assert_eq!(
             (t.action, t.name.as_str(), t.icon.as_deref()),
-            (Action::Eject, "Eject", Some("usb"))
+            (Action::Eject, "Eject", Some("eject"))
         );
+        let svg = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/eject.svg");
+        assert!(svg.is_file(), "{} ships", svg.display());
         assert!(t.usable() && !t.addon && !t.multiple && !t.save_on_exit);
         let tiles = merge(
             &[],

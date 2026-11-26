@@ -6,6 +6,8 @@
 
 ### Changed
 
+- The Eject tile has an eject symbol instead of the USB symbol it shared with the Upgrade tile.
+
 ### Fixed
 
 ## 4.12.0 - 2026-11-25
