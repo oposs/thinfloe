@@ -5232,6 +5232,7 @@ mod eject_tests {
         Stick {
             disk: disk.into(),
             names: vec![name.into()],
+            mounts: vec![0],
             size_bytes: 16_000_000_000,
             model: "Cruzer".into(),
             kind: StickKind::Stick,

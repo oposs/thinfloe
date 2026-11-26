@@ -74,10 +74,12 @@ impl Notes {
     }
 }
 
-/// A stick is the same one while its disk and partition names are: a new
-/// card in the same reader is another stick.
+/// A stick is the same one while its disk, partition names and mount
+/// numbers are: a new card in the same reader is another stick, even one
+/// with the same name.
 fn identity(s: &Stick) -> String {
-    format!("{}\t{}", s.disk, s.names.join("\t"))
+    let mounts: Vec<String> = s.mounts.iter().map(u64::to_string).collect();
+    format!("{}\t{}\t{}", s.disk, s.names.join("\t"), mounts.join("\t"))
 }
 
 fn short(name: &str) -> String {
@@ -246,9 +248,14 @@ mod tests {
     use crate::removable::Kind;
 
     fn stick(disk: &str, name: &str) -> Stick {
+        stick_m(disk, name, 0)
+    }
+
+    fn stick_m(disk: &str, name: &str, mount: u64) -> Stick {
         Stick {
             disk: disk.into(),
             names: vec![name.into()],
+            mounts: vec![mount],
             size_bytes: 1,
             model: "M".into(),
             kind: Kind::Stick,
@@ -305,6 +312,17 @@ mod tests {
         let mut n = Notes::new();
         n.update(&[stick("sdb", "A")], None);
         assert_eq!(n.update(&[stick("sdb", "B")], None), [Note::Connected("B".into())]);
+    }
+
+    #[test]
+    fn a_card_swapped_for_one_of_the_same_name_is_new() {
+        let mut n = Notes::new();
+        n.update(&[stick_m("sdb", "CARD", 1)], None);
+        assert!(n.update(&[stick_m("sdb", "CARD", 1)], None).is_empty());
+        assert_eq!(
+            n.update(&[stick_m("sdb", "CARD", 2)], None),
+            [Note::Connected("CARD".into())]
+        );
     }
 
     #[test]

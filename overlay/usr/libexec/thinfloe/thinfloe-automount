@@ -14,9 +14,11 @@ trees.
 
 Contract file line (readers ignore unknown trailing fields):
 
-    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind
+    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind<TAB>mount
 
-kind is stick or card. A line counts only while mountinfo shows its device
+kind is stick or card; mount is a number each mount gets, counted per boot
+in automount/mount-seq, so a card swapped for one of the same name is a
+new line to the OSD (0 in a line of an older helper). A line counts only while mountinfo shows its device
 at its mount point; every command drops the others first. A write hold is
 one line, pid<TAB>id, with the id that "thinfloe-upgrade drives" reports
 (sn-<serial> or nosn, then size and a partition table fingerprint); it is
@@ -129,6 +131,7 @@ class Line:
     size_bytes: int
     model: str
     kind: str
+    mount: int = 0   # the number of the mount, per boot; 0 in a line of an older helper
 
 
 def read_text(path: str) -> str:
@@ -361,7 +364,8 @@ def parse_lines(text: str) -> List[Line]:
             size = int(f[5])
         except ValueError:
             continue
-        out.append(Line(f[0], f[1], f[2], f[3], f[4], size, f[6], f[7]))
+        mount = int(f[8]) if len(f) > 8 and f[8].isascii() and f[8].isdigit() else 0
+        out.append(Line(f[0], f[1], f[2], f[3], f[4], size, f[6], f[7], mount))
     return out
 
 
@@ -369,7 +373,7 @@ def format_lines(lines: List[Line]) -> str:
     return "".join(
         "\t".join(one_line(str(v)) for v in (
             ln.device, ln.disk, ln.name, ln.mountpoint, ln.fstype, ln.size_bytes,
-            ln.model, ln.kind)) + "\n"
+            ln.model, ln.kind, ln.mount)) + "\n"
         for ln in lines)
 
 
@@ -584,6 +588,18 @@ def read_lines(p: Paths) -> List[Line]:
     return parse_lines(read_text(contract_path(p)))
 
 
+def next_mount(p: Paths) -> int:
+    """The next mount number, counted per boot in automount/mount-seq.
+
+    Called only under files_lock.
+    """
+    path = os.path.join(state_dir(p), "mount-seq")
+    last = read_text(path)
+    n = (int(last) if last.isascii() and last.isdigit() else 0) + 1
+    atomic_write(path, f"{n}\n")
+    return n
+
+
 def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
            event: Optional[tuple] = None) -> None:
     """One locked update of the contract file and, when given, the event file.
@@ -594,6 +610,7 @@ def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
     with files_lock(p):
         lines = [ln for ln in read_lines(p) if ln.device not in drop]
         if add is not None:
+            add.mount = next_mount(p)
             lines = [ln for ln in lines if ln.device != add.device] + [add]
         atomic_write(contract_path(p), format_lines(lines))
         if event is not None:

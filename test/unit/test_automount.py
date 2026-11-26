@@ -287,8 +287,10 @@ class Options(Base):
 class Lines(Base):
     def test_lines_round_trip_and_tolerance(self):
         lines = [
-            mod.Line("/dev/sdb1", "sdb", "MYSTICK", "/media/tfuser/MYSTICK", "vfat", 1024, "Flash", "stick"),
-            mod.Line("/dev/sdc1", "sdc", "CARD", "/media/tfuser/CARD", "exfat", 2048, "Reader", "card"),
+            mod.Line("/dev/sdb1", "sdb", "MYSTICK", "/media/tfuser/MYSTICK", "vfat", 1024, "Flash", "stick",
+                     mount=1),
+            mod.Line("/dev/sdc1", "sdc", "CARD", "/media/tfuser/CARD", "exfat", 2048, "Reader", "card",
+                     mount=2),
         ]
         text = mod.format_lines(lines)
         self.assertTrue(text.endswith("\n"))
@@ -306,6 +308,12 @@ class Lines(Base):
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].size_bytes, 5)
         self.assertEqual(parsed[0].kind, "stick")
+
+    def test_mount_field_is_optional(self):
+        eight = "\t".join(["/dev/sdb1", "sdb", "N", "/m/N", "vfat", "5", "M", "stick"])
+        self.assertEqual(mod.parse_lines(eight + "\n")[0].mount, 0)
+        self.assertEqual(mod.parse_lines(eight + "\tx\n")[0].mount, 0)
+        self.assertEqual(mod.parse_lines(eight + "\t7\textra\n")[0].mount, 7)
 
     def test_format_keeps_one_line_per_entry(self):
         line = mod.Line("/dev/sdb1", "sdb", "a\tb", "/m/a", "vfat", 1, "Mo\ndel", "stick")
@@ -454,7 +462,7 @@ class Add(Commands):
             str(self.tmp / "dev" / "sdb1"), str(mp)])
         self.assertEqual(self.lines(), [mod.Line(
             str(self.tmp / "dev" / "sdb1"), "sdb", "MYSTICK", str(mp), "vfat",
-            2048 * 512, "Flash", "stick")])
+            2048 * 512, "Flash", "stick", mount=1)])
         self.assertEqual(os.stat(self.tmp / "run" / "removable").st_mode & 0o777, 0o644)
 
     def test_add_ntfs_uses_ntfs3(self):
@@ -577,6 +585,21 @@ class Add(Commands):
         self.assertEqual(self.cmd("add", "sdb1"), 0)
         self.assertEqual(self.calls("mount"), [])
         self.assertEqual(self.lines(), [])
+
+    def test_each_mount_gets_a_new_number(self):
+        # A card swapped for one of the same name is another mount.
+        self.stick("sdb", label="CARD", kind_card=True)
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        first = self.lines()[0].mount
+        self.assertGreater(first, 0)
+        size = self.tmp / "sys" / "class" / "block" / "sdb1" / "size"
+        size.write_text("0\n")                       # the card is pulled
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual(self.lines(), [])
+        size.write_text("2048\n")                    # the other CARD goes in
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(self.lines()[0].name, "CARD")
+        self.assertGreater(self.lines()[0].mount, first)
 
 
 class Guards(Commands):

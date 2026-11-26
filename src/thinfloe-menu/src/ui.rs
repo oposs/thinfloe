@@ -2820,6 +2820,7 @@ mod tests {
         let stick = |disk: &str, name: &str, model: &str, bytes: u64| crate::removable::Stick {
             disk: disk.into(),
             names: vec![name.into()],
+            mounts: vec![0],
             size_bytes: bytes,
             model: model.into(),
             kind: crate::removable::Kind::Stick,
@@ -7742,6 +7743,7 @@ mod tests {
             menu.set_removable(vec![crate::removable::Stick {
                 disk: "/dev/sdb".into(),
                 names: vec!["MYSTICK".into()],
+                mounts: vec![0],
                 size_bytes: 16_000_000_000,
                 model: "SanDisk Cruzer".into(),
                 kind: crate::removable::Kind::Stick,
