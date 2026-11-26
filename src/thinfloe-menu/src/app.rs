@@ -1489,14 +1489,22 @@ impl App {
 /// One egui run with the events of every pass: egui runs the closure again
 /// when a pass asks for a discard (at most twice in 0.37) and gives the
 /// later pass no input, so a click seen only in the discarded pass was lost
-/// when only the last pass's answer was kept.
+/// when only the last pass's answer was kept. A widget that reports from its
+/// state (a slider held down) gives the same event again in the input-less
+/// pass; an event equal to the one before it is kept once.
 pub(crate) fn run_passes(
     ctx: &egui::Context,
     input: egui::RawInput,
     mut show: impl FnMut(&mut egui::Ui) -> Option<ui::UiEvent>,
 ) -> (egui::FullOutput, Vec<ui::UiEvent>) {
     let mut events = Vec::new();
-    let out = ctx.run_ui(input, |ui| events.extend(show(ui)));
+    let out = ctx.run_ui(input, |ui| {
+        if let Some(e) = show(ui)
+            && events.last() != Some(&e)
+        {
+            events.push(e);
+        }
+    });
     (out, events)
 }
 
@@ -2703,6 +2711,14 @@ esac"#;
     fn events_of_both_passes_are_kept_in_order() {
         let (events, ran) = passes(&[Some(ui::UiEvent::Tile(1)), Some(ui::UiEvent::Tile(2))], &[0]);
         assert_eq!(events, vec![ui::UiEvent::Tile(1), ui::UiEvent::Tile(2)]);
+        assert_eq!(ran, 2);
+    }
+
+    // A slider held down reports its value again in the second pass.
+    #[test]
+    fn the_same_event_from_both_passes_is_kept_once() {
+        let (events, ran) = passes(&[Some(ui::UiEvent::Tile(1)), Some(ui::UiEvent::Tile(1))], &[0]);
+        assert_eq!(events, vec![ui::UiEvent::Tile(1)]);
         assert_eq!(ran, 2);
     }
 

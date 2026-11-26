@@ -501,7 +501,9 @@ egui reruns a pass that asks for a discard (`ui.rs` does when a page or its
 footer changes height) and gives the second pass no input, so a click is
 seen in the first pass only. The frame loop keeps the event of every pass
 (`app::run_passes`) and handles them in order; before, it kept the last
-pass's answer and such a click did nothing. Guards:
+pass's answer and such a click did nothing. A widget that reports from its
+state, not its input (the Volume slider while it is held), gives the same
+event in both passes; an event equal to the one before it counts once. Guards:
 `an_event_of_a_discarded_pass_is_kept` in `app.rs`,
 `a_tile_click_in_a_discarded_pass_starts_one_tile` in `ui.rs`.
 
