@@ -38,6 +38,40 @@ fail=0
 RUNTIME_TIMEOUT=180
 CONTAINER_NAME="thinfloe-runtime-test-$$"
 
+# TF_RUNTIME_MENU names a host-built thinfloe-menu that the Deskflow, OSD and
+# media key cases mount over the image's (iteration only; the evidence is a
+# run without it). Pass cargo's own output path
+# ($CARGO_TARGET_DIR/release/thinfloe-menu), never a copy: on the development
+# host (ext4, kernel 7.0.0, coreutils 9.4) cp of a binary the linker had just
+# written read its unflushed tail as a hole and wrote zeros there, and the
+# damaged menu panicked at start in std's random source ("failed to generate
+# random data ... failed to fill whole buffer"), inside Claude Code's sandbox
+# and outside it alike (2026-11-26). cat, dd, or cp after sync copy it whole.
+# The preflight runs it once, so a broken one fails here with one line
+# instead of in nine cases.
+runtime_menu_preflight() {
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] || return 0
+    local out rc why
+    if [[ $TF_RUNTIME_MENU != /* || ! -f $TF_RUNTIME_MENU || ! -x $TF_RUNTIME_MENU ]]; then
+        echo "FAIL - TF_RUNTIME_MENU=$TF_RUNTIME_MENU is not an absolute path to an executable file"
+        exit 1
+    fi
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none \
+        -v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro" "$IMAGE" \
+        sh -c 'mkdir -p /tmp/s /tmp/u /tmp/st &&
+               TF_MENU_SHIPPED_DIR=/tmp/s TF_MENU_USER_DIR=/tmp/u TF_STATE_DIR=/tmp/st \
+               thinfloe-menu --check' 2>&1)
+    rc=$?
+    if [[ ($rc -ne 0 && $rc -ne 1) || $out == *panicked* ]]; then
+        why=$(grep -A1 -m1 panicked <<<"$out" | tr '\n' ' ')
+        [[ -n $why ]] || why=$(tail -n 1 <<<"$out")
+        echo "FAIL - TF_RUNTIME_MENU=$TF_RUNTIME_MENU does not run in $IMAGE" \
+            "(thinfloe-menu --check exit $rc): $why"
+        exit 1
+    fi
+}
+runtime_menu_preflight
+
 out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=2 \
@@ -1655,9 +1689,8 @@ mk_check $? "once pactl subscribe runs again, a speaker that drifted is put back
 # types x, Escape, y through one virtual keyboard, so they are its key codes
 # 1, 2, 3 (X 9, 10, 11; --keymap names them for the X window); the probe
 # names a key from the keymap it gets. x must reach the probe and not the X
-# window, y the X window after Escape. TF_RUNTIME_MENU
-# names a host-built thinfloe-menu to use instead of the image's (iteration
-# only; the evidence is a run without it).
+# window, y the X window after Escape. TF_RUNTIME_MENU: see
+# runtime_menu_preflight at the top.
 # shellcheck disable=SC2016 # expands inside the container
 cp_script='wtype -s 9000 x -s 1500 -k Escape -s 1500 y &
 sleep 0.5

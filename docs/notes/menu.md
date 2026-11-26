@@ -500,6 +500,13 @@ animation in the menu does (`animation_time` 0, see `app.rs`). Guards:
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are
 not fixed; they are recorded so they aren't rediscovered from scratch.
 
+- On the development host (ext4, kernel 7.0.0, coreutils 9.4) `cp` of a
+  thinfloe-menu the linker has just written can fill its last kilobytes with
+  zeros; the copy then panics at start with "failed to generate random data
+  ... failed to fill whole buffer". Give `TF_RUNTIME_MENU` cargo's own output
+  path; `test-labwc-runtime.sh` checks it once before the cases
+  (`runtime_menu_preflight`).
+
 - The grid is on one monitor. The span patch covers Xwayland windows only.
 - The status area is not seen while a fullscreen window covers the menu.
   Program output still wakes the covered loop and every wake requests a
