@@ -4,8 +4,10 @@
 //! own, as it does the Deskflow one: its first line is `starting`,
 //! `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` or
 //! `error<TAB>text` (station and driver: the Wi-Fi card under the AWDL link
-//! `iface`; an older daemon leaves them out); readers ignore unknown trailing fields. The lines after it (one per
-//! phone) are not shown. Saved at once, like the Time band; drawing is in
+//! `iface`; an older daemon leaves them out); readers ignore unknown trailing fields. Of the
+//! lines after it, the band shows the transfers to this machine,
+//! `sender<TAB>folder<TAB>receiving<TAB>since<TAB>files<TAB>bytes<TAB>first`; the outbox's
+//! lines (one per phone) are not shown. Saved at once, like the Time band; drawing is in
 //! network_ui.rs.
 
 use std::path::{Path, PathBuf};
@@ -97,18 +99,59 @@ pub fn parse(text: &str) -> Head {
     }
 }
 
+/// A transfer to this machine under way, from a `receiving` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receiving {
+    pub sender: String,
+    pub files: u32,
+    /// The name of the first file.
+    pub first: String,
+}
+
+/// The `receiving` lines of the state file's text (after the head, at least seven fields).
+pub fn parse_receiving(text: &str) -> Vec<Receiving> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() < 7 || f[2] != "receiving" {
+                return None;
+            }
+            Some(Receiving {
+                sender: f[0].to_string(),
+                files: f[4].parse().ok()?,
+                first: f[6].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The band's lines for the transfers under way.
+pub fn receiving_lines(r: &[Receiving]) -> Vec<(String, Tone)> {
+    r.iter()
+        .map(|r| {
+            let what = if r.files == 1 && !r.first.is_empty() {
+                r.first.clone()
+            } else {
+                format!("{} files", r.files)
+            };
+            (format!("Receiving {what} from {}", r.sender), Tone::Plain)
+        })
+        .collect()
+}
+
 /// `$XDG_RUNTIME_DIR/thinfloe-share.state`.
 pub fn path() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty())?;
     Some(PathBuf::from(dir).join("thinfloe-share.state"))
 }
 
-/// The head of the file at `path` and when it was written; `None` when it
-/// cannot be read.
-pub fn read(path: &Path) -> Option<(Head, SystemTime)> {
+/// The head of the file at `path`, its transfers under way and when it was written; `None`
+/// when it cannot be read.
+pub fn read(path: &Path) -> Option<(Head, Vec<Receiving>, SystemTime)> {
     let written = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let text = crate::bounded::read_text(path, MAX_BYTES)?;
-    Some((parse(&text), written))
+    Some((parse(&text), parse_receiving(&text), written))
 }
 
 /// The band's warning when the radio helper found no regulatory country (flag `no-country`).
@@ -176,8 +219,8 @@ pub struct ShareBand {
     /// from it for an empty field.
     host: String,
     error: Option<String>,
-    /// The state file as last read, and when it was written.
-    file: Option<(Head, SystemTime)>,
+    /// The state file as last read: head, transfers under way, when it was written.
+    file: Option<(Head, Vec<Receiving>, SystemTime)>,
     /// When the running daemon started; `None` while none runs.
     running_since: Option<SystemTime>,
     /// Why the daemon ended the last time it failed.
@@ -213,7 +256,7 @@ impl ShareBand {
     }
 
     /// The state file as read now.
-    pub fn set_file(&mut self, file: Option<(Head, SystemTime)>) {
+    pub fn set_file(&mut self, file: Option<(Head, Vec<Receiving>, SystemTime)>) {
         self.file = file;
     }
 
@@ -231,11 +274,27 @@ impl ShareBand {
         if !self.cfg.enabled {
             return None;
         }
-        Some(match (self.running_since, &self.file) {
-            (Some(start), Some((head, written))) if *written + MTIME_SLACK >= start => head.clone(),
-            (Some(_), _) => Head::Starting,
+        Some(match (self.running_since, self.this_run()) {
+            (Some(_), Some((head, _, _))) => head.clone(),
+            (Some(_), None) => Head::Starting,
             (None, _) => self.failure.clone().map_or(Head::Starting, Head::Error),
         })
+    }
+
+    /// The state file when the running daemon wrote it.
+    fn this_run(&self) -> Option<&(Head, Vec<Receiving>, SystemTime)> {
+        let start = self.running_since?;
+        self.file
+            .as_ref()
+            .filter(|(_, _, written)| *written + MTIME_SLACK >= start)
+    }
+
+    /// The transfers under way; empty unless the band shows this run's ready head.
+    pub fn receiving(&self) -> &[Receiving] {
+        match (self.head(), self.this_run()) {
+            (Some(Head::Ready { .. }), Some((_, r, _))) => r,
+            _ => &[],
+        }
     }
 
     /// One change; `Some` is the setting to save now.
@@ -351,6 +410,58 @@ mod tests {
         );
     }
 
+    fn jane_receiving(files: u32) -> Receiving {
+        Receiving {
+            sender: "Jane's iPhone".into(),
+            files,
+            first: "IMG_0042.DNG".into(),
+        }
+    }
+
+    #[test]
+    fn receiving_lines_parse_and_read() {
+        let text = "ready\tawdl0\texclusive\t44\t\twlx1\trtw88_8822bu\nJane's iPhone\tJane's iPhone\tidle\t1\nJane's iPhone\tJane's iPhone\treceiving\t2\t1\t75000000\tIMG_0042.DNG\textra\nX\tX\treceiving\t3\n";
+        assert_eq!(parse_receiving(text), [jane_receiving(1)]);
+        let d = crate::testdir::TestDir::new("share-state", "receiving");
+        let p = d.join("thinfloe-share.state");
+        std::fs::write(&p, text).unwrap();
+        assert_eq!(read(&p).unwrap().1, [jane_receiving(1)]);
+    }
+
+    #[test]
+    fn the_band_says_what_is_arriving() {
+        assert_eq!(
+            receiving_lines(&[jane_receiving(1)]),
+            [("Receiving IMG_0042.DNG from Jane's iPhone".to_string(), Tone::Plain)]
+        );
+        assert_eq!(
+            receiving_lines(&[jane_receiving(3)]),
+            [("Receiving 3 files from Jane's iPhone".to_string(), Tone::Plain)]
+        );
+        assert_eq!(receiving_lines(&[]), []);
+    }
+
+    #[test]
+    fn a_transfer_shows_only_while_ready() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut b = ShareBand::default();
+        b.set_cfg(on(""));
+        b.set_daemon(Some(t0), None);
+        b.set_file(Some((Head::Error("x".into()), vec![jane_receiving(1)], t0)));
+        assert!(b.receiving().is_empty());
+        b.set_file(Some((ready(&[]), vec![jane_receiving(1)], t0)));
+        assert_eq!(b.receiving(), [jane_receiving(1)]);
+        // A file from the run before this one.
+        b.set_daemon(Some(t0 + Duration::from_secs(10)), None);
+        assert!(b.receiving().is_empty());
+        b.set_daemon(Some(t0), None);
+        b.set_cfg(ShareCfg {
+            enabled: false,
+            name: String::new(),
+        });
+        assert!(b.receiving().is_empty());
+    }
+
     #[test]
     fn an_unknown_channel_is_left_out() {
         let mut head = ready_on("wlx1", "rtw88_8822bu");
@@ -464,14 +575,14 @@ mod tests {
     fn the_band_shows_this_runs_head_and_nothing_while_off() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let mut b = ShareBand::default();
-        b.set_file(Some((Head::Error("FloeDrop is stopped.".into()), t0)));
+        b.set_file(Some((Head::Error("FloeDrop is stopped.".into()), Vec::new(), t0)));
         assert_eq!(b.head(), None, "off: no status at all");
         b.set_cfg(on(""));
         assert_eq!(b.head(), Some(Head::Starting), "on, no daemon yet");
         // The file is from the run before this one.
         b.set_daemon(Some(t0 + Duration::from_secs(10)), None);
         assert_eq!(b.head(), Some(Head::Starting));
-        b.set_file(Some((ready(&[]), t0 + Duration::from_secs(11))));
+        b.set_file(Some((ready(&[]), Vec::new(), t0 + Duration::from_secs(11))));
         assert_eq!(b.head(), Some(ready(&[])));
         // It ended with an error and waits to start again.
         b.set_daemon(None, Some("no WiFi card can do AirDrop".into()));
@@ -484,8 +595,9 @@ mod tests {
         let p = d.join("thinfloe-share.state");
         assert_eq!(read(&p), None);
         std::fs::write(&p, "ready\twlx1\texclusive\t6\tno-ble\n").unwrap();
-        let (head, written) = read(&p).unwrap();
+        let (head, receiving, written) = read(&p).unwrap();
         assert_eq!(head, ready(&["no-ble"]));
+        assert!(receiving.is_empty());
         assert_eq!(written, std::fs::metadata(&p).unwrap().modified().unwrap());
     }
 

@@ -6575,11 +6575,17 @@ mod tests {
                 station: "wlx1".into(),
                 driver: "rtw88_8822bu".into(),
             },
+            vec![crate::share_state::Receiving {
+                sender: "Jane's iPhone".into(),
+                files: 1,
+                first: "IMG_0042.DNG".into(),
+            }],
             start,
         )));
         let texts = net_texts(&network_settings(net));
         for t in [
             "Ready on wlx1 (rtw88_8822bu, exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
+            "Receiving IMG_0042.DNG from Jane's iPhone",
             "Sending needs Bluetooth; this machine has none.",
             "Folder: /media/tfuser/FloeDrop",
             "FloeDrop 56db68",

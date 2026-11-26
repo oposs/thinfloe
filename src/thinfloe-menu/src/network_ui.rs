@@ -248,7 +248,10 @@ fn share(
         ui.label(RichText::new(share_state::SWITCH_TEXT).color(t.palette().foreground));
     });
     if let Some(head) = band.head() {
-        for (text, tone) in share_state::status_lines(&head) {
+        for (text, tone) in share_state::status_lines(&head)
+            .into_iter()
+            .chain(share_state::receiving_lines(band.receiving()))
+        {
             ui.label(RichText::new(text).color(crate::upgrade_ui::tone_color(t, tone)));
         }
         muted(ui, t, format!("Folder: {}", share_state::FOLDER));
