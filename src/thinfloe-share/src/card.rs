@@ -114,23 +114,45 @@ fn glob(pat: &str, s: &str) -> bool {
     }
 }
 
-/// Is the card named in the netplan text, as an interface key, a `match: name:` or a `match: macaddress:`?
+/// Is the card named in a `wifis:` part of the netplan text, as an interface key, a
+/// `match: name:` or a `match: macaddress:`? A part runs from its `wifis:` line to the next
+/// line indented as little or less; an `ethernets:` entry holds no Wi-Fi card back.
 fn configured(yaml: &str, iface: &str, mac: Option<&str>) -> bool {
-    yaml.lines().any(|l| {
-        let l = l.split('#').next().unwrap_or("").trim();
+    let mut wifis: Option<usize> = None;
+    for raw in yaml.lines() {
+        let line = raw.split('#').next().unwrap_or("");
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if wifis.is_some_and(|w| indent <= w) {
+            wifis = None;
+        }
         let Some((k, v)) = l.split_once(':') else {
-            return false;
+            continue;
         };
         let (k, v) = (unquote(k), unquote(v));
-        if v.is_empty() {
-            return k == iface;
+        if wifis.is_none() {
+            if k == "wifis" && v.is_empty() {
+                wifis = Some(indent);
+            }
+            continue;
         }
-        match k {
-            "name" => glob(v, iface),
-            "macaddress" => mac.is_some_and(|m| m.eq_ignore_ascii_case(v)),
-            _ => false,
+        let hit = if v.is_empty() {
+            k == iface
+        } else {
+            match k {
+                "name" => glob(v, iface),
+                "macaddress" => mac.is_some_and(|m| m.eq_ignore_ascii_case(v)),
+                _ => false,
+            }
+        };
+        if hit {
+            return true;
         }
-    })
+    }
+    false
 }
 
 /// Every Wi-Fi interface with no address other than IPv6 link-local, no route other than IPv6
@@ -431,6 +453,52 @@ mod tests {
             candidates(&inputs(&["wlp3s0"], Some(by_name))),
             Err(NO_CARD.into())
         );
+    }
+
+    #[test]
+    fn an_ethernet_entry_does_not_hold_a_wifi_card() {
+        let eth = "network:\n  ethernets:\n    wlp3s0:\n      dhcp4: true\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(eth))).unwrap()[0],
+            "wlp3s0"
+        );
+        let wifi = "network:\n  wifis:\n    wlp3s0:\n      dhcp4: true\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(wifi))),
+            Err(NO_CARD.into())
+        );
+        // Files joined by a newline, as the helper reads them: the second names it.
+        let both = format!("{eth}\n{wifi}");
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(&both))),
+            Err(NO_CARD.into())
+        );
+        // A wifis part ends at the next key of its level.
+        let after =
+            "network:\n  wifis:\n    home:\n      dhcp4: true\n  ethernets:\n    wlp3s0: {}\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(after))).unwrap()[0],
+            "wlp3s0"
+        );
+    }
+
+    #[test]
+    fn only_link_local_and_multicast_routes_are_free() {
+        let dev = "wlx00e04c123456";
+        let with = |routes: &str| {
+            let mut i = inputs(&[dev], None);
+            i.ip_route_json = routes.to_string();
+            candidates(&i)
+        };
+        let free =
+            format!(r#"[{{"dst":"fe80::/64","dev":"{dev}"}},{{"dst":"ff00::/8","dev":"{dev}"}}]"#);
+        assert_eq!(with(&free).unwrap()[0], dev);
+        for other in ["2001:db8::/64", "169.254.0.0/16", "default"] {
+            let r = format!(
+                r#"[{{"dst":"fe80::/64","dev":"{dev}"}},{{"dst":"{other}","dev":"{dev}"}}]"#
+            );
+            assert_eq!(with(&r), Err(NO_CARD.into()), "{other}");
+        }
     }
 
     #[test]
