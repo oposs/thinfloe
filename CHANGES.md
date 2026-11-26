@@ -6,6 +6,8 @@
 
 ### Changed
 
+- When a newer release is out, the Upgrade tile keeps its name and says so in small blue type below it, for example "4.12.33 available". Before, the title changed to "Upgrade to …", which did not fit the tile.
+- A click on the small "update" mark of an app tile opens Settings → Packages, where the update can be applied; before, it started the app. A click anywhere else on the tile still starts the app.
 - The Eject tile has an eject symbol instead of the USB symbol it shared with the Upgrade tile.
 
 ### Fixed

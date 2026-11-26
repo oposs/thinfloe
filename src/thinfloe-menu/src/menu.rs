@@ -748,19 +748,14 @@ impl Menu {
             .collect()
     }
 
-    /// The name the grid draws: the Upgrade tile names a newer release,
-    /// unless the person gave it a name of their own.
-    pub fn tile_name(&self, index: usize) -> String {
-        let Some(t) = self.tiles.get(index) else {
-            return String::new();
-        };
-        if t.action == Action::Upgrade
-            && !matches!(t.origin, Origin::Reworded { .. })
-            && let Some(v) = self.update_available()
-        {
-            return format!("Upgrade to {v}");
+    /// The second line of the Upgrade tile while a newer release is out,
+    /// "4.12.33 available", the version as the release names it; it stands
+    /// in for the tile's comment.
+    pub fn release_note(&self, index: usize) -> Option<String> {
+        if self.tiles.get(index)?.action != Action::Upgrade {
+            return None;
         }
-        t.name.clone()
+        Some(format!("{} available", self.update_available()?))
     }
 
     /// Where the add-ons offered a retry in this boot are remembered.
@@ -1199,14 +1194,26 @@ impl Menu {
             || (action == Some(Action::Eject) && self.eject.running.is_some())
     }
 
-    /// Whether an add-on update waits for the next boot, or, for the
-    /// Upgrade tile, a newer release is out. Independent of whether a copy
-    /// runs now.
+    /// Whether an add-on update waits for the next boot, independent of
+    /// whether a copy runs now. The Upgrade tile has its `release_note`
+    /// instead.
     pub fn pending_update(&self, index: usize) -> bool {
-        if self.tiles.get(index).is_some_and(|t| t.action == Action::Upgrade) {
-            return self.update_available().is_some();
-        }
         self.addon_of(index).is_some_and(|a| a.state == AddonState::Pending)
+    }
+
+    /// A click on a tile's update mark: Settings at Packages, where the
+    /// update is applied. Only from the grid, and not under a dialog.
+    pub fn open_packages(&mut self) -> Option<Effect> {
+        if self.dialog() || self.screen != Screen::Grid {
+            return None;
+        }
+        self.show_packages();
+        None
+    }
+
+    fn show_packages(&mut self) {
+        self.screen = Screen::Settings;
+        self.settings_tab = SettingsTab::Packages;
     }
 
     pub fn activate(&mut self, index: usize, now: Instant) -> Option<Effect> {
@@ -1234,8 +1241,7 @@ impl Menu {
             }
             Action::SaveHome => self.request_save(),
             Action::Settings => {
-                self.screen = Screen::Settings;
-                self.settings_tab = SettingsTab::Packages;
+                self.show_packages();
                 None
             }
             Action::Upgrade => {
@@ -2867,6 +2873,28 @@ mod tests {
         assert!(!m.pending_update(1));
     }
 
+    // A click on the update mark started the add-on (2026-11-26); it opens
+    // Settings at Packages, where "Update now" is.
+    #[test]
+    fn the_update_mark_opens_settings_at_packages() {
+        let bin = crate::testdir::TestDir::new("menu", "mark");
+        let mut m = addon_menu(&bin);
+        m.set_addons(vec![st(AddonState::Pending, Some("4.21.0"))]);
+        m.settings_tab = SettingsTab::Sound;
+        assert_eq!(m.open_packages(), None);
+        assert_eq!(m.screen, Screen::Settings);
+        assert_eq!(m.settings_tab, SettingsTab::Packages);
+        assert!(m.jobs.is_empty(), "nothing started");
+        // Only from the grid, and not under a dialog.
+        m.settings_tab = SettingsTab::Sound;
+        m.open_packages();
+        assert_eq!(m.settings_tab, SettingsTab::Sound);
+        m.screen = Screen::Grid;
+        m.eject.panel_open = true;
+        m.open_packages();
+        assert_eq!(m.screen, Screen::Grid);
+    }
+
     #[test]
     fn failed_check_keeps_installed_tile() {
         let bin = crate::testdir::TestDir::new("menu", "failed");
@@ -4370,28 +4398,33 @@ mod tests {
         assert_eq!(m.screen, Screen::Grid);
     }
 
+    // The title "Upgrade to 4.1.0" did not fit the tile (2026-11-26): the
+    // name stays, the release goes on the second line.
     #[test]
-    fn a_newer_release_names_and_marks_the_tile() {
+    fn a_newer_release_gives_the_tile_a_note_and_keeps_its_name() {
         let mut m = upgrade_menu();
         // No release known yet.
-        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
+        assert_eq!(m.release_note(UPGRADE), None);
         assert!(!m.pending_update(UPGRADE));
         m.upgrade.release_file(release());
         assert_eq!(m.upgrade.installed.as_deref(), Some("4.0.0"));
-        assert_eq!(m.tile_name(UPGRADE), "Upgrade to 4.1.0");
-        assert!(m.pending_update(UPGRADE));
-        assert_eq!(m.tile_name(0), "ThinLinc");
+        assert_eq!(m.release_note(UPGRADE).as_deref(), Some("4.1.0 available"));
+        assert_eq!(m.tiles[UPGRADE].name, "Upgrade");
+        // The note replaces the update mark on this tile.
+        assert!(!m.pending_update(UPGRADE));
+        assert_eq!(m.release_note(0), None);
         assert!(!m.pending_update(0));
-        // The installed version is not known: no marker, the plain name.
+        // Only the new release, as it names itself.
+        m.set_installed(Some("4.0.3".into()));
+        assert_eq!(m.release_note(UPGRADE).as_deref(), Some("4.1.0 available"));
+        // The installed version is not known: no note.
         m.set_installed(None);
         assert_eq!(m.upgrade.installed, None);
-        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
-        assert!(!m.pending_update(UPGRADE));
+        assert_eq!(m.release_note(UPGRADE), None);
         // Already on it.
         m.set_installed(Some("4.1.0".into()));
-        assert_eq!(m.tile_name(UPGRADE), "Upgrade");
-        assert!(!m.pending_update(UPGRADE));
-        // A reworded tile keeps its name and gets the marker.
+        assert_eq!(m.release_note(UPGRADE), None);
+        // A reworded tile keeps its name and gets the note.
         m.set_installed(Some("4.0.0".into()));
         let shipped = SourceFile {
             name: "50-upgrade-image.desktop".into(),
@@ -4402,8 +4435,9 @@ mod tests {
             entry: desktop::parse("[Desktop Entry]\nName=Neu\n"),
         };
         m.tiles[UPGRADE] = merge(&[shipped], &[user]).remove(0);
-        assert_eq!(m.tile_name(UPGRADE), "Neu");
-        assert!(m.pending_update(UPGRADE));
+        assert_eq!(m.tiles[UPGRADE].name, "Neu");
+        assert_eq!(m.release_note(UPGRADE).as_deref(), Some("4.1.0 available"));
+        assert!(!m.pending_update(UPGRADE));
     }
 
     #[test]

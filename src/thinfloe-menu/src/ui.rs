@@ -246,6 +246,8 @@ pub enum UiEvent {
     Unfold(u64),
     Upgrade(UpgradeEvent),
     Eject(crate::menu::EjectEvent),
+    /// The person clicked a tile's update mark: Settings at Packages.
+    Packages,
 }
 
 /// Where the header, the grid and the log go on a screen.
@@ -882,22 +884,34 @@ pub fn show_screen(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Ch
                         let enabled = menu.can_activate(index);
                         let sense = if enabled { Sense::click() } else { Sense::hover() };
                         let (rect, resp) = ui.allocate_exact_size(l.tile, sense);
+                        // The update mark is a click area of its own, over
+                        // the tile's: egui gives a click to the later one
+                        // only. It works on a tile that cannot start too.
+                        let mark = menu
+                            .pending_update(index)
+                            .then(|| ui.interact(update_mark_target(ui, rect), resp.id.with("update"), Sense::click()));
+                        let on_mark = mark.as_ref().is_some_and(|m| m.hovered());
                         let running = menu.running(index);
                         paint_tile(
                             ui,
                             rect,
                             tile,
-                            &menu.tile_name(index),
                             icons[index].as_ref(),
+                            menu.release_note(index).as_deref(),
                             TileState {
-                                hovered: resp.hovered() && enabled,
+                                hovered: resp.hovered() && enabled && !on_mark,
                                 focused: resp.has_focus(),
                                 running,
                                 active: menu.active(index),
-                                update: menu.pending_update(index),
+                                update: mark.as_ref().map(|m| MarkState {
+                                    hovered: on_mark,
+                                    focused: m.has_focus(),
+                                }),
                             },
                         );
-                        if resp.clicked() {
+                        if mark.as_ref().is_some_and(|m| m.clicked()) {
+                            clicked = Some(UiEvent::Packages);
+                        } else if resp.clicked() {
                             clicked = Some(UiEvent::Tile(index));
                         }
                     }
@@ -1617,11 +1631,47 @@ struct TileState {
     running: usize,
     /// Whether the ice edge is drawn: a program runs, or the save does.
     active: bool,
-    /// An add-on update waits for the next boot.
-    update: bool,
+    /// An add-on update waits for the next boot: the update mark.
+    update: Option<MarkState>,
 }
 
-fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>, state: TileState) {
+/// The update mark, a click target of its own.
+#[derive(Debug, Clone, Copy, Default)]
+struct MarkState {
+    hovered: bool,
+    focused: bool,
+}
+
+/// The marks' distance from the tile's right and bottom edge, and between
+/// two marks.
+const MARK_RIGHT: f32 = 9.0;
+const MARK_BOTTOM: f32 = 6.0;
+const MARK_GAP: f32 = 8.0;
+/// The update mark's click target reaches this far around the word.
+const MARK_HIT_PAD: f32 = 6.0;
+const UPDATE_MARK: &str = "update";
+
+/// The word `text` as a mark at the bottom right of a tile, `right` its
+/// right edge.
+fn mark_rect(ui: &Ui, rect: Rect, right: f32, text: &str) -> Rect {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        FontId::proportional(brand::MARK_PT),
+        Color32::TRANSPARENT,
+    );
+    Align2::RIGHT_BOTTOM.anchor_size(pos2(right, rect.bottom() - MARK_BOTTOM), galley.size())
+}
+
+/// Where a click opens the Packages tab: the update mark and a margin,
+/// inside the tile.
+fn update_mark_target(ui: &Ui, rect: Rect) -> Rect {
+    mark_rect(ui, rect, rect.right() - MARK_RIGHT, UPDATE_MARK)
+        .expand(MARK_HIT_PAD)
+        .intersect(rect)
+}
+
+fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Option<&str>, state: TileState) {
+    let name = tile.name.as_str();
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
@@ -1691,10 +1741,13 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>,
         lines.push(clipped.layout_job(job));
     };
     line(name, brand::geo(brand::TILE_NAME_PT), fade(t.palette().foreground));
-    // One second line: why the tile is grey, else its comment, else the
-    // note about its file. `--check` has the long form.
+    // One second line: why the tile is grey, else the newer release (the
+    // Upgrade tile), else its comment, else the note about its file.
+    // `--check` has the long form.
     if let Some(why) = &tile.problem {
         line(why, FontId::proportional(brand::TILE_NOTE_PT), t.role(role::WARN));
+    } else if let Some(r) = release {
+        line(r, FontId::proportional(brand::TILE_NOTE_PT), fade(t.palette().primary));
     } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
         // Only a reworded file that lost keys; plain "reworded" is no news.
         match &tile.origin {
@@ -1726,19 +1779,26 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, name: &str, icon: Option<&Icon>,
         );
     }
     // Small marks along the bottom right.
-    let mut right = rect.right() - 9.0;
+    let mut right = rect.right() - MARK_RIGHT;
     let mut mark = |text: &str, color: Color32| {
         let r = p.text(
-            pos2(right, rect.bottom() - 6.0),
+            pos2(right, rect.bottom() - MARK_BOTTOM),
             Align2::RIGHT_BOTTOM,
             text,
             FontId::proportional(brand::MARK_PT),
             color,
         );
-        right = r.left() - 8.0;
+        right = r.left() - MARK_GAP;
     };
-    if state.update {
-        mark("update", t.palette().primary);
+    if let Some(m) = state.update {
+        let target = update_mark_target(ui, rect);
+        if m.hovered {
+            p.rect_filled(target, 0.0, t.palette().accent);
+        }
+        if m.focused {
+            p.rect_stroke(target, 0.0, Stroke::new(2.0, t.palette().ring), StrokeKind::Inside);
+        }
+        mark(UPDATE_MARK, t.palette().primary);
     }
     if tile.origin == Origin::User {
         mark("user", t.palette().muted_foreground);
@@ -3214,6 +3274,200 @@ mod tests {
             "edge"
         );
         assert!(all_texts(&shapes).iter().any(|t| t == "update"), "marker");
+    }
+
+    /// A menu with the shipped Upgrade tile, `installed` running and
+    /// `latest` out.
+    fn upgrade_tile_menu(installed: &str, latest: &str) -> (Menu, usize) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let text = std::fs::read_to_string(dir.join("50-upgrade-image.desktop")).unwrap();
+        let tiles = crate::tiles::merge(
+            &[crate::tiles::SourceFile {
+                name: "50-upgrade-image.desktop".into(),
+                entry: crate::desktop::parse(&text),
+            }],
+            &[],
+        );
+        let mut menu = Menu::new(Grid { tiles, banner: vec![] }, false);
+        menu.set_usb_boot(true);
+        menu.set_installed(Some(installed.into()));
+        menu.upgrade.release_file(crate::release::Release {
+            latest: Some(latest.into()),
+            ..Default::default()
+        });
+        assert!(menu.visible(0));
+        (menu, 0)
+    }
+
+    fn text_shape<'a>(
+        shapes: &'a [egui::epaint::ClippedShape],
+        text: &str,
+    ) -> Option<(Rect, &'a egui::epaint::TextShape)> {
+        shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some((c.clip_rect, t)),
+            _ => None,
+        })
+    }
+
+    // "Upgrade to 4.14.10" did not fit the tile (2026-11-26). The name stays
+    // and the release goes on the second line, in the update mark's blue.
+    #[test]
+    fn the_upgrade_tile_names_the_release_below_its_name_in_blue() {
+        let (mut menu, i) = upgrade_tile_menu("4.12.1", "4.112.333");
+        menu.tiles[i].comment = Some("Write ThinFloe to a stick".into());
+        let shapes = shapes_of(&menu, 1, Instant::now());
+        let texts = all_texts(&shapes);
+        assert!(texts.iter().any(|t| t == "Upgrade"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("Upgrade to")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "update"), "no update mark: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == "Write ThinFloe to a stick"),
+            "the note replaces the comment"
+        );
+        let (clip, note) = text_shape(&shapes, "4.112.333 available").expect("the note");
+        let rows = &note.galley.rows;
+        assert_eq!(rows.len(), 1, "one line");
+        let glyphs: String = rows[0].glyphs.iter().map(|g| g.chr).collect();
+        assert_eq!(glyphs, "4.112.333 available", "not cut");
+        assert!(clip.contains_rect(note.visual_bounding_rect()), "inside the tile");
+        let section = &note.galley.job.sections[0];
+        assert_eq!(section.format.color, ICE, "the primary blue");
+        assert_eq!(section.format.font_id.size, brand::TILE_NOTE_PT);
+        // The text column of a tile, as paint_tile computes it.
+        let tile_w = layout(screen(1280.0, 720.0), 1, 0, 0, 0).tile.x;
+        let text_w = tile_w - 22.0 - ICON_BOX - 14.0 - 14.0;
+        assert!(
+            note.galley.size().x <= text_w,
+            "{} pt of {text_w} pt",
+            note.galley.size().x
+        );
+    }
+
+    #[test]
+    fn a_tile_problem_wins_over_the_release_note() {
+        let (mut menu, i) = upgrade_tile_menu("4.12.0", "4.14.0");
+        let shapes = shapes_of(&menu, 1, Instant::now());
+        assert!(
+            text_shape(&shapes, "4.14.0 available").is_some(),
+            "{:?}",
+            all_texts(&shapes)
+        );
+        menu.tiles[i].problem = Some("broken file".into());
+        let shapes = shapes_of(&menu, 1, Instant::now());
+        let texts = all_texts(&shapes);
+        assert!(texts.iter().any(|t| t == "broken file"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.ends_with("available")), "{texts:?}");
+    }
+
+    /// One frame of the grid of `menu` on 1280 x 720 with `events`.
+    fn grid_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            events,
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut ev = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            ev = show(ui, menu, &icons, &Chrome::default(), Instant::now());
+        });
+        out.textures_delta.clear();
+        (out.shapes, ev)
+    }
+
+    // A click on the update mark started the program (2026-11-26): the
+    // whole tile was one click area.
+    #[test]
+    fn a_click_on_the_update_mark_opens_packages_and_elsewhere_starts_the_tile() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T0".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let mark = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        let name = text_shape(&shapes, "T0").expect("the name").1.visual_bounding_rect();
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.center()));
+        assert_eq!(ev, Some(UiEvent::Packages));
+        // The target is larger than the word: a click just beside it counts.
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.left_center() - vec2(3.0, 0.0)));
+        assert_eq!(ev, Some(UiEvent::Packages));
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.center_bottom() + vec2(0.0, 3.0)));
+        assert_eq!(ev, Some(UiEvent::Packages));
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(name.center()));
+        assert_eq!(ev, Some(UiEvent::Tile(0)));
+        // A tile that cannot start again still offers the update.
+        menu.activate(0, Instant::now());
+        assert!(!menu.can_activate(0));
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(name.center()));
+        assert_eq!(ev, None);
+        let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.center()));
+        assert_eq!(ev, Some(UiEvent::Packages));
+    }
+
+    #[test]
+    fn hovering_the_update_mark_lights_the_mark_not_the_tile() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T0".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let mark = text_shape(&shapes, "update").unwrap().1.visual_bounding_rect();
+        grid_frame(&ctx, &menu, vec![egui::Event::PointerMoved(mark.center())]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let fills: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.fill == TILE_HOVER => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 1, "{fills:?}");
+        assert!(
+            fills[0].contains_rect(mark) && fills[0].height() < 40.0,
+            "the mark's target: {:?}",
+            fills[0]
+        );
     }
 
     #[test]
@@ -7355,6 +7609,12 @@ mod tests {
     /// rasteriser, for looking at. Run by hand:
     /// `TF_SHOT_DIR=<dir> cargo test --lib shot_ -- --ignored`.
     fn shot(menu: &Menu, name: &str, px: (u32, u32), s: f32) {
+        shot_icons(menu, name, px, s, false);
+    }
+
+    /// As `shot`; with `icons` the tiles draw the shipped icons they name
+    /// (rendered here, in the test, from `icons/`).
+    fn shot_icons(menu: &Menu, name: &str, px: (u32, u32), s: f32, icons: bool) {
         let Some(dir) = std::env::var_os("TF_SHOT_DIR") else {
             return;
         };
@@ -7365,7 +7625,17 @@ mod tests {
             screen_rect: Some(screen(px.0 as f32 / s, px.1 as f32 / s)),
             ..Default::default()
         };
-        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let fg = crate::brand::theme().palette().foreground;
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons");
+        let icons: Vec<Option<Icon>> = menu
+            .tiles
+            .iter()
+            .map(|t| {
+                let path = shipped.join(format!("{}.svg", t.icon.as_deref()?));
+                let img = crate::icons::render(&path, render_side(s), [fg.r(), fg.g(), fg.b()], true).ok()?;
+                icons.then(|| Icon::new(&ctx, &t.file, &img, s))
+            })
+            .collect();
         let mut textures = crate::raster::Textures::default();
         let mut canvas = crate::raster::Canvas::new(px.0 as usize, px.1 as usize, crate::brand::rgb::BG);
         // As the real header: the logo at the screen's pixel density (as
@@ -7417,6 +7687,66 @@ mod tests {
             ppm.extend([(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
         }
         std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
+    }
+
+    /// The Upgrade tile with a newer release out, an add-on tile with its
+    /// update mark and the Eject tile.
+    #[test]
+    #[ignore]
+    fn shot_tile_notices() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay/etc/thinfloe/menu");
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "desktop"))
+            .collect();
+        names.sort();
+        let files: Vec<_> = names
+            .iter()
+            .map(|p| crate::tiles::SourceFile {
+                name: p.file_name().unwrap().to_string_lossy().into(),
+                entry: crate::desktop::parse(&std::fs::read_to_string(p).unwrap()),
+            })
+            .collect();
+        let tiles = crate::tiles::merge(&files, &[]);
+        let status = |id: &str, state| crate::addons::AddonStatus {
+            id: id.into(),
+            ticked: true,
+            state,
+            installed: Some("4.20.0".into()),
+            pending: (state == crate::addons::AddonState::Pending).then(|| "4.21.0".into()),
+            auto: true,
+            message: None,
+        };
+        for (installed, latest, name) in [
+            ("4.12.0", "4.12.33", "tile-notices"),
+            ("4.12.1", "4.112.333", "tile-notices-long"),
+        ] {
+            let grid = Grid {
+                tiles: tiles.clone(),
+                banner: vec![],
+            };
+            let mut menu = Menu::new(grid, false);
+            menu.set_usb_boot(true);
+            menu.set_addons(vec![
+                status("10-thinlinc", crate::addons::AddonState::Pending),
+                status("20-oxulnk", crate::addons::AddonState::Installed),
+            ]);
+            menu.set_installed(Some(installed.into()));
+            menu.upgrade.release_file(crate::release::Release {
+                latest: Some(latest.into()),
+                ..Default::default()
+            });
+            menu.set_removable(vec![crate::removable::Stick {
+                disk: "/dev/sdb".into(),
+                names: vec!["MYSTICK".into()],
+                size_bytes: 16_000_000_000,
+                model: "SanDisk Cruzer".into(),
+                kind: crate::removable::Kind::Stick,
+            }]);
+            shot_icons(&menu, &format!("{name}-1080.ppm"), (1920, 1080), 1.0, true);
+            shot_icons(&menu, &format!("{name}-4k.ppm"), (3840, 2160), 2.0, true);
+        }
     }
 
     #[test]
