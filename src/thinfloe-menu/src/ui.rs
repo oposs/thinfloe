@@ -1650,6 +1650,7 @@ const MARK_GAP: f32 = 8.0;
 /// The update mark's click target reaches this far around the word.
 const MARK_HIT_PAD: f32 = 6.0;
 const UPDATE_MARK: &str = "update";
+const USER_MARK: &str = "user";
 
 /// The word `text` as a mark at the bottom right of a tile, `right` its
 /// right edge.
@@ -1668,6 +1669,62 @@ fn update_mark_target(ui: &Ui, rect: Rect) -> Rect {
     mark_rect(ui, rect, rect.right() - MARK_RIGHT, UPDATE_MARK)
         .expand(MARK_HIT_PAD)
         .intersect(rect)
+}
+
+/// The icon's distance from the tile's left edge.
+const ICON_LEFT: f32 = 22.0;
+/// The gap between icon and text, and between text and the tile's right edge.
+const TEXT_PAD: f32 = 14.0;
+
+/// A tile's icon box and text column: `text_x` and `text_w` for the
+/// name line, `note_w` for the second line, which ends before the marks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TileColumns {
+    icon: Rect,
+    text_x: f32,
+    text_w: f32,
+    note_w: f32,
+}
+
+/// The columns of the tile in `rect`; `marks_left` is the left edge of
+/// its leftmost mark area (`marks_left()`), `None` without marks.
+fn tile_columns(rect: Rect, ppp: f32, marks_left: Option<f32>) -> TileColumns {
+    // On a whole pixel, or the icon texture is sampled between two pixels
+    // and its edges turn ragged.
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let icon = Rect::from_min_size(
+        pos2(snap(rect.left() + ICON_LEFT), snap(rect.center().y - ICON_BOX / 2.0)),
+        Vec2::splat(ICON_BOX),
+    );
+    let text_x = icon.right() + TEXT_PAD;
+    let text_w = (rect.right() - TEXT_PAD - text_x).max(0.0);
+    let note_w = match marks_left {
+        Some(left) => text_w.min((left - MARK_GAP - text_x).max(0.0)),
+        None => text_w,
+    };
+    TileColumns {
+        icon,
+        text_x,
+        text_w,
+        note_w,
+    }
+}
+
+/// The left edge of the leftmost mark area of a tile, `None` without
+/// marks: the update mark counts with its click target, the user mark
+/// where the painting puts it.
+fn marks_left(ui: &Ui, rect: Rect, update: bool, user: bool) -> Option<f32> {
+    let mut right = rect.right() - MARK_RIGHT;
+    let mut left: Option<f32> = None;
+    if update {
+        left = Some(update_mark_target(ui, rect).left());
+        right = mark_rect(ui, rect, right, UPDATE_MARK).left() - MARK_GAP;
+    }
+    if user {
+        let l = mark_rect(ui, rect, right, USER_MARK).left();
+        left = Some(left.map_or(l, |x| x.min(l)));
+    }
+    left
 }
 
 fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Option<&str>, state: TileState) {
@@ -1701,13 +1758,10 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
         );
     }
     let ppp = ui.ctx().pixels_per_point();
-    // On a whole pixel, or the icon texture is sampled between two pixels
-    // and its edges turn ragged.
     let snap = |v: f32| (v * ppp).round() / ppp;
-    let icon_rect = Rect::from_min_size(
-        pos2(snap(rect.left() + 22.0), snap(rect.center().y - ICON_BOX / 2.0)),
-        Vec2::splat(ICON_BOX),
-    );
+    let user = tile.origin == Origin::User;
+    let cols = tile_columns(rect, ppp, marks_left(ui, rect, state.update.is_some(), user));
+    let icon_rect = cols.icon;
     match icon {
         // token-ok: white tints nothing: the icon is drawn as rendered, only faded
         Some(icon) => draw_icon(p, &icon.tile, icon_rect.min, fade(Color32::WHITE)),
@@ -1730,24 +1784,37 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     }
     // Name and Comment come from files the user writes. Each is one line,
     // cut with an ellipsis, and all text is clipped to the tile, so no file
-    // can paint over its neighbours.
-    let text_x = icon_rect.right() + 14.0;
-    let text_w = (rect.right() - 14.0 - text_x).max(0.0);
+    // can paint over its neighbours. The second line ends before the marks.
     let clipped = ui.painter_at(rect);
     let mut lines = Vec::new();
-    let mut line = |text: &str, font: FontId, color: Color32| {
+    let mut line = |text: &str, font: FontId, color: Color32, width: f32| {
         let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-        job.wrap = TextWrapping::truncate_at_width(text_w);
+        job.wrap = TextWrapping::truncate_at_width(width);
         lines.push(clipped.layout_job(job));
     };
-    line(name, brand::geo(brand::TILE_NAME_PT), fade(t.palette().foreground));
+    line(
+        name,
+        brand::geo(brand::TILE_NAME_PT),
+        fade(t.palette().foreground),
+        cols.text_w,
+    );
     // One second line: why the tile is grey, else the newer release (the
     // Upgrade tile), else its comment, else the note about its file.
     // `--check` has the long form.
     if let Some(why) = &tile.problem {
-        line(why, FontId::proportional(brand::TILE_NOTE_PT), t.role(role::WARN));
+        line(
+            why,
+            FontId::proportional(brand::TILE_NOTE_PT),
+            t.role(role::WARN),
+            cols.note_w,
+        );
     } else if let Some(r) = release {
-        line(r, FontId::proportional(brand::TILE_NOTE_PT), fade(t.palette().primary));
+        line(
+            r,
+            FontId::proportional(brand::TILE_NOTE_PT),
+            fade(t.palette().primary),
+            cols.note_w,
+        );
     } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
         // Only a reworded file that lost keys; plain "reworded" is no news.
         match &tile.origin {
@@ -1759,6 +1826,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
             &c,
             FontId::proportional(brand::TILE_NOTE_PT),
             fade(t.palette().muted_foreground),
+            cols.note_w,
         );
     }
     let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
@@ -1766,7 +1834,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     let mut y = snap(rect.center().y - block_h / 2.0);
     for (galley, h) in lines.into_iter().zip(heights) {
         // token-ok: fallback colour only: every section of these galleys has its own
-        clipped.galley(pos2(text_x, y), galley, Color32::WHITE);
+        clipped.galley(pos2(cols.text_x, y), galley, Color32::WHITE);
         y += h + 2.0;
     }
     if state.running > 1 {
@@ -1778,11 +1846,13 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
             t.palette().primary,
         );
     }
-    // Small marks along the bottom right.
+    // Small marks along the bottom right, placed by mark_rect() as
+    // marks_left() reckons with them.
     let mut right = rect.right() - MARK_RIGHT;
     let mut mark = |text: &str, color: Color32| {
-        let r = p.text(
-            pos2(right, rect.bottom() - MARK_BOTTOM),
+        let r = mark_rect(ui, rect, right, text);
+        p.text(
+            r.right_bottom(),
             Align2::RIGHT_BOTTOM,
             text,
             FontId::proportional(brand::MARK_PT),
@@ -1800,8 +1870,8 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
         }
         mark(UPDATE_MARK, t.palette().primary);
     }
-    if tile.origin == Origin::User {
-        mark("user", t.palette().muted_foreground);
+    if user {
+        mark(USER_MARK, t.palette().muted_foreground);
     }
 }
 
@@ -3334,13 +3404,15 @@ mod tests {
         let section = &note.galley.job.sections[0];
         assert_eq!(section.format.color, ICE, "the primary blue");
         assert_eq!(section.format.font_id.size, brand::TILE_NOTE_PT);
-        // The text column of a tile, as paint_tile computes it.
-        let tile_w = layout(screen(1280.0, 720.0), 1, 0, 0, 0).tile.x;
-        let text_w = tile_w - 22.0 - ICON_BOX - 14.0 - 14.0;
+        // The text column of a tile, from the drawing code.
+        let tile = layout(screen(1280.0, 720.0), 1, 0, 0, 0).tile;
+        let cols = tile_columns(Rect::from_min_size(pos2(0.0, 0.0), tile), 1.0, None);
+        assert_eq!(cols.note_w, cols.text_w, "no mark, no cut");
         assert!(
-            note.galley.size().x <= text_w,
-            "{} pt of {text_w} pt",
-            note.galley.size().x
+            note.galley.size().x <= cols.note_w,
+            "{} pt of {} pt",
+            note.galley.size().x,
+            cols.note_w
         );
     }
 
@@ -3427,6 +3499,87 @@ mod tests {
         assert_eq!(ev, None);
         let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.center()));
         assert_eq!(ev, Some(UiEvent::Packages));
+    }
+
+    /// One tile "T0" with an add-on update waiting: the update mark.
+    fn update_tile_menu(t0: Tile) -> Menu {
+        let id = t0.name.clone();
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id,
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        menu
+    }
+
+    /// The right edge of the second line `text` and the glyphs drawn of it,
+    /// with the shapes of the frame.
+    fn second_line(menu: &Menu, text: &str) -> (Vec<egui::epaint::ClippedShape>, f32, String) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, menu, vec![]);
+        let (_, line) = text_shape(&shapes, text).expect("the second line");
+        let right = line.pos.x + line.galley.size().x;
+        let glyphs: String = line
+            .galley
+            .rows
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.chr))
+            .collect();
+        (shapes, right, glyphs)
+    }
+
+    // A long comment ran under the update mark and its hover highlight
+    // (PR #62 follow-up, 2026-11-26).
+    #[test]
+    fn a_long_comment_ends_before_the_update_mark() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.comment = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        let (shapes, right, glyphs) = second_line(&menu, &"W".repeat(80));
+        let mark = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        assert!(
+            right <= mark.left() - MARK_HIT_PAD - MARK_GAP + 0.5,
+            "{right} vs {mark:?}"
+        );
+        assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
+    }
+
+    #[test]
+    fn a_long_comment_ends_before_both_marks() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.origin = Origin::User;
+        t0.comment = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        let (shapes, right, glyphs) = second_line(&menu, &"W".repeat(80));
+        let user = text_shape(&shapes, "user")
+            .expect("the user mark")
+            .1
+            .visual_bounding_rect();
+        let update = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        assert!(user.right() < update.left(), "user left of update");
+        assert!(right <= user.left() - MARK_GAP + 0.5, "{right} vs {user:?}");
+        assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
     }
 
     #[test]
