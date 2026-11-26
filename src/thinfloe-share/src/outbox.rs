@@ -51,6 +51,59 @@ pub trait Probe {
     fn busy(&mut self, entries: &[PathBuf]) -> bool;
 }
 
+/// The space left for a batch: the files of an offer take as much again in Owly's
+/// spool inside the same tmpfs.
+pub trait Space {
+    fn free(&mut self) -> Option<u64>;
+}
+
+/// The real space: what the file system holding the outbox has free.
+pub struct SystemSpace(pub PathBuf);
+
+impl Space for SystemSpace {
+    fn free(&mut self) -> Option<u64> {
+        crate::inbox::free_bytes(&self.0).ok()
+    }
+}
+
+/// Bytes of the plain files at or below `entries` (symlinks not followed), within the
+/// walk bounds of the write check.
+pub fn batch_bytes(entries: &[PathBuf]) -> u64 {
+    fn walk(p: &Path, depth: usize, budget: &mut usize, sum: &mut u64) {
+        if depth > WALK_MAX_DEPTH || *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let Ok(md) = fs::symlink_metadata(p) else {
+            return;
+        };
+        if md.is_file() {
+            *sum = sum.saturating_add(md.len());
+        } else if md.is_dir()
+            && let Ok(rd) = fs::read_dir(p)
+        {
+            for e in rd.flatten() {
+                walk(&e.path(), depth + 1, budget, sum);
+            }
+        }
+    }
+    let mut budget = WALK_MAX_ENTRIES;
+    let mut sum = 0;
+    for e in entries {
+        walk(e, 0, &mut budget, &mut sum);
+    }
+    sum
+}
+
+/// OSD text when a batch of `bytes` does not fit in FloeDrop's folder.
+pub fn room_note(device: &str, bytes: u64) -> (Tone, String) {
+    let mb = bytes.div_ceil(1_000_000).max(1);
+    (
+        Tone::Warn,
+        format!("Could not send to {device}: not enough room in FloeDrop for {mb} MB"),
+    )
+}
+
 /// The real check: a file below an entry changed less than `BATCH_DELAY` ago, or a
 /// process of this user has one open for writing (`/proc/*/fd`).
 pub struct SystemProbe;
@@ -175,6 +228,7 @@ pub struct Outbox {
     root: PathBuf,
     devs: Vec<Dev>,
     probe: Box<dyn Probe>,
+    space: Box<dyn Space>,
     notes: Vec<(Tone, String)>,
     /// Folders made since the last `take_new_folders`, for the daemon's inotify watches.
     new_folders: Vec<String>,
@@ -263,7 +317,7 @@ fn delete(p: &Path) -> io::Result<()> {
     }
 }
 
-/// OSD text after an offer ended.
+/// OSD text after an offer ended; `offered` must still exist (a full spool counts them).
 pub fn sent_note(offered: &[PathBuf], device: &str, o: &Outcome) -> (Tone, String) {
     match o {
         Outcome::Delivered => {
@@ -279,6 +333,9 @@ pub fn sent_note(offered: &[PathBuf], device: &str, o: &Outcome) -> (Tone, Strin
             (Tone::Info, text)
         }
         Outcome::Declined => (Tone::Warn, format!("{device} declined")),
+        Outcome::Failed(why) if why.contains("os error 28") || why.contains("No space left") => {
+            room_note(device, batch_bytes(offered))
+        }
         Outcome::Failed(_) => (Tone::Warn, format!("Could not send to {device}")),
     }
 }
@@ -291,6 +348,7 @@ impl Outbox {
 
     pub fn with_probe(root: PathBuf, probe: Box<dyn Probe>) -> Outbox {
         Outbox {
+            space: Box::new(SystemSpace(root.clone())),
             root,
             devs: Vec::new(),
             probe,
@@ -298,6 +356,13 @@ impl Outbox {
             new_folders: Vec::new(),
             dropped: Vec::new(),
         }
+    }
+
+    /// The same outbox with another source of the free space.
+    #[cfg(test)]
+    pub fn with_space(mut self, space: Box<dyn Space>) -> Outbox {
+        self.space = space;
+        self
     }
 
     /// A receiver answered `/Discover` at `addr` with the computer name `name`: give it
@@ -453,6 +518,18 @@ impl Outbox {
                         }
                         d.hold_until = Some(now + HOLD_RETRY);
                         soon(now + HOLD_RETRY);
+                    } else if let Some(free) = self.space.free()
+                        && let bytes = batch_bytes(&entries)
+                        && bytes > free
+                    {
+                        // Owly's archive of the batch needs as much again: it would fail
+                        // on the way. The files stay for a later change.
+                        d.pending = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
+                        d.state = DevState::Failed;
+                        d.since = epoch();
+                        self.notes.push(room_note(&d.name, bytes));
                     } else {
                         let h = t.send(&d.service_id, entries.clone());
                         d.in_flight = Some((h, entries));
@@ -481,6 +558,7 @@ impl Outbox {
             return;
         };
         let (_, offered) = d.in_flight.take().expect("matched above");
+        let note = sent_note(&offered, &d.name, &o);
         let mut stuck = Vec::new();
         for p in &offered {
             if let Err(e) = delete(p) {
@@ -502,7 +580,7 @@ impl Outbox {
         if !matches!(o, Outcome::Failed(_)) {
             d.last_seen = d.last_seen.max(now);
         }
-        self.notes.push(sent_note(&offered, &d.name, &o));
+        self.notes.push(note);
         self.notes.extend(stuck);
     }
 
@@ -868,6 +946,83 @@ mod tests {
         t.changed(JANE, 11);
         t.tick(14);
         assert_eq!(t.calls()[2].1, vec![d]);
+    }
+
+    struct FakeSpace(Rc<Cell<Option<u64>>>);
+    impl Space for FakeSpace {
+        fn free(&mut self) -> Option<u64> {
+            self.0.get()
+        }
+    }
+
+    #[test]
+    fn a_batch_that_does_not_fit_is_kept_and_noted() {
+        let mut t = T::new("ob-room");
+        let free = Rc::new(Cell::new(Some(10)));
+        let busy = t.busy.clone();
+        t.ob = Outbox::with_probe(t.root.clone(), Box::new(FakeProbe(busy)))
+            .with_space(Box::new(FakeSpace(free.clone())));
+        t.seen("id1", JANE, 0);
+        for n in ["a", "b", "c"] {
+            t.put(JANE, n);
+        }
+        fs::write(t.root.join(JANE).join("big"), [0u8; 20]).unwrap();
+        t.changed(JANE, 0);
+        t.tick(3);
+        assert!(t.calls().is_empty());
+        assert_eq!(
+            t.ob.take_notes(),
+            vec![(
+                Tone::Warn,
+                "Could not send to Jane's iPhone: not enough room in FloeDrop for 1 MB".to_string()
+            )]
+        );
+        assert_eq!(t.entries(JANE), vec!["a", "b", "big", "c"]);
+        assert_eq!(t.ob.devices()[0].state, DevState::Failed);
+        t.tick(10);
+        assert!(t.calls().is_empty(), "not tried again without a change");
+        free.set(Some(1 << 30));
+        t.changed(JANE, 11);
+        t.tick(14);
+        assert_eq!(t.calls().len(), 1);
+        assert_eq!(t.calls()[0].1.len(), 4);
+    }
+
+    #[test]
+    fn a_full_spool_says_why() {
+        let d = Dir::new("ob-full-spool");
+        let a = d.0.join("a");
+        fs::write(&a, vec![0u8; 2_500_000]).unwrap();
+        assert_eq!(
+            sent_note(
+                std::slice::from_ref(&a),
+                JANE,
+                &Outcome::Failed("No space left on device (os error 28)".into())
+            ),
+            room_note(JANE, 2_500_000)
+        );
+        assert_eq!(room_note(JANE, 2_500_000).1, format!("Could not send to {JANE}: not enough room in FloeDrop for 3 MB"));
+        assert_eq!(
+            sent_note(&[a], JANE, &Outcome::Failed("link lost".into())),
+            (Tone::Warn, format!("Could not send to {JANE}"))
+        );
+    }
+
+    #[test]
+    fn room_note_rounds_up() {
+        assert!(room_note("X", 1_000_001).1.ends_with("for 2 MB"));
+        assert!(room_note("X", 1_000_000).1.ends_with("for 1 MB"));
+        assert!(room_note("X", 1).1.ends_with("for 1 MB"));
+    }
+
+    #[test]
+    fn batch_bytes_counts_files_below_and_skips_symlinks() {
+        let d = Dir::new("ob-bytes");
+        fs::create_dir_all(d.0.join("t/u")).unwrap();
+        fs::write(d.0.join("t/u/x"), [0u8; 7]).unwrap();
+        fs::write(d.0.join("y"), [0u8; 5]).unwrap();
+        symlink(d.0.join("y"), d.0.join("t/l")).unwrap();
+        assert_eq!(batch_bytes(&[d.0.join("t"), d.0.join("y")]), 12);
     }
 
     #[test]
