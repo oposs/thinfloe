@@ -5,15 +5,30 @@ use owly_airdrop::proto::messages::Offer;
 
 /// The sender's name when the phone gave none.
 const SENDER_FALLBACK: &str = "iPhone";
+/// The longest sender or file name the state file and the log show, in characters.
+pub const MAX_SHOWN: usize = 128;
 
-/// One accepted offer that has not ended yet.
+/// A name from a phone as the band and the log may show it: control characters become
+/// spaces, format characters (bidi overrides, zero-width spaces) are dropped, as in the OSD
+/// notes, and the name is cut at [`MAX_SHOWN`] characters. Any phone in range may send.
+pub fn shown(name: &str) -> String {
+    name.chars()
+        .filter(|&c| !crate::names::is_format(c))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_SHOWN)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// One accepted offer that has not ended yet; names as [`shown`] makes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Incoming {
     pub sender: String,
     /// Files, not folders.
     pub files: u32,
     pub bytes: u64,
-    /// The name of the first file, as the offer gives it.
+    /// The name of the first file.
     pub first: String,
     /// When the offer was accepted, seconds since the epoch.
     pub since: u64,
@@ -29,37 +44,38 @@ pub fn ask_total(offer: &Offer) -> u64 {
     }
 }
 
-/// The transfer an offer of `sender` announces.
+/// The transfer an offer of `sender` announces, its names made safe to show.
 pub fn from_offer(sender: &str, offer: &Offer, since: u64) -> Incoming {
     let files: Vec<_> = match offer {
         Offer::Files(f) => f.iter().filter(|f| !f.is_directory).collect(),
         Offer::Urls(_) => Vec::new(),
     };
+    let sender = shown(sender);
     Incoming {
-        sender: if sender.trim().is_empty() {
+        sender: if sender.is_empty() {
             SENDER_FALLBACK.to_string()
         } else {
-            sender.to_string()
+            sender
         },
         files: u32::try_from(files.len()).unwrap_or(u32::MAX),
         bytes: ask_total(offer),
-        first: files.first().map(|f| f.name.clone()).unwrap_or_default(),
+        first: files.first().map(|f| shown(&f.name)).unwrap_or_default(),
         since,
     }
 }
 
-impl Incoming {
-    /// The transfer of an id no offer was seen for.
-    pub fn unknown() -> Incoming {
-        Incoming {
-            sender: SENDER_FALLBACK.to_string(),
-            files: 0,
-            bytes: 0,
-            first: String::new(),
-            since: 0,
-        }
-    }
+/// The log line of a delivery no accepted offer was seen for (the receiver of an earlier
+/// name, or a request the receiver's queue lost).
+pub fn unknown_received_line() -> String {
+    "received a transfer with no offer seen".to_string()
+}
 
+/// The log line of a failed transfer no accepted offer was seen for.
+pub fn unknown_failed_line(why: &str) -> String {
+    format!("a transfer with no offer seen failed: {why}")
+}
+
+impl Incoming {
     fn what(&self) -> String {
         let files = if self.files == 1 {
             "1 file".to_string()
@@ -92,6 +108,20 @@ impl Incoming {
     pub fn failed_line(&self, why: &str) -> String {
         format!(
             "receiving {} from {:?} failed: {why}",
+            self.what(),
+            self.sender
+        )
+    }
+
+    /// Owly ended the transfer without an event: the phone went before its upload.
+    pub fn ended_line(&self) -> String {
+        format!("the offer from {:?} ended without an upload", self.sender)
+    }
+
+    /// A new name rebinds the receiver, which ends its transfers.
+    pub fn cut_line(&self) -> String {
+        format!(
+            "receiving {} from {:?} was cut by the name change",
             self.what(),
             self.sender
         )
@@ -160,6 +190,20 @@ mod tests {
     }
 
     #[test]
+    fn names_from_a_phone_are_made_safe_to_show() {
+        let offer = Offer::Files(vec![entry("invoice\u{202E}fdp.exe", Some(1), false)]);
+        let i = from_offer("IT Support\u{202E}\u{200B}\t\nx", &offer, 1);
+        assert_eq!(i.sender, "IT Support  x");
+        assert_eq!(i.first, "invoicefdp.exe");
+        let long = "a".repeat(70_000);
+        let offer = Offer::Files(vec![entry(&long, Some(1), false)]);
+        let i = from_offer(&long, &offer, 1);
+        assert_eq!(i.sender.chars().count(), MAX_SHOWN);
+        assert_eq!(i.first.chars().count(), MAX_SHOWN);
+        assert_eq!(from_offer("\u{202E}", &offer, 1).sender, "iPhone");
+    }
+
+    #[test]
     fn the_log_lines_name_sender_files_and_bytes() {
         let mut i = Incoming {
             sender: "Jane's iPhone".into(),
@@ -200,6 +244,23 @@ mod tests {
         assert_eq!(
             links_line("Jane's iPhone"),
             "links from \"Jane's iPhone\" declined"
+        );
+        i.files = 2;
+        assert_eq!(
+            i.ended_line(),
+            "the offer from \"Jane's iPhone\" ended without an upload"
+        );
+        assert_eq!(
+            i.cut_line(),
+            "receiving 2 files, 75000000 bytes from \"Jane's iPhone\" was cut by the name change"
+        );
+        assert_eq!(
+            unknown_received_line(),
+            "received a transfer with no offer seen"
+        );
+        assert_eq!(
+            unknown_failed_line("reset"),
+            "a transfer with no offer seen failed: reset"
         );
     }
 }

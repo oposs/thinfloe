@@ -56,6 +56,14 @@ const DISCOVER_WAIT: Duration = Duration::from_secs(3);
 const OWLYD_WAIT: Duration = Duration::from_secs(5);
 /// The outbox thread looks at its folders at least this often.
 const OUTBOX_MAX_SLEEP: Duration = Duration::from_secs(5);
+/// An accepted offer with no event this long after the accept is looked at: Owly ends a
+/// connection that brings no `/Upload` within its idle time (60 s) without an event.
+const UPLOAD_START_WAIT: Duration = Duration::from_secs(75);
+/// While an upload is under way the entry is looked at again this often.
+const UPLOAD_RECHECK: Duration = Duration::from_secs(15);
+/// An upload is under way when something in `.incoming/` changed this recently (Owly
+/// fails an upload that brings less than 32 KiB in 30 s).
+const UPLOAD_QUIET: Duration = Duration::from_secs(60);
 /// How long the mDNS goodbye gets to go out before the radio is given back.
 const GOODBYE_WAIT: Duration = Duration::from_millis(200);
 /// State text when the helper ends without saying why.
@@ -588,9 +596,20 @@ async fn run(
     code
 }
 
+/// An accepted request until its end.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// What the state file and the log show.
+    shown: Incoming,
+    /// The sender's name as the phone gave it: the inbox folder is made from it.
+    sender: String,
+    /// When to look whether it still runs.
+    check_at: tokio::time::Instant,
+}
+
 /// The transfers under way, oldest first, then by sender.
-fn incoming_list(pending: &HashMap<(u64, u64), Incoming>) -> Vec<Incoming> {
-    let mut v: Vec<Incoming> = pending.values().cloned().collect();
+fn incoming_list<'a>(pending: impl Iterator<Item = &'a Incoming>) -> Vec<Incoming> {
+    let mut v: Vec<Incoming> = pending.cloned().collect();
     v.sort_by(|a, b| (a.since, &a.sender).cmp(&(b.since, &b.sender)));
     v
 }
@@ -875,7 +894,7 @@ struct Airdrop {
     events_tx: mpsc::Sender<(u64, ReceiverEvent)>,
     events: mpsc::Receiver<(u64, ReceiverEvent)>,
     /// Accepted requests not ended yet, by (generation, request id).
-    pending: HashMap<(u64, u64), Incoming>,
+    pending: HashMap<(u64, u64), Pending>,
     /// The receivers in range as the outbox last listed them.
     devices: Vec<Device>,
     _mdns: Registration,
@@ -883,6 +902,8 @@ struct Airdrop {
 }
 
 enum Step {
+    /// A pending transfer's check time came.
+    Check,
     Receiver(Option<Box<(u64, ReceiverEvent)>>),
     Outbox(Option<FromOutbox>),
     Inotify(Option<io::Result<inotify::Event<std::ffi::OsString>>>),
@@ -1032,6 +1053,10 @@ impl Airdrop {
     async fn rename(&mut self, name: &str) -> Result<(), String> {
         self.receiver.abort();
         let _ = (&mut self.receiver).await;
+        // The aborted receiver sends no end for its transfers.
+        for p in drop_generation(&mut self.pending, self.generation) {
+            log(p.shown.cut_line());
+        }
         self.generation += 1;
         self.receiver = bind(
             self.iface,
@@ -1052,20 +1077,40 @@ impl Airdrop {
 
     /// The state file's lists: receivers in range and transfers under way.
     fn lists(&self) -> (Vec<Device>, Vec<Incoming>) {
-        (self.devices.clone(), incoming_list(&self.pending))
+        (
+            self.devices.clone(),
+            incoming_list(self.pending.values().map(|p| &p.shown)),
+        )
     }
 
     /// One event; true when the lists may have changed.
     async fn step(&mut self) -> bool {
+        let check = next_check(&self.pending);
         let step = match self.sending.as_mut() {
             Some(s) => tokio::select! {
                 e = self.events.recv() => Step::Receiver(e.map(Box::new)),
                 m = s.from_outbox.recv() => Step::Outbox(m),
                 i = s.events.next() => Step::Inotify(i),
+                () = check => Step::Check,
             },
-            None => Step::Receiver(self.events.recv().await.map(Box::new)),
+            None => tokio::select! {
+                e = self.events.recv() => Step::Receiver(e.map(Box::new)),
+                () = check => Step::Check,
+            },
         };
         match step {
+            Step::Check => {
+                let uploading = staging_active(
+                    &self.paths.incoming,
+                    std::time::SystemTime::now(),
+                    UPLOAD_QUIET,
+                );
+                let ended = expire(&mut self.pending, tokio::time::Instant::now(), uploading);
+                for p in &ended {
+                    log(p.shown.ended_line());
+                }
+                return !ended.is_empty();
+            }
             Step::Receiver(Some(b)) => {
                 let (generation, ev) = *b;
                 return self.on_receiver(generation, ev);
@@ -1128,11 +1173,9 @@ impl Airdrop {
         });
     }
 
-    /// An accepted request, forgotten here; sender "iPhone" and no files when unknown.
-    fn take(&mut self, generation: u64, id: u64) -> Incoming {
-        self.pending
-            .remove(&(generation, id))
-            .unwrap_or_else(Incoming::unknown)
+    /// An accepted request, forgotten here.
+    fn take(&mut self, generation: u64, id: u64) -> Option<Pending> {
+        self.pending.remove(&(generation, id))
     }
 
     /// One receiver event; true when the transfers under way may have changed.
@@ -1153,7 +1196,12 @@ impl Airdrop {
                 match answer(&r.ask.offer, free, &sender) {
                     Answer::Accept => {
                         log(offer.accepted_line());
-                        self.pending.insert((generation, r.id), offer);
+                        let pending = Pending {
+                            shown: offer,
+                            sender,
+                            check_at: tokio::time::Instant::now() + UPLOAD_START_WAIT,
+                        };
+                        self.pending.insert((generation, r.id), pending);
                         r.accept();
                     }
                     Answer::Decline(note) => {
@@ -1169,11 +1217,14 @@ impl Airdrop {
             }
             ReceiverEvent::Received { id, paths } => {
                 let done = self.take(generation, id);
-                let sender = done.sender.clone();
+                let line = done
+                    .as_ref()
+                    .map_or_else(incoming::unknown_received_line, |p| p.shown.received_line());
+                let sender = done.map_or_else(String::new, |p| p.sender);
                 match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
-                    Ok(placed) if placed.is_empty() => log(done.received_line()),
+                    Ok(placed) if placed.is_empty() => log(line),
                     Ok(placed) => {
-                        log(done.received_line());
+                        log(line);
                         osd::note(osd::Tone::Info, &inbox::received_note(&placed, &sender))
                     }
                     Err(e) => {
@@ -1188,12 +1239,16 @@ impl Airdrop {
             ReceiverEvent::Failed { id, reason } => {
                 // Owly's sandbox for the upload is gone already; nothing was placed.
                 let done = self.take(generation, id);
-                log(done.failed_line(&reason));
-                osd::note(osd::Tone::Warn, &inbox::failed_note(&done.sender));
+                match &done {
+                    Some(p) => log(p.shown.failed_line(&reason)),
+                    None => log(incoming::unknown_failed_line(&reason)),
+                }
+                let sender = done.map_or_else(String::new, |p| p.sender);
+                osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
             }
             ReceiverEvent::Withdrawn { id } => {
                 if let Some(gone) = self.pending.remove(&(generation, id)) {
-                    log(gone.withdrawn_line());
+                    log(gone.shown.withdrawn_line());
                 }
             }
             ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => return false,
@@ -1248,6 +1303,80 @@ fn service_id_at(path: &Path) -> String {
         log(format!("{}: {e}", path.display()));
     }
     id
+}
+
+/// Completes at the first check time among `pending`; never when there is none.
+async fn next_check(pending: &HashMap<(u64, u64), Pending>) {
+    match pending.values().map(|p| p.check_at).min() {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The entries whose check time has come: while an upload is under way (`uploading`) they
+/// are looked at again after [`UPLOAD_RECHECK`], else they are taken out and returned. Owly
+/// sends no event when a phone goes between the accept and its upload.
+fn expire(
+    pending: &mut HashMap<(u64, u64), Pending>,
+    now: tokio::time::Instant,
+    uploading: bool,
+) -> Vec<Pending> {
+    let due: Vec<(u64, u64)> = pending
+        .iter()
+        .filter(|(_, p)| p.check_at <= now)
+        .map(|(k, _)| *k)
+        .collect();
+    let mut ended = Vec::new();
+    for k in due {
+        if uploading {
+            if let Some(p) = pending.get_mut(&k) {
+                p.check_at = now + UPLOAD_RECHECK;
+            }
+        } else if let Some(p) = pending.remove(&k) {
+            ended.push(p);
+        }
+    }
+    ended
+}
+
+/// The entries of the receiver of `generation`, taken out.
+fn drop_generation(pending: &mut HashMap<(u64, u64), Pending>, generation: u64) -> Vec<Pending> {
+    let keys: Vec<(u64, u64)> = pending
+        .keys()
+        .filter(|(g, _)| *g == generation)
+        .copied()
+        .collect();
+    keys.into_iter()
+        .filter_map(|k| pending.remove(&k))
+        .collect()
+}
+
+/// Whether something under `dir` (Owly's staging, `.incoming/`) changed within `quiet`
+/// before `now`: an upload is under way. At most four levels and 4096 entries are looked at.
+fn staging_active(dir: &Path, now: std::time::SystemTime, quiet: Duration) -> bool {
+    let mut seen = 0usize;
+    let mut stack = vec![(dir.to_path_buf(), 0u32)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > 4096 {
+                return false;
+            }
+            let Ok(m) = e.metadata() else { continue };
+            if m.modified()
+                .is_ok_and(|t| now.duration_since(t).map_or(true, |age| age < quiet))
+            {
+                return true;
+            }
+            if m.is_dir() && depth < 4 {
+                stack.push((e.path(), depth + 1));
+            }
+        }
+    }
+    false
 }
 
 /// Removes one leftover staged entry without following a symlink.
@@ -1393,7 +1522,7 @@ mod tests {
         pending.insert((0, 1), one("B", 5));
         pending.insert((0, 2), one("A", 3));
         let names = |p: &HashMap<(u64, u64), Incoming>| {
-            incoming_list(p)
+            incoming_list(p.values())
                 .into_iter()
                 .map(|i| i.sender)
                 .collect::<Vec<_>>()
@@ -1405,6 +1534,79 @@ mod tests {
         pending.remove(&(0, 2));
         pending.remove(&(0, 3));
         assert_eq!(names(&pending), ["B"]);
+    }
+
+    fn pending_at(sender: &str, check_at: tokio::time::Instant) -> Pending {
+        Pending {
+            shown: Incoming {
+                sender: sender.into(),
+                files: 1,
+                bytes: 1,
+                first: "a.jpg".into(),
+                since: 1,
+            },
+            sender: sender.into(),
+            check_at,
+        }
+    }
+
+    #[test]
+    fn an_accept_with_no_upload_ends_at_its_check_time() {
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("A", t0 + UPLOAD_START_WAIT));
+        pending.insert((0, 2), pending_at("B", t0 + UPLOAD_START_WAIT * 2));
+        // Not due yet.
+        assert!(expire(&mut pending, t0, false).is_empty());
+        // Due while an upload runs: looked at again later.
+        let due = t0 + UPLOAD_START_WAIT;
+        assert!(expire(&mut pending, due, true).is_empty());
+        assert_eq!(pending[&(0, 1)].check_at, due + UPLOAD_RECHECK);
+        // Due with nothing arriving: it ends and leaves the lists.
+        let ended = expire(&mut pending, due + UPLOAD_RECHECK, false);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].shown.sender, "A");
+        let left = incoming_list(pending.values().map(|p| &p.shown));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].sender, "B");
+    }
+
+    #[test]
+    fn a_name_change_ends_the_old_receivers_transfers() {
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("A", t0));
+        pending.insert((0, 2), pending_at("B", t0));
+        pending.insert((1, 1), pending_at("C", t0));
+        let mut cut: Vec<String> = drop_generation(&mut pending, 0)
+            .into_iter()
+            .map(|p| p.shown.sender)
+            .collect();
+        cut.sort();
+        assert_eq!(cut, ["A", "B"]);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key(&(1, 1)));
+    }
+
+    #[test]
+    fn a_recent_change_in_staging_is_an_upload() {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+            .join(format!("staging-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("upload-1/Album")).unwrap();
+        let now = std::time::SystemTime::now();
+        // An empty staging dir counts by its own time; an hour later nothing is recent.
+        assert!(staging_active(&dir, now, UPLOAD_QUIET));
+        let later = now + Duration::from_secs(3600);
+        assert!(!staging_active(&dir, later, UPLOAD_QUIET));
+        std::fs::write(dir.join("upload-1/Album/a.jpg"), b"x").unwrap();
+        assert!(staging_active(
+            &dir,
+            std::time::SystemTime::now(),
+            UPLOAD_QUIET
+        ));
+        assert!(!staging_active(&dir.join("missing"), now, UPLOAD_QUIET));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
