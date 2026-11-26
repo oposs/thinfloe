@@ -15,7 +15,9 @@
 # SMOKE_WAIT_FOR, if set, is a grep pattern the log must also contain before
 # the VM is stopped, for a smoke test whose VM reports on the console after
 # the target (the add-on smokes); the TIMEOUT still ends a boot that never
-# prints it.
+# prints it. The timeout line names what was missing: "no multi-user target"
+# when the target never came, "but no line matching '<pattern>'" when the
+# target came and the SMOKE_WAIT_FOR line did not.
 #
 # The exit status is always 0 once QEMU has been started: the verdict is
 # check-boot-smoke.sh's, run on the log afterwards. QEMU failing to start at
@@ -51,7 +53,12 @@ while kill -0 "$qemu" 2>/dev/null; do
         break
     fi
     if (( elapsed >= TIMEOUT )); then
-        echo "run-qemu-smoke: no multi-user target after ${TIMEOUT}s, stopping QEMU"
+        if [[ -n "$reached_at" ]]; then
+            echo "run-qemu-smoke: multi-user target reached after ${reached_at}s," \
+                 "but no line matching '${SMOKE_WAIT_FOR:-}' after ${TIMEOUT}s, stopping QEMU"
+        else
+            echo "run-qemu-smoke: no multi-user target after ${TIMEOUT}s, stopping QEMU"
+        fi
         break
     fi
     sleep 1
