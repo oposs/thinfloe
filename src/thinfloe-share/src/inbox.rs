@@ -56,16 +56,32 @@ fn normalise(p: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// What `place` moved, and the error that stopped it.
+#[derive(Debug)]
+pub struct Placed {
+    /// The new paths of the entries moved, also those moved before an error.
+    pub files: Vec<PathBuf>,
+    pub error: Option<io::Error>,
+}
+
 /// Move the top-level entries `staged` of `staging_root` into `inbox/<safe sender>/`.
 /// Names that exist already get a suffix. A staged symlink (or special file) is removed,
 /// not moved, and not followed; so is every symlink inside a staged folder. Entries that
-/// are not directly below `staging_root` are ignored. Returns the new paths.
-pub fn place(
+/// are not directly below `staging_root` are ignored. The first error stops the move;
+/// what was moved before it stays in `files` (none when the folder could not be made).
+pub fn place(staged: &[PathBuf], staging_root: &Path, inbox: &Path, sender: &str) -> Placed {
+    let mut files = Vec::new();
+    let error = place_into(staged, staging_root, inbox, sender, &mut files).err();
+    Placed { files, error }
+}
+
+fn place_into(
     staged: &[PathBuf],
     staging_root: &Path,
     inbox: &Path,
     sender: &str,
-) -> io::Result<Vec<PathBuf>> {
+    placed: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     fs::create_dir_all(inbox)?;
     let folder_name = names::safe(sender, SENDER_FALLBACK);
     let existing = names_in(inbox)?;
@@ -84,7 +100,6 @@ pub fn place(
     fs::create_dir_all(&folder)?;
     fs::set_permissions(&folder, fs::Permissions::from_mode(0o755))?;
 
-    let mut placed = Vec::new();
     for src in staged {
         if src.parent() != Some(staging_root) {
             continue;
@@ -113,7 +128,7 @@ pub fn place(
         fs::rename(src, &dest)?;
         placed.push(dest);
     }
-    Ok(placed)
+    Ok(())
 }
 
 /// Remove a staging directory after a failed or finished offer; a missing one is fine.
@@ -122,6 +137,25 @@ pub fn discard(staging: &Path) -> io::Result<()> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
+}
+
+/// The sender in a note when the phone gave no name.
+pub const UNKNOWN_SENDER: &str = "an unnamed phone";
+
+/// The sender as a note names it: as the band shows it (`incoming::shown`), or
+/// [`UNKNOWN_SENDER`] when nothing is left. The inbox folder keeps its own fallback.
+pub fn shown_sender(sender: &str) -> String {
+    let s = crate::incoming::shown(sender);
+    if s.is_empty() {
+        UNKNOWN_SENDER.to_string()
+    } else {
+        s
+    }
+}
+
+/// OSD text when some files of a delivery were saved and the others were not.
+pub fn partial_note(placed: usize, total: usize, sender: &str) -> String {
+    format!("{placed} of {total} files from {sender} received; the others could not be saved")
 }
 
 /// OSD text after a successful receive.
@@ -151,6 +185,15 @@ pub fn failed_note(sender: &str) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    impl Placed {
+        fn ok(self) -> Vec<PathBuf> {
+            if let Some(e) = self.error {
+                panic!("place: {e}");
+            }
+            self.files
+        }
+    }
 
     struct Dir(PathBuf);
     impl Dir {
@@ -206,7 +249,7 @@ mod tests {
         let f = staging.join("a.txt");
         fs::write(&f, "x").unwrap();
         fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
-        let out = place(std::slice::from_ref(&f), &staging, &inbox, "Jane's iPhone").unwrap();
+        let out = place(std::slice::from_ref(&f), &staging, &inbox, "Jane's iPhone").ok();
         assert_eq!(out, vec![inbox.join("Jane's iPhone/a.txt")]);
         assert_eq!(fs::read_to_string(&out[0]).unwrap(), "x");
         assert_eq!(mode(&out[0]), 0o644);
@@ -218,7 +261,7 @@ mod tests {
         let (_d, staging, inbox) = setup("fallback");
         let f = staging.join("a.txt");
         fs::write(&f, "x").unwrap();
-        let out = place(&[f], &staging, &inbox, "..").unwrap();
+        let out = place(&[f], &staging, &inbox, "..").ok();
         assert_eq!(out, vec![inbox.join("iPhone/a.txt")]);
     }
 
@@ -229,7 +272,7 @@ mod tests {
         fs::write(inbox.join("Jane/a.txt"), "old").unwrap();
         let f = staging.join("a.txt");
         fs::write(&f, "new").unwrap();
-        let out = place(&[f], &staging, &inbox, "Jane").unwrap();
+        let out = place(&[f], &staging, &inbox, "Jane").ok();
         assert_eq!(out, vec![inbox.join("Jane/a (2).txt")]);
         assert_eq!(fs::read_to_string(inbox.join("Jane/a.txt")).unwrap(), "old");
     }
@@ -242,7 +285,7 @@ mod tests {
         fs::write(dir.join("sub/p.jpg"), "p").unwrap();
         fs::set_permissions(dir.join("sub/p.jpg"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::set_permissions(dir.join("sub"), fs::Permissions::from_mode(0o700)).unwrap();
-        let out = place(&[dir], &staging, &inbox, "Jane").unwrap();
+        let out = place(&[dir], &staging, &inbox, "Jane").ok();
         assert_eq!(out, vec![inbox.join("Jane/Trip")]);
         assert!(inbox.join("Jane/Trip/sub/p.jpg").is_file());
         assert_eq!(mode(&inbox.join("Jane/Trip/sub/p.jpg")), 0o644);
@@ -250,7 +293,7 @@ mod tests {
         // A second folder of the same name gets the suffix at the end.
         let dir2 = staging.join("Trip");
         fs::create_dir_all(&dir2).unwrap();
-        let out = place(&[dir2], &staging, &inbox, "Jane").unwrap();
+        let out = place(&[dir2], &staging, &inbox, "Jane").ok();
         assert_eq!(out, vec![inbox.join("Jane/Trip (2)")]);
     }
 
@@ -259,19 +302,66 @@ mod tests {
         let (d, staging, inbox) = setup("symlink");
         let secret = d.path().join("secret");
         fs::write(&secret, "s").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
         symlink(&secret, staging.join("link")).unwrap();
         let dir = staging.join("D");
         fs::create_dir_all(&dir).unwrap();
         symlink(&secret, dir.join("inner")).unwrap();
         fs::write(dir.join("ok"), "ok").unwrap();
-        let out = place(&[staging.join("link"), dir], &staging, &inbox, "Jane").unwrap();
+        let out = place(&[staging.join("link"), dir], &staging, &inbox, "Jane").ok();
         assert_eq!(out, vec![inbox.join("Jane/D")]);
         assert!(fs::symlink_metadata(inbox.join("Jane/link")).is_err());
         assert!(fs::symlink_metadata(staging.join("link")).is_err());
         assert!(fs::symlink_metadata(inbox.join("Jane/D/inner")).is_err());
         assert!(inbox.join("Jane/D/ok").is_file());
-        assert_eq!(mode(&secret), 0o644 & mode(&secret));
+        assert_eq!(mode(&secret), 0o600);
         assert_eq!(fs::read_to_string(&secret).unwrap(), "s");
+    }
+
+    #[test]
+    fn place_keeps_what_it_moved_before_an_error() {
+        let (_d, staging, inbox) = setup("partial");
+        fs::write(staging.join("a.txt"), "a").unwrap();
+        // A folder whose tree is deeper than PATH_MAX: normalise() fails on it. It is
+        // made with relative steps, which no path length limits.
+        let deep = staging.join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let step = "x".repeat(200);
+        let made = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "cd -P \"$1\" && for i in $(seq 25); do mkdir {step} && cd -P {step} || exit 1; done && : > f"
+            ))
+            .arg("sh")
+            .arg(&deep)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        fs::write(staging.join("z.txt"), "z").unwrap();
+        let staged = [staging.join("a.txt"), deep, staging.join("z.txt")];
+        let placed = place(&staged, &staging, &inbox, "Jane");
+        assert_eq!(placed.files, vec![inbox.join("Jane/a.txt")]);
+        assert!(placed.error.is_some());
+        assert!(staging.join("z.txt").exists());
+    }
+
+    #[test]
+    fn notes_name_an_unnamed_phone() {
+        let three = [
+            PathBuf::from("/a"),
+            PathBuf::from("/b"),
+            PathBuf::from("/c"),
+        ];
+        assert_eq!(
+            received_note(&three, &shown_sender("")),
+            "3 files received from an unnamed phone"
+        );
+        assert_eq!(shown_sender(" \u{202E}\n"), UNKNOWN_SENDER);
+        assert_eq!(shown_sender("Jane"), "Jane");
+        assert_eq!(
+            partial_note(2, 5, "Jane"),
+            "2 of 5 files from Jane received; the others could not be saved"
+        );
     }
 
     #[test]

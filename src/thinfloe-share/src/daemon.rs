@@ -1193,7 +1193,7 @@ impl Airdrop {
                 } else {
                     log(offer.offer_line());
                 }
-                match answer(&r.ask.offer, free, &sender) {
+                match answer(&r.ask.offer, free, &inbox::shown_sender(&sender)) {
                     Answer::Accept => {
                         log(offer.accepted_line());
                         let pending = Pending {
@@ -1221,18 +1221,28 @@ impl Airdrop {
                     .as_ref()
                     .map_or_else(incoming::unknown_received_line, |p| p.shown.received_line());
                 let sender = done.map_or_else(String::new, |p| p.sender);
-                match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
-                    Ok(placed) if placed.is_empty() => log(line),
-                    Ok(placed) => {
-                        log(line);
-                        osd::note(osd::Tone::Info, &inbox::received_note(&placed, &sender))
-                    }
-                    Err(e) => {
-                        log(format!("placing files from {sender:?}: {e}"));
+                let placed =
+                    inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender);
+                let named = inbox::shown_sender(&sender);
+                log(line);
+                match placed.error {
+                    None if placed.files.is_empty() => {}
+                    None => osd::note(
+                        osd::Tone::Info,
+                        &inbox::received_note(&placed.files, &named),
+                    ),
+                    Some(e) => {
+                        log(format!("placing files from {:?}: {e}", incoming::shown(&sender)));
+                        // The entries moved are gone from staging; the rest is dropped.
                         for p in &paths {
                             remove_entry(p);
                         }
-                        osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
+                        let text = if placed.files.is_empty() {
+                            inbox::failed_note(&named)
+                        } else {
+                            inbox::partial_note(placed.files.len(), paths.len(), &named)
+                        };
+                        osd::note(osd::Tone::Warn, &text);
                     }
                 }
             }
@@ -1244,7 +1254,10 @@ impl Airdrop {
                     None => log(incoming::unknown_failed_line(&reason)),
                 }
                 let sender = done.map_or_else(String::new, |p| p.sender);
-                osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
+                osd::note(
+                    osd::Tone::Warn,
+                    &inbox::failed_note(&inbox::shown_sender(&sender)),
+                );
             }
             ReceiverEvent::Withdrawn { id } => {
                 if let Some(gone) = self.pending.remove(&(generation, id)) {
