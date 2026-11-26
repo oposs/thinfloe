@@ -574,7 +574,24 @@ fn capitalized(text: &str) -> String {
 }
 
 /// Draw one frame.
+/// Whether the pointer over `w` is a hand: it is enabled and takes a
+/// click and no drag (scroll bars, sliders and text fields keep theirs).
+fn wants_pointing_hand(w: &egui::WidgetRect) -> bool {
+    w.enabled && w.sense.senses_click() && !w.sense.senses_drag()
+}
+
+/// The pointing hand over the widget egui would give a click to, when
+/// `wants_pointing_hand`. Called first in the pass, so a widget that sets
+/// its own cursor later (a text field's I-beam, a disabled widget) wins.
+/// egui-winit hands the cursor to winit.
+fn pointing_hand(ctx: &egui::Context) {
+    if ctx.viewport(|v| v.hits.click.as_ref().is_some_and(wants_pointing_hand)) {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
 pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
+    pointing_hand(ui.ctx());
     // The clock changes on the minute and at no other time.
     ui.ctx().request_repaint_after(until_next_minute(
         chrome.wall.unwrap_or_else(std::time::SystemTime::now),
@@ -3447,12 +3464,8 @@ mod tests {
         assert!(!texts.iter().any(|t| t.ends_with("available")), "{texts:?}");
     }
 
-    /// One frame of the grid of `menu` on 1280 x 720 with `events`.
-    fn grid_frame(
-        ctx: &egui::Context,
-        menu: &Menu,
-        events: Vec<egui::Event>,
-    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+    /// One pass of `show` for `menu` on 1280 x 720 with `events`.
+    fn grid_pass(ctx: &egui::Context, menu: &Menu, events: Vec<egui::Event>) -> (egui::FullOutput, Option<UiEvent>) {
         let input = egui::RawInput {
             screen_rect: Some(screen(1280.0, 720.0)),
             events,
@@ -3464,7 +3477,27 @@ mod tests {
             ev = show(ui, menu, &icons, &Chrome::default(), Instant::now());
         });
         out.textures_delta.clear();
+        (out, ev)
+    }
+
+    /// One frame of the grid of `menu` on 1280 x 720 with `events`.
+    fn grid_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+        let (out, ev) = grid_pass(ctx, menu, events);
         (out.shapes, ev)
+    }
+
+    /// The cursor `show` asks for with the pointer at `p`: one layout
+    /// pass, then one with the pointer moved there.
+    fn cursor_at(ctx: &egui::Context, menu: &Menu, p: egui::Pos2) -> egui::CursorIcon {
+        grid_pass(ctx, menu, vec![]);
+        grid_pass(ctx, menu, vec![egui::Event::PointerMoved(p)])
+            .0
+            .platform_output
+            .cursor_icon
     }
 
     // A click on the update mark started the program (2026-11-26): the
@@ -3663,6 +3696,65 @@ mod tests {
             }
         }
         assert!(found, "Tab reaches the mark");
+    }
+
+    #[test]
+    fn only_enabled_click_widgets_want_the_hand() {
+        let w = |sense, enabled| egui::WidgetRect {
+            id: egui::Id::NULL.with("widget"),
+            parent_id: egui::Id::NULL,
+            layer_id: egui::LayerId::background(),
+            rect: Rect::ZERO,
+            interact_rect: Rect::ZERO,
+            sense,
+            enabled,
+            visible: true,
+        };
+        assert!(wants_pointing_hand(&w(Sense::click(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::click(), false)));
+        assert!(!wants_pointing_hand(&w(Sense::hover(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::click_and_drag(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::drag(), true)));
+    }
+
+    // The pointer stayed an arrow over everything (2026-11-26).
+    #[test]
+    fn the_pointer_is_a_hand_over_what_takes_a_click() {
+        let mut t1 = plain_tile("T1");
+        t1.problem = Some("broken".into());
+        t1.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0"), t1],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T1".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let at = |text: &str| text_shape(&shapes, text).expect(text).1.visual_bounding_rect().center();
+        let (t0, t1, mark) = (at("T0"), at("T1"), at("update"));
+        use egui::CursorIcon::{Default as Arrow, PointingHand};
+        assert_eq!(cursor_at(&ctx, &menu, t0), PointingHand, "a usable tile");
+        assert_eq!(cursor_at(&ctx, &menu, t1), Arrow, "a greyed tile");
+        assert_eq!(
+            cursor_at(&ctx, &menu, mark),
+            PointingHand,
+            "the greyed tile's update mark"
+        );
+        let log = layout(screen(1280.0, 720.0), 2, 0, 0, 0).log.center();
+        assert_eq!(cursor_at(&ctx, &menu, log), Arrow, "the log");
     }
 
     #[test]
