@@ -101,12 +101,12 @@ pub fn place(
             let _ = fs::remove_file(src);
             continue;
         }
-        let wanted = names::safe(&file_name.to_string_lossy(), FILE_FALLBACK);
+        let shown = file_name.to_string_lossy();
         let taken = names_in(&folder)?;
         let name = if md.is_dir() {
-            names::unique_dir(&taken, &wanted)
+            names::unique_dir(&taken, &names::safe(&shown, FILE_FALLBACK))
         } else {
-            names::unique(&taken, &wanted)
+            names::unique(&taken, &names::safe_file(&shown, FILE_FALLBACK))
         };
         let dest = folder.join(name);
         normalise(src)?;
