@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use owlyd::api::{self, LinkInfo, RadioProxy, StateChangedStream};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::card::{CardInputs, choose_station, country};
+use crate::card::{Bus, CardInfo, CardInputs, choose_station, country};
 
 /// The file owlyd reads each time the radio comes up (no restart needed).
 pub const RADIO_TOML: &str = "/etc/owly/radio.toml";
@@ -294,15 +294,44 @@ fn owner_lost<T>(change: Option<Option<T>>) -> bool {
     !matches!(change, Some(Some(_)))
 }
 
+const SYS_NET: &str = "/sys/class/net";
+
 /// Wi-Fi interfaces: those with a `wireless` directory in sysfs.
 fn wifi_ifaces() -> Vec<String> {
-    let Ok(dir) = std::fs::read_dir("/sys/class/net") else {
+    let Ok(dir) = std::fs::read_dir(SYS_NET) else {
         return Vec::new();
     };
     dir.filter_map(|e| e.ok())
         .filter(|e| e.path().join("wireless").exists())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect()
+}
+
+/// Bus, PCI ID and driver of `iface`'s card, from `<net>/<iface>/device` (`net` is
+/// `/sys/class/net`); what cannot be read stays unknown.
+fn card_info(net: &Path, iface: &str) -> CardInfo {
+    let dev = net.join(iface).join("device");
+    let link_name = |name: &str| {
+        std::fs::read_link(dev.join(name))
+            .ok()
+            .and_then(|t| t.file_name()?.to_str().map(String::from))
+    };
+    let hex = |name: &str| {
+        let s = std::fs::read_to_string(dev.join(name)).ok()?;
+        u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
+    };
+    let bus = match link_name("subsystem").as_deref() {
+        Some("usb") => Bus::Usb,
+        Some("pci") => Bus::Pci,
+        _ => Bus::Other,
+    };
+    CardInfo {
+        bus,
+        pci_id: (bus == Bus::Pci)
+            .then(|| hex("vendor").zip(hex("device")))
+            .flatten(),
+        driver: link_name("driver"),
+    }
 }
 
 fn ip_json(args: &[&str]) -> String {
@@ -355,11 +384,17 @@ fn zone() -> Option<String> {
 }
 
 fn gather() -> (CardInputs, Option<String>) {
+    let wifi_ifaces = wifi_ifaces();
+    let cards = wifi_ifaces
+        .iter()
+        .map(|i| (i.clone(), card_info(Path::new(SYS_NET), i)))
+        .collect();
     let card = CardInputs {
         ip_addr_json: ip_json(&["-j", "addr"]),
         ip_route_json: merge_arrays(&ip_json(&["-j", "route"]), &ip_json(&["-6", "-j", "route"])),
         wifi_yaml: wifi_yaml(),
-        wifi_ifaces: wifi_ifaces(),
+        wifi_ifaces,
+        cards,
     };
     let country = zone().and_then(|z| {
         let tab = std::fs::read_to_string(format!("{ZONEINFO}zone1970.tab")).ok()?;
@@ -553,6 +588,7 @@ mod tests {
             ip_route_json: ROUTE.into(),
             wifi_yaml: None,
             wifi_ifaces: vec!["wlp2s0".into(), "wlx00e04c123456".into()],
+            cards: Default::default(),
         }
     }
 
@@ -680,6 +716,51 @@ mod tests {
             std::fs::read_to_string(&toml).unwrap(),
             "station = \"wlx00e04c123456\"\ncountry = \"CH\"\n"
         );
+    }
+
+    #[test]
+    fn card_facts_come_from_sysfs() {
+        use std::os::unix::fs::symlink;
+        let root = tmp("sysfs").parent().unwrap().parent().unwrap().join("sys");
+        let usb = root.join("devices/usb1/1-1/1-1:1.0");
+        let pci = root.join("devices/pci0000:00/0000:02:00.0");
+        for d in [&usb, &pci] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        symlink("../../../../bus/usb", usb.join("subsystem")).unwrap();
+        symlink(
+            "../../../../bus/usb/drivers/rtw88_8822bu",
+            usb.join("driver"),
+        )
+        .unwrap();
+        symlink("../../../bus/pci", pci.join("subsystem")).unwrap();
+        symlink("../../../bus/pci/drivers/iwlwifi", pci.join("driver")).unwrap();
+        std::fs::write(pci.join("vendor"), "0x8086\n").unwrap();
+        std::fs::write(pci.join("device"), "0x08b3\n").unwrap();
+        for (iface, dev) in [("wlx1", &usb), ("wlp2s0", &pci)] {
+            let n = root.join("class/net").join(iface);
+            std::fs::create_dir_all(&n).unwrap();
+            symlink(dev, n.join("device")).unwrap();
+        }
+        let net = root.join("class/net");
+        assert_eq!(
+            card_info(&net, "wlx1"),
+            CardInfo {
+                bus: Bus::Usb,
+                pci_id: None,
+                driver: Some("rtw88_8822bu".into()),
+            }
+        );
+        assert_eq!(
+            card_info(&net, "wlp2s0"),
+            CardInfo {
+                bus: Bus::Pci,
+                pci_id: Some((0x8086, 0x08b3)),
+                driver: Some("iwlwifi".into()),
+            }
+        );
+        // No device link (a virtual interface): nothing known.
+        assert_eq!(card_info(&net, "gone"), CardInfo::default());
     }
 
     #[test]
