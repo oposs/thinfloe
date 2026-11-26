@@ -1310,7 +1310,9 @@ exit 1'
 # px.py TAG [--within S] SPEC...: grim takes the screen and each SPEC prints
 # "px TAG name=value". name=x,y gives the colour at a point, name=x,y@rrggbb
 # the same with an expectation; name=x0,y0,x1,y1#rrggbb is "found" when some
-# pixel of the box (x1, y1 exclusive) has the colour, else "none". With
+# pixel of the box (x1, y1 exclusive) has the colour, else "none";
+# name=y~rrggbb is "first,last", the x of the first and the last pixel of
+# row y with the colour, else "none". With
 # --within S the screen is taken again until every expectation holds, at
 # most S seconds.
 # shellcheck disable=SC2016 # expands inside the container
@@ -1333,6 +1335,10 @@ def at(img, x, y):
     o = pos + 3 * (y * w + x)
     return data[o:o + 3].hex()
 def value(img, spec):
+    if "~" in spec:
+        y, want = spec.split("~")
+        xs = [x for x in range(img[2]) if at(img, x, int(y)) == want]
+        return ("%d,%d" % (xs[0], xs[-1]) if xs else "none"), None
     if "#" in spec:
         box, want = spec.split("#")
         x0, y0, x1, y1 = map(int, box.split(","))
@@ -1528,12 +1534,12 @@ note)
     note() { python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto((\"note\twarn\t\" + sys.argv[1] + \"\n\").encode(), \"/tmp/xdg/thinfloe-osd.sock\")" "$text"; }
     note
     sleep 0.5
-    px note --within 1 left=270,600,300,697#151b22 right=980,600,1010,697#151b22
+    px note --within 1 shown=0,665,1280,666#151b22 span=665~151b22
     printf "2\n" >/tmp/xdg/thinfloe-scale
     sleep 3
     note
     sleep 0.5
-    px note2 --within 1 left2=30,500,60,675#151b22
+    px note2 --within 1 shown=0,600,1280,601#151b22 span=600~151b22
     stop_osd
     ;;
 esac
@@ -1630,9 +1636,25 @@ wev2=$(mk_val wev2)
 mk_check $? "the volume switch acts at once: after --env-only and labwc --reconfigure the key no longer reaches the window" \
     "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
 
+# note_span TAG MIN MAX SIDE: the border of the note's panel, as px.py
+# found it on one row of a 1280 px output, is MIN..MAX px wide, keeps at
+# least SIDE px to each edge and is centred (to 1 px).
+note_span() {
+    local span l r
+    span=$(mk_px "$1" span)
+    [[ "$(mk_px "$1" shown)" == found && $span =~ ^([0-9]+),([0-9]+)$ ]] || return 1
+    l=${BASH_REMATCH[1]} r=${BASH_REMATCH[2]}
+    (( r - l + 1 >= $2 && r - l + 1 <= $3 && l >= $4 && 1279 - r >= $4 && (l - (1279 - r)) ** 2 <= 1 ))
+}
 mk_run note 1 off off
-mk_expect "a two-row note at scale 1 is 720 px wide, centred" note left=found right=found
-mk_expect "at scale 2 the note keeps 44 px to the edges of a 1280 px output" note2 left2=found
+# The panel is as wide as the wrapped text and its paddings: a word
+# break leaves the rows short of the 688 px the text may take.
+note_span note 321 720 0
+mk_check $? "a two-row note at scale 1 is wider than a key's panel, at most 720 px wide and centred" \
+    "border on row 665 at x $(mk_px note span)"
+note_span note2 721 1192 44
+mk_check $? "at scale 2 the note is wider than 720 px, keeps 44 px to the edges of a 1280 px output and is centred" \
+    "border on row 600 at x $(mk_px note2 span)"
 
 mk_run osd 2 on off
 [[ "$(mk_val socket)" == yes ]] && grep -qx 'pactl: set-sink-volume spk_a 50%' <<<"$MK_OUT" &&
