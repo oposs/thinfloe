@@ -16,7 +16,7 @@ the entries into this file.
 - A phone found again by FloeDrop could get "Could not send to …" although it was in range, and a phone seen over the radio and over mDNS could switch between the two at each rediscovery. Both are fixed.
 - A USB Wi-Fi stick that Owly cannot drive kept FloeDrop from using a working internal card; FloeDrop now tries the next card.
 - On a machine without a free Wi-Fi card, FloeDrop could say "owlyd cannot be reached" instead of "AirDrop needs a Wi-Fi card this machine does not use for its network.". While another program held the radio, FloeDrop changed /etc/owly/radio.toml; it now stops with "The Wi-Fi radio is in use by another program."
-- Switching FloeDrop off while it was starting could leave Bluetooth switched on.
+- Switching FloeDrop off while it was starting left Bluetooth switched on. This can still happen when Bluetooth answers slowly at that moment.
 - FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
 - A Wi-Fi card named only in the Ethernet part of a netplan file was not used by FloeDrop.
 - A time zone set as posix/… or right/… gave FloeDrop no country, so the radio stayed on the slower 2.4 GHz channel.
