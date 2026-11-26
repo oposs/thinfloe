@@ -19,7 +19,7 @@
 - The menu is the only writer of `[deskflow]`; the daemon reads only `generated/deskflow`. The state file and socket contract do not change.
 - `enabled` defaults to `true` (serde default), so existing homes keep working clients.
 - No new Cargo dependency.
-- Cargo on this host: `CARGO_BUILD_JOBS=4`, `--test-threads=4`. Host clippy: `-A clippy::chunks-exact-to-as-chunks` (pre-existing lints, container uses Rust 1.96.0).
+- Cargo on this host: `CARGO_BUILD_JOBS=4`, `--test-threads=4`. Clippy: `make test-menu` (the old `-A clippy::chunks-exact-to-as-chunks` advice broke host clippy).
 - Texts, verbatim: "Share the clipboard", "Handle Compose key on ThinFloe", "Let other computers use this keyboard and mouse (Deskflow)", "Check this fingerprint on the other computer before you trust it there.", "This edge is not free in the current arrangement.", "No monitor edge is free in the current arrangement.", "Fingerprint…", "Check and attach…", "Reject", "Attach", "Cancel", "Close", "Forget <name>", "Edge resistance", "Show the menu here", "Position", "Rotation", "Resolution", "On", "Clipboard", "Compose", column heads "Monitor", "Computer".
 
 ## Review Focus
