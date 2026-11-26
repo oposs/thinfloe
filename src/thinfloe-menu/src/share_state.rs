@@ -130,12 +130,13 @@ pub fn parse_receiving(text: &str) -> Vec<Receiving> {
 pub fn receiving_lines(r: &[Receiving]) -> Vec<(String, Tone)> {
     r.iter()
         .map(|r| {
-            let what = if r.files == 1 && !r.first.is_empty() {
-                r.first.clone()
-            } else {
-                format!("{} files", r.files)
+            let text = match r.files {
+                // Only folders: nothing to count.
+                0 => format!("Receiving from {}", r.sender),
+                1 if !r.first.is_empty() => format!("Receiving {} from {}", r.first, r.sender),
+                n => format!("Receiving {n} files from {}", r.sender),
             };
-            (format!("Receiving {what} from {}", r.sender), Tone::Plain)
+            (text, Tone::Plain)
         })
         .collect()
 }
@@ -437,6 +438,10 @@ mod tests {
         assert_eq!(
             receiving_lines(&[jane_receiving(3)]),
             [("Receiving 3 files from Jane's iPhone".to_string(), Tone::Plain)]
+        );
+        assert_eq!(
+            receiving_lines(&[jane_receiving(0)]),
+            [("Receiving from Jane's iPhone".to_string(), Tone::Plain)]
         );
         assert_eq!(receiving_lines(&[]), []);
     }
