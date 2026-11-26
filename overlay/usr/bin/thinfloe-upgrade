@@ -2543,18 +2543,19 @@ def _hold_dir_lock(folder: str, wait: Optional[float] = None) -> Optional[int]:
     wait = HOLD_LOCK_WAIT if wait is None else wait
     fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     deadline = time.monotonic() + wait
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                return None
-            time.sleep(0.05)
-        except BaseException:
-            os.close(fd)
-            raise
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return None
+                time.sleep(0.05)
+    except BaseException:
+        os.close(fd)   # also an interrupt during the sleep
+        raise
 
 
 def _hold_drive(drive: DriveInfo) -> Optional[str]:

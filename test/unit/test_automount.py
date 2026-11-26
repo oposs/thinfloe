@@ -586,6 +586,18 @@ class Add(Commands):
         self.assertEqual(self.calls("mount"), [])
         self.assertEqual(self.lines(), [])
 
+    def test_a_mount_number_that_cannot_be_stored_still_writes_the_line(self):
+        self.stick()
+        real = mod.atomic_write
+
+        def no_seq(path, text):
+            if path.endswith("mount-seq"):
+                raise OSError(28, "No space left on device")
+            return real(path, text)
+        with unittest.mock.patch.object(mod, "atomic_write", side_effect=no_seq):
+            self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([(ln.name, ln.mount) for ln in self.lines()], [("MYSTICK", 0)])
+
     def test_each_mount_gets_a_new_number(self):
         # A card swapped for one of the same name is another mount.
         self.stick("sdb", label="CARD", kind_card=True)
@@ -953,6 +965,29 @@ class FollowUps(Commands):
         self.assertEqual(hold.read_text(), fresh)
         self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"])
 
+    def test_a_stale_hold_under_a_busy_lock_does_not_stop_the_mount(self):
+        hold, d = self.stale_hold()
+        fd = os.open(hold.parent, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.addCleanup(setattr, mod, "HOLD_LOCK_WAIT", mod.HOLD_LOCK_WAIT)
+        mod.HOLD_LOCK_WAIT = 0.2
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([ln.name for ln in self.lines()], ["MYSTICK"])
+        self.assertTrue(hold.exists(), "the stale file stays until the next add")
+
+    def test_dir_lock_closes_its_fd_on_an_unexpected_error(self):
+        hold, _ = self.stale_hold()
+        before = sorted(os.listdir("/proc/self/fd"))
+
+        def broken(fd, op):
+            raise OSError(5, "I/O error")
+        with unittest.mock.patch.object(mod.fcntl, "flock", side_effect=broken):
+            with self.assertRaises(OSError):
+                with mod.DirLock(str(hold.parent), 1.0):
+                    pass
+        self.assertEqual(sorted(os.listdir("/proc/self/fd")), before)
+
     def test_a_hold_lock_left_by_a_dead_writer_is_free(self):
         hold, d = self.stale_hold()
         code = ("import fcntl, os, sys, time\n"
@@ -1135,6 +1170,20 @@ class Eject(Commands):
         self.assertEqual(self.cmd("eject", "all"), 3)
         self.assertEqual([ln.name for ln in self.lines()], ["A"])
         self.assertEqual(self.event(), ["1", "B", "clean"])
+
+    def test_eject_all_keeps_the_note_when_a_later_disk_fails(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.added("sdc", usb="1-2", label="B")
+        real = mod.unmount_disk
+
+        def second_fails(disk, p, event, batch=None):
+            if disk == "sdc":
+                raise OSError(28, "No space left on device")
+            return real(disk, p, event, batch)
+        with unittest.mock.patch.object(mod, "unmount_disk", side_effect=second_fails):
+            self.assertEqual(self.cmd("eject", "all"), 1)
+        self.assertEqual(self.event(), ["1", "A", "clean"])
+        self.assertEqual([ln.name for ln in self.lines()], ["B"])
 
     def two_partitions(self):
         self.added()

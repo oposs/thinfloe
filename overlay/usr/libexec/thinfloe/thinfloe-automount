@@ -544,15 +544,18 @@ class DirLock:
     def __enter__(self):
         self.fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         deadline = time.monotonic() + self.timeout
-        while True:
-            try:
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    os.close(self.fd)
-                    raise Busy(self.path)
-                time.sleep(0.05)
+        try:
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise Busy(self.path)
+                    time.sleep(0.05)
+        except BaseException:
+            os.close(self.fd)   # __exit__ does not run when __enter__ raises
+            raise
 
     def __exit__(self, *exc):
         os.close(self.fd)   # closing drops the flock
@@ -596,7 +599,13 @@ def next_mount(p: Paths) -> int:
     path = os.path.join(state_dir(p), "mount-seq")
     last = read_text(path)
     n = (int(last) if last.isascii() and last.isdigit() else 0) + 1
-    atomic_write(path, f"{n}\n")
+    try:
+        atomic_write(path, f"{n}\n")
+    except OSError as e:
+        # The line matters more than the number: a mount without its line
+        # would be missing from the Eject tile. 0 reads as "no number".
+        log(f"mount number not stored ({e}): line written with 0")
+        return 0
     return n
 
 
@@ -675,7 +684,8 @@ def drop_stale_hold(path: str, ino: int) -> None:
     directory, and the inode is compared and the file unlinked under the
     same lock, so the file removed is the one compared. Nothing is renamed
     aside: a fresh hold is never missing. When the lock stays taken, the
-    stale hold is kept (the stick stays unmounted until the next add).
+    stale file stays until the next add deletes it; it does not stop this
+    mount (live_hold answers False for it all the same).
     """
     try:
         with DirLock(os.path.dirname(path), HOLD_LOCK_WAIT):
@@ -685,7 +695,7 @@ def drop_stale_hold(path: str, ino: int) -> None:
             except FileNotFoundError:
                 pass   # gone already
     except Busy:
-        log(f"stale hold {path} kept: its directory is locked")
+        log(f"stale hold {path} not deleted yet: its directory is locked")
     except OSError:
         pass   # no hold directory any more
 
@@ -1076,10 +1086,10 @@ def unmount_disk(disk: str, p: Paths, event: bool,
         journal(f"released {disk}: {', '.join(ln.name for ln in done)}")
     ejected = event and status == EXIT_OK
     name = ", ".join(ln.name for ln in lines)
-    if ejected and batch is not None:
-        batch.append(name)
     commit(p, drop={ln.device for ln in done},
            event=(name, "clean") if ejected and batch is None else None)
+    if ejected and batch is not None:
+        batch.append(name)
     if ejected and any(ln.kind == "stick" for ln in lines):
         power_off(disk, p)
     return status
@@ -1093,17 +1103,24 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
         disks = [arg]
     results = []
     batch: Optional[List[str]] = [] if arg == "all" and event else None
-    for disk in disks:
-        try:
-            with disk_lock(p, disk):
-                results.append(unmount_disk(disk, p, event, batch))
-        except Busy:
-            log(f"{disk} is busy")
-            results.append(EXIT_BUSY)
-    if batch:
+    try:
+        for disk in disks:
+            try:
+                with disk_lock(p, disk):
+                    results.append(unmount_disk(disk, p, event, batch))
+            except Busy:
+                log(f"{disk} is busy")
+                results.append(EXIT_BUSY)
+    finally:
         # One event for the batch: the OSD shows one note, with the count.
-        commit(p, event=(batch[0], "clean") if len(batch) == 1
-               else (", ".join(batch), "clean", len(batch)))
+        # Also when a later disk raised: the sticks ejected before it get
+        # their note.
+        if batch:
+            try:
+                commit(p, event=(batch[0], "clean") if len(batch) == 1
+                       else (", ".join(batch), "clean", len(batch)))
+            except OSError as e:
+                log(f"no event for {', '.join(batch)}: {e}")
     if event and all(r is None for r in results):
         print("nothing to eject")
     codes = [r for r in results if r is not None]
