@@ -586,7 +586,11 @@ def read_lines(p: Paths) -> List[Line]:
 
 def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
            event: Optional[tuple] = None) -> None:
-    """One locked update of the contract file and, when given, the event file."""
+    """One locked update of the contract file and, when given, the event file.
+
+    event is (name, state) or (name, state, count); the count is written as
+    a fourth field only when it is 2 or more (an "eject all" batch).
+    """
     with files_lock(p):
         lines = [ln for ln in read_lines(p) if ln.device not in drop]
         if add is not None:
@@ -595,7 +599,9 @@ def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
         if event is not None:
             first = read_text(event_path(p)).split("\t", 1)[0]
             seq = (int(first) if first.isdigit() else 0) + 1
-            atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}\n")
+            count = event[2] if len(event) > 2 else 1
+            extra = f"\t{count}" if count >= 2 else ""
+            atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}{extra}\n")
 
 
 def read_holds(p: Paths) -> Dict[str, Hold]:
@@ -995,7 +1001,8 @@ def released_path(p: Paths, disk: str) -> str:
     return os.path.join(state_dir(p), "released", disk)
 
 
-def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
+def unmount_disk(disk: str, p: Paths, event: bool,
+                 batch: Optional[List[str]] = None) -> Optional[int]:
     """Unmount every partition of a disk; None when none was mounted.
 
     Runs under the disk's lock. A busy first mount leaves every line and
@@ -1005,6 +1012,9 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     event: this is an eject (clean event, power off a stick). Without it
     (release), the partitions are recorded first, so remount mounts exactly
     these again, even when the release is killed half-way.
+    batch: a list when this is one disk of "eject all"; a clean eject then
+    appends its event name to it and writes no event (the caller writes
+    one for the whole batch).
     """
     prune(p)
     lines = [ln for ln in read_lines(p) if ln.disk == disk]
@@ -1048,8 +1058,11 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     if not event and done:
         journal(f"released {disk}: {', '.join(ln.name for ln in done)}")
     ejected = event and status == EXIT_OK
+    name = ", ".join(ln.name for ln in lines)
+    if ejected and batch is not None:
+        batch.append(name)
     commit(p, drop={ln.device for ln in done},
-           event=(", ".join(ln.name for ln in lines), "clean") if ejected else None)
+           event=(name, "clean") if ejected and batch is None else None)
     if ejected and any(ln.kind == "stick" for ln in lines):
         power_off(disk, p)
     return status
@@ -1062,13 +1075,18 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
     else:
         disks = [arg]
     results = []
+    batch: Optional[List[str]] = [] if arg == "all" and event else None
     for disk in disks:
         try:
             with disk_lock(p, disk):
-                results.append(unmount_disk(disk, p, event))
+                results.append(unmount_disk(disk, p, event, batch))
         except Busy:
             log(f"{disk} is busy")
             results.append(EXIT_BUSY)
+    if batch:
+        # One event for the batch: the OSD shows one note, with the count.
+        commit(p, event=(batch[0], "clean") if len(batch) == 1
+               else (", ".join(batch), "clean", len(batch)))
     if event and all(r is None for r in results):
         print("nothing to eject")
     codes = [r for r in results if r is not None]

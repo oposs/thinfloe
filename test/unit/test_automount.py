@@ -1098,8 +1098,20 @@ class Eject(Commands):
         self.added("sdc", usb="1-2", label="B")
         self.assertEqual(self.cmd("eject", "all"), 0)
         self.assertEqual(self.lines(), [])
-        self.assertEqual(self.event()[0], "2")
-        self.assertEqual(self.event()[2], "clean")
+        self.assertEqual(self.event(), ["1", "A, B", "clean", "2"])
+
+    def test_eject_all_of_one_stick_is_a_single_note(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertEqual(self.event(), ["1", "A", "clean"])
+
+    def test_eject_all_with_one_busy_stick_is_a_single_note(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.added("sdc", usb="1-2", label="B")
+        os.environ["FAKE_UMOUNT_BUSY"] = "media/A"   # only A's mount point
+        self.assertEqual(self.cmd("eject", "all"), 3)
+        self.assertEqual([ln.name for ln in self.lines()], ["A"])
+        self.assertEqual(self.event(), ["1", "B", "clean"])
 
     def two_partitions(self):
         self.added()

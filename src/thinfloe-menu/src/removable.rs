@@ -9,7 +9,8 @@
 use std::path::Path;
 
 pub const FILE: &str = "/run/thinfloe/removable";
-/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean`.
+/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`,
+/// the count (2 or more) only for an "eject all" batch.
 pub const EVENT_FILE: &str = "/run/thinfloe/removable.event";
 pub const MAX_BYTES: u64 = 64 * 1024;
 pub const MAX_LINES: usize = 256;
@@ -123,12 +124,15 @@ pub fn read(path: &Path) -> Vec<Stick> {
     }
 }
 
-/// What the helper last told: `seq<TAB>name<TAB>clean|unclean`.
+/// What the helper last told: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub seq: u64,
     pub name: String,
     pub clean: bool,
+    /// How many sticks the event is about: 1 unless the line carries a
+    /// count of 2 or more (an "eject all" batch, `name` then joins their names).
+    pub count: u32,
 }
 
 pub fn parse_event(text: &str) -> Option<Event> {
@@ -143,10 +147,17 @@ pub fn parse_event(text: &str) -> Option<Event> {
         "unclean" => false,
         _ => return None,
     };
+    let count = f
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
     Some(Event {
         seq: seq.parse().ok()?,
         name: crate::battery::sanitise(name),
         clean,
+        count,
     })
 }
 
@@ -245,12 +256,29 @@ mod tests {
             Some(Event {
                 seq: 7,
                 name: "MYSTICK".into(),
-                clean: true
+                clean: true,
+                count: 1
             })
         );
         assert_eq!(parse_event("8\tX\tunclean").map(|e| e.clean), Some(false));
         for bad in ["", "x\tA\tclean", "1\tA", "1\tA\tmaybe", "\tA\tclean"] {
             assert_eq!(parse_event(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn event_count_is_optional_and_bounded() {
+        let c = |t: &str| parse_event(t).map(|e| e.count);
+        assert_eq!(c("7\tA, B\tclean\t2\n"), Some(2));
+        assert_eq!(c("7\tA\tclean\n"), Some(1));
+        for one in [
+            "7\tA\tclean\t",
+            "7\tA\tclean\t0",
+            "7\tA\tclean\tx",
+            "7\tA\tclean\t99999999999",
+        ] {
+            assert_eq!(c(one), Some(1), "{one:?}");
+        }
+        assert_eq!(c("7\tA\tclean\t3\tmore"), Some(3), "trailing fields ignored");
     }
 }

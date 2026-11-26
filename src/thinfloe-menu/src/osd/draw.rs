@@ -383,6 +383,7 @@ mod tests {
         for n in [
             Note::Connected(name.clone()),
             Note::Removable(name.clone()),
+            Note::SticksRemovable(16),
             Note::Unclean(name),
         ] {
             let (t, _) = text(&n);
