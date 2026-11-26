@@ -720,6 +720,29 @@ fn ignore_hangup() {
 }
 
 /// `thinfloe-share --radio`; the exit code.
+/// The card check, then `connect` (owlyd): no free card is said before owlyd is asked,
+/// whose error would hide it. `None` after the error line.
+async fn check_then_connect<O, F>(
+    card: &CardInputs,
+    connect: impl FnOnce() -> F,
+    out: &mut impl Write,
+) -> Option<O>
+where
+    F: Future<Output = Result<O, String>>,
+{
+    if let Err(e) = candidates(card) {
+        say(out, &Err(e.to_string()));
+        return None;
+    }
+    match connect().await {
+        Ok(o) => Some(o),
+        Err(e) => {
+            say(out, &Err(e));
+            None
+        }
+    }
+}
+
 pub fn main() -> i32 {
     ignore_hangup();
     // SAFETY: geteuid has no preconditions.
@@ -750,17 +773,8 @@ pub fn main() -> i32 {
             }
         };
         let (card, country) = gather();
-        // No free card is said before owlyd is asked, whose error would hide it.
-        if let Err(e) = candidates(&card) {
-            say(&mut out, &Err(e.to_string()));
+        let Some(owlyd) = check_then_connect(&card, Owlyd::connect, &mut out).await else {
             return 1;
-        }
-        let owlyd = match Owlyd::connect().await {
-            Ok(o) => o,
-            Err(e) => {
-                say(&mut out, &Err(e));
-                return 1;
-            }
         };
         let mut reg = None;
         let code = hold(
@@ -1037,12 +1051,35 @@ mod tests {
 
     #[test]
     fn no_free_card_is_said_before_owlyd() {
-        // main() calls candidates() before Owlyd::connect(); the function is pure.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let asked = std::cell::Cell::new(0);
+        let connect = || async {
+            asked.set(asked.get() + 1);
+            Err::<(), _>("owlyd cannot be reached".to_string())
+        };
         let mut card = free_card();
         card.wifi_ifaces = vec!["wlp2s0".into()];
+        let mut out = Vec::new();
+        assert!(
+            rt.block_on(check_then_connect(&card, connect, &mut out))
+                .is_none()
+        );
+        assert_eq!(asked.get(), 0, "owlyd is not asked without a free card");
         assert_eq!(
-            candidates(&card).map_err(|e| e.to_string()),
-            Err(NO_CARD.to_string())
+            String::from_utf8(out).unwrap(),
+            format!("error\t{NO_CARD}\n")
+        );
+        let mut out = Vec::new();
+        assert!(
+            rt.block_on(check_then_connect(&free_card(), connect, &mut out))
+                .is_none()
+        );
+        assert_eq!(asked.get(), 1);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "error\towlyd cannot be reached\n"
         );
     }
 
