@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use owly_airdrop::driver::mdns::Mdns;
+use owly_airdrop::driver::mdns::{Browse, Mdns};
 use owly_airdrop::driver::receiver::{Options, Receiver, ReceiverEvent};
 use owly_airdrop::driver::sender::{Payload, Sender};
 use owly_airdrop::driver::tls::Identity;
-use owly_airdrop::proto::mdns::{RECEIVER_FLAGS, Service};
+use owly_airdrop::proto::mdns::{BrowseEvent, RECEIVER_FLAGS, Service};
 use owly_airdrop::proto::receiver::Config;
 use owly_airdrop::proto::sender::{Config as SenderConfig, Outcome};
 
@@ -107,9 +107,14 @@ impl Env {
 
     /// The fake helper: the radio is up on owb with these flags until stdin closes.
     fn spawn(&self, flags: &str) -> Child {
+        self.spawn_with(flags, "cat >/dev/null")
+    }
+
+    /// The fake helper with `tail` after its up line (`cat >/dev/null` waits for EOF).
+    fn spawn_with(&self, flags: &str, tail: &str) -> Child {
         let p = self.dir.join("helper.sh");
         let script = format!(
-            "#!/bin/sh\nprintf 'up\\towb\\texclusive\\t6\\t{flags}\\twlx1\\trtw88_8822bu\\n'\ncat >/dev/null\n"
+            "#!/bin/sh\nprintf 'up\\towb\\texclusive\\t6\\t{flags}\\twlx1\\trtw88_8822bu\\n'\n{tail}\n"
         );
         std::fs::write(&p, script).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -225,6 +230,75 @@ fn receive_from_owly_sender() {
         }
         stop(child);
         assert!(env.state().starts_with("error\t"));
+    });
+}
+
+/// The next `Found` of a receiver within `limit`; its instance.
+async fn next_found(browse: &mut Browse, limit: Duration) -> String {
+    let end = tokio::time::Instant::now() + limit;
+    loop {
+        match tokio::time::timeout_at(end, browse.events.recv()).await {
+            Ok(Some(BrowseEvent::Found(f))) => return f.instance,
+            Ok(Some(BrowseEvent::Lost(_))) => {}
+            Ok(None) => panic!("the browse ended"),
+            Err(_) => panic!("no receiver found within {limit:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_service_is_withdrawn_before_the_radio_goes() {
+    let Some((a, _b)) = enter("the_service_is_withdrawn_before_the_radio_goes") else {
+        return;
+    };
+    runtime().block_on(async {
+        let env = Env::new("goodbye");
+        // The radio goes away as soon as the helper's stdin closes.
+        let child = env.spawn_with("no-ble", "cat >/dev/null; ip link set owb down");
+        let mut browse = Mdns::new(a.index).browse().await.unwrap();
+        let instance = next_found(&mut browse, Duration::from_secs(10)).await;
+        // SAFETY: kill with a valid pid and signal number.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let end = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(end, browse.events.recv()).await {
+                Ok(Some(BrowseEvent::Lost(i))) if i == instance => break,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the browse ended"),
+                Err(_) => panic!("no goodbye for {instance} within 5 s"),
+            }
+        }
+        let mut child = child;
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+    });
+}
+
+#[test]
+fn a_restart_keeps_the_service_name() {
+    let Some((a, _b)) = enter("a_restart_keeps_the_service_name") else {
+        return;
+    };
+    runtime().block_on(async {
+        let env = Env::new("restart");
+        let mut browse = Mdns::new(a.index).browse().await.unwrap();
+        let child = env.spawn("no-ble");
+        let first = next_found(&mut browse, Duration::from_secs(10)).await;
+        stop(child);
+        // The goodbye takes a second to count (RFC 6762 10.1); a new announcement within it
+        // would only refresh the record, with no new Found.
+        let end = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(end, browse.events.recv()).await {
+                Ok(Some(BrowseEvent::Lost(i))) if i == first => break,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the browse ended"),
+                Err(_) => panic!("no goodbye for {first} within 5 s"),
+            }
+        }
+        let child = env.spawn("no-ble");
+        let second = next_found(&mut browse, Duration::from_secs(10)).await;
+        stop(child);
+        assert_eq!(second, first);
     });
 }
 

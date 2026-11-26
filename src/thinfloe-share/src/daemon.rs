@@ -56,6 +56,8 @@ const DISCOVER_WAIT: Duration = Duration::from_secs(3);
 const OWLYD_WAIT: Duration = Duration::from_secs(5);
 /// The outbox thread looks at its folders at least this often.
 const OUTBOX_MAX_SLEEP: Duration = Duration::from_secs(5);
+/// How long the mDNS goodbye gets to go out before the radio is given back.
+const GOODBYE_WAIT: Duration = Duration::from_millis(200);
 /// State text when the helper ends without saying why.
 const HELPER_GONE: &str = "The radio helper stopped without a reason.";
 /// State text after SIGTERM: the menu stopped FloeDrop.
@@ -569,11 +571,13 @@ async fn run(
     st.devices.clear();
     st.incoming.clear();
     st.write();
-    // EOF on its stdin: the helper releases the lease and exits.
-    drop(stdin.take());
+    // The goodbye first, while the link is still up: sent after the radio went, it never
+    // reaches the phones, which then list the next run's receiver beside the old one.
     if let Some(a) = airdrop.take() {
         a.shutdown().await;
     }
+    // EOF on its stdin: the helper releases the lease and exits.
+    drop(stdin.take());
     match tokio::time::timeout(HELPER_GRACE, child.wait()).await {
         Ok(_) => {}
         Err(_) => {
@@ -932,7 +936,7 @@ impl Airdrop {
         let identity = Identity::load_or_generate(&paths.identity).map_err(|e| e.to_string())?;
         let (events_tx, events) = mpsc::channel(64);
         let receiver = bind(iface, &identity, name, paths, 0, events_tx.clone()).await?;
-        let service_id = mdns::service_id(random_bytes());
+        let service_id = service_id_at(&paths.identity.join("service-id"));
         let service = Service {
             instance: service_id.clone(),
             host: format!("floedrop-{service_id}"),
@@ -1208,8 +1212,42 @@ impl Airdrop {
         }
         // The mDNS goodbye goes out when the registration drops.
         drop(self._mdns);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(GOODBYE_WAIT).await;
     }
+}
+
+/// The mDNS service id of this session: the 12 lower-case hex digits in `path` when it holds
+/// exactly that, else a new one, written there (mode 0600, atomically). The same id after
+/// FloeDrop off and on lets phones that missed the goodbye see the same receiver again, not
+/// a second one. `path` is in `$XDG_RUNTIME_DIR`, gone at logout.
+fn service_id_at(path: &Path) -> String {
+    if let Ok(t) = std::fs::read_to_string(path) {
+        let id = t.strip_suffix('\n').unwrap_or(&t);
+        if id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return id.to_string();
+        }
+    }
+    let id = mdns::service_id(random_bytes());
+    let write = || -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(format!("{id}\n").as_bytes())?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(e) = write() {
+        log(format!("{}: {e}", path.display()));
+    }
+    id
 }
 
 /// Removes one leftover staged entry without following a symlink.
@@ -1312,6 +1350,34 @@ mod tests {
             ready_text("awdl0", "wlx1", "rtw88_8822bu", "exclusive", 0),
             "ready on wlx1 (rtw88_8822bu, exclusive)"
         );
+    }
+
+    #[test]
+    fn the_service_id_is_kept_in_the_runtime_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+            .join(format!("service-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("service-id");
+        let hex12 = |s: &str| {
+            s.len() == 12
+                && s.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        };
+        let first = service_id_at(&p);
+        assert!(hex12(&first), "{first}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{first}\n"));
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(service_id_at(&p), first);
+        std::fs::write(&p, "nonsense").unwrap();
+        let new = service_id_at(&p);
+        assert!(hex12(&new), "{new}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{new}\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
