@@ -8,8 +8,9 @@
 # the value cut and printable, and changes nothing.
 #
 # Runs without root: both directories come from environment variables and
-# timedatectl is a stub on PATH that records its arguments (and sleeps for
-# STUB_SLEEP seconds). The --watch cases need inotifywait on the host.
+# timedatectl is a stub on PATH that records its arguments (then waits for
+# the file STUB_GATE, when set, and sleeps for STUB_SLEEP seconds). The
+# --watch cases need inotifywait on the host.
 #
 # Usage: test/integration/test-dhcp-timezone.sh
 
@@ -42,6 +43,14 @@ ln -s ../../outside "$WORK/zi/Europe/Outside"
 cat >"$WORK/bin/timedatectl" <<STUB
 #!/bin/bash
 printf '%s\n' "\$*" >>"$WORK/calls"
+# STUB_GATE: block after recording the call until the file exists (at most
+# 10 s), so a test knows the watcher is inside a scan.
+if [[ -n "\${STUB_GATE:-}" ]]; then
+    for ((i = 0; i < 200; i++)); do
+        [[ -e "\$STUB_GATE" ]] && break
+        sleep 0.05
+    done
+fi
 sleep "\${STUB_SLEEP:-0}"
 STUB
 chmod +x "$WORK/bin/timedatectl"
@@ -227,6 +236,17 @@ wait_for() {
     return 1
 }
 
+# wait_inotify_on DIR: poll every 0.1 s, at most 10 s, for an inotifywait
+# whose last argument is DIR (the watcher runs inotifywait ... -- DIR).
+wait_inotify_on() {
+    local i
+    for ((i = 0; i < 100; i++)); do
+        pgrep -f -- "-- $1\$" >/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 # watch_start LEASE_DIR: start the watcher on LEASE_DIR, output in watch.log.
 watch_start() {
     rm -f "$WORK/calls" "$WORK/watch.log"
@@ -260,14 +280,20 @@ watch_start "$WORK/w1"
 wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: lease present at start not applied"
 watch_stop
 
-# A lease written while a scan runs: timedatectl takes 1 s, the second lease
-# comes in during it and must still be applied.
+# A lease written while a scan runs: timedatectl blocks on the gate, so the
+# second lease comes in while the watcher is inside the scan, by construction,
+# and must still be applied.
+# A lease with an NTP server only is there at the start: its log line says
+# the first scan is over, so the next lease is read by a scan of the loop.
 mkdir -p "$WORK/w2"
-STUB_SLEEP=1 watch_start "$WORK/w2"
-sleep 0.5
+rm -f "$WORK/gate"
+printf 'ADDRESS=10.0.0.4\nNTP=10.0.0.7\n' >"$WORK/w2/1"
+STUB_GATE="$WORK/gate" watch_start "$WORK/w2"
+wait_for "$WORK/watch.log" "NTP servers 10.0.0.7 from DHCP" || fail "watch: first scan did not run"
 lease "$WORK/w2/2" Europe/Zurich
 wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: first lease not applied"
 lease "$WORK/w2/.tmp" Europe/Inside && mv "$WORK/w2/.tmp" "$WORK/w2/2"
+: >"$WORK/gate"
 for ((i = 0; i < 100; i++)); do
     [[ "$(tail -n 1 "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] && break
     sleep 0.1
@@ -275,6 +301,8 @@ done
 [[ "$(tail -n 1 "$WORK/calls" 2>/dev/null)" == "set-timezone -- Europe/Inside" ]] \
     || fail "watch: lease written during a scan lost: $(cat "$WORK/calls" 2>/dev/null)"
 watch_stop
+# The NTP server of this case is not left for the next ones.
+rm -rf "$WORK/chrony-dhcp"
 
 # The lease directory does not exist yet when the watcher starts.
 mkdir -p "$WORK/late"
@@ -286,10 +314,11 @@ wait_for "$WORK/calls" "set-timezone -- Europe/Zurich" || fail "watch: lease in 
 [[ -d "$WORK/late/leases" ]] || fail "watch: lease directory gone"
 watch_stop
 
-# The watcher never creates the lease directory itself.
+# The watcher never creates the lease directory itself: once it waits in the
+# parent, the directory must still be missing.
 mkdir -p "$WORK/nocreate"
 watch_start "$WORK/nocreate/leases"
-sleep 1
+wait_inotify_on "$WORK/nocreate" || fail "watch: no watch on the parent of a missing lease directory"
 [[ ! -e "$WORK/nocreate/leases" ]] || fail "watch: the watcher created the lease directory"
 watch_stop
 
@@ -309,13 +338,25 @@ done
 [[ $(grep -c 'time zone Europe/Zurich from DHCP' "$WORK/watch.log") -eq 1 ]] \
     || fail "watch: same zone logged more than once: $(cat "$WORK/watch.log")"
 
-# A removed lease (link down): nothing set, nothing logged.
+# A removed lease (link down): no zone set, no zone logged. The lease first
+# gets an NTP server, so the scan after the removal logs exactly one line
+# (the NTP servers are gone) and the test knows that scan has run.
+before_calls=$(lines "$WORK/calls")
+printf 'ADDRESS=10.0.0.5\nTIMEZONE=Europe/Zurich\nNTP=10.0.0.9\n' >"$WORK/w3/.tmp" \
+    && mv "$WORK/w3/.tmp" "$WORK/w3/2"
+wait_for "$WORK/watch.log" "NTP servers 10.0.0.9 from DHCP" || fail "watch: lease with an NTP server not read"
+for ((i = 0; i < 100; i++)); do
+    [[ $(lines "$WORK/calls") -gt $before_calls ]] && break
+    sleep 0.1
+done
 before_calls=$(lines "$WORK/calls")
 before_log=$(lines "$WORK/watch.log")
 rm -f "$WORK/w3/2"
-sleep 1.5
-[[ $(lines "$WORK/calls") -eq $before_calls ]] || fail "watch: removed lease called timedatectl"
-[[ $(lines "$WORK/watch.log") -eq $before_log ]] || fail "watch: removed lease logged: $(cat "$WORK/watch.log")"
+wait_for "$WORK/watch.log" "no NTP servers from DHCP" || fail "watch: removed lease not scanned"
+[[ $(lines "$WORK/calls") -eq $before_calls ]] || fail "watch: removed lease called timedatectl: $(cat "$WORK/calls")"
+[[ $(lines "$WORK/watch.log") -eq $((before_log + 1)) ]] || fail "watch: removed lease logged: $(cat "$WORK/watch.log")"
+[[ "$(tail -n 1 "$WORK/watch.log")" == "thinfloe: no NTP servers from DHCP" ]] \
+    || fail "watch: removed lease, last log line: $(tail -n 1 "$WORK/watch.log")"
 
 # inotifywait ends: the watcher fails, so systemd restarts it.
 pkill -P "$WATCHER" inotifywait || fail "watch: no inotifywait child"
@@ -409,11 +450,15 @@ lease "$WORK/w5/2" Europe/Zurich
 watch_start "$WORK/w5"
 wait_for "$WORK/watch.log" "not used" || fail "menu_zone_wins_over_a_renewal: no 'not used' line"
 lease "$WORK/w5/.tmp" Europe/Zurich && mv "$WORK/w5/.tmp" "$WORK/w5/2"
-sleep 1.5
+# Sentinel: a lease with an NTP server and no zone. The scan that logs it has
+# read the renewal too (events come in order) and still sees Europe/Zurich.
+printf 'ADDRESS=10.0.0.6\nNTP=10.0.0.8\n' >"$WORK/w5/.tmp" && mv "$WORK/w5/.tmp" "$WORK/w5/3"
+wait_for "$WORK/watch.log" "NTP servers 10.0.0.8 from DHCP" || fail "menu_zone_wins_over_a_renewal: sentinel lease not read"
 watch_stop
 [[ ! -e "$WORK/calls" ]] || fail "menu_zone_wins_over_a_renewal: zone set: $(cat "$WORK/calls")"
-[[ $(grep -c "not used" "$WORK/watch.log") -eq 1 ]] || fail "menu_zone_wins_over_a_renewal: logged $(grep -c "not used" "$WORK/watch.log") times"
-rm -f "$WORK/time"
+zurich='DHCP time zone Europe/Zurich not used'
+[[ $(grep -cF "$zurich" "$WORK/watch.log") -eq 1 ]] || fail "menu_zone_wins_over_a_renewal: logged $(grep -cF "$zurich" "$WORK/watch.log") times"
+rm -f "$WORK/time" "$WORK/w5/3"
 
 # Stopping the watcher leaves no inotifywait behind.
 mkdir -p "$WORK/w4"
