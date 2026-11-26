@@ -218,7 +218,8 @@ stop() { kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null; hpid=; }
 setup; echo 2 >"$WORK/scale"
 follow STUB_FAIL_FIRST=2
 waitfor "retry: the scale is applied after a failed first attempt" fonts_are 20
-calls_are 3 && ok "retry: three labwc calls in all" || bad "retry: calls $(calls)"
+# rc.xml (fonts_are) is written before the stub logs its third call: wait.
+waitfor "retry: three labwc calls in all" calls_are 3
 sleep 0.8
 calls_are 3 && ok "retry: no more attempts once it worked" || bad "retry: calls $(calls) after success"
 [[ $(grep -c 'title bar scale not applied' "$WORK/err") -eq 1 ]] \
