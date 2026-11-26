@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use thinfloe_menu::icons::{self, ICON_DEADLINE, ICON_MEMORY, ICONS_BUDGET, IconJob, MAX_SVG_ELEMENTS};
+use thinfloe_menu::icons::{self, ICON_MEMORY, IconJob, MAX_SVG_ELEMENTS};
 
 const RENDERER: &str = env!("CARGO_BIN_EXE_thinfloe-menu");
 
@@ -42,9 +42,17 @@ fn job(path: PathBuf) -> IconJob {
     }
 }
 
+// These tests are about stack, memory, the filter guard and PDEATHSIG, not
+// the wall clock: under make test-unit a debug renderer starved of CPU took
+// longer than the menu's 2 s ICON_DEADLINE for the longest allowed chain.
+// icons.rs's own unit tests cover the deadline. A passing run never
+// reaches these bounds; they only end a render that hangs.
+const TEST_DEADLINE: Duration = Duration::from_secs(30);
+const TEST_BUDGET: Duration = Duration::from_secs(120);
+
 fn render(paths: Vec<PathBuf>) -> Vec<Result<egui::ColorImage, String>> {
     let jobs: Vec<IconJob> = paths.into_iter().map(job).collect();
-    icons::render_all(Path::new(RENDERER), &jobs, ICON_DEADLINE, ICONS_BUDGET)
+    icons::render_all(Path::new(RENDERER), &jobs, TEST_DEADLINE, TEST_BUDGET)
 }
 
 fn svg(body: &str) -> String {
@@ -103,14 +111,13 @@ fn children_max_rss() -> u64 {
 #[test]
 fn a_pattern_bomb_draws_the_letter_and_its_memory_is_bounded() {
     let dir = Dir::new("bomb");
-    let start = Instant::now();
     let out = render(vec![
         dir.file("bomb1.svg", &pattern_bomb(1)),
         dir.file("bomb4.svg", &pattern_bomb(4)),
     ]);
-    assert!(start.elapsed() < ICON_DEADLINE, "{:?}", start.elapsed());
-    // Refused or aborted, either way quickly, with the letter drawn; how
-    // resvg allocates the bomb is its own business.
+    // Refused or aborted, either way by itself and not by the deadline,
+    // with the letter drawn; how resvg allocates the bomb is its own
+    // business. No wall-clock check: a starved test run is slow.
     for r in &out {
         let e = r.as_ref().map(|_| ()).unwrap_err();
         assert!(!e.starts_with("took longer"), "{e}");
@@ -173,18 +180,28 @@ fn a_bad_command_line_is_refused() {
     );
 }
 
-/// Pids of the live processes whose parent is `parent`.
+/// Pids of the children of `parent`, from the `children` file of each of
+/// its threads: a scan of every /proc/<pid>/status took seconds on a busy
+/// host under a CPU quota, longer than the menu's 2 s icon deadline.
 fn children_of(parent: u32) -> Vec<u32> {
-    fs::read_dir("/proc")
-        .unwrap()
+    fs::read_dir(format!("/proc/{parent}/task"))
+        .into_iter()
         .flatten()
-        .filter_map(|e| {
-            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-            let status = fs::read_to_string(e.path().join("status")).ok()?;
-            let ppid = status.lines().find_map(|l| l.strip_prefix("PPid:"))?.trim();
-            (ppid == parent.to_string()).then_some(pid)
+        .flatten()
+        .filter_map(|t| fs::read_to_string(t.path().join("children")).ok())
+        .flat_map(|s| {
+            s.split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect::<Vec<u32>>()
         })
         .collect()
+}
+
+/// Whether `pid` has exec'd the renderer: its limits are set by then.
+fn is_renderer(pid: u32) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|c| c.split(|&b| b == 0).any(|a| a == icons::RENDER_ICON_ARG.as_bytes()))
+        .unwrap_or(false)
 }
 
 /// Whether `pid` still runs: gone and zombie both count as ended.
@@ -232,10 +249,16 @@ fn a_renderer_dies_with_its_menu() {
         if let Some(&pid) = children_of(menu.id()).first() {
             break pid;
         }
-        assert!(start.elapsed() < Duration::from_secs(1), "no renderer started");
+        // 10 s, not 1 s: a starved make test-unit is slow to start it.
+        assert!(start.elapsed() < Duration::from_secs(10), "no renderer started");
         std::thread::sleep(Duration::from_millis(5));
     };
-    std::thread::sleep(Duration::from_millis(200));
+    // Wait for the exec, not a fixed time: the menu's own 2 s deadline
+    // kills the render, and a starved run reached it during a 200 ms sleep
+    // plus the search for the child.
+    while !is_renderer(renderer) && running(renderer) && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(running(renderer), "the slow render ended on its own");
     let limits = fs::read_to_string(format!("/proc/{renderer}/limits")).unwrap();
     for (name, value) in [
@@ -252,7 +275,8 @@ fn a_renderer_dies_with_its_menu() {
     menu.kill().unwrap();
     menu.wait().unwrap();
     let killed = Instant::now();
-    while running(renderer) && killed.elapsed() < Duration::from_secs(1) {
+    // A poll limit: 10 s for a starved test run, reached only on a failure.
+    while running(renderer) && killed.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(!running(renderer), "renderer {renderer} outlived its menu");
