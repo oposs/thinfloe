@@ -111,6 +111,9 @@ pub fn read(path: &Path) -> Option<(Head, SystemTime)> {
     Some((parse(&text), written))
 }
 
+/// The band's warning when the radio helper found no regulatory country (flag `no-country`).
+pub const NO_COUNTRY: &str = "No country set: set the time zone in the Time band below for faster FloeDrop.";
+
 /// The band's status lines for `head`, each with its colour.
 pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
     match head {
@@ -142,6 +145,9 @@ pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
                     "Sending needs Bluetooth; this machine has none.".to_string(),
                     Tone::Plain,
                 ));
+            }
+            if flags.iter().any(|f| f == "no-country") {
+                v.push((NO_COUNTRY.to_string(), Tone::Warn));
             }
             v
         }
@@ -321,6 +327,27 @@ mod tests {
         assert_eq!(
             status_lines(&ready_on("wlx1", "")),
             [(format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain)]
+        );
+    }
+
+    #[test]
+    fn no_country_warns_in_the_band() {
+        let phones = "Phones must be set to AirDrop 'Everyone for 10 Minutes'.";
+        let ready_line = (format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain);
+        assert_eq!(
+            status_lines(&ready(&["no-country"])),
+            [ready_line.clone(), (NO_COUNTRY.to_string(), Tone::Warn)]
+        );
+        assert_eq!(
+            status_lines(&ready(&["no-ble", "no-country"])),
+            [
+                ready_line,
+                (
+                    "Sending needs Bluetooth; this machine has none.".to_string(),
+                    Tone::Plain
+                ),
+                (NO_COUNTRY.to_string(), Tone::Warn),
+            ]
         );
     }
 

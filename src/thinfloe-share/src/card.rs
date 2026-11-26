@@ -179,6 +179,35 @@ pub fn candidates(i: &CardInputs) -> Result<Vec<String>, String> {
     })
 }
 
+/// Layouts that name no country: `us` is used the world over, `eu` is a region.
+pub const NO_COUNTRY_LAYOUTS: &[&str] = &["us", "eu"];
+
+/// The country an XKB layout list names: its first layout when that is two lower-case
+/// letters, not in [`NO_COUNTRY_LAYOUTS`] and, upper-cased, a country code of `zone1970`.
+/// `latam`, `ara` or `epo` give none.
+pub fn layout_country(layout: &str, zone1970: &str) -> Option<String> {
+    let first = layout.split(',').next()?.trim();
+    if first.len() != 2
+        || !first.bytes().all(|b| b.is_ascii_lowercase())
+        || NO_COUNTRY_LAYOUTS.contains(&first)
+    {
+        return None;
+    }
+    let code = first.to_ascii_uppercase();
+    zone1970
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split('\t').next())
+        .any(|codes| codes.split(',').any(|c| c == code))
+        .then_some(code)
+}
+
+/// The regulatory country: the time zone's, else the keyboard layout's.
+pub fn choose_country(zone: Option<&str>, layout: Option<&str>, zone1970: &str) -> Option<String> {
+    zone.and_then(|z| country(z, zone1970))
+        .or_else(|| layout.and_then(|l| layout_country(l, zone1970)))
+}
+
 /// The ISO country of `zone`: the first code of its line in `zone1970.tab`.
 pub fn country(zone: &str, zone1970: &str) -> Option<String> {
     zone1970.lines().find_map(|l| {
@@ -436,6 +465,41 @@ mod tests {
     fn country_of_europe_zurich_is_ch() {
         assert_eq!(country("Europe/Zurich", ZONES).as_deref(), Some("CH"));
         assert_eq!(country("Asia/Tokyo", ZONES).as_deref(), Some("JP"));
+    }
+
+    #[test]
+    fn a_layout_that_is_a_country_gives_it() {
+        for (layout, want) in [
+            ("ch", Some("CH")),
+            ("de", Some("DE")),
+            ("gb", Some("GB")),
+            ("us", None),
+            ("eu", None),
+            ("latam", None),
+            ("zz", None),
+            ("", None),
+        ] {
+            assert_eq!(layout_country(layout, ZONES).as_deref(), want, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_layout_of_a_list_decides() {
+        assert_eq!(layout_country("ch,de", ZONES).as_deref(), Some("CH"));
+        assert_eq!(layout_country("us,de", ZONES), None);
+    }
+
+    #[test]
+    fn the_zone_wins_over_the_layout() {
+        assert_eq!(
+            choose_country(Some("Asia/Tokyo"), Some("ch"), ZONES).as_deref(),
+            Some("JP")
+        );
+        assert_eq!(
+            choose_country(Some("UTC"), Some("ch"), ZONES).as_deref(),
+            Some("CH")
+        );
+        assert_eq!(choose_country(None, None, ZONES), None);
     }
 
     #[test]

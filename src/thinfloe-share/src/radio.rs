@@ -3,7 +3,8 @@
 //! Protocol on stdout (private to thinfloe-share), one line each:
 //! `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` once the radio is
 //! up (iface the AWDL link, flags a comma list, `no-ble` when BlueZ offers no adapter,
-//! station the Wi-Fi card under the link and driver its driver, empty when unknown), then `error<TAB>text`
+//! station the Wi-Fi card under the link and driver its driver, empty when unknown;
+//! `no-country` when neither the time zone nor the keyboard layout gave a country), then `error<TAB>text`
 //! and exit 1 when the radio is lost or cannot be had. Exit 0 after the lease
 //! is released on stdin EOF or SIGTERM.
 //!
@@ -18,7 +19,7 @@ use futures_util::StreamExt;
 use owlyd::api::{self, LinkInfo, RadioProxy, StateChangedStream};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::card::{Bus, CardInfo, CardInputs, NO_CARD, candidates, country};
+use crate::card::{Bus, CardInfo, CardInputs, NO_CARD, candidates, choose_country, country};
 
 /// The file owlyd reads each time the radio comes up (no restart needed).
 pub const RADIO_TOML: &str = "/etc/owly/radio.toml";
@@ -226,7 +227,10 @@ pub async fn hold<R: RadioApi, G>(
             return 1;
         }
     };
-    let (guard, flags) = ble.await;
+    let (guard, mut flags) = ble.await;
+    if country.is_none() {
+        flags.push("no-country".into());
+    }
     let channel = api.link_channel(&station).await.unwrap_or(0);
     let driver = card
         .cards
@@ -492,6 +496,23 @@ fn zone() -> Option<String> {
     Some(z.to_string())
 }
 
+/// The value of the last `XKB_DEFAULT_LAYOUT=` line of an environment file; None when empty.
+pub fn env_layout(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("XKB_DEFAULT_LAYOUT="))
+        .next_back()
+        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The keyboard layout the menu wrote to tfuser's generated/environment; None when the
+/// file is missing or unreadable.
+fn keyboard_layout() -> Option<String> {
+    let home = tfuser_home()?;
+    let text = std::fs::read_to_string(home.join(".config/thinfloe/generated/environment")).ok()?;
+    env_layout(&text)
+}
+
 fn gather() -> (CardInputs, Option<String>) {
     let wifi_ifaces = wifi_ifaces();
     let cards = wifi_ifaces
@@ -505,11 +526,16 @@ fn gather() -> (CardInputs, Option<String>) {
         wifi_ifaces,
         cards,
     };
-    let country = zone().and_then(|z| {
-        let tab = std::fs::read_to_string(format!("{ZONEINFO}zone1970.tab")).ok()?;
-        country(&z, &tab)
-    });
-    (card, country)
+    let tab = std::fs::read_to_string(format!("{ZONEINFO}zone1970.tab")).unwrap_or_default();
+    let zone = zone();
+    let layout = keyboard_layout();
+    let found = choose_country(zone.as_deref(), layout.as_deref(), &tab);
+    if let (Some(cc), Some(l)) = (&found, &layout)
+        && zone.as_deref().and_then(|z| country(z, &tab)).is_none()
+    {
+        eprintln!("thinfloe-share: country {cc} from the keyboard layout {l}");
+    }
+    (card, found)
 }
 
 fn random_tag() -> [u8; 3] {
@@ -1012,6 +1038,41 @@ phy#0
         let fake = Fake::default();
         let (_, out) = run(&fake, &free_card(), &tmp("chan0"), async {}).await;
         assert_eq!(out, "up\tawdl0\texclusive\t0\tno-ble\twlx00e04c123456\t\n");
+    }
+
+    #[test]
+    fn the_layout_comes_from_generated_environment() {
+        assert_eq!(
+            env_layout("# header\nXKB_DEFAULT_LAYOUT=ch\nXKB_DEFAULT_VARIANT=fr\n").as_deref(),
+            Some("ch")
+        );
+        assert_eq!(env_layout("XKB_DEFAULT_LAYOUT=\n"), None);
+        assert_eq!(env_layout("XKB_DEFAULT_VARIANT=fr\n"), None);
+    }
+
+    #[tokio::test]
+    async fn no_country_is_a_flag() {
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
+        let toml = tmp("nocountry");
+        *fake.toml.borrow_mut() = toml.clone();
+        let mut out = Vec::new();
+        hold(
+            &fake,
+            &free_card(),
+            None,
+            &toml,
+            no_ble(),
+            async {},
+            &mut out,
+        )
+        .await;
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.split('\t').nth(4), Some("no-ble,no-country"), "{out}");
+        let (_, out) = run(&fake, &free_card(), &tmp("country"), async {}).await;
+        assert_eq!(out.split('\t').nth(4), Some("no-ble"), "{out}");
     }
 
     #[test]
