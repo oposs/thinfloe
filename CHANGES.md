@@ -21,6 +21,18 @@ the entries into this file.
 - FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
 - "FloeDrop cannot start on …" now names the Wi-Fi card and driver instead of awdl0.
 - Now and then a click in the menu did nothing and had to be repeated; it happened when the page changed its layout at the same moment. Every click now counts.
+- After a damaged settings file was rebuilt, FloeDrop was switched off and its name was gone; both are now kept.
+- A phone that gave no name was called "iPhone" in the FloeDrop notes, and a note about a phone with a very long name did not appear. Such a note now appears, and a phone without a name is "an unnamed phone".
+- Received files with long names lost their extension (".HEIC"), and a second file of the same long name could get a name longer than 64 bytes. Both are fixed.
+- When some files of a delivery could not be saved, the note did not mention the ones that arrived; it now says "… of … files from … received; the others could not be saved".
+- A file FloeDrop could not remove from a phone's folder after sending it was offered to the phone again at every change. It is now sent once, and a note says "Could not remove … from the folder of …; it is not sent again".
+- A phone found again by FloeDrop could get "Could not send to …" although it was in range, and a phone seen over the radio and over mDNS could switch between the two at each rediscovery. Both are fixed.
+- FloeDrop started without /media/tfuser/FloeDrop mounted and then wrote into the machine's RAM without a limit. It now stops with "The FloeDrop folder /media/tfuser/FloeDrop is not mounted."
+- On a machine without a free Wi-Fi card, FloeDrop could say "owlyd cannot be reached" instead of "AirDrop needs a Wi-Fi card this machine does not use for its network.". While another program held the radio, FloeDrop changed /etc/owly/radio.toml; it now stops with "The Wi-Fi radio is in use by another program."
+- Switching FloeDrop off while it was starting could leave Bluetooth switched on.
+- A time zone set as posix/… or right/… gave FloeDrop no country, so the radio stayed on the slower 2.4 GHz channel.
+- A Wi-Fi card named only in the Ethernet part of a netplan file was not used by FloeDrop.
+- A FloeDrop state the menu could not read showed "Starting…" for ever; Settings → Network now shows the line it could not read.
 
 ## 4.13.0 - 2026-11-26
 

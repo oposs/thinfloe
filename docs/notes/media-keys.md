@@ -117,7 +117,8 @@ of the menu leaves the other running and the session's exit codes unchanged.
   note replaces the old one, and a key panel replaces a note (and the
   reverse). The text is cut at 200 characters, control characters show as
   spaces, format characters (bidi overrides, zero-width spaces) are dropped, an empty text or another tone drops the datagram. The OSD reads
-  datagrams of up to 1024 bytes.
+  datagrams of up to 1024 bytes. `test-labwc-runtime.sh` checks a two-row
+  note's width at scale 1 and 2 (case `note`).
 - Without an OSD process (crashed, not started), `--osd-key` does the volume
   keys itself on every device, starting from the default device's current
   value, and logs `thinfloe-menu --osd-key: no OSD running; <action> done
