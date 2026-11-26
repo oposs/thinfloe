@@ -19,7 +19,12 @@ pub const BATCH_DELAY: Duration = Duration::from_secs(3);
 /// A receiver not seen for this long is gone; its folder is removed if empty.
 pub const GONE_AFTER: Duration = Duration::from_secs(60);
 /// How soon a batch held by a file still being written is looked at again.
-const HOLD_RETRY: Duration = Duration::from_secs(1);
+const HOLD_RETRY: Duration = BATCH_DELAY;
+/// A batch held this long gets one note; it still waits for the file, without a limit.
+pub const HOLD_NOTE_AFTER: Duration = Duration::from_secs(30);
+/// The write check looks this deep below an entry, and at this many entries of a batch.
+pub const WALK_MAX_DEPTH: usize = 32;
+pub const WALK_MAX_ENTRIES: usize = 10_000;
 /// Folder name when a receiver gives no usable name.
 const DEVICE_FALLBACK: &str = "iPhone";
 
@@ -57,15 +62,29 @@ impl Probe for SystemProbe {
             return true;
         }
         let open = open_for_writing(Path::new("/proc"));
+        // /proc names the real path: an outbox reached through a symlink must match too.
         entries
             .iter()
-            .any(|e| open.iter().any(|p| p.starts_with(e)))
+            .map(|e| fs::canonicalize(e).unwrap_or_else(|_| e.clone()))
+            .any(|e| open.iter().any(|p| p.starts_with(&e)))
     }
 }
 
 /// True if `p` or anything below it (symlinks not followed) has an mtime in the last
 /// `BATCH_DELAY` before `now`. An mtime in the future does not count: it would hold forever.
+/// The walk stops at `WALK_MAX_DEPTH` levels and `WALK_MAX_ENTRIES` entries; what lies
+/// beyond counts as not modified (a file there still open for writing holds the batch
+/// through `/proc`).
 pub fn recently_modified(p: &Path, now: SystemTime) -> bool {
+    let mut budget = WALK_MAX_ENTRIES;
+    modified_below(p, now, 0, &mut budget)
+}
+
+fn modified_below(p: &Path, now: SystemTime, depth: usize, budget: &mut usize) -> bool {
+    if depth > WALK_MAX_DEPTH || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
     let Ok(md) = fs::symlink_metadata(p) else {
         return false;
     };
@@ -79,8 +98,11 @@ pub fn recently_modified(p: &Path, now: SystemTime) -> bool {
         && let Ok(rd) = fs::read_dir(p)
     {
         for e in rd.flatten() {
-            if recently_modified(&e.path(), now) {
+            if modified_below(&e.path(), now, depth + 1, budget) {
                 return true;
+            }
+            if *budget == 0 {
+                break;
             }
         }
     }
@@ -139,6 +161,11 @@ struct Dev {
     pending: Option<Instant>,
     /// Earliest next look at a held batch.
     hold_until: Option<Instant>,
+    /// When the write check first held the current batch, and whether that was noted.
+    held_since: Option<Instant>,
+    hold_noted: bool,
+    /// Offered entries that could not be deleted: never offered again while they exist.
+    stuck: HashSet<PathBuf>,
     in_flight: Option<(SendHandle, Vec<PathBuf>)>,
     state: DevState,
     since: u64,
@@ -168,8 +195,8 @@ fn is_real_dir(p: &Path) -> bool {
 }
 
 /// The entries an offer takes: top-level, not hidden, plain files and directories only
-/// (a symlink or special file is never sent). Sorted by name.
-fn offerable(dir: &Path) -> Vec<PathBuf> {
+/// (a symlink or special file is never sent), and none in `stuck`. Sorted by name.
+fn offerable(dir: &Path, stuck: &HashSet<PathBuf>) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -182,9 +209,30 @@ fn offerable(dir: &Path) -> Vec<PathBuf> {
                 .unwrap_or(false)
         })
         .map(|e| e.path())
+        .filter(|p| !stuck.contains(p))
         .collect();
     v.sort();
     v
+}
+
+/// OSD text when a batch has waited `HOLD_NOTE_AFTER` for a file still open.
+pub fn hold_note(device: &str) -> (Tone, String) {
+    (
+        Tone::Warn,
+        format!("Waiting to send to {device}: a file in its folder is still open"),
+    )
+}
+
+/// OSD text when an offered entry could not be deleted.
+pub fn stuck_note(entry: &Path, device: &str) -> (Tone, String) {
+    let name = entry
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (
+        Tone::Warn,
+        format!("Could not remove {name} from the folder of {device}; it is not sent again"),
+    )
 }
 
 /// Make the folder of a device in range again when the user deleted it; records it in
@@ -330,6 +378,9 @@ impl Outbox {
             present: true,
             pending: Some(now),
             hold_until: None,
+            held_since: None,
+            hold_noted: false,
+            stuck: HashSet::new(),
             in_flight: None,
             state: DevState::Idle,
             since: epoch(),
@@ -383,15 +434,23 @@ impl Outbox {
             }
             soon(d.last_seen + GONE_AFTER);
             ensure_folder(&root, &d.folder, &mut self.new_folders);
+            d.stuck.retain(|p| fs::symlink_metadata(p).is_ok());
             if let Some(changed) = d.pending {
                 let due = (changed + BATCH_DELAY).max(d.hold_until.unwrap_or(now));
                 if now < due {
                     soon(due);
                 } else {
-                    let entries = offerable(&root.join(&d.folder));
+                    let entries = offerable(&root.join(&d.folder), &d.stuck);
                     if entries.is_empty() {
                         d.pending = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
                     } else if self.probe.busy(&entries) {
+                        let since = *d.held_since.get_or_insert(now);
+                        if !d.hold_noted && now.duration_since(since) >= HOLD_NOTE_AFTER {
+                            d.hold_noted = true;
+                            self.notes.push(hold_note(&d.name));
+                        }
                         d.hold_until = Some(now + HOLD_RETRY);
                         soon(now + HOLD_RETRY);
                     } else {
@@ -399,6 +458,8 @@ impl Outbox {
                         d.in_flight = Some((h, entries));
                         d.pending = None;
                         d.hold_until = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
                         d.state = DevState::Sending;
                         d.since = epoch();
                     }
@@ -409,7 +470,8 @@ impl Outbox {
         wake
     }
 
-    /// A send ended: its offered entries are deleted whatever the outcome.
+    /// A send ended: its offered entries are deleted whatever the outcome; one that cannot
+    /// be deleted is noted and not offered again.
     pub fn finished(&mut self, id: SendHandle, o: Outcome, now: Instant) {
         let Some(d) = self
             .devs
@@ -419,9 +481,12 @@ impl Outbox {
             return;
         };
         let (_, offered) = d.in_flight.take().expect("matched above");
+        let mut stuck = Vec::new();
         for p in &offered {
             if let Err(e) = delete(p) {
                 eprintln!("thinfloe-share: delete {}: {e}", p.display());
+                d.stuck.insert(p.clone());
+                stuck.push(stuck_note(p, &d.name));
             }
         }
         if let Outcome::Failed(why) = &o {
@@ -438,6 +503,7 @@ impl Outbox {
             d.last_seen = d.last_seen.max(now);
         }
         self.notes.push(sent_note(&offered, &d.name, &o));
+        self.notes.extend(stuck);
     }
 
     /// Folders made since the last call (new devices and folders made again after the
@@ -724,13 +790,127 @@ mod tests {
         t.changed(JANE, 0);
         t.busy.set(true);
         let wake = t.tick(3).expect("a held batch wakes again");
-        assert!(wake > t.at(3) && wake <= t.at(4));
+        assert!(wake > t.at(3) && wake <= t.at(6));
         assert!(t.calls().is_empty());
-        t.tick(4);
+        t.tick(6);
         assert!(t.calls().is_empty());
         t.busy.set(false);
-        t.tick(5);
+        t.tick(9);
         assert_eq!(t.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_long_hold_is_noted_once() {
+        let mut t = T::new("ob-long-hold");
+        t.seen("id1", JANE, 0);
+        t.put(JANE, "a.jpg");
+        t.changed(JANE, 0);
+        t.busy.set(true);
+        for s in 3..=32 {
+            t.tick(s);
+            assert!(t.ob.take_notes().is_empty(), "no note at {s}");
+        }
+        t.tick(33);
+        assert_eq!(
+            t.ob.take_notes(),
+            vec![(
+                Tone::Warn,
+                "Waiting to send to Jane's iPhone: a file in its folder is still open".to_string()
+            )]
+        );
+        for s in 34..=63 {
+            if s % 20 == 0 {
+                t.seen("id1", JANE, s); // still in range
+            }
+            t.tick(s);
+        }
+        assert!(t.ob.take_notes().is_empty(), "noted once");
+        assert!(t.calls().is_empty());
+        t.busy.set(false);
+        t.tick(66);
+        assert_eq!(t.calls().len(), 1);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_deleted_is_not_offered_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut t = T::new("ob-stuck");
+        t.seen("id1", JANE, 0);
+        let d = t.root.join(JANE).join("d");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        t.put(JANE, "d/sub/f");
+        fs::set_permissions(d.join("sub"), fs::Permissions::from_mode(0o500)).unwrap();
+        t.changed(JANE, 0);
+        t.tick(3);
+        assert_eq!(t.calls(), vec![("id1".to_string(), vec![d.clone()])]);
+        t.finished(1, Outcome::Delivered, 4);
+        let notes = t.ob.take_notes();
+        assert!(
+            notes.contains(&(
+                Tone::Warn,
+                "Could not remove d from the folder of Jane's iPhone; it is not sent again"
+                    .to_string()
+            )),
+            "{notes:?}"
+        );
+        let b = t.put(JANE, "b.jpg");
+        t.changed(JANE, 5);
+        t.tick(8);
+        assert_eq!(t.calls().len(), 2);
+        assert_eq!(t.calls()[1].1, vec![b]);
+        fs::set_permissions(d.join("sub"), fs::Permissions::from_mode(0o755)).unwrap();
+        // Once the entry is gone, a new one of that name is offered again.
+        t.finished(2, Outcome::Delivered, 9);
+        fs::remove_dir_all(&d).unwrap();
+        t.tick(10);
+        fs::create_dir(&d).unwrap();
+        t.put(JANE, "d/g");
+        t.changed(JANE, 11);
+        t.tick(14);
+        assert_eq!(t.calls()[2].1, vec![d]);
+    }
+
+    #[test]
+    fn a_deep_tree_stops_the_walk() {
+        let dir = Dir::new("ob-deep");
+        let old = SystemTime::now() - Duration::from_secs(10);
+        let chain = |top: &Path, depth: usize| {
+            let mut p = top.to_path_buf();
+            let mut dirs = vec![p.clone()];
+            for _ in 0..depth {
+                p = p.join("d");
+                dirs.push(p.clone());
+            }
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("f"), b"x").unwrap();
+            for d in dirs {
+                fs::File::open(&d).unwrap().set_modified(old).unwrap();
+            }
+        };
+        let deep = dir.0.join("deep");
+        chain(&deep, 40);
+        assert!(!recently_modified(&deep, SystemTime::now()));
+        let shallow = dir.0.join("shallow");
+        chain(&shallow, 5);
+        assert!(recently_modified(&shallow, SystemTime::now()));
+    }
+
+    #[test]
+    fn busy_follows_a_symlinked_root() {
+        let d = Dir::new("ob-link-root");
+        let real = d.0.join("real");
+        fs::create_dir(&real).unwrap();
+        let x = real.join("x");
+        fs::write(&x, b"x").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(10);
+        fs::File::open(&x).unwrap().set_modified(old).unwrap();
+        let link = d.0.join("link");
+        symlink(&real, &link).unwrap();
+        let through = link.join("x");
+        assert!(!SystemProbe.busy(std::slice::from_ref(&through)));
+        let w = fs::OpenOptions::new().append(true).open(&x).unwrap();
+        assert!(SystemProbe.busy(std::slice::from_ref(&through)));
+        drop(w);
     }
 
     #[test]

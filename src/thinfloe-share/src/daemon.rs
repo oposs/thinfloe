@@ -710,6 +710,8 @@ fn watch_mask() -> WatchMask {
     WatchMask::CLOSE_WRITE
         | WatchMask::MOVED_TO
         | WatchMask::CREATE
+        | WatchMask::DELETE
+        | WatchMask::MOVED_FROM
         | WatchMask::ONLYDIR
         | WatchMask::DONT_FOLLOW
 }
@@ -1456,6 +1458,13 @@ mod parent_tests {
 mod tests {
     use super::*;
     use owly_airdrop::proto::messages::AskFile;
+
+    #[test]
+    fn the_outbox_wakes_on_delete() {
+        let m = watch_mask();
+        assert!(m.contains(WatchMask::DELETE));
+        assert!(m.contains(WatchMask::MOVED_FROM));
+    }
 
     #[test]
     fn dropped_service_ids_lose_their_targets() {
