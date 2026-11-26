@@ -6,6 +6,7 @@ mod config;
 mod daemon;
 mod health;
 mod inbox;
+mod incoming;
 mod names;
 mod osd;
 mod outbox;

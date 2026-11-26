@@ -201,6 +201,11 @@ fn receive_from_owly_sender() {
         })
         .await;
         assert_eq!(std::fs::read(&landed).unwrap(), b"not really a photo");
+        // The transfer ended: no receiving line is left.
+        until(Duration::from_secs(5), "no receiving line", || {
+            !env.state().contains("\treceiving\t")
+        })
+        .await;
         let staged: Vec<_> = std::fs::read_dir(env.media(".incoming")).unwrap().collect();
         assert!(staged.is_empty(), "staging is empty again");
 

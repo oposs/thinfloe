@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
+use crate::incoming::{self, Incoming, ask_total};
 use crate::outbox::{Outbox, Outcome, SendHandle, Transport};
 use crate::state::{Device, Head};
 use crate::{config, inbox, osd, state};
@@ -146,16 +147,6 @@ pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel:
         how.push_str(&format!(", channel {channel}"));
     }
     format!("ready on {card} ({how})")
-}
-
-/// Bytes an `/Ask` offers; a file without a size counts 0 (the tmpfs still caps it).
-pub fn ask_total(offer: &Offer) -> u64 {
-    match offer {
-        Offer::Files(files) => files
-            .iter()
-            .fold(0u64, |t, f| t.saturating_add(f.size.unwrap_or(0))),
-        Offer::Urls(_) => 0,
-    }
 }
 
 /// What to say to an `/Ask`.
@@ -277,6 +268,14 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
+/// Seconds since the epoch.
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The FloeDrop folder, the tmpfs.
 fn share_root() -> PathBuf {
     std::env::var_os("TF_SHARE_ROOT")
@@ -341,11 +340,12 @@ struct StateFile {
     path: PathBuf,
     head: Head,
     devices: Vec<Device>,
+    incoming: Vec<Incoming>,
 }
 
 impl StateFile {
     fn write(&self) {
-        if let Err(e) = state::write(&self.path, &self.head, &self.devices) {
+        if let Err(e) = state::write(&self.path, &self.head, &self.devices, &self.incoming) {
             log(format!("{}: {e}", self.path.display()));
         }
     }
@@ -448,6 +448,7 @@ async fn run(
         path: state_path,
         head: Head::Starting,
         devices: Vec::new(),
+        incoming: Vec::new(),
     };
     st.write();
     let paths = Paths::new(&runtime_dir);
@@ -539,12 +540,16 @@ async fn run(
                     }
                 }
             }
-            step = next_step(&mut airdrop) => {
-                if let Some(devices) = step
-                    && devices != st.devices
+            changed = next_step(&mut airdrop) => {
+                if changed
+                    && let Some(a) = &airdrop
                 {
-                    st.devices = devices;
-                    st.write();
+                    let (devices, incoming) = a.lists();
+                    if devices != st.devices || incoming != st.incoming {
+                        st.devices = devices;
+                        st.incoming = incoming;
+                        st.write();
+                    }
                 }
             }
         }
@@ -562,6 +567,7 @@ async fn run(
         Exit::Error(t) => t,
     });
     st.devices.clear();
+    st.incoming.clear();
     st.write();
     // EOF on its stdin: the helper releases the lease and exits.
     drop(stdin.take());
@@ -578,7 +584,14 @@ async fn run(
     code
 }
 
-async fn next_step(a: &mut Option<Airdrop>) -> Option<Vec<Device>> {
+/// The transfers under way, oldest first, then by sender.
+fn incoming_list(pending: &HashMap<(u64, u64), Incoming>) -> Vec<Incoming> {
+    let mut v: Vec<Incoming> = pending.values().cloned().collect();
+    v.sort_by(|a, b| (a.since, &a.sender).cmp(&(b.since, &b.sender)));
+    v
+}
+
+async fn next_step(a: &mut Option<Airdrop>) -> bool {
     match a {
         Some(a) => a.step().await,
         None => std::future::pending().await,
@@ -857,8 +870,10 @@ struct Airdrop {
     receiver: tokio::task::JoinHandle<()>,
     events_tx: mpsc::Sender<(u64, ReceiverEvent)>,
     events: mpsc::Receiver<(u64, ReceiverEvent)>,
-    /// Sender names of accepted requests, by (generation, request id).
-    pending: HashMap<(u64, u64), String>,
+    /// Accepted requests not ended yet, by (generation, request id).
+    pending: HashMap<(u64, u64), Incoming>,
+    /// The receivers in range as the outbox last listed them.
+    devices: Vec<Device>,
     _mdns: Registration,
     sending: Option<Sending>,
 }
@@ -954,6 +969,7 @@ impl Airdrop {
             events_tx,
             events,
             pending: HashMap::new(),
+            devices: Vec::new(),
             _mdns: mdns,
             sending,
         })
@@ -1030,8 +1046,13 @@ impl Airdrop {
         Ok(())
     }
 
-    /// One event; the receivers in range when they changed.
-    async fn step(&mut self) -> Option<Vec<Device>> {
+    /// The state file's lists: receivers in range and transfers under way.
+    fn lists(&self) -> (Vec<Device>, Vec<Incoming>) {
+        (self.devices.clone(), incoming_list(&self.pending))
+    }
+
+    /// One event; true when the lists may have changed.
+    async fn step(&mut self) -> bool {
         let step = match self.sending.as_mut() {
             Some(s) => tokio::select! {
                 e = self.events.recv() => Step::Receiver(e.map(Box::new)),
@@ -1043,11 +1064,14 @@ impl Airdrop {
         match step {
             Step::Receiver(Some(b)) => {
                 let (generation, ev) = *b;
-                self.on_receiver(generation, ev)
+                return self.on_receiver(generation, ev);
             }
             // The sender half of the channel is ours: it never closes.
             Step::Receiver(None) => std::future::pending().await,
-            Step::Outbox(Some(FromOutbox::Devices(d))) => return Some(d),
+            Step::Outbox(Some(FromOutbox::Devices(d))) => {
+                self.devices = d;
+                return true;
+            }
             Step::Outbox(Some(FromOutbox::Send { handle, key, paths })) => {
                 self.send(handle, key, paths)
             }
@@ -1061,7 +1085,7 @@ impl Airdrop {
             Step::Inotify(Some(Ok(ev))) => self.on_inotify(ev),
             Step::Inotify(Some(Err(e))) => log(format!("inotify: {e}")),
         }
-        None
+        false
     }
 
     fn on_inotify(&mut self, ev: inotify::Event<std::ffi::OsString>) {
@@ -1100,15 +1124,15 @@ impl Airdrop {
         });
     }
 
-    /// The sender of an accepted request, forgotten here; "iPhone" when unknown.
-    fn sender_of(&mut self, generation: u64, id: u64) -> String {
+    /// An accepted request, forgotten here; sender "iPhone" and no files when unknown.
+    fn take(&mut self, generation: u64, id: u64) -> Incoming {
         self.pending
             .remove(&(generation, id))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "iPhone".into())
+            .unwrap_or_else(Incoming::unknown)
     }
 
-    fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) {
+    /// One receiver event; true when the transfers under way may have changed.
+    fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) -> bool {
         match ev {
             ReceiverEvent::Request(r) => {
                 let sender = r.ask.sender_computer_name.clone();
@@ -1116,17 +1140,22 @@ impl Airdrop {
                     log(format!("{}: {e}", self.paths.root.display()));
                     0
                 });
+                let offer = incoming::from_offer(&sender, &r.ask.offer, epoch_now());
+                if matches!(r.ask.offer, Offer::Urls(_)) {
+                    log(incoming::links_line(&offer.sender));
+                } else {
+                    log(offer.offer_line());
+                }
                 match answer(&r.ask.offer, free, &sender) {
                     Answer::Accept => {
-                        self.pending.insert((generation, r.id), sender);
+                        log(offer.accepted_line());
+                        self.pending.insert((generation, r.id), offer);
                         r.accept();
                     }
                     Answer::Decline(note) => {
-                        log(format!(
-                            "declined an offer from {sender:?} ({} bytes, {free} free, links: {})",
-                            ask_total(&r.ask.offer),
-                            matches!(r.ask.offer, Offer::Urls(_))
-                        ));
+                        if !matches!(r.ask.offer, Offer::Urls(_)) {
+                            log(offer.declined_line(free));
+                        }
                         if let Some((tone, text)) = note {
                             osd::note(tone, &text);
                         }
@@ -1135,10 +1164,12 @@ impl Airdrop {
                 }
             }
             ReceiverEvent::Received { id, paths } => {
-                let sender = self.sender_of(generation, id);
+                let done = self.take(generation, id);
+                let sender = done.sender.clone();
                 match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
-                    Ok(placed) if placed.is_empty() => {}
+                    Ok(placed) if placed.is_empty() => log(done.received_line()),
                     Ok(placed) => {
+                        log(done.received_line());
                         osd::note(osd::Tone::Info, &inbox::received_note(&placed, &sender))
                     }
                     Err(e) => {
@@ -1152,15 +1183,18 @@ impl Airdrop {
             }
             ReceiverEvent::Failed { id, reason } => {
                 // Owly's sandbox for the upload is gone already; nothing was placed.
-                let sender = self.sender_of(generation, id);
-                log(format!("a transfer from {sender:?} failed: {reason}"));
-                osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
+                let done = self.take(generation, id);
+                log(done.failed_line(&reason));
+                osd::note(osd::Tone::Warn, &inbox::failed_note(&done.sender));
             }
             ReceiverEvent::Withdrawn { id } => {
-                self.pending.remove(&(generation, id));
+                if let Some(gone) = self.pending.remove(&(generation, id)) {
+                    log(gone.withdrawn_line());
+                }
             }
-            ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => {}
+            ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => return false,
         }
+        true
     }
 
     async fn shutdown(mut self) {
@@ -1281,6 +1315,33 @@ mod tests {
     }
 
     #[test]
+    fn two_transfers_have_two_lines() {
+        let one = |sender: &str, since| Incoming {
+            sender: sender.into(),
+            files: 1,
+            bytes: 1,
+            first: "a.jpg".into(),
+            since,
+        };
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), one("B", 5));
+        pending.insert((0, 2), one("A", 3));
+        let names = |p: &HashMap<(u64, u64), Incoming>| {
+            incoming_list(p)
+                .into_iter()
+                .map(|i| i.sender)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&pending), ["A", "B"]);
+        // The same phone twice, the same second: both stay.
+        pending.insert((0, 3), one("A", 3));
+        assert_eq!(names(&pending), ["A", "A", "B"]);
+        pending.remove(&(0, 2));
+        pending.remove(&(0, 3));
+        assert_eq!(names(&pending), ["B"]);
+    }
+
+    #[test]
     fn the_start_failure_names_the_card() {
         assert_eq!(
             start_failed_text("awdl0", "wlxc03a55f0d060", "rtw88_8822bu", "mDNS: x"),
@@ -1343,15 +1404,6 @@ mod tests {
             bom_path: "./a.jpg".into(),
             is_directory: false,
         }
-    }
-
-    #[test]
-    fn ask_total_sums_sizes() {
-        let offer = Offer::Files(vec![file(Some(10)), file(None), file(Some(5))]);
-        assert_eq!(ask_total(&offer), 15);
-        let huge = Offer::Files(vec![file(Some(u64::MAX)), file(Some(1))]);
-        assert_eq!(ask_total(&huge), u64::MAX);
-        assert_eq!(ask_total(&Offer::Urls(vec!["x".into()])), 0);
     }
 
     #[test]
