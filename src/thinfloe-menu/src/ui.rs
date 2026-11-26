@@ -1727,13 +1727,23 @@ fn marks_left(ui: &Ui, rect: Rect, update: bool, user: bool) -> Option<f32> {
     left
 }
 
+/// How strongly a tile that cannot be used is drawn.
+const UNUSABLE_FADE: f32 = 0.35;
+
+/// `c` on a tile that cannot be used: faded, unless `usable`.
+fn faded(c: Color32, usable: bool) -> Color32 {
+    if usable { c } else { c.gamma_multiply(UNUSABLE_FADE) }
+}
+
 fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Option<&str>, state: TileState) {
     let name = tile.name.as_str();
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
-    // A tile that cannot be used fades; its reason stays at full strength.
-    let fade = |c: Color32| if usable { c } else { c.gamma_multiply(0.35) };
+    // A tile that cannot be used fades, its focus ring and the update
+    // mark's highlight and ring too; its reason and the word "update" stay
+    // at full strength.
+    let fade = |c: Color32| faded(c, usable);
     let fill = if state.hovered {
         t.palette().accent
     } else if state.active {
@@ -1753,7 +1763,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
         p.rect_stroke(
             rect.expand(2.0),
             0.0,
-            Stroke::new(3.0, t.palette().ring),
+            Stroke::new(3.0, fade(t.palette().ring)),
             StrokeKind::Outside,
         );
     }
@@ -1863,10 +1873,15 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     if let Some(m) = state.update {
         let target = update_mark_target(ui, rect);
         if m.hovered {
-            p.rect_filled(target, 0.0, t.palette().accent);
+            p.rect_filled(target, 0.0, fade(t.palette().accent));
         }
         if m.focused {
-            p.rect_stroke(target, 0.0, Stroke::new(2.0, t.palette().ring), StrokeKind::Inside);
+            p.rect_stroke(
+                target,
+                0.0,
+                Stroke::new(2.0, fade(t.palette().ring)),
+                StrokeKind::Inside,
+            );
         }
         mark(UPDATE_MARK, t.palette().primary);
     }
@@ -3580,6 +3595,74 @@ mod tests {
         assert!(user.right() < update.left(), "user left of update");
         assert!(right <= user.left() - MARK_GAP + 0.5, "{right} vs {user:?}");
         assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
+    }
+
+    // A greyed tile drew the update mark's highlight and the focus rings at
+    // full strength on its faded fill (PR #62 follow-up, 2026-11-26).
+    #[test]
+    fn a_greyed_tile_fades_the_mark_highlight_and_rings() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.problem = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        assert!(!menu.tiles[0].usable());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let mark = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        // The reason line: full strength, and it ends before the mark.
+        let (_, why) = text_shape(&shapes, &"W".repeat(80)).expect("the reason");
+        let warn = Theme::current(&ctx).role(role::WARN);
+        assert_eq!(why.galley.job.sections[0].format.color, warn);
+        let right = why.pos.x + why.galley.size().x;
+        assert!(
+            right <= mark.left() - MARK_HIT_PAD - MARK_GAP + 0.5,
+            "{right} vs {mark:?}"
+        );
+        // The word stays at full strength.
+        let (_, word) = text_shape(&shapes, "update").unwrap();
+        assert_eq!(word.galley.job.sections[0].format.color, ICE);
+        // Hover: the mark's highlight is faded.
+        grid_frame(&ctx, &menu, vec![egui::Event::PointerMoved(mark.center())]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let fills = |c: Color32| {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == c))
+                .count()
+        };
+        assert_eq!(fills(faded(TILE_HOVER, false)), 1, "the faded highlight");
+        assert_eq!(fills(TILE_HOVER), 0, "no full-strength highlight");
+        // Focus: Tab until a ring appears; it is faded too.
+        let ring = Theme::current(&ctx).palette().ring;
+        let strokes = |shapes: &[egui::epaint::ClippedShape], c: Color32| {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == c))
+                .count()
+        };
+        let tab = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut found = false;
+        for _ in 0..3 {
+            grid_frame(&ctx, &menu, vec![tab.clone()]);
+            let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+            if strokes(&shapes, faded(ring, false)) > 0 || strokes(&shapes, ring) > 0 {
+                assert_eq!(strokes(&shapes, ring), 0, "no full-strength ring");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Tab reaches the mark");
     }
 
     #[test]
