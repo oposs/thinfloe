@@ -1448,6 +1448,7 @@ impl App {
             Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
             Some(ui::UiEvent::Retry(r)) => self.cfg.menu.answer_retry(r),
             Some(ui::UiEvent::Eject(e)) => self.cfg.menu.eject_event(e),
+            Some(ui::UiEvent::Packages) => self.cfg.menu.open_packages(),
             Some(ui::UiEvent::Upgrade(e)) => self.cfg.menu.upgrade_event(e, now),
             Some(ui::UiEvent::Unfold(id)) => {
                 if let Some(Err(e)) = self.windows.as_ref().map(|w| w.restore(id)) {

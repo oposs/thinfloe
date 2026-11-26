@@ -108,8 +108,9 @@ impl Env {
     /// The fake helper: the radio is up on owb with these flags until stdin closes.
     fn spawn(&self, flags: &str) -> Child {
         let p = self.dir.join("helper.sh");
-        let script =
-            format!("#!/bin/sh\nprintf 'up\\towb\\texclusive\\t6\\t{flags}\\n'\ncat >/dev/null\n");
+        let script = format!(
+            "#!/bin/sh\nprintf 'up\\towb\\texclusive\\t6\\t{flags}\\twlx1\\trtw88_8822bu\\n'\ncat >/dev/null\n"
+        );
         std::fs::write(&p, script).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         Command::new(BIN)
@@ -177,7 +178,10 @@ fn receive_from_owly_sender() {
             env.state().starts_with("ready\towb\t")
         })
         .await;
-        assert_eq!(env.state(), "ready\towb\texclusive\t6\tno-ble\n");
+        assert_eq!(
+            env.state(),
+            "ready\towb\texclusive\t6\tno-ble\twlx1\trtw88_8822bu\n"
+        );
         assert!(!env.media("outbox").exists(), "no outbox without Bluetooth");
 
         let photo = env.dir.join("IMG_0042.HEIC");

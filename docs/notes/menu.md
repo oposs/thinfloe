@@ -26,6 +26,13 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   again; before that byte a cancel says "Cancelled before anything was
   written. The stick is as it was." After a successful write, a step the tool
   skipped is left out and one it began without `@done` is drawn done.
+- While a newer release is out, the Upgrade tile keeps its name (a
+  reworded one too) and its second line says so in the primary blue,
+  "4.12.33 available" in place of the comment, the new release only and as
+  it names itself; a tile problem still wins. A test checks that
+  "4.112.333 available" fits the 126 pt text column of a 220 pt tile at
+  `TILE_NOTE_PT`. It replaced the title "Upgrade to 4.1.0" (did not fit)
+  and the tile's update mark (2026-11-26).
 - A stick that already has the target release, or a newer one, is named
   so in the footer ("Write ThinFloe 4.5.0 again to this machine's stick,
   which already has it", "Downgrade this machine's stick from ThinFloe 4.6.0

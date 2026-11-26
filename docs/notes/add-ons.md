@@ -140,7 +140,9 @@ defaults, and upgraded sticks keep the settings in their saved home.
   box (on runs `install`, off runs `remove`) and shows the state; Install now,
   Update now and Check now run the verbs above.
   Add-on tiles are drawn only when an installed version exists; a pending
-  one shows the update marker. A failed install asks Retry once per boot per
+  one shows the update marker, a click target of its own (the word and
+  `MARK_HIT_PAD` around it, `ui.rs`) that opens Settings at Packages; the
+  rest of the tile still starts the program. A failed install asks Retry once per boot per
   add-on, remembered in `/tmp/thinfloe-addon-retry.<uid>` (`TF_RETRY_MARKER`
   overrides). The menu reads the add-on files at start and again whenever
   they change. A tile whose file name `thinfloe-addon` refuses (see ids

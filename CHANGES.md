@@ -6,7 +6,14 @@
 
 ### Changed
 
+- When a newer release is out, the Upgrade tile keeps its name and says so in small blue type below it, for example "4.12.33 available". Before, the title changed to "Upgrade to …", which did not fit the tile.
+- A click on the small "update" mark of an app tile opens Settings → Packages, where the update can be applied; before, it started the app. A click anywhere else on the tile still starts the app.
+- The Eject tile has an eject symbol instead of the USB symbol it shared with the Upgrade tile.
+- The FloeDrop line in Settings → Network and the menu log now name the Wi-Fi card FloeDrop uses and its driver, for example "Ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6)", instead of "awdl0", which was the same on every machine.
+
 ### Fixed
+
+- On a machine with an internal Intel Wireless 3160 and a USB Wi-Fi stick, FloeDrop used the internal card and iPhones did not show the machine. FloeDrop now prefers a USB Wi-Fi stick and never uses the Intel Wireless 3160, whose firmware crashes in AirDrop mode. If that card is the only free one, Settings → Network says "The Wi-Fi card … (Intel Wireless 3160) cannot run AirDrop; plug in a USB Wi-Fi stick that can."
 
 ## 4.12.0 - 2026-11-25
 

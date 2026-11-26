@@ -1,5 +1,7 @@
 //! The state file `$XDG_RUNTIME_DIR/thinfloe-share.state`, the contract with the menu.
-//! First line `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags`, `starting` or `error<TAB>text`;
+//! First line `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver`
+//! (iface the AWDL link, station the Wi-Fi card under it; the last two empty when unknown),
+//! `starting` or `error<TAB>text`;
 //! then one line per receiver: `name<TAB>folder<TAB>state<TAB>since_epoch`.
 //! Readers ignore unknown trailing fields.
 
@@ -15,6 +17,9 @@ pub enum Head {
         mode: String,
         channel: u32,
         flags: Vec<String>,
+        /// The Wi-Fi card under the link and its driver; empty when unknown.
+        station: String,
+        driver: String,
     },
     Error(String),
 }
@@ -77,8 +82,10 @@ pub fn render(head: &Head, devices: &[Device]) -> String {
             mode,
             channel,
             flags,
+            station,
+            driver,
         } => format!(
-            "ready\t{}\t{}\t{}\t{}\n",
+            "ready\t{}\t{}\t{}\t{}\t{}\t{}\n",
             field(iface),
             field(mode),
             channel,
@@ -86,7 +93,9 @@ pub fn render(head: &Head, devices: &[Device]) -> String {
                 .iter()
                 .map(|f| field(f).replace(',', "_"))
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
+            field(station),
+            field(driver)
         ),
         Head::Error(t) => format!("error\t{}\n", field(t)),
     };
@@ -119,6 +128,8 @@ pub fn parse(text: &str) -> (Head, Vec<Device>) {
                             .filter(|x| !x.is_empty())
                             .map(String::from)
                             .collect(),
+                        station: f.get(5).copied().unwrap_or("").to_string(),
+                        driver: f.get(6).copied().unwrap_or("").to_string(),
                     },
                     Err(_) => Head::Starting,
                 },
@@ -180,19 +191,26 @@ mod tests {
     #[test]
     fn render_ready_line() {
         let h = Head::Ready {
-            iface: "wlx1".into(),
+            iface: "awdl0".into(),
             mode: "exclusive".into(),
             channel: 6,
             flags: vec!["no-ble".into()],
+            station: "wlxc03a55f0d060".into(),
+            driver: "rtw88_8822bu".into(),
         };
-        assert_eq!(render(&h, &[]), "ready\twlx1\texclusive\t6\tno-ble\n");
+        assert_eq!(
+            render(&h, &[]),
+            "ready\tawdl0\texclusive\t6\tno-ble\twlxc03a55f0d060\trtw88_8822bu\n"
+        );
         let h = Head::Ready {
-            iface: "wlx1".into(),
+            iface: "awdl0".into(),
             mode: "shared".into(),
             channel: 44,
             flags: vec![],
+            station: "wlx1".into(),
+            driver: String::new(),
         };
-        assert_eq!(render(&h, &[]), "ready\twlx1\tshared\t44\t\n");
+        assert_eq!(render(&h, &[]), "ready\tawdl0\tshared\t44\t\twlx1\t\n");
         assert_eq!(render(&Head::Starting, &[]), "starting\n");
         assert_eq!(
             render(&Head::Error("no card".into()), &[]),
@@ -210,20 +228,37 @@ mod tests {
 
     #[test]
     fn parse_ignores_unknown_trailing_fields() {
-        let text = "ready\twlx1\texclusive\t6\tno-ble\tfuture\nJane's iPhone\tJane's iPhone\tsending\t1764000000\textra\tmore\nbroken\nx\ty\tweird\t1\n";
+        let text = "ready\tawdl0\texclusive\t6\tno-ble\twlx1\trtw88_8822bu\tfuture\nJane's iPhone\tJane's iPhone\tsending\t1764000000\textra\tmore\nbroken\nx\ty\tweird\t1\n";
         let (h, d) = parse(text);
         assert_eq!(
             h,
             Head::Ready {
-                iface: "wlx1".into(),
+                iface: "awdl0".into(),
                 mode: "exclusive".into(),
                 channel: 6,
-                flags: vec!["no-ble".into()]
+                flags: vec!["no-ble".into()],
+                station: "wlx1".into(),
+                driver: "rtw88_8822bu".into(),
             }
         );
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].state, DevState::Sending);
         assert_eq!(d[0].name, "Jane's iPhone");
+    }
+
+    #[test]
+    fn a_ready_line_without_the_card_still_parses() {
+        assert_eq!(
+            parse("ready\tawdl0\texclusive\t6\tno-ble\n").0,
+            Head::Ready {
+                iface: "awdl0".into(),
+                mode: "exclusive".into(),
+                channel: 6,
+                flags: vec!["no-ble".into()],
+                station: String::new(),
+                driver: String::new(),
+            }
+        );
     }
 
     #[test]
