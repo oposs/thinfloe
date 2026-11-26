@@ -2,8 +2,9 @@
 //! shows it, and the state file `$XDG_RUNTIME_DIR/thinfloe-share.state`
 //! the daemon `thinfloe-share` writes. The menu parses that file on its
 //! own, as it does the Deskflow one: its first line is `starting`,
-//! `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags` or `error<TAB>text`;
-//! readers ignore unknown trailing fields. The lines after it (one per
+//! `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` or
+//! `error<TAB>text` (station and driver: the Wi-Fi card under the AWDL link
+//! `iface`; an older daemon leaves them out); readers ignore unknown trailing fields. The lines after it (one per
 //! phone) are not shown. Saved at once, like the Time band; drawing is in
 //! network_ui.rs.
 
@@ -65,6 +66,9 @@ pub enum Head {
         mode: String,
         channel: u32,
         flags: Vec<String>,
+        /// The Wi-Fi card under the link and its driver; empty when unknown.
+        station: String,
+        driver: String,
     },
     Error(String),
 }
@@ -83,6 +87,8 @@ pub fn parse(text: &str) -> Head {
                 mode: f[2].to_string(),
                 channel,
                 flags: f[4].split(',').filter(|x| !x.is_empty()).map(String::from).collect(),
+                station: f.get(5).copied().unwrap_or("").to_string(),
+                driver: f.get(6).copied().unwrap_or("").to_string(),
             },
             Err(_) => Head::Starting,
         },
@@ -114,11 +120,17 @@ pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
             mode,
             channel,
             flags,
+            station,
+            driver,
         } => {
+            let card = if station.is_empty() { iface } else { station };
+            let how = if driver.is_empty() {
+                format!("{mode}, channel {channel}")
+            } else {
+                format!("{driver}, {mode}, channel {channel}")
+            };
             let mut v = vec![(
-                format!(
-                    "Ready on {iface} ({mode}, channel {channel}). Phones must be set to AirDrop 'Everyone for 10 Minutes'."
-                ),
+                format!("Ready on {card} ({how}). Phones must be set to AirDrop 'Everyone for 10 Minutes'."),
                 Tone::Plain,
             )];
             if flags.iter().any(|f| f == "no-ble") {
@@ -267,13 +279,51 @@ mod tests {
             mode: "exclusive".into(),
             channel: 6,
             flags: flags.iter().map(|f| f.to_string()).collect(),
+            station: String::new(),
+            driver: String::new(),
         }
+    }
+
+    fn ready_on(station: &str, driver: &str) -> Head {
+        Head::Ready {
+            iface: "awdl0".into(),
+            mode: "exclusive".into(),
+            channel: 6,
+            flags: vec![],
+            station: station.into(),
+            driver: driver.into(),
+        }
+    }
+
+    #[test]
+    fn share_state_parse_names_the_card() {
+        assert_eq!(
+            parse("ready\tawdl0\texclusive\t6\t\twlxc03a55f0d060\trtw88_8822bu\tfuture\n"),
+            ready_on("wlxc03a55f0d060", "rtw88_8822bu")
+        );
+        assert_eq!(parse("ready\tawdl0\texclusive\t6\t\twlx1\n"), ready_on("wlx1", ""));
+    }
+
+    #[test]
+    fn the_band_names_the_card_and_its_driver() {
+        let phones = "Phones must be set to AirDrop 'Everyone for 10 Minutes'.";
+        assert_eq!(
+            status_lines(&ready_on("wlxc03a55f0d060", "rtw88_8822bu")),
+            [(
+                format!("Ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6). {phones}"),
+                Tone::Plain
+            )]
+        );
+        assert_eq!(
+            status_lines(&ready_on("wlx1", "")),
+            [(format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain)]
+        );
     }
 
     #[test]
     fn share_state_parse_ready_no_ble() {
         let text =
-            "ready\twlx1\texclusive\t6\tno-ble\tfuture\nJane's iPhone\tJane's iPhone\tsending\t1764000000\textra\n";
+            "ready\twlx1\texclusive\t6\tno-ble\t\t\tfuture\nJane's iPhone\tJane's iPhone\tsending\t1764000000\textra\n";
         assert_eq!(parse(text), ready(&["no-ble"]));
         assert_eq!(parse("ready\twlx1\texclusive\t6\t\n"), ready(&[]));
         assert_eq!(

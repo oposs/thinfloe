@@ -14,7 +14,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 
 - `thinfloe-menu` (Network tab) writes `[share]` to `config.toml` and then `generated/share` (`enabled=`, `name=`), and sends the daemon SIGHUP. It supervises the daemon like the Deskflow daemon.
 - `thinfloe-share` (the daemon, runs as tfuser) reads only `generated/share`. It watches the outbox with inotify, receives into the inbox, and writes the state file and OSD notes. On SIGHUP it rereads the name.
-- `sudo thinfloe-share --radio` (root helper, started by the daemon) holds the radio from `owlyd`, picks the card and country, writes `/etc/owly/radio.toml` (station and country only), and starts the BlueZ advertisement for the Bluetooth wake-up. It reports on stdout `up` or `error`.
+- `sudo thinfloe-share --radio` (root helper, started by the daemon) holds the radio from `owlyd`, picks the card and country, writes `/etc/owly/radio.toml` (station and country only), and starts the BlueZ advertisement for the Bluetooth wake-up. It reports on stdout `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` or `error<TAB>text`; the daemon also reads an `up` line without the last two fields. The menu log line names the card: `share | ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6) as "FloeDrop Tobi"`, and so does the band's "Ready on …" line.
 - `owlyd` (Owly 0.4.3, commit 21171d8, pinned in Cargo.toml and the Dockerfile) owns the Wi-Fi card in AWDL mode. It is started through D-Bus. No polkit: `owlyd` accepts root.
 
 ## Card choice and country
@@ -26,7 +26,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 
 ## Contracts
 
-- State file `$XDG_RUNTIME_DIR/thinfloe-share.state`, atomic, tab separated. First line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags`; then one line per receiver in range: `name<TAB>folder<TAB>state<TAB>since_epoch` with state `idle`, `sending`, `declined` or `failed`. Readers ignore unknown trailing fields. The menu parses it on its own.
+- State file `$XDG_RUNTIME_DIR/thinfloe-share.state`, atomic, tab separated. First line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver`; `iface` is the AWDL link (`awdl0`), `station` the Wi-Fi card under it and `driver` that card's driver (both empty when unknown; a line from an older daemon has neither). Then one line per receiver in range: `name<TAB>folder<TAB>state<TAB>since_epoch` with state `idle`, `sending`, `declined` or `failed`. Readers ignore unknown trailing fields. The menu parses it on its own.
 - OSD note: one datagram to the OSD socket, `note<TAB>tone<TAB>text<LF>`, tone `info` or `warn`, shown 4 s. Tabs and newlines inside the text become spaces. Sending never blocks; without an OSD the note is lost.
 - Mount: `media-tfuser-FloeDrop.mount` is a tmpfs, options exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Files in it live in RAM. Guard: `test/integration/test-floedrop-image.sh`.
 - `generated/share` is `key=value` lines; the daemon never reads `config.toml`.

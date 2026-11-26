@@ -6111,16 +6111,18 @@ mod tests {
         net.share_mut().set_daemon(Some(start), None);
         net.share_mut().set_file(Some((
             Head::Ready {
-                iface: "wlx1".into(),
+                iface: "awdl0".into(),
                 mode: "exclusive".into(),
                 channel: 6,
                 flags: vec!["no-ble".into()],
+                station: "wlx1".into(),
+                driver: "rtw88_8822bu".into(),
             },
             start,
         )));
         let texts = net_texts(&network_settings(net));
         for t in [
-            "Ready on wlx1 (exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
+            "Ready on wlx1 (rtw88_8822bu, exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
             "Sending needs Bluetooth; this machine has none.",
             "Folder: /media/tfuser/FloeDrop",
             "FloeDrop 56db68",

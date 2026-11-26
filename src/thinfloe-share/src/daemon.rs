@@ -72,11 +72,15 @@ pub enum HelperLine {
         mode: String,
         channel: u32,
         flags: Vec<String>,
+        /// The Wi-Fi card under the link and its driver; empty from a helper that does not say.
+        station: String,
+        driver: String,
     },
     Error(String),
 }
 
-/// \`up<TAB>iface<TAB>mode<TAB>channel<TAB>flags\` or \`error<TAB>text\`; anything else is None.
+/// \`up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver\` or
+/// \`error<TAB>text\`; anything else is None. The last two fields of an up line may be missing.
 pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
     let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
     match f[0] {
@@ -93,6 +97,8 @@ pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            station: f.get(5).copied().unwrap_or("").to_string(),
+            driver: f.get(6).copied().unwrap_or("").to_string(),
         }),
         "error" => {
             let text = f[1..].join(" ");
@@ -104,6 +110,17 @@ pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
             }))
         }
         _ => None,
+    }
+}
+
+/// The log's ready text: the card under the link and its driver when the helper named them,
+/// else the link.
+pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel: u32) -> String {
+    let card = if station.is_empty() { iface } else { station };
+    if driver.is_empty() {
+        format!("ready on {card} ({mode}, channel {channel})")
+    } else {
+        format!("ready on {card} ({driver}, {mode}, channel {channel})")
     }
 }
 
@@ -443,7 +460,7 @@ async fn run(
         tokio::select! {
             line = lines.next_line() => match line {
                 Ok(Some(l)) => match parse_helper_line(&l) {
-                    Some(HelperLine::Up { iface, mode, channel, flags }) if airdrop.is_none() => {
+                    Some(HelperLine::Up { iface, mode, channel, flags, station, driver }) if airdrop.is_none() => {
                         let no_ble = flags.iter().any(|f| f == "no-ble");
                         // Signals and the helper's lines still count while the radio starts.
                         let started = {
@@ -466,9 +483,9 @@ async fn run(
                         };
                         match started {
                             Ok(a) => {
-                                log(format!("ready on {iface} ({mode}, channel {channel}) as {name:?}"));
+                                log(format!("{} as {name:?}", ready_text(&iface, &station, &driver, &mode, channel)));
                                 airdrop = Some(a);
-                                st.head = Head::Ready { iface, mode, channel, flags };
+                                st.head = Head::Ready { iface, mode, channel, flags, station, driver };
                                 st.write();
                             }
                             Err(e) => break 'main Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
@@ -1219,16 +1236,38 @@ mod tests {
     }
 
     #[test]
+    fn the_ready_log_names_the_card() {
+        assert_eq!(
+            ready_text("awdl0", "wlxc03a55f0d060", "rtw88_8822bu", "exclusive", 6),
+            "ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6)"
+        );
+        assert_eq!(
+            ready_text("awdl0", "wlx1", "", "shared", 44),
+            "ready on wlx1 (shared, channel 44)"
+        );
+        // An older helper: the link it reported.
+        assert_eq!(
+            ready_text("awdl0", "", "", "exclusive", 6),
+            "ready on awdl0 (exclusive, channel 6)"
+        );
+    }
+
+    #[test]
     fn helper_lines_parse() {
         assert_eq!(
-            parse_helper_line("up\tawdl0\texclusive\t44\tno-ble"),
+            parse_helper_line(
+                "up\tawdl0\texclusive\t44\tno-ble\twlxc03a55f0d060\trtw88_8822bu\tfuture"
+            ),
             Some(HelperLine::Up {
                 iface: "awdl0".into(),
                 mode: "exclusive".into(),
                 channel: 44,
                 flags: vec!["no-ble".into()],
+                station: "wlxc03a55f0d060".into(),
+                driver: "rtw88_8822bu".into(),
             })
         );
+        // A helper without the card fields.
         assert_eq!(
             parse_helper_line("up\tawdl0\tshared\t6\t\n"),
             Some(HelperLine::Up {
@@ -1236,6 +1275,8 @@ mod tests {
                 mode: "shared".into(),
                 channel: 6,
                 flags: vec![],
+                station: String::new(),
+                driver: String::new(),
             })
         );
         assert_eq!(

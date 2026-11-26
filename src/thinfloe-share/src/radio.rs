@@ -1,8 +1,9 @@
 //! `thinfloe-share --radio`: the root helper that holds AWDL's radio from owlyd.
 //!
 //! Protocol on stdout (private to thinfloe-share), one line each:
-//! `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags` once the radio is up (flags a
-//! comma list, `no-ble` when BlueZ offers no adapter), then `error<TAB>text`
+//! `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` once the radio is
+//! up (iface the AWDL link, flags a comma list, `no-ble` when BlueZ offers no adapter,
+//! station the Wi-Fi card under the link and driver its driver, empty when unknown), then `error<TAB>text`
 //! and exit 1 when the radio is lost or cannot be had. Exit 0 after the lease
 //! is released on stdin EOF or SIGTERM.
 //!
@@ -45,13 +46,29 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-pub fn status_line(r: &Result<(String, String, u32, Vec<String>), String>) -> String {
+/// What the up line reports: the AWDL link (`iface`, always `awdl0` with owlyd), the mode
+/// and channel of owlyd's probe, the flags, and the Wi-Fi card under the link with its driver
+/// (empty when unknown).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Up {
+    pub iface: String,
+    pub mode: String,
+    pub channel: u32,
+    pub flags: Vec<String>,
+    pub station: String,
+    pub driver: String,
+}
+
+pub fn status_line(r: &Result<Up, String>) -> String {
     match r {
-        Ok((iface, mode, channel, flags)) => format!(
-            "up\t{}\t{}\t{channel}\t{}",
-            one_line(iface),
-            one_line(mode),
-            one_line(&flags.join(","))
+        Ok(u) => format!(
+            "up\t{}\t{}\t{}\t{}\t{}\t{}",
+            one_line(&u.iface),
+            one_line(&u.mode),
+            u.channel,
+            one_line(&u.flags.join(",")),
+            one_line(&u.station),
+            one_line(&u.driver)
         ),
         Err(text) => format!("error\t{}", one_line(text)),
     }
@@ -116,7 +133,7 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-fn say(out: &mut impl Write, r: &Result<(String, String, u32, Vec<String>), String>) {
+fn say(out: &mut impl Write, r: &Result<Up, String>) {
     let _ = writeln!(out, "{}", status_line(r));
     let _ = out.flush();
 }
@@ -165,7 +182,22 @@ pub async fn hold<R: RadioApi, G>(
         }
     };
     let (guard, flags) = ble.await;
-    say(out, &Ok((link.interface.clone(), mode, channel, flags)));
+    let driver = card
+        .cards
+        .get(&station)
+        .and_then(|c| c.driver.clone())
+        .unwrap_or_default();
+    say(
+        out,
+        &Ok(Up {
+            iface: link.interface.clone(),
+            mode,
+            channel,
+            flags,
+            station,
+            driver,
+        }),
+    );
     let code = tokio::select! {
         _ = stop => {
             api.release(lease).await;
@@ -625,17 +657,27 @@ mod tests {
 
     #[test]
     fn up_line_format() {
-        let up = Ok(("awdl0".to_string(), "exclusive".to_string(), 44, vec![]));
-        assert_eq!(status_line(&up), "up\tawdl0\texclusive\t44\t");
-        let flagged = Ok((
-            "awdl0".to_string(),
-            "shared".to_string(),
-            6,
-            vec!["no-ble".to_string(), "x".to_string()],
-        ));
-        assert_eq!(status_line(&flagged), "up\tawdl0\tshared\t6\tno-ble,x");
-        let err: Result<(String, String, u32, Vec<String>), String> =
-            Err("bad\tthing\nhere".into());
+        let mut up = Up {
+            iface: "awdl0".into(),
+            mode: "exclusive".into(),
+            channel: 44,
+            flags: vec![],
+            station: "wlxc03a55f0d060".into(),
+            driver: "rtw88_8822bu".into(),
+        };
+        assert_eq!(
+            status_line(&Ok(up.clone())),
+            "up\tawdl0\texclusive\t44\t\twlxc03a55f0d060\trtw88_8822bu"
+        );
+        up.mode = "shared".into();
+        up.channel = 6;
+        up.flags = vec!["no-ble".into(), "x".into()];
+        up.driver = String::new();
+        assert_eq!(
+            status_line(&Ok(up)),
+            "up\tawdl0\tshared\t6\tno-ble,x\twlxc03a55f0d060\t"
+        );
+        let err: Result<Up, String> = Err("bad\tthing\nhere".into());
         assert_eq!(status_line(&err), "error\tbad thing here");
     }
 
@@ -660,10 +702,30 @@ mod tests {
         };
         let (code, out) = run(&fake, &free_card(), &tmp("stale"), async {}).await;
         assert_eq!(code, 0);
-        assert_eq!(out, "up\tawdl0\texclusive\t44\tno-ble\n");
+        assert_eq!(out, "up\tawdl0\texclusive\t44\tno-ble\twlx00e04c123456\t\n");
         assert_eq!(
             *fake.calls.borrow(),
             ["release 3", "probe", "acquire", "release 5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_up_line_names_the_station_and_its_driver() {
+        let fake = Fake::default();
+        let mut card = free_card();
+        card.cards.insert(
+            "wlx00e04c123456".into(),
+            CardInfo {
+                bus: Bus::Usb,
+                pci_id: None,
+                driver: Some("rtw88_8822bu".into()),
+            },
+        );
+        let (code, out) = run(&fake, &card, &tmp("station"), async {}).await;
+        assert_eq!(code, 0);
+        assert_eq!(
+            out,
+            "up\tawdl0\texclusive\t44\tno-ble\twlx00e04c123456\trtw88_8822bu\n"
         );
     }
 
