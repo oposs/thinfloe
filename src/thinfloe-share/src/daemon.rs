@@ -692,9 +692,11 @@ async fn owlyd_link(iface: &str) -> Result<(RadioProxy<'static>, LinkInfo), Stri
 
 /// What the main loop is told by the outbox thread.
 enum FromOutbox {
+    /// An offer to send: the target is taken in the outbox thread when the offer starts,
+    /// so a re-key that comes before the main loop reads it cannot lose it.
     Send {
         handle: SendHandle,
-        key: String,
+        target: Option<Target>,
         paths: Vec<PathBuf>,
     },
     Devices(Vec<Device>),
@@ -714,19 +716,45 @@ enum Cmd {
     Shutdown,
 }
 
-/// A receiver that answered `/Discover`: where to send and its TXT flags.
-#[derive(Debug, Clone, Copy)]
+/// A receiver that answered `/Discover`: where to send, its flags, and whether they came
+/// from its TXT record (mDNS) or are the guess for a radio peer (UP-1b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     addr: SocketAddrV6,
     flags: u32,
+    txt: bool,
 }
 
-type Targets = Arc<Mutex<HashMap<String, Target>>>;
+/// The send targets by service ID. Only the outbox thread has them; each offer carries
+/// its target to the main loop.
+#[derive(Default)]
+struct Targets(HashMap<String, Target>);
 
-/// Where to send to `key`; only the outbox thread writes the map, so a target recorded
-/// after a drop of the same key stays.
-fn record_target(targets: &Targets, key: &str, t: Target) {
-    targets.lock().unwrap().insert(key.to_string(), t);
+impl Targets {
+    /// `t` for the device that answers to `key` now. Guessed flags never replace flags
+    /// from a TXT record: a phone found by mDNS and by the radio keeps its mDNS flags
+    /// under its `awdl-` key, and only the address follows the newest answer.
+    fn record(&mut self, key: &str, t: Target) {
+        match self.0.get_mut(key) {
+            Some(old) if old.txt && !t.txt => old.addr = t.addr,
+            _ => {
+                self.0.insert(key.to_string(), t);
+            }
+        }
+    }
+
+    /// Forgets the service IDs in `dropped` that no device answers to (`known`).
+    fn forget(&mut self, dropped: &[String], known: impl Fn(&str) -> bool) {
+        for id in dropped {
+            if !known(id) {
+                self.0.remove(id);
+            }
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Target> {
+        self.0.get(key).copied()
+    }
 }
 
 /// What a receiver's record says across addresses: 16 hex digits of a hash of it, or
@@ -739,21 +767,12 @@ pub fn stable_id(record: Option<&[u8]>) -> Option<String> {
     Some(format!("{:016x}", h.finish()))
 }
 
-/// Forgets the targets of service IDs the outbox no longer knows.
-fn forget_targets(targets: &Targets, dropped: &[String]) {
-    if dropped.is_empty() {
-        return;
-    }
-    let mut map = targets.lock().unwrap();
-    for id in dropped {
-        map.remove(id);
-    }
-}
 type WatchMap = Arc<Mutex<HashMap<WatchDescriptor, String>>>;
 
 struct ChanTransport {
     next: u64,
     out: mpsc::UnboundedSender<FromOutbox>,
+    targets: Targets,
 }
 
 impl Transport for ChanTransport {
@@ -762,7 +781,7 @@ impl Transport for ChanTransport {
         let handle = SendHandle(self.next);
         let _ = self.out.send(FromOutbox::Send {
             handle,
-            key: service_id.to_string(),
+            target: self.targets.get(service_id),
             paths,
         });
         handle
@@ -787,12 +806,12 @@ fn outbox_thread(
     out: mpsc::UnboundedSender<FromOutbox>,
     mut watches: Watches,
     wmap: WatchMap,
-    targets: Targets,
 ) {
     let mut ob = Outbox::new(root.clone());
     let mut tr = ChanTransport {
         next: 0,
         out: out.clone(),
+        targets: Targets::default(),
     };
     let mut last: Option<Vec<Device>> = None;
     let mut wake = Instant::now() + OUTBOX_MAX_SLEEP;
@@ -805,10 +824,15 @@ fn outbox_thread(
                 name,
                 stable,
                 target,
-            }) => {
-                record_target(&targets, &key, target);
-                ob.seen(&key, &addr, &name, stable.as_deref(), Instant::now());
-            }
+            }) => on_seen(
+                &mut ob,
+                &mut tr,
+                &key,
+                &addr,
+                &name,
+                stable.as_deref(),
+                target,
+            ),
             Ok(Cmd::Changed(folder)) => ob.changed(&folder, Instant::now()),
             Ok(Cmd::Finished(h, o)) => ob.finished(h, o, Instant::now()),
             Ok(Cmd::Shutdown) | Err(smpsc::RecvTimeoutError::Disconnected) => {
@@ -818,7 +842,7 @@ fn outbox_thread(
             Err(smpsc::RecvTimeoutError::Timeout) => {}
         }
         let now = Instant::now();
-        let next = ob.tick(now, &mut tr);
+        let next = settle(&mut ob, &mut tr, now);
         wake = next.map_or(now + OUTBOX_MAX_SLEEP, |n| n.min(now + OUTBOX_MAX_SLEEP));
         for folder in ob.take_new_folders() {
             match watches.add(root.join(&folder), watch_mask()) {
@@ -828,7 +852,6 @@ fn outbox_thread(
                 Err(e) => log(format!("cannot watch outbox/{folder}: {e}")),
             }
         }
-        forget_targets(&targets, &ob.take_dropped());
         for (tone, text) in ob.take_notes() {
             osd::note(tone, &text);
         }
@@ -838,6 +861,29 @@ fn outbox_thread(
             last = Some(devices);
         }
     }
+}
+
+/// A receiver answered: its device, and the target under the key the device answers to.
+fn on_seen(
+    ob: &mut Outbox,
+    tr: &mut ChanTransport,
+    key: &str,
+    addr: &str,
+    name: &str,
+    stable: Option<&str>,
+    target: Target,
+) {
+    if let Some(kept) = ob.seen(key, addr, name, stable, Instant::now()) {
+        tr.targets.record(&kept, target);
+    }
+}
+
+/// The due offers (each with its target), then the targets of dropped keys forgotten.
+fn settle(ob: &mut Outbox, tr: &mut ChanTransport, now: Instant) -> Option<Instant> {
+    let next = ob.tick(now, tr);
+    let dropped = ob.take_dropped();
+    tr.targets.forget(&dropped, |k| ob.knows(k));
+    next
 }
 
 /// Finds receivers: mDNS on the link and `/Discover` at the radio's AWDL
@@ -948,6 +994,7 @@ async fn discovery(
                         target: Target {
                             addr: sock,
                             flags: c.flags,
+                            txt: !c.from_peers,
                         },
                     });
                     c.next_try = tokio::time::Instant::now() + REDISCOVER;
@@ -964,7 +1011,6 @@ struct Sending {
     cmds: smpsc::Sender<Cmd>,
     thread: Option<std::thread::JoinHandle<()>>,
     from_outbox: mpsc::UnboundedReceiver<FromOutbox>,
-    targets: Targets,
     events: inotify::EventStream<Vec<u8>>,
     wmap: WatchMap,
     discovery: tokio::task::JoinHandle<()>,
@@ -1111,14 +1157,12 @@ impl Airdrop {
         let (cmds, cmds_rx) = smpsc::channel();
         let (out_tx, from_outbox) = mpsc::unbounded_channel();
         let wmap: WatchMap = Arc::default();
-        let targets: Targets = Arc::default();
         let thread = std::thread::Builder::new()
             .name("outbox".into())
             .spawn({
                 let root = paths.outbox.clone();
                 let wmap = wmap.clone();
-                let targets = targets.clone();
-                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap, targets)
+                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap)
             })
             .map_err(|e| e.to_string())?;
         let discovery = tokio::spawn(discovery(
@@ -1133,7 +1177,6 @@ impl Airdrop {
             cmds,
             thread: Some(thread),
             from_outbox,
-            targets,
             events,
             wmap,
             discovery,
@@ -1212,9 +1255,11 @@ impl Airdrop {
                 self.devices = d;
                 return true;
             }
-            Step::Outbox(Some(FromOutbox::Send { handle, key, paths })) => {
-                self.send(handle, key, paths)
-            }
+            Step::Outbox(Some(FromOutbox::Send {
+                handle,
+                target,
+                paths,
+            })) => self.send(handle, target, paths),
             Step::Outbox(None) | Step::Inotify(None) => {
                 // Only a panic ends them; receiving goes on without sending.
                 log("the outbox stopped; receiving only");
@@ -1240,9 +1285,8 @@ impl Airdrop {
         }
     }
 
-    fn send(&mut self, handle: SendHandle, key: String, paths: Vec<PathBuf>) {
+    fn send(&mut self, handle: SendHandle, target: Option<Target>, paths: Vec<PathBuf>) {
         let Some(s) = &self.sending else { return };
-        let target = s.targets.lock().unwrap().get(&key).copied();
         let cmds = s.cmds.clone();
         let Some(target) = target else {
             let _ = cmds.send(Cmd::Finished(
@@ -1333,7 +1377,7 @@ impl Airdrop {
                         let text = if placed.files.is_empty() {
                             inbox::failed_note(&named)
                         } else {
-                            inbox::partial_note(placed.files.len(), paths.len(), &named)
+                            inbox::partial_note(placed.files.len(), placed.total, &named)
                         };
                         osd::note(osd::Tone::Warn, &text);
                     }
@@ -1589,19 +1633,6 @@ mod tests {
     }
 
     #[test]
-    fn a_target_recorded_after_a_drop_stays() {
-        let t = Target {
-            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0),
-            flags: 0,
-        };
-        let targets: Targets = Arc::default();
-        record_target(&targets, "k", t);
-        forget_targets(&targets, &["k".to_string()]);
-        record_target(&targets, "k", t);
-        assert!(targets.lock().unwrap().contains_key("k"));
-    }
-
-    #[test]
     fn stable_ids() {
         assert_eq!(stable_id(None), None);
         assert_eq!(stable_id(Some(&[])), None);
@@ -1612,20 +1643,120 @@ mod tests {
         assert_ne!(stable_id(Some(b"record-b")).unwrap(), a);
     }
 
-    #[test]
-    fn dropped_service_ids_lose_their_targets() {
-        let t = Target {
-            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0),
-            flags: 0,
-        };
-        let targets: Targets = Arc::default();
-        for k in ["awdl-aa", "mdns-1", "other"] {
-            targets.lock().unwrap().insert(k.to_string(), t);
+    fn target(port: u16, flags: u32, txt: bool) -> Target {
+        Target {
+            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0),
+            flags,
+            txt,
         }
-        forget_targets(&targets, &["awdl-aa".to_string(), "mdns-1".to_string()]);
-        let mut left: Vec<String> = targets.lock().unwrap().keys().cloned().collect();
+    }
+
+    struct Rig {
+        dir: PathBuf,
+        ob: Outbox,
+        tr: ChanTransport,
+        rx: mpsc::UnboundedReceiver<FromOutbox>,
+    }
+    impl Rig {
+        fn new(name: &str) -> Rig {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+                .join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let (out, rx) = mpsc::unbounded_channel();
+            Rig {
+                ob: Outbox::new(dir.join("outbox")),
+                dir,
+                tr: ChanTransport {
+                    next: 0,
+                    out,
+                    targets: Targets::default(),
+                },
+                rx,
+            }
+        }
+        fn seen(&mut self, key: &str, addr: &str, t: Target) {
+            on_seen(&mut self.ob, &mut self.tr, key, addr, "Jane", None, t);
+            settle(&mut self.ob, &mut self.tr, Instant::now());
+        }
+    }
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn a_phone_seen_again_after_it_went_has_its_target_again() {
+        let mut r = Rig::new("targets-gone");
+        let t = target(1, 7, true);
+        r.seen("Jane-mdns", "fe80::1", t);
+        assert_eq!(r.tr.targets.get("Jane-mdns"), Some(t));
+        let later = Instant::now() + crate::outbox::GONE_AFTER + Duration::from_secs(1);
+        settle(&mut r.ob, &mut r.tr, later);
+        assert_eq!(
+            r.tr.targets.get("Jane-mdns"),
+            None,
+            "a gone phone has no target"
+        );
+        r.seen("Jane-mdns", "fe80::1", t);
+        assert_eq!(r.tr.targets.get("Jane-mdns"), Some(t));
+    }
+
+    #[test]
+    fn an_offer_carries_its_target_past_a_later_rekey() {
+        let mut r = Rig::new("targets-offer");
+        let t = target(1, 7, true);
+        r.tr.targets.record("Jane-mdns", t);
+        let h = r.tr.send("Jane-mdns", vec![PathBuf::from("a")]);
+        r.tr.targets.forget(&["Jane-mdns".to_string()], |_| false);
+        match r.rx.try_recv() {
+            Ok(FromOutbox::Send { handle, target, .. }) => {
+                assert_eq!(handle, h);
+                assert_eq!(target, Some(t));
+            }
+            _ => panic!("no offer"),
+        }
+        r.tr.send("Jane-mdns", Vec::new());
+        assert!(matches!(
+            r.rx.try_recv(),
+            Ok(FromOutbox::Send { target: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_phone_found_by_the_radio_and_by_mdns_keeps_its_txt_flags() {
+        let mut r = Rig::new("targets-txt");
+        let guess = target(1, RECEIVER_FLAGS | SUPPORTS_DVZIP, false);
+        let txt = target(2, RECEIVER_FLAGS, true);
+        r.seen("awdl-aa", "fe80::1", guess);
+        r.seen("Jane-mdns", "fe80::1", txt);
+        assert_eq!(
+            r.tr.targets.get("awdl-aa"),
+            Some(txt),
+            "the awdl key takes the TXT flags"
+        );
+        assert_eq!(r.tr.targets.get("Jane-mdns"), None);
+        r.seen("awdl-aa", "fe80::1", target(3, guess.flags, false));
+        assert_eq!(
+            r.tr.targets.get("awdl-aa"),
+            Some(target(3, RECEIVER_FLAGS, true)),
+            "a later radio answer moves the address only"
+        );
+    }
+
+    #[test]
+    fn forget_keeps_a_key_a_device_answers_to() {
+        let mut ts = Targets::default();
+        for k in ["awdl-aa", "mdns-1", "other"] {
+            ts.record(k, target(1, 0, false));
+        }
+        ts.forget(&["awdl-aa".to_string(), "mdns-1".to_string()], |k| {
+            k == "mdns-1"
+        });
+        let mut left: Vec<String> = ts.0.keys().cloned().collect();
         left.sort();
-        assert_eq!(left, ["other"]);
+        assert_eq!(left, ["mdns-1", "other"]);
     }
 
     #[test]

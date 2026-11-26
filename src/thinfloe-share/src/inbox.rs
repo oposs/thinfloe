@@ -61,6 +61,9 @@ fn normalise(p: &Path) -> io::Result<()> {
 pub struct Placed {
     /// The new paths of the entries moved, also those moved before an error.
     pub files: Vec<PathBuf>,
+    /// The entries `place` was to move: plain files and folders directly below the
+    /// staging root, not the symlinks and special files it drops.
+    pub total: usize,
     pub error: Option<io::Error>,
 }
 
@@ -70,9 +73,18 @@ pub struct Placed {
 /// are not directly below `staging_root` are ignored. The first error stops the move;
 /// what was moved before it stays in `files` (none when the folder could not be made).
 pub fn place(staged: &[PathBuf], staging_root: &Path, inbox: &Path, sender: &str) -> Placed {
+    let total = staged
+        .iter()
+        .filter(|p| p.parent() == Some(staging_root))
+        .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_file() || m.is_dir()))
+        .count();
     let mut files = Vec::new();
     let error = place_into(staged, staging_root, inbox, sender, &mut files).err();
-    Placed { files, error }
+    Placed {
+        files,
+        total,
+        error,
+    }
 }
 
 fn place_into(
@@ -338,9 +350,16 @@ mod tests {
             .unwrap();
         assert!(made.success());
         fs::write(staging.join("z.txt"), "z").unwrap();
-        let staged = [staging.join("a.txt"), deep, staging.join("z.txt")];
+        symlink("/etc/passwd", staging.join("link")).unwrap();
+        let staged = [
+            staging.join("a.txt"),
+            staging.join("link"),
+            deep,
+            staging.join("z.txt"),
+        ];
         let placed = place(&staged, &staging, &inbox, "Jane");
         assert_eq!(placed.files, vec![inbox.join("Jane/a.txt")]);
+        assert_eq!(placed.total, 3, "the dropped symlink is not counted");
         assert!(placed.error.is_some());
         assert!(staging.join("z.txt").exists());
     }

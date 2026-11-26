@@ -377,7 +377,7 @@ impl Outbox {
         name: &str,
         stable: Option<&str>,
         now: Instant,
-    ) {
+    ) -> Option<String> {
         // The same service ID, or the same phone under a new one (found by the radio's
         // peer list first, by mDNS later): one device, one folder. A record alone is
         // not enough: two devices of one Apple account may send the same one, so the
@@ -416,7 +416,7 @@ impl Outbox {
                 d.pending = Some(now);
             }
             ensure_folder(&self.root, &d.folder, &mut self.new_folders);
-            return;
+            return Some(d.service_id.clone());
         }
         let wanted = names::safe(name, DEVICE_FALLBACK);
         // A gone device of the same name hands its folder over.
@@ -434,11 +434,11 @@ impl Outbox {
             d.present = true;
             d.pending = Some(now);
             ensure_folder(&self.root, &d.folder, &mut self.new_folders);
-            return;
+            return Some(service_id.to_string());
         }
         if let Err(e) = fs::create_dir_all(&self.root) {
             eprintln!("thinfloe-share: outbox {}: {e}", self.root.display());
-            return;
+            return None;
         }
         let owned: HashSet<&str> = self.devs.iter().map(|d| d.folder.as_str()).collect();
         // A folder of that name nobody owns (left from an earlier run) is taken over.
@@ -458,7 +458,7 @@ impl Outbox {
             let f = names::unique_dir(&taken, &wanted);
             if let Err(e) = fs::create_dir(self.root.join(&f)) {
                 eprintln!("thinfloe-share: outbox folder {f}: {e}");
-                return;
+                return None;
             }
             self.new_folders.push(f.clone());
             f
@@ -480,6 +480,12 @@ impl Outbox {
             state: DevState::Idle,
             since: epoch(),
         });
+        Some(service_id.to_string())
+    }
+
+    /// Whether a device answers to `service_id` now.
+    pub fn knows(&self, service_id: &str) -> bool {
+        self.devs.iter().any(|d| d.service_id == service_id)
     }
 
     /// Something changed in the folder `folder` (inotify).
