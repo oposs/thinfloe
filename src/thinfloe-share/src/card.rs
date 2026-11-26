@@ -9,9 +9,13 @@ pub const NO_CARD: &str = "AirDrop needs a Wi-Fi card this machine does not use 
 /// Intel Wireless 3160: on thinfloe-56db68 (2026-11-25 and 2026-11-26) the probe said
 /// "exclusive mode up", then the firmware crashed about every 11 s ("Microcode SW error
 /// detected", 40 times in one boot) and iPhones never saw the receiver.
+/// Intel Wireless 7260: the same firmware family as the 3160, skipped by family; not tested
+/// on hardware.
 pub const AWDL_BROKEN: &[(u16, u16, &str)] = &[
     (0x8086, 0x08b3, "Intel Wireless 3160"),
     (0x8086, 0x08b4, "Intel Wireless 3160"),
+    (0x8086, 0x08b1, "Intel Wireless 7260"),
+    (0x8086, 0x08b2, "Intel Wireless 7260"),
 ];
 
 /// The bus a card sits on, from `/sys/class/net/<if>/device/subsystem`.
@@ -42,11 +46,17 @@ pub fn broken_model(info: &CardInfo) -> Option<&'static str> {
         .map(|(_, _, m)| *m)
 }
 
-/// The error for an unused card that cannot run AirDrop.
-pub fn broken_text(iface: &str, model: &str) -> String {
-    format!(
-        "The Wi-Fi card {iface} ({model}) cannot run AirDrop; plug in a USB Wi-Fi stick that can."
-    )
+/// The error for an unused card that cannot run AirDrop; `used_stick` is a USB card the
+/// machine uses for its network, which a new stick would not help beside.
+pub fn broken_text(iface: &str, model: &str, used_stick: Option<&str>) -> String {
+    match used_stick {
+        Some(stick) => format!(
+            "The Wi-Fi card {iface} ({model}) cannot run AirDrop; the USB stick {stick} is used for the network."
+        ),
+        None => format!(
+            "The Wi-Fi card {iface} ({model}) cannot run AirDrop; plug in a USB Wi-Fi stick that can."
+        ),
+    }
 }
 
 /// What the choice looks at; the helper fills it from `ip -j addr`, `ip -j route`, the
@@ -126,7 +136,8 @@ pub fn choose_station(i: &CardInputs) -> Result<String, String> {
     let info = |iface: &str| i.cards.get(iface).cloned().unwrap_or_default();
     // Stable: equal buses keep the sorted-name order.
     ifaces.sort_by_key(|iface| info(iface).bus != Bus::Usb);
-    let mut broken: Option<String> = None;
+    let mut broken: Option<(String, &'static str)> = None;
+    let mut used_stick: Option<String> = None;
     for iface in ifaces {
         let entry = addrs.iter().find(|a| a["ifname"] == iface.as_str());
         let has_addr = entry
@@ -145,16 +156,22 @@ pub fn choose_station(i: &CardInputs) -> Result<String, String> {
             .as_deref()
             .is_some_and(|y| configured(y, &iface, mac));
         if has_addr || has_route || named {
+            if info(&iface).bus == Bus::Usb {
+                used_stick.get_or_insert_with(|| iface.clone());
+            }
             continue;
         }
         match broken_model(&info(&iface)) {
             Some(model) => {
-                broken.get_or_insert_with(|| broken_text(&iface, model));
+                broken.get_or_insert((iface, model));
             }
             None => return Ok(iface),
         }
     }
-    Err(broken.unwrap_or_else(|| NO_CARD.into()))
+    Err(match broken {
+        Some((iface, model)) => broken_text(&iface, model, used_stick.as_deref()),
+        None => NO_CARD.into(),
+    })
 }
 
 /// The ISO country of `zone`: the first code of its line in `zone1970.tab`.
@@ -241,6 +258,35 @@ mod tests {
             &[("wlp2s0", pci(0x8086, 0x08b3))],
         );
         assert_eq!(choose_station(&i), Err(NO_CARD.into()));
+    }
+
+    #[test]
+    fn the_intel_7260_is_skipped_too() {
+        for dev in [0x08b1, 0x08b2] {
+            let i = with(inputs(&["wlp3s0"], None), &[("wlp3s0", pci(0x8086, dev))]);
+            assert_eq!(
+                choose_station(&i),
+                Err("The Wi-Fi card wlp3s0 (Intel Wireless 7260) cannot run AirDrop; plug in a USB Wi-Fi stick that can.".into())
+            );
+            let i = with(
+                inputs(&["wlp3s0", "wlx00e04c123456"], None),
+                &[("wlp3s0", pci(0x8086, dev)), ("wlx00e04c123456", usb())],
+            );
+            assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        }
+    }
+
+    #[test]
+    fn a_3160_beside_a_stick_used_for_the_network_names_the_stick() {
+        // wlp2s0 is connected in the fixture.
+        let i = with(
+            inputs(&["wlp2s0", "wlp3s0"], None),
+            &[("wlp2s0", usb()), ("wlp3s0", pci(0x8086, 0x08b3))],
+        );
+        assert_eq!(
+            choose_station(&i),
+            Err("The Wi-Fi card wlp3s0 (Intel Wireless 3160) cannot run AirDrop; the USB stick wlp2s0 is used for the network.".into())
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
-//! \`thinfloe-share\` with no arguments: the FloeDrop daemon, run as tfuser by the menu.
+//! `thinfloe-share` with no arguments: the FloeDrop daemon, run as tfuser by the menu.
 //!
-//! It starts the root helper (\`sudo -n thinfloe-share --radio\`) with a pipe on its
-//! stdin and reads its one status line. On \`up\` it receives on the lease's
-//! \`awdl0\` (port 8771, files staged in \`.incoming/\` and moved to
-//! \`inbox/<sender>/\`), announces itself over mDNS and, unless the helper says
-//! \`no-ble\`, browses for receivers and sends what lands in \`outbox/<device>/\`.
-//! The state file \`$XDG_RUNTIME_DIR/thinfloe-share.state\` tells the menu how it
+//! It starts the root helper (`sudo -n thinfloe-share --radio`) with a pipe on its
+//! stdin and reads its one status line. On `up` it receives on the lease's
+//! `awdl0` (port 8771, files staged in `.incoming/` and moved to
+//! `inbox/<sender>/`), announces itself over mDNS and, unless the helper says
+//! `no-ble`, browses for receivers and sends what lands in `outbox/<device>/`.
+//! The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` tells the menu how it
 //! goes. Closing the helper's stdin gives the radio back.
 
 use std::collections::HashMap;
@@ -49,7 +49,7 @@ const HELPER_GRACE: Duration = Duration::from_secs(5);
 const REDISCOVER: Duration = Duration::from_secs(20);
 /// A receiver that did not answer yet is tried again this often.
 const RETRY: Duration = Duration::from_secs(2);
-/// The longest one \`/Discover\` may hold up the others.
+/// The longest one `/Discover` may hold up the others.
 const DISCOVER_WAIT: Duration = Duration::from_secs(3);
 /// The longest the owlyd lookup at radio start may take (zbus waits 25 s).
 const OWLYD_WAIT: Duration = Duration::from_secs(5);
@@ -79,8 +79,8 @@ pub enum HelperLine {
     Error(String),
 }
 
-/// \`up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver\` or
-/// \`error<TAB>text\`; anything else is None. The last two fields of an up line may be missing.
+/// `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` or
+/// `error<TAB>text`; anything else is None. The last two fields of an up line may be missing.
 pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
     let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
     match f[0] {
@@ -113,6 +113,24 @@ pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
     }
 }
 
+/// The card under the link with its driver ("wlx1 (rtw88_8822bu)"), the card alone when the
+/// driver is unknown, the link when the helper named no card.
+pub fn card_label(iface: &str, station: &str, driver: &str) -> String {
+    match (station, driver) {
+        ("", _) => iface.to_string(),
+        (s, "") => s.to_string(),
+        (s, d) => format!("{s} ({d})"),
+    }
+}
+
+/// The error when the receiver cannot start on the radio the helper gave.
+pub fn start_failed_text(iface: &str, station: &str, driver: &str, why: &str) -> String {
+    format!(
+        "FloeDrop cannot start on {}: {why}",
+        card_label(iface, station, driver)
+    )
+}
+
 /// The log's ready text: the card under the link and its driver when the helper named them,
 /// else the link.
 pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel: u32) -> String {
@@ -124,7 +142,7 @@ pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel:
     }
 }
 
-/// Bytes an \`/Ask\` offers; a file without a size counts 0 (the tmpfs still caps it).
+/// Bytes an `/Ask` offers; a file without a size counts 0 (the tmpfs still caps it).
 pub fn ask_total(offer: &Offer) -> u64 {
     match offer {
         Offer::Files(files) => files
@@ -151,7 +169,7 @@ pub fn answer(offer: &Offer, free: u64, sender: &str) -> Answer {
     }
 }
 
-/// The IPv6 link-local address (EUI-64) of a MAC address such as \`aa:bb:cc:dd:ee:ff\`.
+/// The IPv6 link-local address (EUI-64) of a MAC address such as `aa:bb:cc:dd:ee:ff`.
 pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
     let b: Vec<u8> = mac
         .split(':')
@@ -171,7 +189,7 @@ pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
     ))
 }
 
-/// The link-local address and index of \`iface\` from \`/proc/net/if_inet6\`'s text.
+/// The link-local address and index of `iface` from `/proc/net/if_inet6`'s text.
 pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
@@ -293,7 +311,7 @@ impl Paths {
         }
     }
 
-    /// \`inbox/\` and an empty \`.incoming/\` (what a killed run left there goes).
+    /// `inbox/` and an empty `.incoming/` (what a killed run left there goes).
     fn prepare(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.inbox) {
             log(format!("{}: {e}", self.inbox.display()));
@@ -488,7 +506,7 @@ async fn run(
                                 st.head = Head::Ready { iface, mode, channel, flags, station, driver };
                                 st.write();
                             }
-                            Err(e) => break 'main Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
+                            Err(e) => break 'main Exit::Error(start_failed_text(&iface, &station, &driver, &e)),
                         }
                     }
                     Some(HelperLine::Up { .. }) => log("a second up line from the helper, ignored"),
@@ -607,7 +625,7 @@ enum Cmd {
     Shutdown,
 }
 
-/// A receiver that answered \`/Discover\`: where to send and its TXT flags.
+/// A receiver that answered `/Discover`: where to send and its TXT flags.
 #[derive(Debug, Clone, Copy)]
 struct Target {
     addr: SocketAddrV6,
@@ -706,8 +724,8 @@ fn outbox_thread(
     }
 }
 
-/// Finds receivers: mDNS on the link and \`/Discover\` at the radio's AWDL
-/// peers, again every [\`REDISCOVER\`] for those that answered.
+/// Finds receivers: mDNS on the link and `/Discover` at the radio's AWDL
+/// peers, again every [`REDISCOVER`] for those that answered.
 async fn discovery(
     iface: Iface,
     own_id: String,
@@ -810,7 +828,7 @@ async fn discovery(
     }
 }
 
-/// The sending half: present unless the helper said \`no-ble\`.
+/// The sending half: present unless the helper said `no-ble`.
 struct Sending {
     sender: watch::Sender<Arc<Sender>>,
     cmds: smpsc::Sender<Cmd>,
@@ -984,7 +1002,7 @@ impl Airdrop {
         })
     }
 
-    /// A new name: a new receiver (its \`/Discover\` answer) and sender.
+    /// A new name: a new receiver (its `/Discover` answer) and sender.
     async fn rename(&mut self, name: &str) -> Result<(), String> {
         self.receiver.abort();
         let _ = (&mut self.receiver).await;
@@ -1166,7 +1184,7 @@ fn remove_entry(p: &Path) {
     }
 }
 
-/// Binds a receiver named \`name\` and forwards its events tagged with \`generation\`.
+/// Binds a receiver named `name` and forwards its events tagged with `generation`.
 async fn bind(
     iface: Iface,
     identity: &Identity,
@@ -1249,6 +1267,22 @@ mod tests {
         assert_eq!(
             ready_text("awdl0", "", "", "exclusive", 6),
             "ready on awdl0 (exclusive, channel 6)"
+        );
+    }
+
+    #[test]
+    fn the_start_failure_names_the_card() {
+        assert_eq!(
+            start_failed_text("awdl0", "wlxc03a55f0d060", "rtw88_8822bu", "mDNS: x"),
+            "FloeDrop cannot start on wlxc03a55f0d060 (rtw88_8822bu): mDNS: x"
+        );
+        assert_eq!(
+            start_failed_text("awdl0", "wlx1", "", "mDNS: x"),
+            "FloeDrop cannot start on wlx1: mDNS: x"
+        );
+        assert_eq!(
+            start_failed_text("awdl0", "", "", "mDNS: x"),
+            "FloeDrop cannot start on awdl0: mDNS: x"
         );
     }
 
