@@ -135,11 +135,17 @@ pub fn start_failed_text(iface: &str, station: &str, driver: &str, why: &str) ->
 /// else the link.
 pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel: u32) -> String {
     let card = if station.is_empty() { iface } else { station };
-    if driver.is_empty() {
-        format!("ready on {card} ({mode}, channel {channel})")
-    } else {
-        format!("ready on {card} ({driver}, {mode}, channel {channel})")
+    let mut how = String::new();
+    if !driver.is_empty() {
+        how.push_str(driver);
+        how.push_str(", ");
     }
+    how.push_str(mode);
+    // 0: the helper could not read the channel.
+    if channel != 0 {
+        how.push_str(&format!(", channel {channel}"));
+    }
+    format!("ready on {card} ({how})")
 }
 
 /// Bytes an `/Ask` offers; a file without a size counts 0 (the tmpfs still caps it).
@@ -1267,6 +1273,10 @@ mod tests {
         assert_eq!(
             ready_text("awdl0", "", "", "exclusive", 6),
             "ready on awdl0 (exclusive, channel 6)"
+        );
+        assert_eq!(
+            ready_text("awdl0", "wlx1", "rtw88_8822bu", "exclusive", 0),
+            "ready on wlx1 (rtw88_8822bu, exclusive)"
         );
     }
 

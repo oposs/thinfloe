@@ -32,6 +32,8 @@ pub trait RadioApi {
     /// What owlyd's probe says of the station radio.toml names now.
     async fn probe(&self) -> Result<Probe, String>;
     async fn acquire(&self) -> Result<(u64, LinkInfo), String>;
+    /// The channel the radio runs on, read from the station's phy once the link is up.
+    async fn link_channel(&self, station: &str) -> Option<u32>;
     async fn release(&self, lease: u64);
     /// A lease held while this helper starts: one a crashed run left
     /// detached. Releasing a lease of a live owner fails, harmlessly.
@@ -40,23 +42,21 @@ pub trait RadioApi {
     async fn wait_lost(&self, lease: u64) -> String;
 }
 
-/// What owlyd's probe says of a station: the mode the radio would run on, the channel it
-/// names (0: unknown) and, when Owly refuses the card, its first reason.
+/// What owlyd's probe says of a station: the mode the radio would run on and, when Owly
+/// refuses the card, its first reason. The probe's channel is not the link's (it is 6 before
+/// the country applies); the up line reads the link's with [`RadioApi::link_channel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     pub mode: String,
-    pub channel: u32,
     pub refusal: Option<String>,
 }
 
-/// owlyd's probe JSON: `mode` (else "unknown"), `channel` and the `say` of the first
-/// `missing` entry.
+/// owlyd's probe JSON: `mode` (else "unknown") and the `say` of the first `missing` entry.
 pub fn parse_probe(json: &str) -> Result<Probe, String> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("owlyd's probe: {e}"))?;
     Ok(Probe {
         mode: v["mode"].as_str().unwrap_or("unknown").to_string(),
-        channel: v["channel"].as_u64().unwrap_or(0) as u32,
         refusal: v["missing"].as_array().and_then(|m| m.first()).map(|m| {
             m["say"]
                 .as_str()
@@ -73,7 +73,7 @@ fn one_line(s: &str) -> String {
 }
 
 /// What the up line reports: the AWDL link (`iface`, always `awdl0` with owlyd), the mode
-/// and channel of owlyd's probe, the flags, and the Wi-Fi card under the link with its driver
+/// of owlyd's probe, the channel the link runs on (0: unknown), the flags, and the Wi-Fi card under the link with its driver
 /// (empty when unknown).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Up {
@@ -215,7 +215,7 @@ pub async fn hold<R: RadioApi, G>(
             }
         }
     }
-    let Some((station, Probe { mode, channel, .. })) = chosen else {
+    let Some((station, Probe { mode, .. })) = chosen else {
         say(out, &Err(first_refusal.unwrap_or_else(|| NO_CARD.into())));
         return 1;
     };
@@ -227,6 +227,7 @@ pub async fn hold<R: RadioApi, G>(
         }
     };
     let (guard, flags) = ble.await;
+    let channel = api.link_channel(&station).await.unwrap_or(0);
     let driver = card
         .cards
         .get(&station)
@@ -314,6 +315,19 @@ impl RadioApi for Owlyd {
         }
     }
 
+    async fn link_channel(&self, station: &str) -> Option<u32> {
+        let index =
+            std::fs::read_to_string(Path::new(SYS_NET).join(station).join("phy80211/index"))
+                .ok()?;
+        let o = tokio::process::Command::new("iw")
+            .arg("dev")
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        iw_channel(&String::from_utf8_lossy(&o.stdout), index.trim())
+    }
+
     async fn release(&self, lease: u64) {
         if let Err(e) = self.radio.release(lease).await {
             eprintln!("thinfloe-share: releasing lease {lease}: {}", api_text(&e));
@@ -356,6 +370,29 @@ impl RadioApi for Owlyd {
             }
         }
     }
+}
+
+/// The channel in the `phy#<phy_index>` section of `iw dev` output: the number of the first
+/// `channel N (` line of any of its interfaces. Other phys are ignored.
+pub fn iw_channel(iw_dev: &str, phy_index: &str) -> Option<u32> {
+    let head = format!("phy#{phy_index}");
+    let mut inside = false;
+    for line in iw_dev.lines() {
+        if !line.starts_with(char::is_whitespace) && !line.is_empty() {
+            inside = line.trim_end() == head;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("channel ")
+            && let Some((n, _)) = rest.split_once(" (")
+            && let Ok(n) = n.parse()
+        {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Whether an item of owlyd's name-owner stream means owlyd is gone (and
@@ -632,6 +669,8 @@ mod tests {
         toml: RefCell<PathBuf>,
         /// Stations the probe refuses, with the reason.
         refuse: Vec<(String, String)>,
+        /// What `link_channel` gives.
+        channel: Option<u32>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -657,9 +696,12 @@ mod tests {
                 .map(|(_, why)| why.clone());
             Ok(Probe {
                 mode: "exclusive".into(),
-                channel: 44,
                 refusal,
             })
+        }
+        async fn link_channel(&self, station: &str) -> Option<u32> {
+            self.calls.borrow_mut().push(format!("channel {station}"));
+            self.channel
         }
         async fn acquire(&self) -> Result<(u64, LinkInfo), String> {
             self.calls.borrow_mut().push("acquire".into());
@@ -749,7 +791,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_free_card_prints_error_and_acquires_nothing() {
-        let fake = Fake::default();
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
         let mut card = free_card();
         card.wifi_ifaces = vec!["wlp2s0".into()];
         let toml = tmp("nocard");
@@ -764,6 +809,7 @@ mod tests {
     async fn a_stale_detached_lease_is_released_first() {
         let fake = Fake {
             stale: Some(3),
+            channel: Some(44),
             ..Default::default()
         };
         let (code, out) = run(&fake, &free_card(), &tmp("stale"), async {}).await;
@@ -771,13 +817,22 @@ mod tests {
         assert_eq!(out, "up\tawdl0\texclusive\t44\tno-ble\twlx00e04c123456\t\n");
         assert_eq!(
             *fake.calls.borrow(),
-            ["release 3", "probe wlx00e04c123456", "acquire", "release 5"]
+            [
+                "release 3",
+                "probe wlx00e04c123456",
+                "acquire",
+                "channel wlx00e04c123456",
+                "release 5"
+            ]
         );
     }
 
     #[tokio::test]
     async fn the_up_line_names_the_station_and_its_driver() {
-        let fake = Fake::default();
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
         let mut card = free_card();
         card.cards.insert(
             "wlx00e04c123456".into(),
@@ -799,6 +854,7 @@ mod tests {
     async fn lease_lost_is_an_error_line() {
         let fake = Fake {
             lost: Some("link lost".into()),
+            channel: Some(44),
             ..Default::default()
         };
         let (code, out) = run(&fake, &free_card(), &tmp("lost"), std::future::pending()).await;
@@ -808,12 +864,22 @@ mod tests {
         assert!(lines[0].starts_with("up\tawdl0\t"));
         assert_eq!(lines[1], "error\tThe radio stopped: link lost");
         // The lease is gone already; nothing to release.
-        assert_eq!(*fake.calls.borrow(), ["probe wlx00e04c123456", "acquire"]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            [
+                "probe wlx00e04c123456",
+                "acquire",
+                "channel wlx00e04c123456"
+            ]
+        );
     }
 
     #[tokio::test]
     async fn stdin_eof_releases_the_lease() {
-        let fake = Fake::default();
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
         let stop = stdin_closed(tokio::io::empty());
         let (code, out) = run(&fake, &free_card(), &tmp("eof"), stop).await;
         assert_eq!(code, 0);
@@ -827,7 +893,6 @@ mod tests {
             parse_probe(r#"{"mode":"exclusive","channel":6,"missing":[]}"#).unwrap(),
             Probe {
                 mode: "exclusive".into(),
-                channel: 6,
                 refusal: None
             }
         );
@@ -868,6 +933,7 @@ mod tests {
     async fn a_refused_stick_falls_back_to_the_next_card() {
         let fake = Fake {
             refuse: vec![("wlx00e04c123456".into(), "untested".into())],
+            channel: Some(44),
             ..Default::default()
         };
         let toml = tmp("refused");
@@ -879,6 +945,7 @@ mod tests {
                 "probe wlx00e04c123456",
                 "probe wlp3s0",
                 "acquire",
+                "channel wlp3s0",
                 "release 5"
             ]
         );
@@ -897,12 +964,54 @@ mod tests {
                 ("wlx00e04c123456".into(), "A".into()),
                 ("wlp3s0".into(), "B".into()),
             ],
+            channel: Some(44),
             ..Default::default()
         };
         let (code, out) = run(&fake, &stick_and_internal(), &tmp("allrefused"), async {}).await;
         assert_eq!(code, 1);
         assert_eq!(out, "error\tA\n");
         assert!(!fake.calls.borrow().iter().any(|c| c == "acquire"));
+    }
+
+    const IW_DEV: &str = "phy#1
+\tInterface owlyibss0
+\t\tifindex 9
+\t\ttype IBSS
+\t\tchannel 44 (5220 MHz), width: 20 MHz (no HT), center1: 5220 MHz
+\tInterface wlxc03a55f0d060
+\t\tifindex 5
+\t\ttype managed
+phy#0
+\tInterface wlp2s0
+\t\tifindex 3
+\t\ttype managed
+\t\tchannel 1 (2412 MHz), width: 20 MHz, center1: 2412 MHz
+";
+
+    #[test]
+    fn the_channel_is_read_from_the_stations_phy_only() {
+        assert_eq!(iw_channel(IW_DEV, "1"), Some(44));
+        assert_eq!(iw_channel(IW_DEV, "0"), Some(1));
+        assert_eq!(iw_channel(IW_DEV, "2"), None);
+        assert_eq!(iw_channel("", "1"), None);
+        // "phy#1" is not "phy#10".
+        assert_eq!(
+            iw_channel(&IW_DEV.replace("phy#1\n", "phy#10\n"), "1"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_up_line_has_the_links_channel() {
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
+        let (_, out) = run(&fake, &free_card(), &tmp("chan44"), async {}).await;
+        assert_eq!(out, "up\tawdl0\texclusive\t44\tno-ble\twlx00e04c123456\t\n");
+        let fake = Fake::default();
+        let (_, out) = run(&fake, &free_card(), &tmp("chan0"), async {}).await;
+        assert_eq!(out, "up\tawdl0\texclusive\t0\tno-ble\twlx00e04c123456\t\n");
     }
 
     #[test]
@@ -920,7 +1029,10 @@ mod tests {
 
     #[tokio::test]
     async fn radio_toml_is_written_before_the_radio_comes_up() {
-        let fake = Fake::default();
+        let fake = Fake {
+            channel: Some(44),
+            ..Default::default()
+        };
         let toml = tmp("written");
         let (code, _) = run(&fake, &free_card(), &toml, async {}).await;
         assert_eq!(code, 0);

@@ -124,11 +124,15 @@ pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
             driver,
         } => {
             let card = if station.is_empty() { iface } else { station };
-            let how = if driver.is_empty() {
-                format!("{mode}, channel {channel}")
+            let mut how = if driver.is_empty() {
+                mode.clone()
             } else {
-                format!("{driver}, {mode}, channel {channel}")
+                format!("{driver}, {mode}")
             };
+            // 0: the radio helper could not read the channel.
+            if *channel != 0 {
+                how.push_str(&format!(", channel {channel}"));
+            }
             let mut v = vec![(
                 format!("Ready on {card} ({how}). Phones must be set to AirDrop 'Everyone for 10 Minutes'."),
                 Tone::Plain,
@@ -317,6 +321,22 @@ mod tests {
         assert_eq!(
             status_lines(&ready_on("wlx1", "")),
             [(format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_channel_is_left_out() {
+        let mut head = ready_on("wlx1", "rtw88_8822bu");
+        if let Head::Ready { channel, .. } = &mut head {
+            *channel = 0;
+        }
+        assert_eq!(
+            status_lines(&head),
+            [(
+                "Ready on wlx1 (rtw88_8822bu, exclusive). Phones must be set to AirDrop 'Everyone for 10 Minutes'."
+                    .to_string(),
+                Tone::Plain
+            )]
         );
     }
 
