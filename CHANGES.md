@@ -9,6 +9,17 @@ the entries into this file.
 - A card swapped in a card reader for another card with the same name gave no "… connected" note. It now does.
 - A long description on an app tile no longer runs under the small "update" or "user" mark; it now ends with "…" before the marks.
 - On a greyed-out tile, the highlight of the "update" mark under the mouse is now greyed out like the rest of the tile; its keyboard focus frame stays at full strength, so it can still be seen.
+- While a phone sends files, Settings → Network shows "Receiving IMG_0042.DNG from Jane's iPhone" (or "Receiving 3 files from …"), and the menu log has a line for each offer, accept, decline and finished or failed delivery, with sender, file count and size.
+- With no time zone set, FloeDrop takes the country from the keyboard layout (for example ch gives Switzerland), which allows the faster 5 GHz channel. If neither gives a country, Settings → Network says "No country set: set the time zone in the Time band below for faster FloeDrop."
+
+### Fixed
+
+- When a TP-Link RTL8812BU stick stopped sending, FloeDrop still said "Ready" and iPhones did not see the machine; later starts failed with "Device or resource busy". FloeDrop now stops and says "The Wi-Fi stick … stopped sending. Unplug it and plug it in again." (for an internal card: "Restart the machine.").
+- After FloeDrop was switched off and on, iPhones could list the machine twice and send the same files to both, so the inbox got " (2)" copies. The machine now shows up once.
+- Settings → Network and the menu log said "channel 6" for FloeDrop while the radio ran on channel 44. They now show the channel the radio really uses.
+- A USB Wi-Fi stick that Owly cannot drive kept FloeDrop from using a working internal card; FloeDrop now tries the next card.
+- FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
+- "FloeDrop cannot start on …" now names the Wi-Fi card and driver instead of awdl0.
 
 ## 4.13.0 - 2026-11-26
 

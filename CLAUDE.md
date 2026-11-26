@@ -156,7 +156,7 @@ Not standing constraints, but each has broken something or is guarded by a test.
 
 ### FloeDrop
 
-- The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` (first line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver`, iface the AWDL link and station the Wi-Fi card under it, then `name<TAB>folder<TAB>state<TAB>since`), the helper's `up` line with the same fields and the OSD note datagram `note<TAB>tone<TAB>text<LF>` are contracts; readers ignore unknown trailing fields. The daemon reads only `generated/share`, never `config.toml`.
+- The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` (first line `starting`, `error<TAB>text` or `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver`, iface the AWDL link and station the Wi-Fi card under it, then `name<TAB>folder<TAB>state<TAB>since`, state `receiving` with `files<TAB>bytes<TAB>first` after it), the helper's `up` line with the same fields and the OSD note datagram `note<TAB>tone<TAB>text<LF>` are contracts; readers ignore unknown trailing fields. The daemon reads only `generated/share`, never `config.toml`.
 - `media-tfuser-FloeDrop.mount` is a tmpfs with exactly `size=25%,uid=1001,gid=1001,mode=0755,nosuid,nodev,noexec`. Guard: `test-floedrop-image.sh`.
 - The radio helper never calls `AcquireDetached` (a crash must give the card back), and a reload SIGHUP goes to the daemon pid only: the process group holds the sudo'd helper. Owly stays pinned to one commit in `Cargo.toml` and the Dockerfile. Notes: [docs/notes/floedrop.md](docs/notes/floedrop.md).
 
