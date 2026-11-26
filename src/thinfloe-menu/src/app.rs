@@ -195,9 +195,9 @@ pub struct App {
     covered: bool,
     height: f32,
     /// The Deskflow daemon, run while `[deskflow] listen` is on.
-    deskflow: crate::deskflow_sup::Supervisor,
+    deskflow: crate::daemon_sup::Supervisor,
     /// The FloeDrop daemon, run while `[share] enabled` is on.
-    share: crate::deskflow_sup::Supervisor,
+    share: crate::daemon_sup::Supervisor,
 }
 
 /// Starts a sampler thread with its `on` flag and returns its shared copy.
@@ -412,7 +412,7 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
     let deskflow = {
         let waker = event_loop.create_proxy();
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/thinfloe-menu"));
-        crate::deskflow_sup::Supervisor::new(program)
+        crate::daemon_sup::Supervisor::new(program)
             .with_args(vec![crate::deskflow::DESKFLOW_ARG.into()])
             .with_log(feed.clone())
             .with_notify(move || {
@@ -425,7 +425,7 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         let program = std::env::var_os("TF_SHARE")
             .filter(|p| !p.is_empty())
             .map_or_else(|| PathBuf::from(crate::share_state::PROGRAM), PathBuf::from);
-        crate::deskflow_sup::Supervisor::new(program)
+        crate::daemon_sup::Supervisor::new(program)
             .with_daemon(crate::share_state::SHARE)
             .with_state_file(crate::share_state::path())
             .with_log(feed.clone())

@@ -44,7 +44,7 @@ use edge::Rect;
 use keymap::{Xkb, keysym_name};
 
 pub const DESKFLOW_ARG: &str = "--deskflow";
-/// The pid of the menu that started the daemon (`deskflow_sup`).
+/// The pid of the menu that started the daemon (`daemon_sup`).
 pub const PARENT_ENV: &str = "TF_DESKFLOW_PARENT";
 const PROBE_CAPTURE_ARG: &str = "--probe-capture";
 const PROBE_CLIP_ARG: &str = "--probe-clip";

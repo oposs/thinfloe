@@ -68,7 +68,7 @@ release.
 - Stick writer and upgrades: `overlay/usr/bin/thinfloe-upgrade`.
 - Time zone and NTP: `overlay/usr/bin/thinfloe-time` (live, as root), `install_local_time()` in `thinfloe-lib.sh` (boot), `overlay/usr/libexec/thinfloe/dhcp-timezone` (DHCP zone and NTP servers), the Time band in `timeband.rs`/`network_ui.rs`. Notes: [docs/notes/time-zone.md](docs/notes/time-zone.md).
 - Add-ons: `overlay/usr/bin/thinfloe-addon` (its docstring lists the commands), hooks in `overlay/usr/libexec/thinfloe/addon-hooks/`.
-- Deskflow server: `src/thinfloe-menu/src/deskflow/` (daemon, `thinfloe-menu --deskflow`), `deskflow_sup.rs` (the menu's supervision), `deskflowtab.rs`/`deskflow_ui.rs` (the Deskflow band). Notes: [docs/notes/deskflow.md](docs/notes/deskflow.md).
+- Deskflow server: `src/thinfloe-menu/src/deskflow/` (daemon, `thinfloe-menu --deskflow`), `daemon_sup.rs` (the menu's supervision of the Deskflow and FloeDrop daemons), `deskflowtab.rs`/`deskflow_ui.rs` (the Deskflow band). Notes: [docs/notes/deskflow.md](docs/notes/deskflow.md).
 - Automount of sticks and cards: `overlay/usr/libexec/thinfloe/thinfloe-automount` (root helper), `overlay/etc/udev/rules.d/90-thinfloe-automount.rules`, `thinfloe-automount@.service`; the Eject tile in `src/thinfloe-menu/src/` (`removable.rs`, `eject_ui.rs`). Notes: [docs/notes/automount.md](docs/notes/automount.md).
 - Battery reader: `overlay/usr/libexec/thinfloe/peripheral-battery` and its units. Bolt microphone mute key (HID++ divert, F20 through uinput): `overlay/usr/libexec/thinfloe/logitech-keys` and `thinfloe-logitech-keys.service`, started by the same udev rule.
 - Boot screen: `overlay/usr/share/plymouth/themes/thinfloe/`.

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::config::ShareCfg;
-use crate::deskflow_sup::Daemon;
+use crate::daemon_sup::Daemon;
 use crate::settings::Tone;
 use crate::sharecfg;
 
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn the_share_daemon_starts_with_sighup_blocked() {
-        use crate::deskflow_sup::Supervisor;
+        use crate::daemon_sup::Supervisor;
         use std::os::unix::fs::PermissionsExt;
         use std::time::Instant;
         let d = crate::testdir::TestDir::new("share-state", "hup");
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn the_daemon_is_told_the_menu_pid() {
-        use crate::deskflow_sup::Supervisor;
+        use crate::daemon_sup::Supervisor;
         use std::os::unix::fs::PermissionsExt;
         use std::time::Instant;
         let d = crate::testdir::TestDir::new("share-state", "parent");
@@ -745,7 +745,7 @@ mod tests {
     /// Whether a reload of a stand-in daemon reaches the daemon and a
     /// child of it in its group: (daemon, child).
     fn reload_reaches(daemon: Daemon, tag: &str) -> (bool, bool) {
-        use crate::deskflow_sup::Supervisor;
+        use crate::daemon_sup::Supervisor;
         use std::os::unix::fs::PermissionsExt;
         use std::time::Instant;
         let d = crate::testdir::TestDir::new("share-state", tag);

@@ -11,8 +11,8 @@ use shadcn_egui::icons::lucide;
 
 use super::surface::{Placement, mark_placement, note_placement, panel_placement};
 use crate::brand::{
-    self, MARK_ICON, OSD_BAR_GAP, OSD_BAR_H, OSD_GAP, OSD_ICON, OSD_NOTE_MAX_W, OSD_NOTE_ROWS, OSD_NOTE_SIDE,
-    OSD_PAD_X, OSD_PAD_Y, OSD_TEXT_PT, OSD_W, role,
+    self, MARK_ICON, OSD_BAR_GAP, OSD_BAR_H, OSD_GAP, OSD_ICON, OSD_NOTE_MAX_W, OSD_NOTE_ROW_H, OSD_NOTE_ROWS,
+    OSD_NOTE_SIDE, OSD_PAD_X, OSD_PAD_Y, OSD_TEXT_PT, OSD_W, role,
 };
 use crate::raster::{Canvas, Textures};
 
@@ -49,9 +49,7 @@ impl PanelView {
             PanelView::Volume { .. } | PanelView::Muted { .. } | PanelView::Brightness { .. }
         )
     }
-}
 
-impl PanelView {
     /// Where the panel goes at `scale`, for a canvas of `size` from
     /// `Painter::panel_on` (a note is as large as its text).
     pub fn placement(&self, scale: f32, size: (u32, u32)) -> Placement {
@@ -76,11 +74,12 @@ struct Look {
     bar: Option<(u8, Color32)>,
 }
 
-fn look(v: &PanelView, t: &Theme) -> Look {
+/// `None` for a note, which has no icon row: `note_ui` draws it.
+fn look(v: &PanelView, t: &Theme) -> Option<Look> {
     let p = t.palette();
     let (ice, muted, warn) = (p.primary, p.muted_foreground, t.role(role::WARN));
     let level = |pc: u8| Some((percent_text(pc), muted));
-    match v {
+    Some(match v {
         PanelView::Volume { percent } => Look {
             icon: &lucide::VOLUME_2,
             icon_color: ice,
@@ -123,7 +122,7 @@ fn look(v: &PanelView, t: &Theme) -> Look {
             right: Some(("not supported".into(), warn)),
             bar: None,
         },
-        PanelView::Note { .. } => unreachable!("a note has no look; `note_ui` draws it"),
+        PanelView::Note { .. } => return None,
         PanelView::BrightnessUnknown => Look {
             icon: &lucide::SUN,
             icon_color: ice,
@@ -131,7 +130,7 @@ fn look(v: &PanelView, t: &Theme) -> Look {
             right: None,
             bar: None,
         },
-    }
+    })
 }
 
 /// Logical pixels as points that land on whole physical pixels, each
@@ -200,7 +199,7 @@ fn panel_ui(ui: &mut Ui, v: &PanelView, scale: f32) {
     }
     let t = Theme::current(ui.ctx());
     let p = t.palette();
-    let l = look(v, &t);
+    let Some(l) = look(v, &t) else { return };
     let all = ui.ctx().content_rect();
     let s = |v: f32| snap(v, scale);
     let (pad_x, pad_y, icon) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_ICON));
@@ -294,7 +293,7 @@ impl Painter {
     /// is as high as a key's panel without a bar, more rows add theirs.
     pub fn note_fit(&mut self, text: &str, scale: f32, output_width: Option<u32>) -> NoteFit {
         let s = |v: f32| snap(v, scale);
-        let (pad_x, pad_y, icon) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_ICON));
+        let (pad_x, pad_y, row) = (s(OSD_PAD_X), s(OSD_PAD_Y), s(OSD_NOTE_ROW_H));
         let widest = note_max_width(scale, output_width);
         let narrowest = (s(OSD_W) * scale).min(widest);
         let max_text = widest / scale - 2.0 * pad_x;
@@ -306,7 +305,7 @@ impl Painter {
         });
         let (text_size, rows, elided) = measured;
         let w = ((text_size.x + 2.0 * pad_x) * scale).ceil().clamp(narrowest, widest);
-        let text_h = if rows > 1 { text_size.y.max(icon) } else { icon };
+        let text_h = if rows > 1 { text_size.y.max(row) } else { row };
         let h = ((2.0 * pad_y + text_h) * scale).round();
         NoteFit {
             size: (w as u32, h as u32),
@@ -508,6 +507,28 @@ mod tests {
         let half = c.height / 2;
         assert!(any(&c, (16, c.width - 16), (4, half), WARN));
         assert!(any(&c, (16, c.width - 16), (half, c.height - 4), WARN));
+    }
+
+    #[test]
+    fn a_note_at_scale_2_is_twice_as_wide() {
+        let mut p = Painter::new();
+        let one = p.note_fit("FloeDrop is ready", 1.0, Some(3840));
+        let two = p.note_fit("FloeDrop is ready", 2.0, Some(3840));
+        assert!(
+            (two.size.0 as i64 - 2 * one.size.0 as i64).abs() <= 2,
+            "{one:?} {two:?}"
+        );
+        assert!(
+            (two.size.1 as i64 - 2 * one.size.1 as i64).abs() <= 2,
+            "{one:?} {two:?}"
+        );
+    }
+
+    #[test]
+    fn a_note_has_no_look() {
+        let t = crate::brand::theme();
+        assert!(look(&note(false, "x"), &t).is_none());
+        assert!(look(&PanelView::MicOff, &t).is_some());
     }
 
     #[test]

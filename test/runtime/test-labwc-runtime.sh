@@ -1518,6 +1518,24 @@ liveoff)
     # Killed outright, the OSD leaves no pactl subscribe behind either.
     stop_osd KILL
     ;;
+note)
+    # A two-row FloeDrop note at scale 1, then at scale 2 (the scale file of the menu).
+    python3 /usr/local/bin/x11-probe.py --background ff0000 --hold 20 &
+    sleep 3
+    start_osd
+    text=$(printf "FloeDrop %.0s" $(seq 40))
+    text=${text% }
+    note() { python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto((\"note\twarn\t\" + sys.argv[1] + \"\n\").encode(), \"/tmp/xdg/thinfloe-osd.sock\")" "$text"; }
+    note
+    sleep 0.5
+    px note --within 1 left=270,600,300,697#151b22 right=980,600,1010,697#151b22
+    printf "2\n" >/tmp/xdg/thinfloe-scale
+    sleep 3
+    note
+    sleep 0.5
+    px note2 --within 1 left2=30,500,60,675#151b22
+    stop_osd
+    ;;
 esac
 sed "s/^/pactl: /" /tmp/pactl.log 2>/dev/null
 exit 0'
@@ -1611,6 +1629,10 @@ wev2=$(mk_val wev2)
 [[ " $wev1" == *" XF86AudioRaiseVolume "* && " $wev2" != *" XF86AudioRaiseVolume "* && " $wev2" == *" y "* ]]
 mk_check $? "the volume switch acts at once: after --env-only and labwc --reconfigure the key no longer reaches the window" \
     "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
+
+mk_run note 1 off off
+mk_expect "a two-row note at scale 1 is 720 px wide, centred" note left=found right=found
+mk_expect "at scale 2 the note keeps 44 px to the edges of a 1280 px output" note2 left2=found
 
 mk_run osd 2 on off
 [[ "$(mk_val socket)" == yes ]] && grep -qx 'pactl: set-sink-volume spk_a 50%' <<<"$MK_OUT" &&
