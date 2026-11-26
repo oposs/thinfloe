@@ -115,12 +115,15 @@ fn a_pattern_bomb_draws_the_letter_and_its_memory_is_bounded() {
         dir.file("bomb1.svg", &pattern_bomb(1)),
         dir.file("bomb4.svg", &pattern_bomb(4)),
     ]);
-    // Refused or aborted, either way by itself and not by the deadline,
-    // with the letter drawn; how resvg allocates the bomb is its own
-    // business. No wall-clock check: a starved test run is slow.
+    // Refused by the guard or aborted by a refused allocation, either way
+    // by itself, with the letter drawn. Not the deadline ("took longer")
+    // and not RLIMIT_CPU (SIGXCPU or SIGKILL): a bomb that spins would end
+    // that way. No wall-clock check: a starved test run is slow.
     for r in &out {
         let e = r.as_ref().map(|_| ()).unwrap_err();
-        assert!(!e.starts_with("took longer"), "{e}");
+        let refused = e.starts_with("more than ") || e.starts_with("elements nested deeper");
+        let aborted = e.starts_with("the renderer was killed by signal 6 (memory allocation of");
+        assert!(refused || aborted, "{e}");
     }
     let peak = children_max_rss();
     assert!(peak <= ICON_MEMORY, "a renderer reached {} MiB", peak >> 20);
