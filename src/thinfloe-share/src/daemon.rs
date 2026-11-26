@@ -1551,6 +1551,21 @@ mod tests {
     use owly_airdrop::proto::messages::AskFile;
 
     #[test]
+    fn default_name_matches_the_menu() {
+        let table = include_str!("../../../test/unit/floedrop-names.tsv");
+        let mut rows = 0;
+        for line in table
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (host, want) = line.split_once('\t').expect("host<TAB>name");
+            assert_eq!(default_name(host), want, "{host}");
+            rows += 1;
+        }
+        assert!(rows >= 5);
+    }
+
+    #[test]
     fn proc_is_not_a_tmpfs() {
         assert!(!is_tmpfs(Path::new("/proc")).unwrap());
         if Path::new("/dev/shm").is_dir() {

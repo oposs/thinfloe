@@ -1,0 +1,7 @@
+# FloeDrop's default name for a host name, as thinfloe-share and the menu make it.
+# host<TAB>expected name; read by sharecfg.rs (menu) and daemon.rs (thinfloe-share).
+thinfloe-56db68	FloeDrop 56db68
+desk-7	FloeDrop desk-7
+thinfloe-	FloeDrop thinfloe-
+THINFLOE-ab	FloeDrop THINFLOE-ab
+thinfloe-ü1	FloeDrop ü1
