@@ -225,7 +225,7 @@ img, video, canvas { max-width: 100%; display: block; }
 .tabs > input { position: absolute; opacity: 0; pointer-events: none; }
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: var(--gap);
   padding: var(--gap);
   background: #1c2026;
@@ -249,16 +249,19 @@ img, video, canvas { max-width: 100%; display: block; }
 #st-network:checked ~ .tabbar label[for="st-network"],
 #st-screen:checked ~ .tabbar label[for="st-screen"],
 #st-keyboard:checked ~ .tabbar label[for="st-keyboard"],
+#st-sound:checked ~ .tabbar label[for="st-sound"],
 #st-status:checked ~ .tabbar label[for="st-status"] { color: #fff; background: #2a2f36; border-color: #4a525c; }
 #st-packages:focus-visible ~ .tabbar label[for="st-packages"],
 #st-network:focus-visible ~ .tabbar label[for="st-network"],
 #st-screen:focus-visible ~ .tabbar label[for="st-screen"],
 #st-keyboard:focus-visible ~ .tabbar label[for="st-keyboard"],
+#st-sound:focus-visible ~ .tabbar label[for="st-sound"],
 #st-status:focus-visible ~ .tabbar label[for="st-status"] { outline: 2px solid var(--ice); outline-offset: 2px; }
 #st-packages:checked ~ .p-packages,
 #st-network:checked ~ .p-network,
 #st-screen:checked ~ .p-screen,
 #st-keyboard:checked ~ .p-keyboard,
+#st-sound:checked ~ .p-sound,
 #st-status:checked ~ .p-status { display: block; }
 
 /* The tile grid, as in the menu: square, 3px apart. */

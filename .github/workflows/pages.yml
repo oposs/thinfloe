@@ -1,6 +1,11 @@
 name: Pages
 # Publishes site/ to GitHub Pages. The page shows the release number from
 # RELEASE, so a release (which changes RELEASE on main) publishes it again.
+#
+# Two jobs, as in GitHub's Pages starter workflow: deploy-pages in the same
+# job as upload-pages-artifact found no artifact 0.3 s after the upload had
+# finished (run 45723254620, twice). A job of its own gives the artifact
+# listing time to see it.
 
 on:
   push:
@@ -19,15 +24,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      pages: read # configure-pages reads the site's settings
     steps:
       - uses: actions/checkout@v7
       - name: Write the release number into the page
@@ -42,5 +43,16 @@ jobs:
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - id: deploy
         uses: actions/deploy-pages@v5
