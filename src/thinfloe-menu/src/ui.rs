@@ -3523,6 +3523,41 @@ mod tests {
             .cursor_icon
     }
 
+    // A pass egui discards gets the click, the pass after it none: the
+    // click starts the tile once, not twice and not never.
+    #[test]
+    fn a_tile_click_in_a_discarded_pass_starts_one_tile() {
+        let menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let name = text_shape(&shapes, "T0").expect("the name").1.visual_bounding_rect();
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            events: click_at(name.center()),
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = vec![None];
+        let mut pass = 0;
+        let (mut out, events) = crate::app::run_passes(&ctx, input, |ui| {
+            if pass == 0 {
+                ui.ctx().request_discard("test");
+            }
+            pass += 1;
+            show(ui, &menu, &icons, &Chrome::default(), Instant::now())
+        });
+        out.textures_delta.clear();
+        assert_eq!(pass, 2, "the discard ran a second pass");
+        assert_eq!(events, vec![UiEvent::Tile(0)]);
+    }
+
     // A click on the update mark started the program (2026-11-26): the
     // whole tile was one click area.
     #[test]

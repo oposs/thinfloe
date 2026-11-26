@@ -1278,7 +1278,6 @@ impl App {
         }
         let input = live.egui.take_egui_input(&live.window);
         let now = Instant::now();
-        let mut event = None;
         // One reading of the wall clock and one look at the zone per frame,
         // for the header and the clock element.
         let wall = std::time::SystemTime::now();
@@ -1342,8 +1341,8 @@ impl App {
             out.textures_delta.clear();
             live.painted = true;
         }
-        let mut out = self.ctx.run_ui(input, |ui| {
-            event = ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now);
+        let (mut out, events) = run_passes(&self.ctx, input, |ui| {
+            ui::show(ui, &self.cfg.menu, &live.icons, &live.chrome, now)
         });
         live.egui.handle_platform_output(&live.window, out.platform_output);
 
@@ -1442,7 +1441,30 @@ impl App {
             }
         }
 
-        let effect = match event.clone() {
+        // Every pass's event, in order; a frame without one ticks once.
+        let mut applied = false;
+        let mut handle = |app: &mut Self, event: Option<ui::UiEvent>| {
+            let some = event.is_some();
+            let effect = app.handle(event, now);
+            if effect.is_some() || some {
+                app.apply(effect, event_loop);
+                applied = true;
+            }
+        };
+        if events.is_empty() {
+            handle(self, None);
+        }
+        for event in events {
+            handle(self, Some(event));
+        }
+        if applied && let Some(live) = self.live.as_ref() {
+            live.window.request_redraw();
+        }
+    }
+
+    /// The effect of one event of a pass; `None` is a frame without one.
+    fn handle(&mut self, event: Option<ui::UiEvent>, now: Instant) -> Option<Effect> {
+        match event {
             Some(ui::UiEvent::Tile(i)) => self.cfg.menu.activate(i, now),
             Some(ui::UiEvent::Chose(c)) => self.cfg.menu.choose(c, now),
             Some(ui::UiEvent::Settings(e)) => self.cfg.menu.settings(e),
@@ -1460,14 +1482,22 @@ impl App {
                 None
             }
             None => self.cfg.menu.tick(now),
-        };
-        if effect.is_some() || event.is_some() {
-            self.apply(effect, event_loop);
-            if let Some(live) = self.live.as_ref() {
-                live.window.request_redraw();
-            }
         }
     }
+}
+
+/// One egui run with the events of every pass: egui runs the closure again
+/// when a pass asks for a discard (at most twice in 0.37) and gives the
+/// later pass no input, so a click seen only in the discarded pass was lost
+/// when only the last pass's answer was kept.
+pub(crate) fn run_passes(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    mut show: impl FnMut(&mut egui::Ui) -> Option<ui::UiEvent>,
+) -> (egui::FullOutput, Vec<ui::UiEvent>) {
+    let mut events = Vec::new();
+    let out = ctx.run_ui(input, |ui| events.extend(show(ui)));
+    (out, events)
 }
 
 /// Whether the screen under a dialog must be painted before it is frozen:
@@ -2640,6 +2670,47 @@ esac"#;
             hardware_wanted(&crate::status::Area { layout }, false, tall),
             "memory shown"
         );
+    }
+
+    /// Runs `run_passes` with a closure that answers `answers[pass]` and
+    /// asks for a discard in the passes listed in `discard`; the events and
+    /// how many passes ran.
+    fn passes(answers: &[Option<ui::UiEvent>], discard: &[usize]) -> (Vec<ui::UiEvent>, usize) {
+        let ctx = egui::Context::default();
+        let mut pass = 0;
+        let (mut out, events) = run_passes(&ctx, egui::RawInput::default(), |ui| {
+            if discard.contains(&pass) {
+                ui.ctx().request_discard("test");
+            }
+            let a = answers.get(pass).cloned().flatten();
+            pass += 1;
+            a
+        });
+        out.textures_delta.clear();
+        (events, pass)
+    }
+
+    // egui runs a discarded pass again without its input; the event of the
+    // first pass was dropped when only the last pass's answer was kept.
+    #[test]
+    fn an_event_of_a_discarded_pass_is_kept() {
+        let (events, ran) = passes(&[Some(ui::UiEvent::Packages), None], &[0]);
+        assert_eq!(events, vec![ui::UiEvent::Packages]);
+        assert_eq!(ran, 2);
+    }
+
+    #[test]
+    fn events_of_both_passes_are_kept_in_order() {
+        let (events, ran) = passes(&[Some(ui::UiEvent::Tile(1)), Some(ui::UiEvent::Tile(2))], &[0]);
+        assert_eq!(events, vec![ui::UiEvent::Tile(1), ui::UiEvent::Tile(2)]);
+        assert_eq!(ran, 2);
+    }
+
+    #[test]
+    fn a_pass_without_a_discard_runs_once() {
+        let (events, ran) = passes(&[Some(ui::UiEvent::Retry(true))], &[]);
+        assert_eq!(events, vec![ui::UiEvent::Retry(true)]);
+        assert_eq!(ran, 1);
     }
 
     #[test]
