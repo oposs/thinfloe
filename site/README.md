@@ -37,8 +37,8 @@ itself is not written) and gives the machine the demo model name
    OxuLnk (the VM needs the network), then click Restart so the home is
    saved to the stick. Stop the VM with `qmp.py … quit`.
 2. **Still pictures** (`img/menu.webp`, `img/menu.png`, `img/settings-packages.webp`,
-   `-keyboard`, `-status`). Boot at 2880x1920, open the Terminal tile and
-   run a script as root that
+   `-keyboard`, `-sound`, `-status`). Boot at 2880x1920, open the Terminal tile and
+   run a script as root (under `systemd-run`, so it outlives the session) that
    - stops `thinfloe-peripheral-battery.timer` and writes two demo lines to
      `/run/thinfloe/peripherals/battery` every 45 s (`MX Mechanical`, 87,
      keyboard; `MX Anywhere 3S`, 64, mouse),
@@ -51,18 +51,27 @@ itself is not written) and gives the machine the demo model name
      layout drawn twice as sharp.
 
    Then `sudo systemctl restart getty@tty1`: the new session reads the new
-   size. Wait five minutes for the graph, park the pointer in the corner
+   size. For the Eject tile, plug a small USB stick into the VM: a raw file
+   with a FAT file system (`truncate -s 256M $W/photos.img`, `mkfs.vfat -n
+   PHOTOS $W/photos.img`), added over QMP with `blockdev-add` (driver
+   `raw`, node name `photos`) and `device_add` (driver `usb-storage`,
+   drive `photos`). In Settings, Sound, switch on "Set the volume on this
+   machine" and set the slider to about two thirds; the Keyboard tab then
+   shows "Volume keys control this machine" on too. Wait five minutes for
+   the graph, park the pointer in the corner
    (`qmp.py … move 2879 1919 2880 1920`) and take the shots. The menu
    picture is the whole screen; the Settings pictures are the crop
-   `1872x858+504+432` (the Keyboard one has the layout list open and its
-   last 6 rows are background). WebP lossless; `menu.png` is the same
-   picture with 256 colours.
+   `1872x858+504+432` (for 4.12.0 the Keyboard one has the layout list
+   closed, so the key switches show). WebP lossless (`cwebp -lossless -z 9`);
+   `menu.png` is the same picture with 256 colours (`convert -dither None
+   -colors 256 PNG8:`, then `oxipng`).
 3. **Network and Screen tabs** (`img/settings-network.webp`, `-screen`).
-   The VM has no WiFi and one monitor, so these two come from the menu's
-   shot test with staged data, at the same size, scale and crop:
+   The VM has no WiFi, one monitor and no Deskflow computer, so these two
+   come from the menu's shot test with staged data (two monitors and two
+   attached computers on the Screen tab), at the same size, scale and crop:
 
        cd src/thinfloe-menu
-       TF_SHOT_DIR=$W cargo test -j4 --lib shot_page -- --ignored
+       TF_SHOT_DIR=$W cargo test -j2 --lib shot_page -- --ignored
 
 4. **Boot movie** (`boot.webm`, `boot.mp4`, `img/boot-poster.webp`). Boot
    at 1440x960 and record from power-on:
