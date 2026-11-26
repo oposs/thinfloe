@@ -2,8 +2,10 @@
 //! Owly's AirDrop tests do: each test runs itself again under
 //! `unshare --user --map-root-user --net`, so no root and no radio are needed.
 //! The fake helper says the radio is up on `owb`; the test is on `owa`.
-//! Where unprivileged user namespaces are off, the tests say so and pass; with `CI` set
-//! they fail instead.
+//! Where unprivileged user namespaces are blocked, each test writes
+//! "SKIP: user namespaces blocked" to stderr (past the test harness's capture, so the
+//! line shows in a passing run) and passes, also when `CI` is set; with
+//! `TF_REQUIRE_USERNS=1` it fails instead.
 
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::unix::fs::PermissionsExt;
@@ -40,10 +42,12 @@ fn enter(test: &str) -> Option<(End, End)> {
         .args(["--user", "--map-root-user", "--net", "true"])
         .status();
     if !probe.is_ok_and(|s| s.success()) {
-        if std::env::var_os("CI").is_some() {
-            panic!("{test}: user namespaces are needed in CI");
+        if std::env::var_os("TF_REQUIRE_USERNS").is_some_and(|v| v == "1") {
+            panic!("{test}: user namespaces are blocked and TF_REQUIRE_USERNS=1 needs them");
         }
-        eprintln!("{test}: skipped, unprivileged user namespaces are not available");
+        // Not eprintln!: the harness captures it and shows it only for a failed test.
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "SKIP: user namespaces blocked ({test})");
         return None;
     }
     let status = Command::new("unshare")
