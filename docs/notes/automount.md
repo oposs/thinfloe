@@ -63,12 +63,15 @@ mounted.
 `/run/thinfloe/removable`, written atomically by the helper only, one line
 per mounted partition:
 
-    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind
+    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind<TAB>mount
 
 `disk` groups the partitions of one stick for eject; `kind` is `stick` or
 `card` (a reader, found by `ID_DRIVE_FLASH_*` or by more than one disk on
 the same USB device, or a built-in SD slot). Readers ignore unknown trailing
-fields. The menu's Eject tile and panel read it (`removable.rs`).
+fields. The menu's Eject tile and panel read it (`removable.rs`). `mount`
+is a number per mount, counted per boot in `/run/thinfloe/automount/mount-seq`,
+so a card swapped for one of the same name is a new stick to the OSD; a
+line of an older helper has none and reads as 0.
 
 A line counts only while `/proc/self/mountinfo` shows its device at its
 mount point. Every command first drops the lines whose mount is gone, with
@@ -84,9 +87,11 @@ reserved (`/run/thinfloe/automount/reserved/<name>`, its pid), and never
 a reserved name.
 
 `/run/thinfloe/removable.event` holds the last removal, one line
-`seq<TAB>name<TAB>clean|unclean`: `clean` after an eject, `unclean` for a
+`seq<TAB>name<TAB>clean|unclean[<TAB>count]`: `clean` after an eject, `unclean` for a
 stick pulled or a card taken out while mounted. A shutdown records nothing.
-`eject all` replaces the line once per disk, so a reader sees only the last.
+`eject all` writes one line for the batch: the names joined with ", " and,
+for two sticks or more, their count (the OSD then says "2 sticks can be
+removed"). A single event keeps its three fields.
 
 ## Commands
 
@@ -122,11 +127,10 @@ no `/`, no `.`, at most 32 characters), 3 busy (nothing changed). The menu calls
 `release` before it opens the stick; a busy release refuses the write with
 "the stick is in use". `add` skips the disk while the pid lives and the
 serial part of the id matches (the write repartitions the stick, so the size
-and partition fingerprint of the id would never match); a stale hold is
-removed, but only the file that was read: it is renamed aside, and if the
-file taken aside is not that inode it is linked back (or a newer hold is
-there already), so a hold the writer renamed into place meanwhile always
-stays. The hold goes when the write ends; a write that never wrote a byte
+and partition fingerprint of the id would never match). The writer renames
+its hold into place, and the helper deletes a stale one (the inode it read,
+compared again) only while it holds an flock on the hold directory; nothing
+is renamed aside, so the file is never missing. The hold goes when the write ends; a write that never wrote a byte
 runs `remount`, so the stick comes back (step `remount`, "Mounting the
 stick again": it can take up to the helper's 80 s add budget). `drives` reports such a stick as
 `automounted`, not `mounted`; an automounted stick that is not the boot
@@ -155,6 +159,11 @@ started:
   the udev query, `sync -f`, `umount` and `umount -l` share what is left,
   each keeping 2 s for every step after it.
 - `eject` and `release` wait 5 s for a disk lock and then answer busy.
+
+The hold directory's flock is taken by `thinfloe-upgrade` around the rename
+of its hold and by the helper around the delete of a stale one, waited for
+5 s at most (`HOLD_LOCK_WAIT`; then the writer writes unlocked and the
+helper keeps the stale hold). Nothing else is taken while it is held.
 
 ## Power off, restart
 
@@ -204,7 +213,9 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
 - `make qemu-smoke-two-sticks`: nothing but FloeDrop's tmpfs is mounted
   under `/media/tfuser` with a second ThinFloe stick attached; both sticks are virtio, which the
   udev rule never matches, so an `add` of the other stick's ESP by hand
-  must be refused as "ThinFloe stick".
+  must be refused as "ThinFloe stick". Both sticks stay on virtio (ruling
+  2026-11-26): the test checks the choice of the stick by its ID, which does
+  not depend on the bus; `make qemu-smoke-automount` covers USB.
 
 ## Owner checks on hardware
 

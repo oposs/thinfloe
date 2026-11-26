@@ -5,6 +5,9 @@ pull request adds its entry as a file in `CHANGES.d/new/`,
 `CHANGES.d/changed/` or `CHANGES.d/fixed/`. The release pull request moves
 the entries into this file.
 
+- After Eject all with several sticks plugged in, the note at the bottom of the screen named only one of them. It now says how many can be removed, for example "2 sticks can be removed".
+- A card swapped in a card reader for another card with the same name gave no "… connected" note. It now does.
+
 ## 4.13.0 - 2026-11-26
 
 ### Changed
