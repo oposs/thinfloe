@@ -207,6 +207,8 @@ struct Dev {
     /// instance) has two service IDs but one address.
     addr: String,
     name: String,
+    /// What stays the same across addresses (a hash of the receiver record), if known.
+    stable: Option<String>,
     folder: String,
     last_seen: Instant,
     present: bool,
@@ -365,22 +367,48 @@ impl Outbox {
         self
     }
 
-    /// A receiver answered `/Discover` at `addr` with the computer name `name`: give it
-    /// a folder, or the folder it, its address or its name had.
-    pub fn seen(&mut self, service_id: &str, addr: &str, name: &str, now: Instant) {
+    /// A receiver answered `/Discover` at `addr` with the computer name `name` and,
+    /// when it sent a receiver record, the record's hash `stable`: give it a folder, or
+    /// the folder it, its address or its name had.
+    pub fn seen(
+        &mut self,
+        service_id: &str,
+        addr: &str,
+        name: &str,
+        stable: Option<&str>,
+        now: Instant,
+    ) {
         // The same service ID, or the same phone under a new one (found by the radio's
-        // peer list first, by mDNS later): one device, one folder.
+        // peer list first, by mDNS later): one device, one folder. A record alone is
+        // not enough: two devices of one Apple account may send the same one, so the
+        // name must agree too.
         let known = self
             .devs
             .iter()
             .position(|d| d.service_id == service_id)
+            .or_else(|| {
+                stable.and_then(|s| {
+                    self.devs
+                        .iter()
+                        .position(|d| d.stable.as_deref() == Some(s) && d.name == name)
+                })
+            })
             .or_else(|| self.devs.iter().position(|d| d.addr == addr));
         if let Some(d) = known.map(|i| &mut self.devs[i]) {
             if d.service_id != service_id {
-                self.dropped
-                    .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
+                // The radio's `awdl-` key wins: it does not change with the mDNS
+                // instance, so the device does not flip between two keys.
+                if d.service_id.starts_with("awdl-") && !service_id.starts_with("awdl-") {
+                    self.dropped.push(service_id.to_string());
+                } else {
+                    self.dropped
+                        .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
+                    d.addr = addr.to_string();
+                }
             }
-            d.addr = addr.to_string();
+            if stable.is_some() {
+                d.stable = stable.map(str::to_string);
+            }
             d.name = name.to_string();
             d.last_seen = now;
             if !d.present {
@@ -400,6 +428,7 @@ impl Outbox {
             self.dropped
                 .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
             d.addr = addr.to_string();
+            d.stable = stable.map(str::to_string);
             d.name = name.to_string();
             d.last_seen = now;
             d.present = true;
@@ -438,6 +467,7 @@ impl Outbox {
             service_id: service_id.to_string(),
             addr: addr.to_string(),
             name: name.to_string(),
+            stable: stable.map(str::to_string),
             folder,
             last_seen: now,
             present: true,
@@ -697,8 +727,19 @@ mod tests {
             self.seen_at(id, &format!("addr-{id}"), name, s);
         }
         fn seen_at(&mut self, id: &str, addr: &str, name: &str, s: u64) {
+            self.seen_with(id, addr, name, None, s);
+        }
+        fn seen_with(&mut self, id: &str, addr: &str, name: &str, stable: Option<&str>, s: u64) {
             let now = self.at(s);
-            self.ob.seen(id, addr, name, now);
+            self.ob.seen(id, addr, name, stable, now);
+        }
+        fn folders(&self) -> Vec<String> {
+            let mut v: Vec<String> = fs::read_dir(&self.root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
         }
         fn changed(&mut self, folder: &str, s: u64) {
             let now = self.at(s);
@@ -751,12 +792,52 @@ mod tests {
         assert_eq!(dirs, vec![JANE.to_string()], "one folder, never \"(2)\"");
         assert_eq!(t.entries(JANE), vec!["early.jpg", "late.jpg"]);
         assert_eq!(t.ob.devices().len(), 1);
-        // The batch goes to the mDNS instance, files from before the re-key too.
+        // The batch goes to the radio's key, files from before the mDNS find too.
         t.tick(4);
         assert_eq!(
             t.calls(),
-            vec![("Jane-mdns-instance".to_string(), vec![early, late])]
+            vec![("awdl-02:11:22:33:44:55".to_string(), vec![early, late])]
         );
+    }
+
+    #[test]
+    fn the_awdl_key_wins_over_an_mdns_key() {
+        let mut t = T::new("ob-awdl-wins");
+        let awdl = "awdl-02:11:22:33:44:55";
+        t.seen_at(awdl, "fe80::1", JANE, 0);
+        t.seen_at("Jane-mdns", "fe80::1", JANE, 1);
+        t.seen_at(awdl, "fe80::1", JANE, 2);
+        t.seen_at("Jane-mdns", "fe80::1", JANE, 3);
+        assert_eq!(t.ob.take_dropped(), vec!["Jane-mdns", "Jane-mdns"]);
+        let a = t.put(JANE, "a.jpg");
+        t.changed(JANE, 3);
+        t.tick(6);
+        assert_eq!(t.calls(), vec![(awdl.to_string(), vec![a])]);
+    }
+
+    #[test]
+    fn one_record_is_one_phone_at_two_addresses() {
+        let mut t = T::new("ob-record");
+        t.seen_with("awdl-a", "fe80::1", JANE, Some("r1"), 0);
+        t.seen_with("Jane-mdns", "fe80::99", JANE, Some("r1"), 1);
+        assert_eq!(t.folders(), vec![JANE.to_string()]);
+        assert_eq!(t.ob.devices().len(), 1);
+        // The same record under another name is another device (one Apple account,
+        // two devices).
+        t.seen_with("Jane-ipad", "fe80::7", "Jane's iPad", Some("r1"), 2);
+        assert_eq!(t.ob.devices().len(), 2);
+    }
+
+    #[test]
+    fn two_phones_of_the_same_name_keep_two_folders() {
+        let mut t = T::new("ob-same-name");
+        t.seen_at("p1", "fe80::1", "iPhone", 0);
+        t.seen_at("p2", "fe80::2", "iPhone", 0);
+        t.seen_at("p1", "fe80::1", "iPhone", 1);
+        t.seen_at("p2", "fe80::2", "iPhone", 1);
+        assert_eq!(t.folders(), vec!["iPhone", "iPhone (2)"]);
+        assert_eq!(t.ob.devices().len(), 2);
+        assert!(t.ob.take_dropped().is_empty());
     }
 
     /// Jane is seen at 0 and her three files are offered at 3 (handle 1).
@@ -1233,10 +1314,10 @@ mod tests {
     #[test]
     fn a_rekey_drops_the_old_service_id() {
         let mut t = T::new("ob-drop-rekey");
-        t.seen_at("awdl-02:11:22:33:44:55", "fe80::1", JANE, 0);
+        t.seen_at("Jane-mdns-instance", "fe80::1", JANE, 0);
         assert!(t.ob.take_dropped().is_empty());
-        t.seen_at("Jane-mdns-instance", "fe80::1", JANE, 1);
-        assert_eq!(t.ob.take_dropped(), vec!["awdl-02:11:22:33:44:55"]);
+        t.seen_at("awdl-02:11:22:33:44:55", "fe80::1", JANE, 1);
+        assert_eq!(t.ob.take_dropped(), vec!["Jane-mdns-instance"]);
     }
 
     #[test]

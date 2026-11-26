@@ -661,6 +661,8 @@ enum Cmd {
         key: String,
         addr: String,
         name: String,
+        stable: Option<String>,
+        target: Target,
     },
     Changed(String),
     Finished(SendHandle, Outcome),
@@ -675,6 +677,22 @@ struct Target {
 }
 
 type Targets = Arc<Mutex<HashMap<String, Target>>>;
+
+/// Where to send to `key`; only the outbox thread writes the map, so a target recorded
+/// after a drop of the same key stays.
+fn record_target(targets: &Targets, key: &str, t: Target) {
+    targets.lock().unwrap().insert(key.to_string(), t);
+}
+
+/// What a receiver's record says across addresses: 16 hex digits of a hash of it, or
+/// `None` without one.
+pub fn stable_id(record: Option<&[u8]>) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let r = record.filter(|r| !r.is_empty())?;
+    let mut h = std::hash::DefaultHasher::new();
+    r.hash(&mut h);
+    Some(format!("{:016x}", h.finish()))
+}
 
 /// Forgets the targets of service IDs the outbox no longer knows.
 fn forget_targets(targets: &Targets, dropped: &[String]) {
@@ -736,7 +754,16 @@ fn outbox_thread(
     loop {
         let wait = wake.saturating_duration_since(Instant::now());
         match cmds.recv_timeout(wait) {
-            Ok(Cmd::Seen { key, addr, name }) => ob.seen(&key, &addr, &name, Instant::now()),
+            Ok(Cmd::Seen {
+                key,
+                addr,
+                name,
+                stable,
+                target,
+            }) => {
+                record_target(&targets, &key, target);
+                ob.seen(&key, &addr, &name, stable.as_deref(), Instant::now());
+            }
             Ok(Cmd::Changed(folder)) => ob.changed(&folder, Instant::now()),
             Ok(Cmd::Finished(h, o)) => ob.finished(h, o, Instant::now()),
             Ok(Cmd::Shutdown) | Err(smpsc::RecvTimeoutError::Disconnected) => {
@@ -776,7 +803,6 @@ async fn discovery(
     radio: Option<RadioProxy<'static>>,
     sender: watch::Receiver<Arc<Sender>>,
     cmds: smpsc::Sender<Cmd>,
-    targets: Targets,
 ) {
     struct Cand {
         key: String,
@@ -852,17 +878,15 @@ async fn discovery(
             let sock = SocketAddrV6::new(*addr, c.port, 0, iface.index);
             match tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await {
                 Ok(Ok(Some(r))) => {
-                    targets.lock().unwrap().insert(
-                        c.key.clone(),
-                        Target {
-                            addr: sock,
-                            flags: c.flags,
-                        },
-                    );
                     let _ = cmds.send(Cmd::Seen {
                         key: c.key.clone(),
                         addr: addr.to_string(),
                         name: r.computer_name,
+                        stable: stable_id(r.record.as_deref()),
+                        target: Target {
+                            addr: sock,
+                            flags: c.flags,
+                        },
                     });
                     c.next_try = tokio::time::Instant::now() + REDISCOVER;
                 }
@@ -1037,7 +1061,6 @@ impl Airdrop {
             radio,
             sender_rx,
             cmds.clone(),
-            targets.clone(),
         ));
         Ok(Sending {
             sender: sender_tx,
@@ -1464,6 +1487,30 @@ mod tests {
         let m = watch_mask();
         assert!(m.contains(WatchMask::DELETE));
         assert!(m.contains(WatchMask::MOVED_FROM));
+    }
+
+    #[test]
+    fn a_target_recorded_after_a_drop_stays() {
+        let t = Target {
+            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0),
+            flags: 0,
+        };
+        let targets: Targets = Arc::default();
+        record_target(&targets, "k", t);
+        forget_targets(&targets, &["k".to_string()]);
+        record_target(&targets, "k", t);
+        assert!(targets.lock().unwrap().contains_key("k"));
+    }
+
+    #[test]
+    fn stable_ids() {
+        assert_eq!(stable_id(None), None);
+        assert_eq!(stable_id(Some(&[])), None);
+        let a = stable_id(Some(b"record-a")).unwrap();
+        assert_eq!(a.len(), 16);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(stable_id(Some(b"record-a")).unwrap(), a);
+        assert_ne!(stable_id(Some(b"record-b")).unwrap(), a);
     }
 
     #[test]
