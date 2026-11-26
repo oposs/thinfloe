@@ -8676,7 +8676,10 @@ mod tests {
         let mut two = monitor_dialog("DP-1");
         two.event(MonEvent::MenuHere, Instant::now());
         two.event(MonEvent::CloseDialog, Instant::now());
-        shot(&monitor_settings(two), "page-screen.ppm", (2880, 1920), 2.0);
+        // Two computers attached with Deskflow beside the monitors.
+        let mut screen = monitor_settings(two);
+        screen.deskflow = two_clients();
+        shot(&screen, "page-screen.ppm", (2880, 1920), 2.0);
         let mut menu = open_settings();
         menu.settings_tab = crate::settings::SettingsTab::Network;
         menu.network = two_networks();
