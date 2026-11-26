@@ -339,8 +339,10 @@ done
     || fail "watch: same zone logged more than once: $(cat "$WORK/watch.log")"
 
 # A removed lease (link down): no zone set, no zone logged. The lease first
-# gets an NTP server, so the scan after the removal logs exactly one line
-# (the NTP servers are gone) and the test knows that scan has run.
+# gets an NTP server, so the scan after the removal logs one line (the NTP
+# servers are gone). That line comes before the zone part of the same scan,
+# so a sentinel lease with another NTP server follows: its line comes from a
+# later scan, which starts only once the removal's scan has ended.
 before_calls=$(lines "$WORK/calls")
 printf 'ADDRESS=10.0.0.5\nTIMEZONE=Europe/Zurich\nNTP=10.0.0.9\n' >"$WORK/w3/.tmp" \
     && mv "$WORK/w3/.tmp" "$WORK/w3/2"
@@ -353,10 +355,13 @@ before_calls=$(lines "$WORK/calls")
 before_log=$(lines "$WORK/watch.log")
 rm -f "$WORK/w3/2"
 wait_for "$WORK/watch.log" "no NTP servers from DHCP" || fail "watch: removed lease not scanned"
+printf 'ADDRESS=10.0.0.7\nNTP=10.0.0.10\n' >"$WORK/w3/.tmp" && mv "$WORK/w3/.tmp" "$WORK/w3/4"
+wait_for "$WORK/watch.log" "NTP servers 10.0.0.10 from DHCP" || fail "watch: removed lease, sentinel lease not read"
 [[ $(lines "$WORK/calls") -eq $before_calls ]] || fail "watch: removed lease called timedatectl: $(cat "$WORK/calls")"
-[[ $(lines "$WORK/watch.log") -eq $((before_log + 1)) ]] || fail "watch: removed lease logged: $(cat "$WORK/watch.log")"
-[[ "$(tail -n 1 "$WORK/watch.log")" == "thinfloe: no NTP servers from DHCP" ]] \
-    || fail "watch: removed lease, last log line: $(tail -n 1 "$WORK/watch.log")"
+[[ $(lines "$WORK/watch.log") -eq $((before_log + 2)) ]] || fail "watch: removed lease logged: $(cat "$WORK/watch.log")"
+[[ "$(tail -n 2 "$WORK/watch.log" | head -n 1)" == "thinfloe: no NTP servers from DHCP" ]] \
+    || fail "watch: removed lease, log: $(tail -n 2 "$WORK/watch.log")"
+rm -f "$WORK/w3/4"
 
 # inotifywait ends: the watcher fails, so systemd restarts it.
 pkill -P "$WATCHER" inotifywait || fail "watch: no inotifywait child"
@@ -449,11 +454,15 @@ mkdir -p "$WORK/w5"
 lease "$WORK/w5/2" Europe/Zurich
 watch_start "$WORK/w5"
 wait_for "$WORK/watch.log" "not used" || fail "menu_zone_wins_over_a_renewal: no 'not used' line"
-lease "$WORK/w5/.tmp" Europe/Zurich && mv "$WORK/w5/.tmp" "$WORK/w5/2"
-# Sentinel: a lease with an NTP server and no zone. The scan that logs it has
-# read the renewal too (events come in order) and still sees Europe/Zurich.
-printf 'ADDRESS=10.0.0.6\nNTP=10.0.0.8\n' >"$WORK/w5/.tmp" && mv "$WORK/w5/.tmp" "$WORK/w5/3"
-wait_for "$WORK/watch.log" "NTP servers 10.0.0.8 from DHCP" || fail "menu_zone_wins_over_a_renewal: sentinel lease not read"
+# The renewal carries an NTP server, so its scan logs a line. That line comes
+# before the zone part of the same scan, so a sentinel lease with another
+# NTP server follows: its line comes from a later scan, which starts only
+# once the renewal's scan has ended.
+printf 'ADDRESS=10.0.0.5\nTIMEZONE=Europe/Zurich\nNTP=10.0.0.8\n' >"$WORK/w5/.tmp" \
+    && mv "$WORK/w5/.tmp" "$WORK/w5/2"
+wait_for "$WORK/watch.log" "NTP servers 10.0.0.8 from DHCP" || fail "menu_zone_wins_over_a_renewal: renewal not read"
+printf 'ADDRESS=10.0.0.6\nNTP=10.0.0.11\n' >"$WORK/w5/.tmp" && mv "$WORK/w5/.tmp" "$WORK/w5/3"
+wait_for "$WORK/watch.log" "10.0.0.11 from DHCP" || fail "menu_zone_wins_over_a_renewal: sentinel lease not read"
 watch_stop
 [[ ! -e "$WORK/calls" ]] || fail "menu_zone_wins_over_a_renewal: zone set: $(cat "$WORK/calls")"
 zurich='DHCP time zone Europe/Zurich not used'
