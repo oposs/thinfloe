@@ -37,6 +37,7 @@ use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use owly_airdrop::proto::ble::{APPLE_COMPANY_ID, Advert, INTERVAL_MS};
+use tokio::time::Instant;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 
 const MANAGER: &str = "org.bluez.LEAdvertisingManager1";
@@ -49,27 +50,30 @@ pub struct BluezAdvertiser {
     adapter: OwnedObjectPath,
 }
 
-/// `f` within `wait`; a timeout is an `io::ErrorKind::TimedOut` error naming `what`.
-async fn bounded<T>(
-    wait: std::time::Duration,
+/// `f` before `deadline`; a timeout is an `io::ErrorKind::TimedOut` error naming `what`.
+async fn until<T>(
+    deadline: Instant,
     what: &str,
     f: impl std::future::Future<Output = io::Result<T>>,
 ) -> io::Result<T> {
-    tokio::time::timeout(wait, f).await.unwrap_or_else(|_| {
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("BlueZ did not answer ({what})"),
-        ))
-    })
+    tokio::time::timeout_at(deadline, f)
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("BlueZ did not answer ({what})"),
+            ))
+        })
 }
 
 impl BluezAdvertiser {
-    pub async fn new(wait: std::time::Duration) -> io::Result<Self> {
-        let conn = bounded(wait, "connect", async {
+    /// Connects and finds the adapter, both before `deadline`.
+    pub async fn new(deadline: Instant) -> io::Result<Self> {
+        let conn = until(deadline, "connect", async {
             zbus::Connection::system().await.map_err(io::Error::other)
         })
         .await?;
-        let adapter = bounded(wait, "adapters", find_adapter(&conn)).await?;
+        let adapter = until(deadline, "adapters", find_adapter(&conn)).await?;
         Ok(BluezAdvertiser { conn, adapter })
     }
 }
@@ -151,13 +155,14 @@ impl Advertisement {
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 impl BluezAdvertiser {
-    /// Transmits `advert` until the registration is dropped. Each BlueZ call takes at most
-    /// `wait`; after a failure or timeout the advert is unregistered and an adapter this
-    /// turned on is turned off again (those calls bounded by `wait` too).
+    /// Transmits `advert` until the registration is dropped. Every BlueZ call of the start
+    /// ends before `deadline`; after a failure or timeout the advert is unregistered and an
+    /// adapter this turned on is turned off again, within `cleanup` more.
     pub async fn advertise(
         &self,
         advert: Advert,
-        wait: std::time::Duration,
+        deadline: Instant,
+        cleanup: std::time::Duration,
     ) -> io::Result<Registration> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = ObjectPath::try_from(format!(
@@ -169,7 +174,7 @@ impl BluezAdvertiser {
         let advertisement = Advertisement {
             data: advert.manufacturer_data(),
         };
-        bounded(wait, "object", async {
+        until(deadline, "object", async {
             self.conn
                 .object_server()
                 .at(&path, advertisement)
@@ -183,16 +188,15 @@ impl BluezAdvertiser {
             path,
             powered_on: false,
         };
-        if let Err(e) = bounded(wait, "power", link.power_on()).await {
-            // A timeout may come after BlueZ turned the adapter on: off again.
-            if e.kind() == io::ErrorKind::TimedOut {
-                link.powered_on = true;
-            }
-            let _ = tokio::time::timeout(wait, link.unregister()).await;
+        let (powered, turned_on) =
+            power_up(deadline, link.get_powered(), || link.set_powered(true)).await;
+        link.powered_on = turned_on;
+        if let Err(e) = powered {
+            let _ = tokio::time::timeout(cleanup, link.unregister()).await;
             return Err(e);
         }
-        if let Err(e) = bounded(wait, "register", link.register()).await {
-            let _ = tokio::time::timeout(wait, link.unregister()).await;
+        if let Err(e) = until(deadline, "register", link.register()).await {
+            let _ = tokio::time::timeout(cleanup, link.unregister()).await;
             return Err(e);
         }
         Ok(Registration(Some(link)))
@@ -209,9 +213,44 @@ struct Link {
     powered_on: bool,
 }
 
+/// BlueZ only advertises on a powered adapter: `get` reads its Powered state and `set`
+/// turns it on, both before `deadline`. Gives the result and whether this may have turned
+/// the adapter on (then it is turned off with the advert). An unknown state, a read that
+/// failed or timed out, never counts as turned on: an adapter the user had on (for a
+/// Bluetooth keyboard) is never switched off. A Set that timed out may have reached BlueZ,
+/// and the adapter was off before, so it counts; a Set BlueZ refused does not.
+async fn power_up<F>(
+    deadline: Instant,
+    get: impl std::future::Future<Output = io::Result<bool>>,
+    set: impl FnOnce() -> F,
+) -> (io::Result<()>, bool)
+where
+    F: std::future::Future<Output = zbus::Result<()>>,
+{
+    match until(deadline, "power state", get).await {
+        Err(e) => return (Err(e), false),
+        Ok(true) => return (Ok(()), false),
+        Ok(false) => {}
+    }
+    match until(deadline, "power", async {
+        set().await.map_err(io::Error::other)
+    })
+    .await
+    {
+        Ok(()) => (Ok(()), true),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => (Err(e), true),
+        Err(e) => (
+            Err(io::Error::other(format!(
+                "Bluetooth is off and couldn't be turned on: {e}"
+            ))),
+            false,
+        ),
+    }
+}
+
 impl Link {
-    /// BlueZ only advertises on a powered adapter.
-    async fn power_on(&mut self) -> io::Result<()> {
+    /// The adapter's Powered property.
+    async fn get_powered(&self) -> io::Result<bool> {
         let reply = self
             .conn
             .call_method(
@@ -224,14 +263,7 @@ impl Link {
             .await
             .map_err(io::Error::other)?;
         let powered: OwnedValue = reply.body().deserialize().map_err(io::Error::other)?;
-        if bool::try_from(powered).unwrap_or(false) {
-            return Ok(());
-        }
-        self.set_powered(true).await.map_err(|e| {
-            io::Error::other(format!("Bluetooth is off and couldn't be turned on: {e}"))
-        })?;
-        self.powered_on = true;
-        Ok(())
+        bool::try_from(powered).map_err(io::Error::other)
     }
 
     async fn set_powered(&self, on: bool) -> zbus::Result<()> {
@@ -298,16 +330,19 @@ impl Registration {
 
 /// Transmits `advert` through the first adapter with LE advertising until
 /// the registration is stopped or dropped; `Ok(None)` when BlueZ has none.
+/// The whole start takes at most `wait`; the cleanup after a failed start
+/// (unregister, and power off what this turned on) at most `wait` more.
 pub async fn advertise(
     advert: Advert,
     wait: std::time::Duration,
 ) -> io::Result<Option<Registration>> {
-    let advertiser = match BluezAdvertiser::new(wait).await {
+    let deadline = Instant::now() + wait;
+    let advertiser = match BluezAdvertiser::new(deadline).await {
         Ok(a) => a,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    advertiser.advertise(advert, wait).await.map(Some)
+    advertiser.advertise(advert, deadline, wait).await.map(Some)
 }
 
 impl Drop for Registration {
@@ -315,5 +350,89 @@ impl Drop for Registration {
         if let (Some(link), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current()) {
             runtime.spawn(link.unregister());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::pending;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn refused() -> zbus::Error {
+        zbus::Error::Failure("org.bluez.Error.Blocked".into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_power_read_that_hangs_never_switches_the_adapter_off() {
+        let (r, turned_on) = power_up(Instant::now() + WAIT, pending(), || async {
+            panic!("no Set after an unknown state")
+        })
+        .await;
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(!turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_power_read_that_fails_never_switches_the_adapter_off() {
+        let (r, turned_on) = power_up(
+            Instant::now() + WAIT,
+            async { Err(io::Error::other("no such property")) },
+            || async { panic!("no Set after an unknown state") },
+        )
+        .await;
+        assert!(r.is_err());
+        assert!(!turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_adapter_that_was_on_is_left_alone() {
+        let (r, turned_on) = power_up(Instant::now() + WAIT, async { Ok(true) }, || async {
+            panic!("no Set for an adapter that is on")
+        })
+        .await;
+        assert!(r.is_ok());
+        assert!(!turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_adapter_turned_on_is_turned_off_again() {
+        let (r, turned_on) = power_up(Instant::now() + WAIT, async { Ok(false) }, || async {
+            Ok(())
+        })
+        .await;
+        assert!(r.is_ok());
+        assert!(turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_power_set_that_hangs_counts_as_turned_on() {
+        let (r, turned_on) = power_up(Instant::now() + WAIT, async { Ok(false) }, pending).await;
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_power_set_refused_does_not_count_as_turned_on() {
+        let (r, turned_on) = power_up(Instant::now() + WAIT, async { Ok(false) }, || async {
+            Err(refused())
+        })
+        .await;
+        assert!(r.unwrap_err().to_string().contains("couldn't be turned on"));
+        assert!(!turned_on);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_read_and_the_set_share_one_deadline() {
+        let start = Instant::now();
+        let get = async {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            Ok(false)
+        };
+        let (r, _) = power_up(start + WAIT, get, pending).await;
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(start.elapsed(), WAIT);
     }
 }
