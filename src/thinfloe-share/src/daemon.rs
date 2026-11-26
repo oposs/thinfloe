@@ -293,6 +293,41 @@ fn share_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT))
 }
 
+/// True when `path` lies on a tmpfs.
+pub fn is_tmpfs(path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` a valid out-pointer.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // f_type's type differs between architectures.
+    #[allow(clippy::unnecessary_cast)]
+    Ok(st.f_type as i64 == libc::TMPFS_MAGIC as i64)
+}
+
+/// The real folder must be the tmpfs; a test root below target/ need not be, unless the
+/// test asks with `TF_SHARE_REQUIRE_TMPFS=1`.
+fn root_must_be_tmpfs() -> bool {
+    std::env::var_os("TF_SHARE_ROOT").is_none()
+        || std::env::var_os("TF_SHARE_REQUIRE_TMPFS").is_some_and(|v| v == "1")
+}
+
+/// The error when FloeDrop's folder is not its tmpfs.
+pub fn not_mounted(root: &Path) -> String {
+    format!("The FloeDrop folder {} is not mounted.", root.display())
+}
+
+/// The ready head's flags: `no-peers` added when owlyd's link was not used.
+fn ready_flags(mut flags: Vec<String>, peers: bool) -> Vec<String> {
+    if !peers {
+        flags.push("no-peers".to_string());
+    }
+    flags
+}
+
 /// The send spool below `root`: a dot folder, so neither the inbox nor the outbox
 /// (both one level lower) ever lists it.
 fn spool_dir(root: &Path) -> PathBuf {
@@ -462,6 +497,15 @@ async fn run(
     };
     st.write();
     let paths = Paths::new(&runtime_dir);
+    // Without its tmpfs FloeDrop would write into the root file system, which is RAM
+    // without the cap; nothing below the folder is made before this check.
+    if root_must_be_tmpfs() && !matches!(is_tmpfs(&paths.root), Ok(true)) {
+        let text = not_mounted(&paths.root);
+        log(&text);
+        st.head = Head::Error(text);
+        st.write();
+        return 1;
+    }
     paths.prepare();
     let mut name = share_name(&configured, &host_name());
 
@@ -519,6 +563,7 @@ async fn run(
                         match started {
                             Ok(a) => {
                                 log(format!("{} as {name:?}", ready_text(&iface, &station, &driver, &mode, channel)));
+                                let flags = ready_flags(flags, a.peers);
                                 airdrop = Some(a);
                                 st.head = Head::Ready { iface, mode, channel, flags, station, driver };
                                 st.write();
@@ -870,13 +915,30 @@ async fn discovery(
             }
         }
         let s = sender.borrow().clone();
-        for (addr, c) in cands.iter_mut() {
-            let now = tokio::time::Instant::now();
-            if c.next_try > now {
-                continue;
+        // Every due receiver is asked at once: one that does not answer costs
+        // DISCOVER_WAIT once, not once per receiver behind it.
+        let now = tokio::time::Instant::now();
+        let due: Vec<(Ipv6Addr, SocketAddrV6)> = cands
+            .iter()
+            .filter(|(_, c)| c.next_try <= now)
+            .map(|(addr, c)| (*addr, SocketAddrV6::new(*addr, c.port, 0, iface.index)))
+            .collect();
+        let answers = futures_util::future::join_all(due.into_iter().map(|(addr, sock)| {
+            let s = &s;
+            async move {
+                (
+                    addr,
+                    sock,
+                    tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await,
+                )
             }
-            let sock = SocketAddrV6::new(*addr, c.port, 0, iface.index);
-            match tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await {
+        }))
+        .await;
+        for (addr, sock, answer) in answers {
+            let Some(c) = cands.get_mut(&addr) else {
+                continue;
+            };
+            match answer {
                 Ok(Ok(Some(r))) => {
                     let _ = cmds.send(Cmd::Seen {
                         key: c.key.clone(),
@@ -925,6 +987,8 @@ struct Airdrop {
     devices: Vec<Device>,
     _mdns: Registration,
     sending: Option<Sending>,
+    /// Whether owlyd's link is used; without it there is no AWDL peer list, only mDNS.
+    pub peers: bool,
 }
 
 enum Step {
@@ -980,6 +1044,7 @@ impl Airdrop {
                 (None, Iface { index, addr }, None)
             }
         };
+        let peers = radio.is_some();
         let identity = Identity::load_or_generate(&paths.identity).map_err(|e| e.to_string())?;
         let (events_tx, events) = mpsc::channel(64);
         let receiver = bind(iface, &identity, name, paths, 0, events_tx.clone()).await?;
@@ -1023,6 +1088,7 @@ impl Airdrop {
             devices: Vec::new(),
             _mdns: mdns,
             sending,
+            peers,
         })
     }
 
@@ -1246,8 +1312,7 @@ impl Airdrop {
                     .as_ref()
                     .map_or_else(incoming::unknown_received_line, |p| p.shown.received_line());
                 let sender = done.map_or_else(String::new, |p| p.sender);
-                let placed =
-                    inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender);
+                let placed = inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender);
                 let named = inbox::shown_sender(&sender);
                 log(line);
                 match placed.error {
@@ -1257,7 +1322,10 @@ impl Airdrop {
                         &inbox::received_note(&placed.files, &named),
                     ),
                     Some(e) => {
-                        log(format!("placing files from {:?}: {e}", incoming::shown(&sender)));
+                        log(format!(
+                            "placing files from {:?}: {e}",
+                            incoming::shown(&sender)
+                        ));
                         // The entries moved are gone from staging; the rest is dropped.
                         for p in &paths {
                             remove_entry(p);
@@ -1481,6 +1549,22 @@ mod parent_tests {
 mod tests {
     use super::*;
     use owly_airdrop::proto::messages::AskFile;
+
+    #[test]
+    fn proc_is_not_a_tmpfs() {
+        assert!(!is_tmpfs(Path::new("/proc")).unwrap());
+        if Path::new("/dev/shm").is_dir() {
+            assert!(is_tmpfs(Path::new("/dev/shm")).unwrap());
+        }
+        assert!(is_tmpfs(Path::new("/no/such/dir")).is_err());
+    }
+
+    #[test]
+    fn the_ready_head_says_no_peers() {
+        let f = vec!["no-ble".to_string()];
+        assert_eq!(ready_flags(f.clone(), false), ["no-ble", "no-peers"]);
+        assert_eq!(ready_flags(f.clone(), true), f);
+    }
 
     #[test]
     fn the_outbox_wakes_on_delete() {

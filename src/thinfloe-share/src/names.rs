@@ -49,9 +49,7 @@ fn cut(s: &str, max: usize) -> &str {
 /// when the dot is not the first byte and the part is 1 to `MAX_EXT` bytes.
 fn split_ext(name: &str) -> (&str, &str) {
     match name.rfind('.') {
-        Some(i) if i > 0 && i + 1 < name.len() && name.len() - i - 1 <= MAX_EXT => {
-            name.split_at(i)
-        }
+        Some(i) if i > 0 && i + 1 < name.len() && name.len() - i - 1 <= MAX_EXT => name.split_at(i),
         _ => (name, ""),
     }
 }
@@ -125,7 +123,10 @@ pub fn unique_dir(dir_entries: &[String], wanted: &str) -> String {
     (2u32..)
         .map(|n| {
             let suffix = format!(" ({n})");
-            format!("{}{suffix}", cut(wanted, MAX_NAME.saturating_sub(suffix.len())))
+            format!(
+                "{}{suffix}",
+                cut(wanted, MAX_NAME.saturating_sub(suffix.len()))
+            )
         })
         .find(|c| !dir_entries.iter().any(|e| e == c))
         .expect("an unused suffix exists")

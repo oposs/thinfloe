@@ -2,7 +2,8 @@
 //! Owly's AirDrop tests do: each test runs itself again under
 //! `unshare --user --map-root-user --net`, so no root and no radio are needed.
 //! The fake helper says the radio is up on `owb`; the test is on `owa`.
-//! Where unprivileged user namespaces are off, the tests say so and pass.
+//! Where unprivileged user namespaces are off, the tests say so and pass; with `CI` set
+//! they fail instead.
 
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::unix::fs::PermissionsExt;
@@ -39,6 +40,9 @@ fn enter(test: &str) -> Option<(End, End)> {
         .args(["--user", "--map-root-user", "--net", "true"])
         .status();
     if !probe.is_ok_and(|s| s.success()) {
+        if std::env::var_os("CI").is_some() {
+            panic!("{test}: user namespaces are needed in CI");
+        }
         eprintln!("{test}: skipped, unprivileged user namespaces are not available");
         return None;
     }
@@ -188,7 +192,7 @@ fn receive_from_owly_sender() {
         .await;
         assert_eq!(
             env.state(),
-            "ready\towb\texclusive\t6\tno-ble\twlx1\trtw88_8822bu\n"
+            "ready\towb\texclusive\t6\tno-ble,no-peers\twlx1\trtw88_8822bu\n"
         );
         assert!(!env.media("outbox").exists(), "no outbox without Bluetooth");
 

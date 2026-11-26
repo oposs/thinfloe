@@ -1082,7 +1082,10 @@ mod tests {
             ),
             room_note(JANE, 2_500_000)
         );
-        assert_eq!(room_note(JANE, 2_500_000).1, format!("Could not send to {JANE}: not enough room in FloeDrop for 3 MB"));
+        assert_eq!(
+            room_note(JANE, 2_500_000).1,
+            format!("Could not send to {JANE}: not enough room in FloeDrop for 3 MB")
+        );
         assert_eq!(
             sent_note(&[a], JANE, &Outcome::Failed("link lost".into())),
             (Tone::Warn, format!("Could not send to {JANE}"))

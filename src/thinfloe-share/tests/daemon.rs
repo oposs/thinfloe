@@ -204,7 +204,16 @@ fn sigterm_while_the_radio_starts() {
         .spawn()
         .unwrap();
     assert!(wait_for(Duration::from_secs(10), || env.exists("started")));
-    let (_conn, _) = bus.accept().unwrap();
+    bus.set_nonblocking(true).unwrap();
+    let mut conn = None;
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            conn = bus.accept().ok();
+            conn.is_some()
+        }),
+        "the daemon never asked the bus"
+    );
+    let _conn = conn;
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(env.state().as_deref(), Some("starting\n"));
     let t0 = Instant::now();
@@ -243,4 +252,33 @@ fn sigterm_closes_the_helper_stdin() {
     );
     let state = env.state().expect("a state file");
     assert!(state.starts_with("error\t"), "{state:?}");
+}
+
+#[test]
+fn a_missing_tmpfs_is_an_error() {
+    let env = Env::new("notmpfs");
+    env.helper("touch \"$D/started\"\ncat >/dev/null");
+    env.config("enabled=true\n");
+    let mut child = env
+        .command()
+        .env("TF_SHARE_REQUIRE_TMPFS", "1")
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(10)).code(),
+        Some(1)
+    );
+    assert_eq!(
+        env.state().as_deref(),
+        Some(
+            format!(
+                "error\tThe FloeDrop folder {} is not mounted.\n",
+                env.dir.join("media").display()
+            )
+            .as_str()
+        )
+    );
+    assert!(!env.exists("started"), "the helper must not start");
+    // Nothing was made below the folder.
+    assert_eq!(std::fs::read_dir(env.dir.join("media")).unwrap().count(), 0);
 }
