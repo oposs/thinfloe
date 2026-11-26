@@ -185,8 +185,8 @@ shutdown (`TimeoutStopSec=30`) is only the fallback.
 - `test/unit/test_automount.py`: skip rules, names, options, contract and
   hold formats, add/remove/eject/release/remount on fake sysfs and `/dev`
   trees (`TF_SYSFS`, `TF_DEV`, `TF_RUN`, `TF_MEDIA`, …).
-- `test/unit/test_upgrade_batch.py`: hold, release and remount around a
-  write; the automounted refusal.
+- `test/unit/test_upgrade_fresh.py`: hold, release and remount around a
+  write; `test/unit/test_upgrade_batch.py`: the automounted refusal.
 - `test/integration/test-automount-image.sh`: rule, unit, tmpfiles entry,
   helper and the file system modules are in the image, with their modes.
 - The menu's `removable`, eject and flush tests (`cargo test`).
