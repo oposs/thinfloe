@@ -4,6 +4,7 @@ mod bluez;
 mod card;
 mod config;
 mod daemon;
+mod health;
 mod inbox;
 mod names;
 mod osd;

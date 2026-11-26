@@ -36,10 +36,12 @@ fi
 FAILED=0
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 
-# iw: the radio helper reads the channel the link runs on with `iw dev`.
+# iw: the radio helper reads the channel the link runs on with `iw dev`; journalctl: it
+# follows owlyd's STATS lines to see a card that stopped sending.
 FILES=(
     usr/bin/thinfloe-share
     usr/sbin/iw
+    usr/bin/journalctl
     usr/lib/owly/owlyd
     usr/lib/systemd/system/owlyd.service
     usr/share/dbus-1/system-services/io.github.t4t5.Owly.service
@@ -52,7 +54,7 @@ FILES=(
 )
 unsquashfs -d "$ROOT" -f "$SQSH" "${FILES[@]}" >/dev/null 2>&1
 
-for f in usr/bin/thinfloe-share usr/sbin/iw usr/lib/owly/owlyd; do
+for f in usr/bin/thinfloe-share usr/sbin/iw usr/bin/journalctl usr/lib/owly/owlyd; do
     [[ -x "$ROOT/$f" ]] || fail "/$f is missing or not executable"
 done
 

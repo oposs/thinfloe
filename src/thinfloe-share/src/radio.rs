@@ -19,7 +19,10 @@ use futures_util::StreamExt;
 use owlyd::api::{self, LinkInfo, RadioProxy, StateChangedStream};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::card::{Bus, CardInfo, CardInputs, NO_CARD, candidates, choose_country, country};
+use crate::card::{
+    Bus, CardInfo, CardInputs, NO_CARD, candidates, choose_country, country, wedged_text,
+};
+use crate::health::{self, Health};
 
 /// The file owlyd reads each time the radio comes up (no restart needed).
 pub const RADIO_TOML: &str = "/etc/owly/radio.toml";
@@ -39,6 +42,9 @@ pub trait RadioApi {
     /// A lease held while this helper starts: one a crashed run left
     /// detached. Releasing a lease of a live owner fails, harmlessly.
     async fn stale_detached(&self) -> Option<u64>;
+    /// Completes once the card under the link has stopped sending (see [`health`]); pending
+    /// for ever when that cannot be watched.
+    async fn wait_wedged(&self, station: &str);
     /// Waits until `lease` ends without this helper releasing it; the reason.
     async fn wait_lost(&self, lease: u64) -> String;
 }
@@ -220,8 +226,15 @@ pub async fn hold<R: RadioApi, G>(
         say(out, &Err(first_refusal.unwrap_or_else(|| NO_CARD.into())));
         return 1;
     };
+    let bus = card.cards.get(&station).map(|c| c.bus).unwrap_or_default();
     let (lease, link) = match api.acquire().await {
         Ok(l) => l,
+        // EBUSY: the card stopped sending in an earlier session and is still stuck.
+        Err(e) if health::busy(&e) => {
+            eprintln!("thinfloe-share: acquire on {station}: {e}");
+            say(out, &Err(wedged_text(&station, bus)));
+            return 1;
+        }
         Err(e) => {
             say(out, &Err(e));
             return 1;
@@ -244,7 +257,7 @@ pub async fn hold<R: RadioApi, G>(
             mode,
             channel,
             flags,
-            station,
+            station: station.clone(),
             driver,
         }),
     );
@@ -255,6 +268,11 @@ pub async fn hold<R: RadioApi, G>(
         }
         reason = api.wait_lost(lease) => {
             say(out, &Err(format!("The radio stopped: {reason}")));
+            1
+        }
+        () = api.wait_wedged(&station) => {
+            api.release(lease).await;
+            say(out, &Err(wedged_text(&station, bus)));
             1
         }
     };
@@ -336,6 +354,52 @@ impl RadioApi for Owlyd {
         if let Err(e) = self.radio.release(lease).await {
             eprintln!("thinfloe-share: releasing lease {lease}: {}", api_text(&e));
         }
+    }
+
+    async fn wait_wedged(&self, station: &str) {
+        use tokio::io::AsyncBufReadExt;
+        let child = tokio::process::Command::new("journalctl")
+            .args([
+                "-u",
+                "owlyd.service",
+                "-f",
+                "-n",
+                "0",
+                "-o",
+                "cat",
+                "--no-pager",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("thinfloe-share: cannot follow owlyd's journal ({e}); no wedge watch");
+                return std::future::pending().await;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return std::future::pending().await;
+        };
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut health = Health::default();
+        while let Ok(Some(l)) = lines.next_line().await {
+            if let Some(c) = health::parse_stats(&l)
+                && health.feed(c)
+            {
+                let (gave_up, sent) = health.run();
+                eprintln!(
+                    "thinfloe-share: {station} gave up {gave_up} of {sent} frames for {} s; the card stopped sending",
+                    health::STUCK_INTERVALS * 10
+                );
+                return;
+            }
+        }
+        eprintln!("thinfloe-share: owlyd's journal ended; no wedge watch");
+        std::future::pending().await
     }
 
     async fn stale_detached(&self) -> Option<u64> {
@@ -697,6 +761,10 @@ mod tests {
         refuse: Vec<(String, String)>,
         /// What `link_channel` gives.
         channel: Option<u32>,
+        /// `wait_wedged` completes at once.
+        wedged: bool,
+        /// `acquire` fails with this text.
+        acquire_error: Option<String>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -731,13 +799,21 @@ mod tests {
         }
         async fn acquire(&self) -> Result<(u64, LinkInfo), String> {
             self.calls.borrow_mut().push("acquire".into());
-            Ok((5, link("awdl0")))
+            match &self.acquire_error {
+                Some(e) => Err(e.clone()),
+                None => Ok((5, link("awdl0"))),
+            }
         }
         async fn release(&self, lease: u64) {
             self.calls.borrow_mut().push(format!("release {lease}"));
         }
         async fn stale_detached(&self) -> Option<u64> {
             self.stale
+        }
+        async fn wait_wedged(&self, _station: &str) {
+            if !self.wedged {
+                std::future::pending::<()>().await;
+            }
         }
         async fn wait_lost(&self, _lease: u64) -> String {
             match &self.lost {
@@ -1073,6 +1149,63 @@ phy#0
         assert_eq!(out.split('\t').nth(4), Some("no-ble,no-country"), "{out}");
         let (_, out) = run(&fake, &free_card(), &tmp("country"), async {}).await;
         assert_eq!(out.split('\t').nth(4), Some("no-ble"), "{out}");
+    }
+
+    fn usb_stick() -> CardInputs {
+        let mut card = free_card();
+        card.cards.insert(
+            "wlx00e04c123456".into(),
+            CardInfo {
+                bus: Bus::Usb,
+                pci_id: None,
+                driver: Some("rtw88_8822bu".into()),
+            },
+        );
+        card
+    }
+
+    const WEDGED: &str =
+        "error\tThe Wi-Fi stick wlx00e04c123456 stopped sending. Unplug it and plug it in again.";
+
+    #[tokio::test]
+    async fn a_wedge_releases_the_lease_and_says_why() {
+        let fake = Fake {
+            channel: Some(44),
+            wedged: true,
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &usb_stick(), &tmp("wedged"), std::future::pending()).await;
+        assert_eq!(code, 1);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(lines[0].starts_with("up\tawdl0\t"));
+        assert_eq!(lines[1], WEDGED);
+        assert_eq!(fake.calls.borrow().last().unwrap(), "release 5");
+    }
+
+    #[tokio::test]
+    async fn a_busy_start_is_a_wedged_stick() {
+        let fake = Fake {
+            acquire_error: Some(
+                "Couldn't bring owlyibss0 up: Device or resource busy (os error 16)".into(),
+            ),
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &usb_stick(), &tmp("busy"), std::future::pending()).await;
+        assert_eq!(code, 1);
+        assert_eq!(out, format!("{WEDGED}\n"));
+        assert!(!fake.calls.borrow().iter().any(|c| c.starts_with("release")));
+    }
+
+    #[tokio::test]
+    async fn another_acquire_error_is_passed_on() {
+        let fake = Fake {
+            acquire_error: Some("AirDrop's radio is in use (lease 3).".into()),
+            ..Default::default()
+        };
+        let (code, out) = run(&fake, &usb_stick(), &tmp("inuse"), std::future::pending()).await;
+        assert_eq!(code, 1);
+        assert_eq!(out, "error\tAirDrop's radio is in use (lease 3).\n");
     }
 
     #[test]

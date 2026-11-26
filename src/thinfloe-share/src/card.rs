@@ -59,6 +59,19 @@ pub fn broken_text(iface: &str, model: &str, used_stick: Option<&str>) -> String
     }
 }
 
+/// The error when the card under the link stopped sending (see `health`). A USB stick can be
+/// plugged in again; an internal card needs a restart.
+pub fn wedged_text(station: &str, bus: Bus) -> String {
+    match bus {
+        Bus::Usb => {
+            format!("The Wi-Fi stick {station} stopped sending. Unplug it and plug it in again.")
+        }
+        Bus::Pci | Bus::Other => {
+            format!("The Wi-Fi card {station} stopped sending. Restart the machine.")
+        }
+    }
+}
+
 /// What the choice looks at; the helper fills it from `ip -j addr`, `ip -j route`, the
 /// netplan Wi-Fi files and /sys. A card matched by MAC in the netplan file is found through the
 /// `address` of its entry in `ip -j addr`.
@@ -500,6 +513,18 @@ mod tests {
             Some("CH")
         );
         assert_eq!(choose_country(None, None, ZONES), None);
+    }
+
+    #[test]
+    fn the_wedged_text_fits_the_bus() {
+        assert_eq!(
+            wedged_text("wlxc03a55f0d060", Bus::Usb),
+            "The Wi-Fi stick wlxc03a55f0d060 stopped sending. Unplug it and plug it in again."
+        );
+        assert_eq!(
+            wedged_text("wlp3s0", Bus::Pci),
+            "The Wi-Fi card wlp3s0 stopped sending. Restart the machine."
+        );
     }
 
     #[test]
