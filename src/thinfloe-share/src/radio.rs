@@ -719,7 +719,6 @@ fn ignore_hangup() {
     unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
 }
 
-/// `thinfloe-share --radio`; the exit code.
 /// The card check, then `connect` (owlyd): no free card is said before owlyd is asked,
 /// whose error would hide it. `None` after the error line.
 async fn check_then_connect<O, F>(
@@ -743,6 +742,7 @@ where
     }
 }
 
+/// `thinfloe-share --radio`; the exit code.
 pub fn main() -> i32 {
     ignore_hangup();
     // SAFETY: geteuid has no preconditions.
