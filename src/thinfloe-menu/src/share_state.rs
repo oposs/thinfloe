@@ -75,8 +75,14 @@ pub enum Head {
     Error(String),
 }
 
-/// The head of the state file's text; a line that does not fit is
-/// `Starting`, as the daemon has not said more yet.
+/// The menu's text for a `ready` line it cannot read.
+pub fn unreadable(line: &str) -> String {
+    format!("FloeDrop's state file has a line the menu cannot read: {line:?}")
+}
+
+/// The head of the state file's text. A `ready` line with too few fields or a channel that
+/// is not a number is an error that shows the line; another first word is `Starting` (a
+/// newer daemon's head).
 pub fn parse(text: &str) -> Head {
     let Some(line) = text.lines().next() else {
         return Head::Starting;
@@ -92,8 +98,9 @@ pub fn parse(text: &str) -> Head {
                 station: f.get(5).copied().unwrap_or("").to_string(),
                 driver: f.get(6).copied().unwrap_or("").to_string(),
             },
-            Err(_) => Head::Starting,
+            Err(_) => Head::Error(unreadable(line)),
         },
+        "ready" => Head::Error(unreadable(line)),
         "error" => Head::Error(f.get(1).copied().unwrap_or("").to_string()),
         _ => Head::Starting,
     }
@@ -158,6 +165,14 @@ pub fn read(path: &Path) -> Option<(Head, Vec<Receiving>, SystemTime)> {
 /// The band's warning when the radio helper found no regulatory country (flag `no-country`).
 pub const NO_COUNTRY: &str = "No country set: set the time zone in the Time band below for faster FloeDrop.";
 
+/// The band's line when the radio helper started without owlyd's peer list (flag `no-peers`).
+pub const NO_PEERS: &str = "owlyd did not answer at start; FloeDrop finds phones over mDNS only.";
+
+/// The band's line naming the card FloeDrop holds; empty when the daemon did not say.
+pub fn held_card_line(station: &str) -> Option<String> {
+    (!station.is_empty()).then(|| format!("While FloeDrop is on, {station} is not used for Wi-Fi."))
+}
+
 /// The band's status lines for `head`, each with its colour.
 pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
     match head {
@@ -184,6 +199,9 @@ pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
                 format!("Ready on {card} ({how}). Phones must be set to AirDrop 'Everyone for 10 Minutes'."),
                 Tone::Plain,
             )];
+            if let Some(l) = held_card_line(station) {
+                v.push((l, Tone::Plain));
+            }
             if flags.iter().any(|f| f == "no-ble") {
                 v.push((
                     "Sending needs Bluetooth; this machine has none.".to_string(),
@@ -192,6 +210,9 @@ pub fn status_lines(head: &Head) -> Vec<(String, Tone)> {
             }
             if flags.iter().any(|f| f == "no-country") {
                 v.push((NO_COUNTRY.to_string(), Tone::Warn));
+            }
+            if flags.iter().any(|f| f == "no-peers") {
+                v.push((NO_PEERS.to_string(), Tone::Plain));
             }
             v
         }
@@ -379,14 +400,26 @@ mod tests {
         let phones = "Phones must be set to AirDrop 'Everyone for 10 Minutes'.";
         assert_eq!(
             status_lines(&ready_on("wlxc03a55f0d060", "rtw88_8822bu")),
-            [(
-                format!("Ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6). {phones}"),
-                Tone::Plain
-            )]
+            [
+                (
+                    format!("Ready on wlxc03a55f0d060 (rtw88_8822bu, exclusive, channel 6). {phones}"),
+                    Tone::Plain
+                ),
+                (
+                    "While FloeDrop is on, wlxc03a55f0d060 is not used for Wi-Fi.".to_string(),
+                    Tone::Plain
+                ),
+            ]
         );
         assert_eq!(
             status_lines(&ready_on("wlx1", "")),
-            [(format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain)]
+            [
+                (format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain),
+                (
+                    "While FloeDrop is on, wlx1 is not used for Wi-Fi.".to_string(),
+                    Tone::Plain
+                ),
+            ]
         );
     }
 
@@ -475,11 +508,17 @@ mod tests {
         }
         assert_eq!(
             status_lines(&head),
-            [(
-                "Ready on wlx1 (rtw88_8822bu, exclusive). Phones must be set to AirDrop 'Everyone for 10 Minutes'."
-                    .to_string(),
-                Tone::Plain
-            )]
+            [
+                (
+                    "Ready on wlx1 (rtw88_8822bu, exclusive). Phones must be set to AirDrop 'Everyone for 10 Minutes'."
+                        .to_string(),
+                    Tone::Plain
+                ),
+                (
+                    "While FloeDrop is on, wlx1 is not used for Wi-Fi.".to_string(),
+                    Tone::Plain
+                ),
+            ]
         );
     }
 
@@ -502,11 +541,45 @@ mod tests {
             Head::Error("no WiFi card can do AirDrop".into())
         );
         assert_eq!(parse("starting\n"), Head::Starting);
-        // Half a line, a bad channel or nothing at all: not ready yet.
+        // Nothing at all: not ready yet.
         assert_eq!(parse(""), Head::Starting);
-        assert_eq!(parse("ready\twlx1\n"), Head::Starting);
-        assert_eq!(parse("ready\twlx1\texclusive\tsix\t\n"), Head::Starting);
         assert_eq!(parse("error\n"), Head::Error(String::new()));
+    }
+
+    #[test]
+    fn a_broken_ready_line_is_shown() {
+        for line in ["ready\tawdl0\texclusive\tsix\t", "ready\tawdl0"] {
+            match parse(&format!("{line}\n")) {
+                Head::Error(t) => {
+                    assert!(
+                        t.starts_with("FloeDrop's state file has a line the menu cannot read: "),
+                        "{t}"
+                    );
+                    assert!(t.ends_with(&format!("{line:?}")), "{t}");
+                }
+                h => panic!("{line:?} gave {h:?}"),
+            }
+        }
+        assert_eq!(parse("stopping\n"), Head::Starting);
+    }
+
+    #[test]
+    fn the_band_says_when_owlyd_was_missing() {
+        let phones = "Phones must be set to AirDrop 'Everyone for 10 Minutes'.";
+        assert_eq!(
+            status_lines(&ready(&["no-ble", "no-peers"])),
+            [
+                (format!("Ready on wlx1 (exclusive, channel 6). {phones}"), Tone::Plain),
+                (
+                    "Sending needs Bluetooth; this machine has none.".to_string(),
+                    Tone::Plain
+                ),
+                (
+                    "owlyd did not answer at start; FloeDrop finds phones over mDNS only.".to_string(),
+                    Tone::Plain
+                ),
+            ]
+        );
     }
 
     #[test]
