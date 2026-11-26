@@ -357,7 +357,6 @@ impl RadioApi for Owlyd {
     }
 
     async fn wait_wedged(&self, station: &str) {
-        use tokio::io::AsyncBufReadExt;
         let child = tokio::process::Command::new("journalctl")
             .args([
                 "-u",
@@ -384,22 +383,10 @@ impl RadioApi for Owlyd {
         let Some(stdout) = child.stdout.take() else {
             return std::future::pending().await;
         };
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let mut health = Health::default();
-        while let Ok(Some(l)) = lines.next_line().await {
-            if let Some(c) = health::parse_stats(&l)
-                && health.feed(c)
-            {
-                let (gave_up, sent) = health.run();
-                eprintln!(
-                    "thinfloe-share: {station} gave up {gave_up} of {sent} frames for {} s; the card stopped sending",
-                    health::STUCK_INTERVALS * 10
-                );
-                return;
-            }
+        if !watch_journal(tokio::io::BufReader::new(stdout), station).await {
+            eprintln!("thinfloe-share: owlyd's journal ended; no wedge watch");
+            std::future::pending().await
         }
-        eprintln!("thinfloe-share: owlyd's journal ended; no wedge watch");
-        std::future::pending().await
     }
 
     async fn stale_detached(&self) -> Option<u64> {
@@ -461,6 +448,27 @@ pub fn iw_channel(iw_dev: &str, phy_index: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Feeds owlyd's journal lines (`journalctl -o cat`) to the wedge rule: true once the card
+/// stopped sending (logged), false when the journal ends first.
+pub async fn watch_journal(journal: impl tokio::io::AsyncBufRead + Unpin, station: &str) -> bool {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = journal.lines();
+    let mut health = Health::default();
+    while let Ok(Some(l)) = lines.next_line().await {
+        if let Some(c) = health::parse_stats(&l)
+            && health.feed(c)
+        {
+            let (gave_up, sent) = health.run();
+            eprintln!(
+                "thinfloe-share: {station} gave up {gave_up} of {sent} frames for {} s; the card stopped sending",
+                health::STUCK_INTERVALS * 10
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether an item of owlyd's name-owner stream means owlyd is gone (and
@@ -638,6 +646,22 @@ async fn ble() -> (Option<crate::bluez::Registration>, Vec<String>) {
     }
 }
 
+/// How long a SIGTERM or SIGINT waits for the daemon to close stdin. The menu stops
+/// FloeDrop with SIGTERM to the whole process group, which holds this helper too, and the
+/// daemon sends its mDNS goodbye before it closes stdin: the radio must stay up for it.
+/// Below the menu's 1 s before its SIGKILL.
+pub const TERM_WAIT: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Completes on EOF of `stdin`; after `signal`, on EOF within [`TERM_WAIT`] or at its end.
+pub async fn stop_on(stdin: impl AsyncRead + Unpin, signal: impl Future<Output = ()>) {
+    let mut closed = std::pin::pin!(stdin_closed(stdin));
+    tokio::select! {
+        _ = &mut closed => return,
+        _ = signal => {}
+    }
+    let _ = tokio::time::timeout(TERM_WAIT, closed).await;
+}
+
 async fn stop() {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut int)) = (
@@ -646,11 +670,13 @@ async fn stop() {
     ) else {
         return;
     };
-    tokio::select! {
-        _ = stdin_closed(tokio::io::stdin()) => {}
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-    }
+    let signalled = async {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    };
+    stop_on(tokio::io::stdin(), signalled).await;
 }
 
 /// A SIGHUP ends nothing here: sudo relays the signals its group gets, and
@@ -1206,6 +1232,73 @@ phy#0
         let (code, out) = run(&fake, &usb_stick(), &tmp("inuse"), std::future::pending()).await;
         assert_eq!(code, 1);
         assert_eq!(out, "error\tAirDrop's radio is in use (lease 3).\n");
+    }
+
+    #[tokio::test]
+    async fn a_sigterm_waits_for_the_daemons_eof() {
+        use std::time::{Duration, Instant};
+        // EOF 100 ms after the signal: the stop waits for it.
+        let (w, r) = tokio::io::duplex(64);
+        let t = Instant::now();
+        let closer = async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(w);
+        };
+        tokio::join!(stop_on(r, async {}), closer);
+        let took = t.elapsed();
+        assert!(
+            took >= Duration::from_millis(90) && took < TERM_WAIT,
+            "{took:?}"
+        );
+        // No EOF: the stop ends at TERM_WAIT.
+        let (_w, r) = tokio::io::duplex(64);
+        let t = Instant::now();
+        stop_on(r, async {}).await;
+        let took = t.elapsed();
+        assert!(took >= TERM_WAIT && took < TERM_WAIT * 2, "{took:?}");
+        // EOF without a signal ends it at once.
+        let t = Instant::now();
+        stop_on(tokio::io::empty(), std::future::pending()).await;
+        assert!(t.elapsed() < Duration::from_millis(100));
+    }
+
+    const STATS_LINE: &str = "2026-11-26T10:00:00.123456Z  INFO owly_awdl::driver: STATS tx_action {s} tx_unicast 0 tx_multicast 0 tx_amsdu 0 | radio full 0 gave up {g} | rx_action 1 rx_data 0 rx_malformed 0 delivered 0 | dropped no_peer 0 queue 0 expired 0 | syn held 0 released 0 | no_overlap 0 | timer late avg 1 µs max 2 µs\n";
+
+    fn journal(steps: &[(u64, u64)]) -> String {
+        let mut text = String::from("add peer aa:bb:cc:dd:ee:ff\n");
+        for (s, g) in steps {
+            text.push_str(
+                &STATS_LINE
+                    .replace("{s}", &s.to_string())
+                    .replace("{g}", &g.to_string()),
+            );
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn the_journal_watch_sees_a_wedge_and_an_end() {
+        let wedged = journal(&[(0, 0), (100, 60), (200, 120), (300, 180)]);
+        assert!(watch_journal(wedged.as_bytes(), "wlx1").await);
+        let healthy = journal(&[(0, 0), (100, 0), (200, 1)]);
+        assert!(!watch_journal(healthy.as_bytes(), "wlx1").await);
+        assert!(!watch_journal(&b""[..], "wlx1").await);
+    }
+
+    #[test]
+    fn every_missing_entry_of_the_probe_refuses_the_card() {
+        // Owly's ids at 21171d8: "hardware" (the card or its driver), "radio" (no channel
+        // the card can use, shared mode without Wi-Fi), "backend" (nl80211 cannot be read
+        // for this card, hostapd missing for a card without ad-hoc mode). Each is about the
+        // station radio.toml names, so another card may do.
+        for id in ["hardware", "radio", "backend"] {
+            let json = format!(r#"{{"mode":"exclusive","missing":[{{"id":"{id}","say":"no"}}]}}"#);
+            assert_eq!(
+                parse_probe(&json).unwrap().refusal.as_deref(),
+                Some("no"),
+                "{id}"
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -130,6 +131,8 @@ impl Env {
                 "DBUS_SYSTEM_BUS_ADDRESS",
                 "unix:path=/nonexistent/floedrop-test-bus",
             )
+            // A group of its own, with the helper in it, as the menu starts it.
+            .process_group(0)
             .spawn()
             .unwrap()
     }
@@ -253,12 +256,17 @@ fn the_service_is_withdrawn_before_the_radio_goes() {
     };
     runtime().block_on(async {
         let env = Env::new("goodbye");
-        // The radio goes away as soon as the helper's stdin closes.
-        let child = env.spawn_with("no-ble", "cat >/dev/null; ip link set owb down");
+        // As the real helper: a SIGTERM to the group does not end it, the radio goes away
+        // when its stdin closes.
+        let child = env.spawn_with(
+            "no-ble",
+            "trap '' TERM INT\ncat >/dev/null\nip link set owb down",
+        );
         let mut browse = Mdns::new(a.index).browse().await.unwrap();
         let instance = next_found(&mut browse, Duration::from_secs(10)).await;
-        // SAFETY: kill with a valid pid and signal number.
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        // The menu's off switch: SIGTERM to the whole group, helper included.
+        // SAFETY: kill with a valid process group id and signal number.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
         let end = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match tokio::time::timeout_at(end, browse.events.recv()).await {
