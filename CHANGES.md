@@ -5,34 +5,31 @@ pull request adds its entry as a file in `CHANGES.d/new/`,
 `CHANGES.d/changed/` or `CHANGES.d/fixed/`. The release pull request moves
 the entries into this file.
 
-- After Eject all with several sticks plugged in, the note at the bottom of the screen named only one of them. It now says how many can be removed, for example "2 sticks can be removed".
-- A card swapped in a card reader for another card with the same name gave no "… connected" note. It now does.
-- A long description on an app tile no longer runs under the small "update" or "user" mark; it now ends with "…" before the marks.
-- On a greyed-out tile, the highlight of the "update" mark under the mouse is now greyed out like the rest of the tile; its keyboard focus frame stays at full strength, so it can still be seen.
-- While a phone sends files, Settings → Network shows "Receiving IMG_0042.DNG from Jane's iPhone" (or "Receiving 3 files from …"), and the menu log has a line for each offer, accept, decline and finished or failed delivery, with sender, file count and size.
-- With no time zone set, FloeDrop takes the country from the keyboard layout (for example ch gives Switzerland), which allows the faster 5 GHz channel. If neither gives a country, Settings → Network says "No country set: set the time zone in the Time band below for faster FloeDrop."
-
-### Fixed
-
+- FloeDrop started without /media/tfuser/FloeDrop mounted and then wrote into the machine's RAM without a limit. It now stops with "The FloeDrop folder /media/tfuser/FloeDrop is not mounted."
 - When a TP-Link RTL8812BU stick stopped sending, FloeDrop still said "Ready" and iPhones did not see the machine; later starts failed with "Device or resource busy". FloeDrop now stops and says "The Wi-Fi stick … stopped sending. Unplug it and plug it in again." (for an internal card: "Restart the machine.").
 - After FloeDrop was switched off and on, iPhones could list the machine twice and send the same files to both, so the inbox got " (2)" copies. The machine now shows up once.
-- Settings → Network and the menu log said "channel 6" for FloeDrop while the radio ran on channel 44. They now show the channel the radio really uses.
-- A USB Wi-Fi stick that Owly cannot drive kept FloeDrop from using a working internal card; FloeDrop now tries the next card.
-- FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
-- "FloeDrop cannot start on …" now names the Wi-Fi card and driver instead of awdl0.
 - Now and then a click in the menu did nothing and had to be repeated; it happened when the page changed its layout at the same moment. Every click now counts.
 - After a damaged settings file was rebuilt, FloeDrop was switched off and its name was gone; both are now kept.
-- A phone that gave no name was called "iPhone" in the FloeDrop notes, and a note about a phone with a very long name did not appear. Such a note now appears, and a phone without a name is "an unnamed phone".
 - Received files with long names lost their extension (".HEIC"), and a second file of the same long name could get a name longer than 64 bytes. Both are fixed.
 - When some files of a delivery could not be saved, the note did not mention the ones that arrived; it now says "… of … files from … received; the others could not be saved".
 - A file FloeDrop could not remove from a phone's folder after sending it was offered to the phone again at every change. It is now sent once, and a note says "Could not remove … from the folder of …; it is not sent again".
 - A phone found again by FloeDrop could get "Could not send to …" although it was in range, and a phone seen over the radio and over mDNS could switch between the two at each rediscovery. Both are fixed.
-- FloeDrop started without /media/tfuser/FloeDrop mounted and then wrote into the machine's RAM without a limit. It now stops with "The FloeDrop folder /media/tfuser/FloeDrop is not mounted."
+- A USB Wi-Fi stick that Owly cannot drive kept FloeDrop from using a working internal card; FloeDrop now tries the next card.
 - On a machine without a free Wi-Fi card, FloeDrop could say "owlyd cannot be reached" instead of "AirDrop needs a Wi-Fi card this machine does not use for its network.". While another program held the radio, FloeDrop changed /etc/owly/radio.toml; it now stops with "The Wi-Fi radio is in use by another program."
 - Switching FloeDrop off while it was starting could leave Bluetooth switched on.
-- A time zone set as posix/… or right/… gave FloeDrop no country, so the radio stayed on the slower 2.4 GHz channel.
+- FloeDrop no longer uses the Intel Wireless 7260, of the same family as the 3160. When the only free card cannot run AirDrop and a USB stick is busy with the network, the message names the stick: "… the USB stick … is used for the network."
 - A Wi-Fi card named only in the Ethernet part of a netplan file was not used by FloeDrop.
+- A time zone set as posix/… or right/… gave FloeDrop no country, so the radio stayed on the slower 2.4 GHz channel.
+- A phone that gave no name was called "iPhone" in the FloeDrop notes, and a note about a phone with a very long name did not appear. Such a note now appears, and a phone without a name is "an unnamed phone".
 - A FloeDrop state the menu could not read showed "Starting…" for ever; Settings → Network now shows the line it could not read.
+- Settings → Network and the menu log said "channel 6" for FloeDrop while the radio ran on channel 44. They now show the channel the radio really uses.
+- "FloeDrop cannot start on …" now names the Wi-Fi card and driver instead of awdl0.
+- After Eject all with several sticks plugged in, the note at the bottom of the screen named only one of them. It now says how many can be removed, for example "2 sticks can be removed".
+- A card swapped in a card reader for another card with the same name gave no "… connected" note. It now does.
+- While a phone sends files, Settings → Network shows "Receiving IMG_0042.DNG from Jane's iPhone" (or "Receiving 3 files from …"), and the menu log has a line for each offer, accept, decline and finished or failed delivery, with sender, file count and size.
+- With no time zone set, FloeDrop takes the country from the keyboard layout (for example ch gives Switzerland), which allows the faster 5 GHz channel. If neither gives a country, Settings → Network says "No country set: set the time zone in the Time band below for faster FloeDrop."
+- A long description on an app tile no longer runs under the small "update" or "user" mark; it now ends with "…" before the marks.
+- On a greyed-out tile, the highlight of the "update" mark under the mouse is now greyed out like the rest of the tile; its keyboard focus frame stays at full strength, so it can still be seen.
 
 ## 4.13.0 - 2026-11-26
 
