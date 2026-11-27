@@ -5,6 +5,12 @@
 # where the host reads it, and what is mounted under /media/tfuser (but
 # FloeDrop's tmpfs at /media/tfuser/FloeDrop): the other ThinFloe stick
 # must not be. Lives on the stick's ESP, not in the image.
+#
+# With the argument "reboot" it then reboots the VM once multi-user.target is
+# reached, from a transient unit: this script runs as part of the boot
+# transaction, so waiting for the target here would wait for itself. QEMU's
+# -no-reboot turns the reboot into an exit, and the shutdown lands on the
+# console (scripts/run-qemu-grow-smoke.sh).
 
 ESP=/run/thinfloe/storage/efi
 
@@ -22,3 +28,9 @@ udevadm settle --timeout=30 >/dev/null 2>&1
     echo "SMOKE-STICK-SKIP: ${other:-none} $([ -n "$other" ] && /usr/libexec/thinfloe/thinfloe-automount add "$other" 2>&1 | tail -1)"
     echo "SMOKE-STICK-DONE"
 } >/dev/console 2>&1
+
+if [ "${1:-}" = reboot ]; then
+    systemd-run --no-block --unit=smoke-stick-reboot /bin/sh -c \
+        'until systemctl is-active -q multi-user.target; do sleep 1; done; systemctl reboot' \
+        >/dev/console 2>&1
+fi

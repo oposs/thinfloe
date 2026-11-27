@@ -100,6 +100,9 @@ unwant "no module with unknown symbols" 'Unknown symbol'
 unwant "no kernel panic"             'Kernel panic'
 unwant "no systemd ordering cycle"   'Found ordering cycle'
 unwant "no failed sysfs write in a hook" 'dracut-[a-z-]+\[[0-9]+\]: .*cannot create /sys/'
+# Only a boot that shuts down prints it: systemd stopped the ESP's mount unit
+# at umount.target while the root's squashfs still held the ESP (#69).
+unwant "no failed unmount at shutdown" 'Failed unmounting'
 
 # The ThinFloe pre-mount and mount hooks need what the cmdline hook sets up
 # (root=thinfloe, /tmp/thinfloe-ramroot). Without the 90thinfloe drop-ins ordering them

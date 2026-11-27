@@ -1,14 +1,17 @@
 #!/bin/bash
 # Boot a stick larger than its image twice and check that the first boot grows
-# the ESP to the cap and the second leaves it alone.
+# the ESP to the cap and the second leaves it alone, then reboots cleanly.
 #
 # Usage: scripts/run-qemu-grow-smoke.sh USB_IMAGE WORK_PREFIX LOG TIMEOUT GRACE APPEND
 #
 # A copy of USB_IMAGE (a 3000 MB ESP) is extended to 8 GiB, as if written to
 # an 8 GB stick, and a file of random data is put on its ESP. QEMU boots it
 # through OVMF and syslinux, twice. Passing requires:
-#   - each boot passes check-boot-smoke.sh,
+#   - each boot passes check-boot-smoke.sh (boot 2's shutdown included: no
+#     "Failed unmounting", #69),
 #   - boot 1 logs the grown partition and the enlarged FAT32, boot 2 neither,
+#   - boot 2 reboots once multi-user.target is reached and its shutdown
+#     leaves the FAT's dirty bit clear (the ESP remounted read-only),
 #   - afterwards partition 1 is 12582912 sectors (6 GiB, TF_ESP_CAP_SECTORS)
 #     at its old start, the MBR is still hybrid, the FAT32 fills the
 #     partition and fsck.fat -n finds nothing,
@@ -64,19 +67,29 @@ sums() {
     done
 }
 
-REPORT='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run="/bin/sh /run/thinfloe/storage/efi/smoke-stick-report.sh"'
+# report [ARG]: the systemd.run options that call smoke-stick-report.sh ARG
+report() {
+    echo "systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run=\"/bin/sh /run/thinfloe/storage/efi/smoke-stick-report.sh${1:+ $1}\""
+}
 
 prepare() {
-    local esp cfg
+    local esp
     cp --sparse=always "$USB_IMAGE" "$IMG" || return 1
     truncate -s 8G "$IMG" || return 1
     esp=$(esp_of "$IMG") || return 1
     mcopy -o -i "$esp" "$DIR/smoke-stick-report.sh" ::smoke-stick-report.sh || return 1
     head -c 4M /dev/urandom >"$tmp/smoke-grow.bin"
     mcopy -o -i "$esp" "$tmp/smoke-grow.bin" ::smoke-grow.bin || return 1
+    set_append "$(report)"
+}
+
+# set_append REPORT: LABEL current's APPEND in both syslinux.cfg copies
+set_append() {
+    local esp cfg report="$1"
+    esp=$(esp_of "$IMG") || return 1
     for cfg in ::syslinux.cfg ::efi/boot/syslinux.cfg; do
         mtype -i "$esp" "$cfg" | tr -d '\r' >"$tmp/cfg" || return 1
-        awk -v append="$APPEND" -v report="$REPORT" '
+        awk -v append="$APPEND" -v report="$report" '
             /^LABEL /   { in_current = ($2 == "current") }
             /^[[:space:]]+APPEND / && in_current && !/ramroot=[a-z]+:\/\// {
                 $0 = "    APPEND ramroot=tl/ramroot.sqsh " append " " report
@@ -96,6 +109,11 @@ echo "grow: partition 1 starts at $start_before, $size_before sectors; MBR types
 
 for n in 1 2; do
     echo "grow: boot $n"
+    # Boot 2 reboots at the end, so its shutdown is on the console and the
+    # FAT is checked as a reboot leaves it.
+    if [[ $n == 2 ]]; then
+        set_append "$(report reboot)" || { echo "could not set boot 2's APPEND" >&2; exit 2; }
+    fi
     SMOKE_WAIT_FOR='^SMOKE-STICK-DONE' "$DIR/run-qemu-smoke.sh" "$LOG.$n" "$TIMEOUT" "$GRACE" -- \
         qemu-system-x86_64 \
         -machine type=q35,accel=kvm \
@@ -134,6 +152,11 @@ if grep -aq 'thinfloe: \(boot stick partition grown\|enlarging\)' < <(tr -d '\r'
 else
     ok "boot 2 left the ESP alone"
 fi
+if grep -aq 'reboot: Restarting system' "$LOG.2"; then
+    ok "boot 2 rebooted"
+else
+    bad "boot 2 did not reboot (no 'reboot: Restarting system'), so its shutdown went unchecked"
+fi
 
 start_after=$(partx -g -o START -n 1 "$IMG")
 sectors_after=$(partx -g -o SECTORS -n 1 "$IMG")
@@ -152,10 +175,15 @@ fi
 
 dd if="$IMG" of="$tmp/esp.img" bs=1M skip=$((start_after / 2048)) \
    count=$((sectors_after / 2048)) conv=sparse status=none || exit 2
-# The smoke run ends the VM while the ESP is mounted, so Linux's dirty bit
-# (bit 0 of byte 65) is still set and fsck.fat reports it as a difference
-# from the backup boot sector. Clear it in the copy; anything else counts.
-printf '\0' | dd of="$tmp/esp.img" bs=1 seek=65 conv=notrunc status=none
+# Linux sets the dirty bit (bit 0 of byte 65) while the FAT is mounted
+# read-write and clears it on a read-only remount or an unmount. Boot 2
+# rebooted, so it must be clear.
+dirty=$(od -An -tu1 -j65 -N1 "$tmp/esp.img" | tr -d ' \n')
+if (( (dirty & 1) == 0 )); then
+    ok "the reboot left the FAT's dirty bit clear"
+else
+    bad "the FAT's dirty bit is set after the reboot (byte 65 is $dirty)"
+fi
 fat_sectors=$(od -An -tu4 -j32 -N4 "$tmp/esp.img" | tr -d ' \n')
 if (( sectors_after - fat_sectors < 2048 )); then
     ok "the FAT32 has $fat_sectors sectors of $sectors_after"

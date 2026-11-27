@@ -777,6 +777,21 @@ else
     echo "FAIL - could not extract the upgrade check units"
     fail=1
 fi
+# On a USB boot the root's squashfs is a loop file on the ESP, so the ESP is
+# busy until systemd-shutdown's last pass. With default dependencies its
+# mount unit conflicts with umount.target and every reboot printed
+# "Failed unmounting run-thinfloe-storage-efi.mount" (#69); without them
+# systemd-shutdown remounts it read-only, which also clears the FAT's dirty
+# bit. make qemu-smoke-grow reboots and checks both on a real shutdown.
+ESPUNIT="$DPKG_TMP/espunit/etc/systemd/system/run-thinfloe-storage-efi.mount.d/thinfloe.conf"
+if unsquashfs -no-xattrs -d "$DPKG_TMP/espunit" "$SQSH" \
+        etc/systemd/system/run-thinfloe-storage-efi.mount.d/thinfloe.conf >/dev/null 2>&1 &&
+   [[ -f "$ESPUNIT" ]] && grep -qxF 'DefaultDependencies=no' "$ESPUNIT"; then
+    echo "ok   - the ESP mount is left to systemd-shutdown (DefaultDependencies=no)"
+else
+    echo "FAIL - run-thinfloe-storage-efi.mount has no drop-in with DefaultDependencies=no; every reboot fails to unmount the ESP"
+    fail=1
+fi
 ADDONUNIT="$DPKG_TMP/addonunit/etc/systemd/system/thinfloe-addons.service"
 if unsquashfs -no-xattrs -d "$DPKG_TMP/addonunit" "$SQSH" \
         etc/systemd/system/thinfloe-addons.service >/dev/null 2>&1 &&

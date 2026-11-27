@@ -606,7 +606,8 @@ qemu-smoke-write: $(USB_IMAGE) $(USB_CHECKSUM) $(KERNEL) $(INITRD)
 
 # Two headless boots through OVMF of the image extended to 8 GiB. Requires
 # the first boot to grow the ESP to 6 GiB with its files intact and the
-# hybrid MBR kept, and the second to leave it alone. See
+# hybrid MBR kept, and the second to leave it alone and reboot with no
+# failed unmount and a clean FAT. See
 # scripts/run-qemu-grow-smoke.sh.
 QEMU_GROW_LOG := $(IMAGE_DIR)/qemu-grow-smoke.log
 QEMU_GROW_PREFIX := $(IMAGE_DIR)/$(PROJECT_NAME)-grow
