@@ -8137,6 +8137,33 @@ mod tests {
     }
 
     #[test]
+    fn a_single_card_eject_with_a_stick_listed_names_the_card() {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![],
+                banner: vec![],
+            },
+            false,
+        );
+        let disk = |disk: &str, name: &str, kind| crate::removable::Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            mounts: vec![0],
+            size_bytes: 1,
+            model: String::new(),
+            kind,
+        };
+        menu.set_removable(vec![
+            disk("sdb", "ONE", crate::removable::Kind::Stick),
+            disk("sdc", "SD", crate::removable::Kind::Card),
+        ]);
+        assert!(menu.eject_event(crate::menu::EjectEvent::One("sdc".into())).is_some());
+        let work = RootWork::of(&menu);
+        assert_eq!(work.title(), "The card is being released");
+        assert_eq!(work.waits(), "the card to be released");
+    }
+
+    #[test]
     fn a_network_apply_is_named_as_such_in_the_ending_dialogs() {
         // A network Apply alone read "Add-ons are being changed" and "The
         // add-on work is finished before you restart."

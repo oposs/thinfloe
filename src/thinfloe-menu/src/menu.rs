@@ -1315,7 +1315,7 @@ impl Menu {
     /// kind of "all" ("the sticks", "the stick and the card").
     fn eject_name(&self, target: &str) -> String {
         if target == "all" {
-            let (sticks, cards) = self.ejecting_kinds();
+            let (sticks, cards) = self.kinds_of(target);
             return crate::removable::the_kinds(sticks, cards);
         }
         self.removable
@@ -1342,7 +1342,7 @@ impl Menu {
             [(_, name, _)] if target == "all" => name.clone(),
             _ => self.eject_name(target),
         };
-        let (sticks, cards) = self.ejecting_kinds();
+        let (sticks, cards) = self.kinds_of(target);
         let (kind, message) = match r {
             EjectResult::Done if all => (
                 Kind::Event,
@@ -1427,9 +1427,22 @@ impl Menu {
         crate::removable::tally(self.flushing().into_iter().map(|(_, k)| k))
     }
 
-    /// How many sticks and cards the running eject began with.
+    /// How many sticks and cards the running eject is about; none while
+    /// none runs.
     pub fn ejecting_kinds(&self) -> (usize, usize) {
-        crate::removable::tally(self.eject.known.iter().map(|(_, _, k)| *k))
+        self.eject.running.as_deref().map_or((0, 0), |t| self.kinds_of(t))
+    }
+
+    /// How many sticks and cards `target` is about: every disk known when
+    /// the eject began for "all", else only the target's (`known` lists them all).
+    fn kinds_of(&self, target: &str) -> (usize, usize) {
+        crate::removable::tally(
+            self.eject
+                .known
+                .iter()
+                .filter(|(d, _, _)| target == "all" || d == target)
+                .map(|(_, _, k)| *k),
+        )
     }
 
     /// Restart and Power off release the sticks before they exit.
@@ -5395,6 +5408,19 @@ mod eject_tests {
         m.eject_event(EjectEvent::All);
         m.eject_finished("all", EjectResult::Done, now);
         assert_eq!(m.eject.message.as_deref(), Some("2 cards can be removed"));
+    }
+
+    #[test]
+    fn a_single_eject_counts_only_its_own_disk() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), card("sdc", "SD")]);
+        m.eject_event(EjectEvent::One("sdc".into()));
+        assert_eq!(m.ejecting_kinds(), (0, 1));
+        m.set_removable(Vec::new());
+        m.eject_finished("sdc", EjectResult::Done, now);
+        assert_eq!(m.eject.last, (0, 1));
+        assert_eq!(m.ejecting_kinds(), (0, 0), "none runs");
     }
 
     #[test]
