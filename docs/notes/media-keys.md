@@ -209,7 +209,11 @@ never set.
   applied to every device again. A start that failed (the server was not up
   yet, or a 3 s timeout) is tried again when the first `pactl subscribe`
   reaches the server, and at every later key, new device, switch change or
-  restart. The child gets `PR_SET_PDEATHSIG`, so it dies with the OSD,
+  restart. A start that worked is followed by a fresh list when the first
+  `pactl subscribe` reaches the server: at a session start the server may
+  list no real sink yet, and a sink that appears before the watch connects
+  sends no event, so without that list the switch on left the volume
+  unknown and the Sound tab's slider dead (#67). The child gets `PR_SET_PDEATHSIG`, so it dies with the OSD,
   also on SIGKILL.
 - The switch turned off while the devices cannot be listed: the shared
   state is still off, so the next restart or new device gets 100 % and
