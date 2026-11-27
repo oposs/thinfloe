@@ -17,7 +17,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 
 /// The state file's name under `XDG_RUNTIME_DIR`; `screen-power` writes it.
@@ -27,6 +27,14 @@ pub const SCREEN_FILE: &str = "thinfloe-screen";
 /// woke them: swayidle runs `screen-power on` on the first input, so the
 /// file can say `on` before the menu sees the press itself.
 pub const WAKE_GRACE: Duration = Duration::from_millis(300);
+
+/// How long the presses under one `off` note are dropped after the first.
+/// The note says `off` until the `on` run has ended (sh, the lock,
+/// `wlopm --on`, a modeset, the rename), which can take well over 100 ms,
+/// so the second press of a double-click lands under the same note. A note
+/// still `off` this long after a drop is stale (a swayidle that died while
+/// dark) and gives way.
+pub const STALE_OFF_AFTER: Duration = Duration::from_secs(2);
 
 /// More than the file ever holds (`off` or `on` and a newline).
 const READ_LIMIT: u64 = 64;
@@ -135,19 +143,25 @@ pub enum Verdict {
 pub struct WakeGuard {
     buttons: Vec<MouseButton>,
     touches: Vec<u64>,
-    /// The `off` note a press was dropped under. One press wakes the
-    /// screen; a later one under the same note passes, so a note left
-    /// behind (a swayidle that died while dark) cannot eat every click.
-    dropped_under: Option<SystemTime>,
+    /// The `off` note a press was dropped under (its modification time),
+    /// and when the first press under it was dropped. Presses under the same
+    /// note are dropped until `STALE_OFF_AFTER` has gone by, then pass, so
+    /// a note left behind cannot eat every click.
+    dropped_under: Option<(SystemTime, Instant)>,
 }
 
 impl WakeGuard {
     /// `screens` is asked only for a press or a touch start.
     pub fn filter(&mut self, input: Input, screens: impl FnOnce() -> Screens) -> Verdict {
+        self.filter_at(input, screens, Instant::now())
+    }
+
+    /// `filter` with the time of the event given.
+    pub fn filter_at(&mut self, input: Input, screens: impl FnOnce() -> Screens, now: Instant) -> Verdict {
         match input {
             Input::Press(b) => {
                 self.buttons.retain(|&x| x != b);
-                if self.wakes(screens()) {
+                if self.wakes(screens(), now) {
                     self.buttons.push(b);
                     Verdict::DropWake
                 } else {
@@ -157,7 +171,7 @@ impl WakeGuard {
             Input::Release(b) => take(&mut self.buttons, b),
             Input::TouchStart(id) => {
                 self.touches.retain(|&x| x != id);
-                if self.wakes(screens()) {
+                if self.wakes(screens(), now) {
                     self.touches.push(id);
                     Verdict::DropWake
                 } else {
@@ -170,16 +184,17 @@ impl WakeGuard {
         }
     }
 
-    /// Whether a press now is the one that wakes the screen: the first under
-    /// an `off` note, or any within `WAKE_GRACE` after an `on` note.
-    fn wakes(&mut self, s: Screens) -> bool {
-        match s.off_note {
-            Some(note) if self.dropped_under == Some(note) => false,
-            Some(note) => {
-                self.dropped_under = Some(note);
+    /// Whether a press at `now` is part of waking the screen: any under an
+    /// `off` note until `STALE_OFF_AFTER` after the first drop under it, or
+    /// any within `WAKE_GRACE` after an `on` note.
+    fn wakes(&mut self, s: Screens, now: Instant) -> bool {
+        match (s.off_note, self.dropped_under) {
+            (Some(note), Some((seen, first))) if seen == note => now.saturating_duration_since(first) < STALE_OFF_AFTER,
+            (Some(note), _) => {
+                self.dropped_under = Some((note, now));
                 true
             }
-            None => s.just_lit(),
+            (None, _) => s.just_lit(),
         }
     }
 }
@@ -280,23 +295,56 @@ mod tests {
     }
 
     #[test]
-    fn one_off_note_drops_one_press() {
-        // A note left behind by a swayidle that died while dark: the first
-        // press under it is dropped, the next passes.
+    fn one_off_note_drops_presses_until_it_is_stale() {
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
         let mut g = WakeGuard::default();
-        assert_eq!(g.filter(Input::Press(LEFT), dark), Verdict::DropWake);
-        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
-        assert_eq!(g.filter(Input::Press(LEFT), dark), Verdict::Pass);
-        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Pass);
-        assert_eq!(g.filter(Input::TouchStart(3), dark), Verdict::Pass);
+        assert_eq!(g.filter_at(Input::Press(LEFT), dark, at(0)), Verdict::DropWake);
+        assert_eq!(
+            g.filter_at(Input::Release(LEFT), || unreachable!(), at(80)),
+            Verdict::Drop
+        );
+        // A double-click: the second press comes while the "on" run is still
+        // under way and the note still says off. It is dropped too, and so is
+        // a second finger.
+        assert_eq!(g.filter_at(Input::Press(LEFT), dark, at(150)), Verdict::DropWake);
+        assert_eq!(
+            g.filter_at(Input::Release(LEFT), || unreachable!(), at(230)),
+            Verdict::Drop
+        );
+        assert_eq!(g.filter_at(Input::TouchStart(3), dark, at(1900)), Verdict::DropWake);
+        assert_eq!(
+            g.filter_at(Input::TouchRest(3, true), || unreachable!(), at(1950)),
+            Verdict::Drop
+        );
+        // A note left behind by a swayidle that died while dark gives way
+        // STALE_OFF_AFTER after the first drop under it.
+        assert_eq!(g.filter_at(Input::Press(LEFT), dark, at(2500)), Verdict::Pass);
+        assert_eq!(
+            g.filter_at(Input::Release(LEFT), || unreachable!(), at(2550)),
+            Verdict::Pass
+        );
+        assert_eq!(g.filter_at(Input::TouchStart(4), dark, at(2600)), Verdict::Pass);
         // The grace after an `on` note still drops, without touching the
         // memory of the old `off` note.
-        assert_eq!(g.filter(Input::Press(LEFT), || lit_ago(100)), Verdict::DropWake);
-        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
-        // The next blanking writes a new note, and its first press is dropped.
-        assert_eq!(g.filter(Input::Press(LEFT), || dark_since(600)), Verdict::DropWake);
-        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
-        assert_eq!(g.filter(Input::Press(LEFT), || dark_since(600)), Verdict::Pass);
+        assert_eq!(
+            g.filter_at(Input::Press(LEFT), || lit_ago(100), at(3000)),
+            Verdict::DropWake
+        );
+        assert_eq!(
+            g.filter_at(Input::Release(LEFT), || unreachable!(), at(3050)),
+            Verdict::Drop
+        );
+        assert_eq!(g.filter_at(Input::Press(LEFT), dark, at(3100)), Verdict::Pass);
+        // The next blanking writes a new note: its presses are dropped again.
+        let later = || dark_since(600);
+        assert_eq!(g.filter_at(Input::Press(LEFT), later, at(9000)), Verdict::DropWake);
+        assert_eq!(
+            g.filter_at(Input::Release(LEFT), || unreachable!(), at(9050)),
+            Verdict::Drop
+        );
+        assert_eq!(g.filter_at(Input::Press(LEFT), later, at(9150)), Verdict::DropWake);
+        assert_eq!(g.filter_at(Input::Press(LEFT), later, at(11_500)), Verdict::Pass);
     }
 
     #[test]

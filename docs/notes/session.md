@@ -209,7 +209,9 @@ release or the rest of the touch, so egui never sees half a click. Motion,
 the wheel and keys pass; a missing file drops nothing, and so does an `on`
 note dated in the future (the clock stepped back), which would otherwise
 drop every press for the length of the step. Under one `off` note the menu
-drops one press only; the next passes. That and the idle loop of
+drops presses for `STALE_OFF_AFTER` (2 s) after the first drop, then lets
+them pass: the note says `off` until the `on` run has ended, well over
+100 ms, so the second press of a double-click lands under it too. That and the idle loop of
 `thinfloe-session`, which runs `screen-power on` before each swayidle when
 the file still says `off` (a swayidle that ended while dark never ran its
 resume), keep a stale note from eating every click. Guards: the `power`
