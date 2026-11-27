@@ -110,11 +110,15 @@ echo "grow: partition 1 starts at $start_before, $size_before sectors; MBR types
 for n in 1 2; do
     echo "grow: boot $n"
     # Boot 2 reboots at the end, so its shutdown is on the console and the
-    # FAT is checked as a reboot leaves it.
+    # FAT is checked as a reboot leaves it. It waits for the reboot line, not
+    # the report: GRACE after the report could stop QEMU mid-shutdown. Under
+    # -no-reboot QEMU exits at the reboot; TIMEOUT stays the backstop.
+    wait_for='^SMOKE-STICK-DONE'
     if [[ $n == 2 ]]; then
         set_append "$(report reboot)" || { echo "could not set boot 2's APPEND" >&2; exit 2; }
+        wait_for='reboot: Restarting system'
     fi
-    SMOKE_WAIT_FOR='^SMOKE-STICK-DONE' "$DIR/run-qemu-smoke.sh" "$LOG.$n" "$TIMEOUT" "$GRACE" -- \
+    SMOKE_WAIT_FOR="$wait_for" "$DIR/run-qemu-smoke.sh" "$LOG.$n" "$TIMEOUT" "$GRACE" -- \
         qemu-system-x86_64 \
         -machine type=q35,accel=kvm \
         -cpu host,migratable=off \

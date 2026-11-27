@@ -33,6 +33,7 @@ The boot process involves several interconnected components:
 
 3. **Boot Process**:
    - **SquashFS Mount**: Mounts compressed read-only rootfs from USB partition or HTTP URL (on USB, the ESP of the stick the firmware booted from, chosen by stick id; see [Standing Constraints](history-of-constraints.md#the-esp-is-chosen-by-stick-id-never-by-the-partlabel-link))
+     The ESP stays mounted at `/run/thinfloe/storage/efi` and stays busy until power-off, because the squashfs is a loop file on it. So `run-thinfloe-storage-efi.mount` has a drop-in with `DefaultDependencies=no`: systemd does not try to unmount it at `umount.target` (that attempt failed on every reboot, #69), and `systemd-shutdown` remounts it read-only at the end, which flushes it and clears the FAT's dirty bit.
    - **ZRAM Setup**: Creates compressed RAM device for writable overlay
    - **OverlayFS**: Combines read-only SquashFS with writable ZRAM layer
    - **machine-id Persistence**: Reads/generates machine-id and stores it in /config/machine-id on EFI partition

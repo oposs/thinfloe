@@ -10,7 +10,8 @@
 # reached, from a transient unit: this script runs as part of the boot
 # transaction, so waiting for the target here would wait for itself. QEMU's
 # -no-reboot turns the reboot into an exit, and the shutdown lands on the
-# console (scripts/run-qemu-grow-smoke.sh).
+# console (scripts/run-qemu-grow-smoke.sh). It waits at most 300 s for the
+# target and then prints a SMOKE-STICK-REBOOT line instead.
 
 ESP=/run/thinfloe/storage/efi
 
@@ -31,6 +32,14 @@ udevadm settle --timeout=30 >/dev/null 2>&1
 
 if [ "${1:-}" = reboot ]; then
     systemd-run --no-block --unit=smoke-stick-reboot /bin/sh -c \
-        'until systemctl is-active -q multi-user.target; do sleep 1; done; systemctl reboot' \
+        'n=0; until systemctl is-active -q multi-user.target; do
+             n=$((n + 1))
+             if [ "$n" -gt 300 ]; then
+                 echo "SMOKE-STICK-REBOOT: no multi-user.target after 300 s, not rebooting" >/dev/console
+                 exit 1
+             fi
+             sleep 1
+         done
+         systemctl reboot' \
         >/dev/console 2>&1
 fi
