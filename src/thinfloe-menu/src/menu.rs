@@ -307,9 +307,17 @@ pub struct EjectState {
     /// The target (a disk or `all`) the helper is working on.
     pub running: Option<String>,
     pub message: Option<String>,
-    /// Disk and name of each stick when the eject began: the helper removes
-    /// them from its file before it ends.
-    known: Vec<(String, String)>,
+    /// Disk, name and kind of each stick or card when the eject began: the
+    /// helper removes them from its file before it ends.
+    known: Vec<(String, String, crate::removable::Kind)>,
+}
+
+/// `text` with its first letter in capitals, to start a sentence.
+fn sentence(text: &str) -> String {
+    let mut c = text.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 pub struct Menu {
@@ -1299,7 +1307,7 @@ impl Menu {
         self.eject.known = self
             .removable
             .iter()
-            .map(|s| (s.disk.clone(), s.label().to_string()))
+            .map(|s| (s.disk.clone(), s.label().to_string(), s.kind))
             .collect();
         let what = self.eject_name(&target);
         self.log.note(Kind::Event, format!("Ejecting {what}."));
@@ -1308,11 +1316,12 @@ impl Menu {
         Some(Effect::Start(Job::Eject { target }))
     }
 
-    /// How the messages call `target`: the stick's first name, or the sticks.
+    /// How the messages call `target`: the stick's first name, or each
+    /// kind of "all" ("the sticks", "the stick and the card").
     fn eject_name(&self, target: &str) -> String {
         if target == "all" {
-            let one = self.eject.known.len() == 1;
-            return if one { "the stick" } else { "the sticks" }.to_string();
+            let (sticks, cards) = self.known_kinds();
+            return crate::removable::the_kinds(sticks, cards);
         }
         self.removable
             .iter()
@@ -1322,8 +1331,8 @@ impl Menu {
                 self.eject
                     .known
                     .iter()
-                    .find(|(d, _)| d == target)
-                    .map(|(_, n)| n.clone())
+                    .find(|(d, _, _)| d == target)
+                    .map(|(_, n, _)| n.clone())
             })
             .unwrap_or_else(|| target.to_string())
     }
@@ -1335,13 +1344,20 @@ impl Menu {
         // One stick is called by its name even when "all" released it.
         let all = target == "all" && self.eject.known.len() != 1;
         let what = match self.eject.known.as_slice() {
-            [(_, name)] if target == "all" => name.clone(),
+            [(_, name, _)] if target == "all" => name.clone(),
             _ => self.eject_name(target),
         };
+        let (sticks, cards) = self.known_kinds();
         let (kind, message) = match r {
-            EjectResult::Done if all => (Kind::Event, "The sticks can be removed".to_string()),
+            EjectResult::Done if all => (
+                Kind::Event,
+                format!("{} can be removed", crate::removable::counted(sticks, cards)),
+            ),
             EjectResult::Done => (Kind::Event, format!("{what} can be removed")),
-            EjectResult::Busy if all => (Kind::Warn, "The sticks are in use: close the files on them".to_string()),
+            EjectResult::Busy if all => (
+                Kind::Warn,
+                format!("{} are in use: close the files on them", sentence(&what)),
+            ),
             EjectResult::Busy => (Kind::Warn, format!("{what} is in use: close the files on it")),
             EjectResult::Failed(e) => (Kind::Warn, format!("Ejecting {what} failed: {e}")),
         };
@@ -1369,22 +1385,51 @@ impl Menu {
         self.root_job_ended(now)
     }
 
-    /// The names of the sticks the exit flushes, for the dialog.
-    fn flushing(&self) -> Vec<&str> {
+    /// The names and kinds of the sticks and cards the exit flushes, for the dialog.
+    fn flushing(&self) -> Vec<(&str, crate::removable::Kind)> {
         if self.eject.known.is_empty() {
-            self.removable.iter().map(|s| s.label()).collect()
+            self.removable.iter().map(|s| (s.label(), s.kind)).collect()
         } else {
-            self.eject.known.iter().map(|(_, n)| n.as_str()).collect()
+            self.eject.known.iter().map(|(_, n, k)| (n.as_str(), *k)).collect()
         }
     }
 
     pub fn flushing_names(&self) -> String {
-        self.flushing().join(", ")
+        let names: Vec<&str> = self.flushing().into_iter().map(|(n, _)| n).collect();
+        names.join(", ")
     }
 
-    /// More than one stick is flushed.
-    pub fn flushing_many(&self) -> bool {
-        self.flushing().len() > 1
+    /// The flushed ones as the subject of a sentence: "The stick is",
+    /// "The sticks are", "The stick and the card are".
+    pub fn flushing_subject(&self) -> String {
+        let (sticks, cards) = self.flushing_kinds();
+        let verb = if sticks + cards > 1 { "are" } else { "is" };
+        format!("{} {verb}", sentence(&crate::removable::the_kinds(sticks, cards)))
+    }
+
+    /// What may have been left unreleased: "A stick", "A card", "A stick or card".
+    pub fn flushing_noun(&self) -> &'static str {
+        match self.flushing_kinds() {
+            (0, c) if c > 0 => "A card",
+            (s, c) if s > 0 && c > 0 => "A stick or card",
+            _ => "A stick",
+        }
+    }
+
+    /// What the running eject is about, for the panel: a stick's name or
+    /// each kind of "all"; None while none runs.
+    pub fn ejecting_what(&self) -> Option<String> {
+        self.eject.running.as_deref().map(|t| self.eject_name(t))
+    }
+
+    /// How many sticks and how many cards the exit flushes.
+    fn flushing_kinds(&self) -> (usize, usize) {
+        crate::removable::tally(self.flushing().into_iter().map(|(_, k)| k))
+    }
+
+    /// How many sticks and cards the running or last eject began with.
+    fn known_kinds(&self) -> (usize, usize) {
+        crate::removable::tally(self.eject.known.iter().map(|(_, _, k)| *k))
     }
 
     /// Restart and Power off release the sticks before they exit.
@@ -2012,7 +2057,11 @@ impl Menu {
             Some(Logout::Leaving { until }) if now >= until => self.ending.exit_code().map(Effect::Exit),
             // A release that hangs must not hold the restart for ever.
             Some(Logout::Ejecting { since }) if now >= since + EJECT_GRACE => {
-                let message = "Releasing the sticks takes too long".to_string();
+                let (sticks, cards) = self.flushing_kinds();
+                let message = format!(
+                    "Releasing {} takes too long",
+                    crate::removable::the_kinds(sticks, cards)
+                );
                 self.log.note(Kind::Warn, format!("{message}."));
                 self.logout = Some(Logout::EjectFailed { message });
                 None
@@ -5304,8 +5353,47 @@ mod eject_tests {
         m.set_removable(Vec::new());
         assert!(!m.eject.panel_open, "nothing left to show");
         m.eject_finished("all", EjectResult::Done, Instant::now());
-        assert_eq!(m.eject.message.as_deref(), Some("The sticks can be removed"));
+        assert_eq!(m.eject.message.as_deref(), Some("2 sticks can be removed"));
         assert_eq!(m.eject.running, None);
+    }
+
+    fn card(disk: &str, name: &str) -> Stick {
+        Stick {
+            kind: StickKind::Card,
+            ..stick(disk, name)
+        }
+    }
+
+    #[test]
+    fn eject_all_of_a_stick_and_a_card_names_both_kinds() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), card("sdc", "SD")]);
+        m.activate(0, now);
+        assert!(m.eject_event(EjectEvent::All).is_some());
+        assert!(m.log.lines().any(|l| l.plain() == "Ejecting the stick and the card."));
+        assert_eq!(m.ejecting_what().as_deref(), Some("the stick and the card"));
+        m.eject_finished("all", EjectResult::Done, now);
+        assert_eq!(m.eject.message.as_deref(), Some("1 stick and 1 card can be removed"));
+        assert_eq!(m.ejecting_what(), None);
+        m.set_removable(vec![card("sdb", "A"), card("sdc", "B")]);
+        m.eject_event(EjectEvent::All);
+        m.eject_finished("all", EjectResult::Busy, now);
+        assert_eq!(
+            m.eject.message.as_deref(),
+            Some("The cards are in use: close the files on them")
+        );
+        m.eject_event(EjectEvent::All);
+        m.eject_finished("all", EjectResult::Done, now);
+        assert_eq!(m.eject.message.as_deref(), Some("2 cards can be removed"));
+    }
+
+    #[test]
+    fn a_single_eject_is_called_by_its_name() {
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), card("sdc", "SD")]);
+        m.eject_event(EjectEvent::One("sdc".into()));
+        assert_eq!(m.ejecting_what().as_deref(), Some("SD"));
     }
 
     #[test]
@@ -5404,7 +5492,7 @@ mod eject_tests {
         assert_eq!(
             m.logout,
             Some(Logout::EjectFailed {
-                message: "Releasing the sticks takes too long".into()
+                message: "Releasing the stick takes too long".into()
             })
         );
         // It ends after all: the power off goes on.
@@ -5548,6 +5636,37 @@ mod eject_tests {
         m.begin_ending(Action::Reboot, now);
         saved(&mut m, now);
         assert!(m.log.lines().any(|l| l.plain() == "Ejecting the stick."));
-        assert!(!m.flushing_many());
+        assert_eq!(m.flushing_subject(), "The stick is");
+    }
+
+    #[test]
+    fn a_release_of_a_stick_and_a_card_names_both() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![stick("sdb", "ONE"), card("sdc", "SD")]);
+        assert_eq!(m.flushing_subject(), "The stick and the card are");
+        assert_eq!(m.flushing_noun(), "A stick or card");
+        m.begin_ending(Action::Poweroff, now);
+        saved(&mut m, now);
+        assert_eq!(m.flushing_subject(), "The stick and the card are");
+        assert_eq!(m.tick(now + EJECT_GRACE), None);
+        assert_eq!(
+            m.logout,
+            Some(Logout::EjectFailed {
+                message: "Releasing the stick and the card takes too long".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_release_of_one_card_says_card() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![card("mmcblk0", "SD")]);
+        assert_eq!(m.flushing_noun(), "A card");
+        m.begin_ending(Action::Reboot, now);
+        saved(&mut m, now);
+        assert!(m.log.lines().any(|l| l.plain() == "Ejecting the card."));
+        assert_eq!(m.flushing_subject(), "The card is");
     }
 }

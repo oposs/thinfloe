@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Set, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 MAX_NAME_BYTES = 255
 FALLBACK_NAME = "disk"
@@ -613,8 +613,9 @@ def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
            event: Optional[tuple] = None) -> None:
     """One locked update of the contract file and, when given, the event file.
 
-    event is (name, state) or (name, state, count); the count is written as
-    a fourth field only when it is 2 or more (an "eject all" batch).
+    event is (name, state) or (name, state, count, cards); the count and,
+    after it, how many of them are cards are written only when the count is
+    2 or more (an "eject all" batch).
     """
     with files_lock(p):
         lines = [ln for ln in read_lines(p) if ln.device not in drop]
@@ -626,7 +627,8 @@ def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
             first = read_text(event_path(p)).split("\t", 1)[0]
             seq = (int(first) if first.isdigit() else 0) + 1
             count = event[2] if len(event) > 2 else 1
-            extra = f"\t{count}" if count >= 2 else ""
+            cards = event[3] if len(event) > 3 else 0
+            extra = f"\t{count}\t{cards}" if count >= 2 else ""
             atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}{extra}\n")
 
 
@@ -1040,8 +1042,8 @@ def unmount_disk(disk: str, p: Paths, event: bool,
     (release), the partitions are recorded first, so remount mounts exactly
     these again, even when the release is killed half-way.
     batch: a list when this is one disk of "eject all"; a clean eject then
-    appends its event name to it and writes no event (the caller writes
-    one for the whole batch).
+    appends its event name and whether it is a card to it and writes no
+    event (the caller writes one for the whole batch).
     """
     prune(p)
     lines = [ln for ln in read_lines(p) if ln.disk == disk]
@@ -1089,7 +1091,7 @@ def unmount_disk(disk: str, p: Paths, event: bool,
     commit(p, drop={ln.device for ln in done},
            event=(name, "clean") if ejected and batch is None else None)
     if ejected and batch is not None:
-        batch.append(name)
+        batch.append((name, all(ln.kind == "card" for ln in lines)))
     if ejected and any(ln.kind == "stick" for ln in lines):
         power_off(disk, p)
     return status
@@ -1102,7 +1104,7 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
     else:
         disks = [arg]
     results = []
-    batch: Optional[List[str]] = [] if arg == "all" and event else None
+    batch: Optional[List[Tuple[str, bool]]] = [] if arg == "all" and event else None
     try:
         for disk in disks:
             try:
@@ -1116,11 +1118,13 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
         # Also when a later disk raised: the sticks ejected before it get
         # their note.
         if batch:
+            names = ", ".join(name for name, _ in batch)
+            cards = sum(1 for _, card in batch if card)
             try:
-                commit(p, event=(batch[0], "clean") if len(batch) == 1
-                       else (", ".join(batch), "clean", len(batch)))
+                commit(p, event=(names, "clean") if len(batch) == 1
+                       else (names, "clean", len(batch), cards))
             except OSError as e:
-                log(f"no event for {', '.join(batch)}: {e}")
+                log(f"no event for {names}: {e}")
     if event and all(r is None for r in results):
         print("nothing to eject")
     codes = [r for r in results if r is not None]

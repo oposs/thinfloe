@@ -147,6 +147,9 @@ pub struct Event {
     /// How many sticks the event is about: 1 unless the line carries a
     /// count of 2 or more (an "eject all" batch, `name` then joins their names).
     pub count: u32,
+    /// How many of them are cards: the field after the count, 0 when it is
+    /// missing (an older helper) or more than the count.
+    pub cards: u32,
 }
 
 pub fn parse_event(text: &str) -> Option<Event> {
@@ -167,12 +170,49 @@ pub fn parse_event(text: &str) -> Option<Event> {
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(1);
+    let cards = f
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n <= count)
+        .unwrap_or(0);
     Some(Event {
         seq: seq.parse().ok()?,
         name: crate::battery::sanitise(name),
         clean,
         count,
+        cards,
     })
+}
+
+/// How many sticks and how many cards the kinds are.
+pub fn tally(kinds: impl IntoIterator<Item = Kind>) -> (usize, usize) {
+    kinds.into_iter().fold((0, 0), |(s, c), k| match k {
+        Kind::Stick => (s + 1, c),
+        Kind::Card => (s, c + 1),
+    })
+}
+
+/// Each kind with its count: "2 sticks", "1 stick and 1 card", "2 cards".
+pub fn counted(sticks: usize, cards: usize) -> String {
+    let one = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    match (sticks, cards) {
+        (s, 0) => one(s, "stick"),
+        (0, c) => one(c, "card"),
+        (s, c) => format!("{} and {}", one(s, "stick"), one(c, "card")),
+    }
+}
+
+/// Each kind without a count: "the stick", "the sticks and the card".
+/// Nothing known reads as "the sticks".
+pub fn the_kinds(sticks: usize, cards: usize) -> String {
+    let the = |n: usize, word: &str| format!("the {word}{}", if n == 1 { "" } else { "s" });
+    match (sticks, cards) {
+        (0, 0) => "the sticks".to_string(),
+        (s, 0) => the(s, "stick"),
+        (0, c) => the(c, "card"),
+        (s, c) => format!("{} and {}", the(s, "stick"), the(c, "card")),
+    }
 }
 
 #[cfg(test)]
@@ -278,13 +318,55 @@ mod tests {
                 seq: 7,
                 name: "MYSTICK".into(),
                 clean: true,
-                count: 1
+                count: 1,
+                cards: 0
             })
         );
         assert_eq!(parse_event("8\tX\tunclean").map(|e| e.clean), Some(false));
         for bad in ["", "x\tA\tclean", "1\tA", "1\tA\tmaybe", "\tA\tclean"] {
             assert_eq!(parse_event(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn event_cards_are_optional_and_within_the_count() {
+        let c = |t: &str| parse_event(t).map(|e| (e.count, e.cards));
+        assert_eq!(c("7\tA, B\tclean\t2\t1\n"), Some((2, 1)));
+        assert_eq!(c("7\tA, B\tclean\t2\t2\n"), Some((2, 2)));
+        // A helper before the field: no card known.
+        assert_eq!(c("7\tA, B\tclean\t2\n"), Some((2, 0)));
+        assert_eq!(c("7\tA\tclean\n"), Some((1, 0)));
+        for bad in ["7\tA, B\tclean\t2\t3", "7\tA, B\tclean\t2\tx", "7\tA, B\tclean\t2\t"] {
+            assert_eq!(c(bad), Some((2, 0)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn kinds_are_named_with_their_count() {
+        assert_eq!(counted(2, 0), "2 sticks");
+        assert_eq!(counted(0, 2), "2 cards");
+        assert_eq!(counted(1, 1), "1 stick and 1 card");
+        assert_eq!(counted(2, 1), "2 sticks and 1 card");
+        assert_eq!(counted(1, 0), "1 stick");
+        assert_eq!(counted(0, 1), "1 card");
+    }
+
+    #[test]
+    fn kinds_are_named_without_a_count() {
+        assert_eq!(the_kinds(1, 0), "the stick");
+        assert_eq!(the_kinds(0, 1), "the card");
+        assert_eq!(the_kinds(3, 0), "the sticks");
+        assert_eq!(the_kinds(0, 2), "the cards");
+        assert_eq!(the_kinds(1, 1), "the stick and the card");
+        assert_eq!(the_kinds(2, 1), "the sticks and the card");
+        // Nothing known: the sticks, as before.
+        assert_eq!(the_kinds(0, 0), "the sticks");
+    }
+
+    #[test]
+    fn tally_counts_each_kind() {
+        assert_eq!(tally([Kind::Stick, Kind::Card, Kind::Stick]), (2, 1));
+        assert_eq!(tally([]), (0, 0));
     }
 
     #[test]

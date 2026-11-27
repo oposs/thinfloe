@@ -754,15 +754,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         .color(t.palette().ring),
                 );
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{} released before {verbing}.",
-                        if menu.flushing_many() {
-                            "The sticks are"
-                        } else {
-                            "The stick is"
-                        }
-                    ))
-                    .color(t.palette().muted_foreground),
+                    egui::RichText::new(format!("{} released before {verbing}.", menu.flushing_subject()))
+                        .color(t.palette().muted_foreground),
                 );
             });
             ui.ctx().request_repaint_after(Duration::from_secs(1));
@@ -770,7 +763,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::EjectFailed { message }) => {
             let mut chose = None;
-            dialog(ui, "A stick was not released", |ui, t| {
+            dialog(ui, &format!("{} was not released", menu.flushing_noun()), |ui, t| {
                 ui.label(egui::RichText::new(message).color(t.role(role::WARN)));
                 ui.label(
                     egui::RichText::new(format!("If you {verb} now, data not yet written to it can be lost."))
