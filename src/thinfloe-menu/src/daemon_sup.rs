@@ -1,3 +1,5 @@
+//! Supervision of the menu's daemons: Deskflow and FloeDrop.
+//!
 //! The menu's side of its daemons (spec, Processes): it runs
 //! `thinfloe-menu --deskflow` while `[deskflow] listen` is on, and
 //! `thinfloe-share` while `[share] enabled` is on; starts one again after

@@ -1,6 +1,7 @@
 //! The sticks and cards the automount helper keeps mounted, read from its
 //! contract file `/run/thinfloe/removable`: one line per mounted partition,
-//! `device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind`.
+//! `device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind<TAB>mount`,
+//! mount a number per mount, counted per boot (0 when missing or not a number).
 //! The helper is trusted, the file is parsed as if it were not: bounded read,
 //! malformed lines dropped, names made printable, the disk name restricted to
 //! what may be handed to the helper again. Unknown trailing fields are
@@ -9,7 +10,8 @@
 use std::path::Path;
 
 pub const FILE: &str = "/run/thinfloe/removable";
-/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean`.
+/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`,
+/// the count (2 or more) only for an "eject all" batch.
 pub const EVENT_FILE: &str = "/run/thinfloe/removable.event";
 pub const MAX_BYTES: u64 = 64 * 1024;
 pub const MAX_LINES: usize = 256;
@@ -30,6 +32,9 @@ pub struct Stick {
     pub disk: String,
     /// The partitions' names, in file order.
     pub names: Vec<String>,
+    /// The partitions' mount numbers, parallel to `names` (0 for a line
+    /// without one): a card swapped for one of the same name differs here.
+    pub mounts: Vec<u64>,
     pub size_bytes: u64,
     pub model: String,
     pub kind: Kind,
@@ -75,6 +80,7 @@ struct Line {
     size: u64,
     model: String,
     kind: Kind,
+    mount: u64,
 }
 
 fn parse_line(line: &str) -> Option<Line> {
@@ -93,6 +99,11 @@ fn parse_line(line: &str) -> Option<Line> {
         size: size.parse().ok()?,
         model: clean(f[6]),
         kind: if f[7] == "card" { Kind::Card } else { Kind::Stick },
+        mount: f
+            .get(8)
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -102,10 +113,14 @@ pub fn parse(text: &str) -> Vec<Stick> {
     let mut out: Vec<Stick> = Vec::new();
     for l in text.split('\n').take(MAX_LINES).filter_map(parse_line) {
         match out.iter().position(|s| s.disk == l.disk) {
-            Some(i) => out[i].names.push(l.name),
+            Some(i) => {
+                out[i].names.push(l.name);
+                out[i].mounts.push(l.mount);
+            }
             None if out.len() < MAX_STICKS => out.push(Stick {
                 disk: l.disk,
                 names: vec![l.name],
+                mounts: vec![l.mount],
                 size_bytes: l.size,
                 model: l.model,
                 kind: l.kind,
@@ -123,12 +138,15 @@ pub fn read(path: &Path) -> Vec<Stick> {
     }
 }
 
-/// What the helper last told: `seq<TAB>name<TAB>clean|unclean`.
+/// What the helper last told: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub seq: u64,
     pub name: String,
     pub clean: bool,
+    /// How many sticks the event is about: 1 unless the line carries a
+    /// count of 2 or more (an "eject all" batch, `name` then joins their names).
+    pub count: u32,
 }
 
 pub fn parse_event(text: &str) -> Option<Event> {
@@ -143,10 +161,17 @@ pub fn parse_event(text: &str) -> Option<Event> {
         "unclean" => false,
         _ => return None,
     };
+    let count = f
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
     Some(Event {
         seq: seq.parse().ok()?,
         name: crate::battery::sanitise(name),
         clean,
+        count,
     })
 }
 
@@ -174,6 +199,13 @@ mod tests {
         );
         assert_eq!((s[1].disk.as_str(), s[1].kind), ("sdc", Kind::Card));
         assert_eq!(s[0].label(), "ONE");
+    }
+
+    #[test]
+    fn mount_field_is_optional_and_garbage_is_zero() {
+        let s = parse("/dev/sdb1\tsdb\tA\t/m\tvfat\t5\tM\tstick\t7\n/dev/sdb2\tsdb\tB\t/m2\tvfat\t5\tM\tstick\n");
+        assert_eq!(s[0].mounts, [7, 0]);
+        assert_eq!(parse("/dev/sdb1\tsdb\tA\t/m\tvfat\t5\tM\tstick\tx\n")[0].mounts, [0]);
     }
 
     #[test]
@@ -245,12 +277,29 @@ mod tests {
             Some(Event {
                 seq: 7,
                 name: "MYSTICK".into(),
-                clean: true
+                clean: true,
+                count: 1
             })
         );
         assert_eq!(parse_event("8\tX\tunclean").map(|e| e.clean), Some(false));
         for bad in ["", "x\tA\tclean", "1\tA", "1\tA\tmaybe", "\tA\tclean"] {
             assert_eq!(parse_event(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn event_count_is_optional_and_bounded() {
+        let c = |t: &str| parse_event(t).map(|e| e.count);
+        assert_eq!(c("7\tA, B\tclean\t2\n"), Some(2));
+        assert_eq!(c("7\tA\tclean\n"), Some(1));
+        for one in [
+            "7\tA\tclean\t",
+            "7\tA\tclean\t0",
+            "7\tA\tclean\tx",
+            "7\tA\tclean\t99999999999",
+        ] {
+            assert_eq!(c(one), Some(1), "{one:?}");
+        }
+        assert_eq!(c("7\tA\tclean\t3\tmore"), Some(3), "trailing fields ignored");
     }
 }

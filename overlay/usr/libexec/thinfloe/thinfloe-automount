@@ -14,12 +14,15 @@ trees.
 
 Contract file line (readers ignore unknown trailing fields):
 
-    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind
+    device<TAB>disk<TAB>name<TAB>mountpoint<TAB>fstype<TAB>size_bytes<TAB>model<TAB>kind<TAB>mount
 
-kind is stick or card. A line counts only while mountinfo shows its device
+kind is stick or card; mount is a number each mount gets, counted per boot
+in automount/mount-seq, so a card swapped for one of the same name is a
+new line to the OSD (0 in a line of an older helper). A line counts only while mountinfo shows its device
 at its mount point; every command drops the others first. A write hold is
 one line, pid<TAB>id, with the id that "thinfloe-upgrade drives" reports
-(sn-<serial> or nosn, then size and a partition table fingerprint). release
+(sn-<serial> or nosn, then size and a partition table fingerprint); it is
+put in place and deleted only under an flock of the hold directory. release
 records the kernel names it unmounts, one per line, in
 automount/released/<disk>; remount mounts those and nothing else.
 """
@@ -128,6 +131,7 @@ class Line:
     size_bytes: int
     model: str
     kind: str
+    mount: int = 0   # the number of the mount, per boot; 0 in a line of an older helper
 
 
 def read_text(path: str) -> str:
@@ -360,7 +364,8 @@ def parse_lines(text: str) -> List[Line]:
             size = int(f[5])
         except ValueError:
             continue
-        out.append(Line(f[0], f[1], f[2], f[3], f[4], size, f[6], f[7]))
+        mount = int(f[8]) if len(f) > 8 and f[8].isascii() and f[8].isdigit() else 0
+        out.append(Line(f[0], f[1], f[2], f[3], f[4], size, f[6], f[7], mount))
     return out
 
 
@@ -368,7 +373,7 @@ def format_lines(lines: List[Line]) -> str:
     return "".join(
         "\t".join(one_line(str(v)) for v in (
             ln.device, ln.disk, ln.name, ln.mountpoint, ln.fstype, ln.size_bytes,
-            ln.model, ln.kind)) + "\n"
+            ln.model, ln.kind, ln.mount)) + "\n"
         for ln in lines)
 
 
@@ -400,6 +405,7 @@ ADD_BUDGET = 80.0      # seconds for a whole add; most of it may go to waiting f
 REMOVE_BUDGET = 25.0   # seconds for a whole remove
 STEP_RESERVE = 10.0    # an add or remove stops waiting for the lock this long before its end
 KILL_WAIT = 1.0        # run() waits this long for a command it has killed
+HOLD_LOCK_WAIT = 5.0   # seconds to wait for the hold directory's flock, then keep a stale hold
 
 
 class Deadline:
@@ -522,6 +528,39 @@ class FileLock:
         os.close(self.fd)   # closing drops the flock
 
 
+class DirLock:
+    """flock on a directory, waited for timeout seconds, then Busy.
+
+    The hold directory's lock: thinfloe-upgrade takes it around the rename
+    of its hold, this helper around the delete of a stale one. A leaf lock:
+    nothing else is taken while it is held.
+    """
+
+    def __init__(self, path: str, timeout: float):
+        self.path = path
+        self.timeout = timeout
+        self.fd = -1
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        deadline = time.monotonic() + self.timeout
+        try:
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise Busy(self.path)
+                    time.sleep(0.05)
+        except BaseException:
+            os.close(self.fd)   # __exit__ does not run when __enter__ raises
+            raise
+
+    def __exit__(self, *exc):
+        os.close(self.fd)   # closing drops the flock
+
+
 def files_lock(p: Paths) -> FileLock:
     return FileLock(p, "files")
 
@@ -552,18 +591,43 @@ def read_lines(p: Paths) -> List[Line]:
     return parse_lines(read_text(contract_path(p)))
 
 
+def next_mount(p: Paths) -> int:
+    """The next mount number, counted per boot in automount/mount-seq.
+
+    Called only under files_lock.
+    """
+    path = os.path.join(state_dir(p), "mount-seq")
+    last = read_text(path)
+    n = (int(last) if last.isascii() and last.isdigit() else 0) + 1
+    try:
+        atomic_write(path, f"{n}\n")
+    except OSError as e:
+        # The line matters more than the number: a mount without its line
+        # would be missing from the Eject tile. 0 reads as "no number".
+        log(f"mount number not stored ({e}): line written with 0")
+        return 0
+    return n
+
+
 def commit(p: Paths, drop: Set[str] = frozenset(), add: Optional[Line] = None,
            event: Optional[tuple] = None) -> None:
-    """One locked update of the contract file and, when given, the event file."""
+    """One locked update of the contract file and, when given, the event file.
+
+    event is (name, state) or (name, state, count); the count is written as
+    a fourth field only when it is 2 or more (an "eject all" batch).
+    """
     with files_lock(p):
         lines = [ln for ln in read_lines(p) if ln.device not in drop]
         if add is not None:
+            add.mount = next_mount(p)
             lines = [ln for ln in lines if ln.device != add.device] + [add]
         atomic_write(contract_path(p), format_lines(lines))
         if event is not None:
             first = read_text(event_path(p)).split("\t", 1)[0]
             seq = (int(first) if first.isdigit() else 0) + 1
-            atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}\n")
+            count = event[2] if len(event) > 2 else 1
+            extra = f"\t{count}" if count >= 2 else ""
+            atomic_write(event_path(p), f"{seq}\t{one_line(event[0])}\t{event[1]}{extra}\n")
 
 
 def read_holds(p: Paths) -> Dict[str, Hold]:
@@ -616,29 +680,24 @@ def live_hold(p: Paths, d: Dev) -> bool:
 def drop_stale_hold(path: str, ino: int) -> None:
     """Delete the hold file at path if it is still the one read (inode ino).
 
-    The writer puts a hold in place by rename, so a hold written since is
-    another inode. The file is first renamed aside, which takes exactly one
-    file away from path; if that is not the stale one, it is linked back
-    (link fails when a newer hold is at path already, and that one stays).
-    No moment remains in which a fresh hold can be deleted.
+    The writer renames its hold into place under an flock of the hold
+    directory, and the inode is compared and the file unlinked under the
+    same lock, so the file removed is the one compared. Nothing is renamed
+    aside: a fresh hold is never missing. When the lock stays taken, the
+    stale file stays until the next add deletes it; it does not stop this
+    mount (live_hold answers False for it all the same).
     """
-    aside = os.path.join(os.path.dirname(path), f".stale-{os.getpid()}")
     try:
-        os.rename(path, aside)
-    except OSError:
-        return   # gone already
-    try:
-        if os.stat(aside).st_ino != ino:
+        with DirLock(os.path.dirname(path), HOLD_LOCK_WAIT):
             try:
-                os.link(aside, path)
-            except FileExistsError:
-                pass   # a newer hold is in place
+                if os.stat(path).st_ino == ino:
+                    os.unlink(path)
+            except FileNotFoundError:
+                pass   # gone already
+    except Busy:
+        log(f"stale hold {path} not deleted yet: its directory is locked")
     except OSError:
-        pass
-    try:
-        os.unlink(aside)
-    except OSError:
-        pass
+        pass   # no hold directory any more
 
 
 def mountinfo_unescape(text: str) -> str:
@@ -969,7 +1028,8 @@ def released_path(p: Paths, disk: str) -> str:
     return os.path.join(state_dir(p), "released", disk)
 
 
-def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
+def unmount_disk(disk: str, p: Paths, event: bool,
+                 batch: Optional[List[str]] = None) -> Optional[int]:
     """Unmount every partition of a disk; None when none was mounted.
 
     Runs under the disk's lock. A busy first mount leaves every line and
@@ -979,6 +1039,9 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     event: this is an eject (clean event, power off a stick). Without it
     (release), the partitions are recorded first, so remount mounts exactly
     these again, even when the release is killed half-way.
+    batch: a list when this is one disk of "eject all"; a clean eject then
+    appends its event name to it and writes no event (the caller writes
+    one for the whole batch).
     """
     prune(p)
     lines = [ln for ln in read_lines(p) if ln.disk == disk]
@@ -1022,8 +1085,11 @@ def unmount_disk(disk: str, p: Paths, event: bool) -> Optional[int]:
     if not event and done:
         journal(f"released {disk}: {', '.join(ln.name for ln in done)}")
     ejected = event and status == EXIT_OK
+    name = ", ".join(ln.name for ln in lines)
     commit(p, drop={ln.device for ln in done},
-           event=(", ".join(ln.name for ln in lines), "clean") if ejected else None)
+           event=(name, "clean") if ejected and batch is None else None)
+    if ejected and batch is not None:
+        batch.append(name)
     if ejected and any(ln.kind == "stick" for ln in lines):
         power_off(disk, p)
     return status
@@ -1036,13 +1102,25 @@ def cmd_unmount(arg: str, p: Paths, event: bool) -> int:
     else:
         disks = [arg]
     results = []
-    for disk in disks:
-        try:
-            with disk_lock(p, disk):
-                results.append(unmount_disk(disk, p, event))
-        except Busy:
-            log(f"{disk} is busy")
-            results.append(EXIT_BUSY)
+    batch: Optional[List[str]] = [] if arg == "all" and event else None
+    try:
+        for disk in disks:
+            try:
+                with disk_lock(p, disk):
+                    results.append(unmount_disk(disk, p, event, batch))
+            except Busy:
+                log(f"{disk} is busy")
+                results.append(EXIT_BUSY)
+    finally:
+        # One event for the batch: the OSD shows one note, with the count.
+        # Also when a later disk raised: the sticks ejected before it get
+        # their note.
+        if batch:
+            try:
+                commit(p, event=(batch[0], "clean") if len(batch) == 1
+                       else (", ".join(batch), "clean", len(batch)))
+            except OSError as e:
+                log(f"no event for {', '.join(batch)}: {e}")
     if event and all(r is None for r in results):
         print("nothing to eject")
     codes = [r for r in results if r is not None]

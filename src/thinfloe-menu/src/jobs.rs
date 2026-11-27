@@ -1011,11 +1011,11 @@ pub fn net_take_over(paths: &Paths, which: &str) -> Result<(), String> {
     lock(&paths.config).refuse_read_only()?;
     let (cfg, inputs) = net_snapshot(paths);
     let net = netfiles::take_over(&cfg.network, which, &paths.homes, &inputs)?;
-    // The public IP keys as they are now: a switch flipped while netplan
-    // checked the candidate is kept.
+    // Only the keys the take-over changed: a key changed while netplan
+    // checked the candidate (the public IP switch, say) is kept.
     lock(&paths.config)
         .update(crate::generated::Table::Network, |c| {
-            c.network = net.with_public_ip_of(&c.network)
+            c.network = net.merged_onto(&cfg.network, &c.network)
         })
         .map(|_| ())
 }
@@ -1025,7 +1025,10 @@ pub fn net_take_over(paths: &Paths, which: &str) -> Result<(), String> {
 /// that `on_spawn` gets. Success makes the candidate `[network]`; a failure
 /// puts back exactly the generated network files the stage replaced. The
 /// candidate is built on the settings as they are at that moment, so a
-/// keyboard or screen change made while the tool runs is kept.
+/// keyboard or screen change made while the tool runs is kept; of
+/// `[network]` it takes only the keys the plan changed
+/// (`NetworkCfg::merged_onto`), so a network key changed meanwhile is kept
+/// as well.
 /// `netboot` is the caller's to know.
 pub fn network_apply(
     paths: &Paths,
@@ -1040,7 +1043,7 @@ pub fn network_apply(
     let staged = {
         let s = lock(&paths.config);
         let mut candidate = s.cfg.clone();
-        candidate.network = net.clone().with_public_ip_of(&s.cfg.network);
+        candidate.network = net.merged_onto(&cfg.network, &s.cfg.network);
         s.stage(crate::generated::Table::Network, &candidate)
             .map_err(|e| ApplyFailed {
                 home_changed: e.restore.is_some(),
@@ -1053,10 +1056,10 @@ pub fn network_apply(
         Ok(()) => {
             let mut s = lock(&paths.config);
             let mut candidate = s.cfg.clone();
-            // The public IP switch may have been flipped while the tool
-            // ran (the store is not locked then); the plan's copy of it
-            // is older.
-            candidate.network = net.with_public_ip_of(&s.cfg.network);
+            // A [network] key may have changed while the tool ran (the
+            // store is not locked then): only the keys the plan changed
+            // are the plan's.
+            candidate.network = net.merged_onto(&cfg.network, &s.cfg.network);
             // The tool applied the staged files, so they stay. The
             // settings that do not follow are told, and the home is saved
             // with the files as they are.
@@ -2821,6 +2824,33 @@ mod tests {
         let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
         assert!(on_disk.network.public_ip);
         assert_eq!(on_disk.network.public_ip_url, "https://ip.example.net");
+    }
+
+    #[test]
+    fn a_network_apply_keeps_a_network_key_changed_while_it_ran() {
+        let d = dir("net-apply-wired-dns");
+        let p = net_paths(&d, "/bin/true", r#"echo '{"result":"ok","reason":""}'"#);
+        let feed = Arc::new(Feed::default());
+        let change = netfiles::Change {
+            wifi: Some(one_net("home")),
+            wired: None,
+        };
+        // Another [network] key changes while the root tool runs: the
+        // Apply's commit keeps it, as it changed the WiFi only.
+        let r = network_apply(&p, &change, false, &feed, |_| {
+            lock(&p.config)
+                .update(crate::generated::Table::Network, |c| {
+                    c.network.wired.dns = vec!["9.9.9.9".into()]
+                })
+                .unwrap();
+        });
+        assert_eq!(r, Ok(()));
+        let net = lock(&p.config).cfg.network.clone();
+        assert_eq!(net.nets(), one_net("home"));
+        assert_eq!(net.wired.dns, ["9.9.9.9"]);
+        let on_disk = crate::config::parse(&String::from_utf8(config_bytes(&p)).unwrap()).unwrap();
+        assert_eq!(on_disk.network.nets(), one_net("home"));
+        assert_eq!(on_disk.network.wired.dns, ["9.9.9.9"]);
     }
 
     #[test]

@@ -38,6 +38,40 @@ fail=0
 RUNTIME_TIMEOUT=180
 CONTAINER_NAME="thinfloe-runtime-test-$$"
 
+# TF_RUNTIME_MENU names a host-built thinfloe-menu that the Deskflow, OSD and
+# media key cases mount over the image's (iteration only; the evidence is a
+# run without it). Pass cargo's own output path
+# ($CARGO_TARGET_DIR/release/thinfloe-menu), never a copy: on the development
+# host (ext4, kernel 7.0.0, coreutils 9.4) cp of a binary the linker had just
+# written read its unflushed tail as a hole and wrote zeros there, and the
+# damaged menu panicked at start in std's random source ("failed to generate
+# random data ... failed to fill whole buffer"), inside Claude Code's sandbox
+# and outside it alike (2026-11-26). cat, dd, or cp after sync copy it whole.
+# The preflight runs it once, so a broken one fails here with one line
+# instead of in nine cases.
+runtime_menu_preflight() {
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] || return 0
+    local out rc why
+    if [[ $TF_RUNTIME_MENU != /* || ! -f $TF_RUNTIME_MENU || ! -x $TF_RUNTIME_MENU ]]; then
+        echo "FAIL - TF_RUNTIME_MENU=$TF_RUNTIME_MENU is not an absolute path to an executable file"
+        exit 1
+    fi
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none \
+        -v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro" "$IMAGE" \
+        sh -c 'mkdir -p /tmp/s /tmp/u /tmp/st &&
+               TF_MENU_SHIPPED_DIR=/tmp/s TF_MENU_USER_DIR=/tmp/u TF_STATE_DIR=/tmp/st \
+               thinfloe-menu --check' 2>&1)
+    rc=$?
+    if [[ ($rc -ne 0 && $rc -ne 1) || $out == *panicked* ]]; then
+        why=$(grep -A1 -m1 panicked <<<"$out" | tr '\n' ' ')
+        [[ -n $why ]] || why=$(tail -n 1 <<<"$out")
+        echo "FAIL - TF_RUNTIME_MENU=$TF_RUNTIME_MENU does not run in $IMAGE" \
+            "(thinfloe-menu --check exit $rc): $why"
+        exit 1
+    fi
+}
+runtime_menu_preflight
+
 out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$CONTAINER_NAME" \
     -e WLR_BACKENDS=headless \
     -e WLR_HEADLESS_OUTPUTS=2 \
@@ -1276,7 +1310,9 @@ exit 1'
 # px.py TAG [--within S] SPEC...: grim takes the screen and each SPEC prints
 # "px TAG name=value". name=x,y gives the colour at a point, name=x,y@rrggbb
 # the same with an expectation; name=x0,y0,x1,y1#rrggbb is "found" when some
-# pixel of the box (x1, y1 exclusive) has the colour, else "none". With
+# pixel of the box (x1, y1 exclusive) has the colour, else "none";
+# name=y~rrggbb is "first,last", the x of the first and the last pixel of
+# row y with the colour, else "none". With
 # --within S the screen is taken again until every expectation holds, at
 # most S seconds.
 # shellcheck disable=SC2016 # expands inside the container
@@ -1299,6 +1335,10 @@ def at(img, x, y):
     o = pos + 3 * (y * w + x)
     return data[o:o + 3].hex()
 def value(img, spec):
+    if "~" in spec:
+        y, want = spec.split("~")
+        xs = [x for x in range(img[2]) if at(img, x, int(y)) == want]
+        return ("%d,%d" % (xs[0], xs[-1]) if xs else "none"), None
     if "#" in spec:
         box, want = spec.split("#")
         x0, y0, x1, y1 = map(int, box.split(","))
@@ -1484,6 +1524,24 @@ liveoff)
     # Killed outright, the OSD leaves no pactl subscribe behind either.
     stop_osd KILL
     ;;
+note)
+    # A two-row FloeDrop note at scale 1, then at scale 2 (the scale file of the menu).
+    python3 /usr/local/bin/x11-probe.py --background ff0000 --hold 20 &
+    sleep 3
+    start_osd
+    text=$(printf "FloeDrop %.0s" $(seq 40))
+    text=${text% }
+    note() { python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto((\"note\twarn\t\" + sys.argv[1] + \"\n\").encode(), \"/tmp/xdg/thinfloe-osd.sock\")" "$text"; }
+    note
+    sleep 0.5
+    px note --within 1 shown=0,665,1280,666#151b22 span=665~151b22
+    printf "2\n" >/tmp/xdg/thinfloe-scale
+    sleep 3
+    note
+    sleep 0.5
+    px note2 --within 1 shown=0,600,1280,601#151b22 span=600~151b22
+    stop_osd
+    ;;
 esac
 sed "s/^/pactl: /" /tmp/pactl.log 2>/dev/null
 exit 0'
@@ -1578,6 +1636,26 @@ wev2=$(mk_val wev2)
 mk_check $? "the volume switch acts at once: after --env-only and labwc --reconfigure the key no longer reaches the window" \
     "before '$wev1', after '$wev2', bindings in rc.xml $(mk_val binds)"
 
+# note_span TAG MIN MAX SIDE: the border of the note's panel, as px.py
+# found it on one row of a 1280 px output, is MIN..MAX px wide, keeps at
+# least SIDE px to each edge and is centred (to 1 px).
+note_span() {
+    local span l r
+    span=$(mk_px "$1" span)
+    [[ "$(mk_px "$1" shown)" == found && $span =~ ^([0-9]+),([0-9]+)$ ]] || return 1
+    l=${BASH_REMATCH[1]} r=${BASH_REMATCH[2]}
+    (( r - l + 1 >= $2 && r - l + 1 <= $3 && l >= $4 && 1279 - r >= $4 && (l - (1279 - r)) ** 2 <= 1 ))
+}
+mk_run note 1 off off
+# The panel is as wide as the wrapped text and its paddings: a word
+# break leaves the rows short of the 688 px the text may take.
+note_span note 321 720 0
+mk_check $? "a two-row note at scale 1 is wider than a key's panel, at most 720 px wide and centred" \
+    "border on row 665 at x $(mk_px note span)"
+note_span note2 721 1192 44
+mk_check $? "at scale 2 the note is wider than 720 px, keeps 44 px to the edges of a 1280 px output and is centred" \
+    "border on row 600 at x $(mk_px note2 span)"
+
 mk_run osd 2 on off
 [[ "$(mk_val socket)" == yes ]] && grep -qx 'pactl: set-sink-volume spk_a 50%' <<<"$MK_OUT" &&
     grep -qx 'pactl: set-sink-volume spk_b 50%' <<<"$MK_OUT"
@@ -1655,9 +1733,8 @@ mk_check $? "once pactl subscribe runs again, a speaker that drifted is put back
 # types x, Escape, y through one virtual keyboard, so they are its key codes
 # 1, 2, 3 (X 9, 10, 11; --keymap names them for the X window); the probe
 # names a key from the keymap it gets. x must reach the probe and not the X
-# window, y the X window after Escape. TF_RUNTIME_MENU
-# names a host-built thinfloe-menu to use instead of the image's (iteration
-# only; the evidence is a run without it).
+# window, y the X window after Escape. TF_RUNTIME_MENU: see
+# runtime_menu_preflight at the top.
 # shellcheck disable=SC2016 # expands inside the container
 cp_script='wtype -s 9000 x -s 1500 -k Escape -s 1500 y &
 sleep 0.5

@@ -102,6 +102,26 @@ This note covers how the tile menu works: the window rules, tiles and icons, the
   `data:` of any size. Limits and guards are in
   `src/thinfloe-menu/src/icons.rs`, and `src/thinfloe-menu/tests/render_icon.rs`
   renders through the real binary.
+  The update mark (an add-on update waits for the next boot) is a click
+  target of its own: a click on it opens Settings → Packages, elsewhere on
+  the tile it starts the program. It is also a focus stop of its own, right
+  after its tile, so Tab reaches Packages without a mouse; the extra stop
+  is kept on purpose (round 2026-11-26b, C4). A tile's second line (reason,
+  release, comment or note) ends `MARK_GAP` before the leftmost mark
+  area, the update mark's click target or the "user" mark; `tile_columns`
+  in `ui.rs` gives the drawing and the tests the same columns. A greyed
+  tile fades its fill and the mark's hover highlight, not its reason, the
+  word "update" or the mark's focus ring: the mark is the one control of
+  a greyed tile that still works, and a faded ring was too faint for a
+  focus indicator. The pointer is a hand over every enabled widget that
+  takes a click and no drag (`pointing_hand` at the start of
+  `ui::show`), but not over an Area's own move widget: a fixed Area, as
+  every dialog is, senses a click over all of itself to come to the
+  front, and the hand showed on the dialog's padding. The folded-window
+  chips sense drag for the strip's scroll area and set the hand
+  themselves. Widgets that set their own cursor later in the pass win (a
+  text field's I-beam). winit draws the hand from whiteglass's `pointer`
+  cursor.
 
 ## Menu density
 
@@ -475,10 +495,29 @@ animation in the menu does (`animation_time` 0, see `app.rs`). Guards:
 `the_switch_knob_moves_and_reads_on_the_page`,
 `a_switch_click_damages_the_old_and_new_knob` in `brand.rs`.
 
+## Events of a discarded pass
+
+egui reruns a pass that asks for a discard (`ui.rs` does when a page or its
+footer changes height) and gives the second pass no input, so a click is
+seen in the first pass only. The frame loop keeps the event of every pass
+(`app::run_passes`) and handles them in order; before, it kept the last
+pass's answer and such a click did nothing. A widget that reports from its
+state, not its input (the Volume slider while it is held), gives the same
+event in both passes; an event equal to the one before it counts once. Guards:
+`an_event_of_a_discarded_pass_is_kept` in `app.rs`,
+`a_tile_click_in_a_discarded_pass_starts_one_tile` in `ui.rs`.
+
 ## Known limits
 
 Open items found during the Ubuntu 26.04/Wayland/PipeWire upgrade. These are
 not fixed; they are recorded so they aren't rediscovered from scratch.
+
+- On the development host (ext4, kernel 7.0.0, coreutils 9.4) `cp` of a
+  thinfloe-menu the linker has just written can fill its last kilobytes with
+  zeros; the copy then panics at start with "failed to generate random data
+  ... failed to fill whole buffer". Give `TF_RUNTIME_MENU` cargo's own output
+  path; `test-labwc-runtime.sh` checks it once before the cases
+  (`runtime_menu_preflight`).
 
 - The grid is on one monitor. The span patch covers Xwayland windows only.
 - The status area is not seen while a fullscreen window covers the menu.
@@ -513,6 +552,9 @@ not fixed; they are recorded so they aren't rediscovered from scratch.
   its host-name line), the title bars, the strip and chip clicks with a real
   mouse, the DHCP time zone from a real DHCP server (on netboot as well; only
   QEMU with dnsmasq has run it).
+- Not verified on hardware (hand cursor): the unit tests prove egui asks
+  for the pointing hand, and the image test that whiteglass's `pointer`
+  file ships; that labwc shows it under a real mouse is an owner check.
 - Not verified on hardware (menu density): the scale chosen from real EDIDs
   (including monitors that report no or a wrong size), and the scaled title
   bars after labwc's reload.

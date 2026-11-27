@@ -9,9 +9,13 @@ pub const NO_CARD: &str = "AirDrop needs a Wi-Fi card this machine does not use 
 /// Intel Wireless 3160: on thinfloe-56db68 (2026-11-25 and 2026-11-26) the probe said
 /// "exclusive mode up", then the firmware crashed about every 11 s ("Microcode SW error
 /// detected", 40 times in one boot) and iPhones never saw the receiver.
+/// Intel Wireless 7260: the same firmware family as the 3160, skipped by family; not tested
+/// on hardware.
 pub const AWDL_BROKEN: &[(u16, u16, &str)] = &[
     (0x8086, 0x08b3, "Intel Wireless 3160"),
     (0x8086, 0x08b4, "Intel Wireless 3160"),
+    (0x8086, 0x08b1, "Intel Wireless 7260"),
+    (0x8086, 0x08b2, "Intel Wireless 7260"),
 ];
 
 /// The bus a card sits on, from `/sys/class/net/<if>/device/subsystem`.
@@ -42,11 +46,30 @@ pub fn broken_model(info: &CardInfo) -> Option<&'static str> {
         .map(|(_, _, m)| *m)
 }
 
-/// The error for an unused card that cannot run AirDrop.
-pub fn broken_text(iface: &str, model: &str) -> String {
-    format!(
-        "The Wi-Fi card {iface} ({model}) cannot run AirDrop; plug in a USB Wi-Fi stick that can."
-    )
+/// The error for an unused card that cannot run AirDrop; `used_stick` is a USB card the
+/// machine uses for its network, which a new stick would not help beside.
+pub fn broken_text(iface: &str, model: &str, used_stick: Option<&str>) -> String {
+    match used_stick {
+        Some(stick) => format!(
+            "The Wi-Fi card {iface} ({model}) cannot run AirDrop; the USB stick {stick} is used for the network."
+        ),
+        None => format!(
+            "The Wi-Fi card {iface} ({model}) cannot run AirDrop; plug in a USB Wi-Fi stick that can."
+        ),
+    }
+}
+
+/// The error when the card under the link stopped sending (see `health`). A USB stick can be
+/// plugged in again; an internal card needs a restart.
+pub fn wedged_text(station: &str, bus: Bus) -> String {
+    match bus {
+        Bus::Usb => {
+            format!("The Wi-Fi stick {station} stopped sending. Unplug it and plug it in again.")
+        }
+        Bus::Pci | Bus::Other => {
+            format!("The Wi-Fi card {station} stopped sending. Restart the machine.")
+        }
+    }
 }
 
 /// What the choice looks at; the helper fills it from `ip -j addr`, `ip -j route`, the
@@ -91,30 +114,53 @@ fn glob(pat: &str, s: &str) -> bool {
     }
 }
 
-/// Is the card named in the netplan text, as an interface key, a `match: name:` or a `match: macaddress:`?
+/// Is the card named in a `wifis:` part of the netplan text, as an interface key, a
+/// `match: name:` or a `match: macaddress:`? A part runs from its `wifis:` line to the next
+/// line indented as little or less; an `ethernets:` entry holds no Wi-Fi card back.
 fn configured(yaml: &str, iface: &str, mac: Option<&str>) -> bool {
-    yaml.lines().any(|l| {
-        let l = l.split('#').next().unwrap_or("").trim();
+    let mut wifis: Option<usize> = None;
+    for raw in yaml.lines() {
+        let line = raw.split('#').next().unwrap_or("");
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if wifis.is_some_and(|w| indent <= w) {
+            wifis = None;
+        }
         let Some((k, v)) = l.split_once(':') else {
-            return false;
+            continue;
         };
         let (k, v) = (unquote(k), unquote(v));
-        if v.is_empty() {
-            return k == iface;
+        if wifis.is_none() {
+            if k == "wifis" && v.is_empty() {
+                wifis = Some(indent);
+            }
+            continue;
         }
-        match k {
-            "name" => glob(v, iface),
-            "macaddress" => mac.is_some_and(|m| m.eq_ignore_ascii_case(v)),
-            _ => false,
+        let hit = if v.is_empty() {
+            k == iface
+        } else {
+            match k {
+                "name" => glob(v, iface),
+                "macaddress" => mac.is_some_and(|m| m.eq_ignore_ascii_case(v)),
+                _ => false,
+            }
+        };
+        if hit {
+            return true;
         }
-    })
+    }
+    false
 }
 
-/// A Wi-Fi interface with no address other than IPv6 link-local, no route other than IPv6
-/// link-local and multicast, and no network configured, and not in [`AWDL_BROKEN`]: a USB card
-/// first, then by sorted name. When the only unused cards are known to fail, the error names the
-/// first of them. Unreadable network state is an error: the card is not taken on a guess.
-pub fn choose_station(i: &CardInputs) -> Result<String, String> {
+/// Every Wi-Fi interface with no address other than IPv6 link-local, no route other than IPv6
+/// link-local and multicast, and no network configured, and not in [`AWDL_BROKEN`], in order
+/// of preference: USB cards first, then by sorted name. When the only unused cards are known to
+/// fail, the error names the first of them. Unreadable network state is an error: no card is
+/// taken on a guess.
+pub fn candidates(i: &CardInputs) -> Result<Vec<String>, String> {
     let (Ok(addrs), Ok(routes)) = (
         serde_json::from_str::<Vec<Value>>(&i.ip_addr_json),
         serde_json::from_str::<Vec<Value>>(&i.ip_route_json),
@@ -126,7 +172,9 @@ pub fn choose_station(i: &CardInputs) -> Result<String, String> {
     let info = |iface: &str| i.cards.get(iface).cloned().unwrap_or_default();
     // Stable: equal buses keep the sorted-name order.
     ifaces.sort_by_key(|iface| info(iface).bus != Bus::Usb);
-    let mut broken: Option<String> = None;
+    let mut broken: Option<(String, &'static str)> = None;
+    let mut used_stick: Option<String> = None;
+    let mut free = Vec::new();
     for iface in ifaces {
         let entry = addrs.iter().find(|a| a["ifname"] == iface.as_str());
         let has_addr = entry
@@ -145,16 +193,54 @@ pub fn choose_station(i: &CardInputs) -> Result<String, String> {
             .as_deref()
             .is_some_and(|y| configured(y, &iface, mac));
         if has_addr || has_route || named {
+            if info(&iface).bus == Bus::Usb {
+                used_stick.get_or_insert_with(|| iface.clone());
+            }
             continue;
         }
         match broken_model(&info(&iface)) {
             Some(model) => {
-                broken.get_or_insert_with(|| broken_text(&iface, model));
+                broken.get_or_insert((iface, model));
             }
-            None => return Ok(iface),
+            None => free.push(iface),
         }
     }
-    Err(broken.unwrap_or_else(|| NO_CARD.into()))
+    if !free.is_empty() {
+        return Ok(free);
+    }
+    Err(match broken {
+        Some((iface, model)) => broken_text(&iface, model, used_stick.as_deref()),
+        None => NO_CARD.into(),
+    })
+}
+
+/// Layouts that name no country: `us` is used the world over, `eu` is a region.
+pub const NO_COUNTRY_LAYOUTS: &[&str] = &["us", "eu"];
+
+/// The country an XKB layout list names: its first layout when that is two lower-case
+/// letters, not in [`NO_COUNTRY_LAYOUTS`] and, upper-cased, a country code of `zone1970`.
+/// `latam`, `ara` or `epo` give none.
+pub fn layout_country(layout: &str, zone1970: &str) -> Option<String> {
+    let first = layout.split(',').next()?.trim();
+    if first.len() != 2
+        || !first.bytes().all(|b| b.is_ascii_lowercase())
+        || NO_COUNTRY_LAYOUTS.contains(&first)
+    {
+        return None;
+    }
+    let code = first.to_ascii_uppercase();
+    zone1970
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split('\t').next())
+        .any(|codes| codes.split(',').any(|c| c == code))
+        .then_some(code)
+}
+
+/// The regulatory country: the time zone's, else the keyboard layout's.
+pub fn choose_country(zone: Option<&str>, layout: Option<&str>, zone1970: &str) -> Option<String> {
+    zone.and_then(|z| country(z, zone1970))
+        .or_else(|| layout.and_then(|l| layout_country(l, zone1970)))
 }
 
 /// The ISO country of `zone`: the first code of its line in `zone1970.tab`.
@@ -223,7 +309,7 @@ mod tests {
             inputs(&["wlp3s0", "wlx00e04c123456"], None),
             &[("wlp3s0", pci(0x8086, 0x08b3)), ("wlx00e04c123456", usb())],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
     }
 
     #[test]
@@ -231,7 +317,7 @@ mod tests {
         for dev in [0x08b3, 0x08b4] {
             let i = with(inputs(&["wlp3s0"], None), &[("wlp3s0", pci(0x8086, dev))]);
             assert_eq!(
-                choose_station(&i),
+                candidates(&i),
                 Err("The Wi-Fi card wlp3s0 (Intel Wireless 3160) cannot run AirDrop; plug in a USB Wi-Fi stick that can.".into())
             );
         }
@@ -240,7 +326,36 @@ mod tests {
             inputs(&["wlp2s0"], None),
             &[("wlp2s0", pci(0x8086, 0x08b3))],
         );
-        assert_eq!(choose_station(&i), Err(NO_CARD.into()));
+        assert_eq!(candidates(&i), Err(NO_CARD.into()));
+    }
+
+    #[test]
+    fn the_intel_7260_is_skipped_too() {
+        for dev in [0x08b1, 0x08b2] {
+            let i = with(inputs(&["wlp3s0"], None), &[("wlp3s0", pci(0x8086, dev))]);
+            assert_eq!(
+                candidates(&i),
+                Err("The Wi-Fi card wlp3s0 (Intel Wireless 7260) cannot run AirDrop; plug in a USB Wi-Fi stick that can.".into())
+            );
+            let i = with(
+                inputs(&["wlp3s0", "wlx00e04c123456"], None),
+                &[("wlp3s0", pci(0x8086, dev)), ("wlx00e04c123456", usb())],
+            );
+            assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
+        }
+    }
+
+    #[test]
+    fn a_3160_beside_a_stick_used_for_the_network_names_the_stick() {
+        // wlp2s0 is connected in the fixture.
+        let i = with(
+            inputs(&["wlp2s0", "wlp3s0"], None),
+            &[("wlp2s0", usb()), ("wlp3s0", pci(0x8086, 0x08b3))],
+        );
+        assert_eq!(
+            candidates(&i),
+            Err("The Wi-Fi card wlp3s0 (Intel Wireless 3160) cannot run AirDrop; the USB stick wlp2s0 is used for the network.".into())
+        );
     }
 
     #[test]
@@ -249,7 +364,7 @@ mod tests {
             inputs(&["wlp3s0"], None),
             &[("wlp3s0", pci(0x8086, 0x2723))],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlp3s0");
+        assert_eq!(candidates(&i).unwrap()[0], "wlp3s0");
         // Beside a 3160, too.
         let i = with(
             inputs(&["wlp3s0", "wlx00e04c654321"], None),
@@ -258,7 +373,7 @@ mod tests {
                 ("wlx00e04c654321", pci(0x8086, 0x2723)),
             ],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c654321");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c654321");
     }
 
     #[test]
@@ -267,27 +382,46 @@ mod tests {
             inputs(&["wlp3s0", "wlx00e04c123456"], None),
             &[("wlp3s0", pci(0x8086, 0x2723)), ("wlx00e04c123456", usb())],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
         // Among equals the sorted name decides.
         let i = with(
             inputs(&["wlx00e04c654321", "wlx00e04c123456"], None),
             &[("wlx00e04c123456", usb()), ("wlx00e04c654321", usb())],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
         // A USB card in use is not taken.
         let i = with(
             inputs(&["wlp2s0", "wlp3s0"], None),
             &[("wlp2s0", usb()), ("wlp3s0", pci(0x8086, 0x2723))],
         );
-        assert_eq!(choose_station(&i).unwrap(), "wlp3s0");
+        assert_eq!(candidates(&i).unwrap()[0], "wlp3s0");
+    }
+
+    #[test]
+    fn the_candidates_come_in_order_of_preference() {
+        let i = with(
+            inputs(&["wlp3s0", "wlx00e04c123456", "wlx00e04c654321"], None),
+            &[
+                ("wlp3s0", pci(0x8086, 0x2723)),
+                ("wlx00e04c123456", usb()),
+                ("wlx00e04c654321", usb()),
+            ],
+        );
+        assert_eq!(
+            candidates(&i).unwrap(),
+            ["wlx00e04c123456", "wlx00e04c654321", "wlp3s0"]
+        );
+        // A 3160 among them is left out.
+        let i = with(
+            inputs(&["wlp3s0", "wlx00e04c123456"], None),
+            &[("wlp3s0", pci(0x8086, 0x08b3)), ("wlx00e04c123456", usb())],
+        );
+        assert_eq!(candidates(&i).unwrap(), ["wlx00e04c123456"]);
     }
 
     #[test]
     fn a_card_without_sysfs_facts_is_still_taken() {
-        assert_eq!(
-            choose_station(&inputs(&["wlp3s0"], None)).unwrap(),
-            "wlp3s0"
-        );
+        assert_eq!(candidates(&inputs(&["wlp3s0"], None)).unwrap()[0], "wlp3s0");
     }
 
     // Fixture: wlp2s0 is connected (address and route), wlx00e04c123456 is a free stick,
@@ -296,71 +430,114 @@ mod tests {
     #[test]
     fn a_connected_card_is_not_taken() {
         let i = inputs(&["wlp2s0", "wlx00e04c123456"], None);
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
         let only = inputs(&["wlp2s0"], None);
-        assert_eq!(choose_station(&only), Err(NO_CARD.into()));
+        assert_eq!(candidates(&only), Err(NO_CARD.into()));
     }
 
     #[test]
     fn a_configured_card_is_never_taken() {
         // wlp3s0 has no address and no route (out of range) but wifi.yaml names it.
         let i = inputs(&["wlp3s0"], Some(WIFI));
-        assert_eq!(choose_station(&i), Err(NO_CARD.into()));
+        assert_eq!(candidates(&i), Err(NO_CARD.into()));
         // Without the file it would be free.
-        assert_eq!(
-            choose_station(&inputs(&["wlp3s0"], None)).unwrap(),
-            "wlp3s0"
-        );
+        assert_eq!(candidates(&inputs(&["wlp3s0"], None)).unwrap()[0], "wlp3s0");
         // Matched by MAC and by name pattern.
         let by_mac = "network:\n  wifis:\n    home:\n      match:\n        macaddress: \"AA:BB:CC:00:00:09\"\n";
         assert_eq!(
-            choose_station(&inputs(&["wlan9"], Some(by_mac))),
+            candidates(&inputs(&["wlan9"], Some(by_mac))),
             Err(NO_CARD.into())
         );
         let by_name = "network:\n  wifis:\n    home:\n      match:\n        name: wlp*\n";
         assert_eq!(
-            choose_station(&inputs(&["wlp3s0"], Some(by_name))),
+            candidates(&inputs(&["wlp3s0"], Some(by_name))),
             Err(NO_CARD.into())
         );
     }
 
     #[test]
+    fn an_ethernet_entry_does_not_hold_a_wifi_card() {
+        let eth = "network:\n  ethernets:\n    wlp3s0:\n      dhcp4: true\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(eth))).unwrap()[0],
+            "wlp3s0"
+        );
+        let wifi = "network:\n  wifis:\n    wlp3s0:\n      dhcp4: true\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(wifi))),
+            Err(NO_CARD.into())
+        );
+        // Files joined by a newline, as the helper reads them: the second names it.
+        let both = format!("{eth}\n{wifi}");
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(&both))),
+            Err(NO_CARD.into())
+        );
+        // A wifis part ends at the next key of its level.
+        let after =
+            "network:\n  wifis:\n    home:\n      dhcp4: true\n  ethernets:\n    wlp3s0: {}\n";
+        assert_eq!(
+            candidates(&inputs(&["wlp3s0"], Some(after))).unwrap()[0],
+            "wlp3s0"
+        );
+    }
+
+    #[test]
+    fn only_link_local_and_multicast_routes_are_free() {
+        let dev = "wlx00e04c123456";
+        let with = |routes: &str| {
+            let mut i = inputs(&[dev], None);
+            i.ip_route_json = routes.to_string();
+            candidates(&i)
+        };
+        let free =
+            format!(r#"[{{"dst":"fe80::/64","dev":"{dev}"}},{{"dst":"ff00::/8","dev":"{dev}"}}]"#);
+        assert_eq!(with(&free).unwrap()[0], dev);
+        for other in ["2001:db8::/64", "169.254.0.0/16", "default"] {
+            let r = format!(
+                r#"[{{"dst":"fe80::/64","dev":"{dev}"}},{{"dst":"{other}","dev":"{dev}"}}]"#
+            );
+            assert_eq!(with(&r), Err(NO_CARD.into()), "{other}");
+        }
+    }
+
+    #[test]
     fn own_up_card_with_only_link_local_is_taken() {
         let i = inputs(&["wlx00e04c654321"], None);
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c654321");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c654321");
         // An IPv4 link-local address still counts.
         let mut j = inputs(&["wlx00e04c654321"], None);
         j.ip_addr_json = j.ip_addr_json.replace(
             "\"family\":\"inet6\",\"local\":\"fe80::2e0:4cff:fe65:4321\",\"prefixlen\":64",
             "\"family\":\"inet\",\"local\":\"169.254.3.4\",\"prefixlen\":16",
         );
-        assert_eq!(choose_station(&j), Err(NO_CARD.into()));
+        assert_eq!(candidates(&j), Err(NO_CARD.into()));
     }
 
     #[test]
     fn unreadable_state_is_an_error_not_a_free_card() {
         let mut i = inputs(&["wlx00e04c123456"], None);
         i.ip_addr_json = "not json".into();
-        assert_eq!(choose_station(&i), Err(NO_STATE.into()));
+        assert_eq!(candidates(&i), Err(NO_STATE.into()));
         let mut i = inputs(&["wlx00e04c123456"], None);
         i.ip_route_json = String::new();
-        assert_eq!(choose_station(&i), Err(NO_STATE.into()));
+        assert_eq!(candidates(&i), Err(NO_STATE.into()));
     }
 
     #[test]
     fn the_stick_beside_a_configured_card_is_taken() {
         let i = inputs(&["wlp3s0", "wlx00e04c123456"], Some(WIFI));
-        assert_eq!(choose_station(&i).unwrap(), "wlx00e04c123456");
+        assert_eq!(candidates(&i).unwrap()[0], "wlx00e04c123456");
     }
 
     #[test]
     fn no_free_card_is_the_error_text() {
         assert_eq!(
-            choose_station(&inputs(&[], None)),
+            candidates(&inputs(&[], None)),
             Err("AirDrop needs a Wi-Fi card this machine does not use for its network.".into())
         );
         assert_eq!(
-            choose_station(&inputs(&["wlp2s0", "wlp3s0"], Some(WIFI))),
+            candidates(&inputs(&["wlp2s0", "wlp3s0"], Some(WIFI))),
             Err(NO_CARD.into())
         );
     }
@@ -369,6 +546,53 @@ mod tests {
     fn country_of_europe_zurich_is_ch() {
         assert_eq!(country("Europe/Zurich", ZONES).as_deref(), Some("CH"));
         assert_eq!(country("Asia/Tokyo", ZONES).as_deref(), Some("JP"));
+    }
+
+    #[test]
+    fn a_layout_that_is_a_country_gives_it() {
+        for (layout, want) in [
+            ("ch", Some("CH")),
+            ("de", Some("DE")),
+            ("gb", Some("GB")),
+            ("us", None),
+            ("eu", None),
+            ("latam", None),
+            ("zz", None),
+            ("", None),
+        ] {
+            assert_eq!(layout_country(layout, ZONES).as_deref(), want, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_layout_of_a_list_decides() {
+        assert_eq!(layout_country("ch,de", ZONES).as_deref(), Some("CH"));
+        assert_eq!(layout_country("us,de", ZONES), None);
+    }
+
+    #[test]
+    fn the_zone_wins_over_the_layout() {
+        assert_eq!(
+            choose_country(Some("Asia/Tokyo"), Some("ch"), ZONES).as_deref(),
+            Some("JP")
+        );
+        assert_eq!(
+            choose_country(Some("UTC"), Some("ch"), ZONES).as_deref(),
+            Some("CH")
+        );
+        assert_eq!(choose_country(None, None, ZONES), None);
+    }
+
+    #[test]
+    fn the_wedged_text_fits_the_bus() {
+        assert_eq!(
+            wedged_text("wlxc03a55f0d060", Bus::Usb),
+            "The Wi-Fi stick wlxc03a55f0d060 stopped sending. Unplug it and plug it in again."
+        );
+        assert_eq!(
+            wedged_text("wlp3s0", Bus::Pci),
+            "The Wi-Fi card wlp3s0 stopped sending. Restart the machine."
+        );
     }
 
     #[test]

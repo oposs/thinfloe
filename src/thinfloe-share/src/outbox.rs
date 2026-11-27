@@ -19,7 +19,12 @@ pub const BATCH_DELAY: Duration = Duration::from_secs(3);
 /// A receiver not seen for this long is gone; its folder is removed if empty.
 pub const GONE_AFTER: Duration = Duration::from_secs(60);
 /// How soon a batch held by a file still being written is looked at again.
-const HOLD_RETRY: Duration = Duration::from_secs(1);
+const HOLD_RETRY: Duration = BATCH_DELAY;
+/// A batch held this long gets one note; it still waits for the file, without a limit.
+pub const HOLD_NOTE_AFTER: Duration = Duration::from_secs(30);
+/// The write check looks this deep below an entry, and at this many entries of a batch.
+pub const WALK_MAX_DEPTH: usize = 32;
+pub const WALK_MAX_ENTRIES: usize = 10_000;
 /// Folder name when a receiver gives no usable name.
 const DEVICE_FALLBACK: &str = "iPhone";
 
@@ -46,6 +51,59 @@ pub trait Probe {
     fn busy(&mut self, entries: &[PathBuf]) -> bool;
 }
 
+/// The space left for a batch: the files of an offer take as much again in Owly's
+/// spool inside the same tmpfs.
+pub trait Space {
+    fn free(&mut self) -> Option<u64>;
+}
+
+/// The real space: what the file system holding the outbox has free.
+pub struct SystemSpace(pub PathBuf);
+
+impl Space for SystemSpace {
+    fn free(&mut self) -> Option<u64> {
+        crate::inbox::free_bytes(&self.0).ok()
+    }
+}
+
+/// Bytes of the plain files at or below `entries` (symlinks not followed), within the
+/// walk bounds of the write check.
+pub fn batch_bytes(entries: &[PathBuf]) -> u64 {
+    fn walk(p: &Path, depth: usize, budget: &mut usize, sum: &mut u64) {
+        if depth > WALK_MAX_DEPTH || *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let Ok(md) = fs::symlink_metadata(p) else {
+            return;
+        };
+        if md.is_file() {
+            *sum = sum.saturating_add(md.len());
+        } else if md.is_dir()
+            && let Ok(rd) = fs::read_dir(p)
+        {
+            for e in rd.flatten() {
+                walk(&e.path(), depth + 1, budget, sum);
+            }
+        }
+    }
+    let mut budget = WALK_MAX_ENTRIES;
+    let mut sum = 0;
+    for e in entries {
+        walk(e, 0, &mut budget, &mut sum);
+    }
+    sum
+}
+
+/// OSD text when a batch of `bytes` does not fit in FloeDrop's folder.
+pub fn room_note(device: &str, bytes: u64) -> (Tone, String) {
+    let mb = bytes.div_ceil(1_000_000).max(1);
+    (
+        Tone::Warn,
+        format!("Could not send to {device}: not enough room in FloeDrop for {mb} MB"),
+    )
+}
+
 /// The real check: a file below an entry changed less than `BATCH_DELAY` ago, or a
 /// process of this user has one open for writing (`/proc/*/fd`).
 pub struct SystemProbe;
@@ -57,15 +115,29 @@ impl Probe for SystemProbe {
             return true;
         }
         let open = open_for_writing(Path::new("/proc"));
+        // /proc names the real path: an outbox reached through a symlink must match too.
         entries
             .iter()
-            .any(|e| open.iter().any(|p| p.starts_with(e)))
+            .map(|e| fs::canonicalize(e).unwrap_or_else(|_| e.clone()))
+            .any(|e| open.iter().any(|p| p.starts_with(&e)))
     }
 }
 
 /// True if `p` or anything below it (symlinks not followed) has an mtime in the last
 /// `BATCH_DELAY` before `now`. An mtime in the future does not count: it would hold forever.
+/// The walk stops at `WALK_MAX_DEPTH` levels and `WALK_MAX_ENTRIES` entries; what lies
+/// beyond counts as not modified (a file there still open for writing holds the batch
+/// through `/proc`).
 pub fn recently_modified(p: &Path, now: SystemTime) -> bool {
+    let mut budget = WALK_MAX_ENTRIES;
+    modified_below(p, now, 0, &mut budget)
+}
+
+fn modified_below(p: &Path, now: SystemTime, depth: usize, budget: &mut usize) -> bool {
+    if depth > WALK_MAX_DEPTH || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
     let Ok(md) = fs::symlink_metadata(p) else {
         return false;
     };
@@ -79,8 +151,11 @@ pub fn recently_modified(p: &Path, now: SystemTime) -> bool {
         && let Ok(rd) = fs::read_dir(p)
     {
         for e in rd.flatten() {
-            if recently_modified(&e.path(), now) {
+            if modified_below(&e.path(), now, depth + 1, budget) {
                 return true;
+            }
+            if *budget == 0 {
+                break;
             }
         }
     }
@@ -132,6 +207,8 @@ struct Dev {
     /// instance) has two service IDs but one address.
     addr: String,
     name: String,
+    /// What stays the same across addresses (a hash of the receiver record), if known.
+    stable: Option<String>,
     folder: String,
     last_seen: Instant,
     present: bool,
@@ -139,6 +216,11 @@ struct Dev {
     pending: Option<Instant>,
     /// Earliest next look at a held batch.
     hold_until: Option<Instant>,
+    /// When the write check first held the current batch, and whether that was noted.
+    held_since: Option<Instant>,
+    hold_noted: bool,
+    /// Offered entries that could not be deleted: never offered again while they exist.
+    stuck: HashSet<PathBuf>,
     in_flight: Option<(SendHandle, Vec<PathBuf>)>,
     state: DevState,
     since: u64,
@@ -148,6 +230,7 @@ pub struct Outbox {
     root: PathBuf,
     devs: Vec<Dev>,
     probe: Box<dyn Probe>,
+    space: Box<dyn Space>,
     notes: Vec<(Tone, String)>,
     /// Folders made since the last `take_new_folders`, for the daemon's inotify watches.
     new_folders: Vec<String>,
@@ -168,8 +251,8 @@ fn is_real_dir(p: &Path) -> bool {
 }
 
 /// The entries an offer takes: top-level, not hidden, plain files and directories only
-/// (a symlink or special file is never sent). Sorted by name.
-fn offerable(dir: &Path) -> Vec<PathBuf> {
+/// (a symlink or special file is never sent), and none in `stuck`. Sorted by name.
+fn offerable(dir: &Path, stuck: &HashSet<PathBuf>) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -182,9 +265,30 @@ fn offerable(dir: &Path) -> Vec<PathBuf> {
                 .unwrap_or(false)
         })
         .map(|e| e.path())
+        .filter(|p| !stuck.contains(p))
         .collect();
     v.sort();
     v
+}
+
+/// OSD text when a batch has waited `HOLD_NOTE_AFTER` for a file still open.
+pub fn hold_note(device: &str) -> (Tone, String) {
+    (
+        Tone::Warn,
+        format!("Waiting to send to {device}: a file in its folder is still open"),
+    )
+}
+
+/// OSD text when an offered entry could not be deleted.
+pub fn stuck_note(entry: &Path, device: &str) -> (Tone, String) {
+    let name = entry
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (
+        Tone::Warn,
+        format!("Could not remove {name} from the folder of {device}; it is not sent again"),
+    )
 }
 
 /// Make the folder of a device in range again when the user deleted it; records it in
@@ -215,7 +319,7 @@ fn delete(p: &Path) -> io::Result<()> {
     }
 }
 
-/// OSD text after an offer ended.
+/// OSD text after an offer ended; `offered` must still exist (a full spool counts them).
 pub fn sent_note(offered: &[PathBuf], device: &str, o: &Outcome) -> (Tone, String) {
     match o {
         Outcome::Delivered => {
@@ -231,6 +335,9 @@ pub fn sent_note(offered: &[PathBuf], device: &str, o: &Outcome) -> (Tone, Strin
             (Tone::Info, text)
         }
         Outcome::Declined => (Tone::Warn, format!("{device} declined")),
+        Outcome::Failed(why) if why.contains("os error 28") || why.contains("No space left") => {
+            room_note(device, batch_bytes(offered))
+        }
         Outcome::Failed(_) => (Tone::Warn, format!("Could not send to {device}")),
     }
 }
@@ -243,6 +350,7 @@ impl Outbox {
 
     pub fn with_probe(root: PathBuf, probe: Box<dyn Probe>) -> Outbox {
         Outbox {
+            space: Box::new(SystemSpace(root.clone())),
             root,
             devs: Vec::new(),
             probe,
@@ -252,22 +360,55 @@ impl Outbox {
         }
     }
 
-    /// A receiver answered `/Discover` at `addr` with the computer name `name`: give it
-    /// a folder, or the folder it, its address or its name had.
-    pub fn seen(&mut self, service_id: &str, addr: &str, name: &str, now: Instant) {
+    /// The same outbox with another source of the free space.
+    #[cfg(test)]
+    pub fn with_space(mut self, space: Box<dyn Space>) -> Outbox {
+        self.space = space;
+        self
+    }
+
+    /// A receiver answered `/Discover` at `addr` with the computer name `name` and,
+    /// when it sent a receiver record, the record's hash `stable`: give it a folder, or
+    /// the folder it, its address or its name had.
+    pub fn seen(
+        &mut self,
+        service_id: &str,
+        addr: &str,
+        name: &str,
+        stable: Option<&str>,
+        now: Instant,
+    ) -> Option<String> {
         // The same service ID, or the same phone under a new one (found by the radio's
-        // peer list first, by mDNS later): one device, one folder.
+        // peer list first, by mDNS later): one device, one folder. A record alone is
+        // not enough: two devices of one Apple account may send the same one, so the
+        // name must agree too.
         let known = self
             .devs
             .iter()
             .position(|d| d.service_id == service_id)
+            .or_else(|| {
+                stable.and_then(|s| {
+                    self.devs
+                        .iter()
+                        .position(|d| d.stable.as_deref() == Some(s) && d.name == name)
+                })
+            })
             .or_else(|| self.devs.iter().position(|d| d.addr == addr));
         if let Some(d) = known.map(|i| &mut self.devs[i]) {
             if d.service_id != service_id {
-                self.dropped
-                    .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
+                // The radio's `awdl-` key wins: it does not change with the mDNS
+                // instance, so the device does not flip between two keys.
+                if d.service_id.starts_with("awdl-") && !service_id.starts_with("awdl-") {
+                    self.dropped.push(service_id.to_string());
+                } else {
+                    self.dropped
+                        .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
+                    d.addr = addr.to_string();
+                }
             }
-            d.addr = addr.to_string();
+            if stable.is_some() {
+                d.stable = stable.map(str::to_string);
+            }
             d.name = name.to_string();
             d.last_seen = now;
             if !d.present {
@@ -275,7 +416,7 @@ impl Outbox {
                 d.pending = Some(now);
             }
             ensure_folder(&self.root, &d.folder, &mut self.new_folders);
-            return;
+            return Some(d.service_id.clone());
         }
         let wanted = names::safe(name, DEVICE_FALLBACK);
         // A gone device of the same name hands its folder over.
@@ -287,16 +428,17 @@ impl Outbox {
             self.dropped
                 .push(std::mem::replace(&mut d.service_id, service_id.to_string()));
             d.addr = addr.to_string();
+            d.stable = stable.map(str::to_string);
             d.name = name.to_string();
             d.last_seen = now;
             d.present = true;
             d.pending = Some(now);
             ensure_folder(&self.root, &d.folder, &mut self.new_folders);
-            return;
+            return Some(service_id.to_string());
         }
         if let Err(e) = fs::create_dir_all(&self.root) {
             eprintln!("thinfloe-share: outbox {}: {e}", self.root.display());
-            return;
+            return None;
         }
         let owned: HashSet<&str> = self.devs.iter().map(|d| d.folder.as_str()).collect();
         // A folder of that name nobody owns (left from an earlier run) is taken over.
@@ -316,7 +458,7 @@ impl Outbox {
             let f = names::unique_dir(&taken, &wanted);
             if let Err(e) = fs::create_dir(self.root.join(&f)) {
                 eprintln!("thinfloe-share: outbox folder {f}: {e}");
-                return;
+                return None;
             }
             self.new_folders.push(f.clone());
             f
@@ -325,15 +467,25 @@ impl Outbox {
             service_id: service_id.to_string(),
             addr: addr.to_string(),
             name: name.to_string(),
+            stable: stable.map(str::to_string),
             folder,
             last_seen: now,
             present: true,
             pending: Some(now),
             hold_until: None,
+            held_since: None,
+            hold_noted: false,
+            stuck: HashSet::new(),
             in_flight: None,
             state: DevState::Idle,
             since: epoch(),
         });
+        Some(service_id.to_string())
+    }
+
+    /// Whether a device answers to `service_id` now.
+    pub fn knows(&self, service_id: &str) -> bool {
+        self.devs.iter().any(|d| d.service_id == service_id)
     }
 
     /// Something changed in the folder `folder` (inotify).
@@ -383,22 +535,44 @@ impl Outbox {
             }
             soon(d.last_seen + GONE_AFTER);
             ensure_folder(&root, &d.folder, &mut self.new_folders);
+            d.stuck.retain(|p| fs::symlink_metadata(p).is_ok());
             if let Some(changed) = d.pending {
                 let due = (changed + BATCH_DELAY).max(d.hold_until.unwrap_or(now));
                 if now < due {
                     soon(due);
                 } else {
-                    let entries = offerable(&root.join(&d.folder));
+                    let entries = offerable(&root.join(&d.folder), &d.stuck);
                     if entries.is_empty() {
                         d.pending = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
                     } else if self.probe.busy(&entries) {
+                        let since = *d.held_since.get_or_insert(now);
+                        if !d.hold_noted && now.duration_since(since) >= HOLD_NOTE_AFTER {
+                            d.hold_noted = true;
+                            self.notes.push(hold_note(&d.name));
+                        }
                         d.hold_until = Some(now + HOLD_RETRY);
                         soon(now + HOLD_RETRY);
+                    } else if let Some(free) = self.space.free()
+                        && let bytes = batch_bytes(&entries)
+                        && bytes > free
+                    {
+                        // Owly's archive of the batch needs as much again: it would fail
+                        // on the way. The files stay for a later change.
+                        d.pending = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
+                        d.state = DevState::Failed;
+                        d.since = epoch();
+                        self.notes.push(room_note(&d.name, bytes));
                     } else {
                         let h = t.send(&d.service_id, entries.clone());
                         d.in_flight = Some((h, entries));
                         d.pending = None;
                         d.hold_until = None;
+                        d.held_since = None;
+                        d.hold_noted = false;
                         d.state = DevState::Sending;
                         d.since = epoch();
                     }
@@ -409,7 +583,8 @@ impl Outbox {
         wake
     }
 
-    /// A send ended: its offered entries are deleted whatever the outcome.
+    /// A send ended: its offered entries are deleted whatever the outcome; one that cannot
+    /// be deleted is noted and not offered again.
     pub fn finished(&mut self, id: SendHandle, o: Outcome, now: Instant) {
         let Some(d) = self
             .devs
@@ -419,9 +594,13 @@ impl Outbox {
             return;
         };
         let (_, offered) = d.in_flight.take().expect("matched above");
+        let note = sent_note(&offered, &d.name, &o);
+        let mut stuck = Vec::new();
         for p in &offered {
             if let Err(e) = delete(p) {
                 eprintln!("thinfloe-share: delete {}: {e}", p.display());
+                d.stuck.insert(p.clone());
+                stuck.push(stuck_note(p, &d.name));
             }
         }
         if let Outcome::Failed(why) = &o {
@@ -437,7 +616,8 @@ impl Outbox {
         if !matches!(o, Outcome::Failed(_)) {
             d.last_seen = d.last_seen.max(now);
         }
-        self.notes.push(sent_note(&offered, &d.name, &o));
+        self.notes.push(note);
+        self.notes.extend(stuck);
     }
 
     /// Folders made since the last call (new devices and folders made again after the
@@ -553,8 +733,19 @@ mod tests {
             self.seen_at(id, &format!("addr-{id}"), name, s);
         }
         fn seen_at(&mut self, id: &str, addr: &str, name: &str, s: u64) {
+            self.seen_with(id, addr, name, None, s);
+        }
+        fn seen_with(&mut self, id: &str, addr: &str, name: &str, stable: Option<&str>, s: u64) {
             let now = self.at(s);
-            self.ob.seen(id, addr, name, now);
+            self.ob.seen(id, addr, name, stable, now);
+        }
+        fn folders(&self) -> Vec<String> {
+            let mut v: Vec<String> = fs::read_dir(&self.root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
         }
         fn changed(&mut self, folder: &str, s: u64) {
             let now = self.at(s);
@@ -607,12 +798,52 @@ mod tests {
         assert_eq!(dirs, vec![JANE.to_string()], "one folder, never \"(2)\"");
         assert_eq!(t.entries(JANE), vec!["early.jpg", "late.jpg"]);
         assert_eq!(t.ob.devices().len(), 1);
-        // The batch goes to the mDNS instance, files from before the re-key too.
+        // The batch goes to the radio's key, files from before the mDNS find too.
         t.tick(4);
         assert_eq!(
             t.calls(),
-            vec![("Jane-mdns-instance".to_string(), vec![early, late])]
+            vec![("awdl-02:11:22:33:44:55".to_string(), vec![early, late])]
         );
+    }
+
+    #[test]
+    fn the_awdl_key_wins_over_an_mdns_key() {
+        let mut t = T::new("ob-awdl-wins");
+        let awdl = "awdl-02:11:22:33:44:55";
+        t.seen_at(awdl, "fe80::1", JANE, 0);
+        t.seen_at("Jane-mdns", "fe80::1", JANE, 1);
+        t.seen_at(awdl, "fe80::1", JANE, 2);
+        t.seen_at("Jane-mdns", "fe80::1", JANE, 3);
+        assert_eq!(t.ob.take_dropped(), vec!["Jane-mdns", "Jane-mdns"]);
+        let a = t.put(JANE, "a.jpg");
+        t.changed(JANE, 3);
+        t.tick(6);
+        assert_eq!(t.calls(), vec![(awdl.to_string(), vec![a])]);
+    }
+
+    #[test]
+    fn one_record_is_one_phone_at_two_addresses() {
+        let mut t = T::new("ob-record");
+        t.seen_with("awdl-a", "fe80::1", JANE, Some("r1"), 0);
+        t.seen_with("Jane-mdns", "fe80::99", JANE, Some("r1"), 1);
+        assert_eq!(t.folders(), vec![JANE.to_string()]);
+        assert_eq!(t.ob.devices().len(), 1);
+        // The same record under another name is another device (one Apple account,
+        // two devices).
+        t.seen_with("Jane-ipad", "fe80::7", "Jane's iPad", Some("r1"), 2);
+        assert_eq!(t.ob.devices().len(), 2);
+    }
+
+    #[test]
+    fn two_phones_of_the_same_name_keep_two_folders() {
+        let mut t = T::new("ob-same-name");
+        t.seen_at("p1", "fe80::1", "iPhone", 0);
+        t.seen_at("p2", "fe80::2", "iPhone", 0);
+        t.seen_at("p1", "fe80::1", "iPhone", 1);
+        t.seen_at("p2", "fe80::2", "iPhone", 1);
+        assert_eq!(t.folders(), vec!["iPhone", "iPhone (2)"]);
+        assert_eq!(t.ob.devices().len(), 2);
+        assert!(t.ob.take_dropped().is_empty());
     }
 
     /// Jane is seen at 0 and her three files are offered at 3 (handle 1).
@@ -724,13 +955,207 @@ mod tests {
         t.changed(JANE, 0);
         t.busy.set(true);
         let wake = t.tick(3).expect("a held batch wakes again");
-        assert!(wake > t.at(3) && wake <= t.at(4));
+        assert!(wake > t.at(3) && wake <= t.at(6));
         assert!(t.calls().is_empty());
-        t.tick(4);
+        t.tick(6);
         assert!(t.calls().is_empty());
         t.busy.set(false);
-        t.tick(5);
+        t.tick(9);
         assert_eq!(t.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_long_hold_is_noted_once() {
+        let mut t = T::new("ob-long-hold");
+        t.seen("id1", JANE, 0);
+        t.put(JANE, "a.jpg");
+        t.changed(JANE, 0);
+        t.busy.set(true);
+        for s in 3..=32 {
+            t.tick(s);
+            assert!(t.ob.take_notes().is_empty(), "no note at {s}");
+        }
+        t.tick(33);
+        assert_eq!(
+            t.ob.take_notes(),
+            vec![(
+                Tone::Warn,
+                "Waiting to send to Jane's iPhone: a file in its folder is still open".to_string()
+            )]
+        );
+        for s in 34..=63 {
+            if s % 20 == 0 {
+                t.seen("id1", JANE, s); // still in range
+            }
+            t.tick(s);
+        }
+        assert!(t.ob.take_notes().is_empty(), "noted once");
+        assert!(t.calls().is_empty());
+        t.busy.set(false);
+        t.tick(66);
+        assert_eq!(t.calls().len(), 1);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_deleted_is_not_offered_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut t = T::new("ob-stuck");
+        t.seen("id1", JANE, 0);
+        let d = t.root.join(JANE).join("d");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        t.put(JANE, "d/sub/f");
+        fs::set_permissions(d.join("sub"), fs::Permissions::from_mode(0o500)).unwrap();
+        t.changed(JANE, 0);
+        t.tick(3);
+        assert_eq!(t.calls(), vec![("id1".to_string(), vec![d.clone()])]);
+        t.finished(1, Outcome::Delivered, 4);
+        let notes = t.ob.take_notes();
+        assert!(
+            notes.contains(&(
+                Tone::Warn,
+                "Could not remove d from the folder of Jane's iPhone; it is not sent again"
+                    .to_string()
+            )),
+            "{notes:?}"
+        );
+        let b = t.put(JANE, "b.jpg");
+        t.changed(JANE, 5);
+        t.tick(8);
+        assert_eq!(t.calls().len(), 2);
+        assert_eq!(t.calls()[1].1, vec![b]);
+        fs::set_permissions(d.join("sub"), fs::Permissions::from_mode(0o755)).unwrap();
+        // Once the entry is gone, a new one of that name is offered again.
+        t.finished(2, Outcome::Delivered, 9);
+        fs::remove_dir_all(&d).unwrap();
+        t.tick(10);
+        fs::create_dir(&d).unwrap();
+        t.put(JANE, "d/g");
+        t.changed(JANE, 11);
+        t.tick(14);
+        assert_eq!(t.calls()[2].1, vec![d]);
+    }
+
+    struct FakeSpace(Rc<Cell<Option<u64>>>);
+    impl Space for FakeSpace {
+        fn free(&mut self) -> Option<u64> {
+            self.0.get()
+        }
+    }
+
+    #[test]
+    fn a_batch_that_does_not_fit_is_kept_and_noted() {
+        let mut t = T::new("ob-room");
+        let free = Rc::new(Cell::new(Some(10)));
+        let busy = t.busy.clone();
+        t.ob = Outbox::with_probe(t.root.clone(), Box::new(FakeProbe(busy)))
+            .with_space(Box::new(FakeSpace(free.clone())));
+        t.seen("id1", JANE, 0);
+        for n in ["a", "b", "c"] {
+            t.put(JANE, n);
+        }
+        fs::write(t.root.join(JANE).join("big"), [0u8; 20]).unwrap();
+        t.changed(JANE, 0);
+        t.tick(3);
+        assert!(t.calls().is_empty());
+        assert_eq!(
+            t.ob.take_notes(),
+            vec![(
+                Tone::Warn,
+                "Could not send to Jane's iPhone: not enough room in FloeDrop for 1 MB".to_string()
+            )]
+        );
+        assert_eq!(t.entries(JANE), vec!["a", "b", "big", "c"]);
+        assert_eq!(t.ob.devices()[0].state, DevState::Failed);
+        t.tick(10);
+        assert!(t.calls().is_empty(), "not tried again without a change");
+        free.set(Some(1 << 30));
+        t.changed(JANE, 11);
+        t.tick(14);
+        assert_eq!(t.calls().len(), 1);
+        assert_eq!(t.calls()[0].1.len(), 4);
+    }
+
+    #[test]
+    fn a_full_spool_says_why() {
+        let d = Dir::new("ob-full-spool");
+        let a = d.0.join("a");
+        fs::write(&a, vec![0u8; 2_500_000]).unwrap();
+        assert_eq!(
+            sent_note(
+                std::slice::from_ref(&a),
+                JANE,
+                &Outcome::Failed("No space left on device (os error 28)".into())
+            ),
+            room_note(JANE, 2_500_000)
+        );
+        assert_eq!(
+            room_note(JANE, 2_500_000).1,
+            format!("Could not send to {JANE}: not enough room in FloeDrop for 3 MB")
+        );
+        assert_eq!(
+            sent_note(&[a], JANE, &Outcome::Failed("link lost".into())),
+            (Tone::Warn, format!("Could not send to {JANE}"))
+        );
+    }
+
+    #[test]
+    fn room_note_rounds_up() {
+        assert!(room_note("X", 1_000_001).1.ends_with("for 2 MB"));
+        assert!(room_note("X", 1_000_000).1.ends_with("for 1 MB"));
+        assert!(room_note("X", 1).1.ends_with("for 1 MB"));
+    }
+
+    #[test]
+    fn batch_bytes_counts_files_below_and_skips_symlinks() {
+        let d = Dir::new("ob-bytes");
+        fs::create_dir_all(d.0.join("t/u")).unwrap();
+        fs::write(d.0.join("t/u/x"), [0u8; 7]).unwrap();
+        fs::write(d.0.join("y"), [0u8; 5]).unwrap();
+        symlink(d.0.join("y"), d.0.join("t/l")).unwrap();
+        assert_eq!(batch_bytes(&[d.0.join("t"), d.0.join("y")]), 12);
+    }
+
+    #[test]
+    fn a_deep_tree_stops_the_walk() {
+        let dir = Dir::new("ob-deep");
+        let old = SystemTime::now() - Duration::from_secs(10);
+        let chain = |top: &Path, depth: usize| {
+            let mut p = top.to_path_buf();
+            let mut dirs = vec![p.clone()];
+            for _ in 0..depth {
+                p = p.join("d");
+                dirs.push(p.clone());
+            }
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("f"), b"x").unwrap();
+            for d in dirs {
+                fs::File::open(&d).unwrap().set_modified(old).unwrap();
+            }
+        };
+        let deep = dir.0.join("deep");
+        chain(&deep, 40);
+        assert!(!recently_modified(&deep, SystemTime::now()));
+        let shallow = dir.0.join("shallow");
+        chain(&shallow, 5);
+        assert!(recently_modified(&shallow, SystemTime::now()));
+    }
+
+    #[test]
+    fn busy_follows_a_symlinked_root() {
+        let d = Dir::new("ob-link-root");
+        let real = d.0.join("real");
+        fs::create_dir(&real).unwrap();
+        let x = real.join("x");
+        fs::write(&x, b"x").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(10);
+        fs::File::open(&x).unwrap().set_modified(old).unwrap();
+        let link = d.0.join("link");
+        symlink(&real, &link).unwrap();
+        let through = link.join("x");
+        assert!(!SystemProbe.busy(std::slice::from_ref(&through)));
+        let w = fs::OpenOptions::new().append(true).open(&x).unwrap();
+        assert!(SystemProbe.busy(std::slice::from_ref(&through)));
+        drop(w);
     }
 
     #[test]
@@ -898,10 +1323,10 @@ mod tests {
     #[test]
     fn a_rekey_drops_the_old_service_id() {
         let mut t = T::new("ob-drop-rekey");
-        t.seen_at("awdl-02:11:22:33:44:55", "fe80::1", JANE, 0);
+        t.seen_at("Jane-mdns-instance", "fe80::1", JANE, 0);
         assert!(t.ob.take_dropped().is_empty());
-        t.seen_at("Jane-mdns-instance", "fe80::1", JANE, 1);
-        assert_eq!(t.ob.take_dropped(), vec!["awdl-02:11:22:33:44:55"]);
+        t.seen_at("awdl-02:11:22:33:44:55", "fe80::1", JANE, 1);
+        assert_eq!(t.ob.take_dropped(), vec!["Jane-mdns-instance"]);
     }
 
     #[test]

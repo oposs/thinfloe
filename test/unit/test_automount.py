@@ -287,8 +287,10 @@ class Options(Base):
 class Lines(Base):
     def test_lines_round_trip_and_tolerance(self):
         lines = [
-            mod.Line("/dev/sdb1", "sdb", "MYSTICK", "/media/tfuser/MYSTICK", "vfat", 1024, "Flash", "stick"),
-            mod.Line("/dev/sdc1", "sdc", "CARD", "/media/tfuser/CARD", "exfat", 2048, "Reader", "card"),
+            mod.Line("/dev/sdb1", "sdb", "MYSTICK", "/media/tfuser/MYSTICK", "vfat", 1024, "Flash", "stick",
+                     mount=1),
+            mod.Line("/dev/sdc1", "sdc", "CARD", "/media/tfuser/CARD", "exfat", 2048, "Reader", "card",
+                     mount=2),
         ]
         text = mod.format_lines(lines)
         self.assertTrue(text.endswith("\n"))
@@ -306,6 +308,12 @@ class Lines(Base):
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].size_bytes, 5)
         self.assertEqual(parsed[0].kind, "stick")
+
+    def test_mount_field_is_optional(self):
+        eight = "\t".join(["/dev/sdb1", "sdb", "N", "/m/N", "vfat", "5", "M", "stick"])
+        self.assertEqual(mod.parse_lines(eight + "\n")[0].mount, 0)
+        self.assertEqual(mod.parse_lines(eight + "\tx\n")[0].mount, 0)
+        self.assertEqual(mod.parse_lines(eight + "\t7\textra\n")[0].mount, 7)
 
     def test_format_keeps_one_line_per_entry(self):
         line = mod.Line("/dev/sdb1", "sdb", "a\tb", "/m/a", "vfat", 1, "Mo\ndel", "stick")
@@ -454,7 +462,7 @@ class Add(Commands):
             str(self.tmp / "dev" / "sdb1"), str(mp)])
         self.assertEqual(self.lines(), [mod.Line(
             str(self.tmp / "dev" / "sdb1"), "sdb", "MYSTICK", str(mp), "vfat",
-            2048 * 512, "Flash", "stick")])
+            2048 * 512, "Flash", "stick", mount=1)])
         self.assertEqual(os.stat(self.tmp / "run" / "removable").st_mode & 0o777, 0o644)
 
     def test_add_ntfs_uses_ntfs3(self):
@@ -577,6 +585,33 @@ class Add(Commands):
         self.assertEqual(self.cmd("add", "sdb1"), 0)
         self.assertEqual(self.calls("mount"), [])
         self.assertEqual(self.lines(), [])
+
+    def test_a_mount_number_that_cannot_be_stored_still_writes_the_line(self):
+        self.stick()
+        real = mod.atomic_write
+
+        def no_seq(path, text):
+            if path.endswith("mount-seq"):
+                raise OSError(28, "No space left on device")
+            return real(path, text)
+        with unittest.mock.patch.object(mod, "atomic_write", side_effect=no_seq):
+            self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([(ln.name, ln.mount) for ln in self.lines()], [("MYSTICK", 0)])
+
+    def test_each_mount_gets_a_new_number(self):
+        # A card swapped for one of the same name is another mount.
+        self.stick("sdb", label="CARD", kind_card=True)
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        first = self.lines()[0].mount
+        self.assertGreater(first, 0)
+        size = self.tmp / "sys" / "class" / "block" / "sdb1" / "size"
+        size.write_text("0\n")                       # the card is pulled
+        self.assertEqual(self.cmd("remove", "sdb1"), 0)
+        self.assertEqual(self.lines(), [])
+        size.write_text("2048\n")                    # the other CARD goes in
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual(self.lines()[0].name, "CARD")
+        self.assertGreater(self.lines()[0].mount, first)
 
 
 class Guards(Commands):
@@ -880,47 +915,94 @@ class FollowUps(Commands):
         self.assertFalse(mod.live_hold(self.p, d))
         self.assertFalse(hold.exists(), "a stale hold is still removed")
 
-    def test_a_hold_written_between_the_check_and_the_delete_is_kept(self):
-        # The writer renames its new hold into place right after the stale
-        # one was taken aside, before it is checked and deleted.
+    def stale_hold(self):
+        """A stale hold of sdb; the hold path and the device."""
         self.stick()
         hold = self.tmp / "run" / "automount" / "hold" / "sdb"
         self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
-        fresh = f"{os.getpid()}\tsn-AA:2:2\n"
-        real_rename = os.rename
-
-        def rename_then_writer(src, dst):
-            real_rename(src, dst)
-            if str(src) == str(hold):
-                tmp = hold.with_name(".new")
-                tmp.write_text(fresh)
-                os.replace(tmp, hold)
         d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
-        with unittest.mock.patch.object(mod.os, "rename", side_effect=rename_then_writer):
+        return hold, d
+
+    def test_a_stale_hold_is_deleted_in_place(self):
+        # Never renamed: a fresh hold is never missing, nothing is left aside.
+        hold, d = self.stale_hold()
+        with unittest.mock.patch.object(mod.os, "rename", side_effect=os.rename) as ren:
             self.assertFalse(mod.live_hold(self.p, d))
-        self.assertEqual(hold.read_text(), fresh)
-        self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"], "nothing left aside")
+        self.assertFalse(hold.exists())
+        self.assertEqual([c for c in ren.call_args_list if str(c.args[0]) == str(hold)], [])
+        self.assertEqual(os.listdir(hold.parent), [])
 
-    def test_a_hold_written_before_it_is_taken_aside_is_put_back(self):
+    def test_the_delete_waits_for_the_writers_lock(self):
+        hold, d = self.stale_hold()
+        fd = os.open(hold.parent, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(fd, fcntl.LOCK_EX)               # the writer, mid-rename
+        self.addCleanup(setattr, mod, "HOLD_LOCK_WAIT", mod.HOLD_LOCK_WAIT)
+        mod.HOLD_LOCK_WAIT = 0.2
+        said = []
+        self.addCleanup(setattr, mod, "log", mod.log)
+        mod.log = said.append
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertTrue(hold.exists(), "kept while the writer holds the lock")
+        self.assertTrue(any("its directory is locked" in s for s in said), said)
+        os.close(fd)
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertFalse(hold.exists())
+
+    def test_a_hold_replaced_before_the_lock_is_kept(self):
         # The stale hold was read; the writer's hold replaces it before the
-        # rename takes it aside: it is linked back into place.
-        self.stick()
-        hold = self.tmp / "run" / "automount" / "hold" / "sdb"
-        self.write("run/automount/hold/sdb", "999999\tsn-AA:1:1\n")
+        # helper has the lock: the inode differs and the fresh hold stays.
+        hold, d = self.stale_hold()
         fresh = f"{os.getpid()}\tsn-AA:2:2\n"
-        real_rename = os.rename
+        real_enter = mod.DirLock.__enter__
 
-        def writer_then_rename(src, dst):
-            if str(src) == str(hold):
-                tmp = hold.with_name(".new")
-                tmp.write_text(fresh)
-                os.replace(tmp, hold)
-            real_rename(src, dst)
-        d = mod.read_dev("sdb1", mod.udev_props("sdb1", self.p), self.p)
-        with unittest.mock.patch.object(mod.os, "rename", side_effect=writer_then_rename):
+        def writer_then_lock(lock):
+            tmp = hold.with_name(".new")
+            tmp.write_text(fresh)
+            os.replace(tmp, hold)
+            return real_enter(lock)
+        with unittest.mock.patch.object(mod.DirLock, "__enter__", writer_then_lock):
             self.assertFalse(mod.live_hold(self.p, d))
         self.assertEqual(hold.read_text(), fresh)
         self.assertEqual(sorted(os.listdir(hold.parent)), ["sdb"])
+
+    def test_a_stale_hold_under_a_busy_lock_does_not_stop_the_mount(self):
+        hold, d = self.stale_hold()
+        fd = os.open(hold.parent, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.addCleanup(setattr, mod, "HOLD_LOCK_WAIT", mod.HOLD_LOCK_WAIT)
+        mod.HOLD_LOCK_WAIT = 0.2
+        self.assertEqual(self.cmd("add", "sdb1"), 0)
+        self.assertEqual([ln.name for ln in self.lines()], ["MYSTICK"])
+        self.assertTrue(hold.exists(), "the stale file stays until the next add")
+
+    def test_dir_lock_closes_its_fd_on_an_unexpected_error(self):
+        hold, _ = self.stale_hold()
+        before = sorted(os.listdir("/proc/self/fd"))
+
+        def broken(fd, op):
+            raise OSError(5, "I/O error")
+        with unittest.mock.patch.object(mod.fcntl, "flock", side_effect=broken):
+            with self.assertRaises(OSError):
+                with mod.DirLock(str(hold.parent), 1.0):
+                    pass
+        self.assertEqual(sorted(os.listdir("/proc/self/fd")), before)
+
+    def test_a_hold_lock_left_by_a_dead_writer_is_free(self):
+        hold, d = self.stale_hold()
+        code = ("import fcntl, os, sys, time\n"
+                "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "time.sleep(60)\n")
+        child = subprocess.Popen([sys.executable, "-c", code, str(hold.parent)],
+                                 stdout=subprocess.PIPE, text=True)
+        self.assertEqual(child.stdout.readline().strip(), "locked")
+        child.kill()
+        child.wait()
+        child.stdout.close()
+        self.assertFalse(mod.live_hold(self.p, d))
+        self.assertFalse(hold.exists())
 
     def test_release_is_logged_for_the_journal(self):
         self.stick()
@@ -1074,8 +1156,34 @@ class Eject(Commands):
         self.added("sdc", usb="1-2", label="B")
         self.assertEqual(self.cmd("eject", "all"), 0)
         self.assertEqual(self.lines(), [])
-        self.assertEqual(self.event()[0], "2")
-        self.assertEqual(self.event()[2], "clean")
+        self.assertEqual(self.event(), ["1", "A, B", "clean", "2"])
+
+    def test_eject_all_of_one_stick_is_a_single_note(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertEqual(self.event(), ["1", "A", "clean"])
+
+    def test_eject_all_with_one_busy_stick_is_a_single_note(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.added("sdc", usb="1-2", label="B")
+        os.environ["FAKE_UMOUNT_BUSY"] = "media/A"   # only A's mount point
+        self.assertEqual(self.cmd("eject", "all"), 3)
+        self.assertEqual([ln.name for ln in self.lines()], ["A"])
+        self.assertEqual(self.event(), ["1", "B", "clean"])
+
+    def test_eject_all_keeps_the_note_when_a_later_disk_fails(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.added("sdc", usb="1-2", label="B")
+        real = mod.unmount_disk
+
+        def second_fails(disk, p, event, batch=None):
+            if disk == "sdc":
+                raise OSError(28, "No space left on device")
+            return real(disk, p, event, batch)
+        with unittest.mock.patch.object(mod, "unmount_disk", side_effect=second_fails):
+            self.assertEqual(self.cmd("eject", "all"), 1)
+        self.assertEqual(self.event(), ["1", "A", "clean"])
+        self.assertEqual([ln.name for ln in self.lines()], ["B"])
 
     def two_partitions(self):
         self.added()

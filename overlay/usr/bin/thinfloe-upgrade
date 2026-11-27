@@ -197,6 +197,7 @@ SPAWN = {"start_new_session": True}
 AUTOMOUNT = "/usr/libexec/thinfloe/thinfloe-automount"
 REMOVABLE_FILE = "/run/thinfloe/removable"   # TF_REMOVABLE moves it in tests
 AUTOMOUNT_HOLD_DIR = "/run/thinfloe/automount/hold"   # TF_AUTOMOUNT_HOLD likewise
+HOLD_LOCK_WAIT = 5.0   # seconds to wait for the hold directory's flock, then write unlocked
 # `contents` lists only below this directory (TF_MEDIA moves it in tests).
 MEDIA_DIR = "/media/tfuser"
 # `contents`: most names shown over all partitions, the longest name kept
@@ -2532,11 +2533,37 @@ def fd_identity(fd: int, device: str) -> str:
     return identity_string(device_serial(device), size, fingerprint)
 
 
+def _hold_dir_lock(folder: str, wait: Optional[float] = None) -> Optional[int]:
+    """The hold directory, opened and flocked; its fd, or None after wait.
+
+    thinfloe-automount deletes a stale hold only under this lock, so a hold
+    renamed in under it is never the file it deletes. wait defaults to
+    HOLD_LOCK_WAIT. OSError when the folder cannot be opened.
+    """
+    wait = HOLD_LOCK_WAIT if wait is None else wait
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return None
+                time.sleep(0.05)
+    except BaseException:
+        os.close(fd)   # also an interrupt during the sleep
+        raise
+
+
 def _hold_drive(drive: DriveInfo) -> Optional[str]:
     """Tell the automounter to leave this drive alone; the hold file's path.
 
-    One line, pid TAB id, named after the kernel name. Without the hold
-    directory (an old image) there is nothing to tell: None.
+    One line, pid TAB id, named after the kernel name, renamed into place
+    under the hold directory's flock. Without the hold directory (an old
+    image) there is nothing to tell: None.
     """
     folder = os.environ.get("TF_AUTOMOUNT_HOLD", AUTOMOUNT_HOLD_DIR)
     path = os.path.join(folder, os.path.basename(drive.device))
@@ -2547,7 +2574,15 @@ def _hold_drive(drive: DriveInfo) -> Optional[str]:
             os.write(fd, f"{os.getpid()}\t{drive_identity(drive)}\n".encode())
         finally:
             os.close(fd)
-        os.replace(tmp, path)
+        lock = _hold_dir_lock(folder)
+        try:
+            if lock is None:
+                log(f"automount hold directory locked for {HOLD_LOCK_WAIT:g} s: "
+                    "hold written unlocked")
+            os.replace(tmp, path)
+        finally:
+            if lock is not None:
+                os.close(lock)
     except OSError as e:
         try:
             os.unlink(tmp)

@@ -579,15 +579,37 @@ fn ipv4_list(v: &[String], what: &str) -> Result<Vec<Ipv4Addr>, String> {
 }
 
 impl NetworkCfg {
-    /// `self` with the public IP keys of `current`. A network Apply or a
-    /// take-over builds its settings from a copy taken before netplan or the
-    /// root tool ran; the switch may have been flipped meanwhile, and the
-    /// copy must not take that back.
-    pub fn with_public_ip_of(self, current: &NetworkCfg) -> NetworkCfg {
+    /// The plan `self`, made from the snapshot `before`, laid onto the
+    /// store as it is now (`current`): each field `self` changed against
+    /// `before` takes `self`'s value, every other field `current`'s. A
+    /// network Apply or a take-over plans on a copy taken before netplan or
+    /// the root tool ran; a key changed meanwhile (the public IP switch, a
+    /// DNS list) must not be taken back. A field both changed takes the
+    /// plan's value: the Apply is the person's last action.
+    pub fn merged_onto(&self, before: &NetworkCfg, current: &NetworkCfg) -> NetworkCfg {
+        fn pick<T: PartialEq + Clone>(planned: &T, before: &T, current: &T) -> T {
+            if planned != before { planned } else { current }.clone()
+        }
+        // No `..`: a new field fails to compile until it is merged here.
+        let NetworkCfg {
+            wifi_device,
+            networks,
+            wifi_dns,
+            wired,
+            kept_wifi,
+            kept_wired,
+            public_ip,
+            public_ip_url,
+        } = self;
         NetworkCfg {
-            public_ip: current.public_ip,
-            public_ip_url: current.public_ip_url.clone(),
-            ..self
+            wifi_device: pick(wifi_device, &before.wifi_device, &current.wifi_device),
+            networks: pick(networks, &before.networks, &current.networks),
+            wifi_dns: pick(wifi_dns, &before.wifi_dns, &current.wifi_dns),
+            wired: pick(wired, &before.wired, &current.wired),
+            kept_wifi: pick(kept_wifi, &before.kept_wifi, &current.kept_wifi),
+            kept_wired: pick(kept_wired, &before.kept_wired, &current.kept_wired),
+            public_ip: pick(public_ip, &before.public_ip, &current.public_ip),
+            public_ip_url: pick(public_ip_url, &before.public_ip_url, &current.public_ip_url),
         }
     }
 
@@ -1039,24 +1061,41 @@ mod tests {
     }
 
     #[test]
-    fn with_public_ip_of_copies_both_keys() {
+    fn merged_onto_takes_the_planned_change_and_keeps_the_rest() {
+        let before = NetworkCfg::default();
+        let planned = NetworkCfg {
+            wifi_dns: vec!["1.1.1.1".into()],
+            ..before.clone()
+        };
         let current = NetworkCfg {
             public_ip: true,
             public_ip_url: "https://ip.example.net".into(),
-            ..NetworkCfg::default()
+            kept_wired: Some("x".into()),
+            ..before.clone()
         };
-        let planned = NetworkCfg {
-            wifi_dns: vec!["1.1.1.1".into()],
-            ..NetworkCfg::default()
-        };
-        let got = planned.with_public_ip_of(&current);
+        let got = planned.merged_onto(&before, &current);
+        assert_eq!(got.wifi_dns, ["1.1.1.1"]);
         assert!(got.public_ip);
         assert_eq!(got.public_ip_url, "https://ip.example.net");
-        assert_eq!(got.wifi_dns, ["1.1.1.1"]);
-        // Off in `current` switches it off in the result as well.
-        let back = got.with_public_ip_of(&NetworkCfg::default());
+        assert_eq!(got.kept_wired.as_deref(), Some("x"));
+        // Off in `current` stays off: an unchanged field is the store's.
+        let back = got.merged_onto(&got, &NetworkCfg::default());
         assert!(!back.public_ip);
         assert_eq!(back.public_ip_url, "");
+    }
+
+    #[test]
+    fn merged_onto_prefers_the_plan_on_a_field_both_changed() {
+        let before = NetworkCfg::default();
+        let planned = NetworkCfg {
+            wifi_dns: vec!["1.1.1.1".into()],
+            ..before.clone()
+        };
+        let current = NetworkCfg {
+            wifi_dns: vec!["9.9.9.9".into()],
+            ..before.clone()
+        };
+        assert_eq!(planned.merged_onto(&before, &current).wifi_dns, ["1.1.1.1"]);
     }
 
     #[test]

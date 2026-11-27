@@ -225,6 +225,8 @@ pub const OSD_NOTE_MAX_W: f32 = 720.0;
 pub const OSD_NOTE_SIDE: f32 = 22.0;
 /// The rows a note wraps to; a longer note is cut with an ellipsis.
 pub const OSD_NOTE_ROWS: usize = 2;
+/// One row of a note, as high as a key panel's icon row.
+pub const OSD_NOTE_ROW_H: f32 = 22.0;
 /// The level bar's height.
 pub const OSD_BAR_H: f32 = 6.0;
 /// From the icon row to the level bar.

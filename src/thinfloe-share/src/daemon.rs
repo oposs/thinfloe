@@ -1,11 +1,11 @@
-//! \`thinfloe-share\` with no arguments: the FloeDrop daemon, run as tfuser by the menu.
+//! `thinfloe-share` with no arguments: the FloeDrop daemon, run as tfuser by the menu.
 //!
-//! It starts the root helper (\`sudo -n thinfloe-share --radio\`) with a pipe on its
-//! stdin and reads its one status line. On \`up\` it receives on the lease's
-//! \`awdl0\` (port 8771, files staged in \`.incoming/\` and moved to
-//! \`inbox/<sender>/\`), announces itself over mDNS and, unless the helper says
-//! \`no-ble\`, browses for receivers and sends what lands in \`outbox/<device>/\`.
-//! The state file \`$XDG_RUNTIME_DIR/thinfloe-share.state\` tells the menu how it
+//! It starts the root helper (`sudo -n thinfloe-share --radio`) with a pipe on its
+//! stdin and reads its one status line. On `up` it receives on the lease's
+//! `awdl0` (port 8771, files staged in `.incoming/` and moved to
+//! `inbox/<sender>/`), announces itself over mDNS and, unless the helper says
+//! `no-ble`, browses for receivers and sends what lands in `outbox/<device>/`.
+//! The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` tells the menu how it
 //! goes. Closing the helper's stdin gives the radio back.
 
 use std::collections::HashMap;
@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
+use crate::incoming::{self, Incoming, ask_total};
 use crate::outbox::{Outbox, Outcome, SendHandle, Transport};
 use crate::state::{Device, Head};
 use crate::{config, inbox, osd, state};
@@ -49,12 +50,22 @@ const HELPER_GRACE: Duration = Duration::from_secs(5);
 const REDISCOVER: Duration = Duration::from_secs(20);
 /// A receiver that did not answer yet is tried again this often.
 const RETRY: Duration = Duration::from_secs(2);
-/// The longest one \`/Discover\` may hold up the others.
+/// The longest one `/Discover` may hold up the others.
 const DISCOVER_WAIT: Duration = Duration::from_secs(3);
 /// The longest the owlyd lookup at radio start may take (zbus waits 25 s).
 const OWLYD_WAIT: Duration = Duration::from_secs(5);
 /// The outbox thread looks at its folders at least this often.
 const OUTBOX_MAX_SLEEP: Duration = Duration::from_secs(5);
+/// An accepted offer with no event this long after the accept is looked at: Owly ends a
+/// connection that brings no `/Upload` within its idle time (60 s) without an event.
+const UPLOAD_START_WAIT: Duration = Duration::from_secs(75);
+/// While an upload is under way the entry is looked at again this often.
+const UPLOAD_RECHECK: Duration = Duration::from_secs(15);
+/// An upload is under way when something in `.incoming/` changed this recently (Owly
+/// fails an upload that brings less than 32 KiB in 30 s).
+const UPLOAD_QUIET: Duration = Duration::from_secs(60);
+/// How long the mDNS goodbye gets to go out before the radio is given back.
+const GOODBYE_WAIT: Duration = Duration::from_millis(200);
 /// State text when the helper ends without saying why.
 const HELPER_GONE: &str = "The radio helper stopped without a reason.";
 /// State text after SIGTERM: the menu stopped FloeDrop.
@@ -79,8 +90,8 @@ pub enum HelperLine {
     Error(String),
 }
 
-/// \`up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver\` or
-/// \`error<TAB>text\`; anything else is None. The last two fields of an up line may be missing.
+/// `up<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver` or
+/// `error<TAB>text`; anything else is None. The last two fields of an up line may be missing.
 pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
     let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
     match f[0] {
@@ -113,25 +124,39 @@ pub fn parse_helper_line(line: &str) -> Option<HelperLine> {
     }
 }
 
+/// The card under the link with its driver ("wlx1 (rtw88_8822bu)"), the card alone when the
+/// driver is unknown, the link when the helper named no card.
+pub fn card_label(iface: &str, station: &str, driver: &str) -> String {
+    match (station, driver) {
+        ("", _) => iface.to_string(),
+        (s, "") => s.to_string(),
+        (s, d) => format!("{s} ({d})"),
+    }
+}
+
+/// The error when the receiver cannot start on the radio the helper gave.
+pub fn start_failed_text(iface: &str, station: &str, driver: &str, why: &str) -> String {
+    format!(
+        "FloeDrop cannot start on {}: {why}",
+        card_label(iface, station, driver)
+    )
+}
+
 /// The log's ready text: the card under the link and its driver when the helper named them,
 /// else the link.
 pub fn ready_text(iface: &str, station: &str, driver: &str, mode: &str, channel: u32) -> String {
     let card = if station.is_empty() { iface } else { station };
-    if driver.is_empty() {
-        format!("ready on {card} ({mode}, channel {channel})")
-    } else {
-        format!("ready on {card} ({driver}, {mode}, channel {channel})")
+    let mut how = String::new();
+    if !driver.is_empty() {
+        how.push_str(driver);
+        how.push_str(", ");
     }
-}
-
-/// Bytes an \`/Ask\` offers; a file without a size counts 0 (the tmpfs still caps it).
-pub fn ask_total(offer: &Offer) -> u64 {
-    match offer {
-        Offer::Files(files) => files
-            .iter()
-            .fold(0u64, |t, f| t.saturating_add(f.size.unwrap_or(0))),
-        Offer::Urls(_) => 0,
+    how.push_str(mode);
+    // 0: the helper could not read the channel.
+    if channel != 0 {
+        how.push_str(&format!(", channel {channel}"));
     }
+    format!("ready on {card} ({how})")
 }
 
 /// What to say to an `/Ask`.
@@ -151,7 +176,7 @@ pub fn answer(offer: &Offer, free: u64, sender: &str) -> Answer {
     }
 }
 
-/// The IPv6 link-local address (EUI-64) of a MAC address such as \`aa:bb:cc:dd:ee:ff\`.
+/// The IPv6 link-local address (EUI-64) of a MAC address such as `aa:bb:cc:dd:ee:ff`.
 pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
     let b: Vec<u8> = mac
         .split(':')
@@ -171,7 +196,7 @@ pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
     ))
 }
 
-/// The link-local address and index of \`iface\` from \`/proc/net/if_inet6\`'s text.
+/// The link-local address and index of `iface` from `/proc/net/if_inet6`'s text.
 pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
@@ -253,11 +278,54 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
+/// Seconds since the epoch.
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The FloeDrop folder, the tmpfs.
 fn share_root() -> PathBuf {
     std::env::var_os("TF_SHARE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT))
+}
+
+/// True when `path` lies on a tmpfs.
+pub fn is_tmpfs(path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` a valid out-pointer.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // f_type's type differs between architectures.
+    #[allow(clippy::unnecessary_cast)]
+    Ok(st.f_type as i64 == libc::TMPFS_MAGIC as i64)
+}
+
+/// The real folder must be the tmpfs; a test root below target/ need not be, unless the
+/// test asks with `TF_SHARE_REQUIRE_TMPFS=1`.
+fn root_must_be_tmpfs() -> bool {
+    std::env::var_os("TF_SHARE_ROOT").is_none()
+        || std::env::var_os("TF_SHARE_REQUIRE_TMPFS").is_some_and(|v| v == "1")
+}
+
+/// The error when FloeDrop's folder is not its tmpfs.
+pub fn not_mounted(root: &Path) -> String {
+    format!("The FloeDrop folder {} is not mounted.", root.display())
+}
+
+/// The ready head's flags: `no-peers` added when owlyd's link was not used.
+fn ready_flags(mut flags: Vec<String>, peers: bool) -> Vec<String> {
+    if !peers {
+        flags.push("no-peers".to_string());
+    }
+    flags
 }
 
 /// The send spool below `root`: a dot folder, so neither the inbox nor the outbox
@@ -293,7 +361,7 @@ impl Paths {
         }
     }
 
-    /// \`inbox/\` and an empty \`.incoming/\` (what a killed run left there goes).
+    /// `inbox/` and an empty `.incoming/` (what a killed run left there goes).
     fn prepare(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.inbox) {
             log(format!("{}: {e}", self.inbox.display()));
@@ -317,11 +385,12 @@ struct StateFile {
     path: PathBuf,
     head: Head,
     devices: Vec<Device>,
+    incoming: Vec<Incoming>,
 }
 
 impl StateFile {
     fn write(&self) {
-        if let Err(e) = state::write(&self.path, &self.head, &self.devices) {
+        if let Err(e) = state::write(&self.path, &self.head, &self.devices, &self.incoming) {
             log(format!("{}: {e}", self.path.display()));
         }
     }
@@ -424,9 +493,19 @@ async fn run(
         path: state_path,
         head: Head::Starting,
         devices: Vec::new(),
+        incoming: Vec::new(),
     };
     st.write();
     let paths = Paths::new(&runtime_dir);
+    // Without its tmpfs FloeDrop would write into the root file system, which is RAM
+    // without the cap; nothing below the folder is made before this check.
+    if root_must_be_tmpfs() && !matches!(is_tmpfs(&paths.root), Ok(true)) {
+        let text = not_mounted(&paths.root);
+        log(&text);
+        st.head = Head::Error(text);
+        st.write();
+        return 1;
+    }
     paths.prepare();
     let mut name = share_name(&configured, &host_name());
 
@@ -484,11 +563,12 @@ async fn run(
                         match started {
                             Ok(a) => {
                                 log(format!("{} as {name:?}", ready_text(&iface, &station, &driver, &mode, channel)));
+                                let flags = ready_flags(flags, a.peers);
                                 airdrop = Some(a);
                                 st.head = Head::Ready { iface, mode, channel, flags, station, driver };
                                 st.write();
                             }
-                            Err(e) => break 'main Exit::Error(format!("FloeDrop cannot start on {iface}: {e}")),
+                            Err(e) => break 'main Exit::Error(start_failed_text(&iface, &station, &driver, &e)),
                         }
                     }
                     Some(HelperLine::Up { .. }) => log("a second up line from the helper, ignored"),
@@ -515,12 +595,16 @@ async fn run(
                     }
                 }
             }
-            step = next_step(&mut airdrop) => {
-                if let Some(devices) = step
-                    && devices != st.devices
+            changed = next_step(&mut airdrop) => {
+                if changed
+                    && let Some(a) = &airdrop
                 {
-                    st.devices = devices;
-                    st.write();
+                    let (devices, incoming) = a.lists();
+                    if devices != st.devices || incoming != st.incoming {
+                        st.devices = devices;
+                        st.incoming = incoming;
+                        st.write();
+                    }
                 }
             }
         }
@@ -538,12 +622,15 @@ async fn run(
         Exit::Error(t) => t,
     });
     st.devices.clear();
+    st.incoming.clear();
     st.write();
-    // EOF on its stdin: the helper releases the lease and exits.
-    drop(stdin.take());
+    // The goodbye first, while the link is still up: sent after the radio went, it never
+    // reaches the phones, which then list the next run's receiver beside the old one.
     if let Some(a) = airdrop.take() {
         a.shutdown().await;
     }
+    // EOF on its stdin: the helper releases the lease and exits.
+    drop(stdin.take());
     match tokio::time::timeout(HELPER_GRACE, child.wait()).await {
         Ok(_) => {}
         Err(_) => {
@@ -554,7 +641,25 @@ async fn run(
     code
 }
 
-async fn next_step(a: &mut Option<Airdrop>) -> Option<Vec<Device>> {
+/// An accepted request until its end.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// What the state file and the log show.
+    shown: Incoming,
+    /// The sender's name as the phone gave it: the inbox folder is made from it.
+    sender: String,
+    /// When to look whether it still runs.
+    check_at: tokio::time::Instant,
+}
+
+/// The transfers under way, oldest first, then by sender.
+fn incoming_list<'a>(pending: impl Iterator<Item = &'a Incoming>) -> Vec<Incoming> {
+    let mut v: Vec<Incoming> = pending.cloned().collect();
+    v.sort_by(|a, b| (a.since, &a.sender).cmp(&(b.since, &b.sender)));
+    v
+}
+
+async fn next_step(a: &mut Option<Airdrop>) -> bool {
     match a {
         Some(a) => a.step().await,
         None => std::future::pending().await,
@@ -587,9 +692,11 @@ async fn owlyd_link(iface: &str) -> Result<(RadioProxy<'static>, LinkInfo), Stri
 
 /// What the main loop is told by the outbox thread.
 enum FromOutbox {
+    /// An offer to send: the target is taken in the outbox thread when the offer starts,
+    /// so a re-key that comes before the main loop reads it cannot lose it.
     Send {
         handle: SendHandle,
-        key: String,
+        target: Option<Target>,
         paths: Vec<PathBuf>,
     },
     Devices(Vec<Device>),
@@ -601,36 +708,71 @@ enum Cmd {
         key: String,
         addr: String,
         name: String,
+        stable: Option<String>,
+        target: Target,
     },
     Changed(String),
     Finished(SendHandle, Outcome),
     Shutdown,
 }
 
-/// A receiver that answered \`/Discover\`: where to send and its TXT flags.
-#[derive(Debug, Clone, Copy)]
+/// A receiver that answered `/Discover`: where to send, its flags, and whether they came
+/// from its TXT record (mDNS) or are the guess for a radio peer (UP-1b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     addr: SocketAddrV6,
     flags: u32,
+    txt: bool,
 }
 
-type Targets = Arc<Mutex<HashMap<String, Target>>>;
+/// The send targets by service ID. Only the outbox thread has them; each offer carries
+/// its target to the main loop.
+#[derive(Default)]
+struct Targets(HashMap<String, Target>);
 
-/// Forgets the targets of service IDs the outbox no longer knows.
-fn forget_targets(targets: &Targets, dropped: &[String]) {
-    if dropped.is_empty() {
-        return;
+impl Targets {
+    /// `t` for the device that answers to `key` now. Guessed flags never replace flags
+    /// from a TXT record: a phone found by mDNS and by the radio keeps its mDNS flags
+    /// under its `awdl-` key, and only the address follows the newest answer.
+    fn record(&mut self, key: &str, t: Target) {
+        match self.0.get_mut(key) {
+            Some(old) if old.txt && !t.txt => old.addr = t.addr,
+            _ => {
+                self.0.insert(key.to_string(), t);
+            }
+        }
     }
-    let mut map = targets.lock().unwrap();
-    for id in dropped {
-        map.remove(id);
+
+    /// Forgets the service IDs in `dropped` that no device answers to (`known`).
+    fn forget(&mut self, dropped: &[String], known: impl Fn(&str) -> bool) {
+        for id in dropped {
+            if !known(id) {
+                self.0.remove(id);
+            }
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Target> {
+        self.0.get(key).copied()
     }
 }
+
+/// What a receiver's record says across addresses: 16 hex digits of a hash of it, or
+/// `None` without one.
+pub fn stable_id(record: Option<&[u8]>) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let r = record.filter(|r| !r.is_empty())?;
+    let mut h = std::hash::DefaultHasher::new();
+    r.hash(&mut h);
+    Some(format!("{:016x}", h.finish()))
+}
+
 type WatchMap = Arc<Mutex<HashMap<WatchDescriptor, String>>>;
 
 struct ChanTransport {
     next: u64,
     out: mpsc::UnboundedSender<FromOutbox>,
+    targets: Targets,
 }
 
 impl Transport for ChanTransport {
@@ -639,7 +781,7 @@ impl Transport for ChanTransport {
         let handle = SendHandle(self.next);
         let _ = self.out.send(FromOutbox::Send {
             handle,
-            key: service_id.to_string(),
+            target: self.targets.get(service_id),
             paths,
         });
         handle
@@ -650,6 +792,8 @@ fn watch_mask() -> WatchMask {
     WatchMask::CLOSE_WRITE
         | WatchMask::MOVED_TO
         | WatchMask::CREATE
+        | WatchMask::DELETE
+        | WatchMask::MOVED_FROM
         | WatchMask::ONLYDIR
         | WatchMask::DONT_FOLLOW
 }
@@ -662,19 +806,33 @@ fn outbox_thread(
     out: mpsc::UnboundedSender<FromOutbox>,
     mut watches: Watches,
     wmap: WatchMap,
-    targets: Targets,
 ) {
     let mut ob = Outbox::new(root.clone());
     let mut tr = ChanTransport {
         next: 0,
         out: out.clone(),
+        targets: Targets::default(),
     };
     let mut last: Option<Vec<Device>> = None;
     let mut wake = Instant::now() + OUTBOX_MAX_SLEEP;
     loop {
         let wait = wake.saturating_duration_since(Instant::now());
         match cmds.recv_timeout(wait) {
-            Ok(Cmd::Seen { key, addr, name }) => ob.seen(&key, &addr, &name, Instant::now()),
+            Ok(Cmd::Seen {
+                key,
+                addr,
+                name,
+                stable,
+                target,
+            }) => on_seen(
+                &mut ob,
+                &mut tr,
+                &key,
+                &addr,
+                &name,
+                stable.as_deref(),
+                target,
+            ),
             Ok(Cmd::Changed(folder)) => ob.changed(&folder, Instant::now()),
             Ok(Cmd::Finished(h, o)) => ob.finished(h, o, Instant::now()),
             Ok(Cmd::Shutdown) | Err(smpsc::RecvTimeoutError::Disconnected) => {
@@ -684,7 +842,7 @@ fn outbox_thread(
             Err(smpsc::RecvTimeoutError::Timeout) => {}
         }
         let now = Instant::now();
-        let next = ob.tick(now, &mut tr);
+        let next = settle(&mut ob, &mut tr, now);
         wake = next.map_or(now + OUTBOX_MAX_SLEEP, |n| n.min(now + OUTBOX_MAX_SLEEP));
         for folder in ob.take_new_folders() {
             match watches.add(root.join(&folder), watch_mask()) {
@@ -694,7 +852,6 @@ fn outbox_thread(
                 Err(e) => log(format!("cannot watch outbox/{folder}: {e}")),
             }
         }
-        forget_targets(&targets, &ob.take_dropped());
         for (tone, text) in ob.take_notes() {
             osd::note(tone, &text);
         }
@@ -706,15 +863,37 @@ fn outbox_thread(
     }
 }
 
-/// Finds receivers: mDNS on the link and \`/Discover\` at the radio's AWDL
-/// peers, again every [\`REDISCOVER\`] for those that answered.
+/// A receiver answered: its device, and the target under the key the device answers to.
+fn on_seen(
+    ob: &mut Outbox,
+    tr: &mut ChanTransport,
+    key: &str,
+    addr: &str,
+    name: &str,
+    stable: Option<&str>,
+    target: Target,
+) {
+    if let Some(kept) = ob.seen(key, addr, name, stable, Instant::now()) {
+        tr.targets.record(&kept, target);
+    }
+}
+
+/// The due offers (each with its target), then the targets of dropped keys forgotten.
+fn settle(ob: &mut Outbox, tr: &mut ChanTransport, now: Instant) -> Option<Instant> {
+    let next = ob.tick(now, tr);
+    let dropped = ob.take_dropped();
+    tr.targets.forget(&dropped, |k| ob.knows(k));
+    next
+}
+
+/// Finds receivers: mDNS on the link and `/Discover` at the radio's AWDL
+/// peers, again every [`REDISCOVER`] for those that answered.
 async fn discovery(
     iface: Iface,
     own_id: String,
     radio: Option<RadioProxy<'static>>,
     sender: watch::Receiver<Arc<Sender>>,
     cmds: smpsc::Sender<Cmd>,
-    targets: Targets,
 ) {
     struct Cand {
         key: String,
@@ -782,25 +961,41 @@ async fn discovery(
             }
         }
         let s = sender.borrow().clone();
-        for (addr, c) in cands.iter_mut() {
-            let now = tokio::time::Instant::now();
-            if c.next_try > now {
-                continue;
+        // Every due receiver is asked at once: one that does not answer costs
+        // DISCOVER_WAIT once, not once per receiver behind it.
+        let now = tokio::time::Instant::now();
+        let due: Vec<(Ipv6Addr, SocketAddrV6)> = cands
+            .iter()
+            .filter(|(_, c)| c.next_try <= now)
+            .map(|(addr, c)| (*addr, SocketAddrV6::new(*addr, c.port, 0, iface.index)))
+            .collect();
+        let answers = futures_util::future::join_all(due.into_iter().map(|(addr, sock)| {
+            let s = &s;
+            async move {
+                (
+                    addr,
+                    sock,
+                    tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await,
+                )
             }
-            let sock = SocketAddrV6::new(*addr, c.port, 0, iface.index);
-            match tokio::time::timeout(DISCOVER_WAIT, s.discover(sock)).await {
+        }))
+        .await;
+        for (addr, sock, answer) in answers {
+            let Some(c) = cands.get_mut(&addr) else {
+                continue;
+            };
+            match answer {
                 Ok(Ok(Some(r))) => {
-                    targets.lock().unwrap().insert(
-                        c.key.clone(),
-                        Target {
-                            addr: sock,
-                            flags: c.flags,
-                        },
-                    );
                     let _ = cmds.send(Cmd::Seen {
                         key: c.key.clone(),
                         addr: addr.to_string(),
                         name: r.computer_name,
+                        stable: stable_id(r.record.as_deref()),
+                        target: Target {
+                            addr: sock,
+                            flags: c.flags,
+                            txt: !c.from_peers,
+                        },
                     });
                     c.next_try = tokio::time::Instant::now() + REDISCOVER;
                 }
@@ -810,13 +1005,12 @@ async fn discovery(
     }
 }
 
-/// The sending half: present unless the helper said \`no-ble\`.
+/// The sending half: present unless the helper said `no-ble`.
 struct Sending {
     sender: watch::Sender<Arc<Sender>>,
     cmds: smpsc::Sender<Cmd>,
     thread: Option<std::thread::JoinHandle<()>>,
     from_outbox: mpsc::UnboundedReceiver<FromOutbox>,
-    targets: Targets,
     events: inotify::EventStream<Vec<u8>>,
     wmap: WatchMap,
     discovery: tokio::task::JoinHandle<()>,
@@ -833,13 +1027,19 @@ struct Airdrop {
     receiver: tokio::task::JoinHandle<()>,
     events_tx: mpsc::Sender<(u64, ReceiverEvent)>,
     events: mpsc::Receiver<(u64, ReceiverEvent)>,
-    /// Sender names of accepted requests, by (generation, request id).
-    pending: HashMap<(u64, u64), String>,
+    /// Accepted requests not ended yet, by (generation, request id).
+    pending: HashMap<(u64, u64), Pending>,
+    /// The receivers in range as the outbox last listed them.
+    devices: Vec<Device>,
     _mdns: Registration,
     sending: Option<Sending>,
+    /// Whether owlyd's link is used; without it there is no AWDL peer list, only mDNS.
+    pub peers: bool,
 }
 
 enum Step {
+    /// A pending transfer's check time came.
+    Check,
     Receiver(Option<Box<(u64, ReceiverEvent)>>),
     Outbox(Option<FromOutbox>),
     Inotify(Option<io::Result<inotify::Event<std::ffi::OsString>>>),
@@ -890,10 +1090,11 @@ impl Airdrop {
                 (None, Iface { index, addr }, None)
             }
         };
+        let peers = radio.is_some();
         let identity = Identity::load_or_generate(&paths.identity).map_err(|e| e.to_string())?;
         let (events_tx, events) = mpsc::channel(64);
         let receiver = bind(iface, &identity, name, paths, 0, events_tx.clone()).await?;
-        let service_id = mdns::service_id(random_bytes());
+        let service_id = service_id_at(&paths.identity.join("service-id"));
         let service = Service {
             instance: service_id.clone(),
             host: format!("floedrop-{service_id}"),
@@ -930,8 +1131,10 @@ impl Airdrop {
             events_tx,
             events,
             pending: HashMap::new(),
+            devices: Vec::new(),
             _mdns: mdns,
             sending,
+            peers,
         })
     }
 
@@ -954,14 +1157,12 @@ impl Airdrop {
         let (cmds, cmds_rx) = smpsc::channel();
         let (out_tx, from_outbox) = mpsc::unbounded_channel();
         let wmap: WatchMap = Arc::default();
-        let targets: Targets = Arc::default();
         let thread = std::thread::Builder::new()
             .name("outbox".into())
             .spawn({
                 let root = paths.outbox.clone();
                 let wmap = wmap.clone();
-                let targets = targets.clone();
-                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap, targets)
+                move || outbox_thread(root, cmds_rx, out_tx, watches, wmap)
             })
             .map_err(|e| e.to_string())?;
         let discovery = tokio::spawn(discovery(
@@ -970,24 +1171,26 @@ impl Airdrop {
             radio,
             sender_rx,
             cmds.clone(),
-            targets.clone(),
         ));
         Ok(Sending {
             sender: sender_tx,
             cmds,
             thread: Some(thread),
             from_outbox,
-            targets,
             events,
             wmap,
             discovery,
         })
     }
 
-    /// A new name: a new receiver (its \`/Discover\` answer) and sender.
+    /// A new name: a new receiver (its `/Discover` answer) and sender.
     async fn rename(&mut self, name: &str) -> Result<(), String> {
         self.receiver.abort();
         let _ = (&mut self.receiver).await;
+        // The aborted receiver sends no end for its transfers.
+        for p in drop_generation(&mut self.pending, self.generation) {
+            log(p.shown.cut_line());
+        }
         self.generation += 1;
         self.receiver = bind(
             self.iface,
@@ -1006,27 +1209,57 @@ impl Airdrop {
         Ok(())
     }
 
-    /// One event; the receivers in range when they changed.
-    async fn step(&mut self) -> Option<Vec<Device>> {
+    /// The state file's lists: receivers in range and transfers under way.
+    fn lists(&self) -> (Vec<Device>, Vec<Incoming>) {
+        (
+            self.devices.clone(),
+            incoming_list(self.pending.values().map(|p| &p.shown)),
+        )
+    }
+
+    /// One event; true when the lists may have changed.
+    async fn step(&mut self) -> bool {
+        let check = next_check(&self.pending);
         let step = match self.sending.as_mut() {
             Some(s) => tokio::select! {
                 e = self.events.recv() => Step::Receiver(e.map(Box::new)),
                 m = s.from_outbox.recv() => Step::Outbox(m),
                 i = s.events.next() => Step::Inotify(i),
+                () = check => Step::Check,
             },
-            None => Step::Receiver(self.events.recv().await.map(Box::new)),
+            None => tokio::select! {
+                e = self.events.recv() => Step::Receiver(e.map(Box::new)),
+                () = check => Step::Check,
+            },
         };
         match step {
+            Step::Check => {
+                let uploading = staging_active(
+                    &self.paths.incoming,
+                    std::time::SystemTime::now(),
+                    UPLOAD_QUIET,
+                );
+                let ended = expire(&mut self.pending, tokio::time::Instant::now(), uploading);
+                for p in &ended {
+                    log(p.shown.ended_line());
+                }
+                return !ended.is_empty();
+            }
             Step::Receiver(Some(b)) => {
                 let (generation, ev) = *b;
-                self.on_receiver(generation, ev)
+                return self.on_receiver(generation, ev);
             }
             // The sender half of the channel is ours: it never closes.
             Step::Receiver(None) => std::future::pending().await,
-            Step::Outbox(Some(FromOutbox::Devices(d))) => return Some(d),
-            Step::Outbox(Some(FromOutbox::Send { handle, key, paths })) => {
-                self.send(handle, key, paths)
+            Step::Outbox(Some(FromOutbox::Devices(d))) => {
+                self.devices = d;
+                return true;
             }
+            Step::Outbox(Some(FromOutbox::Send {
+                handle,
+                target,
+                paths,
+            })) => self.send(handle, target, paths),
             Step::Outbox(None) | Step::Inotify(None) => {
                 // Only a panic ends them; receiving goes on without sending.
                 log("the outbox stopped; receiving only");
@@ -1037,7 +1270,7 @@ impl Airdrop {
             Step::Inotify(Some(Ok(ev))) => self.on_inotify(ev),
             Step::Inotify(Some(Err(e))) => log(format!("inotify: {e}")),
         }
-        None
+        false
     }
 
     fn on_inotify(&mut self, ev: inotify::Event<std::ffi::OsString>) {
@@ -1052,9 +1285,8 @@ impl Airdrop {
         }
     }
 
-    fn send(&mut self, handle: SendHandle, key: String, paths: Vec<PathBuf>) {
+    fn send(&mut self, handle: SendHandle, target: Option<Target>, paths: Vec<PathBuf>) {
         let Some(s) = &self.sending else { return };
-        let target = s.targets.lock().unwrap().get(&key).copied();
         let cmds = s.cmds.clone();
         let Some(target) = target else {
             let _ = cmds.send(Cmd::Finished(
@@ -1076,15 +1308,13 @@ impl Airdrop {
         });
     }
 
-    /// The sender of an accepted request, forgotten here; "iPhone" when unknown.
-    fn sender_of(&mut self, generation: u64, id: u64) -> String {
-        self.pending
-            .remove(&(generation, id))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "iPhone".into())
+    /// An accepted request, forgotten here.
+    fn take(&mut self, generation: u64, id: u64) -> Option<Pending> {
+        self.pending.remove(&(generation, id))
     }
 
-    fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) {
+    /// One receiver event; true when the transfers under way may have changed.
+    fn on_receiver(&mut self, generation: u64, ev: ReceiverEvent) -> bool {
         match ev {
             ReceiverEvent::Request(r) => {
                 let sender = r.ask.sender_computer_name.clone();
@@ -1092,17 +1322,27 @@ impl Airdrop {
                     log(format!("{}: {e}", self.paths.root.display()));
                     0
                 });
-                match answer(&r.ask.offer, free, &sender) {
+                let offer = incoming::from_offer(&sender, &r.ask.offer, epoch_now());
+                if matches!(r.ask.offer, Offer::Urls(_)) {
+                    log(incoming::links_line(&offer.sender));
+                } else {
+                    log(offer.offer_line());
+                }
+                match answer(&r.ask.offer, free, &inbox::shown_sender(&sender)) {
                     Answer::Accept => {
-                        self.pending.insert((generation, r.id), sender);
+                        log(offer.accepted_line());
+                        let pending = Pending {
+                            shown: offer,
+                            sender,
+                            check_at: tokio::time::Instant::now() + UPLOAD_START_WAIT,
+                        };
+                        self.pending.insert((generation, r.id), pending);
                         r.accept();
                     }
                     Answer::Decline(note) => {
-                        log(format!(
-                            "declined an offer from {sender:?} ({} bytes, {free} free, links: {})",
-                            ask_total(&r.ask.offer),
-                            matches!(r.ask.offer, Offer::Urls(_))
-                        ));
+                        if !matches!(r.ask.offer, Offer::Urls(_)) {
+                            log(offer.declined_line(free));
+                        }
                         if let Some((tone, text)) = note {
                             osd::note(tone, &text);
                         }
@@ -1111,32 +1351,59 @@ impl Airdrop {
                 }
             }
             ReceiverEvent::Received { id, paths } => {
-                let sender = self.sender_of(generation, id);
-                match inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender) {
-                    Ok(placed) if placed.is_empty() => {}
-                    Ok(placed) => {
-                        osd::note(osd::Tone::Info, &inbox::received_note(&placed, &sender))
-                    }
-                    Err(e) => {
-                        log(format!("placing files from {sender:?}: {e}"));
+                let done = self.take(generation, id);
+                let line = done
+                    .as_ref()
+                    .map_or_else(incoming::unknown_received_line, |p| p.shown.received_line());
+                let sender = done.map_or_else(String::new, |p| p.sender);
+                let placed = inbox::place(&paths, &self.paths.incoming, &self.paths.inbox, &sender);
+                let named = inbox::shown_sender(&sender);
+                log(line);
+                match placed.error {
+                    None if placed.files.is_empty() => {}
+                    None => osd::note(
+                        osd::Tone::Info,
+                        &inbox::received_note(&placed.files, &named),
+                    ),
+                    Some(e) => {
+                        log(format!(
+                            "placing files from {:?}: {e}",
+                            incoming::shown(&sender)
+                        ));
+                        // The entries moved are gone from staging; the rest is dropped.
                         for p in &paths {
                             remove_entry(p);
                         }
-                        osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
+                        let text = if placed.files.is_empty() {
+                            inbox::failed_note(&named)
+                        } else {
+                            inbox::partial_note(placed.files.len(), placed.total, &named)
+                        };
+                        osd::note(osd::Tone::Warn, &text);
                     }
                 }
             }
             ReceiverEvent::Failed { id, reason } => {
                 // Owly's sandbox for the upload is gone already; nothing was placed.
-                let sender = self.sender_of(generation, id);
-                log(format!("a transfer from {sender:?} failed: {reason}"));
-                osd::note(osd::Tone::Warn, &inbox::failed_note(&sender));
+                let done = self.take(generation, id);
+                match &done {
+                    Some(p) => log(p.shown.failed_line(&reason)),
+                    None => log(incoming::unknown_failed_line(&reason)),
+                }
+                let sender = done.map_or_else(String::new, |p| p.sender);
+                osd::note(
+                    osd::Tone::Warn,
+                    &inbox::failed_note(&inbox::shown_sender(&sender)),
+                );
             }
             ReceiverEvent::Withdrawn { id } => {
-                self.pending.remove(&(generation, id));
+                if let Some(gone) = self.pending.remove(&(generation, id)) {
+                    log(gone.shown.withdrawn_line());
+                }
             }
-            ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => {}
+            ReceiverEvent::Urls { .. } | ReceiverEvent::Discovered { .. } => return false,
         }
+        true
     }
 
     async fn shutdown(mut self) {
@@ -1150,8 +1417,116 @@ impl Airdrop {
         }
         // The mDNS goodbye goes out when the registration drops.
         drop(self._mdns);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(GOODBYE_WAIT).await;
     }
+}
+
+/// The mDNS service id of this session: the 12 lower-case hex digits in `path` when it holds
+/// exactly that, else a new one, written there (mode 0600, atomically). The same id after
+/// FloeDrop off and on lets phones that missed the goodbye see the same receiver again, not
+/// a second one. `path` is in `$XDG_RUNTIME_DIR`, gone at logout.
+fn service_id_at(path: &Path) -> String {
+    if let Ok(t) = std::fs::read_to_string(path) {
+        let id = t.strip_suffix('\n').unwrap_or(&t);
+        if id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return id.to_string();
+        }
+    }
+    let id = mdns::service_id(random_bytes());
+    let write = || -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(format!("{id}\n").as_bytes())?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(e) = write() {
+        log(format!("{}: {e}", path.display()));
+    }
+    id
+}
+
+/// Completes at the first check time among `pending`; never when there is none.
+async fn next_check(pending: &HashMap<(u64, u64), Pending>) {
+    match pending.values().map(|p| p.check_at).min() {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The entries whose check time has come: while an upload is under way (`uploading`) they
+/// are looked at again after [`UPLOAD_RECHECK`], else they are taken out and returned. Owly
+/// sends no event when a phone goes between the accept and its upload.
+fn expire(
+    pending: &mut HashMap<(u64, u64), Pending>,
+    now: tokio::time::Instant,
+    uploading: bool,
+) -> Vec<Pending> {
+    let due: Vec<(u64, u64)> = pending
+        .iter()
+        .filter(|(_, p)| p.check_at <= now)
+        .map(|(k, _)| *k)
+        .collect();
+    let mut ended = Vec::new();
+    for k in due {
+        if uploading {
+            if let Some(p) = pending.get_mut(&k) {
+                p.check_at = now + UPLOAD_RECHECK;
+            }
+        } else if let Some(p) = pending.remove(&k) {
+            ended.push(p);
+        }
+    }
+    ended
+}
+
+/// The entries of the receiver of `generation`, taken out.
+fn drop_generation(pending: &mut HashMap<(u64, u64), Pending>, generation: u64) -> Vec<Pending> {
+    let keys: Vec<(u64, u64)> = pending
+        .keys()
+        .filter(|(g, _)| *g == generation)
+        .copied()
+        .collect();
+    keys.into_iter()
+        .filter_map(|k| pending.remove(&k))
+        .collect()
+}
+
+/// Whether something under `dir` (Owly's staging, `.incoming/`) changed within `quiet`
+/// before `now`: an upload is under way. At most four levels and 4096 entries are looked at.
+fn staging_active(dir: &Path, now: std::time::SystemTime, quiet: Duration) -> bool {
+    let mut seen = 0usize;
+    let mut stack = vec![(dir.to_path_buf(), 0u32)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > 4096 {
+                return false;
+            }
+            let Ok(m) = e.metadata() else { continue };
+            if m.modified()
+                .is_ok_and(|t| now.duration_since(t).map_or(true, |age| age < quiet))
+            {
+                return true;
+            }
+            if m.is_dir() && depth < 4 {
+                stack.push((e.path(), depth + 1));
+            }
+        }
+    }
+    false
 }
 
 /// Removes one leftover staged entry without following a symlink.
@@ -1166,7 +1541,7 @@ fn remove_entry(p: &Path) {
     }
 }
 
-/// Binds a receiver named \`name\` and forwards its events tagged with \`generation\`.
+/// Binds a receiver named `name` and forwards its events tagged with `generation`.
 async fn bind(
     iface: Iface,
     identity: &Identity,
@@ -1220,19 +1595,168 @@ mod tests {
     use owly_airdrop::proto::messages::AskFile;
 
     #[test]
-    fn dropped_service_ids_lose_their_targets() {
-        let t = Target {
-            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0),
-            flags: 0,
-        };
-        let targets: Targets = Arc::default();
-        for k in ["awdl-aa", "mdns-1", "other"] {
-            targets.lock().unwrap().insert(k.to_string(), t);
+    fn default_name_matches_the_menu() {
+        let table = include_str!("../../../test/unit/floedrop-names.tsv");
+        let mut rows = 0;
+        for line in table
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (host, want) = line.split_once('\t').expect("host<TAB>name");
+            assert_eq!(default_name(host), want, "{host}");
+            rows += 1;
         }
-        forget_targets(&targets, &["awdl-aa".to_string(), "mdns-1".to_string()]);
-        let mut left: Vec<String> = targets.lock().unwrap().keys().cloned().collect();
+        assert!(rows >= 5);
+    }
+
+    #[test]
+    fn proc_is_not_a_tmpfs() {
+        assert!(!is_tmpfs(Path::new("/proc")).unwrap());
+        if Path::new("/dev/shm").is_dir() {
+            assert!(is_tmpfs(Path::new("/dev/shm")).unwrap());
+        }
+        assert!(is_tmpfs(Path::new("/no/such/dir")).is_err());
+    }
+
+    #[test]
+    fn the_ready_head_says_no_peers() {
+        let f = vec!["no-ble".to_string()];
+        assert_eq!(ready_flags(f.clone(), false), ["no-ble", "no-peers"]);
+        assert_eq!(ready_flags(f.clone(), true), f);
+    }
+
+    #[test]
+    fn the_outbox_wakes_on_delete() {
+        let m = watch_mask();
+        assert!(m.contains(WatchMask::DELETE));
+        assert!(m.contains(WatchMask::MOVED_FROM));
+    }
+
+    #[test]
+    fn stable_ids() {
+        assert_eq!(stable_id(None), None);
+        assert_eq!(stable_id(Some(&[])), None);
+        let a = stable_id(Some(b"record-a")).unwrap();
+        assert_eq!(a.len(), 16);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(stable_id(Some(b"record-a")).unwrap(), a);
+        assert_ne!(stable_id(Some(b"record-b")).unwrap(), a);
+    }
+
+    fn target(port: u16, flags: u32, txt: bool) -> Target {
+        Target {
+            addr: SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0),
+            flags,
+            txt,
+        }
+    }
+
+    struct Rig {
+        dir: PathBuf,
+        ob: Outbox,
+        tr: ChanTransport,
+        rx: mpsc::UnboundedReceiver<FromOutbox>,
+    }
+    impl Rig {
+        fn new(name: &str) -> Rig {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+                .join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let (out, rx) = mpsc::unbounded_channel();
+            Rig {
+                ob: Outbox::new(dir.join("outbox")),
+                dir,
+                tr: ChanTransport {
+                    next: 0,
+                    out,
+                    targets: Targets::default(),
+                },
+                rx,
+            }
+        }
+        fn seen(&mut self, key: &str, addr: &str, t: Target) {
+            on_seen(&mut self.ob, &mut self.tr, key, addr, "Jane", None, t);
+            settle(&mut self.ob, &mut self.tr, Instant::now());
+        }
+    }
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn a_phone_seen_again_after_it_went_has_its_target_again() {
+        let mut r = Rig::new("targets-gone");
+        let t = target(1, 7, true);
+        r.seen("Jane-mdns", "fe80::1", t);
+        assert_eq!(r.tr.targets.get("Jane-mdns"), Some(t));
+        let later = Instant::now() + crate::outbox::GONE_AFTER + Duration::from_secs(1);
+        settle(&mut r.ob, &mut r.tr, later);
+        assert_eq!(
+            r.tr.targets.get("Jane-mdns"),
+            None,
+            "a gone phone has no target"
+        );
+        r.seen("Jane-mdns", "fe80::1", t);
+        assert_eq!(r.tr.targets.get("Jane-mdns"), Some(t));
+    }
+
+    #[test]
+    fn an_offer_carries_its_target_past_a_later_rekey() {
+        let mut r = Rig::new("targets-offer");
+        let t = target(1, 7, true);
+        r.tr.targets.record("Jane-mdns", t);
+        let h = r.tr.send("Jane-mdns", vec![PathBuf::from("a")]);
+        r.tr.targets.forget(&["Jane-mdns".to_string()], |_| false);
+        match r.rx.try_recv() {
+            Ok(FromOutbox::Send { handle, target, .. }) => {
+                assert_eq!(handle, h);
+                assert_eq!(target, Some(t));
+            }
+            _ => panic!("no offer"),
+        }
+        r.tr.send("Jane-mdns", Vec::new());
+        assert!(matches!(
+            r.rx.try_recv(),
+            Ok(FromOutbox::Send { target: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_phone_found_by_the_radio_and_by_mdns_keeps_its_txt_flags() {
+        let mut r = Rig::new("targets-txt");
+        let guess = target(1, RECEIVER_FLAGS | SUPPORTS_DVZIP, false);
+        let txt = target(2, RECEIVER_FLAGS, true);
+        r.seen("awdl-aa", "fe80::1", guess);
+        r.seen("Jane-mdns", "fe80::1", txt);
+        assert_eq!(
+            r.tr.targets.get("awdl-aa"),
+            Some(txt),
+            "the awdl key takes the TXT flags"
+        );
+        assert_eq!(r.tr.targets.get("Jane-mdns"), None);
+        r.seen("awdl-aa", "fe80::1", target(3, guess.flags, false));
+        assert_eq!(
+            r.tr.targets.get("awdl-aa"),
+            Some(target(3, RECEIVER_FLAGS, true)),
+            "a later radio answer moves the address only"
+        );
+    }
+
+    #[test]
+    fn forget_keeps_a_key_a_device_answers_to() {
+        let mut ts = Targets::default();
+        for k in ["awdl-aa", "mdns-1", "other"] {
+            ts.record(k, target(1, 0, false));
+        }
+        ts.forget(&["awdl-aa".to_string(), "mdns-1".to_string()], |k| {
+            k == "mdns-1"
+        });
+        let mut left: Vec<String> = ts.0.keys().cloned().collect();
         left.sort();
-        assert_eq!(left, ["other"]);
+        assert_eq!(left, ["mdns-1", "other"]);
     }
 
     #[test]
@@ -1249,6 +1773,154 @@ mod tests {
         assert_eq!(
             ready_text("awdl0", "", "", "exclusive", 6),
             "ready on awdl0 (exclusive, channel 6)"
+        );
+        assert_eq!(
+            ready_text("awdl0", "wlx1", "rtw88_8822bu", "exclusive", 0),
+            "ready on wlx1 (rtw88_8822bu, exclusive)"
+        );
+    }
+
+    #[test]
+    fn the_service_id_is_kept_in_the_runtime_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+            .join(format!("service-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("service-id");
+        let hex12 = |s: &str| {
+            s.len() == 12
+                && s.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        };
+        let first = service_id_at(&p);
+        assert!(hex12(&first), "{first}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{first}\n"));
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(service_id_at(&p), first);
+        std::fs::write(&p, "nonsense").unwrap();
+        let new = service_id_at(&p);
+        assert!(hex12(&new), "{new}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{new}\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_transfers_have_two_lines() {
+        let one = |sender: &str, since| Incoming {
+            sender: sender.into(),
+            files: 1,
+            bytes: 1,
+            first: "a.jpg".into(),
+            since,
+        };
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), one("B", 5));
+        pending.insert((0, 2), one("A", 3));
+        let names = |p: &HashMap<(u64, u64), Incoming>| {
+            incoming_list(p.values())
+                .into_iter()
+                .map(|i| i.sender)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&pending), ["A", "B"]);
+        // The same phone twice, the same second: both stay.
+        pending.insert((0, 3), one("A", 3));
+        assert_eq!(names(&pending), ["A", "A", "B"]);
+        pending.remove(&(0, 2));
+        pending.remove(&(0, 3));
+        assert_eq!(names(&pending), ["B"]);
+    }
+
+    fn pending_at(sender: &str, check_at: tokio::time::Instant) -> Pending {
+        Pending {
+            shown: Incoming {
+                sender: sender.into(),
+                files: 1,
+                bytes: 1,
+                first: "a.jpg".into(),
+                since: 1,
+            },
+            sender: sender.into(),
+            check_at,
+        }
+    }
+
+    #[test]
+    fn an_accept_with_no_upload_ends_at_its_check_time() {
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("A", t0 + UPLOAD_START_WAIT));
+        pending.insert((0, 2), pending_at("B", t0 + UPLOAD_START_WAIT * 2));
+        // Not due yet.
+        assert!(expire(&mut pending, t0, false).is_empty());
+        // Due while an upload runs: looked at again later.
+        let due = t0 + UPLOAD_START_WAIT;
+        assert!(expire(&mut pending, due, true).is_empty());
+        assert_eq!(pending[&(0, 1)].check_at, due + UPLOAD_RECHECK);
+        // Due with nothing arriving: it ends and leaves the lists.
+        let ended = expire(&mut pending, due + UPLOAD_RECHECK, false);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].shown.sender, "A");
+        let left = incoming_list(pending.values().map(|p| &p.shown));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].sender, "B");
+    }
+
+    #[test]
+    fn a_name_change_ends_the_old_receivers_transfers() {
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("A", t0));
+        pending.insert((0, 2), pending_at("B", t0));
+        pending.insert((1, 1), pending_at("C", t0));
+        let mut cut: Vec<String> = drop_generation(&mut pending, 0)
+            .into_iter()
+            .map(|p| p.shown.sender)
+            .collect();
+        cut.sort();
+        assert_eq!(cut, ["A", "B"]);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key(&(1, 1)));
+    }
+
+    #[test]
+    fn a_recent_change_in_staging_is_an_upload() {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test-tmp"))
+            .join(format!("staging-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("upload-1/Album")).unwrap();
+        let now = std::time::SystemTime::now();
+        // An empty staging dir counts by its own time; an hour later nothing is recent.
+        assert!(staging_active(&dir, now, UPLOAD_QUIET));
+        let later = now + Duration::from_secs(3600);
+        assert!(!staging_active(&dir, later, UPLOAD_QUIET));
+        std::fs::write(dir.join("upload-1/Album/a.jpg"), b"x").unwrap();
+        assert!(staging_active(
+            &dir,
+            std::time::SystemTime::now(),
+            UPLOAD_QUIET
+        ));
+        assert!(!staging_active(&dir.join("missing"), now, UPLOAD_QUIET));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_start_failure_names_the_card() {
+        assert_eq!(
+            start_failed_text("awdl0", "wlxc03a55f0d060", "rtw88_8822bu", "mDNS: x"),
+            "FloeDrop cannot start on wlxc03a55f0d060 (rtw88_8822bu): mDNS: x"
+        );
+        assert_eq!(
+            start_failed_text("awdl0", "wlx1", "", "mDNS: x"),
+            "FloeDrop cannot start on wlx1: mDNS: x"
+        );
+        assert_eq!(
+            start_failed_text("awdl0", "", "", "mDNS: x"),
+            "FloeDrop cannot start on awdl0: mDNS: x"
         );
     }
 
@@ -1299,15 +1971,6 @@ mod tests {
             bom_path: "./a.jpg".into(),
             is_directory: false,
         }
-    }
-
-    #[test]
-    fn ask_total_sums_sizes() {
-        let offer = Offer::Files(vec![file(Some(10)), file(None), file(Some(5))]);
-        assert_eq!(ask_total(&offer), 15);
-        let huge = Offer::Files(vec![file(Some(u64::MAX)), file(Some(1))]);
-        assert_eq!(ask_total(&huge), u64::MAX);
-        assert_eq!(ask_total(&Offer::Urls(vec!["x".into()])), 0);
     }
 
     #[test]

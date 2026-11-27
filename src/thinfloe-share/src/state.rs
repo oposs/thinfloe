@@ -2,12 +2,18 @@
 //! First line `ready<TAB>iface<TAB>mode<TAB>channel<TAB>flags<TAB>station<TAB>driver`
 //! (iface the AWDL link, station the Wi-Fi card under it; the last two empty when unknown),
 //! `starting` or `error<TAB>text`;
-//! then one line per receiver: `name<TAB>folder<TAB>state<TAB>since_epoch`.
+//! then one line per receiver: `name<TAB>folder<TAB>state<TAB>since_epoch`, state `idle`,
+//! `sending`, `declined` or `failed` for a phone of the outbox; after them one line per
+//! transfer to this machine: `sender<TAB>folder<TAB>receiving<TAB>since_epoch<TAB>files<TAB>bytes<TAB>first`
+//! (folder the inbox folder of the sender, first the first file's name).
 //! Readers ignore unknown trailing fields.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+use crate::incoming::Incoming;
+use crate::names;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
@@ -74,7 +80,7 @@ fn field(s: &str) -> String {
         .collect()
 }
 
-pub fn render(head: &Head, devices: &[Device]) -> String {
+pub fn render(head: &Head, devices: &[Device], incoming: &[Incoming]) -> String {
     let mut out = match head {
         Head::Starting => "starting\n".to_string(),
         Head::Ready {
@@ -108,10 +114,42 @@ pub fn render(head: &Head, devices: &[Device]) -> String {
             d.since
         ));
     }
+    for i in incoming {
+        out.push_str(&format!(
+            "{}\t{}\treceiving\t{}\t{}\t{}\t{}\n",
+            field(&i.sender),
+            field(&names::safe(&i.sender, "iPhone")),
+            i.since,
+            i.files,
+            i.bytes,
+            field(&i.first)
+        ));
+    }
     out
 }
 
-/// Read the file's text back; a line that does not fit is skipped, unknown trailing fields are ignored.
+/// The `receiving` lines of the file's text; one with fewer than seven fields is skipped.
+pub fn parse_incoming(text: &str) -> Vec<Incoming> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() < 7 || f[2] != "receiving" {
+                return None;
+            }
+            Some(Incoming {
+                sender: f[0].to_string(),
+                since: f[3].parse().ok()?,
+                files: f[4].parse().ok()?,
+                bytes: f[5].parse().ok()?,
+                first: f[6].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Read the file's text back; a line that does not fit (a `receiving` line too) is skipped,
+/// unknown trailing fields are ignored.
 pub fn parse(text: &str) -> (Head, Vec<Device>) {
     let mut lines = text.lines();
     let head = match lines.next() {
@@ -157,12 +195,17 @@ pub fn parse(text: &str) -> (Head, Vec<Device>) {
 }
 
 /// Write atomically (temp file, then rename), mode 0644.
-pub fn write(path: &Path, head: &Head, devices: &[Device]) -> std::io::Result<()> {
+pub fn write(
+    path: &Path,
+    head: &Head,
+    devices: &[Device],
+    incoming: &[Incoming],
+) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(render(head, devices).as_bytes())?;
+    f.write_all(render(head, devices, incoming).as_bytes())?;
     f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     f.sync_all()?;
     drop(f);
@@ -188,6 +231,49 @@ mod tests {
         }
     }
 
+    fn incoming() -> Incoming {
+        Incoming {
+            sender: "Jane's iPhone".into(),
+            files: 2,
+            bytes: 75000000,
+            first: "IMG_0042.DNG".into(),
+            since: 1764000100,
+        }
+    }
+
+    #[test]
+    fn render_receiving_line() {
+        assert_eq!(
+            render(&Head::Starting, &[jane()], &[incoming()]),
+            "starting\nJane's iPhone\tJane's iPhone\tidle\t1764000000\nJane's iPhone\tJane's iPhone\treceiving\t1764000100\t2\t75000000\tIMG_0042.DNG\n"
+        );
+    }
+
+    #[test]
+    fn a_receiving_line_with_tabs_stays_one_line() {
+        let mut i = incoming();
+        i.sender = "a\tb".into();
+        i.first = "x\ty.jpg".into();
+        let out = render(&Head::Starting, &[], &[i]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert_eq!(lines[1].split('\t').count(), 7);
+        let back = parse_incoming(&out);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].sender, "a_b");
+        assert_eq!(back[0].first, "x_y.jpg");
+    }
+
+    #[test]
+    fn parse_skips_receiving_lines_for_devices() {
+        let text = render(&Head::Starting, &[jane()], &[incoming()]);
+        assert_eq!(parse(&text).1, vec![jane()]);
+        assert_eq!(parse_incoming(&text), vec![incoming()]);
+        let short = "starting\nX\tX\treceiving\t3\t1\n";
+        assert_eq!(parse_incoming(short), vec![]);
+        assert_eq!(parse(short).1, vec![]);
+    }
+
     #[test]
     fn render_ready_line() {
         let h = Head::Ready {
@@ -199,7 +285,7 @@ mod tests {
             driver: "rtw88_8822bu".into(),
         };
         assert_eq!(
-            render(&h, &[]),
+            render(&h, &[], &[]),
             "ready\tawdl0\texclusive\t6\tno-ble\twlxc03a55f0d060\trtw88_8822bu\n"
         );
         let h = Head::Ready {
@@ -210,10 +296,10 @@ mod tests {
             station: "wlx1".into(),
             driver: String::new(),
         };
-        assert_eq!(render(&h, &[]), "ready\tawdl0\tshared\t44\t\twlx1\t\n");
-        assert_eq!(render(&Head::Starting, &[]), "starting\n");
+        assert_eq!(render(&h, &[], &[]), "ready\tawdl0\tshared\t44\t\twlx1\t\n");
+        assert_eq!(render(&Head::Starting, &[], &[]), "starting\n");
         assert_eq!(
-            render(&Head::Error("no card".into()), &[]),
+            render(&Head::Error("no card".into()), &[], &[]),
             "error\tno card\n"
         );
     }
@@ -221,7 +307,7 @@ mod tests {
     #[test]
     fn render_device_line() {
         assert_eq!(
-            render(&Head::Starting, &[jane()]),
+            render(&Head::Starting, &[jane()], &[]),
             "starting\nJane's iPhone\tJane's iPhone\tidle\t1764000000\n"
         );
     }
@@ -265,7 +351,7 @@ mod tests {
     fn tabs_in_names_cannot_split_lines() {
         let mut d = jane();
         d.name = "a\tb\nc".into();
-        let out = render(&Head::Starting, &[d]);
+        let out = render(&Head::Starting, &[d], &[]);
         assert_eq!(out, "starting\na_b_c\tJane's iPhone\tidle\t1764000000\n");
         let (_, devs) = parse(&out);
         assert_eq!(devs[0].name, "a_b_c");
@@ -278,7 +364,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("thinfloe-share.state");
         let h = Head::Error("x".into());
-        write(&p, &h, &[jane()]).unwrap();
+        write(&p, &h, &[jane()], &[incoming()]).unwrap();
         assert_eq!(
             std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o644
@@ -286,6 +372,10 @@ mod tests {
         assert!(!dir.join("thinfloe-share.state.tmp").exists());
         let (h2, d2) = parse(&std::fs::read_to_string(&p).unwrap());
         assert_eq!((h2, d2), (h, vec![jane()]));
+        assert_eq!(
+            parse_incoming(&std::fs::read_to_string(&p).unwrap()),
+            vec![incoming()]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

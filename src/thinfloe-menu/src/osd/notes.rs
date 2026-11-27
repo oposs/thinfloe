@@ -22,6 +22,8 @@ pub enum Note {
     Connected(String),
     /// Ejected: it can be pulled.
     Removable(String),
+    /// "Eject all" ejected this many sticks (2 or more): all can be pulled.
+    SticksRemovable(u32),
     /// Pulled without eject.
     Unclean(String),
 }
@@ -44,7 +46,8 @@ impl Notes {
 
     /// The notes the sticks and the event call for, the most important
     /// last. An event note comes once per sequence number; skipped numbers
-    /// give none (eject all writes several in a row, the newest is shown).
+    /// give none (several ejects in a row, the newest is shown). An "eject
+    /// all" batch is one event, with the count.
     pub fn update(&mut self, sticks: &[Stick], event: Option<&Event>) -> Vec<Note> {
         let mut out = Vec::new();
         let fresh = event.filter(|e| self.last_seq != Some(e.seq));
@@ -53,7 +56,9 @@ impl Notes {
                 out.push(Note::Connected(s.label().to_string()));
             }
             if let Some(e) = fresh {
-                out.push(if e.clean {
+                out.push(if e.clean && e.count >= 2 {
+                    Note::SticksRemovable(e.count)
+                } else if e.clean {
                     Note::Removable(e.name.clone())
                 } else {
                     Note::Unclean(e.name.clone())
@@ -69,10 +74,12 @@ impl Notes {
     }
 }
 
-/// A stick is the same one while its disk and partition names are: a new
-/// card in the same reader is another stick.
+/// A stick is the same one while its disk, partition names and mount
+/// numbers are: a new card in the same reader is another stick, even one
+/// with the same name.
 fn identity(s: &Stick) -> String {
-    format!("{}\t{}", s.disk, s.names.join("\t"))
+    let mounts: Vec<String> = s.mounts.iter().map(u64::to_string).collect();
+    format!("{}\t{}\t{}", s.disk, s.names.join("\t"), mounts.join("\t"))
 }
 
 fn short(name: &str) -> String {
@@ -89,6 +96,7 @@ pub fn text(n: &Note) -> (String, bool) {
     match n {
         Note::Connected(name) => (format!("{} connected", short(name)), false),
         Note::Removable(name) => (format!("{} can be removed", short(name)), false),
+        Note::SticksRemovable(n) => (format!("{n} sticks can be removed"), false),
         Note::Unclean(name) => (
             format!("{} removed without eject \u{2014} files may be lost", short(name)),
             true,
@@ -240,9 +248,14 @@ mod tests {
     use crate::removable::Kind;
 
     fn stick(disk: &str, name: &str) -> Stick {
+        stick_m(disk, name, 0)
+    }
+
+    fn stick_m(disk: &str, name: &str, mount: u64) -> Stick {
         Stick {
             disk: disk.into(),
             names: vec![name.into()],
+            mounts: vec![mount],
             size_bytes: 1,
             model: "M".into(),
             kind: Kind::Stick,
@@ -254,6 +267,7 @@ mod tests {
             seq,
             name: "MYSTICK".into(),
             clean,
+            count: 1,
         }
     }
 
@@ -301,6 +315,17 @@ mod tests {
     }
 
     #[test]
+    fn a_card_swapped_for_one_of_the_same_name_is_new() {
+        let mut n = Notes::new();
+        n.update(&[stick_m("sdb", "CARD", 1)], None);
+        assert!(n.update(&[stick_m("sdb", "CARD", 1)], None).is_empty());
+        assert_eq!(
+            n.update(&[stick_m("sdb", "CARD", 2)], None),
+            [Note::Connected("CARD".into())]
+        );
+    }
+
+    #[test]
     fn a_replug_with_the_same_name_is_new_but_a_repeat_read_is_not() {
         let mut n = Notes::new();
         n.update(&[stick("sdb", "A")], None);
@@ -335,12 +360,29 @@ mod tests {
     fn skipped_seqs_give_one_note_and_the_clean_disappearance_none() {
         let mut n = Notes::new();
         n.update(&[stick("sdb", "A"), stick("sdc", "B")], Some(&ev(1, true)));
-        // Eject all wrote 2, 3, 4; the OSD saw only 4, and both disks went.
+        // Three ejects in a row wrote 2, 3, 4; the OSD saw only 4, and both disks went.
         assert_eq!(n.update(&[], Some(&ev(4, true))), [Note::Removable("MYSTICK".into())]);
         // The disappearance alone is no news.
         let mut m = Notes::new();
         m.update(&[stick("sdb", "A")], Some(&ev(1, true)));
         assert!(m.update(&[], Some(&ev(1, true))).is_empty());
+    }
+
+    #[test]
+    fn a_batch_is_one_note_with_the_count() {
+        let mut n = Notes::new();
+        n.update(&[stick("sdb", "A"), stick("sdc", "B")], None);
+        let batch = Event {
+            seq: 1,
+            name: "A, B".into(),
+            clean: true,
+            count: 2,
+        };
+        assert_eq!(n.update(&[], Some(&batch)), [Note::SticksRemovable(2)]);
+        assert_eq!(
+            text(&Note::SticksRemovable(2)),
+            ("2 sticks can be removed".to_string(), false)
+        );
     }
 
     #[test]
@@ -407,7 +449,8 @@ mod tests {
             Some(Event {
                 seq: 7,
                 name: "A".into(),
-                clean: false
+                clean: false,
+                count: 1
             })
         );
     }

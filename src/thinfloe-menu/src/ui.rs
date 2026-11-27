@@ -573,8 +573,32 @@ fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Whether the pointer over `w` is a hand: it is enabled and takes a
+/// click and no drag (scroll bars, sliders and text fields keep theirs).
+/// An Area's own move widget is no click target: a fixed Area (every
+/// dialog) senses a click over all of itself only to come to the front.
+fn wants_pointing_hand(w: &egui::WidgetRect) -> bool {
+    w.enabled && w.sense.senses_click() && !w.sense.senses_drag() && w.id != area_move_id(w.layer_id)
+}
+
+/// The id egui 0.37 gives an Area's move widget (`Area::show`).
+fn area_move_id(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("move")
+}
+
+/// The pointing hand over the widget egui would give a click to, when
+/// `wants_pointing_hand`. Called first in the pass, so a widget that sets
+/// its own cursor later (a text field's I-beam, a disabled widget) wins.
+/// egui-winit hands the cursor to winit.
+fn pointing_hand(ctx: &egui::Context) {
+    if ctx.viewport(|v| v.hits.click.as_ref().is_some_and(wants_pointing_hand)) {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
 /// Draw one frame.
 pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, now: Instant) -> Option<UiEvent> {
+    pointing_hand(ui.ctx());
     // The clock changes on the minute and at no other time.
     ui.ctx().request_repaint_after(until_next_minute(
         chrome.wall.unwrap_or_else(std::time::SystemTime::now),
@@ -1000,6 +1024,10 @@ fn show_strip(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], rect: Rect) -> O
                     // scroll area, so it hands the movement back.
                     if resp.dragged() {
                         ui.scroll_with_delta(vec2(resp.drag_delta().x, 0.0));
+                    } else if resp.hovered() {
+                        // It senses drag for the scroll area, so
+                        // pointing_hand() leaves it out; a click unfolds.
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     let p = ui.painter();
                     let fill = if resp.hovered() {
@@ -1650,6 +1678,7 @@ const MARK_GAP: f32 = 8.0;
 /// The update mark's click target reaches this far around the word.
 const MARK_HIT_PAD: f32 = 6.0;
 const UPDATE_MARK: &str = "update";
+const USER_MARK: &str = "user";
 
 /// The word `text` as a mark at the bottom right of a tile, `right` its
 /// right edge.
@@ -1670,13 +1699,79 @@ fn update_mark_target(ui: &Ui, rect: Rect) -> Rect {
         .intersect(rect)
 }
 
+/// The icon's distance from the tile's left edge.
+const ICON_LEFT: f32 = 22.0;
+/// The gap between icon and text, and between text and the tile's right edge.
+const TEXT_PAD: f32 = 14.0;
+
+/// A tile's icon box and text column: `text_x` and `text_w` for the
+/// name line, `note_w` for the second line, which ends before the marks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TileColumns {
+    icon: Rect,
+    text_x: f32,
+    text_w: f32,
+    note_w: f32,
+}
+
+/// The columns of the tile in `rect`; `marks_left` is the left edge of
+/// its leftmost mark area (`marks_left()`), `None` without marks.
+fn tile_columns(rect: Rect, ppp: f32, marks_left: Option<f32>) -> TileColumns {
+    // On a whole pixel, or the icon texture is sampled between two pixels
+    // and its edges turn ragged.
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let icon = Rect::from_min_size(
+        pos2(snap(rect.left() + ICON_LEFT), snap(rect.center().y - ICON_BOX / 2.0)),
+        Vec2::splat(ICON_BOX),
+    );
+    let text_x = icon.right() + TEXT_PAD;
+    let text_w = (rect.right() - TEXT_PAD - text_x).max(0.0);
+    let note_w = match marks_left {
+        Some(left) => text_w.min((left - MARK_GAP - text_x).max(0.0)),
+        None => text_w,
+    };
+    TileColumns {
+        icon,
+        text_x,
+        text_w,
+        note_w,
+    }
+}
+
+/// The left edge of the leftmost mark area of a tile, `None` without
+/// marks: the update mark counts with its click target, the user mark
+/// where the painting puts it.
+fn marks_left(ui: &Ui, rect: Rect, update: bool, user: bool) -> Option<f32> {
+    let mut right = rect.right() - MARK_RIGHT;
+    let mut left: Option<f32> = None;
+    if update {
+        left = Some(update_mark_target(ui, rect).left());
+        right = mark_rect(ui, rect, right, UPDATE_MARK).left() - MARK_GAP;
+    }
+    if user {
+        let l = mark_rect(ui, rect, right, USER_MARK).left();
+        left = Some(left.map_or(l, |x| x.min(l)));
+    }
+    left
+}
+
+/// How strongly a tile that cannot be used is drawn.
+const UNUSABLE_FADE: f32 = 0.35;
+
+/// `c` on a tile that cannot be used: faded, unless `usable`.
+fn faded(c: Color32, usable: bool) -> Color32 {
+    if usable { c } else { c.gamma_multiply(UNUSABLE_FADE) }
+}
+
 fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Option<&str>, state: TileState) {
     let name = tile.name.as_str();
     let t = Theme::current(ui.ctx());
     let p = ui.painter();
     let usable = tile.usable();
-    // A tile that cannot be used fades; its reason stays at full strength.
-    let fade = |c: Color32| if usable { c } else { c.gamma_multiply(0.35) };
+    // A tile that cannot be used fades, its focus ring and the update
+    // mark's highlight too; its reason, the word "update" and the mark's
+    // focus ring stay at full strength.
+    let fade = |c: Color32| faded(c, usable);
     let fill = if state.hovered {
         t.palette().accent
     } else if state.active {
@@ -1696,18 +1791,15 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
         p.rect_stroke(
             rect.expand(2.0),
             0.0,
-            Stroke::new(3.0, t.palette().ring),
+            Stroke::new(3.0, fade(t.palette().ring)),
             StrokeKind::Outside,
         );
     }
     let ppp = ui.ctx().pixels_per_point();
-    // On a whole pixel, or the icon texture is sampled between two pixels
-    // and its edges turn ragged.
     let snap = |v: f32| (v * ppp).round() / ppp;
-    let icon_rect = Rect::from_min_size(
-        pos2(snap(rect.left() + 22.0), snap(rect.center().y - ICON_BOX / 2.0)),
-        Vec2::splat(ICON_BOX),
-    );
+    let user = tile.origin == Origin::User;
+    let cols = tile_columns(rect, ppp, marks_left(ui, rect, state.update.is_some(), user));
+    let icon_rect = cols.icon;
     match icon {
         // token-ok: white tints nothing: the icon is drawn as rendered, only faded
         Some(icon) => draw_icon(p, &icon.tile, icon_rect.min, fade(Color32::WHITE)),
@@ -1730,24 +1822,37 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     }
     // Name and Comment come from files the user writes. Each is one line,
     // cut with an ellipsis, and all text is clipped to the tile, so no file
-    // can paint over its neighbours.
-    let text_x = icon_rect.right() + 14.0;
-    let text_w = (rect.right() - 14.0 - text_x).max(0.0);
+    // can paint over its neighbours. The second line ends before the marks.
     let clipped = ui.painter_at(rect);
     let mut lines = Vec::new();
-    let mut line = |text: &str, font: FontId, color: Color32| {
+    let mut line = |text: &str, font: FontId, color: Color32, width: f32| {
         let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-        job.wrap = TextWrapping::truncate_at_width(text_w);
+        job.wrap = TextWrapping::truncate_at_width(width);
         lines.push(clipped.layout_job(job));
     };
-    line(name, brand::geo(brand::TILE_NAME_PT), fade(t.palette().foreground));
+    line(
+        name,
+        brand::geo(brand::TILE_NAME_PT),
+        fade(t.palette().foreground),
+        cols.text_w,
+    );
     // One second line: why the tile is grey, else the newer release (the
     // Upgrade tile), else its comment, else the note about its file.
     // `--check` has the long form.
     if let Some(why) = &tile.problem {
-        line(why, FontId::proportional(brand::TILE_NOTE_PT), t.role(role::WARN));
+        line(
+            why,
+            FontId::proportional(brand::TILE_NOTE_PT),
+            t.role(role::WARN),
+            cols.note_w,
+        );
     } else if let Some(r) = release {
-        line(r, FontId::proportional(brand::TILE_NOTE_PT), fade(t.palette().primary));
+        line(
+            r,
+            FontId::proportional(brand::TILE_NOTE_PT),
+            fade(t.palette().primary),
+            cols.note_w,
+        );
     } else if let Some(c) = tile.comment.clone().or(tile.note.clone()).or_else(|| {
         // Only a reworded file that lost keys; plain "reworded" is no news.
         match &tile.origin {
@@ -1759,6 +1864,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
             &c,
             FontId::proportional(brand::TILE_NOTE_PT),
             fade(t.palette().muted_foreground),
+            cols.note_w,
         );
     }
     let heights: Vec<f32> = lines.iter().map(|g| g.size().y).collect();
@@ -1766,7 +1872,7 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     let mut y = snap(rect.center().y - block_h / 2.0);
     for (galley, h) in lines.into_iter().zip(heights) {
         // token-ok: fallback colour only: every section of these galleys has its own
-        clipped.galley(pos2(text_x, y), galley, Color32::WHITE);
+        clipped.galley(pos2(cols.text_x, y), galley, Color32::WHITE);
         y += h + 2.0;
     }
     if state.running > 1 {
@@ -1778,11 +1884,13 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
             t.palette().primary,
         );
     }
-    // Small marks along the bottom right.
+    // Small marks along the bottom right, placed by mark_rect() as
+    // marks_left() reckons with them.
     let mut right = rect.right() - MARK_RIGHT;
     let mut mark = |text: &str, color: Color32| {
-        let r = p.text(
-            pos2(right, rect.bottom() - MARK_BOTTOM),
+        let r = mark_rect(ui, rect, right, text);
+        p.text(
+            r.right_bottom(),
             Align2::RIGHT_BOTTOM,
             text,
             FontId::proportional(brand::MARK_PT),
@@ -1793,15 +1901,17 @@ fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile, icon: Option<&Icon>, release: Op
     if let Some(m) = state.update {
         let target = update_mark_target(ui, rect);
         if m.hovered {
-            p.rect_filled(target, 0.0, t.palette().accent);
+            p.rect_filled(target, 0.0, fade(t.palette().accent));
         }
+        // Full strength: the mark is the one control of a greyed tile that
+        // still works, and its focus must stay visible.
         if m.focused {
             p.rect_stroke(target, 0.0, Stroke::new(2.0, t.palette().ring), StrokeKind::Inside);
         }
         mark(UPDATE_MARK, t.palette().primary);
     }
-    if tile.origin == Origin::User {
-        mark("user", t.palette().muted_foreground);
+    if user {
+        mark(USER_MARK, t.palette().muted_foreground);
     }
 }
 
@@ -2820,6 +2930,7 @@ mod tests {
         let stick = |disk: &str, name: &str, model: &str, bytes: u64| crate::removable::Stick {
             disk: disk.into(),
             names: vec![name.into()],
+            mounts: vec![0],
             size_bytes: bytes,
             model: model.into(),
             kind: crate::removable::Kind::Stick,
@@ -3333,13 +3444,15 @@ mod tests {
         let section = &note.galley.job.sections[0];
         assert_eq!(section.format.color, ICE, "the primary blue");
         assert_eq!(section.format.font_id.size, brand::TILE_NOTE_PT);
-        // The text column of a tile, as paint_tile computes it.
-        let tile_w = layout(screen(1280.0, 720.0), 1, 0, 0, 0).tile.x;
-        let text_w = tile_w - 22.0 - ICON_BOX - 14.0 - 14.0;
+        // The text column of a tile, from the drawing code.
+        let tile = layout(screen(1280.0, 720.0), 1, 0, 0, 0).tile;
+        let cols = tile_columns(Rect::from_min_size(pos2(0.0, 0.0), tile), 1.0, None);
+        assert_eq!(cols.note_w, cols.text_w, "no mark, no cut");
         assert!(
-            note.galley.size().x <= text_w,
-            "{} pt of {text_w} pt",
-            note.galley.size().x
+            note.galley.size().x <= cols.note_w,
+            "{} pt of {} pt",
+            note.galley.size().x,
+            cols.note_w
         );
     }
 
@@ -3359,14 +3472,20 @@ mod tests {
         assert!(!texts.iter().any(|t| t.ends_with("available")), "{texts:?}");
     }
 
-    /// One frame of the grid of `menu` on 1280 x 720 with `events`.
-    fn grid_frame(
+    /// One pass of `show` for `menu` on 1280 x 720 with `events`.
+    fn grid_pass(ctx: &egui::Context, menu: &Menu, events: Vec<egui::Event>) -> (egui::FullOutput, Option<UiEvent>) {
+        pass_on(ctx, menu, vec2(1280.0, 720.0), events)
+    }
+
+    /// One pass of `show` for `menu` on a screen of `size` with `events`.
+    fn pass_on(
         ctx: &egui::Context,
         menu: &Menu,
+        size: Vec2,
         events: Vec<egui::Event>,
-    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+    ) -> (egui::FullOutput, Option<UiEvent>) {
         let input = egui::RawInput {
-            screen_rect: Some(screen(1280.0, 720.0)),
+            screen_rect: Some(screen(size.x, size.y)),
             events,
             ..Default::default()
         };
@@ -3376,7 +3495,67 @@ mod tests {
             ev = show(ui, menu, &icons, &Chrome::default(), Instant::now());
         });
         out.textures_delta.clear();
+        (out, ev)
+    }
+
+    /// One frame of the grid of `menu` on 1280 x 720 with `events`.
+    fn grid_frame(
+        ctx: &egui::Context,
+        menu: &Menu,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::epaint::ClippedShape>, Option<UiEvent>) {
+        let (out, ev) = grid_pass(ctx, menu, events);
         (out.shapes, ev)
+    }
+
+    /// The cursor `show` asks for with the pointer at `p`: one layout
+    /// pass, then one with the pointer moved there.
+    fn cursor_at(ctx: &egui::Context, menu: &Menu, p: egui::Pos2) -> egui::CursorIcon {
+        cursor_on(ctx, menu, vec2(1280.0, 720.0), p)
+    }
+
+    /// `cursor_at` on a screen of `size`.
+    fn cursor_on(ctx: &egui::Context, menu: &Menu, size: Vec2, p: egui::Pos2) -> egui::CursorIcon {
+        pass_on(ctx, menu, size, vec![]);
+        pass_on(ctx, menu, size, vec![egui::Event::PointerMoved(p)])
+            .0
+            .platform_output
+            .cursor_icon
+    }
+
+    // A pass egui discards gets the click, the pass after it none: the
+    // click starts the tile once, not twice and not never.
+    #[test]
+    fn a_tile_click_in_a_discarded_pass_starts_one_tile() {
+        let menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let name = text_shape(&shapes, "T0").expect("the name").1.visual_bounding_rect();
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            events: click_at(name.center()),
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = vec![None];
+        let mut pass = 0;
+        let (mut out, events) = crate::app::run_passes(&ctx, input, |ui| {
+            if pass == 0 {
+                ui.ctx().request_discard("test");
+            }
+            pass += 1;
+            show(ui, &menu, &icons, &Chrome::default(), Instant::now())
+        });
+        out.textures_delta.clear();
+        assert_eq!(pass, 2, "the discard ran a second pass");
+        assert_eq!(events, vec![UiEvent::Tile(0)]);
     }
 
     // A click on the update mark started the program (2026-11-26): the
@@ -3426,6 +3605,319 @@ mod tests {
         assert_eq!(ev, None);
         let (_, ev) = grid_frame(&ctx, &menu, click_at(mark.center()));
         assert_eq!(ev, Some(UiEvent::Packages));
+    }
+
+    /// One tile "T0" with an add-on update waiting: the update mark.
+    fn update_tile_menu(t0: Tile) -> Menu {
+        let id = t0.name.clone();
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![t0],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id,
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        menu
+    }
+
+    /// The right edge of the second line `text` and the glyphs drawn of it,
+    /// with the shapes of the frame.
+    fn second_line(menu: &Menu, text: &str) -> (Vec<egui::epaint::ClippedShape>, f32, String) {
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, menu, vec![]);
+        let (_, line) = text_shape(&shapes, text).expect("the second line");
+        let right = line.pos.x + line.galley.size().x;
+        let glyphs: String = line
+            .galley
+            .rows
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.chr))
+            .collect();
+        (shapes, right, glyphs)
+    }
+
+    // A long comment ran under the update mark and its hover highlight
+    // (PR #62 follow-up, 2026-11-26).
+    #[test]
+    fn a_long_comment_ends_before_the_update_mark() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.comment = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        let (shapes, right, glyphs) = second_line(&menu, &"W".repeat(80));
+        let mark = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        assert!(
+            right <= mark.left() - MARK_HIT_PAD - MARK_GAP + 0.5,
+            "{right} vs {mark:?}"
+        );
+        assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
+    }
+
+    #[test]
+    fn a_long_comment_ends_before_both_marks() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.origin = Origin::User;
+        t0.comment = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        let (shapes, right, glyphs) = second_line(&menu, &"W".repeat(80));
+        let user = text_shape(&shapes, "user")
+            .expect("the user mark")
+            .1
+            .visual_bounding_rect();
+        let update = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        assert!(user.right() < update.left(), "user left of update");
+        assert!(right <= user.left() - MARK_GAP + 0.5, "{right} vs {user:?}");
+        assert!(glyphs.ends_with('…'), "cut with an ellipsis: {glyphs}");
+    }
+
+    // A greyed tile drew the update mark's highlight at full strength on
+    // its faded fill (PR #62 follow-up, 2026-11-26). The mark's focus ring
+    // stays at full strength: it is the tile's one working control.
+    #[test]
+    fn a_greyed_tile_fades_the_mark_highlight_not_its_focus_ring() {
+        let mut t0 = plain_tile("T0");
+        t0.addon = true;
+        t0.problem = Some("W".repeat(80));
+        let menu = update_tile_menu(t0);
+        assert!(!menu.tiles[0].usable());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let mark = text_shape(&shapes, "update")
+            .expect("the mark")
+            .1
+            .visual_bounding_rect();
+        // The reason line: full strength, and it ends before the mark.
+        let (_, why) = text_shape(&shapes, &"W".repeat(80)).expect("the reason");
+        let warn = Theme::current(&ctx).role(role::WARN);
+        assert_eq!(why.galley.job.sections[0].format.color, warn);
+        let right = why.pos.x + why.galley.size().x;
+        assert!(
+            right <= mark.left() - MARK_HIT_PAD - MARK_GAP + 0.5,
+            "{right} vs {mark:?}"
+        );
+        // The word stays at full strength.
+        let (_, word) = text_shape(&shapes, "update").unwrap();
+        assert_eq!(word.galley.job.sections[0].format.color, ICE);
+        // Hover: the mark's highlight is faded.
+        grid_frame(&ctx, &menu, vec![egui::Event::PointerMoved(mark.center())]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let fills = |c: Color32| {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == c))
+                .count()
+        };
+        assert_eq!(fills(faded(TILE_HOVER, false)), 1, "the faded highlight");
+        assert_eq!(fills(TILE_HOVER), 0, "no full-strength highlight");
+        // Focus: Tab until a ring appears; it is at full strength.
+        let ring = Theme::current(&ctx).palette().ring;
+        let strokes = |shapes: &[egui::epaint::ClippedShape], c: Color32| {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == c))
+                .count()
+        };
+        let tab = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut found = false;
+        for _ in 0..3 {
+            grid_frame(&ctx, &menu, vec![tab.clone()]);
+            let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+            if strokes(&shapes, faded(ring, false)) > 0 || strokes(&shapes, ring) > 0 {
+                assert_eq!(strokes(&shapes, faded(ring, false)), 0, "no faded ring");
+                assert_eq!(strokes(&shapes, ring), 1, "the mark's ring");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Tab reaches the mark");
+    }
+
+    #[test]
+    fn only_enabled_click_widgets_want_the_hand() {
+        let w = |sense, enabled| egui::WidgetRect {
+            id: egui::Id::NULL.with("widget"),
+            parent_id: egui::Id::NULL,
+            layer_id: egui::LayerId::background(),
+            rect: Rect::ZERO,
+            interact_rect: Rect::ZERO,
+            sense,
+            enabled,
+            visible: true,
+        };
+        assert!(wants_pointing_hand(&w(Sense::click(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::click(), false)));
+        assert!(!wants_pointing_hand(&w(Sense::hover(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::click_and_drag(), true)));
+        assert!(!wants_pointing_hand(&w(Sense::drag(), true)));
+        let area = egui::LayerId::new(egui::Order::Middle, egui::Id::NULL.with("dialog"));
+        let mover = egui::WidgetRect {
+            id: area_move_id(area),
+            layer_id: area,
+            ..w(Sense::click(), true)
+        };
+        assert!(!wants_pointing_hand(&mover), "an Area's move widget");
+    }
+
+    // The pointer stayed an arrow over everything (2026-11-26).
+    #[test]
+    fn the_pointer_is_a_hand_over_what_takes_a_click() {
+        let mut t1 = plain_tile("T1");
+        t1.problem = Some("broken".into());
+        t1.addon = true;
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0"), t1],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.set_addons(vec![crate::addons::AddonStatus {
+            id: "T1".into(),
+            ticked: true,
+            state: crate::addons::AddonState::Pending,
+            installed: Some("1".into()),
+            pending: Some("2".into()),
+            auto: true,
+            message: None,
+        }]);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let at = |text: &str| text_shape(&shapes, text).expect(text).1.visual_bounding_rect().center();
+        let (t0, t1, mark) = (at("T0"), at("T1"), at("update"));
+        use egui::CursorIcon::{Default as Arrow, PointingHand};
+        assert_eq!(cursor_at(&ctx, &menu, t0), PointingHand, "a usable tile");
+        assert_eq!(cursor_at(&ctx, &menu, t1), Arrow, "a greyed tile");
+        assert_eq!(
+            cursor_at(&ctx, &menu, mark),
+            PointingHand,
+            "the greyed tile's update mark"
+        );
+        let log = layout(screen(1280.0, 720.0), 2, 0, 0, 0).log.center();
+        assert_eq!(cursor_at(&ctx, &menu, log), Arrow, "the log");
+    }
+
+    /// Where `what` is drawn on `menu`'s screen of `size`.
+    fn drawn_at(ctx: &egui::Context, menu: &Menu, size: Vec2, what: &str) -> Rect {
+        pass_on(ctx, menu, size, vec![]);
+        let shapes = pass_on(ctx, menu, size, vec![]).0.shapes;
+        text_rects(&shapes)
+            .into_iter()
+            .find(|(t, _)| t == what)
+            .unwrap_or_else(|| panic!("{what} not drawn in {:?}", all_texts(&shapes)))
+            .1
+    }
+
+    // A fixed Area senses a click over all of itself to come to the front:
+    // the pointer was a hand on every dialog's padding (review, 2026-11-26).
+    #[test]
+    fn the_pointer_is_an_arrow_on_a_dialog_and_a_hand_over_its_buttons() {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![plain_tile("T0")],
+                banner: vec![],
+            },
+            false,
+        );
+        menu.logout = Some(Logout::Confirm);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let (shapes, _) = {
+            grid_frame(&ctx, &menu, vec![]);
+            grid_frame(&ctx, &menu, vec![])
+        };
+        let texts = all_texts(&shapes);
+        let title = texts.first().cloned().expect("a dialog");
+        let small = vec2(1280.0, 720.0);
+        let title = drawn_at(&ctx, &menu, small, &title);
+        let stay = drawn_at(&ctx, &menu, small, "Stay");
+        use egui::CursorIcon::{Default as Arrow, PointingHand};
+        assert_eq!(
+            cursor_at(&ctx, &menu, title.left_top() + vec2(0.0, -12.0)),
+            Arrow,
+            "the padding"
+        );
+        assert_eq!(cursor_at(&ctx, &menu, stay.center()), PointingHand, "a button");
+    }
+
+    // A chip senses drag for the strip's scroll area; a click on it unfolds
+    // the window, so it shows the hand too (review, 2026-11-26).
+    #[test]
+    fn the_pointer_is_a_hand_over_a_folded_window_chip() {
+        let menu = folded_menu(1);
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        let chip = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if (r.rect.height() - CHIP_H).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .expect("a chip");
+        assert_eq!(cursor_at(&ctx, &menu, chip.center()), egui::CursorIcon::PointingHand);
+    }
+
+    // Settings: a shadcn button takes the hand, a text field keeps its
+    // I-beam, which it sets after pointing_hand() (review, 2026-11-26).
+    #[test]
+    fn the_pointer_in_settings_is_a_hand_over_a_tab_and_a_beam_over_a_field() {
+        let menu = keyboard_menu();
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        let big = vec2(1920.0, 1080.0);
+        let tab = drawn_at(&ctx, &menu, big, "Network");
+        assert_eq!(
+            cursor_on(&ctx, &menu, big, tab.center()),
+            egui::CursorIcon::PointingHand,
+            "a tab"
+        );
+        let label = drawn_at(&ctx, &menu, big, "Try it here");
+        // The field: the widget that senses click and drag in the label's row.
+        let field = ctx.viewport(|v| {
+            v.prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, ws)| ws.iter())
+                .filter(|w| w.sense.senses_drag() && w.sense.senses_click())
+                .filter(|w| w.rect.left() > label.right() && w.rect.y_range().contains(label.center().y))
+                .map(|w| w.rect)
+                .next()
+        });
+        let field = field.expect("the Try it here field");
+        assert_eq!(
+            cursor_on(&ctx, &menu, big, field.center()),
+            egui::CursorIcon::Text,
+            "a text field"
+        );
     }
 
     #[test]
@@ -6118,11 +6610,17 @@ mod tests {
                 station: "wlx1".into(),
                 driver: "rtw88_8822bu".into(),
             },
+            vec![crate::share_state::Receiving {
+                sender: "Jane's iPhone".into(),
+                files: 1,
+                first: "IMG_0042.DNG".into(),
+            }],
             start,
         )));
         let texts = net_texts(&network_settings(net));
         for t in [
             "Ready on wlx1 (rtw88_8822bu, exclusive, channel 6). Phones must be set to AirDrop 'Everyone for 10 Minutes'.",
+            "Receiving IMG_0042.DNG from Jane's iPhone",
             "Sending needs Bluetooth; this machine has none.",
             "Folder: /media/tfuser/FloeDrop",
             "FloeDrop 56db68",
@@ -7742,6 +8240,7 @@ mod tests {
             menu.set_removable(vec![crate::removable::Stick {
                 disk: "/dev/sdb".into(),
                 names: vec!["MYSTICK".into()],
+                mounts: vec![0],
                 size_bytes: 16_000_000_000,
                 model: "SanDisk Cruzer".into(),
                 kind: crate::removable::Kind::Stick,

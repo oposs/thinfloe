@@ -337,7 +337,7 @@ fn read_generated(dir: &Path, name: &str) -> Result<Option<String>, String> {
 }
 
 /// The config rebuilt from `generated/`; `Ok(None)` when it holds no file.
-/// `[status]` and `[notice]` stay default.
+/// `[status]` and `[notice]` stay default; `[share]` is read from `generated/share`.
 pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     let env = read_generated(dir, "environment")?;
     let screen = read_generated(dir, "screen")?;
@@ -346,7 +346,8 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     let wired = read_generated(dir, "ethernet.yaml")?;
     let time = read_generated(dir, "time")?;
     let deskflow = read_generated(dir, "deskflow")?;
-    if [&env, &screen, &kanshi_text, &wifi, &wired, &time, &deskflow]
+    let share = read_generated(dir, "share")?;
+    if [&env, &screen, &kanshi_text, &wifi, &wired, &time, &deskflow, &share]
         .iter()
         .all(|f| f.is_none())
     {
@@ -374,6 +375,9 @@ pub fn from_generated(dir: &Path) -> Result<Option<ThinfloeConfig>, String> {
     // A broken file is an error, not defaults: the pairings stay on disk.
     if let Some(t) = &deskflow {
         cfg.deskflow = crate::deskflowcfg::parse(t)?.deskflow;
+    }
+    if let Some(t) = &share {
+        cfg.share = crate::sharecfg::parse(strip_header(t));
     }
     Ok(Some(cfg))
 }
@@ -724,6 +728,10 @@ mod tests {
             },
         ];
         c.network.wifi_dns = vec!["1.1.1.1".into()];
+        c.share = crate::config::ShareCfg {
+            enabled: true,
+            name: "Front desk".into(),
+        };
         c.network.set_wired(&Wired::Static {
             address: "10.0.0.5".parse().unwrap(),
             prefix: 24,
@@ -759,11 +767,24 @@ mod tests {
             "ethernet.yaml",
             "time",
             "deskflow",
+            "share",
         ] {
             let body = generated::render(&cfg, name, &inp()).unwrap();
             generated::write_if_changed(&d, name, body.as_deref()).unwrap();
         }
         assert_eq!(from_generated(&d).unwrap(), Some(cfg));
+    }
+
+    #[test]
+    fn a_broken_config_keeps_floedrop_as_it_was() {
+        let d = TestDir::new("convert", "share");
+        let mut cfg = ThinfloeConfig::default();
+        cfg.share.enabled = true;
+        cfg.share.name = "Front desk".into();
+        let body = generated::render(&cfg, "share", &inp()).unwrap();
+        generated::write_if_changed(&d, "share", body.as_deref()).unwrap();
+        let back = from_generated(&d).unwrap().expect("share alone counts");
+        assert_eq!(back.share, cfg.share);
     }
 
     #[test]

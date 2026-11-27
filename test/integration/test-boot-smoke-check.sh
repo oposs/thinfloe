@@ -5,7 +5,8 @@
 # wrote its terminal reset into the middle of systemd's "Reached target
 # multi-user.target" line, and the plain grep no longer matched. These
 # fixtures pin that escape sequences inside the line are tolerated, and that
-# a boot which never reached the target is still rejected.
+# a boot which never reached the target is still rejected. The last cases run
+# scripts/run-qemu-smoke.sh on a fake QEMU and pin its timeout lines.
 #
 # Usage: test/integration/test-boot-smoke-check.sh
 
@@ -84,6 +85,50 @@ elif grep -q 'FAIL - no module with unknown symbols' "$WORK/out"; then
     ok "full check fails a log with 'Unknown symbol'"
 else
     bad "unknown-symbol log failed for another reason: $(grep FAIL "$WORK/out")"
+fi
+
+# run-qemu-smoke.sh against a fake QEMU: it writes FAKE_LINES to the file
+# given after -serial and then waits like a VM that never powers off.
+RUN="$REPO/scripts/run-qemu-smoke.sh"
+cat >"$WORK/fake-qemu" <<'FAKE'
+#!/bin/bash
+while [[ $# -gt 0 ]]; do
+    [[ $1 == -serial ]] && { log=${2#file:}; break; }
+    shift
+done
+[[ -n "${FAKE_LINES:-}" ]] && printf '%b' "$FAKE_LINES" >"$log"
+exec sleep 30
+FAKE
+chmod +x "$WORK/fake-qemu"
+
+# Target reached, the SMOKE_WAIT_FOR line never comes: the timeout line says so.
+out=$(FAKE_LINES='Reached target multi-user.target - Multi-User System.\n' \
+    SMOKE_WAIT_FOR='^NEVER' "$RUN" "$WORK/q.log" 3 0 -- "$WORK/fake-qemu" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && $out == *"but no line matching '^NEVER' after 3s"* && $out != *"no multi-user target"* ]]; then
+    ok "wait_for_missing: the timeout names the line it waited for"
+else
+    bad "wait_for_missing (rc $rc): $out"
+fi
+
+# Target never reached: the old line.
+out=$(FAKE_LINES= "$RUN" "$WORK/q.log" 3 0 -- "$WORK/fake-qemu" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && $out == *"no multi-user target after 3s"* ]]; then
+    ok "never_reached: the timeout names the missing target"
+else
+    bad "never_reached (rc $rc): $out"
+fi
+
+# Target and the SMOKE_WAIT_FOR line both there: stopped before the timeout.
+began=$SECONDS
+out=$(FAKE_LINES='Reached target multi-user.target - Multi-User System.\nSMOKE-X-DONE\n' \
+    SMOKE_WAIT_FOR='^SMOKE-X-DONE' "$RUN" "$WORK/q.log" 3 0 -- "$WORK/fake-qemu" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && $((SECONDS - began)) -le 3 && $out != *"stopping QEMU"* ]]; then
+    ok "wait_for_seen: stopped once the line is there"
+else
+    bad "wait_for_seen (rc $rc, $((SECONDS - began))s): $out"
 fi
 
 if [[ $fail -ne 0 ]]; then
