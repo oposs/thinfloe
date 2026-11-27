@@ -258,9 +258,14 @@ $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 endif
 
+# BUILD_CACHE: the directory where podman keeps the cargo target directories
+# of the menu-build stage (its RUN --mount=type=cache lines), passed to the
+# container build as TMPDIR. Empty: podman's default, $TMPDIR or /var/tmp.
+# CI restores it from the cache of main (docs/release-ci.md).
+BUILD_CACHE ?=
 .ubuntu-container: containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES) $(SHARE_FILES) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
-	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
+	$(if $(BUILD_CACHE),mkdir -p '$(BUILD_CACHE)' && TMPDIR='$(BUILD_CACHE)') $(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
 		-t $(UBUNTU_IMAGE) \
 		-f containers/ubuntu/Dockerfile \

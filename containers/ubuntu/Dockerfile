@@ -63,18 +63,23 @@ ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
 # before the COPY of the menu and share sources so a change there does not
 # rebuild it. The commit is pinned here and in src/thinfloe-share/Cargo.toml;
 # keep the two in step. OWLY_TOOLCHAIN is the toolchain of the two crates.
+# The three cargo builds keep their target directories in a cache mount
+# (/cargo-target, one directory per crate), so a build after a change to the
+# sources compiles only what changed. The mount is no part of any layer; the
+# Makefile's BUILD_CACHE says where podman keeps it (docs/release-ci.md).
 ARG OWLY_REV=21171d8f9a08bfa2c625a1fa338e877a67913e54
 ARG OWLY_TOOLCHAIN=1.96.0
-RUN set -eu; \
+RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=locked set -eu; \
     rustup toolchain install "$OWLY_TOOLCHAIN" --profile minimal; \
+    export CARGO_TARGET_DIR=/cargo-target/owly; \
     mkdir /build-owly; cd /build-owly; \
     git init -q; \
     git fetch -q --depth 1 https://github.com/t4t5/owly "$OWLY_REV"; \
     git checkout -q FETCH_HEAD; \
     test "$(git rev-parse HEAD)" = "$OWLY_REV"; \
     CARGO_PROFILE_RELEASE_STRIP=true CARGO_BUILD_JOBS=4 rustup run "$OWLY_TOOLCHAIN" cargo build --release --locked -j 4 -p owlyd; \
-    install -D -m 0755 target/release/owlyd /out/usr/lib/owly/owlyd; \
-    cmp target/release/owlyd /out/usr/lib/owly/owlyd
+    install -D -m 0755 "$CARGO_TARGET_DIR"/release/owlyd /out/usr/lib/owly/owlyd; \
+    cmp "$CARGO_TARGET_DIR"/release/owlyd /out/usr/lib/owly/owlyd
 # The tree mirrors the repository: migrate.rs embeds the home templates from
 # overlay/home/tfuser/.config/thinfloe by a path relative to its own file.
 COPY src/thinfloe-menu/ /build/src/thinfloe-menu/
@@ -83,19 +88,21 @@ COPY overlay/home/tfuser/.config/thinfloe/ /build/overlay/home/tfuser/.config/th
 # FloeDrop: thinfloe-share, built from the crate copied above. Its Owly
 # dependency is pinned in Cargo.toml to the same commit as OWLY_REV above.
 WORKDIR /build/src/thinfloe-share
-RUN set -eu; \
+RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=locked set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     rustup toolchain install "$toolchain" --profile minimal; \
+    export CARGO_TARGET_DIR=/cargo-target/share; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
-    install -D -m 0755 target/release/thinfloe-share /out/usr/bin/thinfloe-share; \
-    cmp target/release/thinfloe-share /out/usr/bin/thinfloe-share
+    install -D -m 0755 "$CARGO_TARGET_DIR"/release/thinfloe-share /out/usr/bin/thinfloe-share; \
+    cmp "$CARGO_TARGET_DIR"/release/thinfloe-share /out/usr/bin/thinfloe-share
 WORKDIR /build/src/thinfloe-menu
-RUN set -eu; \
+RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=locked set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
+    export CARGO_TARGET_DIR=/cargo-target/menu; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
-    install -D -m 0755 target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
+    install -D -m 0755 "$CARGO_TARGET_DIR"/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     # A zero-filled copy was once seen on /scratch; compare, do not trust.
-    cmp target/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
+    cmp "$CARGO_TARGET_DIR"/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     install -D -m 0644 -t /out/usr/share/thinfloe/icons icons/*.svg icons/LICENSE; \
     # Fonts linked into the menu, whose licences ask to travel with them:
     # egui's built-in set (Ubuntu Light, Hack, Noto Emoji, the emoji and

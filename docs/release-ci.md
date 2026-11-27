@@ -155,6 +155,39 @@ of podman storage (within the 10 GB repository cache limit) or a registry
 cache, which needs `packages: write` in a `repo-infra` caller workflow and
 therefore goes through `repo-infra` first.
 
+### Cargo cache (2026-11-27)
+
+A layer cache saves little for a change to the menu: the binary enters the
+final stage before dracut and the slim step, so they, the export and every
+test run again. The cargo builds were the larger part. The three cargo
+`RUN` lines of the `menu-build` stage (owlyd, thinfloe-share,
+thinfloe-menu) keep their target directories in a cache mount
+(`--mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target`, one
+directory per crate, `sharing=locked`). Podman keeps it in
+`$TMPDIR/buildah-cache-<uid>/`, `/var/tmp` without `TMPDIR`; `make
+BUILD_CACHE=<dir>` runs the container build with `TMPDIR=<dir>`. The mount is
+no part of a layer, and the stage's `cmp` checks of the installed binaries
+stay.
+
+In CI the `image` job sets `BUILD_CACHE=/home/runner/build-cache`, restores
+the newest Actions cache `cargo-target-v1-*` before `make test-integration`
+and saves one (key `cargo-target-v1-<sha>`) only on a push to `main`, so
+pull requests read the cache of `main` and do not fill the 10 GB limit. The
+cache is about 1.4 GB. The release build (`release-build-local.yml`) restores
+nothing and builds cold.
+
+Measured on the development host (4 cores): cold, owlyd 59 s, thinfloe-share
+72 s, thinfloe-menu 156 s. With the cache, after a change to the menu's
+`main.rs`: thinfloe-share 3 s, thinfloe-menu 61 s, owlyd a few seconds.
+
+The same change removed a second export: `make image` built the container
+stamp and exported the rootfs again (about 2 minutes) after `make
+test-integration`, because the cargo test of `test-network-netplan.sh`
+created `src/thinfloe-menu/target/` on the runner (no `CARGO_TARGET_DIR`)
+and so changed the mtime of a directory that was a prerequisite of
+`.ubuntu-container`. The stamp's input hash now covers the directory names
+instead.
+
 ## Runner setup for the project's workflows
 
 `scripts/ci-runner-setup.sh` prepares the runner after the checkout:
