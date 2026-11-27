@@ -67,6 +67,13 @@ ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
 # (/cargo-target, one directory per crate), so a build after a change to the
 # sources compiles only what changed. The mount is no part of any layer; the
 # Makefile's BUILD_CACHE says where podman keeps it (docs/release-ci.md).
+# Cargo judges a local crate fresh by mtime, and every checkout on a host
+# shares the mount: sources from another worktree, older than the cached
+# binary, were taken as built and the image got that worktree's menu. So the
+# menu and share builds pass TF_SOURCE_KEY, a hash of the copied sources;
+# the crates read it with option_env!, cargo rebuilds when it changes, and
+# test-source-key.sh finds it in the image's binaries. The key is computed
+# here and in test/integration/lib/source-key.sh alike; keep them in step.
 ARG OWLY_REV=21171d8f9a08bfa2c625a1fa338e877a67913e54
 ARG OWLY_TOOLCHAIN=1.96.0
 RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=locked set -eu; \
@@ -92,6 +99,8 @@ RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=loc
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     rustup toolchain install "$toolchain" --profile minimal; \
     export CARGO_TARGET_DIR=/cargo-target/share; \
+    TF_SOURCE_KEY=$(cd /build && find src/thinfloe-share -path src/thinfloe-share/target -prune -o -type f ! -name '*~' -print | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64); \
+    test "${#TF_SOURCE_KEY}" -eq 64; export TF_SOURCE_KEY; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 "$CARGO_TARGET_DIR"/release/thinfloe-share /out/usr/bin/thinfloe-share; \
     cmp "$CARGO_TARGET_DIR"/release/thinfloe-share /out/usr/bin/thinfloe-share
@@ -99,6 +108,8 @@ WORKDIR /build/src/thinfloe-menu
 RUN --mount=type=cache,id=thinfloe-cargo-target,target=/cargo-target,sharing=locked set -eu; \
     toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml); \
     export CARGO_TARGET_DIR=/cargo-target/menu; \
+    TF_SOURCE_KEY=$(cd /build && find src/thinfloe-menu overlay/home/tfuser/.config/thinfloe -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64); \
+    test "${#TF_SOURCE_KEY}" -eq 64; export TF_SOURCE_KEY; \
     CARGO_BUILD_JOBS=4 rustup run "$toolchain" cargo build --release --locked -j 4; \
     install -D -m 0755 "$CARGO_TARGET_DIR"/release/thinfloe-menu /out/usr/bin/thinfloe-menu; \
     # A zero-filled copy was once seen on /scratch; compare, do not trust.

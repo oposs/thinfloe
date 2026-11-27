@@ -502,8 +502,20 @@ const MIGRATE_MAX_BYTES: u64 = 64 * 1024;
 /// notes about ignored ones.
 const ENV_MAX_BYTES: u64 = 64 * 1024;
 
+/// Hash of the sources this binary was built from (`--source-key`), set by
+/// the image build; as an env dependency it also makes cargo rebuild the
+/// crate when the sources change, whatever their mtimes.
+const SOURCE_KEY: &str = match option_env!("TF_SOURCE_KEY") {
+    Some(key) => key,
+    None => "none",
+};
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == "--source-key") {
+        println!("{SOURCE_KEY}");
+        return ExitCode::SUCCESS;
+    }
     if args.get(1).is_some_and(|a| a == icons::RENDER_ICON_ARG) {
         return icons::render_icon_main(&args[2..]);
     }
