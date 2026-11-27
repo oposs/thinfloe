@@ -176,12 +176,12 @@ help:
 $(ARTIFACT_DIR) $(ROOTFS_DIR) $(IMAGE_DIR):
 	mkdir -p $@
 
-# Find all overlay files (excluding editor backups). The directories are
-# prerequisites too: a deleted file takes its own name off OVERLAY_FILES, so
-# without them make saw nothing changed and the image kept the deleted file
-# (test-container-inputs.sh). Deleting a file changes its directory's mtime.
-# __pycache__ is pruned: bytecode a tool run leaves there is not an input
-# (it changed overlay/usr/bin's mtime and made the image look stale).
+# Find all overlay files (excluding editor backups). A deleted file takes its
+# own name off OVERLAY_FILES, so by mtime alone make saw nothing changed and
+# the image kept the deleted file (test-container-inputs.sh). The names of
+# the files and directories are therefore part of the stamp's input hash
+# (UBUNTU_INPUTS_HASH below). __pycache__ is pruned: bytecode a tool run
+# leaves there is not an input.
 OVERLAY_FILES := $(shell find overlay -name __pycache__ -prune -o -type f ! -name '*~' -print 2>/dev/null)
 OVERLAY_DIRS := $(shell find overlay -name __pycache__ -prune -o -type d -print 2>/dev/null)
 
@@ -194,11 +194,8 @@ OVERLAY_DIRS := $(shell find overlay -name __pycache__ -prune -o -type d -print 
 #
 # PATCH_FILES is a wildcard, expanded once at parse time: deleting a patch
 # removes its own name from this list along with it, so the deleted file's
-# prerequisite vanishes too and make sees nothing that changed. The bare
-# directory containers/ubuntu/patches, added as a second prerequisite on
-# .ubuntu-container below, closes that hole - its mtime changes whenever a
-# file is added to or removed from it, even when no surviving patch file
-# changed.
+# prerequisite vanishes too and make sees nothing that changed. The input
+# hash of the stamp, which covers the file names, closes that hole.
 BRAND_FILES := $(wildcard brand/*)
 PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 
@@ -207,9 +204,8 @@ PATCH_FILES := $(wildcard containers/ubuntu/patches/*.patch)
 # OVERLAY_FILES only finds files under overlay/, and the crate cannot live
 # there because overlay/ is copied into the shipped rootfs. Without this,
 # editing main.rs leaves the stamp valid, 'make rootfs' reports nothing to
-# do, and 'make test' validates a stale binary while printing green. The
-# directories are listed as well, so deleting a file still changes a
-# prerequisite's mtime.
+# do, and 'make test' validates a stale binary while printing green. A
+# deleted file changes the stamp's input hash.
 MENU_FILES := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type f ! -name '*~' -print 2>/dev/null)
 MENU_DIRS := $(shell find src/thinfloe-menu -path src/thinfloe-menu/target -prune -o -type d -print 2>/dev/null)
 # thinfloe-share (FloeDrop) is built in the same stage, so it is an input too.
@@ -217,10 +213,9 @@ SHARE_FILES := $(shell find src/thinfloe-share -path src/thinfloe-share/target -
 SHARE_DIRS := $(shell find src/thinfloe-share -path src/thinfloe-share/target -prune -o -type d -print 2>/dev/null)
 
 # The slim step is copied into the ubuntu container and run as its last RUN.
-# Like PATCH_FILES, its files and their directory are prerequisites of
-# .ubuntu-container: the files catch an edit, the directory catches a
-# deleted file. Editor backups and bytecode are no input (.dockerignore
-# keeps them out of the build context too).
+# Like PATCH_FILES, its files are prerequisites of .ubuntu-container and a
+# deleted file changes the input hash. Editor backups and bytecode are no
+# input (.dockerignore keeps them out of the build context too).
 SLIM_FILES := $(filter-out %~ %/__pycache__,$(wildcard containers/ubuntu/slim/*))
 
 # Each container stamp holds the ID of the image its build produced, and is
@@ -235,7 +230,11 @@ SLIM_FILES := $(filter-out %~ %/__pycache__,$(wildcard containers/ubuntu/slim/*)
 # per checkout, or two checkouts will keep rebuilding over each other.
 #
 # .ubuntu-container also holds, on its second line, a hash of the names,
-# modes and contents of its input files, and is dropped when they differ.
+# modes and contents of its input files and of the names and modes of their
+# directories, and is dropped when they differ. The directories are no
+# prerequisites: their mtime changes when a tool creates something in them
+# that is no input, and cargo's src/thinfloe-menu/target/ from a test made
+# every make image after make test-integration build and export again.
 # By mtime alone, `touch .ubuntu-container` after an edit made the stamp
 # newer than the edited file, and make exported the old image as if it
 # were built from it. To force a rebuild, remove the stamp
@@ -251,14 +250,15 @@ drop_stale_stamp = $(shell id=$$($(call image_id,$(1)) 2>/dev/null); [ -n "$$id"
 # "No rule to make target" error.
 ifneq ($(PREBUILT),1)
 UBUNTU_INPUTS := $(sort containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES) $(SHARE_FILES))
-UBUNTU_INPUTS_HASH := $(shell { stat -c '%a %n' $(UBUNTU_INPUTS); sha256sum $(UBUNTU_INPUTS); } 2>&1 | sha256sum | cut -d' ' -f1)
+UBUNTU_INPUT_DIRS := $(sort $(wildcard brand) containers/ubuntu/patches containers/ubuntu/slim $(OVERLAY_DIRS) $(MENU_DIRS) $(SHARE_DIRS))
+UBUNTU_INPUTS_HASH := $(shell { stat -c '%a %n' $(UBUNTU_INPUTS) $(UBUNTU_INPUT_DIRS); sha256sum $(UBUNTU_INPUTS); } 2>&1 | sha256sum | cut -d' ' -f1)
 $(shell [ "$$(sed -n 2p .ubuntu-container 2>/dev/null)" = "$(UBUNTU_INPUTS_HASH)" ] || rm -f .ubuntu-container)
 $(call drop_stale_stamp,$(UBUNTU_IMAGE),.ubuntu-container)
 $(call drop_stale_stamp,$(IMAGE_BUILDER),.image-builder-container)
 $(call drop_stale_stamp,$(IPXE_BUILDER),.ipxe-container)
 endif
 
-.ubuntu-container: containers/ubuntu/Dockerfile $(wildcard brand) $(BRAND_FILES) $(OVERLAY_FILES) $(OVERLAY_DIRS) $(PATCH_FILES) containers/ubuntu/patches $(SLIM_FILES) containers/ubuntu/slim $(MENU_FILES) $(MENU_DIRS) $(SHARE_FILES) $(SHARE_DIRS) | $(ROOTFS_DIR)
+.ubuntu-container: containers/ubuntu/Dockerfile $(BRAND_FILES) $(OVERLAY_FILES) $(PATCH_FILES) $(SLIM_FILES) $(MENU_FILES) $(SHARE_FILES) | $(ROOTFS_DIR)
 	@echo "Building Ubuntu container..."
 	$(CONTAINER_RUNTIME) build --pull --progress=plain --cpu-period=100000 --cpu-quota=$$(($(BUILD_JOBS)*100000)) \
 		--build-arg VERSION=$(VERSION) \
