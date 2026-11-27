@@ -3558,6 +3558,69 @@ mod tests {
         assert_eq!(events, vec![UiEvent::Tile(0)]);
     }
 
+    // The Volume slider held down reports its value from the pointer in
+    // egui's second, input-less pass too: one drag step in a frame whose
+    // first pass is discarded must send one level, not the same one twice.
+    #[test]
+    fn a_slider_drag_in_a_discarded_pass_reports_one_level() {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Sound;
+        let mut kb = menu.keyboard.shown.clone();
+        kb.volume_keys = true;
+        menu.keyboard = crate::keyboard::KeyboardTab::new(kb, Err("no list".into()));
+        let v = crate::soundtab::Volume {
+            percent: 40,
+            muted: false,
+            on: true,
+        };
+        menu.sound.set_file(Some(v), Instant::now());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        // The slider ends just left of its "40 %" label.
+        let label = text_shape(&shapes, "40 %").expect("the level").1.visual_bounding_rect();
+        let at = |dx: f32| pos2(label.left() - dx, label.center().y);
+        let press = egui::Event::PointerButton {
+            pos: at(30.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        };
+        let (_, ev) = grid_frame(&ctx, &menu, vec![egui::Event::PointerMoved(at(30.0)), press]);
+        let level = |ev: &Option<UiEvent>| match ev {
+            Some(UiEvent::Settings(SettingsEvent::Sound(crate::soundtab::SoundEvent::Level { percent, done }))) => {
+                Some((*percent, *done))
+            }
+            _ => None,
+        };
+        let (pressed, _) = level(&ev).unwrap_or_else(|| panic!("the press on the slider: {ev:?}"));
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            events: vec![egui::Event::PointerMoved(at(80.0))],
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut pass = 0;
+        let mut reported = Vec::new();
+        let (mut out, events) = crate::app::run_passes(&ctx, input, |ui| {
+            if pass == 0 {
+                ui.ctx().request_discard("test");
+            }
+            pass += 1;
+            let ev = show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            reported.push(ev.clone());
+            ev
+        });
+        out.textures_delta.clear();
+        assert_eq!(pass, 2, "the discard ran a second pass");
+        // Both passes report the drag: what run_passes keeps once.
+        let dragged = level(&reported[0]).expect("the drag in the first pass");
+        assert!(dragged.0 < pressed && !dragged.1, "{pressed} -> {dragged:?}");
+        assert_eq!(reported[1], reported[0], "the second pass reports the same level");
+        assert_eq!(events, vec![reported[0].clone().unwrap()]);
+    }
+
     // A click on the update mark started the program (2026-11-26): the
     // whole tile was one click area.
     #[test]
