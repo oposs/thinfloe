@@ -486,6 +486,90 @@ else
     fail=1
 fi
 
+# The press that wakes a blanked screen must not start the tile under the
+# pointer (#68): labwc still delivers the press while wlopm has the outputs
+# off. One tile (the centre of the grid's first row, 640,240) appends a line
+# to /tmp/hits. A click on the lit screen starts it (the control). Then the
+# session's own swayidle commands (screen-power) blank the output after 2 s;
+# a click without motion wakes it, starts nothing, and the menu prints its
+# debug line. A click 0.6 s after the wake (past the 300 ms grace) starts the
+# tile again.
+# shellcheck disable=SC2016 # expands inside the container
+wake_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_MENU_SHIPPED_DIR=/tmp/tiles TF_MENU_USER_DIR=/tmp/utiles TF_SAVE_HOME=/bin/true TF_STATE_DIR=/tmp/state TF_MENU_DEBUG=1
+mkdir -p $TF_CONFIG_DIR /tmp/tiles /tmp/utiles /tmp/state
+printf "[Desktop Entry]\nType=Application\nName=Hit\nIcon=utilities-terminal\nExec=sh -c \"echo hit >>/tmp/hits\"\n" >/tmp/tiles/10-hit.desktop
+hits() { if [ -f /tmp/hits ]; then wc -l </tmp/hits; else echo 0; fi; }
+click() { wlrctl pointer move -5000 -5000; wlrctl pointer move 640 240; wlrctl pointer click left; }
+note() { cat "$XDG_RUNTIME_DIR/thinfloe-screen" 2>/dev/null || echo none; }
+thinfloe-menu >/tmp/m.err 2>&1 &
+mpid=$!
+sleep 3
+click
+sleep 1
+echo "lit_hits=$(hits)"
+swayidle -w timeout 2 "/usr/libexec/thinfloe/screen-power off" resume "/usr/libexec/thinfloe/screen-power on" >/tmp/swayidle.log 2>&1 &
+spid=$!
+sleep 3.5
+echo "power_off=$(wlopm | tr "\n" " ")"
+echo "note_off=$(note)"
+wlrctl pointer click left
+sleep 0.6
+echo "power_on=$(wlopm | tr "\n" " ")"
+echo "note_on=$(note)"
+echo "dark_hits=$(hits)"
+click
+sleep 1
+echo "relit_hits=$(hits)"
+kill $spid $mpid
+wait $mpid
+echo "dropped=$(grep -c "^thinfloe-menu: a press woke the screen; dropped$" /tmp/m.err)"
+sed "s/^/merr: /" /tmp/m.err | grep -E "woke|started|screen" | tail -20
+sed "s/^/swayidle: /" /tmp/swayidle.log | tail -5
+exit 0'
+run_wake_click_case() {
+    local name="thinfloe-runtime-test-wake-$$" rc out mount=()
+    [[ -n "${TF_RUNTIME_MENU:-}" ]] && mount=(-v "$TF_RUNTIME_MENU:/usr/bin/thinfloe-menu:ro")
+    out=$(timeout --kill-after=10 "$RUNTIME_TIMEOUT" podman run --rm --log-driver=none --name "$name" \
+        "${mount[@]}" \
+        -e WLR_BACKENDS=headless \
+        -e WLR_HEADLESS_OUTPUTS=1 \
+        -e WLR_RENDERER=pixman \
+        -e XDG_RUNTIME_DIR=/tmp/xdg \
+        -e WAKE_SCRIPT="$wake_script" \
+        "$IMAGE" \
+        sh -c 'mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+               printf "%s\n" "$WAKE_SCRIPT" >/tmp/wake.sh &&
+               labwc -C /etc/thinfloe/labwc -S "sh /tmp/wake.sh"' 2>&1)
+    rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "FAIL - podman run timed out after ${RUNTIME_TIMEOUT}s (labwc hang during the wake click case)"
+        grep -E '^merr: |^[a-z_]+=' <<<"$out"
+        podman rm -f "$name" >/dev/null 2>&1
+        fail=1
+        return
+    fi
+    local diag
+    diag="$(grep -E '^merr: |^swayidle: |^[a-z_]+=' <<<"$out" | tr '\n' '|')"
+    wk_ok() { grep -qx "$1" <<<"$out"; }
+    wk_check() {
+        if [[ $1 -eq 0 ]]; then
+            echo "ok   - $2"
+        else
+            echo "FAIL - $2: $diag"
+            fail=1
+        fi
+    }
+    wk_ok lit_hits=1
+    wk_check $? "wake_click: a click on the lit screen starts the tile under the pointer"
+    wk_ok 'power_off=HEADLESS-1 off ' && wk_ok note_off=off
+    wk_check $? "wake_click: swayidle's screen-power off blanks the output with wlopm and notes off"
+    wk_ok lit_hits=1 && wk_ok dark_hits=1 && wk_ok dropped=1 && wk_ok 'power_on=HEADLESS-1 on ' && wk_ok note_on=on
+    wk_check $? "wake_click: the click that wakes the screen starts nothing, the menu says it dropped the press, screen-power on lights the output"
+    wk_ok dark_hits=1 && wk_ok relit_hits=2
+    wk_check $? "wake_click: a click 0.6 s after the wake starts the tile again"
+}
+run_wake_click_case
+
 # A fullscreen window that covers the menu whole leaves the menu visible on no
 # output, so winit reports no monitor. The menu took that as a move and wrote
 # the guess for the largest mode: 2 next to a 4K monitor, and the title bars

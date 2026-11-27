@@ -62,7 +62,7 @@ release.
 - Boot menu and kernel parameters: `configs/syslinux.cfg`.
 - Session: `overlay/usr/bin/thinfloe-session`, `overlay/etc/profile.d/10-thinfloe-session.sh`, `overlay/usr/bin/thinfloe-compose-labwc-config`, `overlay/etc/systemd/system/getty@tty1.service`.
 - Compositor config: `overlay/etc/thinfloe/labwc/` (`rc.xml`, `environment`), outside `$HOME`.
-- Tile menu: `src/thinfloe-menu/` (look in `brand.rs`, layout in `ui.rs`, state in `menu.rs`, event loop in `app.rs`, status area in `status/`).
+- Tile menu: `src/thinfloe-menu/` (look in `brand.rs`, layout in `ui.rs`, state in `menu.rs`, event loop in `app.rs`, status area in `status/`, the dropped wake click in `power.rs`, its state file from `overlay/usr/libexec/thinfloe/screen-power`).
 - Shipped tiles: `overlay/etc/thinfloe/menu/*.desktop`; user tiles `~/.config/thinfloe/menu/`.
 - Home save: `overlay/usr/bin/thinfloe-save-home`; restore: `restore_home()` in `thinfloe-lib.sh`.
 - Stick writer and upgrades: `overlay/usr/bin/thinfloe-upgrade`.

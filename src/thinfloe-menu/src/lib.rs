@@ -48,6 +48,7 @@ pub mod notes;
 pub mod osd;
 pub mod outputs;
 pub mod pciids;
+pub mod power;
 pub mod publicip;
 pub mod quiet;
 pub mod raster;

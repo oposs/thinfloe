@@ -1,0 +1,39 @@
+#!/bin/sh
+# screen-power off|on: blank or wake every output for swayidle, and note it
+# for thinfloe-menu.
+#
+# $XDG_RUNTIME_DIR/thinfloe-screen holds "off" while the outputs are dark and
+# "on" once they are back; its modification time says when. The menu reads it
+# on a click and drops the press that wakes a dark screen, and any press up
+# to 300 ms after the wake (#68): labwc delivers that press to the window
+# under the pointer. The menu cannot ask the compositor instead: wlroots gives
+# an output's power control (zwlr_output_power_v1) to one client only, so a
+# menu holding it would make wlopm fail to blank.
+#
+# "off" is noted before the outputs go dark, "on" after they are back, so the
+# whole dark spell is covered. Each note is written to a temporary file and
+# renamed into place, so the menu never reads half a file.
+set -u
+
+note() {
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 0
+    _f="$XDG_RUNTIME_DIR/thinfloe-screen"
+    printf '%s\n' "$1" >"$_f.new" && mv -f "$_f.new" "$_f"
+}
+
+case "${1:-}" in
+    off)
+        note off
+        exec wlopm --off '*'
+        ;;
+    on)
+        wlopm --on '*'
+        rc=$?
+        note on
+        exit "$rc"
+        ;;
+    *)
+        echo "usage: screen-power off|on" >&2
+        exit 2
+        ;;
+esac

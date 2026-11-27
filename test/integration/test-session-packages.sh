@@ -112,6 +112,7 @@ present "ssh host key unit"   'thinfloe-ssh-hostkeys\.service$'
 absent  "old regenerate unit" 'regenerate_ssh_host_keys\.service$'
 present "thinfloe-menu"          'usr/bin/thinfloe-menu$'
 present "session verdict"     'usr/libexec/thinfloe/session-verdict$'
+present "screen power helper" 'usr/libexec/thinfloe/screen-power$'
 for t in 10-thinlinc 20-oxulnk 30-terminal 40-save-home 50-upgrade-image 60-settings 70-eject 80-reboot 81-poweroff; do
     present "tile $t" "etc/thinfloe/menu/$t\.desktop$"
 done
@@ -309,22 +310,28 @@ done
 # *management* protocol and disables the output outright - that changes the
 # monitor layout and resizes the fullscreen ThinLinc client. wlopm speaks
 # output *power* management, which is real DPMS and leaves the layout alone.
-if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/thinfloe-session >/dev/null 2>&1 &&
-   [[ -f "$DPKG_TMP/idle/usr/bin/thinfloe-session" ]]; then
+# swayidle runs screen-power, which calls wlopm and notes the state for the
+# menu (#68).
+if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/thinfloe-session \
+        usr/libexec/thinfloe/screen-power >/dev/null 2>&1 &&
+   [[ -f "$DPKG_TMP/idle/usr/bin/thinfloe-session" && -f "$DPKG_TMP/idle/usr/libexec/thinfloe/screen-power" ]]; then
     SESS="$DPKG_TMP/idle/usr/bin/thinfloe-session"
+    SPOW="$DPKG_TMP/idle/usr/libexec/thinfloe/screen-power"
     if grep -q 'swayidle' "$SESS"; then
         echo "ok   - session starts swayidle"
     else
         echo "FAIL - thinfloe-session does not start swayidle (screen never blanks)"
         fail=1
     fi
-    if grep -qE 'wlopm --(off|on)' "$SESS"; then
-        echo "ok   - session blanks via wlopm"
+    if grep -q "timeout \"\$_t\" '/usr/libexec/thinfloe/screen-power off'" "$SESS" &&
+       grep -q "resume '/usr/libexec/thinfloe/screen-power on'" "$SESS" &&
+       grep -qE "wlopm --off '\*'" "$SPOW" && grep -qE "wlopm --on '\*'" "$SPOW"; then
+        echo "ok   - session blanks via screen-power and wlopm"
     else
-        echo "FAIL - thinfloe-session does not blank via wlopm"
+        echo "FAIL - thinfloe-session does not blank via screen-power and wlopm"
         fail=1
     fi
-    if grep -qE 'wlr-randr[^|]*--off' < <(grep -vE '^[[:space:]]*#' "$SESS"); then
+    if grep -qE 'wlr-randr[^|]*--off' < <(grep -vhE '^[[:space:]]*#' "$SESS" "$SPOW"); then
         echo "FAIL - thinfloe-session blanks with 'wlr-randr --off' (disables the"
         echo "       output and reflows the layout); use wlopm instead"
         fail=1
@@ -332,7 +339,7 @@ if unsquashfs -no-xattrs -d "$DPKG_TMP/idle" "$SQSH" usr/bin/thinfloe-session >/
         echo "ok   - session does not disable outputs to blank"
     fi
 else
-    echo "FAIL - cannot extract usr/bin/thinfloe-session from $SQSH"
+    echo "FAIL - cannot extract usr/bin/thinfloe-session or usr/libexec/thinfloe/screen-power from $SQSH"
     fail=1
 fi
 

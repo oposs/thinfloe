@@ -249,6 +249,19 @@ tf_idle_child() {
     _c=
 }
 
+# swayidle blanks and wakes through screen-power, which notes the state in
+# $XDG_RUNTIME_DIR/thinfloe-screen for the menu (it drops the press that
+# wakes a dark screen). A swayidle that ended while the screens were dark
+# never ran its resume command: wake them before the next one starts, so it
+# starts from lit screens and the menu does not drop every press for a note
+# that is no longer true.
+tf_screen_note="${XDG_RUNTIME_DIR:-/nonexistent}/thinfloe-screen"
+tf_screen_lit() {
+    if [ "$(cat "$tf_screen_note" 2>/dev/null)" = off ]; then
+        /usr/libexec/thinfloe/screen-power on
+    fi
+}
+
 tf_idle_loop() {
     # $! inherited from this shell may name a program the sessionrc started;
     # a child of the loop's own replaces it before the traps exist.
@@ -260,11 +273,12 @@ tf_idle_loop() {
     trap 'tf_idle_kill; sleep 0.1; tf_idle_kill; exit 0' TERM
     while :; do
         _reread=0
+        tf_screen_lit
         _t=$(tf_idle_timeout)
         if [ "$_t" -gt 0 ]; then
             tf_idle_child swayidle -w \
-                timeout "$_t" 'wlopm --off \*' \
-                resume 'wlopm --on \*'
+                timeout "$_t" '/usr/libexec/thinfloe/screen-power off' \
+                resume '/usr/libexec/thinfloe/screen-power on'
         else
             tf_idle_child sleep 2147483647
         fi
