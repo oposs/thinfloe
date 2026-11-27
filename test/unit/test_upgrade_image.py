@@ -695,7 +695,8 @@ class TestCopyHomeToDrive(unittest.TestCase):
         self.assertNotIn("umount", calls)
         self.assertNotIn("tar", calls)
         self.assertIn("could not copy", out.getvalue())
-        self.assertNotIn("unmount", out.getvalue())
+        # Its own message, not the word: the mount path holds TMPDIR.
+        self.assertNotIn("could not unmount", out.getvalue())
 
 
     def _partial_then_raise(self, exc):
