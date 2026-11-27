@@ -247,7 +247,8 @@ pub enum AudioRequest {
     /// sound server came back).
     Resync,
     /// Start, if no start has worked yet (the sound server was not up at
-    /// the first try); otherwise nothing.
+    /// the first try); otherwise list the devices again, so that a sink
+    /// that appeared before the watch connected gives the state.
     Start,
 }
 
@@ -588,7 +589,8 @@ pub enum Watch {
     /// A line of `pactl subscribe` about a sink, a source or the server.
     Event(PaEvent),
     /// The first `pactl subscribe` reached the sound server: a start that
-    /// failed before it was up can work now.
+    /// failed before it was up can work now, and a device that appeared
+    /// before the subscription was live is found by a fresh list.
     Connected,
     /// `pactl subscribe` ended and runs again: the sound server may have
     /// restarted, and events in between are lost.
