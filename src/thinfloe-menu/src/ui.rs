@@ -452,6 +452,8 @@ struct RootWork {
     write: bool,
     network: bool,
     eject: bool,
+    /// The sticks and cards the eject began with; none known reads as one stick.
+    ejecting: (usize, usize),
 }
 
 impl RootWork {
@@ -461,22 +463,31 @@ impl RootWork {
             write: menu.upgrade.writing(),
             network: menu.network.applying(),
             eject: menu.eject.running.is_some(),
+            ejecting: menu.ejecting_kinds(),
+        }
+    }
+
+    /// "The stick is", "The stick and the card are": the subject of the eject.
+    fn released(self) -> String {
+        match self.ejecting {
+            (0, 0) => crate::removable::subject(1, 0),
+            (s, c) => crate::removable::subject(s, c),
         }
     }
 
     /// The Confirm dialog's title.
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
             RootWork {
                 addons: true,
                 write: true,
                 ..
-            } => "Add-ons are being changed and a stick is written",
-            RootWork { addons: true, .. } => "Add-ons are being changed",
-            RootWork { write: true, .. } => "A stick is being written",
-            RootWork { network: true, .. } => "Network settings are being applied",
-            RootWork { eject: true, .. } => "A stick is being released",
-            _ => "Work is still running",
+            } => "Add-ons are being changed and a stick is written".to_string(),
+            RootWork { addons: true, .. } => "Add-ons are being changed".to_string(),
+            RootWork { write: true, .. } => "A stick is being written".to_string(),
+            RootWork { network: true, .. } => "Network settings are being applied".to_string(),
+            RootWork { eject: true, .. } => format!("{} being released", self.released()),
+            _ => "Work is still running".to_string(),
         }
     }
 
@@ -506,7 +517,8 @@ impl RootWork {
                 write: false,
                 network: false,
                 eject: true,
-            } => Some("The stick is released"),
+                ..
+            } => return format!("{} released", self.released()),
             _ => None,
         };
         if let Some(one) = one {
@@ -524,10 +536,15 @@ impl RootWork {
         if self
             == (RootWork {
                 eject: true,
+                ejecting: self.ejecting,
                 ..RootWork::default()
             })
         {
-            return "the stick to be released".to_string();
+            let (s, c) = match self.ejecting {
+                (0, 0) => (1, 0),
+                kinds => kinds,
+            };
+            return format!("{} to be released", crate::removable::the_kinds(s, c));
         }
         let parts = self.parts(["the add-ons", "the stick", "the network settings"]);
         if parts.is_empty() {
@@ -615,9 +632,9 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             let title = if menu.jobs.is_empty() {
                 work.title()
             } else {
-                "Programs are still running"
+                "Programs are still running".to_string()
             };
-            dialog(ui, title, |ui, t| {
+            dialog(ui, &title, |ui, t| {
                 for job in &menu.jobs {
                     ui.label(egui::RichText::new(&job.name).color(t.palette().foreground));
                 }
@@ -8089,6 +8106,7 @@ mod tests {
             write,
             network,
             eject,
+            ..RootWork::default()
         };
         assert_eq!(w(false, true, false, false).waits(), "the stick");
         assert_eq!(w(true, false, false, false).waits(), "the add-ons");
@@ -8099,6 +8117,23 @@ mod tests {
             w(true, true, true, false).waits(),
             "the add-ons, the stick and the network settings"
         );
+    }
+
+    #[test]
+    fn the_ending_dialogs_name_the_kinds_of_the_eject() {
+        let e = |sticks, cards| RootWork {
+            eject: true,
+            ejecting: (sticks, cards),
+            ..RootWork::default()
+        };
+        assert_eq!(e(0, 1).title(), "The card is being released");
+        assert_eq!(e(0, 1).finished(), "The card is released");
+        assert_eq!(e(0, 1).waits(), "the card to be released");
+        assert_eq!(e(1, 1).title(), "The stick and the card are being released");
+        assert_eq!(e(1, 1).finished(), "The stick and the card are released");
+        assert_eq!(e(2, 0).waits(), "the sticks to be released");
+        // No kind known: one stick.
+        assert_eq!(e(0, 0).finished(), "The stick is released");
     }
 
     #[test]
@@ -8134,7 +8169,7 @@ mod tests {
             "The add-on work and the write are finished"
         );
         assert_eq!(w(true, false, false).finished(), "The add-on work is finished");
-        assert_eq!(w(false, false, true).title(), "A stick is being released");
+        assert_eq!(w(false, false, true).title(), "The stick is being released");
         assert_eq!(w(false, false, true).finished(), "The stick is released");
         assert_eq!(w(false, true, false).stopping(), "Stopping the write");
         assert_eq!(

@@ -10,8 +10,9 @@
 use std::path::Path;
 
 pub const FILE: &str = "/run/thinfloe/removable";
-/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`,
-/// the count (2 or more) only for an "eject all" batch.
+/// One line per ejection or removal: `seq<TAB>name<TAB>clean|unclean[<TAB>count<TAB>cards]`,
+/// the count of disks (2 or more) and how many of them are cards only for
+/// an "eject all" batch.
 pub const EVENT_FILE: &str = "/run/thinfloe/removable.event";
 pub const MAX_BYTES: u64 = 64 * 1024;
 pub const MAX_LINES: usize = 256;
@@ -138,13 +139,13 @@ pub fn read(path: &Path) -> Vec<Stick> {
     }
 }
 
-/// What the helper last told: `seq<TAB>name<TAB>clean|unclean[<TAB>count]`.
+/// What the helper last told: `seq<TAB>name<TAB>clean|unclean[<TAB>count<TAB>cards]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub seq: u64,
     pub name: String,
     pub clean: bool,
-    /// How many sticks the event is about: 1 unless the line carries a
+    /// How many disks (sticks and cards) the event is about: 1 unless the line carries a
     /// count of 2 or more (an "eject all" batch, `name` then joins their names).
     pub count: u32,
     /// How many of them are cards: the field after the count, 0 when it is
@@ -200,6 +201,24 @@ pub fn counted(sticks: usize, cards: usize) -> String {
         (s, 0) => one(s, "stick"),
         (0, c) => one(c, "card"),
         (s, c) => format!("{} and {}", one(s, "stick"), one(c, "card")),
+    }
+}
+
+/// The kinds as the subject of a sentence: "The stick is", "The sticks
+/// are", "The stick and the card are".
+pub fn subject(sticks: usize, cards: usize) -> String {
+    let verb = if sticks + cards > 1 { "are" } else { "is" };
+    let the = the_kinds(sticks, cards);
+    format!("T{} {verb}", &the[1..])
+}
+
+/// One of the kinds, not saying which: "A stick", "A card", "A stick or
+/// card". Nothing known reads as "A stick".
+pub fn a_kind(sticks: usize, cards: usize) -> &'static str {
+    match (sticks, cards) {
+        (0, c) if c > 0 => "A card",
+        (s, c) if s > 0 && c > 0 => "A stick or card",
+        _ => "A stick",
     }
 }
 
@@ -361,6 +380,17 @@ mod tests {
         assert_eq!(the_kinds(2, 1), "the sticks and the card");
         // Nothing known: the sticks, as before.
         assert_eq!(the_kinds(0, 0), "the sticks");
+    }
+
+    #[test]
+    fn kinds_as_a_subject_and_as_one_of_them() {
+        assert_eq!(subject(1, 0), "The stick is");
+        assert_eq!(subject(0, 2), "The cards are");
+        assert_eq!(subject(1, 1), "The stick and the card are");
+        assert_eq!(a_kind(2, 0), "A stick");
+        assert_eq!(a_kind(0, 1), "A card");
+        assert_eq!(a_kind(1, 2), "A stick or card");
+        assert_eq!(a_kind(0, 0), "A stick");
     }
 
     #[test]

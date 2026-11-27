@@ -310,14 +310,9 @@ pub struct EjectState {
     /// Disk, name and kind of each stick or card when the eject began: the
     /// helper removes them from its file before it ends.
     known: Vec<(String, String, crate::removable::Kind)>,
-}
-
-/// `text` with its first letter in capitals, to start a sentence.
-fn sentence(text: &str) -> String {
-    let mut c = text.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
+    /// How many sticks and cards the last finished eject began with: what a
+    /// failed release names once the helper has dropped their lines.
+    last: (usize, usize),
 }
 
 pub struct Menu {
@@ -1320,7 +1315,7 @@ impl Menu {
     /// kind of "all" ("the sticks", "the stick and the card").
     fn eject_name(&self, target: &str) -> String {
         if target == "all" {
-            let (sticks, cards) = self.known_kinds();
+            let (sticks, cards) = self.ejecting_kinds();
             return crate::removable::the_kinds(sticks, cards);
         }
         self.removable
@@ -1347,7 +1342,7 @@ impl Menu {
             [(_, name, _)] if target == "all" => name.clone(),
             _ => self.eject_name(target),
         };
-        let (sticks, cards) = self.known_kinds();
+        let (sticks, cards) = self.ejecting_kinds();
         let (kind, message) = match r {
             EjectResult::Done if all => (
                 Kind::Event,
@@ -1356,7 +1351,11 @@ impl Menu {
             EjectResult::Done => (Kind::Event, format!("{what} can be removed")),
             EjectResult::Busy if all => (
                 Kind::Warn,
-                format!("{} are in use: close the files on them", sentence(&what)),
+                // The helper does not say which disk is busy.
+                format!(
+                    "{} is in use: close the files on it",
+                    crate::removable::a_kind(sticks, cards)
+                ),
             ),
             EjectResult::Busy => (Kind::Warn, format!("{what} is in use: close the files on it")),
             EjectResult::Failed(e) => (Kind::Warn, format!("Ejecting {what} failed: {e}")),
@@ -1364,6 +1363,7 @@ impl Menu {
         self.log.note(kind, format!("{message}."));
         self.eject.message = Some(message.clone());
         self.eject.running = None;
+        self.eject.last = (sticks, cards);
         self.eject.known.clear();
         // The exit's release ended after EJECT_GRACE had put up "takes too
         // long": the dialog now says how it ended, and a release that
@@ -1403,17 +1403,13 @@ impl Menu {
     /// "The sticks are", "The stick and the card are".
     pub fn flushing_subject(&self) -> String {
         let (sticks, cards) = self.flushing_kinds();
-        let verb = if sticks + cards > 1 { "are" } else { "is" };
-        format!("{} {verb}", sentence(&crate::removable::the_kinds(sticks, cards)))
+        crate::removable::subject(sticks, cards)
     }
 
     /// What may have been left unreleased: "A stick", "A card", "A stick or card".
     pub fn flushing_noun(&self) -> &'static str {
-        match self.flushing_kinds() {
-            (0, c) if c > 0 => "A card",
-            (s, c) if s > 0 && c > 0 => "A stick or card",
-            _ => "A stick",
-        }
+        let (sticks, cards) = self.flushing_kinds();
+        crate::removable::a_kind(sticks, cards)
     }
 
     /// What the running eject is about, for the panel: a stick's name or
@@ -1422,13 +1418,17 @@ impl Menu {
         self.eject.running.as_deref().map(|t| self.eject_name(t))
     }
 
-    /// How many sticks and how many cards the exit flushes.
+    /// How many sticks and how many cards the exit flushes: those of the
+    /// eject that runs, else those still listed, else those of the last eject.
     fn flushing_kinds(&self) -> (usize, usize) {
+        if self.eject.known.is_empty() && self.removable.is_empty() {
+            return self.eject.last;
+        }
         crate::removable::tally(self.flushing().into_iter().map(|(_, k)| k))
     }
 
-    /// How many sticks and cards the running or last eject began with.
-    fn known_kinds(&self) -> (usize, usize) {
+    /// How many sticks and cards the running eject began with.
+    pub fn ejecting_kinds(&self) -> (usize, usize) {
         crate::removable::tally(self.eject.known.iter().map(|(_, _, k)| *k))
     }
 
@@ -5373,15 +5373,24 @@ mod eject_tests {
         assert!(m.eject_event(EjectEvent::All).is_some());
         assert!(m.log.lines().any(|l| l.plain() == "Ejecting the stick and the card."));
         assert_eq!(m.ejecting_what().as_deref(), Some("the stick and the card"));
+        assert_eq!(m.ejecting_kinds(), (1, 1));
         m.eject_finished("all", EjectResult::Done, now);
         assert_eq!(m.eject.message.as_deref(), Some("1 stick and 1 card can be removed"));
         assert_eq!(m.ejecting_what(), None);
+        // Busy does not say which one: the message claims neither.
+        m.set_removable(vec![stick("sdb", "ONE"), card("sdc", "SD")]);
+        m.eject_event(EjectEvent::All);
+        m.eject_finished("all", EjectResult::Busy, now);
+        assert_eq!(
+            m.eject.message.as_deref(),
+            Some("A stick or card is in use: close the files on it")
+        );
         m.set_removable(vec![card("sdb", "A"), card("sdc", "B")]);
         m.eject_event(EjectEvent::All);
         m.eject_finished("all", EjectResult::Busy, now);
         assert_eq!(
             m.eject.message.as_deref(),
-            Some("The cards are in use: close the files on them")
+            Some("A card is in use: close the files on it")
         );
         m.eject_event(EjectEvent::All);
         m.eject_finished("all", EjectResult::Done, now);
@@ -5412,7 +5421,7 @@ mod eject_tests {
         );
         assert_eq!(msg(&m), "Ejecting MYSTICK failed: sdb2 is still mounted");
         m.eject_finished("all", EjectResult::Busy, Instant::now());
-        assert_eq!(msg(&m), "The sticks are in use: close the files on them");
+        assert_eq!(msg(&m), "A stick is in use: close the files on it");
         // The helper drops the stick from its file before it ends.
         m.set_removable(vec![stick("sdb", "MYSTICK")]);
         let Some(Effect::Start(_)) = m.eject_event(EjectEvent::One("sdb".into())) else {
@@ -5668,5 +5677,19 @@ mod eject_tests {
         saved(&mut m, now);
         assert!(m.log.lines().any(|l| l.plain() == "Ejecting the card."));
         assert_eq!(m.flushing_subject(), "The card is");
+    }
+
+    #[test]
+    fn a_failed_release_of_a_card_still_says_card_once_it_is_gone() {
+        let now = Instant::now();
+        let mut m = eject_menu();
+        m.set_removable(vec![card("mmcblk0", "SD")]);
+        m.begin_ending(Action::Reboot, now);
+        saved(&mut m, now);
+        // The helper dropped the line, then failed.
+        m.set_removable(Vec::new());
+        m.eject_finished("all", EjectResult::Failed("mmcblk0p2 is still mounted".into()), now);
+        assert!(matches!(m.logout, Some(Logout::EjectFailed { .. })));
+        assert_eq!(m.flushing_noun(), "A card");
     }
 }
