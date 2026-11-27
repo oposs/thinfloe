@@ -259,6 +259,8 @@ fn orphan_a_renderer(dir: &Dir) -> Option<(u32, libc::c_int, Duration)> {
         .env("TF_MENU_SHIPPED_DIR", dir.0.join("shipped"))
         .env("TF_MENU_USER_DIR", dir.0.join("user"))
         .env("TF_STATE_DIR", dir.0.join("state"))
+        // Never the host's ~/.config/thinfloe/config.toml.
+        .env("TF_CONFIG_DIR", dir.0.join("config"))
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -279,6 +281,8 @@ fn orphan_a_renderer(dir: &Dir) -> Option<(u32, libc::c_int, Duration)> {
     let Some(limits) = limits.filter(|_| running(renderer)) else {
         menu.kill().unwrap();
         menu.wait().unwrap();
+        // A renderer this process adopted is reaped, not left a zombie.
+        reap(renderer);
         return None;
     };
     for (name, value) in [
@@ -322,7 +326,7 @@ fn a_renderer_dies_with_its_menu() {
         })
         .collect();
     let slow = dir.file("slow.svg", &svg(&circles));
-    for d in ["shipped", "user", "state"] {
+    for d in ["shipped", "user", "state", "config"] {
         fs::create_dir_all(dir.0.join(d)).unwrap();
     }
     fs::write(
