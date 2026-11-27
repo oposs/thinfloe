@@ -54,7 +54,7 @@ FloeDrop sends and receives files with iPhones nearby over AirDrop. The phone se
 ## Tests
 
 - `cargo test` in `src/thinfloe-share` (part of `make test-unit`); the veth tests need user namespaces: where they are blocked, each test prints "SKIP: user namespaces blocked" and passes, also when `CI` is set; they fail instead only when `TF_REQUIRE_USERNS=1` is set.
-- veth tests (`tests/veth.rs`): receive and send against Owly's own sender and receiver, the receiving line gone after a delivery, the goodbye before the radio goes (`the_service_is_withdrawn_before_the_radio_goes`) and one service name across a restart (`a_restart_keeps_the_service_name`).
+- veth tests (`tests/veth.rs`): receive and send against Owly's own sender and receiver, the receiving line gone after a delivery, the goodbye on the menu's SIGTERM to the group (`the_service_is_withdrawn_before_the_radio_goes`, see the limits) and one service name across a restart (`a_restart_keeps_the_service_name`).
 - `test/unit/floedrop-names.tsv` holds the default names; the menu's `sharecfg.rs` and the daemon's `daemon.rs` tests both read it.
 - `test/runtime/test-labwc-runtime.sh` case `note`: a two-row note's width at scale 1 and 2.
 - `test/integration/test-floedrop-image.sh`: Owly files, `iw` and `journalctl` (the helper's channel and wedge watch), the mount unit and its options in the image.
@@ -111,4 +111,4 @@ Stock `owly` 0.4.3 command line, not yet the FloeDrop image.
 - No byte progress while receiving: Owly reports only start and end.
 - A change of the time zone or keyboard layout takes effect at the next FloeDrop start.
 - The wedge threshold rests on one wedged stick; a large send to a phone moving out of range is not tested (`radio full` is not counted: it counts retries that may still succeed). The journal follow is tested on recorded lines only.
-- The veth goodbye test cannot show the old order failing: the daemon sends the goodbye faster than a shell helper can take the link down.
+- The veth goodbye test does not guard either stop order. Its fake shell helper ignores SIGTERM and keeps the link until EOF, so the real helper's wait is not run: only the unit test `a_sigterm_waits_for_the_daemons_eof` pins it. A daemon that closed stdin before the goodbye passes too: it sends the goodbye faster than a shell helper can take the link down.
