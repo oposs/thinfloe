@@ -57,12 +57,16 @@ itself is not written) and gives the machine the demo model name
    `raw`, node name `photos`) and `device_add` (driver `usb-storage`,
    drive `photos`). In Settings, Sound, switch on "Set the volume on this
    machine" and set the slider to about two thirds; the Keyboard tab then
-   shows "Volume keys control this machine" on too. Wait five minutes for
-   the graph, park the pointer in the corner
+   shows "Volume keys control this machine" on too. If the Sound tab says
+   "The volume is not known yet" (4.13.0, after a session restart with the
+   switch already on), switch it off and on again. Wait five minutes for
+   the graph, and move the pointer by one pixel every half minute while you
+   wait: after five idle minutes the screen goes dark, and a click then
+   wakes it and lands on a tile. Park the pointer in the corner
    (`qmp.py … move 2879 1919 2880 1920`) and take the shots. The menu
    picture is the whole screen; the Settings pictures are the crop
-   `1872x858+504+432` (for 4.12.0 the Keyboard one has the layout list
-   closed, so the key switches show). WebP lossless (`cwebp -lossless -z 9`);
+   `1872x858+504+432` (the Keyboard one with the layout list closed, so
+   the key switches show). WebP lossless (`cwebp -lossless -z 9`);
    `menu.png` is the same picture with 256 colours (`convert -dither None
    -colors 256 PNG8:`, then `oxipng`).
 3. **Network and Screen tabs** (`img/settings-network.webp`, `-screen`).
