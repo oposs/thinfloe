@@ -42,26 +42,28 @@ pub fn path() -> Option<PathBuf> {
 /// What the screens are doing at one moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Screens {
-    /// The screens are blanked now.
-    pub dark: bool,
+    /// The modification time of the `off` note while the screens are
+    /// blanked; `None` when they are not.
+    pub off_note: Option<SystemTime>,
     /// How long ago they came back on; `None` when the file does not say.
     pub since_lit: Option<Duration>,
 }
 
 impl Screens {
     /// From the file's content and modification time. Only `off` and `on`
-    /// count; anything else is a file that says nothing. A modification time
-    /// after `now` (a clock step) is a wake just now.
+    /// count; anything else is a file that says nothing. An `on` note
+    /// modified after `now` (the clock stepped back) is no recent wake:
+    /// counted as one, it would drop every press for the whole step.
     pub fn parse(content: &[u8], modified: SystemTime, now: SystemTime) -> Screens {
         let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
         match first.trim_ascii() {
             b"off" => Screens {
-                dark: true,
+                off_note: Some(modified),
                 since_lit: None,
             },
             b"on" => Screens {
-                dark: false,
-                since_lit: Some(now.duration_since(modified).unwrap_or(Duration::ZERO)),
+                off_note: None,
+                since_lit: now.duration_since(modified).ok(),
             },
             _ => Screens::default(),
         }
@@ -79,9 +81,13 @@ impl Screens {
         read().unwrap_or_default()
     }
 
-    /// Whether a press now is the one that wakes the screen.
-    pub fn woken_by_press(&self) -> bool {
-        self.dark || self.since_lit.is_some_and(|d| d < WAKE_GRACE)
+    pub fn dark(&self) -> bool {
+        self.off_note.is_some()
+    }
+
+    /// Whether the screens came back on less than `WAKE_GRACE` ago.
+    pub fn just_lit(&self) -> bool {
+        self.since_lit.is_some_and(|d| d < WAKE_GRACE)
     }
 }
 
@@ -129,6 +135,10 @@ pub enum Verdict {
 pub struct WakeGuard {
     buttons: Vec<MouseButton>,
     touches: Vec<u64>,
+    /// The `off` note a press was dropped under. One press wakes the
+    /// screen; a later one under the same note passes, so a note left
+    /// behind (a swayidle that died while dark) cannot eat every click.
+    dropped_under: Option<SystemTime>,
 }
 
 impl WakeGuard {
@@ -137,7 +147,7 @@ impl WakeGuard {
         match input {
             Input::Press(b) => {
                 self.buttons.retain(|&x| x != b);
-                if screens().woken_by_press() {
+                if self.wakes(screens()) {
                     self.buttons.push(b);
                     Verdict::DropWake
                 } else {
@@ -147,7 +157,7 @@ impl WakeGuard {
             Input::Release(b) => take(&mut self.buttons, b),
             Input::TouchStart(id) => {
                 self.touches.retain(|&x| x != id);
-                if screens().woken_by_press() {
+                if self.wakes(screens()) {
                     self.touches.push(id);
                     Verdict::DropWake
                 } else {
@@ -157,6 +167,19 @@ impl WakeGuard {
             Input::TouchRest(id, true) => take(&mut self.touches, id),
             Input::TouchRest(id, false) if self.touches.contains(&id) => Verdict::Drop,
             Input::TouchRest(..) | Input::Other => Verdict::Pass,
+        }
+    }
+
+    /// Whether a press now is the one that wakes the screen: the first under
+    /// an `off` note, or any within `WAKE_GRACE` after an `on` note.
+    fn wakes(&mut self, s: Screens) -> bool {
+        match s.off_note {
+            Some(note) if self.dropped_under == Some(note) => false,
+            Some(note) => {
+                self.dropped_under = Some(note);
+                true
+            }
+            None => s.just_lit(),
         }
     }
 }
@@ -179,16 +202,23 @@ mod tests {
 
     const LEFT: MouseButton = MouseButton::Left;
 
-    fn dark() -> Screens {
+    const T0: SystemTime = SystemTime::UNIX_EPOCH;
+
+    /// Dark under the `off` note of `T0` plus `s` seconds.
+    fn dark_since(s: u64) -> Screens {
         Screens {
-            dark: true,
+            off_note: Some(T0 + Duration::from_secs(1_800_000_000 + s)),
             since_lit: None,
         }
     }
 
+    fn dark() -> Screens {
+        dark_since(0)
+    }
+
     fn lit_ago(ms: u64) -> Screens {
         Screens {
-            dark: false,
+            off_note: None,
             since_lit: Some(Duration::from_millis(ms)),
         }
     }
@@ -212,8 +242,8 @@ mod tests {
         assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
         assert_eq!(g.filter(Input::Press(LEFT), || lit_ago(400)), Verdict::Pass);
         assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Pass);
-        assert!(lit_ago(299).woken_by_press());
-        assert!(!lit_ago(300).woken_by_press());
+        assert!(lit_ago(299).just_lit());
+        assert!(!lit_ago(300).just_lit());
     }
 
     #[test]
@@ -250,6 +280,26 @@ mod tests {
     }
 
     #[test]
+    fn one_off_note_drops_one_press() {
+        // A note left behind by a swayidle that died while dark: the first
+        // press under it is dropped, the next passes.
+        let mut g = WakeGuard::default();
+        assert_eq!(g.filter(Input::Press(LEFT), dark), Verdict::DropWake);
+        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
+        assert_eq!(g.filter(Input::Press(LEFT), dark), Verdict::Pass);
+        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Pass);
+        assert_eq!(g.filter(Input::TouchStart(3), dark), Verdict::Pass);
+        // The grace after an `on` note still drops, without touching the
+        // memory of the old `off` note.
+        assert_eq!(g.filter(Input::Press(LEFT), || lit_ago(100)), Verdict::DropWake);
+        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
+        // The next blanking writes a new note, and its first press is dropped.
+        assert_eq!(g.filter(Input::Press(LEFT), || dark_since(600)), Verdict::DropWake);
+        assert_eq!(g.filter(Input::Release(LEFT), || unreachable!()), Verdict::Drop);
+        assert_eq!(g.filter(Input::Press(LEFT), || dark_since(600)), Verdict::Pass);
+    }
+
+    #[test]
     fn a_touch_on_a_dark_screen_is_dropped_whole() {
         let mut g = WakeGuard::default();
         assert_eq!(g.filter(Input::TouchStart(7), dark), Verdict::DropWake);
@@ -264,13 +314,16 @@ mod tests {
 
     #[test]
     fn the_file_says_off_on_or_nothing() {
-        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let t0 = T0 + Duration::from_secs(1_800_000_000);
         let ms = Duration::from_millis;
         assert_eq!(Screens::parse(b"off\n", t0, t0 + ms(5000)), dark());
         assert_eq!(Screens::parse(b"on\n", t0, t0 + ms(120)), lit_ago(120));
         assert_eq!(Screens::parse(b"on", t0, t0 + ms(120)), lit_ago(120));
-        // A clock step backwards: a wake just now.
-        assert_eq!(Screens::parse(b"on\n", t0 + ms(50), t0), lit_ago(0));
+        // The clock stepped back after the wake: no recent wake, a press passes.
+        let stepped = Screens::parse(b"on\n", t0 + ms(50), t0);
+        assert_eq!(stepped, Screens::default());
+        let mut g = WakeGuard::default();
+        assert_eq!(g.filter(Input::Press(LEFT), || stepped), Verdict::Pass);
         for junk in [&b""[..], b"\n", b"of", b"offf\n", b"1\n", b"\non\n"] {
             assert_eq!(Screens::parse(junk, t0, t0), Screens::default(), "{junk:?}");
         }
@@ -282,10 +335,10 @@ mod tests {
         let p = dir.join(SCREEN_FILE);
         assert_eq!(Screens::read(&p), Screens::default());
         std::fs::write(&p, "off\n").unwrap();
-        assert!(Screens::read(&p).dark);
+        assert!(Screens::read(&p).dark());
         std::fs::write(&p, "on\n").unwrap();
         let s = Screens::read(&p);
-        assert!(!s.dark);
+        assert!(!s.dark());
         assert!(s.since_lit.is_some_and(|d| d < Duration::from_secs(60)));
     }
 }

@@ -255,11 +255,20 @@ tf_idle_child() {
 # never ran its resume command: wake them before the next one starts, so it
 # starts from lit screens and the menu does not drop every press for a note
 # that is no longer true.
+# Like every child of the loop it runs in the background and is waited for
+# (dash runs a trap only once a foreground command has ended). A signal ends
+# the wait, not the wake: the loop waits again until it is done.
+# TF_SCREEN_POWER names a stand-in for the tests.
 tf_screen_note="${XDG_RUNTIME_DIR:-/nonexistent}/thinfloe-screen"
+tf_screen_power=${TF_SCREEN_POWER:-/usr/libexec/thinfloe/screen-power}
 tf_screen_lit() {
-    if [ "$(cat "$tf_screen_note" 2>/dev/null)" = off ]; then
-        /usr/libexec/thinfloe/screen-power on
-    fi
+    [ "$(cat "$tf_screen_note" 2>/dev/null)" = off ] || return 0
+    "$tf_screen_power" on &
+    _w=$!
+    wait "$_w"
+    while kill -0 "$_w" 2>/dev/null; do
+        wait "$_w"
+    done
 }
 
 tf_idle_loop() {
