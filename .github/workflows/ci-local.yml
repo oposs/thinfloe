@@ -71,7 +71,9 @@ jobs:
         run: make image MEMCAP=
 
       - name: Save the cargo cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # TEMPORARY for the first run of this pull request: fill a cache the
+        # next run of the same pull request can read. Removed before merge.
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.BUILD_CACHE }}/buildah-cache-*
