@@ -5,8 +5,10 @@
 # file deleted from overlay/ took its own name off that list, so make saw no
 # changed prerequisite: the image kept the deleted file, and `make test`
 # validated it green (found 2026-10-27, when a removed systemd drop-in stayed
-# in ramroot.sqsh). The directories are prerequisites too now; deleting a
-# file changes its directory's mtime.
+# in ramroot.sqsh). The stamp now holds a hash of the input names, so a
+# deleted file is seen. The directories are no prerequisites: a tool that
+# creates cargo's target/ or a __pycache__ in one changed its mtime, and
+# make built the container and exported the rootfs again.
 #
 # Runs the real Makefile in a scratch tree with a stub container runtime and
 # asks `make -q` whether the stamp is up to date.
@@ -58,8 +60,8 @@ inputs=(RELEASE containers/ubuntu/Dockerfile src/thinfloe-menu/src/main.rs
 # Prints "up-to-date" when make would not rebuild the stamp, "rebuild"
 # otherwise. Every input, file and directory, is older than the stamp first.
 reset() {
-    rm -rf "$TREE/overlay" "$TREE/brand"
-    mkdir -p "$TREE/overlay/etc/x.d" "$TREE/brand"
+    rm -rf "$TREE/overlay" "$TREE/brand" "$TREE/src/thinfloe-menu/target"
+    mkdir -p "$TREE/overlay/etc/x.d" "$TREE/overlay/usr/bin" "$TREE/brand"
     for f in "${inputs[@]}"; do : >"$TREE/$f"; done
     echo 4.2.0 >"$TREE/RELEASE"
     (cd "$TREE" && find RELEASE containers src overlay brand scripts -exec touch -d '2020-01-01' {} +)
@@ -127,6 +129,36 @@ if [[ $(state) == rebuild ]]; then
     ok "deleting an overlay directory rebuilds the image"
 else
     bad "deleting an overlay directory left the image standing"
+fi
+
+reset
+mkdir "$TREE/overlay/etc/new.d"
+if [[ $(state) == rebuild ]]; then
+    ok "a new empty overlay directory rebuilds the image"
+else
+    bad "a new empty overlay directory left the image standing (it is missing from the image)"
+fi
+
+# cargo test in the crate (test-network-netplan.sh) creates target/ when
+# CARGO_TARGET_DIR is not set, as on the CI runners. That is no input.
+reset
+mkdir "$TREE/src/thinfloe-menu/target"
+: >"$TREE/src/thinfloe-menu/target/junk"
+if [[ $(state) == up-to-date ]]; then
+    ok "a new target/ in the menu crate does not make the container stale"
+else
+    bad "a new target/ in the menu crate makes the container rebuild ($(state))"
+fi
+
+# The first bytecode a tool run writes creates the __pycache__ directory,
+# which changes overlay/usr/bin's mtime.
+reset
+mkdir "$TREE/overlay/usr/bin/__pycache__"
+: >"$TREE/overlay/usr/bin/__pycache__/tool.cpython-312.pyc"
+if [[ $(state) == up-to-date ]]; then
+    ok "a first __pycache__ in overlay/usr/bin does not make the image stale"
+else
+    bad "a first __pycache__ in overlay/usr/bin makes the image rebuild ($(state))"
 fi
 
 reset

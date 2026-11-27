@@ -44,6 +44,9 @@ jobs:
     timeout-minutes: 90
     env:
       BUILD_JOBS: "4"
+      # The cargo target directories of the container's menu-build stage
+      # (docs/release-ci.md, "Cargo cache").
+      BUILD_CACHE: /home/runner/build-cache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,11 +55,27 @@ jobs:
       - name: Prepare the runner
         run: scripts/ci-runner-setup.sh all
 
+      # Every run reads the newest cache a push to main saved; only a push
+      # to main saves one, so pull requests do not fill the cache.
+      - name: Restore the cargo cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE }}/buildah-cache-*
+          key: cargo-target-v1-${{ github.sha }}
+          restore-keys: cargo-target-v1-
+
       - name: make test-integration
         run: make test-integration MEMCAP=
 
       - name: make image
         run: make image MEMCAP=
+
+      - name: Save the cargo cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.BUILD_CACHE }}/buildah-cache-*
+          key: cargo-target-v1-${{ github.sha }}
 
       - name: Record the prebuilt files
         run: scripts/ci-check-prebuilt.sh record
