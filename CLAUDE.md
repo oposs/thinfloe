@@ -34,9 +34,9 @@ make release-assets TF_VERSION=X.Y.Z  # the six release assets to artifacts/rele
 Menu crate: `cargo test`, `cargo clippy` and `cargo fmt` in `src/thinfloe-menu`.
 
 A release starts on GitHub: the **Create release PR** workflow
-(`release-pr.yml`, run by hand with bugfix, feature or major) rolls
-`CHANGES.md`, writes the version to `RELEASE`, builds the image and runs the
-ten smoke tests on it (`release-build-local.yml`), runs `ci.yml`, drafts the
+(`release-pr.yml`, run by hand with bugfix, feature or major) moves the
+fragments in `CHANGES.d/` into `CHANGES.md`, writes the version to
+`RELEASE`, builds the image and runs the ten smoke tests on it (`release-build-local.yml`), runs `ci.yml`, drafts the
 release and opens the release pull request; merging it publishes the
 release. Each release carries exactly six assets: `vmlinuz`, `initrd.img`,
 `ramroot.sqsh`, `thinfloe-usb.img.zst`, `version` and `SHA256SUMS`, no
@@ -86,7 +86,8 @@ Not standing constraints, but each has broken something or is guarded by a test.
 ### Workflow
 
 - A round of several feature branches goes through one `round/<date>` branch and one PR to `main`: the branches are rebased onto it in turn, the full gates run once on it. A branch that is ready alone with no round open is its own PR.
-- Gates: the full set (`make test-unit`, `make test`, `make test-runtime` for session or menu changes, the smoke tests the change touches) before a branch's first push. In a round, a feature branch runs them before it joins the round branch, and the round branch runs the full set once before the round PR's push. After a rebase with no conflict outside `CHANGES.md` only `make test-menu`; after a code conflict the full set again.
+- Gates: the full set (`make test-unit`, `make test`, `make test-runtime` for session or menu changes, the smoke tests the change touches) before a branch's first push. In a round, a feature branch runs them before it joins the round branch, and the round branch runs the full set once before the round PR's push. After a rebase with no code conflict only `make test-menu`; after a code conflict the full set again.
+- Changelog entries go into a new file under `CHANGES.d/new/`, `changed/` or `fixed/`, named as `CHANGES.d/README.md` says; nothing but a release edits `CHANGES.md`.
 - Review per branch, before it joins the round: one whole-branch review, one fix wave, one scoped re-review of the fixes. Later findings go to the follow-up list in the PR body (one heading per branch) unless they are a real bug: wrong behaviour, data loss, security, a broken constraint. The round branch gets no second whole review; only the conflict resolutions made during the rebases are checked. After the merge the controller offers the follow-up lists to the owner.
 
 ### Build
