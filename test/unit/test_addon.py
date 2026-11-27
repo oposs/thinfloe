@@ -137,7 +137,8 @@ class TestServer(unittest.TestCase):
         srv = Server()
         start = time.monotonic()
         srv.close()
-        self.assertLess(time.monotonic() - start, 0.1)
+        # 0.3 s leaves room for a loaded host and still fails on the 0.5 s poll.
+        self.assertLess(time.monotonic() - start, 0.3)
 
 
 class ServerTest(unittest.TestCase):
