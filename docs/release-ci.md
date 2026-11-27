@@ -177,7 +177,9 @@ image held the other worktree's menu, and the gates passed on it
 `TF_SOURCE_KEY`, a SHA-256 over the copied sources (the menu's also over the
 home templates it embeds). The crates read it with `option_env!` and print it
 with `--source-key`; cargo records it as an env dependency and rebuilds the
-crate when it changes. `test-source-key.sh` computes the key over the checkout
+crate when it changes. In the menu the key sits in the library (`lib.rs`),
+which holds the code: in `main.rs` it rebuilt only `main.rs` and linked the
+stale library. `test-source-key.sh` computes the key over the checkout
 (`test/integration/lib/source-key.sh`) and looks for it in the image's
 binaries.
 

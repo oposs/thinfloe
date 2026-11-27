@@ -1,5 +1,15 @@
 //! thinfloe-menu: the tile grid that is the body of the thinfloe session.
 
+/// Hash of the sources this binary was built from (`--source-key`), set by
+/// the image build. It lives in the library, which holds the code: as an env
+/// dependency it makes cargo rebuild the library when the sources change,
+/// whatever their mtimes, and the binary with it. In main.rs it rebuilt only
+/// main.rs and linked a stale library.
+pub const SOURCE_KEY: &str = match option_env!("TF_SOURCE_KEY") {
+    Some(key) => key,
+    None => "none",
+};
+
 pub mod addons;
 pub mod app;
 pub mod atomic;
