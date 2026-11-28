@@ -523,18 +523,35 @@ else
 fi
 rmdir "$SPW/run/thinfloe-screen.lock"
 rm -f "$SPW/wlopm.calls"
-flock "$SPW/run/thinfloe-screen.lock" sleep 30 &
+# The holder is the pid that holds the lock, so killing it frees the lock.
+sh -c 'exec 9>>"$1"; flock 9; exec sleep 30' _ "$SPW/run/thinfloe-screen.lock" &
 holder=$!
-sleep 0.2
+n=0
+while flock -n "$SPW/run/thinfloe-screen.lock" true && (( n++ < 50 )); do sleep 0.1; done
 start=$SECONDS
 spower on; rc=$?
 took=$(( SECONDS - start ))
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
-if [[ $rc == 0 && $took -le 15 && "$(cat "$SPW/wlopm.calls" 2>/dev/null)" == "--on *" &&
+if [[ $rc == 0 && $took -ge 9 && $took -le 15 && "$(cat "$SPW/wlopm.calls" 2>/dev/null)" == "--on *" &&
       "$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)" == on ]]; then
     ok "screen-power: a lock held by a hung run is given up after 10 s and the outputs wake"
 else
     bad "screen-power: held lock: exit $rc after ${took}s, wlopm '$(cat "$SPW/wlopm.calls" 2>/dev/null)', note '$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)'"
+fi
+rm -f "$SPW/wlopm.calls"
+# A wlopm that hangs is ended after 5 s and does not keep the lock.
+cat >"$SPW/bin/wlopm" <<STUB
+#!/bin/sh
+echo "\$*" >>"$SPW/wlopm.calls"
+exec sleep 30
+STUB
+start=$SECONDS
+spower off
+took=$(( SECONDS - start ))
+if [[ $took -le 8 ]] && flock -n "$SPW/run/thinfloe-screen.lock" true; then
+    ok "screen-power: a hung wlopm is ended after 5 s and leaves the lock free"
+else
+    bad "screen-power: hung wlopm: took ${took}s, lock $(flock -n "$SPW/run/thinfloe-screen.lock" true && echo free || echo held)"
 fi
 
 # A new home: the timeout comes from generated/screen alone. The sessionrc
