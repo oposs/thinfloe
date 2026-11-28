@@ -2232,7 +2232,7 @@ run_deskflow_pairing_case
 # 1.26 logs no input; ThinFloe's side is wev, a Wayland window that has
 # the keyboard focus whenever no capture has it. The daemon logs each
 # release as 'thinfloe-deskflow: released (<reason>)'. Edge resistance is
-# low (15 px): one move onto the edge does not capture, pushes of 10 px do.
+# low (15 px): one move onto the edge does not capture, a push of 20 px does.
 # shellcheck disable=SC2016 # expands inside the container
 fw_script='export TF_CONFIG_DIR=/tmp/tfcfg TF_DESKFLOW_STATE=/tmp/xdg/df.state TF_DESKFLOW_SOCKET=/tmp/xdg/df.sock
 gen=$TF_CONFIG_DIR/generated/deskflow
@@ -2250,9 +2250,12 @@ free_edge() { st | grep -q "	connected	[0-9]*	[0-9]*	[0-9]*	$"; }
 released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
 wev_has() { grep -q "sym: $1 " /tmp/wev.log; }
 rec_has() { grep -qx "$1" /tmp/xrec; }
-# Three pushes of 10 px, closer together than the 300 ms after which the
-# resistance starts again.
-push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+# Each move of a push is over the 15 px of "low" on its own. The moves are
+# separate wlrctl processes, and on a slow runner two of them can come more
+# than 300 ms apart, and then the resistance sum starts again (#70).
+# Summing is tested in edge.rs. The capture starts on the first move; the
+# second lands after the lock or is lost.
+push() { wlrctl pointer move 20 0; wlrctl pointer move 20 0; upto 2 state active; }
 ms() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
 stdbuf -oL wev -f wl_keyboard:key >/tmp/wev.log 2>&1 &
 python3 /usr/local/bin/x11-probe.py --record 160 >/tmp/xrec 2>&1 &
@@ -2379,10 +2382,10 @@ run_deskflow_forward_case() {
     fw_check $? "touch_without_push_stays: one move onto the edge leaves the pointer on ThinFloe"
     # After the mark: the entry at the left edge of the device, level with
     # where the pointer left (y 360 of 720), then 40 right and 30 down
-    # (one more push of 10 may land after the lock).
+    # (the second 20 px move of the push may land after the lock).
     local rec
     rec=$(grep '^rec: ' <<<"$out" | cut -c6-)
-    fw_ok push=active && grep -Eq '^[0-9]+:MOTION 0 360$' <<<"$rec" && grep -Eq '^[0-9]+:MOTION (40|50) 390$' <<<"$rec"
+    fw_ok push=active && grep -Eq '^[0-9]+:MOTION 0 360$' <<<"$rec" && grep -Eq '^[0-9]+:MOTION (40|60) 390$' <<<"$rec"
     fw_check $? "pointer_reaches_client: pushing into the edge moves the pointer onto the device at the matching height, and motion follows"
     grep -qx 'BUTTON 1' <<<"$rec" && grep -qx 'BUTTON 2' <<<"$rec" && grep -qx 'BUTTON 3' <<<"$rec" && grep -qx 'BUTTON 5' <<<"$rec"
     fw_check $? "the left, middle and right buttons reach the device as X buttons 1, 2 and 3, the wheel turned down as 5"
@@ -2426,7 +2429,7 @@ released() { grep -q "^thinfloe-deskflow: released ($1)$" /tmp/d.err; }
 rec_has() { grep -qx "$1" /tmp/xrec; }
 hits() { tr "\n" " " </tmp/hits; }
 hit() { grep -qx "$1" /tmp/hits; }
-push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+push() { wlrctl pointer move 20 0; wlrctl pointer move 20 0; upto 2 state active; }
 python3 /usr/local/bin/x11-probe.py --record 90 >/tmp/xrec 2>&1 &
 thinfloe-menu --deskflow >/tmp/d.out 2>/tmp/d.err &
 dpid=$!
@@ -2783,7 +2786,7 @@ write_cfg() { printf "$head\n[[deskflow.device]]\nname = \"laptop\"\nfingerprint
 backs() { grep -c "^thinfloe-deskflow: released (back)$" /tmp/d.err; }
 back_after() { [ "$(backs)" -gt "$1" ]; }
 btn_after() { [ "$(grep -c "^BUTTON " /tmp/xbtn)" -gt "$1" ]; }
-push() { wlrctl pointer move 10 0; wlrctl pointer move 10 0; wlrctl pointer move 10 0; upto 2 state active; }
+push() { wlrctl pointer move 20 0; wlrctl pointer move 20 0; upto 2 state active; }
 rec_since() { tail -n +"$(( $1 + 1 ))" /tmp/xrec; }
 rec_since_has() { rec_since "$1" | grep -qx "$2"; }
 rec_since_match() { rec_since "$1" | grep -Eq "$2"; }
