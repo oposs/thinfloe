@@ -75,9 +75,15 @@ fn setup() -> (End, End) {
     }
     ip(&["link", "set", "owa", "up"]);
     ip(&["link", "set", "owb", "up"]);
+    // The kernel adds an address tentative (IFA_F_TENTATIVE, 0x40) and clears the
+    // flag from a work queue, with DAD off too; a bind in between fails with
+    // EADDRNOTAVAIL (#90). So wait until the flag is gone, not only for the line.
+    const TENTATIVE: u32 = 0x40;
+    const DADFAILED: u32 = 0x08;
     let end = |name: &str, addr: &str| {
         let addr: Ipv6Addr = addr.parse().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut flags = None;
         loop {
             let text = std::fs::read_to_string("/proc/net/if_inet6").unwrap();
             let hex = format!("{:032x}", u128::from(addr));
@@ -85,12 +91,18 @@ fn setup() -> (End, End) {
                 .lines()
                 .find(|l| l.starts_with(&hex) && l.ends_with(name))
             {
-                let index = u32::from_str_radix(l.split_whitespace().nth(1).unwrap(), 16).unwrap();
-                return End { index, addr };
+                let f: Vec<&str> = l.split_whitespace().collect();
+                let index = u32::from_str_radix(f[1], 16).unwrap();
+                let bits = u32::from_str_radix(f[4], 16).unwrap();
+                assert!(bits & DADFAILED == 0, "{name}: DAD failed on {addr}");
+                if bits & TENTATIVE == 0 {
+                    return End { index, addr };
+                }
+                flags = Some(bits);
             }
             assert!(
                 Instant::now() < deadline,
-                "{name} got no link-local address"
+                "{name} got no usable link-local address (flags {flags:02x?})"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
