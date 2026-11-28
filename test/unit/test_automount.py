@@ -1156,7 +1156,13 @@ class Eject(Commands):
         self.added("sdc", usb="1-2", label="B")
         self.assertEqual(self.cmd("eject", "all"), 0)
         self.assertEqual(self.lines(), [])
-        self.assertEqual(self.event(), ["1", "A, B", "clean", "2"])
+        self.assertEqual(self.event(), ["1", "A, B", "clean", "2", "0"])
+
+    def test_eject_all_counts_the_cards_of_the_batch(self):
+        self.added("sdb", usb="1-1", label="A")
+        self.added("sdc", usb="1-2", kind_card=True, label="CARD")
+        self.assertEqual(self.cmd("eject", "all"), 0)
+        self.assertEqual(self.event(), ["1", "A, CARD", "clean", "2", "1"])
 
     def test_eject_all_of_one_stick_is_a_single_note(self):
         self.added("sdb", usb="1-1", label="A")

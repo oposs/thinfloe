@@ -504,6 +504,10 @@ const ENV_MAX_BYTES: u64 = 64 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == "--source-key") {
+        println!("{}", thinfloe_menu::SOURCE_KEY);
+        return ExitCode::SUCCESS;
+    }
     if args.get(1).is_some_and(|a| a == icons::RENDER_ICON_ARG) {
         return icons::render_icon_main(&args[2..]);
     }

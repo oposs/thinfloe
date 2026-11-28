@@ -31,8 +31,7 @@ pub fn show(ui: &Ui, menu: &Menu) -> Option<EjectEvent> {
         if menu.removable.len() > 1 && ui.add_enabled(idle, Button::new("Eject all")).clicked() {
             chose = Some(EjectEvent::All);
         }
-        if let Some(target) = &menu.eject.running {
-            let what = if target == "all" { "the sticks" } else { "the stick" };
+        if let Some(what) = menu.ejecting_what() {
             ui.label(egui::RichText::new(format!("Ejecting {what}...")).color(t.palette().muted_foreground));
         }
         if let Some(m) = &menu.eject.message {

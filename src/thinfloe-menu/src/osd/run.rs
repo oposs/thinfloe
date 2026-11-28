@@ -147,8 +147,9 @@ pub(super) fn run() -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let notify = Arc::new(Notify { tx, wake: wake_tx });
 
-    // The watch first: a device that comes while the worker starts is
-    // then not missed.
+    // The watch first: a device that comes once it is subscribed is then
+    // not missed. One that comes before (the child is started but not yet
+    // connected) is found by the list its `Connected` asks for (#67).
     let n = notify.clone();
     let _watch = super::audio::watch(&Pactl::from_env(), move |w| n.send(Msg::Watch(w)));
     let env = env_file();

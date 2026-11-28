@@ -247,7 +247,8 @@ pub enum AudioRequest {
     /// sound server came back).
     Resync,
     /// Start, if no start has worked yet (the sound server was not up at
-    /// the first try); otherwise nothing.
+    /// the first try); otherwise list the devices again, so that a sink
+    /// that appeared before the watch connected gives the state.
     Start,
 }
 
@@ -507,7 +508,14 @@ impl Worker {
             AudioRequest::Resync => {
                 return (self.realign(|s, sinks, sources| s.reapply(sinks, sources)), Vec::new());
             }
-            AudioRequest::Start if self.sync.is_some() => return (None, Vec::new()),
+            // The watch reached the sound server. A start that worked
+            // before it may have listed no real sink yet (the server was
+            // still coming up), and one that appeared before the watch
+            // connected sent no event: list again, so that it gives the
+            // state.
+            AudioRequest::Start if self.sync.is_some() => {
+                return (self.realign(|s, sinks, sources| s.reapply(sinks, sources)), Vec::new());
+            }
             AudioRequest::Start => {
                 let ev = self.start().map_or_else(AudioEvent::Failed, AudioEvent::Mark);
                 return (Some(ev), Vec::new());
@@ -581,7 +589,8 @@ pub enum Watch {
     /// A line of `pactl subscribe` about a sink, a source or the server.
     Event(PaEvent),
     /// The first `pactl subscribe` reached the sound server: a start that
-    /// failed before it was up can work now.
+    /// failed before it was up can work now, and a device that appeared
+    /// before the subscription was live is found by a fresh list.
     Connected,
     /// `pactl subscribe` ended and runs again: the sound server may have
     /// restarted, and events in between are lost.
@@ -1470,6 +1479,32 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_sink_that_came_before_the_watch_connected_gives_the_volume_file() {
+        // The session starts while the sound server is still coming up:
+        // the start lists no real sink, and the sink appears before
+        // `pactl subscribe` connects, so no event tells of it. The
+        // watch's `Connected` must still let the sink give the state.
+        let d = TestDir::new("osd-audio", "late-sink");
+        let p = fake(&d, &json(&[(1, "auto_null", 100, false)]), "[]", "auto_null", "", "");
+        let file = d.join("volume");
+        let worker = AudioWorker::spawn_with_file(p, Mode::Keys, Some(file.clone()), |_| {});
+        wait_for("the start's lists", || calls(&d, "get-default-source").len() == 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!file.exists(), "no sink gave the state yet");
+        std::fs::write(d.join("sinks.json"), json(&[(2, "a", 66, false)])).unwrap();
+        std::fs::write(d.join("default-sink"), "a\n").unwrap();
+        worker.request(AudioRequest::Start);
+        wait_for("the file says 66 %", || {
+            std::fs::read_to_string(&file).is_ok_and(|t| t == "66 0 on\n")
+        });
+        assert_eq!(
+            calls(&d, "set-"),
+            Vec::<String>::new(),
+            "the sink gives the state, it is not set"
+        );
+    }
+
+    #[test]
     fn no_write_follows_the_drop_that_removes_the_volume_file() {
         let d = TestDir::new("osd-audio", "drop-file");
         let p = fake(
@@ -1898,14 +1933,20 @@ pub(super) mod tests {
                 && count(&events, |e| matches!(e, AudioEvent::Mark(_))) == 2
         });
         assert_eq!(calls(&d, "set-"), ["set-sink-volume a 100%"]);
-        // With a state, Start does nothing.
+        // With a state, Start lists the devices again (a sink may have
+        // come before the watch connected) but starts nothing anew, and
+        // sets nothing that is in line already.
+        std::fs::write(d.join("sinks.json"), json(&[(1, "a", 100, false)])).unwrap();
         let before = log(&d).len();
         worker.request(AudioRequest::Start);
         worker.request(AudioRequest::Step(5));
-        // The step's list and set: the Start before it ran no pactl call.
-        wait_for("the step's set", || log(&d).len() == before + 2);
+        wait_for("the step's list", || log(&d).len() == before + 3);
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(calls(&d, "get-default-sink").len(), 2, "no third start");
-        assert_eq!(log(&d)[before..], ["-f json list sinks", "set-sink-volume a 100%"]);
+        assert_eq!(
+            log(&d)[before..],
+            ["-f json list sinks", "-f json list sources", "-f json list sinks"]
+        );
     }
 
     #[test]

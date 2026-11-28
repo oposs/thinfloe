@@ -169,6 +169,20 @@ BUILD_CACHE=<dir>` runs the container build with `TMPDIR=<dir>`. The mount is
 no part of a layer, and the stage's `cmp` checks of the installed binaries
 stay.
 
+Cargo takes a local crate as built when no source file is newer than the
+binary, and every checkout on a host shares the mount. A worktree whose files
+were older than a binary another worktree had built got that binary: the
+image held the other worktree's menu, and the gates passed on it
+(2026-11-27). The thinfloe-share and thinfloe-menu builds therefore set
+`TF_SOURCE_KEY`, a SHA-256 over the copied sources (the menu's also over the
+home templates it embeds). The crates read it with `option_env!` and print it
+with `--source-key`; cargo records it as an env dependency and rebuilds the
+crate when it changes. In the menu the key sits in the library (`lib.rs`),
+which holds the code: in `main.rs` it rebuilt only `main.rs` and linked the
+stale library. `test-source-key.sh` computes the key over the checkout
+(`test/integration/lib/source-key.sh`) and looks for it in the image's
+binaries.
+
 In CI the `image` job sets `BUILD_CACHE=/home/runner/build-cache`, restores
 the newest Actions cache `cargo-target-v1-*` before `make test-integration`
 and saves one (key `cargo-target-v1-<sha>`) only on a push to `main`, so

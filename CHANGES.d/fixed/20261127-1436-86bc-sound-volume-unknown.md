@@ -1,0 +1,1 @@
+- With "Set the volume on this machine" switched on, the Sound tab could say "The volume is not known yet" after a session start, with the slider greyed at 0 % and dead until the setting was switched off and on again. (#67)

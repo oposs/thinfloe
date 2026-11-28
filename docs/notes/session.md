@@ -190,6 +190,50 @@ daemon, and that it does *not* blank with `wlr-randr --off`.
 **Confirmed on hardware (2026-10-01):** the screen blanks at the 300 s default
 and any keypress restores it.
 
+**The waking click (#68).** labwc keeps delivering pointer input while the
+outputs are off, so the click that woke a dark screen also started the tile
+under the pointer (seen on 4.13.0: OxuLnk, a Terminal and Back up home
+started from clicks meant for Settings). swayidle therefore blanks and wakes
+through `/usr/libexec/thinfloe/screen-power off|on`, which runs `wlopm` and
+writes `$XDG_RUNTIME_DIR/thinfloe-screen` by rename: `off` before the
+outputs go dark, `on` after they are back, the file's modification time
+saying when. swayidle forks its commands without waiting, so an `off` and
+an `on` can overlap: each run holds `thinfloe-screen.lock` (flock) for the
+note and the `wlopm` call together and writes through a temporary file of
+its own; an `on` note that cannot be written removes the note.
+
+On a button press or a touch start the menu reads the file
+(`src/thinfloe-menu/src/power.rs`) and drops the press when it says `off`,
+or `on` written less than 300 ms ago (`WAKE_GRACE`), together with its
+release or the rest of the touch, so egui never sees half a click. Motion,
+the wheel and keys pass; a missing file drops nothing, and so does an `on`
+note dated in the future (the clock stepped back), which would otherwise
+drop every press for the length of the step. Under one `off` note the menu
+drops presses for `STALE_OFF_AFTER` (2 s) after the first drop, then lets
+them pass: the note says `off` until the `on` run has ended, well over
+100 ms, so the second press of a double-click lands under it too. That and the idle loop of
+`thinfloe-session`, which runs `screen-power on` before each swayidle when
+the file still says `off` (a swayidle that ended while dark never ran its
+resume), keep a stale note from eating every click. Guards: the `power`
+unit tests, `test-session-lifecycle.sh` (the stale note at a start and
+after SIGUSR1), `test-session-packages.sh`.
+
+The menu cannot ask labwc instead. wlroots gives an output's power control
+(`zwlr_output_power_v1`) to one client only: while the menu held it,
+`wlopm --off` failed ("Setting power mode for output 'HEADLESS-1' failed")
+and nothing blanked. `zwlr_output_manager_v1` (`wlr-randr`) still reports a
+powered-off output as enabled.
+
+With `TF_MENU_DEBUG` the menu prints `a press woke the screen; dropped`. The
+`wake_click` case of `make test-runtime` runs swayidle with these commands
+at a 2 s timeout and clicks a tile on the lit, the dark and the woken
+screen. Only the menu is guarded: a click on a dark screen over ThinLinc or
+another window still reaches that window.
+
+Known limit: keys are not guarded. A tile reached with Tab holds the
+keyboard focus (its ring shows), and egui takes Enter or Space on it as a
+click, so the key that wakes the screen starts that tile.
+
 ## x11-xserver-utils: investigated and disproved
 
 `xrandr`, `xset` and `xrdb` were a hard dependency of the `xorg` metapackage,

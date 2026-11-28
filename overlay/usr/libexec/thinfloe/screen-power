@@ -1,0 +1,60 @@
+#!/bin/sh
+# screen-power off|on: blank or wake every output for swayidle, and note it
+# for thinfloe-menu.
+#
+# $XDG_RUNTIME_DIR/thinfloe-screen holds "off" while the outputs are dark and
+# "on" once they are back; its modification time says when. The menu reads it
+# on a click and drops the press that wakes a dark screen, and any press up
+# to 300 ms after the wake (#68): labwc delivers that press to the window
+# under the pointer. The menu cannot ask the compositor instead: wlroots gives
+# an output's power control (zwlr_output_power_v1) to one client only, so a
+# menu holding it would make wlopm fail to blank.
+#
+# "off" is noted before the outputs go dark, "on" after they are back, so the
+# whole dark spell is covered. swayidle forks its commands without waiting,
+# so an "off" and an "on" can run at once: each holds thinfloe-screen.lock
+# for its whole run, the note and wlopm, so the last command started is the
+# last to write and to switch. Each note is written to a temporary file of
+# its own and renamed into place, so the menu never reads half a file. When
+# the "on" note cannot be written the note is removed, so no stale "off" is
+# left to drop a press.
+set -u
+
+dir=${XDG_RUNTIME_DIR:-}
+note=$dir/thinfloe-screen
+
+# write_note off|on
+write_note() {
+    [ -n "$dir" ] || return 0
+    _t=$note.$$
+    if printf '%s\n' "$1" >"$_t" && mv -f "$_t" "$note"; then
+        return 0
+    fi
+    rm -f "$_t"
+    return 1
+}
+
+case ${1:-} in
+    off|on) ;;
+    *)
+        echo "usage: screen-power off|on" >&2
+        exit 2
+        ;;
+esac
+
+# The lock is held until this script exits; without a runtime directory there
+# is no note to guard.
+if [ -n "$dir" ]; then
+    exec 9>>"$dir/thinfloe-screen.lock"
+    flock 9
+fi
+
+if [ "$1" = off ]; then
+    write_note off
+    wlopm --off '*'
+else
+    wlopm --on '*'
+    rc=$?
+    write_note on || rm -f "$note"
+    exit "$rc"
+fi

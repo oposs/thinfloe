@@ -257,6 +257,10 @@ async fn next_found(browse: &mut Browse, limit: Duration) -> String {
     }
 }
 
+/// The daemon's goodbye on the menu's SIGTERM to the whole group. It guards neither stop
+/// order: the fake helper below has the helper's wait for EOF built in (the real helper's is
+/// pinned by the unit test `a_sigterm_waits_for_the_daemons_eof` in radio.rs), and a daemon
+/// that closed stdin before the goodbye sends it faster than the shell takes the link down.
 #[test]
 fn the_service_is_withdrawn_before_the_radio_goes() {
     let Some((a, _b)) = enter("the_service_is_withdrawn_before_the_radio_goes") else {
@@ -264,8 +268,8 @@ fn the_service_is_withdrawn_before_the_radio_goes() {
     };
     runtime().block_on(async {
         let env = Env::new("goodbye");
-        // As the real helper: a SIGTERM to the group does not end it, the radio goes away
-        // when its stdin closes.
+        // The helper's new order, built in: a SIGTERM to the group does not end it, the
+        // radio goes away when its stdin closes.
         let child = env.spawn_with(
             "no-ble",
             "trap '' TERM INT\ncat >/dev/null\nip link set owb down",

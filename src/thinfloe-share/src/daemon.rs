@@ -8,7 +8,7 @@
 //! The state file `$XDG_RUNTIME_DIR/thinfloe-share.state` tells the menu how it
 //! goes. Closing the helper's stdin gives the radio back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::unix::fs::DirBuilderExt;
@@ -64,6 +64,10 @@ const UPLOAD_RECHECK: Duration = Duration::from_secs(15);
 /// An upload is under way when something in `.incoming/` changed this recently (Owly
 /// fails an upload that brings less than 32 KiB in 30 s).
 const UPLOAD_QUIET: Duration = Duration::from_secs(60);
+/// An entry whose connection is gone is looked at once more after this: Owly queues the
+/// `Received` or `Failed` of an upload before it answers and closes, and the main loop
+/// may not have read it yet.
+const GONE_GRACE: Duration = Duration::from_secs(5);
 /// How long the mDNS goodbye gets to go out before the radio is given back.
 const GOODBYE_WAIT: Duration = Duration::from_millis(200);
 /// State text when the helper ends without saying why.
@@ -644,12 +648,16 @@ async fn run(
 /// An accepted request until its end.
 #[derive(Debug, Clone)]
 struct Pending {
+    /// The phone's end of the connection the offer came on; its upload uses it too.
+    peer: SocketAddrV6,
     /// What the state file and the log show.
     shown: Incoming,
     /// The sender's name as the phone gave it: the inbox folder is made from it.
     sender: String,
     /// When to look whether it still runs.
     check_at: tokio::time::Instant,
+    /// The last look found its connection gone; the next one ends it.
+    gone: bool,
 }
 
 /// The transfers under way, oldest first, then by sender.
@@ -1234,12 +1242,27 @@ impl Airdrop {
         };
         match step {
             Step::Check => {
-                let uploading = staging_active(
-                    &self.paths.incoming,
-                    std::time::SystemTime::now(),
-                    UPLOAD_QUIET,
-                );
-                let ended = expire(&mut self.pending, tokio::time::Instant::now(), uploading);
+                let now = tokio::time::Instant::now();
+                // Each entry by its own connection: Owly closes it when the phone goes, and
+                // an upload on another one says nothing about it (#72). Only where the table
+                // cannot be read, any recent change in staging keeps every entry.
+                let ended = match std::fs::read_to_string("/proc/net/tcp6") {
+                    Ok(text) => {
+                        let open = open_connections(&text, RECEIVE_PORT);
+                        // The table has no scope id; only the AWDL link listens on 8771.
+                        expire(&mut self.pending, now, |p| {
+                            open.contains(&(*p.peer.ip(), p.peer.port()))
+                        })
+                    }
+                    Err(_) => {
+                        let uploading = staging_active(
+                            &self.paths.incoming,
+                            std::time::SystemTime::now(),
+                            UPLOAD_QUIET,
+                        );
+                        expire(&mut self.pending, now, |_| uploading)
+                    }
+                };
                 for p in &ended {
                     log(p.shown.ended_line());
                 }
@@ -1332,9 +1355,11 @@ impl Airdrop {
                     Answer::Accept => {
                         log(offer.accepted_line());
                         let pending = Pending {
+                            peer: r.peer,
                             shown: offer,
                             sender,
                             check_at: tokio::time::Instant::now() + UPLOAD_START_WAIT,
+                            gone: false,
                         };
                         self.pending.insert((generation, r.id), pending);
                         r.accept();
@@ -1463,13 +1488,14 @@ async fn next_check(pending: &HashMap<(u64, u64), Pending>) {
     }
 }
 
-/// The entries whose check time has come: while an upload is under way (`uploading`) they
-/// are looked at again after [`UPLOAD_RECHECK`], else they are taken out and returned. Owly
-/// sends no event when a phone goes between the accept and its upload.
+/// The entries whose check time has come: those still under way (`alive`) are looked at
+/// again after [`UPLOAD_RECHECK`]; one found not alive is looked at once more after
+/// [`GONE_GRACE`], and taken out and returned when it is still not alive then. Owly sends no
+/// event when a phone goes between the accept and its upload.
 fn expire(
     pending: &mut HashMap<(u64, u64), Pending>,
     now: tokio::time::Instant,
-    uploading: bool,
+    alive: impl Fn(&Pending) -> bool,
 ) -> Vec<Pending> {
     let due: Vec<(u64, u64)> = pending
         .iter()
@@ -1478,15 +1504,52 @@ fn expire(
         .collect();
     let mut ended = Vec::new();
     for k in due {
-        if uploading {
-            if let Some(p) = pending.get_mut(&k) {
+        match pending.get_mut(&k) {
+            Some(p) if alive(p) => {
+                p.gone = false;
                 p.check_at = now + UPLOAD_RECHECK;
             }
-        } else if let Some(p) = pending.remove(&k) {
-            ended.push(p);
+            Some(p) if !p.gone => {
+                p.gone = true;
+                p.check_at = now + GONE_GRACE;
+            }
+            Some(_) => ended.extend(pending.remove(&k)),
+            None => {}
         }
     }
     ended
+}
+
+/// The remote ends of the connections to `local_port` in the text of `/proc/net/tcp6` that
+/// are established or in CLOSE_WAIT (the phone closed its side; Owly may still be finishing
+/// the upload). The kernel prints each address as four 32-bit words in host byte order.
+fn open_connections(text: &str, local_port: u16) -> HashSet<(Ipv6Addr, u16)> {
+    let end = |s: &str| -> Option<(Ipv6Addr, u16)> {
+        let (addr, port) = s.split_once(':')?;
+        if addr.len() != 32 || !addr.is_ascii() {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for (i, chunk) in bytes.chunks_mut(4).enumerate() {
+            let word = u32::from_str_radix(&addr[i * 8..i * 8 + 8], 16).ok()?;
+            chunk.copy_from_slice(&word.to_ne_bytes());
+        }
+        Some((Ipv6Addr::from(bytes), u16::from_str_radix(port, 16).ok()?))
+    };
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            // sl, local, remote, state; 01 is ESTABLISHED, 08 CLOSE_WAIT.
+            if f.len() < 4 || !matches!(f[3], "01" | "08") {
+                return None;
+            }
+            let (_, port) = end(f[1])?;
+            if port != local_port {
+                return None;
+            }
+            end(f[2])
+        })
+        .collect()
 }
 
 /// The entries of the receiver of `generation`, taken out.
@@ -1835,8 +1898,15 @@ mod tests {
         assert_eq!(names(&pending), ["B"]);
     }
 
+    /// The address and port a phone named `sender` connected from in these tests.
+    fn peer_of(sender: &str) -> SocketAddrV6 {
+        let n = u16::from(sender.as_bytes()[0]);
+        SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, n), 50000 + n, 0, 3)
+    }
+
     fn pending_at(sender: &str, check_at: tokio::time::Instant) -> Pending {
         Pending {
+            peer: peer_of(sender),
             shown: Incoming {
                 sender: sender.into(),
                 files: 1,
@@ -1846,6 +1916,7 @@ mod tests {
             },
             sender: sender.into(),
             check_at,
+            gone: false,
         }
     }
 
@@ -1856,18 +1927,124 @@ mod tests {
         pending.insert((0, 1), pending_at("A", t0 + UPLOAD_START_WAIT));
         pending.insert((0, 2), pending_at("B", t0 + UPLOAD_START_WAIT * 2));
         // Not due yet.
-        assert!(expire(&mut pending, t0, false).is_empty());
+        assert!(expire(&mut pending, t0, |_| false).is_empty());
         // Due while an upload runs: looked at again later.
         let due = t0 + UPLOAD_START_WAIT;
-        assert!(expire(&mut pending, due, true).is_empty());
+        assert!(expire(&mut pending, due, |_| true).is_empty());
         assert_eq!(pending[&(0, 1)].check_at, due + UPLOAD_RECHECK);
-        // Due with nothing arriving: it ends and leaves the lists.
-        let ended = expire(&mut pending, due + UPLOAD_RECHECK, false);
+        // Due with its connection gone: a grace for an event already on its way, then it
+        // ends and leaves the lists.
+        let gone = due + UPLOAD_RECHECK;
+        assert!(expire(&mut pending, gone, |_| false).is_empty());
+        assert_eq!(pending[&(0, 1)].check_at, gone + GONE_GRACE);
+        let ended = expire(&mut pending, gone + GONE_GRACE, |_| false);
         assert_eq!(ended.len(), 1);
         assert_eq!(ended[0].shown.sender, "A");
         let left = incoming_list(pending.values().map(|p| &p.shown));
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].sender, "B");
+    }
+
+    #[test]
+    fn a_dead_transfer_ends_while_another_uploads() {
+        // #72: A's phone went before its upload, B's upload runs. A ends at its check time,
+        // B stays; B's upload does not keep A's entry.
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("A", t0));
+        pending.insert((0, 2), pending_at("B", t0));
+        let b = peer_of("B");
+        assert!(expire(&mut pending, t0, |p| p.peer == b).is_empty());
+        let ended = expire(&mut pending, t0 + GONE_GRACE, |p| p.peer == b);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].shown.sender, "A");
+        // B, looked at with A the first time, is not due again yet.
+        assert_eq!(pending[&(0, 2)].check_at, t0 + UPLOAD_RECHECK);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn a_received_after_the_connection_closed_keeps_its_sender() {
+        // Owly queues Received, then answers and closes: the check can see the connection
+        // gone before the main loop reads the event. The entry stays for the event, which
+        // takes it with its sender (the inbox folder, the OSD note's name).
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::new();
+        pending.insert((0, 1), pending_at("Jane's iPhone", t0));
+        assert!(expire(&mut pending, t0, |_| false).is_empty());
+        let done = pending.remove(&(0, 1)).expect("the entry is still there");
+        assert_eq!(done.sender, "Jane's iPhone");
+        // A connection seen again before the grace ends clears the mark.
+        pending.insert((0, 2), pending_at("B", t0));
+        assert!(expire(&mut pending, t0, |_| false).is_empty());
+        let back = t0 + GONE_GRACE;
+        assert!(expire(&mut pending, back, |_| true).is_empty());
+        assert!(!pending[&(0, 2)].gone);
+        assert_eq!(pending[&(0, 2)].check_at, back + UPLOAD_RECHECK);
+    }
+
+    #[test]
+    fn the_open_connections_come_from_tcp6() {
+        // /proc/net/tcp6 on x86_64: a listener on 8771 (0A), one connection from
+        // fe80::ff:fe00:a port 50000 established (01), one from port 50001 in
+        // CLOSE_WAIT (08: the phone closed its side, Owly may still finish the upload),
+        // and one established on another local port.
+        let text = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 000080FE00000000FF0000000A0000FE:2243 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 1 1 0000000000000000 100 0 0 10 0
+   1: 000080FE00000000FF0000000B0000FE:2243 000080FE00000000FF0000000A0000FE:C350 01 00000000:00000000 00:00000000 00000000  1001        0 2 1 0000000000000000 20 4 30 10 -1
+   2: 000080FE00000000FF0000000B0000FE:2243 000080FE00000000FF0000000A0000FE:C351 08 00000000:00000000 00:00000000 00000000  1001        0 3 1 0000000000000000 20 4 30 10 -1
+   3: 000080FE00000000FF0000000B0000FE:01BB 000080FE00000000FF0000000A0000FE:C352 01 00000000:00000000 00:00000000 00000000  1001        0 4 1 0000000000000000 20 4 30 10 -1
+";
+        let a: Ipv6Addr = "fe80::ff:fe00:a".parse().unwrap();
+        let open = open_connections(text, 8771);
+        if cfg!(target_endian = "little") {
+            assert_eq!(open, HashSet::from([(a, 50000), (a, 50001)]));
+        }
+        assert!(open_connections("garbage\n   0: zz:zz zz:zz 01\n", 8771).is_empty());
+    }
+
+    #[test]
+    fn a_live_connection_is_open_until_it_closes() {
+        // The host's real table: a connection to a listener on ::1.
+        let listener = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(l) => l,
+            Err(e) => {
+                // Not eprintln!: the harness shows that only for a failed test.
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "SKIP: no IPv6 on ::1 ({e})");
+                return;
+            }
+        };
+        let port = listener.local_addr().unwrap().port();
+        let client = std::net::TcpStream::connect(("::1", port)).unwrap();
+        let (server, from) = listener.accept().unwrap();
+        let std::net::SocketAddr::V6(from) = from else {
+            panic!("not IPv6")
+        };
+        let key = (*from.ip(), from.port());
+        let read = || open_connections(&std::fs::read_to_string("/proc/net/tcp6").unwrap(), port);
+        assert!(read().contains(&key), "{:?}", read());
+        // The phone's side closes first: ours is in CLOSE_WAIT and still counts.
+        drop(client);
+        let end = Instant::now() + Duration::from_secs(2);
+        let close_wait = loop {
+            let text = std::fs::read_to_string("/proc/net/tcp6").unwrap();
+            let port_hex = format!(":{port:04X} ");
+            if text
+                .lines()
+                .any(|l| l.contains(&port_hex) && l.split_whitespace().nth(3) == Some("08"))
+            {
+                break true;
+            }
+            if Instant::now() > end {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(close_wait, "no CLOSE_WAIT within 2 s");
+        assert!(read().contains(&key), "{:?}", read());
+        drop(server);
+        assert!(!read().contains(&key));
     }
 
     #[test]

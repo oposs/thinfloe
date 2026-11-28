@@ -22,8 +22,9 @@ pub enum Note {
     Connected(String),
     /// Ejected: it can be pulled.
     Removable(String),
-    /// "Eject all" ejected this many sticks (2 or more): all can be pulled.
-    SticksRemovable(u32),
+    /// "Eject all" ejected this many sticks and cards (2 or more in all):
+    /// all can be pulled.
+    BatchRemovable { sticks: u32, cards: u32 },
     /// Pulled without eject.
     Unclean(String),
 }
@@ -57,7 +58,10 @@ impl Notes {
             }
             if let Some(e) = fresh {
                 out.push(if e.clean && e.count >= 2 {
-                    Note::SticksRemovable(e.count)
+                    Note::BatchRemovable {
+                        sticks: e.count - e.cards,
+                        cards: e.cards,
+                    }
                 } else if e.clean {
                     Note::Removable(e.name.clone())
                 } else {
@@ -96,7 +100,13 @@ pub fn text(n: &Note) -> (String, bool) {
     match n {
         Note::Connected(name) => (format!("{} connected", short(name)), false),
         Note::Removable(name) => (format!("{} can be removed", short(name)), false),
-        Note::SticksRemovable(n) => (format!("{n} sticks can be removed"), false),
+        Note::BatchRemovable { sticks, cards } => (
+            format!(
+                "{} can be removed",
+                removable::counted(*sticks as usize, *cards as usize)
+            ),
+            false,
+        ),
         Note::Unclean(name) => (
             format!("{} removed without eject \u{2014} files may be lost", short(name)),
             true,
@@ -268,6 +278,7 @@ mod tests {
             name: "MYSTICK".into(),
             clean,
             count: 1,
+            cards: 0,
         }
     }
 
@@ -377,12 +388,31 @@ mod tests {
             name: "A, B".into(),
             clean: true,
             count: 2,
+            cards: 0,
         };
-        assert_eq!(n.update(&[], Some(&batch)), [Note::SticksRemovable(2)]);
+        let two = Note::BatchRemovable { sticks: 2, cards: 0 };
+        assert_eq!(text(&two), ("2 sticks can be removed".to_string(), false));
+        assert_eq!(n.update(&[], Some(&batch)), [two]);
+    }
+
+    #[test]
+    fn a_batch_with_a_card_names_each_kind() {
+        let mut n = Notes::new();
+        n.update(&[stick("sdb", "A"), stick("sdc", "B")], None);
+        let batch = Event {
+            seq: 1,
+            name: "A, B".into(),
+            clean: true,
+            count: 2,
+            cards: 1,
+        };
+        let mixed = Note::BatchRemovable { sticks: 1, cards: 1 };
+        assert_eq!(text(&mixed), ("1 stick and 1 card can be removed".to_string(), false));
         assert_eq!(
-            text(&Note::SticksRemovable(2)),
-            ("2 sticks can be removed".to_string(), false)
+            text(&Note::BatchRemovable { sticks: 0, cards: 2 }),
+            ("2 cards can be removed".to_string(), false)
         );
+        assert_eq!(n.update(&[], Some(&batch)), [mixed]);
     }
 
     #[test]
@@ -450,7 +480,8 @@ mod tests {
                 seq: 7,
                 name: "A".into(),
                 clean: false,
-                count: 1
+                count: 1,
+                cards: 0
             })
         );
     }

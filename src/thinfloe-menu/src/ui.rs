@@ -452,6 +452,8 @@ struct RootWork {
     write: bool,
     network: bool,
     eject: bool,
+    /// The sticks and cards the eject began with; none known reads as one stick.
+    ejecting: (usize, usize),
 }
 
 impl RootWork {
@@ -461,22 +463,31 @@ impl RootWork {
             write: menu.upgrade.writing(),
             network: menu.network.applying(),
             eject: menu.eject.running.is_some(),
+            ejecting: menu.ejecting_kinds(),
+        }
+    }
+
+    /// "The stick is", "The stick and the card are": the subject of the eject.
+    fn released(self) -> String {
+        match self.ejecting {
+            (0, 0) => crate::removable::subject(1, 0),
+            (s, c) => crate::removable::subject(s, c),
         }
     }
 
     /// The Confirm dialog's title.
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
             RootWork {
                 addons: true,
                 write: true,
                 ..
-            } => "Add-ons are being changed and a stick is written",
-            RootWork { addons: true, .. } => "Add-ons are being changed",
-            RootWork { write: true, .. } => "A stick is being written",
-            RootWork { network: true, .. } => "Network settings are being applied",
-            RootWork { eject: true, .. } => "A stick is being released",
-            _ => "Work is still running",
+            } => "Add-ons are being changed and a stick is written".to_string(),
+            RootWork { addons: true, .. } => "Add-ons are being changed".to_string(),
+            RootWork { write: true, .. } => "A stick is being written".to_string(),
+            RootWork { network: true, .. } => "Network settings are being applied".to_string(),
+            RootWork { eject: true, .. } => format!("{} being released", self.released()),
+            _ => "Work is still running".to_string(),
         }
     }
 
@@ -506,7 +517,8 @@ impl RootWork {
                 write: false,
                 network: false,
                 eject: true,
-            } => Some("The stick is released"),
+                ..
+            } => return format!("{} released", self.released()),
             _ => None,
         };
         if let Some(one) = one {
@@ -524,10 +536,15 @@ impl RootWork {
         if self
             == (RootWork {
                 eject: true,
+                ejecting: self.ejecting,
                 ..RootWork::default()
             })
         {
-            return "the stick to be released".to_string();
+            let (s, c) = match self.ejecting {
+                (0, 0) => (1, 0),
+                kinds => kinds,
+            };
+            return format!("{} to be released", crate::removable::the_kinds(s, c));
         }
         let parts = self.parts(["the add-ons", "the stick", "the network settings"]);
         if parts.is_empty() {
@@ -615,9 +632,9 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
             let title = if menu.jobs.is_empty() {
                 work.title()
             } else {
-                "Programs are still running"
+                "Programs are still running".to_string()
             };
-            dialog(ui, title, |ui, t| {
+            dialog(ui, &title, |ui, t| {
                 for job in &menu.jobs {
                     ui.label(egui::RichText::new(&job.name).color(t.palette().foreground));
                 }
@@ -754,15 +771,8 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
                         .color(t.palette().ring),
                 );
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{} released before {verbing}.",
-                        if menu.flushing_many() {
-                            "The sticks are"
-                        } else {
-                            "The stick is"
-                        }
-                    ))
-                    .color(t.palette().muted_foreground),
+                    egui::RichText::new(format!("{} released before {verbing}.", menu.flushing_subject()))
+                        .color(t.palette().muted_foreground),
                 );
             });
             ui.ctx().request_repaint_after(Duration::from_secs(1));
@@ -770,7 +780,7 @@ pub fn show(ui: &mut Ui, menu: &Menu, icons: &[Option<Icon>], chrome: &Chrome, n
         }
         Some(Logout::EjectFailed { message }) => {
             let mut chose = None;
-            dialog(ui, "A stick was not released", |ui, t| {
+            dialog(ui, &format!("{} was not released", menu.flushing_noun()), |ui, t| {
                 ui.label(egui::RichText::new(message).color(t.role(role::WARN)));
                 ui.label(
                     egui::RichText::new(format!("If you {verb} now, data not yet written to it can be lost."))
@@ -3556,6 +3566,69 @@ mod tests {
         out.textures_delta.clear();
         assert_eq!(pass, 2, "the discard ran a second pass");
         assert_eq!(events, vec![UiEvent::Tile(0)]);
+    }
+
+    // The Volume slider held down reports its value from the pointer in
+    // egui's second, input-less pass too: one drag step in a frame whose
+    // first pass is discarded must send one level, not the same one twice.
+    #[test]
+    fn a_slider_drag_in_a_discarded_pass_reports_one_level() {
+        let mut menu = open_settings();
+        menu.settings_tab = crate::settings::SettingsTab::Sound;
+        let mut kb = menu.keyboard.shown.clone();
+        kb.volume_keys = true;
+        menu.keyboard = crate::keyboard::KeyboardTab::new(kb, Err("no list".into()));
+        let v = crate::soundtab::Volume {
+            percent: 40,
+            muted: false,
+            on: true,
+        };
+        menu.sound.set_file(Some(v), Instant::now());
+        let ctx = egui::Context::default();
+        crate::brand::apply(&ctx);
+        grid_frame(&ctx, &menu, vec![]);
+        let (shapes, _) = grid_frame(&ctx, &menu, vec![]);
+        // The slider ends just left of its "40 %" label.
+        let label = text_shape(&shapes, "40 %").expect("the level").1.visual_bounding_rect();
+        let at = |dx: f32| pos2(label.left() - dx, label.center().y);
+        let press = egui::Event::PointerButton {
+            pos: at(30.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        };
+        let (_, ev) = grid_frame(&ctx, &menu, vec![egui::Event::PointerMoved(at(30.0)), press]);
+        let level = |ev: &Option<UiEvent>| match ev {
+            Some(UiEvent::Settings(SettingsEvent::Sound(crate::soundtab::SoundEvent::Level { percent, done }))) => {
+                Some((*percent, *done))
+            }
+            _ => None,
+        };
+        let (pressed, _) = level(&ev).unwrap_or_else(|| panic!("the press on the slider: {ev:?}"));
+        let input = egui::RawInput {
+            screen_rect: Some(screen(1280.0, 720.0)),
+            events: vec![egui::Event::PointerMoved(at(80.0))],
+            ..Default::default()
+        };
+        let icons: Vec<Option<Icon>> = menu.tiles.iter().map(|_| None).collect();
+        let mut pass = 0;
+        let mut reported = Vec::new();
+        let (mut out, events) = crate::app::run_passes(&ctx, input, |ui| {
+            if pass == 0 {
+                ui.ctx().request_discard("test");
+            }
+            pass += 1;
+            let ev = show(ui, &menu, &icons, &Chrome::default(), Instant::now());
+            reported.push(ev.clone());
+            ev
+        });
+        out.textures_delta.clear();
+        assert_eq!(pass, 2, "the discard ran a second pass");
+        // Both passes report the drag: what run_passes keeps once.
+        let dragged = level(&reported[0]).expect("the drag in the first pass");
+        assert!(dragged.0 < pressed && !dragged.1, "{pressed} -> {dragged:?}");
+        assert_eq!(reported[1], reported[0], "the second pass reports the same level");
+        assert_eq!(events, vec![reported[0].clone().unwrap()]);
     }
 
     // A click on the update mark started the program (2026-11-26): the
@@ -8033,6 +8106,7 @@ mod tests {
             write,
             network,
             eject,
+            ..RootWork::default()
         };
         assert_eq!(w(false, true, false, false).waits(), "the stick");
         assert_eq!(w(true, false, false, false).waits(), "the add-ons");
@@ -8043,6 +8117,50 @@ mod tests {
             w(true, true, true, false).waits(),
             "the add-ons, the stick and the network settings"
         );
+    }
+
+    #[test]
+    fn the_ending_dialogs_name_the_kinds_of_the_eject() {
+        let e = |sticks, cards| RootWork {
+            eject: true,
+            ejecting: (sticks, cards),
+            ..RootWork::default()
+        };
+        assert_eq!(e(0, 1).title(), "The card is being released");
+        assert_eq!(e(0, 1).finished(), "The card is released");
+        assert_eq!(e(0, 1).waits(), "the card to be released");
+        assert_eq!(e(1, 1).title(), "The stick and the card are being released");
+        assert_eq!(e(1, 1).finished(), "The stick and the card are released");
+        assert_eq!(e(2, 0).waits(), "the sticks to be released");
+        // No kind known: one stick.
+        assert_eq!(e(0, 0).finished(), "The stick is released");
+    }
+
+    #[test]
+    fn a_single_card_eject_with_a_stick_listed_names_the_card() {
+        let mut menu = Menu::new(
+            Grid {
+                tiles: vec![],
+                banner: vec![],
+            },
+            false,
+        );
+        let disk = |disk: &str, name: &str, kind| crate::removable::Stick {
+            disk: disk.into(),
+            names: vec![name.into()],
+            mounts: vec![0],
+            size_bytes: 1,
+            model: String::new(),
+            kind,
+        };
+        menu.set_removable(vec![
+            disk("sdb", "ONE", crate::removable::Kind::Stick),
+            disk("sdc", "SD", crate::removable::Kind::Card),
+        ]);
+        assert!(menu.eject_event(crate::menu::EjectEvent::One("sdc".into())).is_some());
+        let work = RootWork::of(&menu);
+        assert_eq!(work.title(), "The card is being released");
+        assert_eq!(work.waits(), "the card to be released");
     }
 
     #[test]
@@ -8078,7 +8196,7 @@ mod tests {
             "The add-on work and the write are finished"
         );
         assert_eq!(w(true, false, false).finished(), "The add-on work is finished");
-        assert_eq!(w(false, false, true).title(), "A stick is being released");
+        assert_eq!(w(false, false, true).title(), "The stick is being released");
         assert_eq!(w(false, false, true).finished(), "The stick is released");
         assert_eq!(w(false, true, false).stopping(), "Stopping the write");
         assert_eq!(

@@ -110,6 +110,7 @@ run_session() {
         TF_STATE_DIR="$WORK/state" XDG_RUNTIME_DIR="${SESSION_XDG-$WORK}" TF_SESSION_STATUS="$WORK/thinfloe-session.status" \
         TF_MENU="$WORK/bin/menu" TF_SAVE_HOME="$WORK/bin/thinfloe-save-home" \
         TF_SESSION_LOG="$WORK/log" TF_PLYMOUTH_STEP="$WORK/bin/step" TF_LABWC_SCALE=/bin/true \
+        TF_SCREEN_POWER="$WORK/bin/screen-power" \
         sh "$SESSION" >/dev/null 2>"$WORK/session.err"
 }
 
@@ -464,6 +465,40 @@ else
 fi
 mv "$WORK/wlopm.off" "$WORK/bin/wlopm"
 rm -f "$WORK/home/.thinfloe-sessionrc" "$SCREEN"
+
+# A swayidle that ended while the screens were dark never ran its resume
+# command and left the note at "off" (#68). The idle loop wakes the screens
+# with 'screen-power on' before each swayidle while the note says off: at a
+# session start, and after SIGUSR1. The stub only records its calls; it does
+# not rewrite the note.
+NOTE="$WORK/thinfloe-screen"
+cat >"$WORK/bin/screen-power" <<STUB
+#!/bin/sh
+echo "\$*" >>"$WORK/screen-power.calls"
+STUB
+chmod 755 "$WORK/bin/screen-power"
+rm -f "$WORK/screen-power.calls"
+printf 'off\n' >"$NOTE"
+idle_run '' - "wait-idle; cp '$WORK/screen-power.calls' '$WORK/seen' 2>/dev/null" >/dev/null
+if [[ "$(cat "$WORK/seen" 2>/dev/null)" == on ]]; then
+    ok "idle: a session that starts with an off note runs 'screen-power on' before swayidle"
+else
+    bad "idle: off note at start: calls '$(cat "$WORK/screen-power.calls" 2>/dev/null)'"
+fi
+rm -f "$WORK/screen-power.calls" "$WORK/seen"
+printf 'on\n' >"$NOTE"
+idle_run '' - "wait-idle
+cat '$WORK/screen-power.calls' >'$WORK/before' 2>/dev/null
+rm -f '$WORK'/idle.*
+printf 'off\\n' >'$NOTE'; kill -USR1 \$TF_IDLE_PID
+wait-idle
+cp '$WORK/screen-power.calls' '$WORK/seen' 2>/dev/null" >/dev/null
+if [[ ! -s "$WORK/before" && "$(cat "$WORK/seen" 2>/dev/null)" == on ]]; then
+    ok "idle: an on note runs nothing; after SIGUSR1 with an off note 'screen-power on' runs once"
+else
+    bad "idle: SIGUSR1 with off note: before '$(cat "$WORK/before" 2>/dev/null)', calls '$(cat "$WORK/screen-power.calls" 2>/dev/null)'"
+fi
+rm -f "$NOTE" "$WORK/screen-power.calls" "$WORK/before" "$WORK/seen" "$WORK"/idle.*
 
 # A new home: the timeout comes from generated/screen alone. The sessionrc
 # is no longer read for it, and the menu is told nothing about it.

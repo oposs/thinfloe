@@ -119,12 +119,26 @@ class Server:
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = "http://127.0.0.1:%d" % self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        # shutdown() waits for serve_forever's next poll; the default poll of
+        # 0.5 s added half a second to every test that closes a server.
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
 
     def close(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+class TestServer(unittest.TestCase):
+    def test_close_is_quick(self):
+        # Every ServerTest closes a server; a close that waits for a slow
+        # poll of serve_forever adds that wait to each test (#79).
+        srv = Server()
+        start = time.monotonic()
+        srv.close()
+        # 0.3 s leaves room for a loaded host and still fails on the 0.5 s poll.
+        self.assertLess(time.monotonic() - start, 0.3)
 
 
 class ServerTest(unittest.TestCase):
@@ -388,12 +402,16 @@ class TestPage(ServerTest):
         # (a+)+$ backtracks exponentially on a run of a's without a match.
         self.srv.routes["/p"] = Route(200, body=b"a" * 40 + b"!")
         page = self.srv.base + "/p"
-        start = time.monotonic()
-        with self.assertRaises(ad.CheckError) as cm:
-            ad.check(page_source(page, "(a+)+$"))
-        elapsed = time.monotonic() - start
+        # One second instead of the shipped five keeps the test short; the
+        # child is still killed by the same deadline.
+        with mock.patch.object(ad, "PATTERN_TIMEOUT", 1):
+            start = time.monotonic()
+            with self.assertRaises(ad.CheckError) as cm:
+                ad.check(page_source(page, "(a+)+$"))
+            elapsed = time.monotonic() - start
         self.assertIn("the pattern took too long on %s" % page, str(cm.exception))
-        self.assertLess(elapsed, 8, "the match must be stopped after about 5 s")
+        self.assertGreaterEqual(elapsed, 1, "the match runs until PATTERN_TIMEOUT")
+        self.assertLess(elapsed, 3, "the match must be stopped after about 1 s")
 
     def test_user_agent(self):
         seen = []
@@ -544,8 +562,17 @@ class TestApt(ServerTest):
 
     def test_apt_unreachable(self):
         src = apt_source("http://127.0.0.1:9/flat", None, suite="./", component=None)
-        with self.assertRaises(ad.CheckError):
-            ad.check(src)
+        # apt retries a refused connection three times with a growing pause
+        # (7 s together); the test asks for no retry.
+        real = ad._apt_run
+
+        def no_retries(cmd, env, cwd=None):
+            return real(cmd[:1] + ["-o", "Acquire::Retries=0"] + cmd[1:], env, cwd)
+
+        with mock.patch.object(ad, "_apt_run", no_retries):
+            with self.assertRaises(ad.CheckError) as cm:
+                ad.check(src)
+        self.assertIn("127.0.0.1:9", str(cm.exception))
 
 
 # ============ Store, install, remove, status ============

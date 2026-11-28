@@ -1,0 +1,1 @@
+- Settings → Network no longer keeps "Receiving … from <phone>" for a phone that left before its upload while another phone's upload runs. The entry now goes about 80 s after the accept, as it does with a single transfer. (#72)

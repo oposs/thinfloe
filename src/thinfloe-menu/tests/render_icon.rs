@@ -215,35 +215,52 @@ fn running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-// Before PR_SET_PDEATHSIG, a renderer whose menu was killed ran on until
-// RLIMIT_CPU ended it, up to 3 s later.
-#[test]
-fn a_renderer_dies_with_its_menu() {
-    let dir = Dir::new("orphan");
-    // Hundreds of tiny dashes keep resvg busy for seconds, under every
-    // guard and every limit.
-    let circles: String = (0..400)
-        .map(|i| {
-            format!(
-                r#"<circle cx="12" cy="12" r="{}" fill="none" stroke="red" stroke-dasharray="0.002"/>"#,
-                1 + i % 11
-            )
-        })
-        .collect();
-    let slow = dir.file("slow.svg", &svg(&circles));
-    for d in ["shipped", "user", "state"] {
-        fs::create_dir_all(dir.0.join(d)).unwrap();
+/// The CPU time `pid` has used so far, from /proc/<pid>/stat.
+fn cpu_time(pid: u32) -> Option<Duration> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // After the command name: state is field 3, utime and stime 14 and 15.
+    let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
+    let ticks: u64 = fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+    // SAFETY: sysconf reads a constant of the system.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    Some(Duration::from_millis(ticks * 1000 / hz))
+}
+
+/// Wait for `pid`, a child or an orphan this process adopted, to end, and
+/// give its wait status and the CPU time it used; `None` when it is no
+/// child of ours, because its menu reaped it.
+fn reap(pid: u32) -> Option<(libc::c_int, Duration)> {
+    let mut status = 0;
+    // SAFETY: wait4 fills the status and the struct it is given and
+    // nothing else.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    loop {
+        let r = unsafe { libc::wait4(pid as libc::pid_t, &mut status, 0, &mut usage) };
+        if r == pid as libc::pid_t {
+            let time = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+            return Some((status, time(usage.ru_utime) + time(usage.ru_stime)));
+        }
+        if r == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return None;
     }
-    fs::write(
-        dir.0.join("user/slow.desktop"),
-        format!("[Desktop Entry]\nName=Slow\nExec=true\nIcon={}\n", slow.display()),
-    )
-    .unwrap();
+}
+
+/// Start a menu whose one tile has a slow icon, check the limits of its
+/// renderer, kill the menu and reap the renderer, which this process
+/// adopts: its pid, wait status and the CPU time it used after the kill.
+/// `None` when the run shows nothing: the menu's own 2 s deadline ended the
+/// render first, or the renderer had used so much CPU before the kill that
+/// RLIMIT_CPU could look like the menu's death.
+fn orphan_a_renderer(dir: &Dir) -> Option<(u32, libc::c_int, Duration)> {
     let mut menu = std::process::Command::new(RENDERER)
         .arg("--check")
         .env("TF_MENU_SHIPPED_DIR", dir.0.join("shipped"))
         .env("TF_MENU_USER_DIR", dir.0.join("user"))
         .env("TF_STATE_DIR", dir.0.join("state"))
+        // Never the host's ~/.config/thinfloe/config.toml.
+        .env("TF_CONFIG_DIR", dir.0.join("config"))
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -256,14 +273,18 @@ fn a_renderer_dies_with_its_menu() {
         assert!(start.elapsed() < Duration::from_secs(10), "no renderer started");
         std::thread::sleep(Duration::from_millis(5));
     };
-    // Wait for the exec, not a fixed time: the menu's own 2 s deadline
-    // kills the render, and a starved run reached it during a 200 ms sleep
-    // plus the search for the child.
+    // Wait for the exec, not a fixed time: the limits are set by then.
     while !is_renderer(renderer) && running(renderer) && start.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(running(renderer), "the slow render ended on its own");
-    let limits = fs::read_to_string(format!("/proc/{renderer}/limits")).unwrap();
+    let limits = fs::read_to_string(format!("/proc/{renderer}/limits")).ok();
+    let Some(limits) = limits.filter(|_| running(renderer)) else {
+        menu.kill().unwrap();
+        menu.wait().unwrap();
+        // A renderer this process adopted is reaped, not left a zombie.
+        reap(renderer);
+        return None;
+    };
     for (name, value) in [
         ("Max address space", ICON_MEMORY.to_string()),
         ("Max cpu time", "3".to_string()),
@@ -275,12 +296,57 @@ fn a_renderer_dies_with_its_menu() {
         let fields: Vec<&str> = line[name.len()..].split_whitespace().collect();
         assert_eq!(fields[..2], [value.as_str(), value.as_str()], "{line}");
     }
+    let before = cpu_time(renderer);
     menu.kill().unwrap();
     menu.wait().unwrap();
-    let killed = Instant::now();
-    // A poll limit: 10 s for a starved test run, reached only on a failure.
-    while running(renderer) && killed.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(10));
+    let (status, cpu) = reap(renderer)?;
+    let before = before.filter(|b| *b < Duration::from_millis(1500))?;
+    Some((renderer, status, cpu.saturating_sub(before)))
+}
+
+// Before PR_SET_PDEATHSIG, a renderer whose menu was killed ran on until
+// RLIMIT_CPU ended it, up to 3 s later. A poll of /proc with a time limit
+// could not tell the two apart (with a 10 s limit RLIMIT_CPU passed it,
+// with 1 s a starved host failed it): the test adopts the orphan and asks
+// the kernel how it ended and how much CPU it had used.
+#[test]
+fn a_renderer_dies_with_its_menu() {
+    // SAFETY: prctl only sets a flag of this process. Orphans of the
+    // menus this test kills come to this process, not to init.
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+    let dir = Dir::new("orphan");
+    // Hundreds of tiny dashes keep resvg busy for seconds, under every
+    // guard and every limit.
+    let circles: String = (0..400)
+        .map(|i| {
+            format!(
+                r#"<circle cx="12" cy="12" r="{}" fill="none" stroke="red" stroke-dasharray="0.002"/>"#,
+                1 + i % 11
+            )
+        })
+        .collect();
+    let slow = dir.file("slow.svg", &svg(&circles));
+    for d in ["shipped", "user", "state", "config"] {
+        fs::create_dir_all(dir.0.join(d)).unwrap();
     }
-    assert!(!running(renderer), "renderer {renderer} outlived its menu");
+    fs::write(
+        dir.0.join("user/slow.desktop"),
+        format!("[Desktop Entry]\nName=Slow\nExec=true\nIcon={}\n", slow.display()),
+    )
+    .unwrap();
+    // A starved run can miss the exec until the menu's deadline has ended
+    // the render; then it tries again.
+    let (renderer, status, after_kill) = (0..5)
+        .find_map(|_| orphan_a_renderer(&dir))
+        .expect("the menu's deadline ended the render in 5 runs");
+    assert!(
+        libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL,
+        "renderer {renderer} ended with wait status {status:#x}"
+    );
+    // RLIMIT_CPU kills with SIGKILL too, at 3 s of CPU time: at least 1.5 s
+    // after the kill. A renderer that dies with its menu uses next to none.
+    assert!(
+        after_kill < Duration::from_secs(1),
+        "renderer {renderer} outlived its menu: it used {after_kill:?} of CPU after the kill"
+    );
 }

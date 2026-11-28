@@ -183,6 +183,11 @@ pub struct App {
     /// The monitors; `None` when the compositor cannot tell, then the
     /// Screen tab shows none.
     heads: Option<crate::heads::Heads>,
+    /// The screen state file of `screen-power`; `None` without
+    /// `XDG_RUNTIME_DIR`, then no press is dropped.
+    screen_file: Option<PathBuf>,
+    /// Drops the press that wakes a dark screen (#68).
+    wake: crate::power::WakeGuard,
     /// The menu's output file for labwc-scale; `None` without
     /// `XDG_RUNTIME_DIR`, then the menu stays where labwc puts it.
     output_file: Option<PathBuf>,
@@ -442,6 +447,8 @@ pub fn run(mut cfg: Config) -> Result<i32, String> {
         windows,
         folded_seen: Vec::new(),
         heads,
+        screen_file: crate::power::path(),
+        wake: crate::power::WakeGuard::default(),
         addon_log: AddonLog::new(cfg.addon_log.clone()),
         addon_log_read: false,
         shown,
@@ -1849,6 +1856,20 @@ impl ApplicationHandler<Wake> for App {
             // which thinfloe-session reads as logout.
             WindowEvent::CloseRequested => return,
             _ => {}
+        }
+        // The press that wakes a dark screen is not a click. Before the
+        // dialog's refusal, so the guard sees every release.
+        let screen_file = self.screen_file.as_deref();
+        let screens = || screen_file.map(crate::power::Screens::read).unwrap_or_default();
+        match self.wake.filter(crate::power::Input::of(&event), screens) {
+            crate::power::Verdict::Pass => {}
+            crate::power::Verdict::DropWake => {
+                if self.cfg.debug {
+                    eprintln!("thinfloe-menu: a press woke the screen; dropped");
+                }
+                return;
+            }
+            crate::power::Verdict::Drop => return,
         }
         // While the dialog is up, input is refused rather than handled.
         if self.cfg.menu.refuses_input() && is_input(&event) {

@@ -87,11 +87,13 @@ reserved (`/run/thinfloe/automount/reserved/<name>`, its pid), and never
 a reserved name.
 
 `/run/thinfloe/removable.event` holds the last removal, one line
-`seq<TAB>name<TAB>clean|unclean[<TAB>count]`: `clean` after an eject, `unclean` for a
+`seq<TAB>name<TAB>clean|unclean[<TAB>count<TAB>cards]`: `clean` after an eject, `unclean` for a
 stick pulled or a card taken out while mounted. A shutdown records nothing.
 `eject all` writes one line for the batch: the names joined with ", " and,
-for two sticks or more, their count (the OSD then says "2 sticks can be
-removed"). A single event keeps its three fields.
+for two disks or more, their count and how many of them are cards (the OSD
+then names each kind with its count: "2 sticks can be removed", "1 stick and
+1 card can be removed"). A single event keeps its three fields; a line with
+a count and no `cards` field (an older helper) reads as sticks only.
 
 ## Commands
 

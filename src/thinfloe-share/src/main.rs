@@ -19,6 +19,14 @@ mod state;
 const OWLY_VERSION: &str = "0.4.3";
 const OWLY_REV: &str = "21171d8";
 
+/// Hash of the sources this binary was built from (`--source-key`), set by
+/// the image build; as an env dependency it also makes cargo rebuild the
+/// crate when the sources change, whatever their mtimes.
+const SOURCE_KEY: &str = match option_env!("TF_SOURCE_KEY") {
+    Some(key) => key,
+    None => "none",
+};
+
 fn version_line() -> String {
     format!(
         "thinfloe-share {} (owly {} {})",
@@ -33,9 +41,10 @@ fn main() {
     match arg.as_deref() {
         Some("--version") => println!("{}", version_line()),
         Some("--radio") => std::process::exit(radio::main()),
+        Some("--source-key") => println!("{SOURCE_KEY}"),
         None => std::process::exit(daemon::main()),
         _ => {
-            eprintln!("usage: thinfloe-share [--version | --radio]");
+            eprintln!("usage: thinfloe-share [--version | --radio | --source-key]");
             std::process::exit(2);
         }
     }
