@@ -68,6 +68,10 @@ const UPLOAD_QUIET: Duration = Duration::from_secs(60);
 /// `Received` or `Failed` of an upload before it answers and closes, and the main loop
 /// may not have read it yet.
 const GONE_GRACE: Duration = Duration::from_secs(5);
+/// How long an entry ended for a lost connection is kept for a `Received` or `Failed` that
+/// comes later still, so the files keep the sender's name; at most [`ENDED_MAX`] of them.
+const ENDED_KEEP: Duration = Duration::from_secs(600);
+const ENDED_MAX: usize = 32;
 /// How long the mDNS goodbye gets to go out before the radio is given back.
 const GOODBYE_WAIT: Duration = Duration::from_millis(200);
 /// State text when the helper ends without saying why.
@@ -1037,6 +1041,8 @@ struct Airdrop {
     events: mpsc::Receiver<(u64, ReceiverEvent)>,
     /// Accepted requests not ended yet, by (generation, request id).
     pending: HashMap<(u64, u64), Pending>,
+    /// Entries ended for a lost connection, with when they ended (see [`ENDED_KEEP`]).
+    ended: HashMap<(u64, u64), (Pending, tokio::time::Instant)>,
     /// The receivers in range as the outbox last listed them.
     devices: Vec<Device>,
     _mdns: Registration,
@@ -1139,6 +1145,7 @@ impl Airdrop {
             events_tx,
             events,
             pending: HashMap::new(),
+            ended: HashMap::new(),
             devices: Vec::new(),
             _mdns: mdns,
             sending,
@@ -1199,6 +1206,7 @@ impl Airdrop {
         for p in drop_generation(&mut self.pending, self.generation) {
             log(p.shown.cut_line());
         }
+        self.ended.clear();
         self.generation += 1;
         self.receiver = bind(
             self.iface,
@@ -1263,10 +1271,12 @@ impl Airdrop {
                         expire(&mut self.pending, now, |_| uploading)
                     }
                 };
-                for p in &ended {
+                for (_, p) in &ended {
                     log(p.shown.ended_line());
                 }
-                return !ended.is_empty();
+                let changed = !ended.is_empty();
+                keep_ended(&mut self.ended, ended, now);
+                return changed;
             }
             Step::Receiver(Some(b)) => {
                 let (generation, ev) = *b;
@@ -1332,8 +1342,9 @@ impl Airdrop {
     }
 
     /// An accepted request, forgotten here.
+    /// An entry ended for a lost connection is still found here (#85).
     fn take(&mut self, generation: u64, id: u64) -> Option<Pending> {
-        self.pending.remove(&(generation, id))
+        take_entry(&mut self.pending, &mut self.ended, (generation, id))
     }
 
     /// One receiver event; true when the transfers under way may have changed.
@@ -1422,6 +1433,7 @@ impl Airdrop {
                 );
             }
             ReceiverEvent::Withdrawn { id } => {
+                self.ended.remove(&(generation, id));
                 if let Some(gone) = self.pending.remove(&(generation, id)) {
                     log(gone.shown.withdrawn_line());
                 }
@@ -1496,7 +1508,7 @@ fn expire(
     pending: &mut HashMap<(u64, u64), Pending>,
     now: tokio::time::Instant,
     alive: impl Fn(&Pending) -> bool,
-) -> Vec<Pending> {
+) -> Vec<((u64, u64), Pending)> {
     let due: Vec<(u64, u64)> = pending
         .iter()
         .filter(|(_, p)| p.check_at <= now)
@@ -1513,7 +1525,7 @@ fn expire(
                 p.gone = true;
                 p.check_at = now + GONE_GRACE;
             }
-            Some(_) => ended.extend(pending.remove(&k)),
+            Some(_) => ended.extend(pending.remove(&k).map(|p| (k, p))),
             None => {}
         }
     }
@@ -1550,6 +1562,38 @@ fn open_connections(text: &str, local_port: u16) -> HashSet<(Ipv6Addr, u16)> {
             end(f[2])
         })
         .collect()
+}
+
+/// Keeps `ended` for a late event: those older than [`ENDED_KEEP`] go, and the oldest
+/// beyond [`ENDED_MAX`].
+fn keep_ended(
+    kept: &mut HashMap<(u64, u64), (Pending, tokio::time::Instant)>,
+    ended: Vec<((u64, u64), Pending)>,
+    now: tokio::time::Instant,
+) {
+    kept.extend(ended.into_iter().map(|(k, p)| (k, (p, now))));
+    kept.retain(|_, (_, at)| now.duration_since(*at) < ENDED_KEEP);
+    while kept.len() > ENDED_MAX {
+        let Some(oldest) = kept
+            .iter()
+            .min_by_key(|(k, (_, at))| (*at, **k))
+            .map(|(k, _)| *k)
+        else {
+            break;
+        };
+        kept.remove(&oldest);
+    }
+}
+
+/// The entry an event is about: under way, or ended for a lost connection.
+fn take_entry(
+    pending: &mut HashMap<(u64, u64), Pending>,
+    ended: &mut HashMap<(u64, u64), (Pending, tokio::time::Instant)>,
+    key: (u64, u64),
+) -> Option<Pending> {
+    pending
+        .remove(&key)
+        .or_else(|| ended.remove(&key).map(|(p, _)| p))
 }
 
 /// The entries of the receiver of `generation`, taken out.
@@ -1904,6 +1948,44 @@ mod tests {
         SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, n), 50000 + n, 0, 3)
     }
 
+    #[test]
+    fn a_late_received_still_finds_the_sender_of_an_ended_entry() {
+        // #85: the phone closed, the grace ran out, then Owly's Received came.
+        let t0 = tokio::time::Instant::now();
+        let mut pending = HashMap::from([((0, 1), pending_at("Jane's iPhone", t0))]);
+        let mut kept = HashMap::new();
+        assert!(expire(&mut pending, t0, |_| false).is_empty());
+        let ended = expire(&mut pending, t0 + GONE_GRACE, |_| false);
+        keep_ended(&mut kept, ended, t0 + GONE_GRACE);
+        let late = take_entry(&mut pending, &mut kept, (0, 1)).expect("kept for a late event");
+        assert_eq!(late.sender, "Jane's iPhone");
+        assert!(
+            take_entry(&mut pending, &mut kept, (0, 1)).is_none(),
+            "taken once"
+        );
+    }
+
+    #[test]
+    fn ended_entries_are_kept_for_a_while_and_a_few_only() {
+        let t0 = tokio::time::Instant::now();
+        let mut kept = HashMap::new();
+        keep_ended(&mut kept, vec![((0, 1), pending_at("A", t0))], t0);
+        keep_ended(
+            &mut kept,
+            Vec::new(),
+            t0 + ENDED_KEEP - Duration::from_secs(1),
+        );
+        assert!(kept.contains_key(&(0, 1)));
+        keep_ended(&mut kept, Vec::new(), t0 + ENDED_KEEP);
+        assert!(kept.is_empty(), "gone after ENDED_KEEP");
+        let many = (0..ENDED_MAX as u64 + 3)
+            .map(|i| ((0, i), pending_at("B", t0)))
+            .collect();
+        keep_ended(&mut kept, many, t0);
+        assert_eq!(kept.len(), ENDED_MAX);
+        assert!(!kept.contains_key(&(0, 0)), "the oldest go first");
+    }
+
     fn pending_at(sender: &str, check_at: tokio::time::Instant) -> Pending {
         Pending {
             peer: peer_of(sender),
@@ -1939,7 +2021,7 @@ mod tests {
         assert_eq!(pending[&(0, 1)].check_at, gone + GONE_GRACE);
         let ended = expire(&mut pending, gone + GONE_GRACE, |_| false);
         assert_eq!(ended.len(), 1);
-        assert_eq!(ended[0].shown.sender, "A");
+        assert_eq!(ended[0].1.shown.sender, "A");
         let left = incoming_list(pending.values().map(|p| &p.shown));
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].sender, "B");
@@ -1957,7 +2039,7 @@ mod tests {
         assert!(expire(&mut pending, t0, |p| p.peer == b).is_empty());
         let ended = expire(&mut pending, t0 + GONE_GRACE, |p| p.peer == b);
         assert_eq!(ended.len(), 1);
-        assert_eq!(ended[0].shown.sender, "A");
+        assert_eq!(ended[0].1.shown.sender, "A");
         // B, looked at with A the first time, is not due again yet.
         assert_eq!(pending[&(0, 2)].check_at, t0 + UPLOAD_RECHECK);
         assert_eq!(pending.len(), 1);
