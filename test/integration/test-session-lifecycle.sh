@@ -500,6 +500,43 @@ else
 fi
 rm -f "$NOTE" "$WORK/screen-power.calls" "$WORK/before" "$WORK/seen" "$WORK"/idle.*
 
+# The real screen-power: a lock file it cannot open, or a lock another run
+# holds, must not stop it from switching the outputs and writing the note.
+SPOWER="$ROOT/overlay/usr/libexec/thinfloe/screen-power"
+SPW="$WORK/spower"
+mkdir -p "$SPW/bin" "$SPW/run"
+cat >"$SPW/bin/wlopm" <<STUB
+#!/bin/sh
+echo "\$*" >>"$SPW/wlopm.calls"
+STUB
+chmod 755 "$SPW/bin/wlopm"
+spower() {
+    env -i PATH="$SPW/bin:/usr/bin:/bin" XDG_RUNTIME_DIR="$SPW/run" sh "$SPOWER" "$1" 2>/dev/null
+}
+mkdir "$SPW/run/thinfloe-screen.lock"
+spower off; rc=$?
+if [[ $rc == 0 && "$(cat "$SPW/wlopm.calls" 2>/dev/null)" == "--off *" &&
+      "$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)" == off ]]; then
+    ok "screen-power: a lock file it cannot open does not stop the blanking or the note"
+else
+    bad "screen-power: unopenable lock: exit $rc, wlopm '$(cat "$SPW/wlopm.calls" 2>/dev/null)', note '$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)'"
+fi
+rmdir "$SPW/run/thinfloe-screen.lock"
+rm -f "$SPW/wlopm.calls"
+flock "$SPW/run/thinfloe-screen.lock" sleep 30 &
+holder=$!
+sleep 0.2
+start=$SECONDS
+spower on; rc=$?
+took=$(( SECONDS - start ))
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+if [[ $rc == 0 && $took -le 15 && "$(cat "$SPW/wlopm.calls" 2>/dev/null)" == "--on *" &&
+      "$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)" == on ]]; then
+    ok "screen-power: a lock held by a hung run is given up after 10 s and the outputs wake"
+else
+    bad "screen-power: held lock: exit $rc after ${took}s, wlopm '$(cat "$SPW/wlopm.calls" 2>/dev/null)', note '$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)'"
+fi
+
 # A new home: the timeout comes from generated/screen alone. The sessionrc
 # is no longer read for it, and the menu is told nothing about it.
 NEW_SCREEN="$WORK/home/.config/thinfloe/generated/screen"

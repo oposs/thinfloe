@@ -256,8 +256,10 @@ tf_idle_child() {
 # starts from lit screens and the menu does not drop every press for a note
 # that is no longer true.
 # Like every child of the loop it runs in the background and is waited for
-# (dash runs a trap only once a foreground command has ended). A signal ends
-# the wait, not the wake: the loop waits again until it is done.
+# (dash runs a trap only once a foreground command has ended). A TERM or a
+# SIGUSR1 kills it like any child of the loop (the wake is $!); after a
+# SIGUSR1 the loop comes round at once and, the note still saying off,
+# wakes the screens again.
 # TF_SCREEN_POWER names a stand-in for the tests.
 tf_screen_note="${XDG_RUNTIME_DIR:-/nonexistent}/thinfloe-screen"
 tf_screen_power=${TF_SCREEN_POWER:-/usr/libexec/thinfloe/screen-power}
