@@ -17,9 +17,10 @@
 # keeps no queue, but swayidle starts at most one "off" before its "on", so
 # the one that waits is the later one. A lock not had within 10 s, or a lock
 # file that cannot be opened, is run without: a hung wlopm must not leave
-# the screens dark for good, and wlopm runs at most 5 s without fd 9, so a
-# hung one cannot keep the lock past its own run. Each note is written to a temporary file of
-# its own and renamed into place, so the menu never reads half a file. When
+# the screens dark for good. wlopm runs without fd 9 and is killed after 5 s
+# (SIGKILL 1 s later if it ignores SIGTERM), so a hung one cannot keep the
+# lock past its own run. Each note is written to a temporary file of its
+# own and renamed into place, so the menu never reads half a file. When
 # the "on" note cannot be written the note is removed, so no stale "off" is
 # left to drop a press.
 set -u
@@ -55,9 +56,9 @@ fi
 
 if [ "$1" = off ]; then
     write_note off
-    timeout 5 wlopm --off '*' 9>&-
+    timeout -k 1 5 wlopm --off '*' 9>&-
 else
-    timeout 5 wlopm --on '*' 9>&-
+    timeout -k 1 5 wlopm --on '*' 9>&-
     rc=$?
     write_note on || rm -f "$note"
     exit "$rc"

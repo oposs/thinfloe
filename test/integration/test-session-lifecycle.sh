@@ -539,9 +539,11 @@ else
     bad "screen-power: held lock: exit $rc after ${took}s, wlopm '$(cat "$SPW/wlopm.calls" 2>/dev/null)', note '$(cat "$SPW/run/thinfloe-screen" 2>/dev/null)'"
 fi
 rm -f "$SPW/wlopm.calls"
-# A wlopm that hangs is ended after 5 s and does not keep the lock.
+# A wlopm that hangs and ignores SIGTERM is ended after 6 s and does not
+# keep the lock.
 cat >"$SPW/bin/wlopm" <<STUB
 #!/bin/sh
+trap '' TERM
 echo "\$*" >>"$SPW/wlopm.calls"
 exec sleep 30
 STUB
@@ -549,7 +551,7 @@ start=$SECONDS
 spower off
 took=$(( SECONDS - start ))
 if [[ $took -le 8 ]] && flock -n "$SPW/run/thinfloe-screen.lock" true; then
-    ok "screen-power: a hung wlopm is ended after 5 s and leaves the lock free"
+    ok "screen-power: a hung wlopm that ignores SIGTERM is killed after 6 s and leaves the lock free"
 else
     bad "screen-power: hung wlopm: took ${took}s, lock $(flock -n "$SPW/run/thinfloe-screen.lock" true && echo free || echo held)"
 fi
