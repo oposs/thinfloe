@@ -14,7 +14,10 @@
 #     fails on any "Found ordering cycle",
 #   - thinfloe-addons.service finished before getty@tty1.service started,
 #   - /usr/share/thinfloe-smoke-addon/ok exists,
-#   - the status file says 90-smoke is installed.
+#   - the status file says 90-smoke is installed,
+#   - the VM then reboots with the add-on installed, its shutdown passes
+#     check-boot-smoke.sh too (no "Failed unmounting", #69), and the FAT's
+#     dirty bit is clear afterwards (the ESP remounted read-only).
 # The VM reports the last two on the serial console through
 # scripts/smoke-addons-report.sh, which runs as systemd.run=.
 
@@ -83,9 +86,11 @@ tar -C "$home" -czf "$tmp/home.tar.gz" . || exit 2
 mcopy -o -i "$ESP" "$tmp/home.tar.gz" ::home.tar.gz || exit 2
 mcopy -o -i "$ESP" "$DIR/smoke-addons-report.sh" ::smoke-report.sh || exit 2
 
-REPORT='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run="/bin/sh /run/thinfloe/storage/efi/smoke-report.sh"'
+REPORT='systemd.wants=kernel-command-line.service systemd.run_success_action=none systemd.run_failure_action=none systemd.run="/bin/sh /run/thinfloe/storage/efi/smoke-report.sh reboot"'
 
-SMOKE_WAIT_FOR='^SMOKE-ADDON-DONE' "$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
+# It waits for the reboot line, not the report: GRACE after the report could
+# stop QEMU mid-shutdown. TIMEOUT stays the backstop.
+SMOKE_WAIT_FOR='reboot: Restarting system' "$DIR/run-qemu-smoke.sh" "$LOG" "$TIMEOUT" "$GRACE" -- \
     qemu-system-x86_64 \
     -machine type=q35,accel=kvm \
     -cpu host,migratable=off \
@@ -140,6 +145,23 @@ if grep -qaE '^90-smoke\|1\|installed\|1\.0\|' "$clean"; then
 else
     bad "the status file does not say 90-smoke is installed:"
     sed -n '/SMOKE-ADDON-STATUS-BEGIN/,/SMOKE-ADDON-STATUS-END/p' "$clean" | sed 's/^/         /'
+fi
+
+if grep -qaE 'reboot: Restarting system' "$clean"; then
+    ok "the VM rebooted with the add-on installed"
+else
+    bad "the VM did not reboot (no 'reboot: Restarting system'), so its shutdown went unchecked"
+    grep -aE '^SMOKE-ADDON-REBOOT' "$clean" | sed 's/^/         /'
+fi
+
+# Linux sets the dirty bit (bit 0 of byte 65 of the FAT's boot sector)
+# while it is mounted read-write and clears it on a read-only remount or an
+# unmount.
+dirty=$(od -An -tu1 -j$((start * 512 + 65)) -N1 "$WORK" | tr -d ' \n')
+if [[ -n "$dirty" ]] && (( (dirty & 1) == 0 )); then
+    ok "the reboot left the FAT's dirty bit clear"
+else
+    bad "the FAT's dirty bit is set after the reboot (byte 65 is '$dirty')"
 fi
 
 if [[ $fail -ne 0 ]]; then
