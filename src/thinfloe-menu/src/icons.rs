@@ -523,6 +523,8 @@ fn render_one(program: &Path, job: &IconJob, wait: Duration) -> Result<egui::Col
             .spawn()
             .map_err(|e| NoImage::Failed(format!("cannot start the renderer: {e}")))?,
     );
+    #[cfg(test)]
+    tests::SPAWNED.with(|n| n.set(n.get() + 1));
     let no_pipe = || NoImage::Failed("no pipe to the renderer".into());
     // Never more than the largest valid reply, plus one byte to tell a
     // reply that is too long.
@@ -611,6 +613,12 @@ pub fn render_all(
 mod tests {
     use super::*;
     use crate::testdir::TestDir;
+
+    thread_local! {
+        /// Renderers `render_one` started on this thread. libtest runs each
+        /// test on a thread of its own, and `render_all` stays on it.
+        pub(super) static SPAWNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     /// The directory goes when the returned guard drops, so callers bind it
     /// to a named variable for the length of the test.
@@ -869,8 +877,9 @@ mod tests {
 
     /// A stand-in for thinfloe-menu --render-icon: a shell script that acts on
     /// the name of the icon it is asked for. A renderer that lingers leaves
-    /// its pid next to that name, so the test can see it was reaped; as a
-    /// symlink, since RLIMIT_FSIZE kills a renderer that writes a file.
+    /// its pid and start time (field 22 of `/proc/<pid>/stat`) next to that
+    /// name, so the test can see it was reaped; as a symlink, since
+    /// RLIMIT_FSIZE kills a renderer that writes a file.
     ///
     /// A child shell writes the script, never this process: a test thread
     /// that forks while this process holds the file open for writing hands
@@ -893,8 +902,8 @@ mod tests {
                 br#"#!/bin/sh
 case "$5" in
 *ok) printf 'RGBA\002\000\000\000\001\000\000\000\377\000\000\377\377\000\000\377' ;;
-*hang) ln -s $$ "$5.pid"; exec sleep 60 ;;
-*closed) ln -s $$ "$5.pid"; exec sleep 60 >&- ;;
+*hang) ln -s "$$:$(cut -d' ' -f22 /proc/$$/stat)" "$5.pid"; exec sleep 60 ;;
+*closed) ln -s "$$:$(cut -d' ' -f22 /proc/$$/stat)" "$5.pid"; exec sleep 60 >&- ;;
 *endless) exec cat /dev/zero ;;
 *garbage) printf 'hello' ;;
 *wide) printf 'RGBA\005\000\000\000\001\000\000\000' ;;
@@ -925,11 +934,37 @@ esac
     }
 
     /// The renderer that wrote `<name>.pid` is gone: killed and reaped, not
-    /// left running and not a zombie.
+    /// left running and not a zombie. A process with the same pid but
+    /// another start time is a later one that reused the pid.
     fn assert_reaped(dir: &Path, name: &str) {
-        let pid = fs::read_link(dir.join(format!("{name}.pid"))).unwrap();
-        let proc = Path::new("/proc").join(&pid);
-        assert!(!proc.exists(), "renderer {} of {name} is still there", pid.display());
+        let link = dir.join(format!("{name}.pid"));
+        let mark = fs::read_link(&link).unwrap_or_else(|e| {
+            panic!(
+                "the renderer of {name} left no {} ({e}): it was killed at its deadline \
+                 before its first line, so the host was too slow to start a shell",
+                link.display()
+            )
+        });
+        let mark = mark.to_string_lossy();
+        let (pid, start) = mark.split_once(':').expect("pid:starttime");
+        assert!(
+            !start.is_empty() && start.bytes().all(|b| b.is_ascii_digit()),
+            "the renderer of {name} wrote no start time: {mark:?}"
+        );
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return;
+        };
+        // Field 22; the fields after the comm's ')' start at field 3.
+        let now = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .unwrap_or_else(|| panic!("no start time in /proc/{pid}/stat: {stat}"));
+        assert_ne!(now, start, "renderer {pid} of {name} is still there: {stat}");
+    }
+
+    /// The number of renderers this thread has started.
+    fn spawned() -> usize {
+        SPAWNED.with(|n| n.get())
     }
 
     /// Deadlines for the tests that must not meet one. The production
@@ -1001,8 +1036,10 @@ esac
     /// seconds to start (to answer, or to leave its pid), and the tests
     /// only ask that the wait ended long before the hanging renderers'
     /// `sleep 60` did. With 200 to 500 ms deadlines and bounds below one
-    /// second, both tests failed on a busy core.
-    const SHORT_ICON: Duration = Duration::from_secs(2);
+    /// second, both tests failed on a busy core; 2 s came close on a
+    /// starved one. The tests run beside the rest of the suite, which takes
+    /// longer than they do (10 s and 7.5 s).
+    const SHORT_ICON: Duration = Duration::from_secs(5);
     const FAR_BELOW_THE_SLEEP: Duration = Duration::from_secs(30);
 
     // The hanging renderers sleep far past every deadline here, so the test
@@ -1010,6 +1047,8 @@ esac
     #[test]
     fn a_slow_renderer_is_killed_and_reaped_at_the_deadline() {
         let dir = TestDir::new("icons", "child-slow");
+        let late = Err(format!("took longer than {SHORT_ICON:?}"));
+        let before = spawned();
         let start = Instant::now();
         let out = render_all(
             &fake_renderer(&dir),
@@ -1021,14 +1060,10 @@ esac
         let errors: Vec<_> = out.into_iter().map(|r| r.map(|_| ())).collect();
         assert_eq!(
             errors,
-            vec![
-                Ok(()),
-                Err("took longer than 2s".to_string()),
-                Err("took longer than 2s".to_string()),
-                Ok(()),
-            ],
+            vec![Ok(()), late.clone(), late, Ok(())],
             "the icons after a slow one still render"
         );
+        assert_eq!(spawned() - before, 4);
         assert_reaped(&dir, "hang");
         assert_reaped(&dir, "closed");
     }
@@ -1036,6 +1071,7 @@ esac
     #[test]
     fn the_startup_budget_bounds_the_wait_for_all_icons() {
         let dir = TestDir::new("icons", "child-budget");
+        let before = spawned();
         let start = Instant::now();
         let out = render_all(
             &fake_renderer(&dir),
@@ -1046,15 +1082,13 @@ esac
         );
         assert!(start.elapsed() < FAR_BELOW_THE_SLEEP, "{:?}", start.elapsed());
         let errors: Vec<_> = out.into_iter().map(|r| r.map(|_| ())).collect();
-        assert_eq!(errors[0], Err("took longer than 2s".to_string()));
+        assert_eq!(errors[0], Err(format!("took longer than {SHORT_ICON:?}")));
         assert_eq!(errors[1..], vec![Err("no time left at startup".to_string()); 3]);
         assert_reaped(&dir, "1-hang");
         assert_reaped(&dir, "2-hang");
-        assert!(
-            fs::symlink_metadata(dir.join("3-hang.pid")).is_err(),
-            "no renderer started without time left"
-        );
+        assert_eq!(spawned() - before, 2, "no renderer started without time left");
     }
+
     #[test]
     fn refuses_png_bombs_before_decoding() {
         let (_dir, r) = roots("bomb");
