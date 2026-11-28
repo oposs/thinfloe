@@ -204,17 +204,45 @@ pub fn link_local(mac: &str) -> Option<Ipv6Addr> {
     ))
 }
 
-/// The link-local address and index of `iface` from `/proc/net/if_inet6`'s text.
+/// Address flags of `/proc/net/if_inet6` that make a bind fail: tentative
+/// (0x40, also with DAD off until the kernel's work queue clears it) and
+/// DAD failed (0x08).
+const IFA_UNUSABLE: u32 = 0x40 | 0x08;
+
+/// How long the fallback waits for a tentative link-local address to become
+/// usable.
+const LINK_LOCAL_WAIT: Duration = Duration::from_secs(3);
+
+/// The usable link-local address and index of `iface` from
+/// `/proc/net/if_inet6`'s text; a tentative or DAD-failed address is skipped.
 pub fn if_inet6_link_local(text: &str, iface: &str) -> Option<(Ipv6Addr, u32)> {
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
         if f.len() < 6 || f[5] != iface || f[3] != "20" || f[0].len() != 32 {
             return None;
         }
+        let flags = u32::from_str_radix(f[4], 16).ok()?;
+        if flags & IFA_UNUSABLE != 0 {
+            return None;
+        }
         let n = u128::from_str_radix(f[0], 16).ok()?;
         let index = u32::from_str_radix(f[1], 16).ok()?;
         Some((Ipv6Addr::from(n), index))
     })
+}
+
+/// `iface`'s usable link-local address, waiting up to [`LINK_LOCAL_WAIT`]
+/// while it is still tentative.
+async fn own_link_local(iface: &str) -> Option<(Ipv6Addr, u32)> {
+    let until = tokio::time::Instant::now() + LINK_LOCAL_WAIT;
+    loop {
+        let text = std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default();
+        let found = if_inet6_link_local(&text, iface);
+        if found.is_some() || tokio::time::Instant::now() >= until {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Unblock SIGHUP on this thread, where the runtime polls its handler.
@@ -1098,9 +1126,11 @@ impl Airdrop {
                 log(format!(
                     "not using owlyd's link ({e}); reading {iface_name}'s own address"
                 ));
-                let text = std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default();
-                let (addr, index) = if_inet6_link_local(&text, iface_name)
-                    .ok_or_else(|| format!("{iface_name} has no IPv6 link-local address"))?;
+                let (addr, index) = own_link_local(iface_name)
+                    .await
+                    .ok_or_else(|| {
+                        format!("{iface_name} has no usable IPv6 link-local address (none, still tentative or DAD failed)")
+                    })?;
                 (None, Iface { index, addr }, None)
             }
         };
@@ -2264,6 +2294,27 @@ fe800000000000000000000000000002 03 40 20 80     eth0
             Some(("fe80::2".parse().unwrap(), 3))
         );
         assert_eq!(if_inet6_link_local(text, "lo"), None);
+    }
+
+    #[test]
+    fn if_inet6_skips_a_tentative_or_dad_failed_address() {
+        // Flags 0xc0 = permanent + tentative, 0x88 = permanent + DAD failed,
+        // 0x04 = optimistic, which a bind accepts.
+        let text = "\
+fe800000000000000000000000000001 07 40 20 c0    awdl0
+fe800000000000000000000000000002 03 40 20 88     eth0
+fe800000000000000000000000000003 03 40 20 80     eth0
+fe800000000000000000000000000004 04 40 20 04     eth1
+";
+        assert_eq!(if_inet6_link_local(text, "awdl0"), None);
+        assert_eq!(
+            if_inet6_link_local(text, "eth0"),
+            Some(("fe80::3".parse().unwrap(), 3))
+        );
+        assert_eq!(
+            if_inet6_link_local(text, "eth1"),
+            Some(("fe80::4".parse().unwrap(), 4))
+        );
     }
 
     #[test]
