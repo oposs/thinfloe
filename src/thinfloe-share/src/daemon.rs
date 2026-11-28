@@ -1564,7 +1564,6 @@ fn open_connections(text: &str, local_port: u16) -> HashSet<(Ipv6Addr, u16)> {
         .collect()
 }
 
-/// The entries of the receiver of `generation`, taken out.
 /// Keeps `ended` for a late event: those older than [`ENDED_KEEP`] go, and the oldest
 /// beyond [`ENDED_MAX`].
 fn keep_ended(
@@ -1597,6 +1596,7 @@ fn take_entry(
         .or_else(|| ended.remove(&key).map(|(p, _)| p))
 }
 
+/// The entries of the receiver of `generation`, taken out.
 fn drop_generation(pending: &mut HashMap<(u64, u64), Pending>, generation: u64) -> Vec<Pending> {
     let keys: Vec<(u64, u64)> = pending
         .keys()
